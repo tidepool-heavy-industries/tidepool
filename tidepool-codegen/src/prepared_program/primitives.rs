@@ -564,6 +564,9 @@ pub(super) fn recognize_operation(
     declaration: &OperationDecl,
     signature: &Signature,
 ) -> Option<PrimitiveOperation> {
+    if let OperationIdentity::Capability { name } = &declaration.identity {
+        return super::capabilities::recognize(name, signature).map(PrimitiveOperation::Capability);
+    }
     if let Some(operation) = super::arrays::recognize(&declaration.identity, signature) {
         return Some(PrimitiveOperation::Array(operation));
     }
@@ -619,6 +622,23 @@ pub(super) fn recognize_operation(
     {
         return Some(PrimitiveOperation::DataToTagSmall);
     }
+    if let OperationIdentity::WiredInError { kind } = &declaration.identity {
+        let arguments =
+            if *kind == tidepool_repr::execution_schema::WiredInErrorKind::AbsentSumField {
+                &[][..]
+            } else {
+                &[RuntimeRep::Address][..]
+            };
+        if signature.arguments == arguments && signature.results == ResultContract::NoSuccess {
+            return Some(PrimitiveOperation::WiredInError(*kind));
+        }
+    }
+    if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "noDuplicate#")
+        && signature.arguments == [RuntimeRep::Void]
+        && returns_exact(signature, &[])
+    {
+        return Some(PrimitiveOperation::NoDuplicate);
+    }
     if signature.arguments == [RuntimeRep::Void] && signature.results == ResultContract::NoSuccess {
         if let OperationIdentity::PrimOp(name) = &declaration.identity {
             let cause = match name.as_str() {
@@ -645,6 +665,7 @@ pub(super) fn recognize_operation(
 
 #[derive(Clone, Copy)]
 pub(super) enum PrimitiveOperation {
+    Capability(super::capabilities::Capability),
     Array(super::arrays::ArrayOperation),
     ByteArray(super::byte_arrays::ByteOperation),
     Formatting(super::formatting::FormattingOperation),
@@ -654,11 +675,22 @@ pub(super) enum PrimitiveOperation {
     CStringLen,
     Raise,
     DataToTagSmall,
+    WiredInError(tidepool_repr::execution_schema::WiredInErrorKind),
+    NoDuplicate,
     PrimitiveFailure(super::fallible::PrimitiveFailure),
     BasicScalar(BasicScalarOperation),
     WideWord(super::wide_words::WideWordOperation),
     Integer(IntegerOperation),
     Floating(super::floating::FloatingOperation),
+}
+
+impl PrimitiveOperation {
+    pub(super) fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Capability(_) | Self::WiredInError(_) | Self::Raise | Self::PrimitiveFailure(_)
+        )
+    }
 }
 
 pub(super) fn emit_operation(
@@ -671,12 +703,32 @@ pub(super) fn emit_operation(
     prepared_enter: cranelift_module::FuncId,
     gc: cranelift_module::FuncId,
     boxed_array: &tidepool_heap::execution_descriptor::ObjectDescriptor,
+    mut_var: &tidepool_heap::execution_descriptor::ObjectDescriptor,
     bytes_array: &tidepool_heap::execution_descriptor::ObjectDescriptor,
 ) -> Result<Option<Vec<ir::Value>>, super::CompileError> {
     match operation {
+        PrimitiveOperation::Capability(capability) => {
+            super::capabilities::emit_unsupported(builder, pipeline, vmctx, capability)?;
+            Ok(None)
+        }
         PrimitiveOperation::DataToTagSmall => {
             super::data_tag::emit(builder, pipeline, vmctx, prepared_enter, arguments[0]).map(Some)
         }
+        PrimitiveOperation::WiredInError(kind) => {
+            super::failures::emit_wired_in_error(
+                builder,
+                pipeline,
+                vmctx,
+                bytes,
+                kind,
+                arguments.first().copied(),
+            )?;
+            Ok(None)
+        }
+        // Prepared invocations have one private, serialized evaluator, eager
+        // blackholes, and no scheduler. There can be no duplicate evaluation
+        // for this primop to suppress under that execution contract.
+        PrimitiveOperation::NoDuplicate => Ok(Some(Vec::new())),
         PrimitiveOperation::PrimitiveFailure(cause) => {
             super::fallible::emit_terminal(builder, pipeline, vmctx, cause)?;
             Ok(None)
@@ -691,6 +743,17 @@ pub(super) fn emit_operation(
         }
         PrimitiveOperation::Array(super::arrays::ArrayOperation::WriteBoxed) => {
             super::arrays::emit_write_boxed(builder, pipeline, vmctx, boxed_array, arguments)
+                .map(Some)
+        }
+        PrimitiveOperation::Array(super::arrays::ArrayOperation::NewMutVar) => {
+            super::arrays::emit_new_mut_var(builder, pipeline, vmctx, gc, mut_var, arguments)
+                .map(Some)
+        }
+        PrimitiveOperation::Array(super::arrays::ArrayOperation::ReadMutVar) => {
+            super::arrays::emit_read_mut_var(builder, pipeline, vmctx, mut_var, arguments).map(Some)
+        }
+        PrimitiveOperation::Array(super::arrays::ArrayOperation::WriteMutVar) => {
+            super::arrays::emit_write_mut_var(builder, pipeline, vmctx, mut_var, arguments)
                 .map(Some)
         }
         PrimitiveOperation::Array(super::arrays::ArrayOperation::SizeofBoxed) => {
@@ -1351,6 +1414,26 @@ mod tests {
     }
 
     #[test]
+    fn no_duplicate_requires_exact_void_to_empty_returns_contract() {
+        use RuntimeRep::*;
+        let declaration = OperationDecl {
+            identity: OperationIdentity::PrimOp("noDuplicate#".into()),
+            signature: tidepool_repr::execution_schema::SignatureId(0),
+        };
+        assert!(matches!(
+            recognize_operation(&declaration, &sig(vec![Void], vec![])),
+            Some(PrimitiveOperation::NoDuplicate)
+        ));
+        for rejected in [
+            sig(vec![], vec![]),
+            sig(vec![Void], vec![Void]),
+            sig(vec![UnliftedRef], vec![]),
+        ] {
+            assert!(recognize_operation(&declaration, &rejected).is_none());
+        }
+    }
+
+    #[test]
     fn raise_requires_exact_nonsuccess_contract() {
         let declaration = OperationDecl {
             identity: OperationIdentity::PrimOp("raise#".into()),
@@ -1376,6 +1459,68 @@ mod tests {
             results: ResultContract::NoSuccess,
         };
         assert!(recognize_operation(&declaration, &wrong_argument).is_none());
+    }
+
+    #[test]
+    fn wired_errors_require_authoritative_identity_and_exact_bottoming_signature() {
+        use tidepool_repr::execution_schema::WiredInErrorKind;
+
+        let declaration = OperationDecl {
+            identity: OperationIdentity::WiredInError {
+                kind: WiredInErrorKind::PatternMatch,
+            },
+            signature: tidepool_repr::execution_schema::SignatureId(0),
+        };
+        let accepted = Signature {
+            arguments: vec![RuntimeRep::Address],
+            results: ResultContract::NoSuccess,
+        };
+        assert!(matches!(
+            recognize_operation(&declaration, &accepted),
+            Some(PrimitiveOperation::WiredInError(
+                WiredInErrorKind::PatternMatch
+            ))
+        ));
+        for rejected in [
+            Signature {
+                arguments: vec![],
+                results: ResultContract::NoSuccess,
+            },
+            Signature {
+                arguments: vec![RuntimeRep::Address],
+                results: ResultContract::Returns(vec![]),
+            },
+        ] {
+            assert!(recognize_operation(&declaration, &rejected).is_none());
+        }
+
+        let nullary = OperationDecl {
+            identity: OperationIdentity::WiredInError {
+                kind: WiredInErrorKind::AbsentSumField,
+            },
+            signature: tidepool_repr::execution_schema::SignatureId(0),
+        };
+        assert!(matches!(
+            recognize_operation(
+                &nullary,
+                &Signature {
+                    arguments: vec![],
+                    results: ResultContract::NoSuccess,
+                }
+            ),
+            Some(PrimitiveOperation::WiredInError(
+                WiredInErrorKind::AbsentSumField
+            ))
+        ));
+
+        let foreign_spelling = OperationDecl {
+            identity: OperationIdentity::Intrinsic {
+                symbol: "patError".into(),
+                convention: ForeignConvention::CCall,
+            },
+            signature: tidepool_repr::execution_schema::SignatureId(0),
+        };
+        assert!(recognize_operation(&foreign_spelling, &accepted).is_none());
     }
 
     #[test]

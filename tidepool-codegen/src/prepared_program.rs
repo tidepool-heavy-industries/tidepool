@@ -4,6 +4,7 @@
 //! tables are invocation-owned. No invocation pointer is embedded in code.
 
 use crate::entry_abi::EntryAbi;
+mod capabilities;
 mod failures;
 use crate::pipeline::{CodegenPipeline, PipelineError};
 use cranelift_codegen::ir::{self, types, AbiParam, InstBuilder, Value as SsaValue};
@@ -206,6 +207,14 @@ impl CompiledProgram {
             ("prepared_bad_state", prepared_bad_state as *const u8),
             ("prepared_blackhole", prepared_blackhole as *const u8),
             ("prepared_raise", no_success::raise as *const u8),
+            (
+                "prepared_wired_in_error",
+                failures::prepared_wired_in_error as *const u8,
+            ),
+            (
+                "prepared_unsupported_capability",
+                capabilities::unsupported as *const u8,
+            ),
             (
                 "prepared_new_boxed",
                 arrays::prepared_new_boxed as *const u8,

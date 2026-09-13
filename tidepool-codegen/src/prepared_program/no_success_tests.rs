@@ -372,6 +372,64 @@ fn assert_raised(program: &CompiledProgram) {
     ));
 }
 
+fn wired_error_wire(kind: WiredInErrorKind, unused_returning_join: bool) -> WireProgram {
+    let arguments = if kind == WiredInErrorKind::AbsentSumField {
+        vec![]
+    } else {
+        vec![RuntimeRep::Address]
+    };
+    let mut wire = testing::wire_program();
+    wire.signatures[0].results = ResultContract::NoSuccess;
+    wire.signatures.push(Signature {
+        arguments,
+        results: ResultContract::NoSuccess,
+    });
+    wire.operations.push(OperationDecl {
+        identity: OperationIdentity::WiredInError { kind },
+        signature: SignatureId(1),
+    });
+    let operation = ExprFrame::Operation {
+        operation: OperationId(0),
+        arguments: if kind == WiredInErrorKind::AbsentSumField {
+            vec![]
+        } else {
+            vec![Atom::Scalar(ScalarLiteral::Bytes(
+                b"Suite.hs:3|adapter".to_vec(),
+            ))]
+        },
+    };
+    wire.expressions.nodes = vec![operation];
+    if unused_returning_join {
+        let signature = SignatureId(wire.signatures.len() as u32);
+        wire.signatures.push(Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::Address]),
+        });
+        wire.expressions
+            .nodes
+            .push(ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::Bytes(
+                b"unreachable".to_vec(),
+            ))]));
+        wire.expressions.nodes.push(ExprFrame::LetJoins {
+            bindings: Group::NonRecursive(JoinBinding {
+                id: JoinId(0),
+                signature,
+                parameters: vec![],
+                body: 1,
+            }),
+            body: 0,
+        });
+        let Group::NonRecursive(entry) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        let HeapRhs::Function { body, .. } = &mut entry.binding.rhs else {
+            unreachable!()
+        };
+        *body = 2;
+    }
+    wire
+}
+
 #[test]
 fn w5_no_success_raised_caf_uses_status_only_body_and_reusable_settlement() {
     let linked = link_program(
@@ -481,4 +539,125 @@ fn w5_no_success_void_prefix_uses_logical_arity_without_payload() {
 #[test]
 fn w5_no_success_parent_may_contain_an_unused_returning_join() {
     assert_raised(&compile(bottoming_wire(BottomCall::UnusedReturningJoin)));
+}
+
+#[test]
+fn wired_pattern_failure_uses_real_adapter_and_ignores_returning_join() {
+    let program = compile(wired_error_wire(WiredInErrorKind::PatternMatch, true));
+    assert!(matches!(
+        program.run_entry(
+            ValueId(0),
+            &[],
+            &RunOptions::default(),
+            Arc::new(AtomicBool::new(false)),
+        ),
+        Err(ExecutionError::Runtime(MachineFailure {
+            cause: RuntimeError::PatternMatchFailure(message),
+            disposition: MachineDisposition::Reusable,
+        })) if message == "Suite.hs:3: Non-exhaustive patterns in adapter\n"
+    ));
+}
+
+#[test]
+fn wired_impossible_is_an_integrity_terminal() {
+    let program = compile(wired_error_wire(WiredInErrorKind::Impossible, false));
+    assert!(matches!(
+        program.run_entry(
+            ValueId(0),
+            &[],
+            &RunOptions::default(),
+            Arc::new(AtomicBool::new(false)),
+        ),
+        Err(ExecutionError::Runtime(MachineFailure {
+            cause: RuntimeError::WiredInError {
+                kind: WiredInErrorKind::Impossible,
+                message,
+            },
+            disposition: MachineDisposition::Unavailable,
+        })) if message == "Suite.hs:3|adapter"
+    ));
+}
+
+#[test]
+fn wired_absent_sum_field_is_a_nullary_integrity_terminal() {
+    let program = compile(wired_error_wire(WiredInErrorKind::AbsentSumField, false));
+    assert!(matches!(
+        program.run_entry(
+            ValueId(0),
+            &[],
+            &RunOptions::default(),
+            Arc::new(AtomicBool::new(false)),
+        ),
+        Err(ExecutionError::Runtime(MachineFailure {
+            cause: RuntimeError::WiredInError {
+                kind: WiredInErrorKind::AbsentSumField,
+                message,
+            },
+            disposition: MachineDisposition::Unavailable,
+        })) if message == "entered absent sum field!"
+    ));
+}
+
+#[test]
+fn wired_language_failure_caf_retries_in_one_invocation() {
+    let mut wire = wired_error_wire(WiredInErrorKind::DeferredType, false);
+    let reference_signature = SignatureId(wire.signatures.len() as u32);
+    wire.signatures.push(Signature {
+        arguments: vec![],
+        results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+    });
+    let Group::NonRecursive(entry) = &mut wire.bindings[0] else {
+        unreachable!()
+    };
+    entry.binding.rhs = HeapRhs::Thunk {
+        signature: SignatureId(0),
+        update: UpdatePolicy::Memoize,
+        captures: vec![],
+        body: 0,
+    };
+    wire.expressions
+        .nodes
+        .push(ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(
+            ValueId(0),
+        ))]));
+    wire.bindings.push(Group::NonRecursive(TopBinding {
+        identity: testing::identity("WiredFailure", "referenceEntry"),
+        binding: HeapBinding {
+            id: ValueId(1),
+            rhs: HeapRhs::Function {
+                signature: reference_signature,
+                parameters: vec![],
+                captures: vec![],
+                body: 1,
+            },
+        },
+    }));
+    let program = compile(wire);
+    let mut invocation = super::invocation::PreparedInvocation::enter(
+        &program,
+        ValueId(1),
+        &[],
+        &RunOptions::default(),
+        Arc::new(AtomicBool::new(false)),
+    )
+    .unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            invocation.observe(10_000),
+            Err(ExecutionError::Runtime(MachineFailure {
+                cause: RuntimeError::WiredInError {
+                    kind: WiredInErrorKind::DeferredType,
+                    ..
+                },
+                disposition: MachineDisposition::Reusable,
+            }))
+        ));
+        assert!(matches!(
+            invocation.machine.take_runtime_error(),
+            Some(RuntimeError::WiredInError {
+                kind: WiredInErrorKind::DeferredType,
+                ..
+            })
+        ));
+    }
 }

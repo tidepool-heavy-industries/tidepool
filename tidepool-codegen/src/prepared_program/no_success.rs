@@ -56,6 +56,12 @@ pub(super) fn emit_terminal(
     let function = pipeline.module.declare_func_in_func(function, builder.func);
     let call = builder.ins().call(function, &arguments);
     let status = builder.inst_results(call)[0];
-    crate::alloc::emit_prepared_failure_return(builder, status);
+    emit_status(builder, status);
     Ok(())
+}
+
+/// End a failing path with the status recorded by its noncollecting host call,
+/// without publishing any of the enclosing signature's successful results.
+pub(super) fn emit_status(builder: &mut FunctionBuilder<'_>, status: Value) {
+    crate::alloc::emit_prepared_failure_return(builder, status);
 }

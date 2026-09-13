@@ -20,6 +20,9 @@ pub(super) enum ArrayOperation {
     NewBoxed,
     ReadBoxed,
     WriteBoxed,
+    NewMutVar,
+    ReadMutVar,
+    WriteMutVar,
     SizeofBoxed,
     UnsafeFreezeBoxed,
     ShrinkSmallBoxed,
@@ -72,6 +75,24 @@ pub(super) fn recognize(
                 && signature.results == ResultContract::Returns(vec![]) =>
         {
             Some(ArrayOperation::WriteBoxed)
+        }
+        "newMutVar#"
+            if signature.arguments == [LiftedRef, Void]
+                && signature.results == ResultContract::Returns(vec![UnliftedRef]) =>
+        {
+            Some(ArrayOperation::NewMutVar)
+        }
+        "readMutVar#"
+            if signature.arguments == [UnliftedRef, Void]
+                && signature.results == ResultContract::Returns(vec![LiftedRef]) =>
+        {
+            Some(ArrayOperation::ReadMutVar)
+        }
+        "writeMutVar#"
+            if signature.arguments == [UnliftedRef, LiftedRef, Void]
+                && signature.results == ResultContract::Returns(vec![]) =>
+        {
+            Some(ArrayOperation::WriteMutVar)
         }
         "sizeofSmallArray#"
         | "sizeofSmallMutableArray#"
@@ -506,7 +527,46 @@ pub(super) fn emit_new_boxed(
     descriptor: &ObjectDescriptor,
     arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
-    let initial = arguments[1];
+    emit_new_boxed_value(
+        builder,
+        pipeline,
+        vmctx,
+        gc,
+        descriptor,
+        arguments[0],
+        arguments[1],
+    )
+}
+
+pub(super) fn emit_new_mut_var(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    gc: FuncId,
+    descriptor: &ObjectDescriptor,
+    arguments: &[Value],
+) -> Result<Vec<Value>, super::CompileError> {
+    let length = builder.ins().iconst(types::I64, 1);
+    emit_new_boxed_value(
+        builder,
+        pipeline,
+        vmctx,
+        gc,
+        descriptor,
+        length,
+        arguments[0],
+    )
+}
+
+fn emit_new_boxed_value(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    gc: FuncId,
+    descriptor: &ObjectDescriptor,
+    length: Value,
+    initial: Value,
+) -> Result<Vec<Value>, super::CompileError> {
     builder.declare_value_needs_stack_map(initial);
     let gc = pipeline.module.declare_func_in_func(gc, builder.func);
     let object = crate::alloc::emit_prepared_alloc_fast_path(builder, vmctx, descriptor, gc);
@@ -525,9 +585,7 @@ pub(super) fn emit_new_boxed(
         .declare_function("prepared_new_boxed", Linkage::Import, &signature)
         .map_err(|error| crate::pipeline::PipelineError::Declaration(error.to_string()))?;
     let host = pipeline.module.declare_func_in_func(host, builder.func);
-    let call = builder
-        .ins()
-        .call(host, &[vmctx, object, arguments[0], initial]);
+    let call = builder.ins().call(host, &[vmctx, object, length, initial]);
     let status = builder.inst_results(call)[0];
     let success = builder
         .ins()
@@ -591,6 +649,35 @@ pub(super) fn emit_read_boxed(
     descriptor: &ObjectDescriptor,
     arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
+    emit_read_boxed_value(
+        builder,
+        pipeline,
+        vmctx,
+        descriptor,
+        arguments[0],
+        arguments[1],
+    )
+}
+
+pub(super) fn emit_read_mut_var(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    descriptor: &ObjectDescriptor,
+    arguments: &[Value],
+) -> Result<Vec<Value>, super::CompileError> {
+    let index = builder.ins().iconst(types::I64, 0);
+    emit_read_boxed_value(builder, pipeline, vmctx, descriptor, arguments[0], index)
+}
+
+fn emit_read_boxed_value(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    descriptor: &ObjectDescriptor,
+    reference: Value,
+    index: Value,
+) -> Result<Vec<Value>, super::CompileError> {
     let host = declare_host(builder, pipeline, "prepared_read_boxed", 5)?;
     let owner = builder
         .ins()
@@ -598,7 +685,7 @@ pub(super) fn emit_read_boxed(
     let output = output_slot(builder);
     let call = builder
         .ins()
-        .call(host, &[vmctx, arguments[0], owner, arguments[1], output]);
+        .call(host, &[vmctx, reference, owner, index, output]);
     let status = builder.inst_results(call)[0];
     finish_checked_call(builder, status);
     let value = builder
@@ -615,15 +702,53 @@ pub(super) fn emit_write_boxed(
     descriptor: &ObjectDescriptor,
     arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
-    builder.declare_value_needs_stack_map(arguments[2]);
+    emit_write_boxed_value(
+        builder,
+        pipeline,
+        vmctx,
+        descriptor,
+        arguments[0],
+        arguments[1],
+        arguments[2],
+    )
+}
+
+pub(super) fn emit_write_mut_var(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    descriptor: &ObjectDescriptor,
+    arguments: &[Value],
+) -> Result<Vec<Value>, super::CompileError> {
+    let index = builder.ins().iconst(types::I64, 0);
+    emit_write_boxed_value(
+        builder,
+        pipeline,
+        vmctx,
+        descriptor,
+        arguments[0],
+        index,
+        arguments[1],
+    )
+}
+
+fn emit_write_boxed_value(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    descriptor: &ObjectDescriptor,
+    reference: Value,
+    index: Value,
+    value: Value,
+) -> Result<Vec<Value>, super::CompileError> {
+    builder.declare_value_needs_stack_map(value);
     let host = declare_host(builder, pipeline, "prepared_write_boxed", 5)?;
     let owner = builder
         .ins()
         .iconst(types::I64, descriptor.initial_header_word() as i64);
-    let call = builder.ins().call(
-        host,
-        &[vmctx, arguments[0], owner, arguments[1], arguments[2]],
-    );
+    let call = builder
+        .ins()
+        .call(host, &[vmctx, reference, owner, index, value]);
     let status = builder.inst_results(call)[0];
     finish_checked_call(builder, status);
     Ok(Vec::new())
@@ -884,6 +1009,54 @@ mod tests {
         .is_none());
     }
 
+    #[test]
+    fn mut_var_operations_require_exact_state_threaded_signatures() {
+        let signature = |arguments, results| Signature {
+            arguments,
+            results: ResultContract::Returns(results),
+        };
+        let primop = |name: &str| OperationIdentity::PrimOp(name.into());
+        assert!(matches!(
+            recognize(
+                &primop("newMutVar#"),
+                &signature(
+                    vec![RuntimeRep::LiftedRef, RuntimeRep::Void],
+                    vec![RuntimeRep::UnliftedRef],
+                ),
+            ),
+            Some(ArrayOperation::NewMutVar)
+        ));
+        assert!(matches!(
+            recognize(
+                &primop("readMutVar#"),
+                &signature(
+                    vec![RuntimeRep::UnliftedRef, RuntimeRep::Void],
+                    vec![RuntimeRep::LiftedRef],
+                ),
+            ),
+            Some(ArrayOperation::ReadMutVar)
+        ));
+        assert!(matches!(
+            recognize(
+                &primop("writeMutVar#"),
+                &signature(
+                    vec![
+                        RuntimeRep::UnliftedRef,
+                        RuntimeRep::LiftedRef,
+                        RuntimeRep::Void,
+                    ],
+                    vec![],
+                ),
+            ),
+            Some(ArrayOperation::WriteMutVar)
+        ));
+        assert!(recognize(
+            &primop("writeMutVar#"),
+            &signature(vec![RuntimeRep::UnliftedRef, RuntimeRep::LiftedRef], vec![],),
+        )
+        .is_none());
+    }
+
     fn empty_constructor(index: u64) -> ConstructorDecl {
         ConstructorDecl {
             identity: testing::identity("Arrays", &format!("C{index}")),
@@ -910,22 +1083,37 @@ mod tests {
     ) -> crate::prepared_program::CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        let mut_var = names[0] == "newMutVar#";
         wire.signatures.extend([
             Signature {
-                arguments: vec![RuntimeRep::Int(64), RuntimeRep::LiftedRef, RuntimeRep::Void],
+                arguments: if mut_var {
+                    vec![RuntimeRep::LiftedRef, RuntimeRep::Void]
+                } else {
+                    vec![RuntimeRep::Int(64), RuntimeRep::LiftedRef, RuntimeRep::Void]
+                },
                 results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
             },
             Signature {
-                arguments: vec![
-                    RuntimeRep::UnliftedRef,
-                    RuntimeRep::Int(64),
-                    RuntimeRep::LiftedRef,
-                    RuntimeRep::Void,
-                ],
+                arguments: if mut_var {
+                    vec![
+                        RuntimeRep::UnliftedRef,
+                        RuntimeRep::LiftedRef,
+                        RuntimeRep::Void,
+                    ]
+                } else {
+                    vec![
+                        RuntimeRep::UnliftedRef,
+                        RuntimeRep::Int(64),
+                        RuntimeRep::LiftedRef,
+                        RuntimeRep::Void,
+                    ]
+                },
                 results: ResultContract::Returns(vec![]),
             },
             Signature {
-                arguments: if names[2].starts_with("index") {
+                arguments: if mut_var {
+                    vec![RuntimeRep::UnliftedRef, RuntimeRep::Void]
+                } else if names[2].starts_with("index") {
                     vec![RuntimeRep::UnliftedRef, RuntimeRep::Int(64)]
                 } else {
                     vec![
@@ -965,7 +1153,11 @@ mod tests {
         let mut nodes = vec![
             ExprFrame::Operation {
                 operation: OperationId(0),
-                arguments: vec![int(1), Atom::Ref(ValueRef::Local(ValueId(1))), Atom::Void],
+                arguments: if mut_var {
+                    vec![Atom::Ref(ValueRef::Local(ValueId(1))), Atom::Void]
+                } else {
+                    vec![int(1), Atom::Ref(ValueRef::Local(ValueId(1))), Atom::Void]
+                },
             },
             ExprFrame::Construct {
                 constructor: ConstructorId(1),
@@ -973,16 +1165,26 @@ mod tests {
             },
             ExprFrame::Operation {
                 operation: OperationId(1),
-                arguments: vec![
-                    Atom::Ref(ValueRef::Local(ValueId(100))),
-                    int(0),
-                    Atom::Ref(ValueRef::Local(ValueId(101))),
-                    Atom::Void,
-                ],
+                arguments: if mut_var {
+                    vec![
+                        Atom::Ref(ValueRef::Local(ValueId(100))),
+                        Atom::Ref(ValueRef::Local(ValueId(101))),
+                        Atom::Void,
+                    ]
+                } else {
+                    vec![
+                        Atom::Ref(ValueRef::Local(ValueId(100))),
+                        int(0),
+                        Atom::Ref(ValueRef::Local(ValueId(101))),
+                        Atom::Void,
+                    ]
+                },
             },
             ExprFrame::Operation {
                 operation: OperationId(2),
-                arguments: if names[2].starts_with("index") {
+                arguments: if mut_var {
+                    vec![Atom::Ref(ValueRef::Local(ValueId(100))), Atom::Void]
+                } else if names[2].starts_with("index") {
                     vec![Atom::Ref(ValueRef::Local(ValueId(100))), int(read_index)]
                 } else {
                     vec![
@@ -1669,47 +1871,12 @@ mod tests {
     }
 
     #[test]
-    fn w5_array_boxed_allocation_survives_result_collection() {
-        let mut wire = testing::wire_program();
-        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::UnliftedRef]);
-        wire.signatures.push(Signature {
-            arguments: vec![RuntimeRep::Int(64), RuntimeRep::LiftedRef, RuntimeRep::Void],
-            results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
-        });
-        wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("Arrays", "C"),
-            family: testing::identity("Arrays", "T"),
-            host_id: tidepool_repr::DataConId(999),
-            result_rep: RuntimeRep::LiftedRef,
-            tag: 1,
-            family_size: 1,
-            field_reps: vec![],
-            strict_fields: vec![],
-            layout: CheckedLayout {
-                fields: vec![],
-                alignment: 1,
-                payload_size: 0,
-                root_mask: vec![],
-            },
-        });
-        wire.bindings.push(Group::NonRecursive(TopBinding {
-            identity: testing::identity("Arrays", "initial"),
-            binding: HeapBinding {
-                id: ValueId(1),
-                rhs: HeapRhs::Constructor {
-                    constructor: ConstructorId(0),
-                    fields: vec![],
-                },
-            },
-        }));
-        wire.operations.push(OperationDecl {
-            identity: OperationIdentity::PrimOp("newSmallArray#".into()),
-            signature: SignatureId(1),
-        });
-        wire.expressions.nodes = vec![
-            ExprFrame::Operation {
-                operation: OperationId(0),
-                arguments: vec![
+    fn boxed_arrays_and_mut_vars_remain_unobservable_after_result_collection() {
+        for (name, signature, arguments) in [
+            (
+                "newSmallArray#",
+                vec![RuntimeRep::Int(64), RuntimeRep::LiftedRef, RuntimeRep::Void],
+                vec![
                     Atom::Scalar(ScalarLiteral::Int {
                         bits: 64,
                         bytes: 3_i64.to_be_bytes().to_vec(),
@@ -1717,47 +1884,95 @@ mod tests {
                     Atom::Ref(ValueRef::Local(ValueId(1))),
                     Atom::Void,
                 ],
-            },
-            ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(4)))]),
-            ExprFrame::Case {
-                scrutinee: 0,
-                binder: ValueId(2),
-                kind: CaseKind::MultiValue,
-                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
-                alternatives: vec![Alternative {
-                    pattern: AlternativePattern::Default,
-                    binders: vec![ValueId(4)],
-                    body: 1,
-                }],
-            },
-        ];
-        if let Group::NonRecursive(top) = &mut wire.bindings[0] {
-            if let HeapRhs::Function { body, .. } = &mut top.binding.rhs {
-                *body = 2;
+            ),
+            (
+                "newMutVar#",
+                vec![RuntimeRep::LiftedRef, RuntimeRep::Void],
+                vec![Atom::Ref(ValueRef::Local(ValueId(1))), Atom::Void],
+            ),
+        ] {
+            let mut wire = testing::wire_program();
+            wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::UnliftedRef]);
+            wire.signatures.push(Signature {
+                arguments: signature,
+                results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+            });
+            wire.constructors.push(ConstructorDecl {
+                identity: testing::identity("Arrays", "C"),
+                family: testing::identity("Arrays", "T"),
+                host_id: tidepool_repr::DataConId(999),
+                result_rep: RuntimeRep::LiftedRef,
+                tag: 1,
+                family_size: 1,
+                field_reps: vec![],
+                strict_fields: vec![],
+                layout: CheckedLayout {
+                    fields: vec![],
+                    alignment: 1,
+                    payload_size: 0,
+                    root_mask: vec![],
+                },
+            });
+            wire.bindings.push(Group::NonRecursive(TopBinding {
+                identity: testing::identity("Arrays", "initial"),
+                binding: HeapBinding {
+                    id: ValueId(1),
+                    rhs: HeapRhs::Constructor {
+                        constructor: ConstructorId(0),
+                        fields: vec![],
+                    },
+                },
+            }));
+            wire.operations.push(OperationDecl {
+                identity: OperationIdentity::PrimOp(name.into()),
+                signature: SignatureId(1),
+            });
+            wire.expressions.nodes = vec![
+                ExprFrame::Operation {
+                    operation: OperationId(0),
+                    arguments,
+                },
+                ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(4)))]),
+                ExprFrame::Case {
+                    scrutinee: 0,
+                    binder: ValueId(2),
+                    kind: CaseKind::MultiValue,
+                    scrutinee_results: ResultContract::Returns(vec![RuntimeRep::UnliftedRef]),
+                    alternatives: vec![Alternative {
+                        pattern: AlternativePattern::Default,
+                        binders: vec![ValueId(4)],
+                        body: 1,
+                    }],
+                },
+            ];
+            if let Group::NonRecursive(top) = &mut wire.bindings[0] {
+                if let HeapRhs::Function { body, .. } = &mut top.binding.rhs {
+                    *body = 2;
+                }
             }
-        }
-        let linked =
-            link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        let program = crate::prepared_program::CompiledProgram::compile(&linked).unwrap();
-        let result = program.run_entry(
-            ValueId(0),
-            &[],
-            &crate::prepared_program::RunOptions {
-                collect_before_observation: true,
-                ..Default::default()
-            },
-            Arc::new(AtomicBool::new(false)),
-        );
-        assert!(matches!(
-            result,
-            Err(crate::prepared_program::ExecutionError::Observation(
-                crate::prepared_program::ObservationFailure::Unobservable(
-                    tidepool_heap::execution_descriptor::ObjectKind::External(
-                        ExternalStorageKind::BoxedArray
+            let linked =
+                link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+            let program = crate::prepared_program::CompiledProgram::compile(&linked).unwrap();
+            let result = program.run_entry(
+                ValueId(0),
+                &[],
+                &crate::prepared_program::RunOptions {
+                    collect_before_observation: true,
+                    ..Default::default()
+                },
+                Arc::new(AtomicBool::new(false)),
+            );
+            assert!(matches!(
+                result,
+                Err(crate::prepared_program::ExecutionError::Observation(
+                    crate::prepared_program::ObservationFailure::Unobservable(
+                        tidepool_heap::execution_descriptor::ObjectKind::External(
+                            ExternalStorageKind::BoxedArray
+                        )
                     )
-                )
-            ))
-        ));
+                ))
+            ));
+        }
     }
 
     #[test]
@@ -1782,6 +1997,29 @@ mod tests {
         assert!(
             result.collections >= 2,
             "fixture must move the array and child"
+        );
+        assert!(matches!(result.values.as_slice(),
+            [tidepool_bridge::Value::Con(id, fields)] if *id == tidepool_repr::DataConId(1001) && fields.is_empty()));
+    }
+
+    #[test]
+    fn prepared_mut_var_write_read_preserves_dynamic_child_through_gc() {
+        let program = flow_program(["newMutVar#", "writeMutVar#", "readMutVar#"], 0, 24);
+        let result = program
+            .run_entry(
+                ValueId(0),
+                &[],
+                &crate::prepared_program::RunOptions {
+                    nursery_bytes: 128,
+                    collect_before_observation: true,
+                    ..Default::default()
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        assert!(
+            result.collections >= 2,
+            "fixture must move the mutable cell and child"
         );
         assert!(matches!(result.values.as_slice(),
             [tidepool_bridge::Value::Con(id, fields)] if *id == tidepool_repr::DataConId(1001) && fields.is_empty()));
@@ -2117,6 +2355,72 @@ mod tests {
             Some(crate::host_fns::RuntimeError::BadPointer)
         );
         assert_eq!(machine.external_storage_stats().live_objects, 1);
+    }
+
+    #[test]
+    fn boxed_array_host_rejects_mut_var_descriptor_identity() {
+        use tidepool_repr::execution_schema::{Architecture, Endianness, TargetDescriptor};
+        let target = TargetDescriptor {
+            architecture: Architecture::X86_64,
+            endianness: Endianness::Little,
+            pointer_width: 64,
+            word_width: 64,
+            abi: "sysv64".into(),
+            features: Vec::new(),
+        };
+        let boxed_array =
+            Arc::new(ObjectDescriptor::external(ExternalStorageKind::BoxedArray, &target).unwrap());
+        let mut_var =
+            Arc::new(ObjectDescriptor::external(ExternalStorageKind::BoxedArray, &target).unwrap());
+        assert_ne!(
+            boxed_array.initial_header_word(),
+            mut_var.initial_header_word()
+        );
+        let machine = crate::machine_state::MachineState::new();
+        let extent = mut_var.allocation_extent() as usize;
+        machine
+            .install_prepared_buffer(
+                vec![0_u64; extent / 8],
+                vec![boxed_array.clone(), mut_var.clone()],
+            )
+            .unwrap();
+        let (start, size) = machine.gc_active_range().unwrap();
+        let payload = machine
+            .allocate_external_storage(ExternalStorageKind::BoxedArray, 1)
+            .unwrap();
+        unsafe {
+            mut_var.initialize_header(start);
+            mut_var
+                .external_payload_slot(start, extent)
+                .unwrap()
+                .write(payload);
+        }
+        let mut vmctx = unsafe {
+            crate::context::VMContext::new(start, start.add(size), crate::host_fns::gc_trigger)
+        };
+        vmctx.alloc_ptr = unsafe { start.add(extent) };
+        vmctx.machine_state = &machine as *const _ as *mut _;
+        let reference = (start as usize | usize::from(mut_var.tag())) as *mut u8;
+        let sentinel = 13usize as *mut u8;
+        let mut output = sentinel;
+        let status = unsafe {
+            prepared_read_boxed(
+                &mut vmctx,
+                reference,
+                Arc::as_ptr(&boxed_array),
+                0,
+                &mut output,
+            )
+        };
+        assert_eq!(
+            status,
+            crate::prepared_control::CallStatus::IntegrityFailure as i32
+        );
+        assert_eq!(output, sentinel);
+        assert_eq!(
+            machine.take_runtime_error(),
+            Some(crate::host_fns::RuntimeError::BadPointer)
+        );
     }
 
     #[test]

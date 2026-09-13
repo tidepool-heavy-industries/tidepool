@@ -428,6 +428,7 @@ fn emit_function_at(
                             prepared_enter,
                             prepared_gc,
                             &plan.boxed_array,
+                            &plan.mut_var,
                             &plan.bytes_array,
                         )?;
                         match (output, signature.results.returned_reps()) {
@@ -447,7 +448,11 @@ fn emit_function_at(
                                     node,
                                 )?;
                             }
-                            (None, None) => {}
+                            // `None` is an emitter-established terminal. This
+                            // includes deferred capabilities whose wire
+                            // contract retains GHC's successful result shape,
+                            // though native execution never publishes it.
+                            (None, _) if operation.is_terminal() => {}
                             _ => return Err(unsupported(id, node)),
                         }
                     }
