@@ -6,7 +6,10 @@
 -- Uses findAndReadIface to read .hi files directly from disk, bypassing the
 -- PIT (Package Interface Table) cache. The PIT replaces mi_extra_decls with
 -- a panic thunk to save memory, so loadSysInterface can't be used here.
-module Tidepool.FatIface (FatIfaceCache, newFatIfaceCache, lookupFatIface) where
+module Tidepool.FatIface
+  ( FatIfaceCache, newFatIfaceCache, lookupFatIface
+  , FatIfaceLookup(..), FatIfaceMissing(..), lookupFatIfaceExact
+  ) where
 
 import GHC.Core (CoreBind, Bind(..))
 import GHC.Driver.Env (HscEnv)
@@ -29,6 +32,22 @@ import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
 import qualified Data.Map.Strict as Map
 import System.IO (hPutStrLn, stderr)
 import System.Environment (lookupEnv)
+
+-- | Exact recovery keeps absence distinct from an unreadable interface.
+-- The legacy Maybe view must not be used by prepared body recovery.
+data FatIfaceMissing = NameWithoutModule | NoExtraDeclarations | BindingAbsent
+  deriving (Eq, Show)
+
+data FatIfaceLookup
+  = FatIfaceFound CoreBind
+  | FatIfaceMissing FatIfaceMissing
+  | FatIfaceLoadFailure Module String
+  | FatIfaceUnsupported String
+
+lookupFatIfaceExact :: HscEnv -> FatIfaceCache -> Name -> IO FatIfaceLookup
+lookupFatIfaceExact _ _ name | Nothing <- nameModule_maybe name =
+  pure (FatIfaceMissing NameWithoutModule)
+lookupFatIfaceExact _ _ _ = pure (FatIfaceUnsupported "wave5:B1 exact cached interface outcome")
 
 -- | Cache of deserialized fat interface Core, keyed by Module.
 -- Each module's extra-decls are deserialized at most once.
