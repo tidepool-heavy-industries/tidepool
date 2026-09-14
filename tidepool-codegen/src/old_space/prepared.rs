@@ -43,6 +43,38 @@ unsafe impl DescriptorOldSpace for super::OldSpace {
 }
 
 impl super::OldSpace {
+    /// Promote selected prepared roots and give each one a stable,
+    /// persistently registered slot owned by this old-space owner.
+    ///
+    /// The returned slots are the only representation a handle ledger may
+    /// retain.  Callers must never retain the temporary result/argument slot:
+    /// that storage belongs to one execution frame and is removed at unwind.
+    pub(crate) unsafe fn retain_prepared(
+        &mut self,
+        machine: &MachineState,
+        vmctx: &mut VMContext,
+        selected: &[*mut *mut u8],
+        descriptors: &[Arc<ObjectDescriptor>],
+    ) -> Result<Vec<super::RootSlot>, RuntimeError> {
+        self.promote_prepared(machine, vmctx, selected, descriptors)?;
+        let mut retained = Vec::new();
+        retained
+            .try_reserve_exact(selected.len())
+            .map_err(|_| RuntimeError::HeapOverflow)?;
+        for &source in selected {
+            let pointer = *source;
+            if pointer.is_null() {
+                return Err(RuntimeError::BadPointer);
+            }
+            let mut cell = Box::new(pointer);
+            let address: *mut *mut u8 = &mut *cell;
+            self.slots.push(cell);
+            machine.register_persistent_root(address);
+            retained.push(super::RootSlot::new(address));
+        }
+        Ok(retained)
+    }
+
     /// # Safety
     /// No generated frames are live. Selected slots belong to the complete
     /// invocation root registry; vmctx/machine/OldSpace belong to that same
