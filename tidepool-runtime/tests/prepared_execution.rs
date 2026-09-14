@@ -14,6 +14,8 @@ use tidepool_runtime::session::PreparedRuntime;
 const ARTIFACT: &[u8] = include_bytes!("../../haskell/test-prepared-stg/fixtures/m3-vertical.cbor");
 const FREER_RETENTION_ARTIFACT: &[u8] =
     include_bytes!("../../haskell/test-prepared-stg/fixtures/freer-retention.cbor");
+const FREER_RESUME_ARTIFACT: &[u8] =
+    include_bytes!("../../haskell/test-prepared-stg/fixtures/freer-resume.cbor");
 
 fn head(major: u8, length: usize) -> Vec<u8> {
     assert!(length < 24);
@@ -328,4 +330,100 @@ fn runtime_retains_a_real_freer_continuation_without_observing_it() {
         assert!(runtime.release(child));
     }
     assert!(runtime.release(second_outer));
+}
+
+/// One `TopBinding` (with its enclosing group's recursion flattened) matching
+/// `occurrence` in `FREER_RESUME_ARTIFACT`'s home module. Panics rather than
+/// returning `Option` because every caller below treats a missing top as a
+/// probe-shape failure, not a runtime condition to branch on.
+fn freer_resume_top(
+    prepared: &tidepool_repr::execution_schema::PreparedProgram,
+    occurrence: &str,
+) -> tidepool_repr::execution_schema::TopBinding {
+    prepared
+        .bindings()
+        .iter()
+        .flat_map(|group| match group {
+            tidepool_repr::execution_schema::Group::NonRecursive(top) => {
+                std::slice::from_ref(top).to_vec()
+            }
+            tidepool_repr::execution_schema::Group::Recursive(tops) => tops.clone(),
+        })
+        .find(|top| top.identity.module == "FreerResume" && top.identity.occurrence == occurrence)
+        .unwrap_or_else(|| panic!("FreerResume artifact has no top named {occurrence}"))
+}
+
+/// `program` and `resumeInt` do not reference each other's top-level
+/// bindings (`resumeInt` is not in the reachability closure the corpus
+/// projection computes for `program`'s entry, and vice versa), so
+/// `freerResumeEntries = (program, resumeInt)` is projected as the artifact's
+/// designated entry purely to pull both into one reachable closure. Neither
+/// `program` nor `resumeInt` needs to be the *designated* entry to be a real,
+/// separately callable top of this artifact: `run_entry`/`run_entry_retained`
+/// accept any top's `ValueId` directly (see
+/// `retained_session_caches_closed_program_and_rejects_unclosed_artifact`
+/// above), and admission is whole-program
+/// (`tidepool_codegen::prepared_program::admission::admit_prepared`), so a
+/// single successful compile admits every top in the artifact, `resumeInt`
+/// included.
+#[test]
+fn freer_resume_artifact_admits_program_and_resume_int_as_two_entries() {
+    let prepared = parse_program(
+        FREER_RESUME_ARTIFACT,
+        &requirements(),
+        DecodeLimits::default(),
+    )
+    .expect("freer-resume artifact parses");
+
+    let program_top = freer_resume_top(&prepared, "program");
+    let resume_int_top = freer_resume_top(&prepared, "resumeInt");
+
+    let resume_int_signature = match &resume_int_top.binding.rhs {
+        tidepool_repr::execution_schema::HeapRhs::Function { signature, .. } => {
+            &prepared.signatures()[signature.0 as usize]
+        }
+        other => panic!("resumeInt must project as a callable function top, got {other:?}"),
+    };
+    assert_eq!(
+        resume_int_signature.arguments,
+        vec![
+            tidepool_repr::execution_schema::RuntimeRep::LiftedRef,
+            tidepool_repr::execution_schema::RuntimeRep::Int(64)
+        ],
+        "resumeInt k n = qApp k (I# n) takes the retained Arrs continuation \
+         and the unboxed Int# answer, with no Void state-token argument \
+         because Eff is not IO"
+    );
+
+    // `PreparedRuntime::from_artifact` parses and links; compilation (and
+    // therefore whole-program admission) is deferred to the first entry run.
+    let mut runtime = PreparedRuntime::from_artifact(
+        FREER_RESUME_ARTIFACT,
+        &requirements(),
+        DecodeLimits::default(),
+        MachineImports::default(),
+    )
+    .expect("freer-resume artifact is closed and links with no missing imports");
+
+    let cancel = runtime.new_cancel_handle();
+    let program_run = runtime
+        .run_entry_retained(Some(program_top.binding.id), &[], false, &cancel)
+        .expect(
+            "running the `program` top compiles (and whole-program-admits) \
+             the artifact, which includes `resumeInt` as a second top",
+        );
+    assert_eq!(program_run.values.len(), 1);
+    assert!(matches!(
+        program_run.values[0],
+        PreparedValueResult::Managed(_)
+    ));
+
+    // `admit_prepared` (`tidepool_codegen::prepared_program::admission`) is
+    // documented whole-program: it walks every top in `program.bindings()`
+    // before any entry compiles, not just the one about to run. The
+    // successful `program` run above therefore already proves `resumeInt`'s
+    // entry ABI was admitted alongside it. This test stops short of calling
+    // `resumeInt` itself: doing so needs a real retained `Arrs` continuation
+    // (a `Managed` argument, not a fabricated `Scalar`), and building one is
+    // E2's resume-loop concern, not E1's admission probe.
 }

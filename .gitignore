@@ -39,6 +39,7 @@ haskell/test/text_cbor/
 *.cbor
 !haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor
 !haskell/test-prepared-stg/fixtures/freer-retention.cbor
+!haskell/test-prepared-stg/fixtures/freer-resume.cbor
 *.log
 dump_*.rs
 test_*.hs
