@@ -1940,8 +1940,11 @@ mod tests {
         assert_eq!(a_roots_before, 1);
         assert_eq!(a_tops_before.len(), 1);
         assert_ne!(a_tops_before[0], 0);
+        let b_roots_before = machine.persistent_roots_count(program_b);
         let b_tops = machine.top_words(program_b);
+        assert_eq!(b_roots_before, 1);
         assert_eq!(b_tops.len(), 1);
+        assert_ne!(b_tops[0], 0);
         // Disjoint, non-overlapping slot ranges: B's own slot can never alias
         // A's, so neither program's generated code can observe the other's
         // table cell.
@@ -1983,14 +1986,30 @@ mod tests {
         ));
 
         // Installing B, and a moving collection driven from either program,
-        // never deregistered A's already-claimed root: same persistent-root
-        // count as observed right after A's own install, and the slot still
-        // resolves to a live object (a copying collector relocates the
-        // object and updates the table cell's *contents* in place -- the
-        // cell's own address, not checked here, is what must never move, and
-        // is guaranteed by `RootWords` never reallocating after creation).
+        // never deregistered either program's already-claimed root: same
+        // persistent-root count as observed right after each program's own
+        // install, and each slot still resolves to a live object. A copying
+        // collector relocates the object and rewrites the table cell's
+        // *contents* in place -- the cell's own storage address (not checked
+        // here) is what must never move, guaranteed by `RootWords` never
+        // reallocating after creation -- so the cell's *content* changing is
+        // exactly the positive evidence that this invocation's collection
+        // really walked and updated this program's root, for BOTH programs,
+        // not merely the first one installed. This is the assertion that a
+        // silently-skipped `register_persistent_root` for any
+        // second-or-later installed program would fail: without a live
+        // persistent root, a copying collection has nothing to update in
+        // place, so the table cell would keep its pre-collection value even
+        // though the bytes it points to (now-abandoned from-space) are no
+        // longer valid -- and a values-only assertion after that collection
+        // could still coincidentally read back correct data before that
+        // stale memory is overwritten by later allocation.
         assert_eq!(machine.persistent_roots_count(program_a), a_roots_before);
         assert_ne!(machine.top_words(program_a)[0], 0);
+        assert_ne!(machine.top_words(program_a)[0], a_tops_before[0]);
+        assert_eq!(machine.persistent_roots_count(program_b), b_roots_before);
+        assert_ne!(machine.top_words(program_b)[0], 0);
+        assert_ne!(machine.top_words(program_b)[0], b_tops[0]);
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 
