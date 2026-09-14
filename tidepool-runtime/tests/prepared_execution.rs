@@ -762,7 +762,10 @@ fn drive_freer_program_to_val(
             return word as i64;
         }
 
-        assert_eq!(identity, fixture.e_id, "an Eff value at WHNF is either Val or E");
+        assert_eq!(
+            identity, fixture.e_id,
+            "an Eff value at WHNF is either Val or E"
+        );
         assert_eq!(fields.len(), 2, "E has exactly two fields: Union and Arrs");
         let union = take_managed(&mut fields, 0);
         let k = take_managed(&mut fields, 1);
@@ -773,7 +776,11 @@ fn drive_freer_program_to_val(
             fields: mut union_fields,
         } = runtime.inspect_outer(&union).expect("Union inspects");
         assert_eq!(union_identity, fixture.union_id);
-        assert_eq!(union_fields.len(), 2, "Union has an unpacked tag word and a payload");
+        assert_eq!(
+            union_fields.len(),
+            2,
+            "Union has an unpacked tag word and a payload"
+        );
         let tag = take_scalar(&union_fields, 0);
         assert_eq!(tag, 0, "the only effect in '[Req] is index 0");
         let payload = take_managed(&mut union_fields, 1);
@@ -822,10 +829,16 @@ fn split_suspension(
     fixture: &FreerResumeFixture,
     outer: PreparedValue,
 ) -> (PreparedValue, PreparedValue) {
-    let PreparedOuter::Constructor { identity, mut fields } = runtime
+    let PreparedOuter::Constructor {
+        identity,
+        mut fields,
+    } = runtime
         .inspect_outer(&outer)
         .expect("a freshly suspended Eff value inspects");
-    assert_eq!(identity, fixture.e_id, "program's first suspension is E, not Val");
+    assert_eq!(
+        identity, fixture.e_id,
+        "program's first suspension is E, not Val"
+    );
     assert_eq!(fields.len(), 2);
     let union = take_managed(&mut fields, 0);
     let k = take_managed(&mut fields, 1);
@@ -855,7 +868,12 @@ fn parked_continuations_resume_out_of_order_with_a_collection_between() {
 
     let first_cancel = runtime.new_cancel_handle();
     let first = runtime
-        .run_entry_retained(Some(fixture.program_top.binding.id), &[], true, &first_cancel)
+        .run_entry_retained(
+            Some(fixture.program_top.binding.id),
+            &[],
+            true,
+            &first_cancel,
+        )
         .expect("first `program` run suspends on its first Ask");
     let Some(PreparedValueResult::Managed(outer1)) = first.values.into_iter().next() else {
         panic!("`program` must return one managed `Eff` outer value");
@@ -863,7 +881,12 @@ fn parked_continuations_resume_out_of_order_with_a_collection_between() {
 
     let second_cancel = runtime.new_cancel_handle();
     let second = runtime
-        .run_entry_retained(Some(fixture.program_top.binding.id), &[], true, &second_cancel)
+        .run_entry_retained(
+            Some(fixture.program_top.binding.id),
+            &[],
+            true,
+            &second_cancel,
+        )
         .expect("second, independent `program` run also suspends on its first Ask");
     let Some(PreparedValueResult::Managed(outer2)) = second.values.into_iter().next() else {
         panic!("`program` must return one managed `Eff` outer value");
@@ -924,7 +947,12 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
 
     let first_cancel = runtime.new_cancel_handle();
     let first = runtime
-        .run_entry_retained(Some(fixture.program_top.binding.id), &[], true, &first_cancel)
+        .run_entry_retained(
+            Some(fixture.program_top.binding.id),
+            &[],
+            true,
+            &first_cancel,
+        )
         .expect("first `program` run suspends on its first Ask");
     let Some(PreparedValueResult::Managed(outer1)) = first.values.into_iter().next() else {
         panic!("`program` must return one managed `Eff` outer value");
@@ -950,7 +978,11 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
     } = runtime
         .inspect_outer(&k1)
         .expect("k1's own Node/Leaf FTCQueue cell is ordinary WHNF data and inspects");
-    assert_eq!(node_fields.len(), 2, "program's two dependent sends build k1 as Node(Leaf, Leaf)");
+    assert_eq!(
+        node_fields.len(),
+        2,
+        "program's two dependent sends build k1 as Node(Leaf, Leaf)"
+    );
     let left = take_managed(&mut node_fields, 0);
     let right = take_managed(&mut node_fields, 1);
 
@@ -965,7 +997,11 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
     } = runtime
         .inspect_outer(&left)
         .expect("Leaf itself is ordinary WHNF data (one field: the closure)");
-    assert_eq!(leaf_fields.len(), 1, "Leaf has exactly one field: the closure");
+    assert_eq!(
+        leaf_fields.len(),
+        1,
+        "Leaf has exactly one field: the closure"
+    );
     let closure = take_managed(&mut leaf_fields, 0);
 
     let forced = runtime.inspect_outer(&closure);
@@ -993,7 +1029,12 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
     // suspension, driven all the way to completion.
     let second_cancel = runtime.new_cancel_handle();
     let second = runtime
-        .run_entry_retained(Some(fixture.program_top.binding.id), &[], true, &second_cancel)
+        .run_entry_retained(
+            Some(fixture.program_top.binding.id),
+            &[],
+            true,
+            &second_cancel,
+        )
         .expect("an unrelated `program` run proceeds normally while k1 is parked");
     let Some(PreparedValueResult::Managed(outer2)) = second.values.into_iter().next() else {
         panic!("`program` must return one managed `Eff` outer value");
@@ -1085,8 +1126,12 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
 #[test]
 fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
     let requirements = requirements();
-    let prepared = parse_program(FREER_RESUME_ARTIFACT, &requirements, DecodeLimits::default())
-        .expect("freer-resume artifact parses");
+    let prepared = parse_program(
+        FREER_RESUME_ARTIFACT,
+        &requirements,
+        DecodeLimits::default(),
+    )
+    .expect("freer-resume artifact parses");
     let program_top = freer_resume_top(&prepared, "program");
     let resume_int_top = freer_resume_top(&prepared, "resumeInt");
     let ask_argument_top = freer_resume_top(&prepared, "askArgument");
@@ -1095,8 +1140,8 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
 
     let linked = link_program(prepared, &MachineImports::default())
         .expect("freer-resume artifact is closed and admits with no imports");
-    let program =
-        CompiledProgram::compile(&linked, TopSlotBase::ZERO).expect("freer-resume artifact compiles");
+    let program = CompiledProgram::compile(&linked, TopSlotBase::ZERO)
+        .expect("freer-resume artifact compiles");
     let top_slots = program.top_slot_count();
     let (mut machine, program_id) = PreparedMachine::new(
         program,
@@ -1190,12 +1235,17 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
         .run_entry_retained(
             program_id,
             resume_int_top.binding.id,
-            &[CodegenPreparedInput::Managed(k), CodegenPreparedInput::Scalar(n)],
+            &[
+                CodegenPreparedInput::Managed(k),
+                CodegenPreparedInput::Scalar(n),
+            ],
             call_options,
             cancel,
         )
-        .expect_err("a cancel flag already set when generated code starts must still be \
-                      caught by resumeInt's own entry safepoint, not skip execution");
+        .expect_err(
+            "a cancel flag already set when generated code starts must still be \
+                      caught by resumeInt's own entry safepoint, not skip execution",
+        );
     assert!(matches!(
         &cancelled,
         ExecutionError::Runtime(failure)
@@ -1212,7 +1262,10 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
         .run_entry_retained(
             program_id,
             resume_int_top.binding.id,
-            &[CodegenPreparedInput::Managed(k), CodegenPreparedInput::Scalar(n)],
+            &[
+                CodegenPreparedInput::Managed(k),
+                CodegenPreparedInput::Scalar(n),
+            ],
             call_options,
             Arc::new(AtomicBool::new(false)),
         )
@@ -1220,7 +1273,9 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
     let mut resumed_values = resumed.values.into_iter();
     assert!(matches!(
         resumed_values.next(),
-        Some(tidepool_codegen::prepared_program::PreparedResult::Managed(_))
+        Some(tidepool_codegen::prepared_program::PreparedResult::Managed(
+            _
+        ))
     ));
     assert!(resumed_values.next().is_none());
     assert_eq!(machine.disposition(), MachineDisposition::Reusable);
