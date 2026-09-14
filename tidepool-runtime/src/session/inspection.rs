@@ -1262,19 +1262,27 @@ mod tests {
                 module: "No.Such.Module".into()
             }
         );
-        assert!(results[6].render().contains("data Public"));
-        assert!(results[7].render().contains("exportedValue :: Int"));
-        assert!(matches!(results[8], InspectionResult::NotFound { .. }));
+        // Alias.Public / Alias.exportedValue / Missing.Public / the three TypeSearch
+        // queries were originally the last six entries pushed onto `queries` and were
+        // checked at indices 6-11. The StructuredType/StructuredInfo queries were later
+        // spliced into the `vec![...]` literal ahead of those pushes, shifting every
+        // pushed query down by ten slots (they now live at indices 16-21) without these
+        // assertions being renumbered. Left at 6-11 they instead re-checked the spliced-in
+        // StructuredType/StructuredInfo queries, contradicting the dedicated structured
+        // assertions for those indices below and failing outright on results[6].
+        assert!(results[16].render().contains("data Public"));
+        assert!(results[17].render().contains("exportedValue :: Int"));
+        assert!(matches!(results[18], InspectionResult::NotFound { .. }));
         assert!(
-            matches!(results[9], InspectionResult::TypeMatches { .. }),
+            matches!(results[19], InspectionResult::TypeMatches { .. }),
             "{:?}",
-            results[9]
+            results[19]
         );
-        assert!(matches!(results[10], InspectionResult::Rejected { .. }));
+        assert!(matches!(results[20], InspectionResult::Rejected { .. }));
         assert!(
-            matches!(results[11], InspectionResult::TypeMatches { .. }),
+            matches!(results[21], InspectionResult::TypeMatches { .. }),
             "{:?}",
-            results[11]
+            results[21]
         );
         let grouped = results[4].render();
         assert!(grouped.starts_with("-- BrowseFixture\n"));
