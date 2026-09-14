@@ -199,6 +199,9 @@ run_pure_cohort bignum BignumContract "$bignum_root" 6
 run_pure_cohort usertypes UserTypesContract "$usertypes_root" 8
 run_pure_cohort text TextContract "$text_root" 8
 
+echo "==> checking pure-eval cohort probes against the committed opacity manifest"
+"$repo_root/scripts/probe-opacity-check.sh"
+
 report_totals() {
   local cohort="$1"
   local report="$2"

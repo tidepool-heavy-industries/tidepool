@@ -123,14 +123,19 @@ preserves that behavior; resource exhaustion is not a proof that the counter
 cannot overflow, because observations can be reclaimed. If this owner survives
 session cutover, propagate typed exhaustion through observation completion.
 
-## Optimizer-folded corpus probes measure nothing
+## Optimizer folding can outrun a corpus probe's claimed mechanism
 
 A corpus probe is compiled at `-O2` before projection, so GHC's simplifier can
-reduce it to a literal or a reference to a pre-built CAF. Such a probe passes
-projection, validation, admission, compilation, execution and comparison while
-exercising none of the machinery its cohort is named for. Stage totals cannot
-distinguish this from genuine coverage, and a rising pass count can therefore
-overstate engine capability.
+reduce all or part of it to a literal or a reference to a pre-built CAF. That
+alone is not evidence of a hollow probe: a CAF's own body can still perform
+substantial computation when forced (Data.Map's `fromList`, a patch-diff
+engine, and a hand-rolled expression interpreter all remain real work behind a
+top-level name), and a probe that folds to a literal is still legitimate
+coverage of literal semantics — the projection/admission/compilation/execution
+path for a nullary CAF is a real shape the engine must handle correctly. The
+defect is narrower and specific to each probe: a mismatch between what its
+cohort claims the probe exercises and what its reachable Core actually calls,
+not an absolute claim that a folded probe "measures nothing."
 
 Tidy Core is the evidence boundary. Dumping it with
 
@@ -138,17 +143,65 @@ Tidy Core is the evidence boundary. Dumping it with
 ghc -XGHC2024 -O2 -ddump-simpl -dsuppress-all -fforce-recomp -c <Module>.hs
 ```
 
-shows exactly what reaches CorePrep and the Core-to-STG handoff. A probe that
-appears there as a bare literal, or as a reference to an already-built CAF, is
-hollow regardless of its stage outcomes. Probes whose inputs are opaque to the
-simplifier retain real calls at that boundary.
+shows exactly what reaches CorePrep and the Core-to-STG handoff. Checking a
+probe against its cohort's claim means following its reachable bodies — its
+own binding, and every other top-level binding referenced transitively from
+it — and asking whether that closure still shows a call into the specific
+mechanism the cohort names (a real `Map`/`Set` operation, `Integer` arithmetic
+on operands wider than 64 bits, class-dictionary dispatch, a recursive
+traversal worker, and so on). A probe whose reachable closure contains no such
+call has silently substituted the mechanism's compile-time result for the
+mechanism itself; a probe whose closure still calls it is honest regardless of
+how much of the surrounding expression also folded.
+
+`scripts/probe-opacity-check.sh` makes this a recurring, not one-shot, check.
+It dumps Tidy Core for the four cohorts hardened this way (Containers, Bignum,
+UserTypes, Text) and checks each probe's reachable closure against a committed
+manifest of marker substrings in
+`haskell/test-prepared-stg/probe-opacity-manifest.json`, one derived from an
+actual dump of the current source rather than guessed. It runs from
+`scripts/prepared-corpus.sh`, which `scripts/fixtures.sh check` already calls,
+so `just verify` reaches it; `just probe-opacity-check` runs it standalone.
+Markers avoid any token built from a bare compiler Unique (a short mixed
+letter/digit tag glued directly after an underscore, as in `$wgo1_s8Xl`) —
+two identical `-fforce-recomp` runs of these modules showed such tags shift
+between builds, while primop names, exported library names, and helper names
+GHC derives deterministically from the probe's own identifier (`opaquePair`,
+`integerMul`, `eitherTraversed_go1`) did not.
 
 The observed folding was literal arithmetic, class-dictionary selection,
 record-field resolution, and the `fmap`/`foldr`/`traverse`/`>>=` chains over
-small structures; recursion over an allocated ADT resisted it. Whether any of
-the 812 Suite tops are hollow for the same reason is unestablished: that corpus
-predates this check and no Tidy Core audit has been run across it. Establish
-that before treating Suite stage totals as coverage evidence.
+small structures; recursion over an allocated ADT resisted it — Data.Map and
+Data.Set operations over literal-Text keys resisted it too, without needing
+opacity seeds, because GHC does not unfold their internal balanced-tree
+recursion.
+
+The 812-top Suite corpus predates this check; a Tidy Core audit of it, using
+the same plain `ghc -O2 -ddump-simpl` boundary as above (not the prepared
+pipeline's own `-fno-full-laziness -fno-cpr-anal` compile flags, so the 812
+STG-identity count is not reproduced here and is untouched by this audit), is
+now established. Of 252 top-level Suite bindings cleanly identified in the
+dump by source name (out of 292 named `suite_cbor` targets; the remainder are
+lifted-local bindings whose compiler-assigned name depends on optimization
+flags this survey did not reproduce), 98 have a reachable closure of pure
+literals, data-constructor application, and boilerplate string
+materialization; 154 retain a call into real arithmetic, a recursive worker,
+or a library function. The split tracks
+Suite's own section structure, not a uniform hollowness risk: the sections
+that exist to exercise a specific Core *shape* — Int/Other literals,
+Arithmetic, Comparisons, Let/Case/data-constructor/lambda forms, If-then-else,
+Edge cases — fold to a literal almost without exception (their point is that
+the pipeline projects and executes that shape correctly, and a resolved CAF is
+exactly that shape). The sections that exist to exercise a specific
+*behavior* — LetRec, the PAP and lazy-thunk/BlackHole regression probes, the
+`filter`/`nubBy` regressions, `Show`, and the `[patch|…|]`/`genPatch`
+diff-engine probes — stay almost entirely computational, because recursion,
+laziness, and the patch engine's own control flow resist the same folding.
+Suite therefore is not a cohort with one claimed mechanism the way Containers
+or Bignum are; its high fold rate in the shape-coverage sections is not a
+defect, but it does mean a Suite stage-pass count should be read as "the
+pipeline handled this many distinct Core shapes," not as "this many pieces of
+runtime machinery executed."
 
 Keeping a probe honest is a constraint on its inputs, not on its shape. Probes
 must stay nullary monomorphic tops of observable types, because the runner
