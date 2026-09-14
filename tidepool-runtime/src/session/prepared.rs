@@ -48,7 +48,7 @@ pub enum PreparedRuntimeError {
     #[error(transparent)]
     Parse(#[from] ParseError),
     #[error(transparent)]
-    Link(#[from] LinkError),
+    Link(Box<LinkError>),
     #[error("prepared execution cancelled")]
     Cancelled,
     #[error("prepared compilation rejected: {0}")]
@@ -88,6 +88,12 @@ impl PreparedRuntimeError {
                 }
             },
         }
+    }
+}
+
+impl From<LinkError> for PreparedRuntimeError {
+    fn from(error: LinkError) -> Self {
+        Self::Link(Box::new(error))
     }
 }
 
@@ -155,10 +161,11 @@ impl PreparedRuntime {
             return Err(PreparedRuntimeError::Cancelled);
         }
         let entry = binding.unwrap_or_else(|| self.linked.prepared().entry());
-        let result = self
-            .compiled
-            .as_ref()
-            .expect("compiled program installed above")
+        let compiled = match self.compiled.as_ref() {
+            Some(compiled) => compiled,
+            None => unreachable!("compiled program installed above"),
+        };
+        let result = compiled
             .run_entry(
                 entry,
                 arguments,

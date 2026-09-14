@@ -232,7 +232,7 @@ pub enum InspectionResult {
         query: String,
         matches: Vec<TypeMatch>,
     },
-    StructuredInfo(Result<IdentifierInfo, QueryError>),
+    StructuredInfo(Result<Box<IdentifierInfo>, QueryError>),
     StructuredType(Result<TypeInfo, QueryError>),
 }
 
@@ -579,9 +579,9 @@ fn decode_inspection_result(value: &CborValue) -> Result<InspectionResult, Compi
         }
         "StructuredInfoOk" => {
             let body = array_len(value, 2, "StructuredInfoOk result")?;
-            Ok(InspectionResult::StructuredInfo(Ok(
+            Ok(InspectionResult::StructuredInfo(Ok(Box::new(
                 decode_identifier_info(&body[1])?,
-            )))
+            ))))
         }
         "StructuredTypeOk" => {
             let body = array_len(value, 2, "StructuredTypeOk result")?;
