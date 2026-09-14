@@ -93,7 +93,7 @@ for crate in "${!crates[@]}"; do
     echo "note: broader coverage is available with: just suite $crate"
   else
     run_step "cargo nextest run -p $crate" \
-      cargo nextest run -p "$crate" --status-level fail --final-status-level fail
+      cargo nextest run -p "$crate" --no-fail-fast --status-level fail --final-status-level fail
   fi
 done
 

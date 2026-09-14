@@ -290,9 +290,9 @@ fn case_trap_makes_the_machine_permanently_unavailable() {
                         "machine refused for the wrong cause: {cause:?}"
                     );
                 }
-                other => panic!(
-                    "expected JitError::MachineUnavailable after a case trap, got {other:?}"
-                ),
+                other => {
+                    panic!("expected JitError::MachineUnavailable after a case trap, got {other:?}")
+                }
             }
 
             drop(machine);
