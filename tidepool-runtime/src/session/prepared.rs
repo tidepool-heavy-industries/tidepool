@@ -103,6 +103,7 @@ impl PreparedRuntimeError {
                 | ExecutionError::ArgumentRepresentation { .. }
                 | ExecutionError::UnknownPreparedHandle
                 | ExecutionError::ImportShape { .. }
+                | ExecutionError::DescriptorShape { .. }
                 | ExecutionError::UnknownProgram(_)
                 | ExecutionError::TopTableExhausted { .. }
                 | ExecutionError::TopSlotBaseMismatch { .. } => PreparedFailureKind::Rejected,
@@ -358,7 +359,8 @@ impl PreparedRuntime {
         }
         let linked = link_program(prepared, &values)?;
         let machine = self.machine_mut()?;
-        let compiled = CompiledProgram::compile(&linked, machine.next_top_slot_base())
+        let compiled = machine
+            .compile_for_install(&linked)
             .map_err(PreparedRuntimeError::Compile)?;
         let program = machine
             .install_program(compiled, bindings)

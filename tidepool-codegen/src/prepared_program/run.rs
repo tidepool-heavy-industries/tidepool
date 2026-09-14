@@ -72,6 +72,8 @@ pub enum ExecutionError {
     },
     #[error("program {0:?} is not installed on this machine")]
     UnknownProgram(ProgramId),
+    #[error("constructor {identity:?} is declared differently from the descriptor this machine already shares for it")]
+    DescriptorShape { identity: Box<SymbolIdentity> },
     #[error("top table exhausted: program requests {requested} slots, {available} available")]
     TopTableExhausted { requested: usize, available: usize },
     #[error(

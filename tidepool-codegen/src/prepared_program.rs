@@ -40,6 +40,8 @@ mod no_success_tests;
 mod observe;
 mod roots;
 pub use observe::ObservationFailure;
+mod interner;
+pub use interner::DescriptorInterner;
 mod run;
 pub use machine::{
     ImportBindings, PreparedCallOptions, PreparedHandle, PreparedInput, PreparedMachine,
@@ -133,6 +135,10 @@ pub enum CompileError {
     Descriptor(#[from] tidepool_heap::execution_descriptor::DescriptorConstructionError),
     #[error("checked program lacks representation for {0:?}")]
     MissingRepresentation(ValueId),
+    #[error("constructor {identity:?} is declared differently from the descriptor already interned for it")]
+    DescriptorShape {
+        identity: Box<tidepool_repr::execution_schema::SymbolIdentity>,
+    },
 }
 
 pub(crate) struct CompiledEntry {
@@ -205,6 +211,13 @@ pub struct CompiledProgram {
     /// Admitted imports' slots -- see [`plan::ImportSlot`]. Indexed by
     /// `GlobalId`, occupying the machine-wide range right after `top_slots`.
     pub(crate) import_slots: Vec<plan::ImportSlot>,
+    /// This program's constructor declarations with the descriptors they
+    /// compiled against, so an installing machine can absorb them into its
+    /// [`DescriptorInterner`] and later programs share them.
+    pub(crate) interned_constructors: Vec<(
+        tidepool_repr::execution_schema::ConstructorDecl,
+        Arc<ObjectDescriptor>,
+    )>,
     pub(crate) byte_tops: BTreeMap<ValueId, Arc<[u8]>>,
     /// Own every address embedded in generated code, including scalar literals
     /// with no top-level Bytes binding. Keys are logical bytes; values are the
@@ -217,7 +230,22 @@ pub struct CompiledProgram {
 }
 
 impl CompiledProgram {
+    /// Compile with a fresh descriptor interner: a standalone program, or the
+    /// first program of a machine (whose descriptors the machine absorbs at
+    /// install). Later programs on a machine compile through
+    /// `PreparedMachine::compile_for_install` so they share descriptors.
     pub fn compile(linked: &LinkedProgram, base: TopSlotBase) -> Result<Self, CompileError> {
+        Self::compile_with(linked, base, &mut DescriptorInterner::default())
+    }
+
+    /// [`Self::compile`] against `interner`: constructor identities already
+    /// interned reuse their descriptor, so this program's `Case`, enter and
+    /// observation recognise objects an earlier program built.
+    pub fn compile_with(
+        linked: &LinkedProgram,
+        base: TopSlotBase,
+        interner: &mut DescriptorInterner,
+    ) -> Result<Self, CompileError> {
         let target = &linked.prepared().envelope().target;
         let host_matches = cfg!(all(target_os = "linux", target_arch = "x86_64"))
             && target.architecture == Architecture::X86_64;
@@ -234,7 +262,7 @@ impl CompiledProgram {
         use cranelift_codegen::isa::CallConv;
         use cranelift_module::Linkage;
         use tidepool_repr::execution_schema::{HeapRhs, RuntimeRep};
-        let plan = plan::ProgramPlan::new(linked.prepared(), base)?;
+        let plan = plan::ProgramPlan::new(linked.prepared(), base, interner)?;
         let profile = NativeAbiProfile::new(plan.program.envelope().target.clone(), 0)?;
         let statics = image::build_static_image(&plan)?;
         let mut pipeline = CodegenPipeline::new(
@@ -743,6 +771,7 @@ impl CompiledProgram {
             statics,
             top_slots: plan.top_slots,
             import_slots: plan.import_slots,
+            interned_constructors: plan.interned_constructors,
             byte_tops,
             bytes: plan.bytes,
             heap_top_specs: plan.heap_top_specs,

@@ -6,9 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tidepool_heap::execution_descriptor::{EntryMetadata, ObjectDescriptor, ObjectKind};
 use tidepool_repr::execution_schema::{
-    AlternativePattern, Atom, CaseKind, ExprFrame, Group, HeapBinding, HeapRhs, PreparedProgram,
-    ResultContract, RuntimeRep, ScalarLiteral, Signature, StorageLayout, SymbolIdentity, ValueId,
-    ValueRef,
+    AlternativePattern, Atom, CaseKind, ConstructorDecl, ExprFrame, Group, HeapBinding, HeapRhs,
+    PreparedProgram, ResultContract, RuntimeRep, ScalarLiteral, Signature, StorageLayout,
+    SymbolIdentity, ValueId, ValueRef,
 };
 
 pub(super) struct FunctionPlan<'a> {
@@ -63,6 +63,9 @@ pub(super) struct ProgramPlan<'a> {
     pub thunks: BTreeMap<ValueId, ThunkPlan<'a>>,
     pub top_bindings: BTreeMap<ValueId, &'a HeapBinding>,
     pub constructors: Vec<Arc<ObjectDescriptor>>,
+    /// Each declaration with the descriptor it compiled against (interned or
+    /// fresh), handed to the installing machine.
+    pub interned_constructors: Vec<(ConstructorDecl, Arc<ObjectDescriptor>)>,
     pub boxed_array: Arc<ObjectDescriptor>,
     /// Fixed one-slot mutable cells share the boxed payload ledger, not array
     /// identity. Hosts must authenticate this distinct descriptor before access.
@@ -91,7 +94,11 @@ impl<'a> ProgramPlan<'a> {
     /// `PreparedMachine::install_program` chooses a nonzero base for every
     /// program after the first so every installed program's slots occupy a
     /// disjoint, contiguous range of one shared table.
-    pub fn new(program: &'a PreparedProgram, base: TopSlotBase) -> Result<Self, CompileError> {
+    pub fn new(
+        program: &'a PreparedProgram,
+        base: TopSlotBase,
+        interner: &mut super::DescriptorInterner,
+    ) -> Result<Self, CompileError> {
         // wave4:LAYOUT_PLAN — collect top/local RHS types, function and join
         // parameter reps, case binder/alternative reps from checked signatures
         // and ConstructorDecl. Multi-component case binder is non-value Void.
@@ -186,13 +193,11 @@ impl<'a> ProgramPlan<'a> {
 
         let target = &program.envelope().target;
         let mut constructors = Vec::with_capacity(program.constructors().len());
+        let mut interned_constructors = Vec::with_capacity(program.constructors().len());
         for declaration in program.constructors() {
-            let layout = StorageLayout::for_reps(target, &declaration.field_reps)?;
-            constructors.push(Arc::new(ObjectDescriptor::constructor(
-                declaration.tag,
-                layout,
-                None,
-            )?));
+            let descriptor = interner.intern(target, declaration)?;
+            interned_constructors.push((declaration.clone(), Arc::clone(&descriptor)));
+            constructors.push(descriptor);
         }
 
         let bindings = all_bindings(program);
@@ -367,6 +372,7 @@ impl<'a> ProgramPlan<'a> {
             )?),
             top_slots,
             import_slots,
+            interned_constructors,
             bytes: Arc::new(PinnedBytes::new(bytes)),
             heap_tops,
             heap_top_specs,

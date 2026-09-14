@@ -140,6 +140,11 @@ pub struct PreparedMachine<'code> {
     /// transitive graph is covered no matter which program produced the
     /// objects it reaches.
     descriptors: Vec<Arc<ObjectDescriptor>>,
+    /// One descriptor per constructor identity across every installed
+    /// program ([`super::DescriptorInterner`]): later programs compile
+    /// against it through [`Self::compile_for_install`], so their `Case`,
+    /// enter and observation recognise cells an earlier program built.
+    interner: super::DescriptorInterner,
     /// Union of every installed program's descriptor registry (constructor
     /// identity/field-representation metadata for non-forcing observation).
     descriptor_registry: BTreeMap<usize, DescriptorMetadata>,
@@ -287,7 +292,20 @@ impl<'code> PreparedMachine<'code> {
             statics: Vec::new(),
             descriptors: Vec::new(),
             descriptor_registry: BTreeMap::new(),
+            interner: super::DescriptorInterner::default(),
         })
+    }
+
+    /// Compile a program to install next on this machine: against the next
+    /// top-slot base and this machine's descriptor interner, so every
+    /// constructor identity an installed program already declared resolves
+    /// to the same descriptor address the existing cells carry.
+    pub fn compile_for_install(
+        &mut self,
+        linked: &tidepool_repr::execution_schema::LinkedProgram,
+    ) -> Result<CompiledProgram, super::CompileError> {
+        let base = self.next_top_slot_base();
+        CompiledProgram::compile_with(linked, base, &mut self.interner)
     }
 
     /// The base a program must be compiled against
@@ -358,6 +376,15 @@ impl<'code> PreparedMachine<'code> {
                 });
             }
         }
+
+        // A constructor identity this machine already shares must be
+        // declared identically, with the same descriptor, by the incoming
+        // program; otherwise nothing is absorbed and nothing else happens.
+        self.interner
+            .absorb(&compiled.interned_constructors)
+            .map_err(|identity| ExecutionError::DescriptorShape {
+                identity: Box::new(identity),
+            })?;
 
         // Reserve (capacity/contiguity, above) then verify EVERY declared
         // import before any other install side effect -- no statics
@@ -1758,9 +1785,12 @@ mod tests {
     fn base_program(base: TopSlotBase, host_id: u64) -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        // One identity per host id: two programs on one machine may not
+        // declare the same constructor identity differently.
+        let unit = format!("Unit{host_id}");
         wire.constructors.push(ConstructorDecl {
-            identity: testing::identity("MachineMulti", "Unit"),
-            family: testing::identity("MachineMulti", "Unit"),
+            identity: testing::identity("MachineMulti", &unit),
+            family: testing::identity("MachineMulti", &unit),
             host_id: tidepool_repr::DataConId(host_id),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
@@ -3343,12 +3373,13 @@ mod tests {
     /// which never equals B's descriptor's address, so the dispatch always
     /// falls through to the integrity trap. This is why test (1) above
     /// reads the import through `inspect_outer` instead.
+    /// X1: a generated `Case` in B over a constructor A built. B is compiled
+    /// through `compile_for_install`, so its `Field` descriptor IS A's (one
+    /// interned descriptor per constructor identity) and algebraic dispatch
+    /// matches A's cell. Before interning this exact program trapped
+    /// (`CaseTrap`, machine `Unavailable`) -- the S3 finding.
     #[test]
-    #[ignore = "FINDING: CaseKind::Algebraic dispatch cannot recognize a foreign program's \
-        constructor -- see the doc comment on this test and the S3 acceptance-test-1 \
-        correction note above. Confirmed empirically: this test reproduces an \
-        IntegrityFailure/case-trap, not the field value."]
-    fn s3_finding_generated_case_cannot_recognize_a_foreign_constructor() {
+    fn x1_generated_case_reads_a_foreign_constructor_through_the_interned_descriptor() {
         let (mut machine, program_a) = PreparedMachine::new(
             s3_field_producer_program(TopSlotBase::ZERO),
             PreparedMachineOptions {
@@ -3450,8 +3481,10 @@ mod tests {
         );
         let linked =
             link_program(prepared, &machine_imports).expect("case-dispatch consumer fixture links");
-        let compiled = CompiledProgram::compile(&linked, base_b)
-            .expect("case-dispatch consumer fixture compiles");
+        assert_eq!(base_b, machine.next_top_slot_base());
+        let compiled = machine
+            .compile_for_install(&linked)
+            .expect("case-dispatch consumer fixture compiles against the machine's interner");
         let program_b = machine
             .install_program(compiled, imports)
             .expect("B installs, importing A's Field");
@@ -3464,13 +3497,71 @@ mod tests {
                 call,
                 Arc::new(AtomicBool::new(false)),
             )
-            .expect("if this succeeds, the FINDING above is stale and should be revisited");
+            .expect("B's generated Case recognises A's Field cell through the shared descriptor");
         assert!(matches!(
             result.values.as_slice(),
             [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(
                 99
             ))]
         ));
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+        assert!(machine.release(*handle_a));
+    }
+
+    /// X1: the same identity declared differently by a later program is a
+    /// typed refusal at compile, not a silently aliased descriptor.
+    #[test]
+    fn x1_conflicting_constructor_declaration_is_a_typed_compile_error() {
+        let (mut machine, _program_a) = PreparedMachine::new(
+            s3_field_producer_program(TopSlotBase::ZERO),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+                top_slots: 16,
+            },
+        )
+        .expect("A installs");
+        // Same identity `S3Import.Field`, but declared with no fields.
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("S3Import", "Field"),
+            family: testing::identity("S3Import", "Field"),
+            host_id: tidepool_repr::DataConId(960),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        });
+        wire.expressions.nodes[0] = ExprFrame::Construct {
+            constructor: ConstructorId(0),
+            fields: vec![],
+        };
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Thunk {
+            signature: SignatureId(0),
+            update: UpdatePolicy::Memoize,
+            captures: vec![],
+            body: 0,
+        };
+        let prepared = testing::prepare(wire).expect("conflicting fixture");
+        let linked =
+            link_program(prepared, &MachineImports::default()).expect("conflicting fixture links");
+        match machine.compile_for_install(&linked) {
+            Err(super::super::CompileError::DescriptorShape { identity })
+                if *identity == testing::identity("S3Import", "Field") => {}
+            Err(other) => panic!("expected DescriptorShape, got {other:?}"),
+            Ok(_) => panic!("a differently-declared Field must not compile against A's interner"),
+        }
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 
     fn s3_closure_producer_identity() -> SymbolIdentity {
