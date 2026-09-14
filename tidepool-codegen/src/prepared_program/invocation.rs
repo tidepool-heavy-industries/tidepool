@@ -49,13 +49,16 @@ pub(super) struct PreparedInvocation<'code> {
 /// Admission is borrowed only while native code may collect or observe.
 /// Clear the shared-derived raw pointer before any mutable OldSpace borrow or
 /// invocation move; a stable Box address alone does not preserve provenance.
-struct OldSpaceScope<'a> {
+pub(super) struct OldSpaceScope<'a> {
     machine: &'a MachineState,
     _owner: &'a OldSpace,
 }
 
 impl<'a> OldSpaceScope<'a> {
-    fn new(machine: &'a MachineState, owner: &'a OldSpace) -> Result<Self, ExecutionError> {
+    pub(super) fn new(
+        machine: &'a MachineState,
+        owner: &'a OldSpace,
+    ) -> Result<Self, ExecutionError> {
         // Every installed pointer is owned by another live scope. Nested
         // installation would lose its cleanup obligation, so fail closed.
         if unsafe { machine.prepared_old_space() }.is_some() {

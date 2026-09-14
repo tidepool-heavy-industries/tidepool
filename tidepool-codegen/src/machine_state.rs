@@ -553,6 +553,26 @@ impl MachineState {
         self.last_failure.try_borrow().ok().and_then(|f| f.clone())
     }
 
+    /// Start a fresh prepared entry on this machine.
+    ///
+    /// Language failure and cancellation settle one entry only.  An integrity
+    /// failure is a machine property and therefore cannot be cleared here.
+    /// Callers must have removed their run-scoped roots before beginning the
+    /// next entry; persistent roots intentionally remain installed.
+    pub(crate) fn begin_prepared_call(&self) -> Result<(), MachineFailure> {
+        if self.disposition() == MachineDisposition::Unavailable {
+            return Err(self.last_failure().unwrap_or(MachineFailure {
+                cause: RuntimeError::BadPointer,
+                disposition: MachineDisposition::Unavailable,
+            }));
+        }
+        self.prepared_exception.set(std::ptr::null_mut());
+        self.runtime_error.borrow_mut().take();
+        self.last_failure.borrow_mut().take();
+        self.reset_call_depth();
+        Ok(())
+    }
+
     /// Take the pending cause, if any. Uses `try_borrow_mut` defensively: this
     /// runs on the signal/teardown path, and a signal can fire while JIT host
     /// code still holds a `borrow_mut` on the cell — a plain `borrow_mut`

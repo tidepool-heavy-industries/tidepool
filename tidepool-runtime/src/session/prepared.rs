@@ -14,7 +14,7 @@ use tidepool_bridge::Value;
 use tidepool_codegen::jit_machine::MachineDisposition;
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
-    CompileError, CompiledProgram, ExecutionError, RunOptions,
+    CompileError, CompiledProgram, ExecutionError, PreparedMachine, RunOptions,
 };
 use tidepool_repr::execution_schema::{
     link_program, parse_program, DecodeLimits, LinkError, LinkedProgram, MachineImports,
@@ -107,8 +107,7 @@ pub struct PreparedRunResult {
 /// a monotonic reuse decision.
 pub struct PreparedRuntime {
     linked: LinkedProgram,
-    compiled: Option<CompiledProgram>,
-    terminal: Option<MachineFailure>,
+    machine: Option<PreparedMachine>,
 }
 
 impl PreparedRuntime {
@@ -122,16 +121,15 @@ impl PreparedRuntime {
         let linked = link_program(prepared, &imports)?;
         Ok(Self {
             linked,
-            compiled: None,
-            terminal: None,
+            machine: None,
         })
     }
 
     #[must_use]
     pub fn disposition(&self) -> MachineDisposition {
-        self.terminal
+        self.machine
             .as_ref()
-            .map_or(MachineDisposition::Reusable, |failure| failure.disposition)
+            .map_or(MachineDisposition::Reusable, PreparedMachine::disposition)
     }
 
     #[must_use]
@@ -157,35 +155,41 @@ impl PreparedRuntime {
         cancel: &PreparedCancelHandle,
         after_lower_success: impl FnOnce(),
     ) -> Result<PreparedRunResult, PreparedRuntimeError> {
-        if let Some(failure) = &self.terminal {
-            return Err(PreparedRuntimeError::Unavailable(failure.clone()));
+        if let Some(machine) = &self.machine {
+            if machine.disposition() == MachineDisposition::Unavailable {
+                return Err(PreparedRuntimeError::Unavailable(
+                    machine.failure().unwrap_or(MachineFailure {
+                        cause: tidepool_codegen::host_fns::RuntimeError::BadPointer,
+                        disposition: MachineDisposition::Unavailable,
+                    }),
+                ));
+            }
         }
         if cancel.is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
-        if self.compiled.is_none() {
-            self.compiled = Some(
-                CompiledProgram::compile(&self.linked).map_err(PreparedRuntimeError::Compile)?,
+        let options = RunOptions {
+            collect_before_observation: collect,
+            ..RunOptions::default()
+        };
+        if self.machine.is_none() {
+            let program =
+                CompiledProgram::compile(&self.linked).map_err(PreparedRuntimeError::Compile)?;
+            self.machine = Some(
+                PreparedMachine::new(program, &options)
+                    .map_err(|error| self.classify_execution(error))?,
             );
         }
         if cancel.is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
         let entry = binding.unwrap_or_else(|| self.linked.prepared().entry());
-        let compiled = match self.compiled.as_ref() {
-            Some(compiled) => compiled,
-            None => unreachable!("compiled program installed above"),
+        let machine = match self.machine.as_mut() {
+            Some(machine) => machine,
+            None => unreachable!("prepared machine installed above"),
         };
-        let result = compiled
-            .run_entry(
-                entry,
-                arguments,
-                &RunOptions {
-                    collect_before_observation: collect,
-                    ..RunOptions::default()
-                },
-                Arc::clone(&cancel.0),
-            )
+        let result = machine
+            .run_entry(entry, arguments, &options, Arc::clone(&cancel.0))
             .map_err(|error| self.classify_execution(error))?;
         // Lower success is the completion point. Cancellation published after
         // it may affect a later entry, but cannot rewrite this result.
@@ -197,22 +201,8 @@ impl PreparedRuntime {
     }
 
     fn classify_execution(&mut self, error: ExecutionError) -> PreparedRuntimeError {
-        let terminal = terminal_failure(&error);
-        let error = PreparedRuntimeError::Run(error);
-        if self.terminal.is_none() {
-            if let Some(failure) = terminal {
-                self.terminal = Some(failure);
-            }
-        }
-        error
+        PreparedRuntimeError::Run(error)
     }
-}
-
-fn terminal_failure(error: &ExecutionError) -> Option<MachineFailure> {
-    let ExecutionError::Runtime(failure) = error else {
-        return None;
-    };
-    (failure.disposition == MachineDisposition::Unavailable).then(|| failure.clone())
 }
 
 pub fn run_prepared_once(
@@ -376,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn compiled_failure_retains_disposition_separately_from_first_cause() {
+    fn integrity_failure_is_typed_independently_from_its_cause() {
         let failure = MachineFailure {
             cause: RuntimeError::Cancelled,
             disposition: MachineDisposition::Unavailable,
@@ -387,14 +377,10 @@ mod tests {
             error,
             PreparedRuntimeError::Unavailable(retained) if retained == failure
         ));
-        assert_eq!(
-            terminal_failure(&ExecutionError::Runtime(failure.clone())),
-            Some(failure)
-        );
     }
 
     #[test]
-    fn terminal_failure_is_replayed_before_cancellation() {
+    fn uninstalled_failure_does_not_create_a_second_terminal_owner() {
         let mut runtime = m3_runtime();
         let failure = MachineFailure {
             cause: RuntimeError::Cancelled,
@@ -410,10 +396,7 @@ mod tests {
         let cancel = runtime.new_cancel_handle();
         cancel.cancel();
         let replayed = runtime.run_entry(None, &[], false, &cancel).unwrap_err();
-        assert!(matches!(
-            replayed,
-            PreparedRuntimeError::Unavailable(retained) if retained == failure
-        ));
+        assert!(matches!(replayed, PreparedRuntimeError::Cancelled));
     }
 
     #[test]
@@ -427,6 +410,25 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(cancel.is_cancelled());
+    }
+
+    #[test]
+    fn prepared_machine_reuses_one_heap_across_settled_entries() {
+        let mut runtime = m3_runtime();
+        let first_cancel = runtime.new_cancel_handle();
+        let first = runtime
+            .run_entry(None, &[], true, &first_cancel)
+            .expect("first prepared entry settles");
+        let second_cancel = runtime.new_cancel_handle();
+        let second = runtime
+            .run_entry(None, &[], true, &second_cancel)
+            .expect("second prepared entry reuses the machine");
+
+        assert_eq!(
+            format!("{:?}", first.values),
+            format!("{:?}", second.values)
+        );
+        assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
     }
 
     #[test]
