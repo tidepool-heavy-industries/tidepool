@@ -956,6 +956,99 @@ mod tests {
         }));
     }
 
+    /// A minimal closed `TPSTG` artifact (one nullary function returning a
+    /// literal `Int64`) encoded by hand against the running schema constants,
+    /// never a captured artifact, so it tracks `SCHEMA_VERSION` automatically.
+    fn finite_prepared_program_bytes() -> Vec<u8> {
+        fn head(major: u8, length: usize) -> Vec<u8> {
+            let mut result = Vec::new();
+            if length <= 23 {
+                result.push((major << 5) | length as u8);
+            } else if length <= u8::MAX as usize {
+                result.extend([(major << 5) | 24, length as u8]);
+            } else if length <= u16::MAX as usize {
+                result.push((major << 5) | 25);
+                result.extend((length as u16).to_be_bytes());
+            } else {
+                result.push((major << 5) | 26);
+                result.extend((length as u32).to_be_bytes());
+            }
+            result
+        }
+        fn array(values: impl IntoIterator<Item = Vec<u8>>) -> Vec<u8> {
+            let values: Vec<_> = values.into_iter().collect();
+            let mut result = head(4, values.len());
+            for value in values {
+                result.extend(value);
+            }
+            result
+        }
+        fn uint(value: u64) -> Vec<u8> {
+            if value <= 23 {
+                vec![value as u8]
+            } else if value <= u8::MAX as u64 {
+                vec![0x18, value as u8]
+            } else if value <= u16::MAX as u64 {
+                let mut result = vec![0x19];
+                result.extend((value as u16).to_be_bytes());
+                result
+            } else {
+                let mut result = vec![0x1a];
+                result.extend((value as u32).to_be_bytes());
+                result
+            }
+        }
+        fn text(value: &str) -> Vec<u8> {
+            let mut result = head(3, value.len());
+            result.extend(value.as_bytes());
+            result
+        }
+        fn bytes(value: &[u8]) -> Vec<u8> {
+            let mut result = head(2, value.len());
+            result.extend(value);
+            result
+        }
+
+        let rep_int64 = array([uint(4), uint(64)]);
+        let signature = array([array([]), array([uint(0), array([rep_int64])])]);
+        let scalar_42 = array([uint(0), uint(64), bytes(&42_i64.to_be_bytes())]);
+        let atom = array([uint(1), scalar_42]);
+        let return_frame = array([uint(0), array([atom])]);
+        let symbol = array([
+            text("fixture"),
+            text("Suite"),
+            text("value"),
+            text("lit_42"),
+            array([uint(0)]),
+        ]);
+        let function_rhs = array([uint(0), uint(0), array([]), array([]), uint(0)]);
+        let heap_binding = array([uint(0), function_rhs]);
+        let top_binding = array([symbol, heap_binding]);
+        let group_nonrecursive = array([uint(0), top_binding]);
+        array([
+            text("TPSTG"),
+            uint(tidepool_repr::execution_schema::SCHEMA_VERSION),
+            text("ghc-9.12-prepared-stg"),
+            text("ghc-9.12.2"),
+            uint(tidepool_repr::execution_schema::EXECUTION_ABI_VERSION),
+            array([
+                uint(0),
+                uint(0),
+                uint(64),
+                uint(64),
+                text("sysv64"),
+                array([]),
+            ]),
+            array([signature]),
+            array([]),
+            array([]),
+            array([]),
+            array([return_frame]),
+            array([group_nonrecursive]),
+            uint(0),
+        ])
+    }
+
     #[test]
     fn no_finite_observation_preserves_compile_evidence_without_native_execution() {
         use tidepool_repr::execution_schema::testing;
@@ -974,9 +1067,13 @@ mod tests {
             serde_json::json!({"kind": "no_finite_observation"})
         );
 
-        // GHC-produced Suite.lit_42 (schema 7) is finite: without the typed
-        // guard, this row would execute and reach comparison instead.
-        let bytes = include_bytes!("../fixtures/suite-lit-42.prepared.cbor");
+        // A minimal closed prepared program (return literal 42, mirroring
+        // Suite.lit_42) is finite: without the typed guard, this row would
+        // execute and reach comparison instead. Built directly against the
+        // running schema and requirements rather than frozen wire bytes, so
+        // it cannot strand on a schema bump the way a captured artifact would.
+        let bytes = finite_prepared_program_bytes();
+        let bytes = bytes.as_slice();
         let envelope = testing::envelope();
         let requirements = ProgramRequirements {
             schema_version: envelope.schema_version,
