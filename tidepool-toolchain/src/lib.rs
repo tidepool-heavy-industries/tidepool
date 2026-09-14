@@ -27,8 +27,8 @@ pub mod toolchain;
 
 pub use artifacts::{
     compile_targets, compile_targets_with_session_inject, compile_targets_with_stable_inject,
-    read_yield_sites, CompiledArtifacts, NominalHead, SessionInject, SiteType, StableValInject,
-    TargetArtifact, YieldSite, YieldSiteCollision, YieldSites,
+    read_yield_sites, CompiledArtifacts, ConstructorIdentityMismatch, NominalHead, SessionInject,
+    SiteType, StableValInject, TargetArtifact, YieldSite, YieldSiteCollision, YieldSites,
 };
 pub use failclass::{classify_compile, FailureClass, FailureEnvelope, Phase};
 
@@ -77,6 +77,17 @@ pub enum CompileError {
     /// The target binding has IO type, which is not supported.
     #[error("IO type detected in result binding. IO operations (unsafePerformIO, etc.) are not supported in the Tidepool sandbox.")]
     IOTypeDetected,
+    /// A prepared program's constructor `host_id` RESOLVES in the
+    /// `DataConTable` shipped alongside it, but to a different constructor —
+    /// cross-paired artifact and metadata (one compile's prepared program
+    /// with another compile's table), or an extractor identity-minting bug.
+    /// Rejected at assembly so no handler ever interprets an observed
+    /// `Value::Con(host_id, ...)` under the wrong table's nominal name. A
+    /// `host_id` with no table entry at all is not this error — see
+    /// `artifacts::check_constructor_identity_agreement`'s doc for why that
+    /// is deliberately out of scope.
+    #[error("constructor identity mismatch: {0}")]
+    ConstructorIdentity(#[from] artifacts::ConstructorIdentityMismatch),
 }
 
 /// Rewrite an extractor spawn failure into a self-explaining `io::Error`:

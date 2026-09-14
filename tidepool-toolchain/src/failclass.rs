@@ -178,6 +178,13 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         CompileError::Asks(_) => {
             FailureEnvelope::new(FailureClass::VersionSkew, Phase::Compile, err.to_string())
         }
+        // A prepared program's constructor host_id does not correspond to
+        // the DataConTable entry shipped alongside it — cross-paired build
+        // artifacts (e.g. a cache/session mismatch) or an extractor
+        // identity-minting bug, never the user's source.
+        CompileError::ConstructorIdentity(_) => {
+            FailureEnvelope::new(FailureClass::VersionSkew, Phase::Compile, err.to_string())
+        }
     }
 }
 
