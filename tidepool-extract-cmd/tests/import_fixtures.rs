@@ -88,8 +88,10 @@ fn generate_import_producer_and_consumer_fixtures() {
         producer_cbor.display()
     );
 
-    // import-consumer.cbor: consumerResult references both producerValue and
-    // producerFn, declared as executable imports at generation 11. The
+    // import-consumer.cbor: consumerEntries pulls consumerResult (which
+    // applies producerFn) and consumerValue (which only re-exports
+    // producerValue) into one reachable closure; both producer symbols are
+    // declared as executable imports at generation 11. The
     // projection must exclude their bodies from recovery and declare them as
     // globals carrying that generation, even though ImportProducer.hs is
     // compiled alongside ImportConsumer.hs as a home module (both are under
@@ -112,7 +114,7 @@ fn generate_import_producer_and_consumer_fixtures() {
     consumer_cmd
         .input(fixture_src.join("ImportConsumer.hs"))
         .output_dir(&consumer_out)
-        .target("consumerResult")
+        .target("consumerEntries")
         .include(&lib)
         .include(&fixture_src)
         .retained_generation(producer_value_id, 11)
@@ -126,7 +128,7 @@ fn generate_import_producer_and_consumer_fixtures() {
         "import-consumer compile failed: {}",
         String::from_utf8_lossy(&consumer_result.output.stderr)
     );
-    let consumer_cbor = consumer_out.join("consumerResult.prepared.cbor");
+    let consumer_cbor = consumer_out.join("consumerEntries.prepared.cbor");
     assert!(
         consumer_cbor.is_file(),
         "expected {} to exist",

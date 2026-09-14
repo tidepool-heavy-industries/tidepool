@@ -1,0 +1,17 @@
+{
+  "source_revision": "ImportConsumerOracle.hs (consumerValueAt 0#, consumerResult from ImportConsumer.hs) native GHC 9.12.2, runghc -i. ImportConsumerOracle.hs",
+  "expectations": {
+    "consumerValueAt": {
+      "kind": "int_list",
+      "value": [
+        1,
+        2,
+        3
+      ]
+    },
+    "consumerResult": {
+      "kind": "int",
+      "value": 6
+    }
+  }
+}

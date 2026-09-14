@@ -9,11 +9,11 @@ use tidepool_codegen::prepared_program::{
     PreparedOuter as PreparedOuterCodegen, TopSlotBase,
 };
 use tidepool_repr::execution_schema::{
-    link_program, parse_program, Architecture, DecodeLimits, Endianness, ImportedValue,
-    MachineImports, ProgramRequirements, TargetDescriptor, TopBinding, ValueId,
-    EXECUTION_ABI_VERSION, SCHEMA_VERSION,
+    link_program, parse_program, Architecture, DecodeLimits, Endianness, ImportedValue, LinkError,
+    MachineImports, PreparedProgram, ProgramRequirements, SymbolIdentity, TargetDescriptor,
+    TopBinding, ValueId, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
 };
-use tidepool_repr::DataConId;
+use tidepool_repr::{DataConId, Generation};
 use tidepool_runtime::prepared_execution::{
     run_prepared_once, PreparedArgument, PreparedCancelHandle, PreparedFailureKind, PreparedOuter,
     PreparedRuntimeError, PreparedValue, PreparedValueResult,
@@ -1279,4 +1279,349 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
     ));
     assert!(resumed_values.next().is_none());
     assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+}
+
+// ---- S6: end-to-end retained import through the session runtime ---------
+
+const IMPORT_PRODUCER_ARTIFACT: &[u8] =
+    include_bytes!("../../haskell/test-prepared-stg/fixtures/import-producer.cbor");
+const IMPORT_CONSUMER_ARTIFACT: &[u8] =
+    include_bytes!("../../haskell/test-prepared-stg/fixtures/import-consumer.cbor");
+/// `consumerValueAt 0#`'s GHC-computed value, transcribed from
+/// `ImportConsumerOracle.hs` run under the pinned GHC 9.12.2. Never
+/// hand-derived.
+const IMPORT_CONSUMER_EXPECTATIONS: &str =
+    include_str!("../../haskell/test-prepared-stg/ImportConsumerExpectations.json");
+
+fn tops(prepared: &PreparedProgram) -> Vec<TopBinding> {
+    prepared
+        .bindings()
+        .iter()
+        .flat_map(|group| match group {
+            tidepool_repr::execution_schema::Group::NonRecursive(top) => {
+                std::slice::from_ref(top).to_vec()
+            }
+            tidepool_repr::execution_schema::Group::Recursive(tops) => tops.clone(),
+        })
+        .collect()
+}
+
+fn top_named(prepared: &PreparedProgram, module: &str, occurrence: &str) -> TopBinding {
+    tops(prepared)
+        .into_iter()
+        .find(|top| top.identity.module == module && top.identity.occurrence == occurrence)
+        .unwrap_or_else(|| {
+            let available: Vec<String> = tops(prepared)
+                .iter()
+                .map(|top| {
+                    format!(
+                        "{}.{} ({:?})",
+                        top.identity.module, top.identity.occurrence, top.binding.id
+                    )
+                })
+                .collect();
+            panic!("artifact has no top {module}.{occurrence}; tops: {available:?}")
+        })
+}
+
+/// The first of `occurrences` present as a top of `module`: GHC's
+/// worker/wrapper split may leave only the `$w`-prefixed worker as a top.
+fn top_named_any(prepared: &PreparedProgram, module: &str, occurrences: &[&str]) -> TopBinding {
+    occurrences
+        .iter()
+        .find_map(|occurrence| {
+            tops(prepared)
+                .into_iter()
+                .find(|top| top.identity.module == module && top.identity.occurrence == *occurrence)
+        })
+        .unwrap_or_else(|| {
+            let available: Vec<String> = tops(prepared)
+                .iter()
+                .map(|top| format!("{}.{}", top.identity.module, top.identity.occurrence))
+                .collect();
+            panic!("artifact has no top {module}.{occurrences:?}; tops: {available:?}")
+        })
+}
+
+/// How many physical arguments a function top's projected signature takes:
+/// an unused parameter absence analysis turned into a `Void` rep is declared
+/// but not passed.
+fn top_arity(prepared: &PreparedProgram, top: &TopBinding) -> usize {
+    match &top.binding.rhs {
+        tidepool_repr::execution_schema::HeapRhs::Function { signature, .. } => prepared
+            .signatures()[signature.0 as usize]
+            .arguments
+            .iter()
+            .filter(|rep| !matches!(rep, tidepool_repr::execution_schema::RuntimeRep::Void))
+            .count(),
+        _ => 0,
+    }
+}
+
+fn producer_identity(occurrence: &str) -> SymbolIdentity {
+    SymbolIdentity {
+        unit: "main".to_owned(),
+        module: "ImportProducer".to_owned(),
+        namespace: "value".to_owned(),
+        occurrence: occurrence.to_owned(),
+        record_parent: None,
+    }
+}
+
+fn expected_consumer_value() -> Vec<i64> {
+    let parsed: serde_json::Value = serde_json::from_str(IMPORT_CONSUMER_EXPECTATIONS)
+        .expect("ImportConsumerExpectations.json parses as JSON");
+    parsed["expectations"]["consumerValueAt"]["value"]
+        .as_array()
+        .expect("consumerValue expectation is a list")
+        .iter()
+        .map(|element| {
+            element
+                .as_i64()
+                .expect("consumerValue elements are integers")
+        })
+        .collect()
+}
+
+/// Flatten an observed `[Int]`: a cons cell is `Con(_, [head, tail])`, nil
+/// is `Con(_, [])`, and each head is a bare literal or an `I#` box around one.
+fn observed_int_list(value: &Value) -> Vec<i64> {
+    let mut out = Vec::new();
+    let mut cursor = value;
+    loop {
+        match cursor {
+            Value::Con(_, fields) if fields.is_empty() => return out,
+            Value::Con(_, fields) if fields.len() == 2 => {
+                let head = match &fields[0] {
+                    Value::Lit(tidepool_repr::Literal::LitInt(n)) => *n,
+                    Value::Con(_, boxed) => match boxed.as_slice() {
+                        [Value::Lit(tidepool_repr::Literal::LitInt(n))] => *n,
+                        other => panic!("unexpected boxed list head {other:?}"),
+                    },
+                    other => panic!("unexpected list head {other:?}"),
+                };
+                out.push(head);
+                cursor = &fields[1];
+            }
+            other => panic!("unexpected list shape {other:?}"),
+        }
+    }
+}
+
+/// Rung 2 end to end through the session runtime: install the producer,
+/// bind `producerValue` and `producerFn` as retained tops at the generation
+/// the consumer was projected against, install the consumer importing both,
+/// run its data-only entry with collections between every step and compare
+/// against the GHC oracle, then show a consumer linked against a stale
+/// generation is refused before anything is installed and that leased
+/// bindings cannot be released. `consumerResult` (which applies
+/// `producerFn`) is deliberately not run: cross-program invocation has no
+/// mechanism this wave.
+#[test]
+fn retained_import_end_to_end_links_consumer_against_bound_producer_tops() {
+    let producer = parse_program(
+        IMPORT_PRODUCER_ARTIFACT,
+        &requirements(),
+        DecodeLimits::default(),
+    )
+    .expect("import-producer artifact parses");
+    assert!(
+        producer.globals().is_empty(),
+        "the producer is a closed program"
+    );
+    let consumer = parse_program(
+        IMPORT_CONSUMER_ARTIFACT,
+        &requirements(),
+        DecodeLimits::default(),
+    )
+    .expect("import-consumer artifact parses");
+    let value_identity = producer_identity("producerValue");
+    let fn_identity = producer_identity("producerFn");
+    for identity in [&value_identity, &fn_identity] {
+        let declaration = consumer
+            .globals()
+            .iter()
+            .find(|global| &global.identity == identity)
+            .unwrap_or_else(|| panic!("consumer declares {identity:?} as a global"));
+        assert_eq!(
+            declaration.required_generation,
+            Some(11),
+            "S5 pinned both imports at retained generation 11"
+        );
+    }
+    let producer_value_top = top_named(&producer, "ImportProducer", "producerValue");
+    let producer_fn_top = top_named(&producer, "ImportProducer", "producerFn");
+    let consumer_value_top = top_named_any(
+        &consumer,
+        "ImportConsumer",
+        &["consumerValueAt", "$wconsumerValueAt"],
+    );
+    let scalar_args = vec![0_u64; top_arity(&consumer, &consumer_value_top)];
+    let managed_args: Vec<PreparedArgument<'_>> = scalar_args
+        .iter()
+        .map(|word| PreparedArgument::Scalar(*word))
+        .collect();
+
+    let mut runtime = PreparedRuntime::from_prepared(producer, MachineImports::default())
+        .expect("producer links closed");
+    let first = runtime.first_program().expect("producer installs");
+    runtime
+        .set_val_gen(Generation(11))
+        .expect("the session starts the turn the consumer was projected against");
+    let bound_value = runtime
+        .bind_top(first, producer_value_top.binding.id, "producerValue")
+        .expect("producerValue binds at generation 11");
+    let bound_fn = runtime
+        .bind_top(first, producer_fn_top.binding.id, "producerFn")
+        .expect("producerFn binds at generation 11");
+    assert_eq!(runtime.retained_handle_count(), 2);
+
+    let program = runtime
+        .install_prepared(
+            consumer.clone(),
+            &[
+                (value_identity.clone(), bound_value),
+                (fn_identity.clone(), bound_fn),
+            ],
+        )
+        .expect("consumer links against both generation-11 bindings and installs");
+    assert_ne!(program, first);
+    assert_eq!(runtime.bindings().lease_count(bound_value), 1);
+    assert_eq!(runtime.bindings().lease_count(bound_fn), 1);
+
+    let cancel = runtime.new_cancel_handle();
+    let expected = expected_consumer_value();
+    let observed = runtime
+        .run_entry_in(
+            program,
+            consumer_value_top.binding.id,
+            &scalar_args,
+            true,
+            &cancel,
+        )
+        .expect("consumerValueAt reads producerValue through its import slot");
+    assert_eq!(observed.values.len(), 1);
+    assert_eq!(observed_int_list(&observed.values[0]), expected);
+    let again = runtime
+        .run_entry_in(
+            program,
+            consumer_value_top.binding.id,
+            &scalar_args,
+            true,
+            &cancel,
+        )
+        .expect("a second run after another collection reads the same import");
+    assert_eq!(observed_int_list(&again.values[0]), expected);
+
+    // The consumer reads through the slot: one new root for the retained
+    // result, the two bound roots untouched, and the result releases.
+    let mut retained = runtime
+        .run_entry_retained_in(
+            program,
+            consumer_value_top.binding.id,
+            &managed_args,
+            true,
+            &cancel,
+        )
+        .expect("consumerValueAt retains");
+    assert_eq!(runtime.retained_handle_count(), 3);
+    let value = take_managed(&mut retained.values, 0);
+    assert!(runtime.release(value));
+    assert_eq!(runtime.retained_handle_count(), 2);
+
+    // The pinned target holds the imported function as a constructor field:
+    // it flows through bind/link/install as a value and is readable.
+    let entries_top = top_named_any(
+        &consumer,
+        "ImportConsumer",
+        &["consumerEntries", "$wconsumerEntries"],
+    );
+    let entries_args: Vec<PreparedArgument<'_>> = (0..top_arity(&consumer, &entries_top))
+        .map(|_| PreparedArgument::Scalar(0))
+        .collect();
+    let mut entries = runtime
+        .run_entry_retained_in(
+            program,
+            entries_top.binding.id,
+            &entries_args,
+            true,
+            &cancel,
+        )
+        .expect("consumerEntries builds its pair at run time");
+    let pair = take_managed(&mut entries.values, 0);
+    let PreparedOuter::Constructor {
+        fields: mut pair_fields,
+        ..
+    } = runtime.inspect_outer(&pair).expect("the pair inspects");
+    assert!(runtime.release(pair));
+    assert_eq!(pair_fields.len(), 2);
+    let list = take_managed(&mut pair_fields, 0);
+    let function = take_managed(&mut pair_fields, 1);
+    // The list field is this module's own lazy `consumerValueAt n`: a thunk
+    // the host never forces (the evaluated list was already read above
+    // through the entry itself).
+    match runtime.inspect_outer(&list) {
+        Err(PreparedRuntimeError::Run(ExecutionError::Observation(
+            ObservationFailure::Unobservable(kind),
+        ))) => assert_eq!(format!("{kind:?}"), "Thunk"),
+        Err(other) => panic!("expected the typed Unobservable(Thunk) refusal, got {other:?}"),
+        Ok(_) => panic!("an unforced thunk must not inspect as a constructor"),
+    }
+    assert!(runtime.release(list));
+    match runtime.inspect_outer(&function) {
+        Err(PreparedRuntimeError::Run(ExecutionError::Observation(
+            ObservationFailure::Unobservable(kind),
+        ))) => assert_eq!(
+            format!("{kind:?}"),
+            "Function",
+            "the imported function is held as a callable, never entered"
+        ),
+        Err(other) => panic!("expected the typed Unobservable(Function) refusal, got {other:?}"),
+        Ok(_) => panic!("a function-typed import must not inspect as a constructor"),
+    }
+    assert!(runtime.release(function));
+    assert_eq!(runtime.retained_handle_count(), 2);
+
+    // A consumer projected against generation 11 does not link against
+    // bindings made at generation 12, and the refusal installs nothing.
+    runtime.advance_generation();
+    let stale_value = runtime
+        .bind_top(first, producer_value_top.binding.id, "producerValue")
+        .expect("producerValue rebinds at generation 12");
+    let stale_fn = runtime
+        .bind_top(first, producer_fn_top.binding.id, "producerFn")
+        .expect("producerFn rebinds at generation 12");
+    let handles_before = runtime.retained_handle_count();
+    let error = runtime
+        .install_prepared(
+            consumer,
+            &[
+                (value_identity.clone(), stale_value),
+                (fn_identity.clone(), stale_fn),
+            ],
+        )
+        .expect_err("a stale generation must not link");
+    assert!(
+        matches!(&error, PreparedRuntimeError::Link(link) if matches!(**link, LinkError::ImportContract(_))),
+        "expected ImportContract, got {error:?}"
+    );
+    assert_eq!(error.kind(), PreparedFailureKind::Rejected);
+    assert_eq!(runtime.retained_handle_count(), handles_before);
+    assert_eq!(runtime.bindings().lease_count(stale_value), 0);
+    assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
+
+    // Leased bindings stay for the importing program's lifetime; the
+    // never-leased generation-12 bindings release.
+    assert!(matches!(
+        runtime.release_binding(bound_value),
+        Err(PreparedRuntimeError::BindingLeased { leases: 1, .. })
+    ));
+    runtime
+        .release_binding(stale_value)
+        .expect("an unleased binding releases");
+    runtime
+        .release_binding(stale_fn)
+        .expect("an unleased binding releases");
+    assert_eq!(runtime.retained_handle_count(), 2);
+    assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
 }
