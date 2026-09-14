@@ -77,9 +77,9 @@ where
 
         // The gc_trigger signature for the alloc slow path: one spelling,
         // shared with the emitters.
-        let gc_sig_ref = builder.import_signature(
-            tidepool_codegen::alloc::gc_trigger_signature(pipeline.isa.default_call_conv()),
-        );
+        let gc_sig_ref = builder.import_signature(tidepool_codegen::alloc::gc_trigger_signature(
+            pipeline.isa.default_call_conv(),
+        ));
 
         let oom_func = {
             let mut sig = ir::Signature::new(pipeline.isa.default_call_conv());

@@ -9,21 +9,35 @@
 //!   closures, promoted out of the nursery once at bind time so a later run
 //!   can resolve them through a stable [`RootSlot`].
 //!
-//! ## The write barrier
+//! ## Old-to-young edges
 //!
-//! Every store of a nursery pointer into already-tenured or external-to-
-//! nursery memory routes through ONE function, [`crate::host_fns::write_barrier`]:
-//! thunk memoization (a Tier1 closure tenures UNFORCED, and forcing it later
-//! mutates its indirection cell to point at a nursery result),
-//! `WriteSmallArray`/`WriteArray`, `casSmallArray#`, and the
-//! boxed-array copy family's destination range, and `deep_force`'s constructor
-//! field rewrites. `write_barrier` records the
-//! store's destination slot in the machine's remembered set; `perform_gc`
-//! traces and rewrites every remembered slot on every collection (including
-//! the doubling re-evacuate, which reuses the same root-slot list), exactly
-//! like a stack or persistent root. The barrier is armed on the first
-//! `OldSpace::tenure` call — before that there is no old-space, so no
-//! old-to-young store is possible.
+//! A minor collection never scans old-space, so every pointer from tenured
+//! or external memory into the nursery must be a root. The machine's
+//! remembered set (`MachineState::register_remembered_slot`, traced and
+//! rewritten by `perform_gc` on every collection, including the growth
+//! re-evacuate) holds those slots. Exactly one recorder feeds it per edge
+//! class:
+//!
+//! - **Old-space object fields** are recorded at the store, by ONE function,
+//!   [`crate::host_fns::write_barrier`]: thunk memoization (a Tier1 closure
+//!   tenures UNFORCED, and forcing it later mutates its indirection cell to
+//!   point at a nursery result; the prepared enter's update does the same)
+//!   and `deep_force`'s constructor field rewrites. The barrier is armed on
+//!   the first `OldSpace::tenure` call -- before that there is no old-space,
+//!   so no old-to-young store is possible.
+//! - **Boxed-array payload slots** are recorded once, as a whole, when the
+//!   array's wrapper is tenured (`tenure` -> `scan_heap_region` ->
+//!   `MachineState::retain_external_payloads`), because a payload is
+//!   mutable for its whole life and any of its slots may hold a young value
+//!   after any later write. Array write sites (`WriteSmallArray`/`WriteArray`,
+//!   `casSmallArray#`, the copy family) therefore call no barrier. A NURSERY
+//!   array's external payload is not remembered at all: the collection's
+//!   reachability expansion (`trace_heap_region` -> `external_payload_view`)
+//!   finds it from the wrapper and roots its slots for that collection only.
+//!
+//! The test-only kill switch for mutation checks
+//! (`host_fns::set_remembered_set_disabled_for_test`) sits at the sink both
+//! recorders share, so disabling it removes every old-to-young root at once.
 //!
 //! The minor GC's from-range is the nursery ONLY (`raw::cheney_copy`'s
 //! `is_in_range` excludes old-space addresses), so tenured objects are never
@@ -32,17 +46,17 @@
 //! pass (`host_fns::gc`'s `verify_tenured_graph`) walks the tenured graph
 //! from the persistent roots and classifies every slot it reaches, including
 //! a boxed array's external malloc'd payload slots. That pass follows the
-//! object graph rather than the remembered set, so it is independent of this
-//! barrier and detects a store the barrier failed to record — at the
-//! collection that strands the target, rather than whenever something next
-//! dereferences it.
+//! object graph rather than the remembered set, so it is independent of both
+//! recorders above and detects an edge neither recorded -- at the collection
+//! that strands the target, rather than whenever something next dereferences
+//! it.
 //!
 //! Old-space is compacted only on an explicit *major* pass (when a binding
 //! generation dies) — never during a minor GC.
 //!
 //! ## Sibling-reference fixup
 //!
-//! The write barrier above covers stores made AFTER an object is tenured. It
+//! The recorders above cover stores made AFTER an object is tenured. It
 //! does not cover a SIBLING object — some other live nursery value that
 //! independently held a pointer into the graph [`OldSpace::tenure`] is about
 //! to evacuate, from BEFORE that tenure call runs. `tenure`'s own

@@ -1,11 +1,20 @@
-//! Regression suite for the generational write barrier (see `old_space.rs`'s
-//! module doc for the invariant it enforces): before the fix, `OldSpace::tenure`
+//! Regression suite for old-to-young edge recording (see `old_space.rs`'s
+//! module doc, "Old-to-young edges"): before the fix, `OldSpace::tenure`
 //! registered a persistent root for the tenured object itself, but old-space
 //! was never rescanned by a minor GC (`raw::cheney_copy`'s from-range is the
 //! nursery only) — a `writeSmallArray#`/`WriteArray` store into an
 //! already-tenured array's external payload buffer was invisible to every
 //! later minor collection, so a fresh nursery value written there had no path
 //! back to a GC root once the array itself was off-nursery.
+//!
+//! Today a tenured array's payload slots are remembered as a whole at tenure
+//! (`MachineState::retain_external_payloads`), and the write barrier proper
+//! covers old-space object fields (thunk memoization). The mutation checks
+//! below disable the remembered set at its single sink
+//! (`set_remembered_set_disabled_for_test`), which removes both recorders at
+//! once; a check that disabled only the barrier would stay green for arrays
+//! and prove nothing, which is exactly what happened when tenure-time
+//! remembering was added on top of the barrier.
 //!
 //! Every test runs with `TIDEPOOL_GC_POISON`/`TIDEPOOL_HEAP_VERIFY` on so a
 //! dangling read is deterministic (poison tag 0xDD) rather than
@@ -551,15 +560,15 @@ fn tenured_thunk_indirection_uses_write_barrier_and_survives_gc() {
         .unwrap();
 }
 
-/// MUTATION CHECK. With the write barrier force-disabled via
-/// `set_write_barrier_disabled_for_test`, re-run the exact G1 scenario. This
+/// MUTATION CHECK. With remembered-set recording force-disabled via
+/// `set_remembered_set_disabled_for_test`, re-run the exact G1 scenario. This
 /// MUST go red with the same predicted dangling-element corruption
 /// (`CaseTrap`, gc-poison tag 0xDD/221) the reachability spike above
 /// predicts — if it stayed green, the test would prove nothing.
 ///
 /// Heap-verify is deliberately OFF here, unlike every other test in this
-/// file. This test's claim is that the BARRIER is load-bearing: remove it and
-/// the stranded element is read back as poison at the dereference. With
+/// file. This test's claim is that the REMEMBERED SET is load-bearing: remove
+/// it and the stranded element is read back as poison at the dereference. With
 /// heap-verify on, `verify_tenured_graph` now detects the unrecorded store
 /// EARLIER — at the collection that strands it — and aborts the process
 /// before the read is ever reached, which would test the verifier rather than
@@ -567,14 +576,14 @@ fn tenured_thunk_indirection_uses_write_barrier_and_survives_gc() {
 /// is the test for that second, separate claim.
 #[test]
 #[serial]
-fn tenured_array_write_g1_reproduces_without_barrier() {
+fn tenured_array_write_g1_reproduces_without_remembered_set() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
             reset_test_counters();
             set_heap_verify(false);
             set_gc_poison(true);
-            tidepool_codegen::host_fns::set_write_barrier_disabled_for_test(true);
+            tidepool_codegen::host_fns::set_remembered_set_disabled_for_test(true);
             let table = table();
 
             let dummy = build_value_fragment(0);
@@ -626,21 +635,21 @@ fn tenured_array_write_g1_reproduces_without_barrier() {
                 .expect("add_function read_back");
             let result = machine.run_fragment_pure(read_fn);
 
-            tidepool_codegen::host_fns::set_write_barrier_disabled_for_test(false);
+            tidepool_codegen::host_fns::set_remembered_set_disabled_for_test(false);
             set_gc_poison(false);
             set_heap_verify(false);
 
             match result {
                 Ok(v) => panic!(
-                    "EXPECTED this to fail with the barrier disabled — instead got a value \
-                     ({v:?}) with no corruption. A green-either-way test proves nothing; \
-                     something else in the change is masking the bug."
+                    "EXPECTED this to fail with the remembered set disabled — instead got a \
+                     value ({v:?}) with no corruption. A green-either-way test proves nothing; \
+                     something else is keeping the stranded element alive."
                 ),
                 Err(e) => {
                     // This IS the mutation evidence: with the barrier disabled, the
                     // scenario reproduces the exact pre-fix corruption.
                     eprintln!(
-                        "mutation check: barrier disabled -> G1 reproduces corruption: {e:?}"
+                        "mutation check: remembered set disabled -> G1 reproduces corruption: {e:?}"
                     );
                 }
             }
@@ -652,16 +661,16 @@ fn tenured_array_write_g1_reproduces_without_barrier() {
         .unwrap();
 }
 
-/// The write barrier's own verifier gate: with the barrier force-disabled AND
+/// The verifier gate: with remembered-set recording force-disabled AND
 /// `TIDEPOOL_HEAP_VERIFY` on, the unrecorded old-to-young store is caught by
 /// `verify_tenured_graph` at the collection that strands the target — not
 /// later, at whatever next dereferences it.
 ///
 /// This is the claim that matters about the verifier pass: it is INDEPENDENT
-/// of the barrier. A verifier that walked the barrier's remembered set could
-/// only ever inspect stores the barrier already caught, so it would be blind
+/// of the remembered set. A verifier that walked the remembered set could
+/// only ever inspect edges some recorder already caught, so it would be blind
 /// to precisely this failure. Walking the tenured object graph instead means
-/// a slot the barrier never recorded is still found.
+/// a slot no recorder registered is still found.
 ///
 /// Run in a SUBPROCESS because the detection aborts rather than unwinds:
 /// `gc_trigger` is `extern "C"`, so a panic raised inside a JIT-triggered
@@ -719,7 +728,7 @@ fn heap_verify_catches_unrecorded_store_at_the_stranding_collection() {
     );
 }
 
-/// The G1 scenario with the write barrier force-disabled: tenure a boxed
+/// The G1 scenario with remembered-set recording force-disabled: tenure a boxed
 /// array, have a later fragment write a freshly allocated nursery `Con` into
 /// its payload, then force collections. With `heap_verify` on, a collection
 /// is expected to detect the stranded slot and abort the process, so this
@@ -731,7 +740,7 @@ fn run_g1_scenario_with_barrier_disabled(heap_verify: bool) {
             reset_test_counters();
             set_heap_verify(heap_verify);
             set_gc_poison(true);
-            tidepool_codegen::host_fns::set_write_barrier_disabled_for_test(true);
+            tidepool_codegen::host_fns::set_remembered_set_disabled_for_test(true);
             let table = table();
 
             let dummy = build_value_fragment(0);
@@ -769,7 +778,7 @@ fn run_g1_scenario_with_barrier_disabled(heap_verify: bool) {
                 .expect("add_function filler");
             let _ = machine.run_fragment_pure(filler);
 
-            tidepool_codegen::host_fns::set_write_barrier_disabled_for_test(false);
+            tidepool_codegen::host_fns::set_remembered_set_disabled_for_test(false);
             set_gc_poison(false);
             set_heap_verify(false);
             drop(machine);
