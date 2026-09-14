@@ -31,7 +31,7 @@ services its effects.
 | `tidepool-protocol` | Source schema for effect and error definitions |
 | `tidepool-mcp` | MCP server library and generated Haskell effect surface |
 | `tidepool-handlers` | Concrete effect handlers |
-| `tidepool-repl` | Stateful GHCi-style MCP server |
+| `tidepool-repl` | Stateful GHCi-style MCP server (currently not a Cargo workspace member — its `Cargo.toml` was removed under the in-progress STG cutover; directory and source remain on disk) |
 | `tidepool-harness` | Resident authored-harness runtime and driver |
 | `tidepool-agent` | Typed coding-agent backend boundary |
 | `tidepool-worktree` | Managed coding checkouts, repository observation, and journal |

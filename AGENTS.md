@@ -63,7 +63,9 @@ providers, scheduling, resources, persistence, and argument parsing.
 - `tidepool-model`, `tidepool-model-output`, `tidepool-agent`: provider-neutral
   conversations, model-output parsing, and coding-agent backends.
 - `tidepool-actor`: actor identity, lifecycle, mailbox, and resident workbench.
-- `tidepool-repl` and `tidepool`: user-facing REPL and Shoal runtimes.
+- `tidepool-repl` (currently not a Cargo workspace member — its `Cargo.toml`
+  was removed under the in-progress STG cutover; source remains on disk) and
+  `tidepool`: user-facing REPL and Shoal runtimes.
 - `tidepool-worktree`: managed coding checkouts and repository observation.
 
 Read the nearest nested `AGENTS.md` before editing a subsystem. Use
