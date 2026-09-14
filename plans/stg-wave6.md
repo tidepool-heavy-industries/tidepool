@@ -12,9 +12,9 @@ linear `PreparedValue`s with `inspect_outer`, managed entry arguments through
 `run_entry_retained`, stable old-space root slots (`OldSpace::retain_prepared`
 + `RootHandleLedger`), and a real freer `send` artifact
 (`haskell/test-prepared-stg/fixtures/freer-retention.cbor`) whose `E`
-continuation survives collection as data. `plans/stg-wave6-handoff.md` named
+continuation survives collection as data. The Wave 6A handoff named
 executable imports as the next owner and forbade resident/workbench cutover
-this wave; that handoff's content is absorbed here.
+this wave; its content is absorbed here and the handoff file is gone.
 
 ## Acceptance ladder
 
@@ -24,27 +24,23 @@ passes once it does. Ordered by minimal new surface first.
 | Rung | Criterion | Status |
 |---|---|---|
 | 0 | Decode a real effect request with a real closure `Leaf` field (no suspension), classified without going through `observe()` (which rejects functions/PAPs) | **Done** (Wave 6A) |
-| 1 | Smallest real end-to-end suspend/resume: print -> sleep -> print, single turn, single realm; heap object identity checked across resumes | Wave 6B (E1-E3) |
-| 2 | Retained bindings across turns: turn N+1's program links against turn N's binding via `required_generation`, reads it off the same persistent heap (identity, not re-import by value) | Wave 6B (S1-S6) |
-| 3 | Interleaved parked work: two suspended continuations share one heap, resumed out of order, survive an intervening nursery GC | Not started this wave |
+| 1 | Smallest real end-to-end suspend/resume: print -> sleep -> print, single turn, single realm; heap object identity checked across resumes | **Done** (Wave 6B, E1-E3: `freer-resume.cbor`, `freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments`, parking tests in `tidepool-runtime/tests/prepared_execution.rs`) |
+| 2 | Retained bindings across turns: turn N+1's program links against turn N's binding via `required_generation`, reads it off the same persistent heap (identity, not re-import by value) | **Done with recorded limits** (Wave 6B, S1-S6: `retained_import_end_to_end_links_consumer_against_bound_producer_tops`; limits under "Rung 2 boundaries" below) |
+| 3 | Interleaved parked work: two suspended continuations share one heap, resumed out of order, survive an intervening nursery GC | Covered within one program (`parked_continuations_resume_out_of_order_with_a_collection_between`); not yet pinned across two installed programs on one heap |
 | 4 | Cancellation of one parked turn among siblings, via a realm-scoped `CancelHandle`; sibling and `close_realm` counts unaffected | Not started this wave |
 | 5 | Actor-turn authority: retiring an incarnation releases its parked frame; a different incarnation cannot resume it | Not started this wave |
 | 6 | Composite: rungs 2-5 together in one resident session — the actual gate for calling Wave 6 done | Not started this wave |
 
-Rung 3 has a dependency this design makes explicit rather than treats as an
-implementation detail discovered mid-rung: entering a thunk that is
-`DescriptorState::Evaluating` (blackholed) is today indistinguishable from
-`<<loop>>` — that indistinguishability *is* the loop-detection mechanism.
-Rung 1 and 2 are safe because at most one evaluator ever touches the heap at
-a time; rung 3 puts two parked continuations' blackholed thunk chains on one
-heap, so a resuming evaluator can re-enter a thunk blackholed by a *different*,
-still-parked continuation and wrongly report `<<loop>>`. The blackhole-vs-loop
-distinction (evaluator identity on the descriptor state, plus a wait/settle
-contract for "not mine, park behind it") must land as its own deliverable
-before rung 3 is attempted, not be discovered as a bug during it. No existing
-design or ticket in `plans/` or `docs/` resolves this beyond the one paragraph
-in `docs/stg-projection-inventory.md` ("`noDuplicate#` execution invariant")
-and the mirrored bullet in `plans/stg-wave5-delivery.md`'s failure contracts.
+Rung 3's blackhole question is settled by D3 below for this engine's
+suspension model: a freer request is returned as an `E` value at WHNF, no
+native stack is captured, and every thunk on the path to `E` has settled, so
+a parked continuation leaves no `DescriptorState::Evaluating` header behind
+for another resume to trip over (`docs/stg-projection-inventory.md`,
+"`noDuplicate#` execution invariant", and the E3 tests). Evaluator identity
+on the descriptor state becomes necessary only if a future design captures
+native stacks, and must be re-decided then. What rung 3 still lacks is the
+cross-program pinning: two parked continuations from two installed programs
+on one heap, resumed out of order across a collection.
 
 ## Decisions
 
@@ -162,14 +158,185 @@ must not be conflated with this.
   `tidepool-runtime::session::workbench` for the routing decision itself,
   gated on rungs 2-5 landing together in one resident-session test first.
 
-## Status ledger (updated as tasks land)
+## Rung 2 boundaries (what an import can and cannot do today)
 
-Wave 6B tracks (see `plans/actually-since-you-found-jiggly-turing.md` for the
-per-task cards): W1-W3 (independent prep), E1-E3 (effect resume,
-same-program, no codegen change — rungs 0-1), S1-S6 (imports substrate,
-codegen then runtime — rung 2), S5 (Haskell retained globals, parallel with
-S1-S4), D1-D3 (this document and its follow-on updates).
+An admitted global is a top-table slot published from a retained root at
+install (`PreparedMachine::install_program` with `ImportBindings`), read by
+identity on the shared heap. Generated code can load, hold, pass and return
+an imported value. It cannot yet:
 
-This section is updated once E3/S6 land with what actually happened; commit
-ledger and gate results are appended here per the plan's D3 documentation
-task.
+- call an imported closure, or force an imported thunk: `apply.rs`'s
+  dispatchers and `entry.rs`'s enter routine match a callee against the
+  compiling program's own function/thunk tables (`BadThunkState`, machine
+  `Unavailable`) -- X2 below;
+- (closed by X1, `a0e41c70d`) `Case` on an imported constructor: a program
+  compiled through `PreparedMachine::compile_for_install` shares one
+  descriptor per constructor identity with every earlier program, so its
+  `Case` and evaluated-constructor enter recognise their cells; a program
+  compiled standalone still sees only its own;
+- hold an import in a top-level constructor: static data cannot carry a
+  pointer known only at install (`image.rs` rejects it at compile time);
+- install a closure containing any of the above bodies, since admission is
+  whole-program.
+
+Host observation (`inspect_outer`, entry-result observation) resolves an
+imported value, including another program's static cells, through the
+machine-wide descriptor/static union. Two further caveats: retained
+generation matching is external-name-only, so a producer must withhold the
+unfolding of a retained symbol (GHC otherwise inlines small static data
+into the consumer as a recovered copy; the S6 probe uses `NOINLINE`), and
+`required_evaluated` means weak head normal form (a function or PAP counts,
+matching the projection's `importedEntry`).
+
+Follow-ups, in dependency order: S3b (import-holding tops become heap
+tops published after import slots; default-only `Case` skips dispatch),
+then cross-program call and case dispatch through the machine-wide
+registry (the real "apply an imported closure" primitive D2 deferred), then
+S5's contract for unfoldings of retained symbols. S2b (two GC tests for
+collection during a second program's live native call and static-region
+admission across programs) is a small independent card.
+
+## Completion plan (what is left to call Wave 6 done)
+
+Rung 6 is the gate: rungs 2-5 together in one resident session. Everything
+below is ordered so each stage leaves the tree green and independently
+useful, and so the design-gated stages come after the mechanical ones.
+Effort labels are for one engineer driving directly; the GC/codegen stages
+are not delegation candidates.
+
+### Stage 1: imports become usable (rung 2 for real)
+
+An import can be held and read today but not called, cased on, forced, or
+placed in top-level data (see "Rung 2 boundaries"). A notebook that cannot
+call a retained function has not really retained it.
+
+- **X1 constructor descriptor interning.** One descriptor per constructor
+  identity across every program on a machine (`DescriptorInterner`, owned
+  by `PreparedMachine`; `CompiledProgram::compile_with`;
+  `PreparedMachine::compile_for_install`; absorb at install with a typed
+  `DescriptorShape` refusal). Closes `Case` on imported constructors,
+  including `seq`, and evaluated-constructor enter. Acceptance: the former
+  S3 finding test passes un-ignored (B's generated `Case` reads A's
+  `Field(99)`); a conflicting declaration under a known identity is
+  `CompileError::DescriptorShape`; codegen and runtime suites no worse.
+  Status: **done**, `a0e41c70d` (codegen lib 470 passed; runtime session
+  and integration suites 11 and 10 passed).
+- **X2 function and thunk dispatch through the machine.** After each
+  per-program fast chain (`apply.rs::emit_dispatchers`,
+  `entry.rs::emit_prepared_enter`), replace the terminal bad-state with a
+  host lookup `prepared_resolve_entry(vmctx, header, signature_hash) ->
+  code` over a machine-wide map `install` fills from every program's
+  `pipeline.get_function_ptr` for its function and thunk descriptors, then
+  `call_indirect` with the ABI `EntryAbi::cranelift_signature` gives (thunk
+  bodies: `(vmctx, reference) -> (status, value)`). Foreign PAPs are a
+  second step (read pending arguments through the PAP's own descriptor
+  layout, then dispatch the underlying function). Acceptance: S2's T2 and
+  T4 un-ignore and pass (a collection inside the producer's code while the
+  consumer's frame is live; static admission through a call); S6 runs
+  `consumerResult` (`producerFn (length producerValue)`) against the
+  oracle's 6, with the pinned closure regenerated to include it; a call
+  with a mismatching signature hash is a typed failure, machine
+  `Reusable`. Medium-large.
+- **S3b import-holding tops.** A top-level constructor referencing a
+  `Global` becomes a heap top (`image.rs::heap_top_partition`),
+  `initialize_heap_tops` resolves the field from the import slot, and
+  `install` publishes import slots before initializing heap tops. Default-
+  only algebraic `Case` skips descriptor matching. Acceptance: a consumer
+  whose target is `(consumerResult, producerValue)` as static data
+  compiles, installs and reads correctly across collections. Small.
+- **S5 unfoldings.** A retained symbol's unfolding must not be visible to a
+  later turn's compilation (today `NOINLINE` in the probe stands in for
+  it). Acceptance: `ImportProducer.hs` without `NOINLINE` still projects
+  `producerValue`/`producerFn` as globals with no recovered
+  `producerValue1..5`/`$wproducerFn` tops. Haskell, medium.
+- **S2b GC residuals.** Two lib tests: a collection triggered from inside a
+  second installed program's own live native call (a first-only stack-map
+  chain fails it), and retention of one of A's genuinely static objects
+  through B (a first-only static set fails it). Small; X2's T4 covers the
+  second if it lands first.
+
+### Stage 2: parked work across programs and realms (rungs 3-4)
+
+- **C0 rung 3 pinned across programs.** Install the freer-resume artifact
+  twice on one machine (second compile via `compile_for_install`), park one
+  `k` from each, collect, resume in the opposite order to completion
+  against the pinned expectation; then both parked while an unrelated entry
+  of the other program runs. Replace the ladder's rung-3 row with Done and
+  the test names. Small.
+- **C1 rung 4 realm-scoped cancellation.** `PreparedMachine` embeds the
+  existing `ResourceLedger` (continuations empty this wave), `run_entry*`
+  and `inspect_outer` take a `RealmId`, `realm_cancel_handle` returns the
+  JIT's `CancelHandle` (`reset` is the retry path), `close_realm` settles
+  exactly as `JitEffectMachine::close_realm` does; `PreparedRuntime` drops
+  `PreparedCancelHandle` for `open_realm`/`cancel_handle`/`close_realm`.
+  Acceptance: two realms each park a `k`; cancel R1 -> `Cancelled` inside
+  generated code, `k` valid, R2 unaffected; reset, retry succeeds;
+  `close_realm(R1)` returns exactly R1's handle count, R2 resumes, a second
+  close is `(0, 0)`; machine `Reusable` and handle receipts match at every
+  step. Medium. Depends on nothing in stage 1 but shares `machine.rs`, so
+  after X2.
+
+### Stage 3: sessions and actors (rungs 5-6), design-gated
+
+- **Rung 5 actor-turn authority.** Owner named in "Remaining rung owners"
+  is `PreparedPersistentSession`, which does not exist; `PreparedRuntime`
+  is the closest thing and now carries bindings, generations and leases.
+  Design question for the user before any card: does `PreparedRuntime`
+  become the STG analogue of `PersistentSession`'s stow-XOR-run discipline
+  (a `MachineLease`-shaped affine borrow around `PreparedMachine`), with
+  `tidepool-actor`'s unchanged authority contract (exact-incarnation
+  ownership, one outstanding update per request, retirement ends the
+  incarnation) layered on top -- or does `PersistentSession` itself grow
+  an engine enum? `tidepool-actor` is mid-cutover under the user's own
+  commits and carries 23 clippy diagnostics; that lineage must be read
+  first. Acceptance sketch: retiring an incarnation releases its parked
+  frame (its realm closes); a different incarnation cannot resume it
+  (typed refusal by realm); leases held by an incarnation's installed
+  programs release on retirement.
+- **Rung 6 workbench cutover, the composite gate.** One resident-session
+  test that exercises rungs 2-5 together: a turn binds a value, a later
+  turn imports and calls it, two turns park and resume out of order, one
+  is cancelled by realm, an incarnation retires and its work is released.
+  Then, and only then, the routing decision in
+  `tidepool-runtime::session::workbench`: real notebook turns through the
+  prepared engine instead of Core (`session/prepared.rs`'s note that
+  production `resident_workbench` still dispatches Core stands until this
+  lands). Wave 7 non-goals stay non-goals (no stack snapshots, no atomic
+  `MutVar#`, no Core JIT deletion).
+
+### Hygiene that rides along
+
+- `tidepool-actor`'s 23 clippy diagnostics keep `just changed` from ever
+  passing as a whole; either land that lineage or record them as known the
+  way `tidepool-agent`'s were (`plans/stg-wave5-delivery.md`).
+- `session::inspection::tests::one_inspection_compile_answers_type_info_and_browse_queries`
+  fails on the `data Public` browse assertion at the pre-wave baseline;
+  owner unknown, not this wave.
+- Update "Rung 2 boundaries" and the inventory as X1/X2/S3b land; each
+  removes a bullet there.
+
+## Status ledger
+
+Wave 6B (2026-09-13/14), on `engine/stg-production-cutover` from
+`3f43c7d4f`. Per-task cards: `plans/actually-since-you-found-jiggly-turing.md`.
+
+| Task | Outcome | Commits |
+|---|---|---|
+| W1 gate record | report only; clippy failure on `tidepool-actor` found pre-existing | — |
+| W2 worktree hygiene | done; branch superseded by the corrected ledger, deleted | (`16c59a891` records it) |
+| W3 closure ledger | corrected numbers written directly (402 fixture mismatches at the time, not 812; supersession hashes fixed) | `16c59a891` |
+| E1 FreerResume probe + artifact | accepted | `5412e4606` |
+| E2 resume loop | accepted | `34d6eca26` |
+| E3 parking semantics | accepted; post-merge fixes for S1's API | `59973f08a`, `632e216f4`, `413f89ee1` |
+| S1 machine-wide top table | accepted after one refutation (test coverage) | `7706fb2e6` (merge), `af007b864` |
+| S5 retained-generation globals | accepted | `86c4dd52b` |
+| D1 this plan | accepted | `617c1fb72` |
+| S2 one heap per machine | T1/T3 accepted; T2/T4 blocked by the invocation gap, orchestrator-accepted with the residual recorded (S2b) | `84025f519`, merge `c971168b1` |
+| S3 global lowering, admission, import bindings | accepted after direct review; `required_evaluated` widened to WHNF | `05e385cf3`, `8a9d9db5b`, merge `522c1028f` |
+| S4 session custody | `BoundValue::Prepared`, `PreparedRuntime` bind/install/release, per-turn generations | `03f31d80f`, `c6942db51` |
+| S6 end-to-end retained import | passes against the GHC oracle; probe reshaped around the rung-2 boundaries | `2659fce83` |
+| D2 standing docs | inventory: `noDuplicate#` reasoning, admitted-import contract, remaining per-program tables | `9eb6efe99`, `6c9b00d64`, this commit |
+| dev-ux | `just changed` no longer aborts at its first failing step | `5a5df1b72` |
+| gate artifacts | fixtures-update fingerprint; `prepared_execution.rs` formatted | `3a7e6e999`, `25fe148d7` |
+
+Gate on the final tree (`2659fce83`): see "Gate results" below.

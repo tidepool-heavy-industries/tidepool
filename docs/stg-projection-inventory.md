@@ -132,15 +132,28 @@ roots and every installed program untouched. The import is read by
 identity, not copied: the slot resolves to the producing program's own
 object on the shared heap.
 
-Two per-program tables in generated code still see only their own program:
-`apply.rs`'s call dispatchers and `CaseKind::Algebraic` dispatch match a
-callee's or scrutinee's descriptor against the compiling program's own
-function/PAP and constructor tables. So generated code can load, hold, pass
-and return an imported value, but a generated call *of* an imported
-closure, or a generated `Case` *on* an imported constructor, traps. Host
-observation (`inspect_outer`) resolves either through the machine-wide
-descriptor union. Cross-program invocation and dispatch are recorded as the
-next codegen step, not implied by import admission.
+Constructor descriptors are interned per machine (`DescriptorInterner`,
+one descriptor per constructor identity; a conflicting later declaration
+is `CompileError::DescriptorShape`): a program compiled through
+`PreparedMachine::compile_for_install` shares every earlier program's
+constructor descriptors, so its `Case` (including `seq`) and
+evaluated-constructor enter recognise cells another program built. The
+per-program tables generated code still consults only for its own program
+are `apply.rs`'s call dispatchers and `entry.rs`'s thunk enter chain, so a
+generated call *of* an imported closure, or forcing an imported thunk,
+traps (`BadThunkState`, machine `Unavailable`). Because admission is
+whole-program, a closure containing such a body does not install at all.
+A top-level constructor whose field is an import is rejected at compile
+time (`image.rs`): static data cannot hold a pointer known only at
+install. Host observation (`inspect_outer`, `run_entry`'s result
+observation) resolves imported values, including another program's static
+cells, through the machine-wide descriptor/static union. Cross-program
+invocation and dispatch, and import-holding tops, are recorded as the next
+codegen steps, not implied by import admission. Retained-generation
+matching is external-name-only: a retained symbol whose body GHC inlines
+into the consumer (small static data with an exposed unfolding) is
+consumed as a recovered copy, not through the import; the producer side
+must withhold the unfolding.
 
 The currently emitted strict subset is:
 
