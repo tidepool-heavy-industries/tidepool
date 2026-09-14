@@ -432,6 +432,15 @@ unsafe impl Send for JitEffectMachine {}
 pub struct CancelHandle(Arc<AtomicBool>);
 
 impl CancelHandle {
+    /// Wrap an existing flag as a `CancelHandle`. Crate-internal: the
+    /// prepared engine's `PreparedMachine::realm_cancel_handle` reuses this
+    /// same handle type over its own realm-scoped flags
+    /// ([`crate::resource_ledger::ResourceLedger::cancel_flag`]) rather than
+    /// defining a second cancel-handle type.
+    pub(crate) fn from_flag(flag: Arc<AtomicBool>) -> Self {
+        Self(flag)
+    }
+
     /// Request cancellation of the associated `JitEffectMachine`. The running
     /// program (if any) will abort at its next GC safepoint with
     /// `YieldError::Cancelled`.

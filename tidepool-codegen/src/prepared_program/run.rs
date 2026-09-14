@@ -108,7 +108,7 @@ impl CompiledProgram {
                 top_slots: self.top_slot_count(),
             },
         )?;
-        machine.run_entry(
+        machine.run_entry_with_raw_cancel(
             program,
             entry,
             arguments,

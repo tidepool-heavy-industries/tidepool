@@ -15,8 +15,8 @@ use tidepool_repr::execution_schema::{
 };
 use tidepool_repr::{DataConId, Generation};
 use tidepool_runtime::prepared_execution::{
-    run_prepared_once, PreparedArgument, PreparedCancelHandle, PreparedFailureKind, PreparedOuter,
-    PreparedRuntimeError, PreparedValue, PreparedValueResult,
+    run_prepared_once, PreparedArgument, PreparedFailureKind, PreparedOuter, PreparedRuntimeError,
+    PreparedValue, PreparedValueResult, RealmId,
 };
 use tidepool_runtime::session::PreparedRuntime;
 
@@ -184,13 +184,13 @@ fn freer_effect_identity() -> DataConId {
 
 #[test]
 fn one_shot_runs_closed_compiled_program_and_returns_values() {
-    let cancel = PreparedCancelHandle::default();
+    let cancel = Arc::new(AtomicBool::new(false));
     let result = run_prepared_once(
         &strict_artifact(),
         &requirements(),
         DecodeLimits::default(),
         MachineImports::default(),
-        &cancel,
+        cancel,
     )
     .unwrap();
     // `run_prepared_once` requests the contract's collection-before-observation
@@ -204,13 +204,13 @@ fn one_shot_runs_closed_compiled_program_and_returns_values() {
 
 #[test]
 fn one_shot_rejects_missing_import_malformed_and_precancel() {
-    let cancel = PreparedCancelHandle::default();
+    let cancel = Arc::new(AtomicBool::new(false));
     let missing = run_prepared_once(
         ARTIFACT,
         &requirements(),
         DecodeLimits::default(),
         MachineImports::default(),
-        &cancel,
+        Arc::clone(&cancel),
     )
     .unwrap_err();
     assert_eq!(missing.kind(), PreparedFailureKind::Rejected);
@@ -220,18 +220,18 @@ fn one_shot_rejects_missing_import_malformed_and_precancel() {
         &requirements(),
         DecodeLimits::default(),
         MachineImports::default(),
-        &cancel,
+        Arc::clone(&cancel),
     )
     .unwrap_err();
     assert_eq!(malformed.kind(), PreparedFailureKind::Rejected);
 
-    cancel.cancel();
+    cancel.store(true, std::sync::atomic::Ordering::Release);
     let cancelled = run_prepared_once(
         ARTIFACT,
         &requirements(),
         DecodeLimits::default(),
         imports(),
-        &cancel,
+        Arc::clone(&cancel),
     )
     .unwrap_err();
     assert!(matches!(cancelled, PreparedRuntimeError::Cancelled));
@@ -247,12 +247,11 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
         MachineImports::default(),
     )
     .unwrap();
-    let cancel = session.new_cancel_handle();
     let first = session
-        .run_entry(Some(ValueId(0)), &[], true, &cancel)
+        .run_entry(Some(ValueId(0)), &[], true, RealmId::ROOT)
         .unwrap();
     let second = session
-        .run_entry(Some(ValueId(0)), &[], false, &cancel)
+        .run_entry(Some(ValueId(0)), &[], false, RealmId::ROOT)
         .unwrap();
     assert!(matches!(
         first.values.as_slice(),
@@ -271,9 +270,8 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
         imports(),
     )
     .unwrap();
-    let unclosed_cancel = unclosed.new_cancel_handle();
     let rejected = unclosed
-        .run_entry(None, &[], false, &unclosed_cancel)
+        .run_entry(None, &[], false, RealmId::ROOT)
         .unwrap_err();
     assert_eq!(rejected.kind(), PreparedFailureKind::Rejected);
     assert_eq!(unclosed.disposition(), MachineDisposition::Reusable);
@@ -285,10 +283,10 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
         MachineImports::default(),
     )
     .unwrap();
-    let cancelled = session.new_cancel_handle();
-    cancelled.cancel();
+    let cancelled_realm = session.open_realm();
+    session.cancel_handle(cancelled_realm).unwrap().cancel();
     assert!(matches!(
-        session.run_entry(Some(ValueId(0)), &[], false, &cancelled),
+        session.run_entry(Some(ValueId(0)), &[], false, cancelled_realm),
         Err(PreparedRuntimeError::Cancelled)
     ));
     assert_eq!(session.disposition(), MachineDisposition::Reusable);
@@ -303,9 +301,8 @@ fn runtime_retains_a_real_freer_continuation_without_observing_it() {
         MachineImports::default(),
     )
     .expect("FreerRetention artifact is closed and admitted");
-    let first_cancel = runtime.new_cancel_handle();
     let first = runtime
-        .run_entry_retained(None, &[], false, &first_cancel)
+        .run_entry_retained(None, &[], false, RealmId::ROOT)
         .expect("first Freer request is retained");
     let mut first_values = first.values.into_iter();
     let Some(PreparedValueResult::Managed(outer)) = first_values.next() else {
@@ -313,9 +310,8 @@ fn runtime_retains_a_real_freer_continuation_without_observing_it() {
     };
     assert!(first_values.next().is_none());
 
-    let second_cancel = runtime.new_cancel_handle();
     let second = runtime
-        .run_entry_retained(None, &[], true, &second_cancel)
+        .run_entry_retained(None, &[], true, RealmId::ROOT)
         .expect("a later collection retains the first Freer request");
     assert!(second.collections >= 1);
     let mut second_values = second.values.into_iter();
@@ -325,7 +321,7 @@ fn runtime_retains_a_real_freer_continuation_without_observing_it() {
     assert!(second_values.next().is_none());
 
     let PreparedOuter::Constructor { identity, fields } = runtime
-        .inspect_outer(&outer)
+        .inspect_outer(&outer, RealmId::ROOT)
         .expect("retained outer request survives the later collection");
     assert_eq!(identity, freer_effect_identity());
     let mut children: Vec<_> = fields
@@ -419,9 +415,8 @@ fn freer_resume_artifact_admits_program_and_resume_int_as_two_entries() {
     )
     .expect("freer-resume artifact is closed and links with no missing imports");
 
-    let cancel = runtime.new_cancel_handle();
     let program_run = runtime
-        .run_entry_retained(Some(program_top.binding.id), &[], false, &cancel)
+        .run_entry_retained(Some(program_top.binding.id), &[], false, RealmId::ROOT)
         .expect(
             "running the `program` top compiles (and whole-program-admits) \
              the artifact, which includes `resumeInt` as a second top",
@@ -559,9 +554,8 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments() {
     )
     .expect("freer-resume artifact is closed and admitted");
 
-    let cancel = runtime.new_cancel_handle();
     let first = runtime
-        .run_entry_retained(Some(program_top.binding.id), &[], true, &cancel)
+        .run_entry_retained(Some(program_top.binding.id), &[], true, RealmId::ROOT)
         .expect("running `program` compiles the artifact and suspends on the first Ask");
     let mut first_values = first.values.into_iter();
     let Some(PreparedValueResult::Managed(mut outer)) = first_values.next() else {
@@ -575,7 +569,7 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments() {
             identity,
             mut fields,
         } = runtime
-            .inspect_outer(&outer)
+            .inspect_outer(&outer, RealmId::ROOT)
             .expect("the retained Eff value survives its collection and inspects");
 
         if identity == val_id {
@@ -587,13 +581,12 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments() {
             let boxed = take_managed(&mut fields, 0);
             assert!(runtime.release(boxed));
 
-            let value_cancel = runtime.new_cancel_handle();
             let value_result = runtime
                 .run_entry_retained(
                     Some(val_result_top.binding.id),
                     &[PreparedArgument::Managed(&outer)],
                     true,
-                    &value_cancel,
+                    RealmId::ROOT,
                 )
                 .expect("valResult (Val (I# n) -> n) forces program's final Int");
             let mut value_values = value_result.values.into_iter();
@@ -614,7 +607,9 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments() {
         let PreparedOuter::Constructor {
             identity: union_identity,
             fields: mut union_fields,
-        } = runtime.inspect_outer(&union).expect("Union inspects");
+        } = runtime
+            .inspect_outer(&union, RealmId::ROOT)
+            .expect("Union inspects");
         assert_eq!(union_identity, union_id);
         assert_eq!(
             union_fields.len(),
@@ -631,13 +626,12 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments() {
         // since `Ask :: !Int -> Req Int` is strict, unboxes straight to
         // `Int#`) via an ordinary pattern match, compiled and called like
         // any other top -- not a Rust-side freer walker.
-        let ask_cancel = runtime.new_cancel_handle();
         let ask_result = runtime
             .run_entry_retained(
                 Some(ask_argument_top.binding.id),
                 &[PreparedArgument::Managed(&payload)],
                 true,
-                &ask_cancel,
+                RealmId::ROOT,
             )
             .expect("askArgument (Ask (I# n) -> n) forces the Ask request's Int#");
         let mut ask_values = ask_result.values.into_iter();
@@ -648,13 +642,12 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments() {
         assert!(runtime.release(payload));
         seen_answers.push(n);
 
-        let resume_cancel = runtime.new_cancel_handle();
         let resumed = runtime
             .run_entry_retained(
                 Some(resume_int_top.binding.id),
                 &[PreparedArgument::Managed(&k), PreparedArgument::Scalar(n)],
                 true,
-                &resume_cancel,
+                RealmId::ROOT,
             )
             .expect("resumeInt (qApp k (I# n)) applies the retained continuation");
         assert!(runtime.release(k));
@@ -736,7 +729,7 @@ fn drive_freer_program_to_val(
             identity,
             mut fields,
         } = runtime
-            .inspect_outer(&outer)
+            .inspect_outer(&outer, RealmId::ROOT)
             .expect("the retained Eff value survives its collection and inspects");
 
         if identity == fixture.val_id {
@@ -744,13 +737,12 @@ fn drive_freer_program_to_val(
             let boxed = take_managed(&mut fields, 0);
             assert!(runtime.release(boxed));
 
-            let value_cancel = runtime.new_cancel_handle();
             let value_result = runtime
                 .run_entry_retained(
                     Some(fixture.val_result_top.binding.id),
                     &[PreparedArgument::Managed(&outer)],
                     true,
-                    &value_cancel,
+                    RealmId::ROOT,
                 )
                 .expect("valResult (Val (I# n) -> n) forces the settled Int");
             let mut value_values = value_result.values.into_iter();
@@ -774,7 +766,9 @@ fn drive_freer_program_to_val(
         let PreparedOuter::Constructor {
             identity: union_identity,
             fields: mut union_fields,
-        } = runtime.inspect_outer(&union).expect("Union inspects");
+        } = runtime
+            .inspect_outer(&union, RealmId::ROOT)
+            .expect("Union inspects");
         assert_eq!(union_identity, fixture.union_id);
         assert_eq!(
             union_fields.len(),
@@ -786,13 +780,12 @@ fn drive_freer_program_to_val(
         let payload = take_managed(&mut union_fields, 1);
         assert!(runtime.release(union));
 
-        let ask_cancel = runtime.new_cancel_handle();
         let ask_result = runtime
             .run_entry_retained(
                 Some(fixture.ask_argument_top.binding.id),
                 &[PreparedArgument::Managed(&payload)],
                 true,
-                &ask_cancel,
+                RealmId::ROOT,
             )
             .expect("askArgument (Ask (I# n) -> n) forces the Ask request's Int#");
         let mut ask_values = ask_result.values.into_iter();
@@ -802,13 +795,12 @@ fn drive_freer_program_to_val(
         assert!(ask_values.next().is_none());
         assert!(runtime.release(payload));
 
-        let resume_cancel = runtime.new_cancel_handle();
         let resumed = runtime
             .run_entry_retained(
                 Some(fixture.resume_int_top.binding.id),
                 &[PreparedArgument::Managed(&k), PreparedArgument::Scalar(n)],
                 true,
-                &resume_cancel,
+                RealmId::ROOT,
             )
             .expect("resumeInt (qApp k (I# n)) applies the retained continuation");
         assert!(runtime.release(k));
@@ -833,7 +825,7 @@ fn split_suspension(
         identity,
         mut fields,
     } = runtime
-        .inspect_outer(&outer)
+        .inspect_outer(&outer, RealmId::ROOT)
         .expect("a freshly suspended Eff value inspects");
     assert_eq!(
         identity, fixture.e_id,
@@ -866,26 +858,24 @@ fn parked_continuations_resume_out_of_order_with_a_collection_between() {
     )
     .expect("freer-resume artifact is closed and admitted");
 
-    let first_cancel = runtime.new_cancel_handle();
     let first = runtime
         .run_entry_retained(
             Some(fixture.program_top.binding.id),
             &[],
             true,
-            &first_cancel,
+            RealmId::ROOT,
         )
         .expect("first `program` run suspends on its first Ask");
     let Some(PreparedValueResult::Managed(outer1)) = first.values.into_iter().next() else {
         panic!("`program` must return one managed `Eff` outer value");
     };
 
-    let second_cancel = runtime.new_cancel_handle();
     let second = runtime
         .run_entry_retained(
             Some(fixture.program_top.binding.id),
             &[],
             true,
-            &second_cancel,
+            RealmId::ROOT,
         )
         .expect("second, independent `program` run also suspends on its first Ask");
     let Some(PreparedValueResult::Managed(outer2)) = second.values.into_iter().next() else {
@@ -945,13 +935,12 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
     )
     .expect("freer-resume artifact is closed and admitted");
 
-    let first_cancel = runtime.new_cancel_handle();
     let first = runtime
         .run_entry_retained(
             Some(fixture.program_top.binding.id),
             &[],
             true,
-            &first_cancel,
+            RealmId::ROOT,
         )
         .expect("first `program` run suspends on its first Ask");
     let Some(PreparedValueResult::Managed(outer1)) = first.values.into_iter().next() else {
@@ -976,7 +965,7 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
         fields: mut node_fields,
         ..
     } = runtime
-        .inspect_outer(&k1)
+        .inspect_outer(&k1, RealmId::ROOT)
         .expect("k1's own Node/Leaf FTCQueue cell is ordinary WHNF data and inspects");
     assert_eq!(
         node_fields.len(),
@@ -995,7 +984,7 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
         fields: mut leaf_fields,
         ..
     } = runtime
-        .inspect_outer(&left)
+        .inspect_outer(&left, RealmId::ROOT)
         .expect("Leaf itself is ordinary WHNF data (one field: the closure)");
     assert_eq!(
         leaf_fields.len(),
@@ -1004,7 +993,7 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
     );
     let closure = take_managed(&mut leaf_fields, 0);
 
-    let forced = runtime.inspect_outer(&closure);
+    let forced = runtime.inspect_outer(&closure, RealmId::ROOT);
     assert!(
         matches!(
             forced,
@@ -1027,13 +1016,12 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
     // An unrelated entry runs on the same machine while k1 sits parked: a
     // second, independent `program` invocation, sharing no state with k1's
     // suspension, driven all the way to completion.
-    let second_cancel = runtime.new_cancel_handle();
     let second = runtime
         .run_entry_retained(
             Some(fixture.program_top.binding.id),
             &[],
             true,
-            &second_cancel,
+            RealmId::ROOT,
         )
         .expect("an unrelated `program` run proceeds normally while k1 is parked");
     let Some(PreparedValueResult::Managed(outer2)) = second.values.into_iter().next() else {
@@ -1053,18 +1041,19 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
     let PreparedOuter::Constructor {
         identity: union_identity,
         fields: mut union_fields,
-    } = runtime.inspect_outer(&union1).expect("Union inspects");
+    } = runtime
+        .inspect_outer(&union1, RealmId::ROOT)
+        .expect("Union inspects");
     assert_eq!(union_identity, fixture.union_id);
     let payload = take_managed(&mut union_fields, 1);
     assert!(runtime.release(union1));
 
-    let ask_cancel = runtime.new_cancel_handle();
     let ask_result = runtime
         .run_entry_retained(
             Some(fixture.ask_argument_top.binding.id),
             &[PreparedArgument::Managed(&payload)],
             true,
-            &ask_cancel,
+            RealmId::ROOT,
         )
         .expect("askArgument still forces k1's own Ask request after the unrelated run");
     let mut ask_values = ask_result.values.into_iter();
@@ -1074,13 +1063,12 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
     assert!(ask_values.next().is_none());
     assert!(runtime.release(payload));
 
-    let resume_cancel = runtime.new_cancel_handle();
     let resumed = runtime
         .run_entry_retained(
             Some(fixture.resume_int_top.binding.id),
             &[PreparedArgument::Managed(&k1), PreparedArgument::Scalar(n)],
             true,
-            &resume_cancel,
+            RealmId::ROOT,
         )
         .expect("resumeInt still applies k1 after an unrelated entry ran while it was parked");
     assert!(runtime.release(k1));
@@ -1103,7 +1091,7 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
 /// E3(c): cancellation set so a running entry's own compiled safepoint poll
 /// observes it -- not a shortcut check performed before generated code ever
 /// runs. `PreparedRuntime::run_entry_retained` (`tidepool-runtime/src/session/prepared.rs`)
-/// checks its `PreparedCancelHandle` in plain Rust before it ever calls into
+/// checks its realm's cancel flag in plain Rust before it ever calls into
 /// the machine, so driving cancellation through that wrapper would prove
 /// only the wrapper's own precondition check, not the generated-code
 /// contract. This test instead drives `tidepool_codegen::prepared_program::PreparedMachine`
@@ -1163,7 +1151,7 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
             program_top.binding.id,
             &[],
             call_options,
-            Arc::new(AtomicBool::new(false)),
+            tidepool_codegen::suspension::RealmId::ROOT,
         )
         .expect("`program` suspends on its first Ask");
     let mut first_values = first.values.into_iter();
@@ -1175,7 +1163,7 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
     assert!(first_values.next().is_none());
 
     let PreparedOuterCodegen::Constructor { identity, fields } = machine
-        .inspect_outer(outer)
+        .inspect_outer(outer, tidepool_codegen::suspension::RealmId::ROOT)
         .expect("the freshly suspended Eff value inspects");
     assert_eq!(identity, e_id);
     assert_eq!(fields.len(), 2);
@@ -1199,7 +1187,9 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
     let PreparedOuterCodegen::Constructor {
         identity: union_identity,
         fields: mut union_fields,
-    } = machine.inspect_outer(union).expect("Union inspects");
+    } = machine
+        .inspect_outer(union, tidepool_codegen::suspension::RealmId::ROOT)
+        .expect("Union inspects");
     assert_eq!(union_identity, union_id);
     let payload = match std::mem::replace(
         &mut union_fields[1],
@@ -1216,7 +1206,7 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
             ask_argument_top.binding.id,
             &[CodegenPreparedInput::Managed(payload)],
             call_options,
-            Arc::new(AtomicBool::new(false)),
+            tidepool_codegen::suspension::RealmId::ROOT,
         )
         .expect("askArgument forces the Ask request's Int#");
     let mut ask_values = ask_result.values.into_iter();
@@ -1230,7 +1220,8 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
     // The flag generated code's own safepoint will see, not a value read
     // before entering it: `run_entry_retained` above never checked this
     // flag, and neither does the call below before it reaches the adapter.
-    let cancel = Arc::new(AtomicBool::new(true));
+    let cancel_realm = tidepool_codegen::suspension::RealmId::fresh();
+    machine.realm_cancel_handle(cancel_realm).cancel();
     let cancelled = machine
         .run_entry_retained(
             program_id,
@@ -1240,7 +1231,7 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
                 CodegenPreparedInput::Scalar(n),
             ],
             call_options,
-            cancel,
+            cancel_realm,
         )
         .expect_err(
             "a cancel flag already set when generated code starts must still be \
@@ -1267,7 +1258,7 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
                 CodegenPreparedInput::Scalar(n),
             ],
             call_options,
-            Arc::new(AtomicBool::new(false)),
+            tidepool_codegen::suspension::RealmId::ROOT,
         )
         .expect("k remains a valid handle after a cancellation that committed nothing");
     let mut resumed_values = resumed.values.into_iter();
@@ -1310,7 +1301,7 @@ fn drive_freer_program_to_val_in(
             identity,
             mut fields,
         } = runtime
-            .inspect_outer(&outer)
+            .inspect_outer(&outer, RealmId::ROOT)
             .expect("the retained Eff value survives its collection and inspects");
 
         if identity == fixture.val_id {
@@ -1318,14 +1309,13 @@ fn drive_freer_program_to_val_in(
             let boxed = take_managed(&mut fields, 0);
             assert!(runtime.release(boxed));
 
-            let value_cancel = runtime.new_cancel_handle();
             let value_result = runtime
                 .run_entry_retained_in(
                     program,
                     fixture.val_result_top.binding.id,
                     &[PreparedArgument::Managed(&outer)],
                     true,
-                    &value_cancel,
+                    RealmId::ROOT,
                 )
                 .expect("valResult (Val (I# n) -> n) forces the settled Int");
             let mut value_values = value_result.values.into_iter();
@@ -1349,7 +1339,9 @@ fn drive_freer_program_to_val_in(
         let PreparedOuter::Constructor {
             identity: union_identity,
             fields: mut union_fields,
-        } = runtime.inspect_outer(&union).expect("Union inspects");
+        } = runtime
+            .inspect_outer(&union, RealmId::ROOT)
+            .expect("Union inspects");
         assert_eq!(union_identity, fixture.union_id);
         assert_eq!(
             union_fields.len(),
@@ -1361,14 +1353,13 @@ fn drive_freer_program_to_val_in(
         let payload = take_managed(&mut union_fields, 1);
         assert!(runtime.release(union));
 
-        let ask_cancel = runtime.new_cancel_handle();
         let ask_result = runtime
             .run_entry_retained_in(
                 program,
                 fixture.ask_argument_top.binding.id,
                 &[PreparedArgument::Managed(&payload)],
                 true,
-                &ask_cancel,
+                RealmId::ROOT,
             )
             .expect("askArgument (Ask (I# n) -> n) forces the Ask request's Int#");
         let mut ask_values = ask_result.values.into_iter();
@@ -1378,14 +1369,13 @@ fn drive_freer_program_to_val_in(
         assert!(ask_values.next().is_none());
         assert!(runtime.release(payload));
 
-        let resume_cancel = runtime.new_cancel_handle();
         let resumed = runtime
             .run_entry_retained_in(
                 program,
                 fixture.resume_int_top.binding.id,
                 &[PreparedArgument::Managed(&k), PreparedArgument::Scalar(n)],
                 true,
-                &resume_cancel,
+                RealmId::ROOT,
             )
             .expect("resumeInt (qApp k (I# n)) applies the retained continuation");
         assert!(runtime.release(k));
@@ -1414,9 +1404,14 @@ fn park_second_program(
             &[],
         )
         .expect("a second, independent copy of freer-resume installs alongside the first");
-    let cancel = runtime.new_cancel_handle();
     let result = runtime
-        .run_entry_retained_in(program, fixture.program_top.binding.id, &[], true, &cancel)
+        .run_entry_retained_in(
+            program,
+            fixture.program_top.binding.id,
+            &[],
+            true,
+            RealmId::ROOT,
+        )
         .expect("the second program's own `program` run suspends on its first Ask");
     let Some(PreparedValueResult::Managed(outer)) = result.values.into_iter().next() else {
         panic!("`program` must return one managed `Eff` outer value");
@@ -1443,14 +1438,13 @@ fn c0_two_installed_programs_park_and_resume_out_of_order_with_a_collection_betw
     .expect("freer-resume artifact is closed and admitted");
     let program_a = runtime.first_program().expect("the first program installs");
 
-    let a_cancel = runtime.new_cancel_handle();
     let a_first = runtime
         .run_entry_retained_in(
             program_a,
             fixture.program_top.binding.id,
             &[],
             true,
-            &a_cancel,
+            RealmId::ROOT,
         )
         .expect("program A's `program` run suspends on its first Ask");
     let Some(PreparedValueResult::Managed(outer_a)) = a_first.values.into_iter().next() else {
@@ -1505,14 +1499,13 @@ fn c0_unrelated_entry_of_a_second_installed_program_runs_while_the_first_stays_p
     .expect("freer-resume artifact is closed and admitted");
     let program_a = runtime.first_program().expect("the first program installs");
 
-    let a_cancel = runtime.new_cancel_handle();
     let a_first = runtime
         .run_entry_retained_in(
             program_a,
             fixture.program_top.binding.id,
             &[],
             true,
-            &a_cancel,
+            RealmId::ROOT,
         )
         .expect("program A's `program` run suspends on its first Ask");
     let Some(PreparedValueResult::Managed(outer_a)) = a_first.values.into_iter().next() else {
@@ -1540,7 +1533,7 @@ fn c0_unrelated_entry_of_a_second_installed_program_runs_while_the_first_stays_p
         fields: outer_a_fields,
         ..
     } = runtime
-        .inspect_outer(&outer_a)
+        .inspect_outer(&outer_a, RealmId::ROOT)
         .expect("A's parked E{union, k} outer still inspects");
     let mut outer_a_fields = outer_a_fields.into_iter();
     let Some(PreparedValueResult::Managed(union_a)) = outer_a_fields.next() else {
@@ -1554,7 +1547,7 @@ fn c0_unrelated_entry_of_a_second_installed_program_runs_while_the_first_stays_p
         fields: mut node_fields,
         ..
     } = runtime
-        .inspect_outer(&k_a)
+        .inspect_outer(&k_a, RealmId::ROOT)
         .expect("k_a's own Node/Leaf FTCQueue cell is ordinary WHNF data and inspects");
     assert_eq!(node_fields.len(), 2, "program's k is Node(Leaf, Leaf)");
     let leaf = take_managed(&mut node_fields, 0);
@@ -1564,7 +1557,7 @@ fn c0_unrelated_entry_of_a_second_installed_program_runs_while_the_first_stays_p
         fields: mut leaf_fields,
         ..
     } = runtime
-        .inspect_outer(&leaf)
+        .inspect_outer(&leaf, RealmId::ROOT)
         .expect("Leaf itself is ordinary WHNF data (one field: the closure)");
     assert_eq!(
         leaf_fields.len(),
@@ -1575,7 +1568,7 @@ fn c0_unrelated_entry_of_a_second_installed_program_runs_while_the_first_stays_p
     assert!(runtime.release(leaf));
     assert!(
         matches!(
-            runtime.inspect_outer(&closure),
+            runtime.inspect_outer(&closure, RealmId::ROOT),
             Err(PreparedRuntimeError::Run(ExecutionError::Observation(
                 ObservationFailure::Unobservable(_)
             )))
@@ -1807,7 +1800,6 @@ fn retained_import_end_to_end_links_consumer_against_bound_producer_tops() {
     assert_eq!(runtime.bindings().lease_count(bound_value), 1);
     assert_eq!(runtime.bindings().lease_count(bound_fn), 1);
 
-    let cancel = runtime.new_cancel_handle();
     let expected = expected_consumer_value();
     let observed = runtime
         .run_entry_in(
@@ -1815,7 +1807,7 @@ fn retained_import_end_to_end_links_consumer_against_bound_producer_tops() {
             consumer_value_top.binding.id,
             &scalar_args,
             true,
-            &cancel,
+            RealmId::ROOT,
         )
         .expect("consumerValueAt reads producerValue through its import slot");
     assert_eq!(observed.values.len(), 1);
@@ -1826,7 +1818,7 @@ fn retained_import_end_to_end_links_consumer_against_bound_producer_tops() {
             consumer_value_top.binding.id,
             &scalar_args,
             true,
-            &cancel,
+            RealmId::ROOT,
         )
         .expect("a second run after another collection reads the same import");
     assert_eq!(observed_int_list(&again.values[0]), expected);
@@ -1839,7 +1831,7 @@ fn retained_import_end_to_end_links_consumer_against_bound_producer_tops() {
             consumer_value_top.binding.id,
             &managed_args,
             true,
-            &cancel,
+            RealmId::ROOT,
         )
         .expect("consumerValueAt retains");
     assert_eq!(runtime.retained_handle_count(), 3);
@@ -1863,14 +1855,16 @@ fn retained_import_end_to_end_links_consumer_against_bound_producer_tops() {
             entries_top.binding.id,
             &entries_args,
             true,
-            &cancel,
+            RealmId::ROOT,
         )
         .expect("consumerEntries builds its pair at run time");
     let pair = take_managed(&mut entries.values, 0);
     let PreparedOuter::Constructor {
         fields: mut pair_fields,
         ..
-    } = runtime.inspect_outer(&pair).expect("the pair inspects");
+    } = runtime
+        .inspect_outer(&pair, RealmId::ROOT)
+        .expect("the pair inspects");
     assert!(runtime.release(pair));
     assert_eq!(pair_fields.len(), 2);
     let list = take_managed(&mut pair_fields, 0);
@@ -1878,7 +1872,7 @@ fn retained_import_end_to_end_links_consumer_against_bound_producer_tops() {
     // The list field is this module's own lazy `consumerValueAt n`: a thunk
     // the host never forces (the evaluated list was already read above
     // through the entry itself).
-    match runtime.inspect_outer(&list) {
+    match runtime.inspect_outer(&list, RealmId::ROOT) {
         Err(PreparedRuntimeError::Run(ExecutionError::Observation(
             ObservationFailure::Unobservable(kind),
         ))) => assert_eq!(format!("{kind:?}"), "Thunk"),
@@ -1886,7 +1880,7 @@ fn retained_import_end_to_end_links_consumer_against_bound_producer_tops() {
         Ok(_) => panic!("an unforced thunk must not inspect as a constructor"),
     }
     assert!(runtime.release(list));
-    match runtime.inspect_outer(&function) {
+    match runtime.inspect_outer(&function, RealmId::ROOT) {
         Err(PreparedRuntimeError::Run(ExecutionError::Observation(
             ObservationFailure::Unobservable(kind),
         ))) => assert_eq!(

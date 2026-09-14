@@ -48,9 +48,9 @@ pub use persistent::{
 };
 
 pub use prepared::{
-    run_prepared_once, PreparedArgument, PreparedCancelHandle, PreparedFailureKind, PreparedOuter,
+    run_prepared_once, CancelHandle, PreparedArgument, PreparedFailureKind, PreparedOuter,
     PreparedRetainedResult, PreparedRunResult, PreparedRuntime, PreparedRuntimeError,
-    PreparedValue, PreparedValueResult,
+    PreparedValue, PreparedValueResult, RealmId,
 };
 
 pub use recovery::{DeclarationRecoveryReport, LostDeclaration, ReplayedDeclaration};

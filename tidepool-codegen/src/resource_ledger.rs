@@ -180,6 +180,13 @@ impl ResourceLedger {
         }
     }
 
+    pub(crate) fn try_reserve_handles(
+        &mut self,
+        additional: usize,
+    ) -> Result<(), std::collections::TryReserveError> {
+        self.handles.try_reserve(additional)
+    }
+
     pub(crate) fn insert_handle(&mut self, slot: RootSlot, realm: RealmId) -> ValueHandle {
         self.handles.insert(slot, realm)
     }

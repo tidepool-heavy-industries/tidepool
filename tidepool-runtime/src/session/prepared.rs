@@ -8,12 +8,9 @@
 //! `CoreExpr` machine is not a fallback for any operation in this module.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use tidepool_bridge::Value;
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
-use tidepool_codegen::jit_machine::MachineDisposition;
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
     CompileError, CompiledProgram, ExecutionError, ImportBindings, PreparedCallOptions,
@@ -22,6 +19,12 @@ use tidepool_codegen::prepared_program::{
     RunOptions, TopSlotBase,
 };
 use tidepool_codegen::scope::ScopeId;
+// Re-exported: callers of this module's realm-scoped cancellation API
+// (`open_realm`/`cancel_handle`/`close_realm`) need both types without a
+// separate `tidepool_codegen` dependency of their own.
+pub use tidepool_codegen::jit_machine::CancelHandle;
+pub use tidepool_codegen::jit_machine::MachineDisposition;
+pub use tidepool_codegen::suspension::RealmId;
 use tidepool_repr::execution_schema::{
     link_program, parse_program, DecodeLimits, Group, HeapRhs, ImportedValue, LinkError,
     LinkedProgram, MachineImports, ParseError, PreparedProgram, ProgramRequirements, Signature,
@@ -37,20 +40,6 @@ use tidepool_repr::{
 /// a whole session rather than one program. Exhaustion is the typed
 /// `ExecutionError::TopTableExhausted`, never a reallocation.
 const SESSION_TOP_SLOTS: usize = 4096;
-
-#[derive(Clone, Debug, Default)]
-pub struct PreparedCancelHandle(Arc<AtomicBool>);
-
-impl PreparedCancelHandle {
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
-    }
-
-    #[must_use]
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreparedFailureKind {
@@ -425,9 +414,30 @@ impl PreparedRuntime {
             })
     }
 
+    /// Mint a fresh realm id for a new cancellation scope. A realm id is a
+    /// free-standing identity (`RealmId::fresh`); it needs no machine and
+    /// nothing is registered under it until the first call or inspection
+    /// made with it.
     #[must_use]
-    pub fn new_cancel_handle(&self) -> PreparedCancelHandle {
-        PreparedCancelHandle::default()
+    pub fn open_realm(&self) -> RealmId {
+        RealmId::fresh()
+    }
+
+    /// Obtain a clone-able cancellation handle scoped to `realm`, lazily
+    /// minting that realm's flag on first request. Cancelling it aborts
+    /// only calls made with `realm`; sibling realms are unaffected.
+    pub fn cancel_handle(&mut self, realm: RealmId) -> Result<CancelHandle, PreparedRuntimeError> {
+        self.ensure_machine()?;
+        Ok(self.machine_mut()?.realm_cancel_handle(realm))
+    }
+
+    /// SCOPE EXIT: close `realm`, releasing every value handle it owns.
+    /// `(0, 0)` if no machine has been installed yet (nothing to close).
+    /// See [`PreparedMachine::close_realm`] for the exact contract.
+    pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
+        self.machine
+            .as_mut()
+            .map_or((0, 0), |(machine, _)| machine.close_realm(realm))
     }
 
     /// Number of `PreparedValue`s this runtime's machine currently retains.
@@ -448,11 +458,11 @@ impl PreparedRuntime {
         binding: Option<ValueId>,
         arguments: &[u64],
         collect: bool,
-        cancel: &PreparedCancelHandle,
+        realm: RealmId,
     ) -> Result<PreparedRunResult, PreparedRuntimeError> {
         let program = self.ensure_machine()?;
         let entry = self.entry_of(program, binding)?;
-        self.run_entry_with_completion_hook(program, entry, arguments, collect, cancel, || {})
+        self.run_entry_with_completion_hook(program, entry, arguments, collect, realm, || {})
     }
 
     /// [`Self::run_entry`] for any installed program.
@@ -462,9 +472,9 @@ impl PreparedRuntime {
         entry: ValueId,
         arguments: &[u64],
         collect: bool,
-        cancel: &PreparedCancelHandle,
+        realm: RealmId,
     ) -> Result<PreparedRunResult, PreparedRuntimeError> {
-        self.run_entry_with_completion_hook(program, entry, arguments, collect, cancel, || {})
+        self.run_entry_with_completion_hook(program, entry, arguments, collect, realm, || {})
     }
 
     /// Execute with scalar or borrowed retained arguments and retain managed
@@ -475,11 +485,11 @@ impl PreparedRuntime {
         binding: Option<ValueId>,
         arguments: &[PreparedArgument<'_>],
         collect: bool,
-        cancel: &PreparedCancelHandle,
+        realm: RealmId,
     ) -> Result<PreparedRetainedResult, PreparedRuntimeError> {
         let program = self.ensure_machine()?;
         let entry = self.entry_of(program, binding)?;
-        self.run_entry_retained_in(program, entry, arguments, collect, cancel)
+        self.run_entry_retained_in(program, entry, arguments, collect, realm)
     }
 
     /// [`Self::run_entry_retained`] for any installed program.
@@ -489,10 +499,15 @@ impl PreparedRuntime {
         entry: ValueId,
         arguments: &[PreparedArgument<'_>],
         collect: bool,
-        cancel: &PreparedCancelHandle,
+        realm: RealmId,
     ) -> Result<PreparedRetainedResult, PreparedRuntimeError> {
         self.ensure_available()?;
-        if cancel.is_cancelled() {
+        self.ensure_machine()?;
+        if self
+            .machine_mut()?
+            .realm_cancel_handle(realm)
+            .is_cancelled()
+        {
             return Err(PreparedRuntimeError::Cancelled);
         }
         let mut lowered = Vec::new();
@@ -508,9 +523,8 @@ impl PreparedRuntime {
                 PreparedArgument::Managed(value) => PreparedInput::Managed(value.0),
             });
         }
-        self.ensure_machine()?;
         let machine = self.machine_mut()?;
-        if cancel.is_cancelled() {
+        if machine.realm_cancel_handle(realm).is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
         let result = machine
@@ -522,7 +536,7 @@ impl PreparedRuntime {
                     observation_budget: 0,
                     collect_before_observation: collect,
                 },
-                Arc::clone(&cancel.0),
+                realm,
             )
             .map_err(Self::classify_execution)?;
         Ok(Self::retain_result(result))
@@ -533,13 +547,14 @@ impl PreparedRuntime {
     pub fn inspect_outer(
         &mut self,
         value: &PreparedValue,
+        realm: RealmId,
     ) -> Result<PreparedOuter, PreparedRuntimeError> {
         self.ensure_available()?;
         let (machine, _) = self.machine.as_mut().ok_or(PreparedRuntimeError::Run(
             ExecutionError::UnknownPreparedHandle,
         ))?;
         let outer = machine
-            .inspect_outer(value.0)
+            .inspect_outer(value.0, realm)
             .map_err(Self::classify_execution)?;
         Ok(Self::outer_result(outer))
     }
@@ -558,24 +573,28 @@ impl PreparedRuntime {
         entry: ValueId,
         arguments: &[u64],
         collect: bool,
-        cancel: &PreparedCancelHandle,
+        realm: RealmId,
         after_lower_success: impl FnOnce(),
     ) -> Result<PreparedRunResult, PreparedRuntimeError> {
         self.ensure_available()?;
-        if cancel.is_cancelled() {
+        self.ensure_machine()?;
+        if self
+            .machine_mut()?
+            .realm_cancel_handle(realm)
+            .is_cancelled()
+        {
             return Err(PreparedRuntimeError::Cancelled);
         }
         let options = PreparedCallOptions {
             observation_budget: RunOptions::default().observation_budget,
             collect_before_observation: collect,
         };
-        self.ensure_machine()?;
         let machine = self.machine_mut()?;
-        if cancel.is_cancelled() {
+        if machine.realm_cancel_handle(realm).is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
         let result = machine
-            .run_entry(program, entry, arguments, options, Arc::clone(&cancel.0))
+            .run_entry(program, entry, arguments, options, realm)
             .map_err(Self::classify_execution)?;
         // Lower success is the completion point. Cancellation published after
         // it may affect a later entry, but cannot rewrite this result.
@@ -701,18 +720,44 @@ impl PreparedRuntime {
     }
 }
 
+/// Run a closed, non-retained entry once against a freshly parsed and linked
+/// artifact, discarding the machine afterward. `cancel` is an
+/// externally-owned flag (not a realm): this is a one-shot helper with no
+/// session to scope a realm against, so a caller may pre-cancel before this
+/// function even constructs a machine (e.g. a request already cancelled
+/// before compilation started), or flip it mid-call from another thread --
+/// the same contract [`tidepool_codegen::prepared_program::CompiledProgram::run_entry`]
+/// preserves for the same reason.
 pub fn run_prepared_once(
     artifact: &[u8],
     requirements: &ProgramRequirements,
     limits: DecodeLimits,
     imports: MachineImports,
-    cancel: &PreparedCancelHandle,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<PreparedRunResult, PreparedRuntimeError> {
-    if cancel.is_cancelled() {
+    if cancel.load(std::sync::atomic::Ordering::Acquire) {
         return Err(PreparedRuntimeError::Cancelled);
     }
     let mut runtime = PreparedRuntime::from_artifact(artifact, requirements, limits, imports)?;
-    runtime.run_entry(None, &[], true, cancel)
+    let program = runtime.ensure_machine()?;
+    let entry = runtime.entry_of(program, None)?;
+    let machine = runtime.machine_mut()?;
+    let result = machine
+        .run_entry_with_raw_cancel(
+            program,
+            entry,
+            &[],
+            PreparedCallOptions {
+                observation_budget: RunOptions::default().observation_budget,
+                collect_before_observation: true,
+            },
+            cancel,
+        )
+        .map_err(PreparedRuntime::classify_execution)?;
+    Ok(PreparedRunResult {
+        values: result.values,
+        collections: result.collections,
+    })
 }
 
 #[cfg(test)]
@@ -890,45 +935,44 @@ mod tests {
                 if retained == failure
         ));
 
-        let cancel = runtime.new_cancel_handle();
-        cancel.cancel();
-        let replayed = runtime.run_entry(None, &[], false, &cancel).unwrap_err();
+        let realm = runtime.open_realm();
+        runtime.cancel_handle(realm).unwrap().cancel();
+        let replayed = runtime.run_entry(None, &[], false, realm).unwrap_err();
         assert!(matches!(replayed, PreparedRuntimeError::Cancelled));
     }
 
     #[test]
     fn cancellation_after_compiled_success_does_not_veto_completion() {
         let mut runtime = m3_runtime();
-        let cancel = runtime.new_cancel_handle();
+        let realm = runtime.open_realm();
 
         let program = runtime.first_program().expect("first program installs");
         let entry = runtime
             .entry_of(program, None)
             .expect("first program has an entry");
+        let cancel = runtime.cancel_handle(realm).unwrap();
         let result =
-            runtime.run_entry_with_completion_hook(program, entry, &[], false, &cancel, || {
+            runtime.run_entry_with_completion_hook(program, entry, &[], false, realm, || {
                 cancel.cancel();
             });
 
         assert!(result.is_ok());
-        assert!(cancel.is_cancelled());
+        assert!(runtime.cancel_handle(realm).unwrap().is_cancelled());
 
-        let next_cancel = runtime.new_cancel_handle();
+        let next_realm = runtime.open_realm();
         runtime
-            .run_entry(None, &[], false, &next_cancel)
+            .run_entry(None, &[], false, next_realm)
             .expect("cancellation published after completion must not poison reuse");
     }
 
     #[test]
     fn prepared_machine_reuses_one_heap_across_settled_entries() {
         let mut runtime = m3_runtime();
-        let first_cancel = runtime.new_cancel_handle();
         let first = runtime
-            .run_entry(None, &[], true, &first_cancel)
+            .run_entry(None, &[], true, RealmId::ROOT)
             .expect("first prepared entry settles");
-        let second_cancel = runtime.new_cancel_handle();
         let second = runtime
-            .run_entry(None, &[], true, &second_cancel)
+            .run_entry(None, &[], true, RealmId::ROOT)
             .expect("second prepared entry reuses the machine");
 
         assert_eq!(
@@ -941,21 +985,19 @@ mod tests {
     #[test]
     fn cancelled_admission_does_not_poison_the_retained_machine() {
         let mut runtime = m3_runtime();
-        let first_cancel = runtime.new_cancel_handle();
         runtime
-            .run_entry(None, &[], false, &first_cancel)
+            .run_entry(None, &[], false, RealmId::ROOT)
             .expect("first prepared entry installs the machine");
 
-        let cancelled = runtime.new_cancel_handle();
-        cancelled.cancel();
+        let cancelled_realm = runtime.open_realm();
+        runtime.cancel_handle(cancelled_realm).unwrap().cancel();
         assert!(matches!(
-            runtime.run_entry(None, &[], false, &cancelled),
+            runtime.run_entry(None, &[], false, cancelled_realm),
             Err(PreparedRuntimeError::Cancelled)
         ));
 
-        let retry_cancel = runtime.new_cancel_handle();
         runtime
-            .run_entry(None, &[], true, &retry_cancel)
+            .run_entry(None, &[], true, RealmId::ROOT)
             .expect("cancelled admission leaves machine reusable");
         assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
     }
@@ -1078,10 +1120,9 @@ mod tests {
     #[test]
     fn bind_install_run_reads_the_bound_top_by_generation() {
         let (mut runtime, first) = session();
-        let cancel = runtime.new_cancel_handle();
         // Force the CAF once so it is an evaluated (updated) constructor.
         runtime
-            .run_entry(None, &[], true, &cancel)
+            .run_entry(None, &[], true, RealmId::ROOT)
             .expect("producer entry runs");
         let id = runtime
             .bind_top(first, ValueId(0), "producer")
@@ -1101,14 +1142,14 @@ mod tests {
         assert_eq!(runtime.bindings().lease_count(id), 1);
 
         let read = runtime
-            .run_entry_retained_in(consumer, ValueId(0), &[], true, &cancel)
+            .run_entry_retained_in(consumer, ValueId(0), &[], true, RealmId::ROOT)
             .expect("consumer reads its import through the slot");
         let mut values = read.values;
         let PreparedValueResult::Managed(value) = values.remove(0) else {
             panic!("consumer must return the imported managed value");
         };
         let PreparedOuter::Constructor { identity, fields } = runtime
-            .inspect_outer(&value)
+            .inspect_outer(&value, RealmId::ROOT)
             .expect("imported value inspects through the shared machine");
         assert_eq!(identity, tidepool_repr::DataConId(980));
         assert!(matches!(
@@ -1180,9 +1221,8 @@ mod tests {
             matches!(&error, PreparedRuntimeError::Link(link) if matches!(**link, LinkError::ImportContract(_))),
             "expected ImportContract, got {error:?}"
         );
-        let cancel = runtime.new_cancel_handle();
         runtime
-            .run_entry(None, &[], true, &cancel)
+            .run_entry(None, &[], true, RealmId::ROOT)
             .expect("forcing the CAF updates the bound top in place");
         runtime
             .install_prepared(

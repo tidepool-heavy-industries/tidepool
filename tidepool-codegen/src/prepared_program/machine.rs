@@ -60,10 +60,11 @@ use super::{
 };
 use crate::context::VMContext;
 use crate::host_fns::{gc_trigger, prepared_gc_trigger, RuntimeError};
+use crate::jit_machine::CancelHandle;
 use crate::machine_state::{MachineDisposition, MachineFailure, MachineState};
 use crate::old_space::OldSpace;
 use crate::prepared_control::CallStatus;
-use crate::resource_ledger::RootHandleLedger;
+use crate::resource_ledger::ResourceLedger;
 use crate::suspension::{RealmId, ValueHandle};
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -123,7 +124,12 @@ pub struct PreparedMachine<'code> {
     top_capacity: usize,
     claimed_slots: usize,
     nursery_bytes: usize,
-    handles: RootHandleLedger,
+    /// Value handles AND realm-scoped cancellation flags for this machine,
+    /// shared exactly as `JitEffectMachine` shares its own
+    /// [`ResourceLedger`]. Continuations stay empty for the prepared engine
+    /// (`counts().parked_continuations == 0` always) -- this machine has no
+    /// parked-continuation registry, only run/inspect calls scoped by realm.
+    handles: ResourceLedger,
     /// The one heap shared by every installed program -- see the module doc.
     machine: Rc<MachineState>,
     vmctx: VMContext,
@@ -281,7 +287,7 @@ impl<'code> PreparedMachine<'code> {
             top_capacity: options.top_slots,
             claimed_slots: 0,
             nursery_bytes: options.nursery_bytes,
-            handles: RootHandleLedger::default(),
+            handles: ResourceLedger::default(),
             // No heap exists until the first program installs
             // (`MachineState::new` is plain ambient state -- it owns no GC
             // region yet -- and `VMContext::new` merely stores raw pointers,
@@ -429,7 +435,7 @@ impl<'code> PreparedMachine<'code> {
             }
             let entry = self
                 .handles
-                .get(handle.raw)
+                .handle(handle.raw)
                 .ok_or(ExecutionError::UnknownPreparedHandle)?;
             let pointer = unsafe { entry.slot.current() } as usize;
             if pointer == 0 {
@@ -605,7 +611,7 @@ impl<'code> PreparedMachine<'code> {
         for &(slot, raw) in &resolved_imports {
             let pointer = self
                 .handles
-                .get(raw)
+                .handle(raw)
                 .map(|entry| unsafe { entry.slot.current() } as u64)
                 .ok_or(ExecutionError::UnknownPreparedHandle)?;
             self.top_table.write(slot, pointer)?;
@@ -642,7 +648,7 @@ impl<'code> PreparedMachine<'code> {
     /// a caller can confirm every retained `PreparedHandle` was released.
     #[must_use]
     pub fn handle_count(&self) -> usize {
-        self.handles.len()
+        self.handles.counts().value_handles
     }
 
     /// Release one retained managed result. Unknown or foreign values do not
@@ -651,11 +657,62 @@ impl<'code> PreparedMachine<'code> {
     /// ids are process-unique, so this machine's ledger simply never saw it
     /// minted (see the module doc).
     pub fn release(&mut self, handle: PreparedHandle) -> bool {
-        let Some(entry) = self.handles.take(handle.raw) else {
+        let Some(entry) = self.handles.take_handle(handle.raw) else {
             return false;
         };
         self.machine.deregister_persistent_root(entry.slot.addr());
         true
+    }
+
+    /// Obtain a clone-able cancellation handle scoped to ONE runtime
+    /// resource scope, lazily minting that scope's flag on first request.
+    /// Cancelling this handle aborts only runs/calls made with `realm` --
+    /// a sibling realm's run on the same machine is unaffected, because
+    /// [`Self::run_entry`]/[`Self::run_entry_retained`] install the ACTIVE
+    /// call's flag (via [`ResourceLedger::cancel_flag`]) into the shared
+    /// `MachineState`, not a machine-wide flag.
+    ///
+    /// A cancelled realm's flag is NOT auto-cleared after the cancelled run
+    /// completes -- same discipline as `JitEffectMachine`'s own
+    /// [`CancelHandle`] (whose own doc says "call `reset` between runs if
+    /// you intend to reuse"): the caller decides when a realm is done
+    /// retrying and calls [`CancelHandle::reset`] explicitly.
+    pub fn realm_cancel_handle(&mut self, realm: RealmId) -> CancelHandle {
+        CancelHandle::from_flag(self.handles.cancel_flag(realm))
+    }
+
+    /// SCOPE EXIT: close `realm`, releasing every value handle it owns.
+    /// Mirrors `JitEffectMachine::close_realm`'s contract, minus parked
+    /// continuations -- the prepared engine never parks one (continuations
+    /// stay empty for this machine; see the `handles` field doc):
+    ///
+    /// - every [`PreparedHandle`] minted under `realm` (by
+    ///   [`Self::inspect_outer`] or a call's retained results) has its
+    ///   persistent-root registration deregistered (the slot cell stays
+    ///   with `OldSpace` for the machine's life; the VALUE it pinned becomes
+    ///   collectable once nothing else reaches it);
+    /// - the realm's cancel flag entry is dropped;
+    /// - sibling realms and their handles are untouched;
+    /// - `RealmId::ROOT`-tagged handles ([`Self::retain_top`]'s session-level
+    ///   bindings) are never affected by any `close_realm` call -- they are
+    ///   not part of any realm a caller can close this way.
+    ///
+    /// Returns `(0, handles_released)` (frames are always 0 for this
+    /// engine). Closing a realm that owns nothing is a no-op `(0, 0)` --
+    /// idempotent by construction, so a retirement path that can race a
+    /// wholesale teardown stays safe.
+    pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
+        let closed = self.handles.close_realm(realm);
+        debug_assert!(
+            closed.frames.is_empty(),
+            "PreparedMachine never parks a continuation; ResourceLedger::close_realm \
+             must not report any for this engine"
+        );
+        let handles_released = closed.handles.len();
+        for entry in closed.handles {
+            self.machine.deregister_persistent_root(entry.slot.addr());
+        }
+        (0, handles_released)
     }
 
     fn ensure_handle_access(&self) -> Result<(), ExecutionError> {
@@ -678,12 +735,13 @@ impl<'code> PreparedMachine<'code> {
     pub fn inspect_outer(
         &mut self,
         handle: PreparedHandle,
+        realm: RealmId,
     ) -> Result<PreparedOuter, ExecutionError> {
         self.ensure_handle_access()?;
         let source = self
             .handles
-            .get(handle.raw)
-            .filter(|entry| entry.realm == RealmId::ROOT)
+            .handle(handle.raw)
+            .filter(|entry| entry.realm == realm)
             .map(|entry| entry.slot)
             .ok_or(ExecutionError::UnknownPreparedHandle)?;
         let word = unsafe { source.current() } as usize;
@@ -732,7 +790,7 @@ impl<'code> PreparedMachine<'code> {
             }
         }
         self.handles
-            .try_reserve(managed.len())
+            .try_reserve_handles(managed.len())
             .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
         let mut selected = Vec::new();
         selected
@@ -772,7 +830,7 @@ impl<'code> PreparedMachine<'code> {
                 return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
             }
             for ((field_index, rep), root) in managed.into_iter().zip(roots) {
-                let raw = self.handles.insert(root, RealmId::ROOT);
+                let raw = self.handles.insert_handle(root, realm);
                 output[field_index] = PreparedResult::Managed(PreparedHandle { raw, rep });
             }
         }
@@ -923,7 +981,7 @@ impl<'code> PreparedMachine<'code> {
     #[cfg(test)]
     pub(crate) fn handle_current_pointer(&self, handle: PreparedHandle) -> Option<usize> {
         self.handles
-            .get(handle.raw)
+            .handle(handle.raw)
             .map(|entry| unsafe { entry.slot.current() } as usize)
     }
 
@@ -968,7 +1026,7 @@ impl<'code> PreparedMachine<'code> {
             mark,
         };
         self.handles
-            .try_reserve(1)
+            .try_reserve_handles(1)
             .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
         if unsafe { self.machine.prepared_old_space() }.is_some() {
             return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
@@ -990,7 +1048,7 @@ impl<'code> PreparedMachine<'code> {
             }
             return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
         };
-        let raw = self.handles.insert(root, RealmId::ROOT);
+        let raw = self.handles.insert_handle(root, RealmId::ROOT);
         Ok(PreparedHandle {
             raw,
             rep: RuntimeRep::LiftedRef,
@@ -1003,7 +1061,7 @@ impl<'code> PreparedMachine<'code> {
     /// the slot must therefore refuse to release the handle first.
     #[must_use]
     pub fn handle_root(&self, handle: PreparedHandle) -> Option<crate::old_space::RootSlot> {
-        self.handles.get(handle.raw).map(|entry| entry.slot)
+        self.handles.handle(handle.raw).map(|entry| entry.slot)
     }
 
     /// Whether a retained handle's value is already in weak head normal form
@@ -1013,7 +1071,7 @@ impl<'code> PreparedMachine<'code> {
     pub fn handle_is_evaluated(&self, handle: PreparedHandle) -> Result<bool, ExecutionError> {
         let word = self
             .handles
-            .get(handle.raw)
+            .handle(handle.raw)
             .map(|entry| unsafe { entry.slot.current() } as usize)
             .filter(|word| *word != 0)
             .ok_or(ExecutionError::UnknownPreparedHandle)?;
@@ -1034,8 +1092,9 @@ impl<'code> PreparedMachine<'code> {
         entry: ValueId,
         arguments: &[PreparedInput],
         options: PreparedCallOptions,
-        cancel: Arc<AtomicBool>,
+        realm: RealmId,
     ) -> Result<PreparedResultBatch, ExecutionError> {
+        let cancel = self.handles.cancel_flag(realm);
         let program = self
             .programs
             .get(id.0 as usize)
@@ -1045,6 +1104,7 @@ impl<'code> PreparedMachine<'code> {
             arguments,
             options,
             cancel,
+            realm,
             &self.machine,
             &mut self.vmctx,
             &mut self.old_space,
@@ -1055,6 +1115,27 @@ impl<'code> PreparedMachine<'code> {
 
     /// Execute one scalar-only entry on the retained machine.
     pub fn run_entry(
+        &mut self,
+        id: ProgramId,
+        entry: ValueId,
+        arguments: &[u64],
+        options: PreparedCallOptions,
+        realm: RealmId,
+    ) -> Result<RunResult, ExecutionError> {
+        let cancel = self.handles.cancel_flag(realm);
+        self.run_entry_with_raw_cancel(id, entry, arguments, options, cancel)
+    }
+
+    /// [`Self::run_entry`]'s primitive, taking an externally-owned cancel
+    /// flag directly instead of minting one from a realm. `pub` (not
+    /// crate-internal): both [`CompiledProgram::run_entry`] (`run.rs`)'s
+    /// one-shot ephemeral-machine convenience API and callers in other
+    /// crates that construct and control their own `Arc<AtomicBool>`
+    /// directly (e.g. from a watchdog thread, or to pre-cancel a call before
+    /// any realm/machine exists) use this instead of a realm -- that
+    /// contract predates realm-scoped cancellation and is out of C1's scope
+    /// to migrate (dozens of existing test call sites).
+    pub fn run_entry_with_raw_cancel(
         &mut self,
         id: ProgramId,
         entry: ValueId,
@@ -1107,11 +1188,12 @@ impl<'code> InstalledProgram<'code> {
         arguments: &[PreparedInput],
         options: PreparedCallOptions,
         cancel: Arc<AtomicBool>,
+        realm: RealmId,
         machine: &MachineState,
         vmctx: &mut VMContext,
         old_space: &mut OldSpace,
         descriptors: &[Arc<ObjectDescriptor>],
-        handles: &mut RootHandleLedger,
+        handles: &mut ResourceLedger,
     ) -> Result<PreparedResultBatch, ExecutionError> {
         let (adapter, reps, result_contract, result_layout) = {
             let compiled = self
@@ -1151,7 +1233,7 @@ impl<'code> InstalledProgram<'code> {
                     // argument here, so long as it is still live in this
                     // machine's ledger (see the module doc).
                     let entry = handles
-                        .get(handle.raw)
+                        .handle(handle.raw)
                         .ok_or(ExecutionError::UnknownPreparedHandle)?;
                     let word = unsafe { entry.slot.current() } as usize as u64;
                     if word == 0 {
@@ -1286,14 +1368,14 @@ impl<'code> InstalledProgram<'code> {
                 return Err(runtime_error(machine, RuntimeError::BadPointer));
             }
             handles
-                .try_reserve(roots.len())
+                .try_reserve_handles(roots.len())
                 .map_err(|_| runtime_error(machine, RuntimeError::HeapOverflow))?;
             let managed =
                 result_reps.iter().copied().enumerate().filter(|(_, rep)| {
                     matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef)
                 });
             for ((logical, rep), root) in managed.zip(roots) {
-                let raw = handles.insert(root, RealmId::ROOT);
+                let raw = handles.insert_handle(root, realm);
                 output[logical] = PreparedResult::Managed(PreparedHandle { raw, rep });
             }
         }
@@ -1472,7 +1554,6 @@ mod tests {
     use crate::prepared_program::{
         ExecutionError, PreparedCallOptions, PreparedMachineOptions, RunOptions,
     };
-    use std::sync::{atomic::AtomicBool, Arc};
     use tidepool_repr::execution_schema::{
         link_program, parse_program, testing, Alternative, AlternativePattern, Architecture, Atom,
         CaseKind, CheckedLayout, ConstructorDecl, ConstructorId, DecodeLimits, Endianness,
@@ -1826,7 +1907,8 @@ mod tests {
     #[test]
     fn cancellation_is_recoverable_before_a_following_entry() {
         let (mut machine, program) = machine();
-        let cancelled = Arc::new(AtomicBool::new(true));
+        let realm = RealmId::fresh();
+        machine.realm_cancel_handle(realm).cancel();
 
         let error = machine
             .run_entry(
@@ -1837,7 +1919,7 @@ mod tests {
                     observation_budget: RunOptions::default().observation_budget,
                     collect_before_observation: false,
                 },
-                Arc::clone(&cancelled),
+                realm,
             )
             .expect_err("cancelled entry must not publish a result");
         assert!(matches!(
@@ -1857,7 +1939,7 @@ mod tests {
                     observation_budget: RunOptions::default().observation_budget,
                     collect_before_observation: false,
                 },
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             )
             .expect("a settled cancellation must leave the machine reusable");
         assert_eq!(result.values.len(), 1);
@@ -1876,7 +1958,7 @@ mod tests {
                     observation_budget: 0,
                     collect_before_observation: false,
                 },
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             )
             .expect_err("bounded observation must reject a constructor at zero budget");
         assert!(matches!(
@@ -1896,7 +1978,7 @@ mod tests {
                     observation_budget: RunOptions::default().observation_budget,
                     collect_before_observation: false,
                 },
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             )
             .expect("an observation failure must not poison the prepared machine");
         assert_eq!(result.values.len(), 1);
@@ -1921,7 +2003,7 @@ mod tests {
                     observation_budget: RunOptions::default().observation_budget,
                     collect_before_observation: false,
                 },
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             )
             .expect_err("raised entry must report a language failure");
         assert!(matches!(
@@ -1941,7 +2023,7 @@ mod tests {
                     observation_budget: RunOptions::default().observation_budget,
                     collect_before_observation: false,
                 },
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             )
             .expect("a language failure must not poison the prepared machine");
         assert!(matches!(
@@ -1978,7 +2060,7 @@ mod tests {
                     observation_budget: RunOptions::default().observation_budget,
                     collect_before_observation: false,
                 },
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             )
             .expect("first entry");
         let second = machine
@@ -1990,7 +2072,7 @@ mod tests {
                     observation_budget: RunOptions::default().observation_budget,
                     collect_before_observation: true,
                 },
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             )
             .expect("entry after collection");
 
@@ -2033,7 +2115,7 @@ mod tests {
                     observation_budget: RunOptions::default().observation_budget,
                     collect_before_observation: true,
                 },
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             )
             .expect("managed result is retained before frame cleanup");
         assert!(batch.collections >= 1);
@@ -2056,7 +2138,7 @@ mod tests {
                     observation_budget: RunOptions::default().observation_budget,
                     collect_before_observation: true,
                 },
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             )
             .expect("source handle");
         let [PreparedResult::Managed(handle)] = batch.values.as_slice() else {
@@ -2080,7 +2162,7 @@ mod tests {
                 ValueId(3),
                 &[PreparedInput::Managed(*handle)],
                 options,
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             ),
             Err(ExecutionError::UnknownPreparedHandle)
         ));
@@ -2094,7 +2176,7 @@ mod tests {
                 ValueId(3),
                 &[PreparedInput::Managed(wrong_rep)],
                 options,
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             ),
             Err(ExecutionError::ArgumentRepresentation { .. })
         ));
@@ -2115,13 +2197,7 @@ mod tests {
             collect_before_observation: false,
         };
         let producer = machine
-            .run_entry_retained(
-                program,
-                ValueId(0),
-                &[],
-                options,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry_retained(program, ValueId(0), &[], options, RealmId::ROOT)
             .expect("producer result");
         let [PreparedResult::Managed(handle)] = producer.values.as_slice() else {
             panic!("producer must retain its constructor");
@@ -2132,7 +2208,7 @@ mod tests {
                 ValueId(1),
                 &[PreparedInput::Managed(*handle)],
                 options,
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             )
             .expect("managed argument survives generated allocation");
         assert!(consumer.collections >= 1);
@@ -2157,20 +2233,14 @@ mod tests {
             collect_before_observation: true,
         };
         let produced = machine
-            .run_entry_retained(
-                program,
-                ValueId(0),
-                &[],
-                call,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry_retained(program, ValueId(0), &[], call, RealmId::ROOT)
             .expect("retained outer result");
         assert!(produced.collections >= 1);
         let [PreparedResult::Managed(outer)] = produced.values.as_slice() else {
             panic!("producer must return one managed outer result");
         };
         let PreparedOuter::Constructor { identity, fields } = machine
-            .inspect_outer(*outer)
+            .inspect_outer(*outer, RealmId::ROOT)
             .expect("outer inspection must not force its callable field");
         assert_eq!(identity, tidepool_repr::DataConId(991));
         let [PreparedResult::Managed(continuation), PreparedResult::Managed(unforced)] =
@@ -2179,7 +2249,7 @@ mod tests {
             panic!("outer inspection must retain callable and thunk fields");
         };
         assert!(matches!(
-            machine.inspect_outer(*continuation),
+            machine.inspect_outer(*continuation, RealmId::ROOT),
             Err(ExecutionError::Observation(
                 super::super::ObservationFailure::Unobservable(
                     tidepool_heap::execution_descriptor::ObjectKind::Function
@@ -2187,7 +2257,7 @@ mod tests {
             ))
         ));
         assert!(matches!(
-            machine.inspect_outer(*unforced),
+            machine.inspect_outer(*unforced, RealmId::ROOT),
             Err(ExecutionError::Observation(
                 super::super::ObservationFailure::Unobservable(
                     tidepool_heap::execution_descriptor::ObjectKind::Thunk
@@ -2196,7 +2266,7 @@ mod tests {
         ));
 
         let PreparedOuter::Constructor { fields, .. } = machine
-            .inspect_outer(*outer)
+            .inspect_outer(*outer, RealmId::ROOT)
             .expect("source handle remains live for repeated inspection");
         let [PreparedResult::Managed(second_continuation), PreparedResult::Managed(second_unforced)] =
             fields.as_slice()
@@ -2208,12 +2278,12 @@ mod tests {
             PreparedMachine::new(outer_with_function_field_program(), options)
                 .expect("foreign prepared machine");
         assert!(matches!(
-            foreign.inspect_outer(*outer),
+            foreign.inspect_outer(*outer, RealmId::ROOT),
             Err(ExecutionError::UnknownPreparedHandle)
         ));
         assert!(machine.release(*outer));
         assert!(matches!(
-            machine.inspect_outer(*outer),
+            machine.inspect_outer(*outer, RealmId::ROOT),
             Err(ExecutionError::UnknownPreparedHandle)
         ));
         assert!(machine.release(*continuation));
@@ -2234,7 +2304,7 @@ mod tests {
                     observation_budget: 0,
                     collect_before_observation: false,
                 },
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             )
             .expect("retained source handle");
         let [PreparedResult::Managed(handle)] = batch.values.as_slice() else {
@@ -2242,7 +2312,7 @@ mod tests {
         };
         machine.machine.set_first_cause(RuntimeError::BadPointer);
         assert!(matches!(
-            machine.inspect_outer(*handle),
+            machine.inspect_outer(*handle, RealmId::ROOT),
             Err(ExecutionError::Runtime(failure))
                 if failure.cause == RuntimeError::BadPointer
                     && failure.disposition == MachineDisposition::Unavailable
@@ -2265,13 +2335,7 @@ mod tests {
             collect_before_observation: false,
         };
         let first = machine
-            .run_entry_retained(
-                program_id,
-                entry,
-                &[],
-                call,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry_retained(program_id, entry, &[], call, RealmId::ROOT)
             .expect("real freer request returns a retained outer value");
         let [PreparedResult::Managed(outer)] = first.values.as_slice() else {
             panic!("FreerRetention entry must return one managed E request");
@@ -2285,7 +2349,7 @@ mod tests {
                     collect_before_observation: true,
                     ..call
                 },
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             )
             .expect("second real freer request collects without losing the first");
         assert!(second.collections >= 1);
@@ -2293,7 +2357,7 @@ mod tests {
             panic!("second FreerRetention request must also be managed");
         };
         let PreparedOuter::Constructor { identity, fields } = machine
-            .inspect_outer(*outer)
+            .inspect_outer(*outer, RealmId::ROOT)
             .expect("first E request remains rooted after the later collection");
         assert_eq!(
             identity, effect,
@@ -2339,22 +2403,10 @@ mod tests {
             collect_before_observation: false,
         };
         let before_a = machine
-            .run_entry(
-                program_a,
-                ValueId(0),
-                &[],
-                options,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry(program_a, ValueId(0), &[], options, RealmId::ROOT)
             .expect("program A entry before collection");
         let before_b = machine
-            .run_entry(
-                program_b,
-                ValueId(0),
-                &[],
-                options,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry(program_b, ValueId(0), &[], options, RealmId::ROOT)
             .expect("program B entry before collection");
         assert!(matches!(
             before_a.values.as_slice(),
@@ -2387,22 +2439,10 @@ mod tests {
             ..options
         };
         let after_a = machine
-            .run_entry(
-                program_a,
-                ValueId(0),
-                &[],
-                collect,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry(program_a, ValueId(0), &[], collect, RealmId::ROOT)
             .expect("program A entry after a forced collection");
         let after_b = machine
-            .run_entry(
-                program_b,
-                ValueId(0),
-                &[],
-                collect,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry(program_b, ValueId(0), &[], collect, RealmId::ROOT)
             .expect("program B entry after a forced collection");
         assert!(after_a.collections >= 1);
         assert!(after_b.collections >= 1);
@@ -2481,7 +2521,7 @@ mod tests {
                     observation_budget: RunOptions::default().observation_budget,
                     collect_before_observation: false,
                 },
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             )
             .expect("program A still runs correctly after the rejected install");
         assert!(matches!(
@@ -2638,13 +2678,7 @@ mod tests {
             collect_before_observation: false,
         };
         let produced = machine
-            .run_entry_retained(
-                program_a,
-                ValueId(0),
-                &[],
-                call,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
             .expect("A produces a retained constructor with a field");
         let [PreparedResult::Managed(handle)] = produced.values.as_slice() else {
             panic!("A must return one managed constructor");
@@ -2659,7 +2693,7 @@ mod tests {
                 ValueId(0),
                 &[PreparedInput::Managed(*handle)],
                 call,
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             )
             .expect("B accepts A's handle as a managed argument");
         assert!(
@@ -2671,7 +2705,7 @@ mod tests {
         };
 
         let PreparedOuter::Constructor { identity, .. } = machine
-            .inspect_outer(*returned)
+            .inspect_outer(*returned, RealmId::ROOT)
             .expect("the returned handle inspects through the machine-wide union");
         assert_eq!(
             identity,
@@ -2698,7 +2732,7 @@ mod tests {
                     collect_before_observation: true,
                     ..call
                 },
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             )
             .expect("A's own entry still runs and forces a collection");
         assert!(after.collections >= 1);
@@ -2737,13 +2771,7 @@ mod tests {
             collect_before_observation: false,
         };
         machine
-            .run_entry(
-                program_a,
-                ValueId(0),
-                &[],
-                call,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry(program_a, ValueId(0), &[], call, RealmId::ROOT)
             .expect("A runs once before B's install is attempted");
 
         let base_before = machine.next_top_slot_base();
@@ -2773,7 +2801,7 @@ mod tests {
                     collect_before_observation: true,
                     ..call
                 },
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             )
             .expect(
                 "A still runs correctly with collect_before_observation after the rejected install",
@@ -3013,19 +3041,13 @@ mod tests {
             collect_before_observation: true,
         };
         let produced = machine
-            .run_entry_retained(
-                program_a,
-                ValueId(0),
-                &[],
-                call,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
             .expect("A produces its Envelope(f, unforced)");
         let [PreparedResult::Managed(outer)] = produced.values.as_slice() else {
             panic!("A's producer must return one managed Envelope");
         };
         let PreparedOuter::Constructor { identity, fields } = machine
-            .inspect_outer(*outer)
+            .inspect_outer(*outer, RealmId::ROOT)
             .expect("A's outer inspects without forcing its callable field");
         assert_eq!(identity, tidepool_repr::DataConId(981));
         let [PreparedResult::Managed(f), PreparedResult::Managed(unforced)] = fields.as_slice()
@@ -3039,7 +3061,7 @@ mod tests {
                 ValueId(0),
                 &[PreparedInput::Managed(*f)],
                 call,
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             )
             .expect(
                 "B calls A's closure through the shared dispatcher; A's code runs with B's frame live",
@@ -3057,7 +3079,7 @@ mod tests {
             identity: result_identity,
             ..
         } = machine
-            .inspect_outer(*result)
+            .inspect_outer(*result, RealmId::ROOT)
             .expect("the call's result inspects through the machine-wide descriptor union");
         assert_eq!(
             result_identity,
@@ -3219,13 +3241,7 @@ mod tests {
             collect_before_observation: false,
         };
         let produced = machine
-            .run_entry_retained(
-                program_a,
-                ValueId(0),
-                &[],
-                call,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
             .expect("A produces its retained Field(99)");
         let [PreparedResult::Managed(handle_a)] = produced.values.as_slice() else {
             panic!("A must return one managed constructor");
@@ -3247,13 +3263,7 @@ mod tests {
             .expect("B installs, importing A's Field as a required-evaluated global");
 
         let before = machine
-            .run_entry_retained(
-                program_b,
-                ValueId(0),
-                &[],
-                call,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry_retained(program_b, ValueId(0), &[], call, RealmId::ROOT)
             .expect("B reads its import slot and returns the same handle");
         let [PreparedResult::Managed(handle_b_before)] = before.values.as_slice() else {
             panic!("B must retain the imported handle");
@@ -3271,7 +3281,7 @@ mod tests {
             identity: field_identity,
             fields: field_fields,
         } = machine
-            .inspect_outer(*handle_b_before)
+            .inspect_outer(*handle_b_before, RealmId::ROOT)
             .expect("B's imported handle inspects through the machine-wide descriptor union");
         assert_eq!(field_identity, tidepool_repr::DataConId(960));
         let [PreparedResult::Scalar(field_value)] = field_fields.as_slice() else {
@@ -3300,25 +3310,13 @@ mod tests {
             ..call
         };
         let after_a = machine
-            .run_entry_retained(
-                program_a,
-                ValueId(0),
-                &[],
-                collect,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry_retained(program_a, ValueId(0), &[], collect, RealmId::ROOT)
             .expect("A's own entry still runs and forces a collection");
         let [PreparedResult::Managed(handle_a_after)] = after_a.values.as_slice() else {
             panic!("A must still return one managed constructor");
         };
         let after = machine
-            .run_entry_retained(
-                program_b,
-                ValueId(0),
-                &[],
-                collect,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry_retained(program_b, ValueId(0), &[], collect, RealmId::ROOT)
             .expect("B's own entry still runs and forces a collection");
         let [PreparedResult::Managed(handle_b_after)] = after.values.as_slice() else {
             panic!("B must still retain the imported handle");
@@ -3343,7 +3341,7 @@ mod tests {
             identity: field_identity_after,
             fields: field_fields_after,
         } = machine
-            .inspect_outer(*handle_b_after)
+            .inspect_outer(*handle_b_after, RealmId::ROOT)
             .expect("B's re-read handle still classifies correctly after collection");
         assert_eq!(field_identity_after, tidepool_repr::DataConId(960));
         let [PreparedResult::Scalar(field_value_after)] = field_fields_after.as_slice() else {
@@ -3393,13 +3391,7 @@ mod tests {
             collect_before_observation: false,
         };
         let produced = machine
-            .run_entry_retained(
-                program_a,
-                ValueId(0),
-                &[],
-                call,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
             .expect("A produces its retained Field(99)");
         let [PreparedResult::Managed(handle_a)] = produced.values.as_slice() else {
             panic!("A must return one managed constructor");
@@ -3490,13 +3482,7 @@ mod tests {
             .expect("B installs, importing A's Field");
 
         let result = machine
-            .run_entry(
-                program_b,
-                ValueId(0),
-                &[],
-                call,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry(program_b, ValueId(0), &[], call, RealmId::ROOT)
             .expect("B's generated Case recognises A's Field cell through the shared descriptor");
         assert!(matches!(
             result.values.as_slice(),
@@ -3718,13 +3704,7 @@ mod tests {
             collect_before_observation: false,
         };
         let produced = machine
-            .run_entry_retained(
-                program_a,
-                ValueId(0),
-                &[],
-                call,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
             .expect("A produces its retained closure f");
         let [PreparedResult::Managed(handle_f)] = produced.values.as_slice() else {
             panic!("A must return one managed closure");
@@ -3746,7 +3726,7 @@ mod tests {
                 ValueId(0),
                 &[],
                 call,
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             )
             .expect("B's own 32 allocations under a tiny nursery force a collection, then it reads the import");
         assert!(
@@ -3766,7 +3746,7 @@ mod tests {
             machine.import_slot_is_registered_root(program_b, &s3_closure_producer_identity()),
             "B's import slot must be registered as its own independent persistent root"
         );
-        match machine.inspect_outer(*handle_f_via_b_before) {
+        match machine.inspect_outer(*handle_f_via_b_before, RealmId::ROOT) {
             Err(ExecutionError::Observation(super::super::ObservationFailure::Unobservable(kind))) => {
                 assert_eq!(
                     kind,
@@ -3789,25 +3769,13 @@ mod tests {
             ..call
         };
         let after_a = machine
-            .run_entry_retained(
-                program_a,
-                ValueId(0),
-                &[],
-                collect,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry_retained(program_a, ValueId(0), &[], collect, RealmId::ROOT)
             .expect("A's own entry still runs and forces a further collection");
         let [PreparedResult::Managed(handle_f_after)] = after_a.values.as_slice() else {
             panic!("A must still return one managed closure");
         };
         let after = machine
-            .run_entry_retained(
-                program_b,
-                ValueId(0),
-                &[],
-                collect,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry_retained(program_b, ValueId(0), &[], collect, RealmId::ROOT)
             .expect("B's own entry still runs, allocates, and forces another collection");
         assert!(after.collections >= 1);
         let [PreparedResult::Managed(handle_f_via_b_after)] = after.values.as_slice() else {
@@ -3829,7 +3797,7 @@ mod tests {
             machine.import_slot_is_registered_root(program_b, &s3_closure_producer_identity()),
             "B's import slot root registration survives a forced collection on both sides"
         );
-        match machine.inspect_outer(*handle_f_via_b_after) {
+        match machine.inspect_outer(*handle_f_via_b_after, RealmId::ROOT) {
             Err(ExecutionError::Observation(super::super::ObservationFailure::Unobservable(kind))) => {
                 assert_eq!(kind, tidepool_heap::execution_descriptor::ObjectKind::Function);
             }
@@ -3866,13 +3834,7 @@ mod tests {
             collect_before_observation: false,
         };
         let produced = machine
-            .run_entry_retained(
-                program_a,
-                ValueId(0),
-                &[],
-                call,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
             .expect("A produces its retained closure f");
         let [PreparedResult::Managed(handle_f)] = produced.values.as_slice() else {
             panic!("A must return one managed closure");
@@ -3893,13 +3855,7 @@ mod tests {
             )
             .expect("a function object is in WHNF and satisfies required_evaluated");
         let read = machine
-            .run_entry_retained(
-                program_b,
-                ValueId(0),
-                &[],
-                call,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry_retained(program_b, ValueId(0), &[], call, RealmId::ROOT)
             .expect("B reads its function import");
         let [PreparedResult::Managed(handle_f_via_b)] = read.values.as_slice() else {
             panic!("B must retain the imported function handle");
@@ -3933,13 +3889,7 @@ mod tests {
             collect_before_observation: false,
         };
         let produced = machine
-            .run_entry_retained(
-                program_a,
-                ValueId(0),
-                &[],
-                call,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
             .expect("A produces its retained Field(99)");
         let [PreparedResult::Managed(handle_a)] = produced.values.as_slice() else {
             panic!("A must return one managed constructor");
@@ -3978,13 +3928,7 @@ mod tests {
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 
         let result = machine
-            .run_entry(
-                program_a,
-                ValueId(0),
-                &[],
-                call,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry(program_a, ValueId(0), &[], call, RealmId::ROOT)
             .expect("A still runs correctly after the rejected install");
         assert!(matches!(
             result.values.as_slice(),
@@ -4013,19 +3957,13 @@ mod tests {
             collect_before_observation: false,
         };
         let produced = machine
-            .run_entry_retained(
-                program_a,
-                ValueId(0),
-                &[],
-                call,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
             .expect("A produces its Envelope(f, unforced)");
         let [PreparedResult::Managed(outer)] = produced.values.as_slice() else {
             panic!("A's producer must return one managed Envelope");
         };
         let PreparedOuter::Constructor { fields, .. } = machine
-            .inspect_outer(*outer)
+            .inspect_outer(*outer, RealmId::ROOT)
             .expect("A's outer inspects without forcing its unforced field");
         let [PreparedResult::Managed(f), PreparedResult::Managed(unforced)] = fields.as_slice()
         else {
@@ -4250,8 +4188,9 @@ mod tests {
     ) -> u32 {
         let mut length = 0;
         loop {
-            let PreparedOuter::Constructor { identity, fields } =
-                machine.inspect_outer(handle).expect("list cell inspects");
+            let PreparedOuter::Constructor { identity, fields } = machine
+                .inspect_outer(handle, RealmId::ROOT)
+                .expect("list cell inspects");
             assert!(machine.release(handle));
             if identity == nil_host_id {
                 assert!(fields.is_empty());
@@ -4301,13 +4240,7 @@ mod tests {
             collect_before_observation: false,
         };
         let a_result = machine
-            .run_entry(
-                program_a,
-                ValueId(0),
-                &[],
-                call_bridged,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry(program_a, ValueId(0), &[], call_bridged, RealmId::ROOT)
             .expect("A's own entry still runs correctly alongside B");
         assert!(matches!(
             a_result.values.as_slice(),
@@ -4316,13 +4249,7 @@ mod tests {
         ));
 
         let b_result = machine
-            .run_entry_retained(
-                program_b,
-                ValueId(0),
-                &[],
-                call_retained,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry_retained(program_b, ValueId(0), &[], call_retained, RealmId::ROOT)
             .expect(
                 "B builds its 40-cell chain across at least one mid-call collection; if the \
                  stack-map chain only resolved A's registry, B's own live locals at that \
@@ -4385,13 +4312,7 @@ mod tests {
             collect_before_observation: false,
         };
         let produced = machine
-            .run_entry_retained(
-                program_a,
-                ValueId(0),
-                &[],
-                call,
-                Arc::new(AtomicBool::new(false)),
-            )
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
             .expect("A produces its retained constructor");
         let [PreparedResult::Managed(handle)] = produced.values.as_slice() else {
             panic!("A must return one managed constructor");
@@ -4408,14 +4329,14 @@ mod tests {
                 ValueId(0),
                 &[PreparedInput::Managed(*handle)],
                 call,
-                Arc::new(AtomicBool::new(false)),
+                RealmId::ROOT,
             )
             .expect("B accepts A's already-stable handle and collects during its own call");
         let [PreparedResult::Managed(returned)] = consumed.values.as_slice() else {
             panic!("B must retain the returned argument");
         };
         let PreparedOuter::Constructor { identity, .. } = machine
-            .inspect_outer(*returned)
+            .inspect_outer(*returned, RealmId::ROOT)
             .expect("the returned handle inspects through the machine-wide union");
         assert_eq!(identity, tidepool_repr::DataConId(985));
         assert_eq!(
