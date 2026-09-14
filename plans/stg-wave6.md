@@ -26,7 +26,7 @@ passes once it does. Ordered by minimal new surface first.
 | 0 | Decode a real effect request with a real closure `Leaf` field (no suspension), classified without going through `observe()` (which rejects functions/PAPs) | **Done** (Wave 6A) |
 | 1 | Smallest real end-to-end suspend/resume: print -> sleep -> print, single turn, single realm; heap object identity checked across resumes | **Done** (Wave 6B, E1-E3: `freer-resume.cbor`, `freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments`, parking tests in `tidepool-runtime/tests/prepared_execution.rs`) |
 | 2 | Retained bindings across turns: turn N+1's program links against turn N's binding via `required_generation`, reads it off the same persistent heap (identity, not re-import by value) | **Done with recorded limits** (Wave 6B, S1-S6: `retained_import_end_to_end_links_consumer_against_bound_producer_tops`; limits under "Rung 2 boundaries" below) |
-| 3 | Interleaved parked work: two suspended continuations share one heap, resumed out of order, survive an intervening nursery GC | Covered within one program (`parked_continuations_resume_out_of_order_with_a_collection_between`); not yet pinned across two installed programs on one heap |
+| 3 | Interleaved parked work: two suspended continuations share one heap, resumed out of order, survive an intervening nursery GC | **Done** (C0, cross-program: `c0_two_installed_programs_park_and_resume_out_of_order_with_a_collection_between`, `c0_unrelated_entry_of_a_second_installed_program_runs_while_the_first_stays_parked`; scope note below) |
 | 4 | Cancellation of one parked turn among siblings, via a realm-scoped `CancelHandle`; sibling and `close_realm` counts unaffected | Not started this wave |
 | 5 | Actor-turn authority: retiring an incarnation releases its parked frame; a different incarnation cannot resume it | Not started this wave |
 | 6 | Composite: rungs 2-5 together in one resident session — the actual gate for calling Wave 6 done | Not started this wave |
@@ -41,6 +41,20 @@ on the descriptor state becomes necessary only if a future design captures
 native stacks, and must be re-decided then. What rung 3 still lacks is the
 cross-program pinning: two parked continuations from two installed programs
 on one heap, resumed out of order across a collection.
+
+**C0 landed** (`19890675e`): both tests pass with
+`collect_before_observation: true` at every step, `retained_handle_count()
+== 0` at the end. Scope, stated explicitly: these tests verify the
+session/parking protocol across two installed programs, which is rung 3's
+own stated criterion. They do not independently verify the deeper
+native-frame stack-map-walk invariant (whether a collection triggered
+*during* a second program's own live call correctly traces that program's
+frames) -- mutation-tested and confirmed not to catch a stack-map-chain
+truncated to the first registry, because both tests' collections happen
+via `collect_before_observation`, a post-call trigger with no generated
+frames live on the native stack. That invariant is S2b's separate target,
+and S2b's own mutation test surfaced an unresolved finding there too (see
+S2b below) -- it is not yet proven by any test in the suite.
 
 ## Decisions
 
@@ -249,20 +263,38 @@ call a retained function has not really retained it.
   it). Acceptance: `ImportProducer.hs` without `NOINLINE` still projects
   `producerValue`/`producerFn` as globals with no recovered
   `producerValue1..5`/`$wproducerFn` tops. Haskell, medium.
-- **S2b GC residuals.** Two lib tests: a collection triggered from inside a
-  second installed program's own live native call (a first-only stack-map
-  chain fails it), and retention of one of A's genuinely static objects
-  through B (a first-only static set fails it). Small; X2's T4 covers the
-  second if it lands first.
+- **S2b GC residuals — landed with an open finding (`aa9001889`).** Two lib
+  tests: `s2b_second_program_native_frame_is_walked_through_the_stack_map_
+  chain` (a collection triggered from inside a second installed program's
+  own live native call, tracing a bare Cranelift local never registered as
+  a Rust root) and `s2b_a_static_object_is_retained_through_b_via_the_
+  shared_static_region_set` (retention of one of A's genuinely static
+  objects through B). Both pass on the unmodified tree. **Not settled:**
+  mutation-testing the first test by truncating
+  `MachineState::stack_map_registries()` to the first registry -- the exact
+  mutation this card asked it to catch -- did NOT make it fail.
+  `gc/frame_walker.rs::walk_frames` silently skips a frame whose return
+  address matches no registry in the chain (treats it as an untracked
+  host-boundary frame) rather than erroring, and this specific test's
+  allocation pattern doesn't expose the resulting corruption -- plausibly
+  because the untraced object's fromspace memory isn't reused before the
+  test reads it back, not because the chain is actually correct. This is a
+  genuine open question about `walk_frames`'s own semantics under a
+  degraded chain, needs direct judgment rather than another Sonnet
+  test-writing pass, and is not yet closed by any test in the suite.
 
 ### Stage 2: parked work across programs and realms (rungs 3-4)
 
-- **C0 rung 3 pinned across programs.** Install the freer-resume artifact
-  twice on one machine (second compile via `compile_for_install`), park one
-  `k` from each, collect, resume in the opposite order to completion
-  against the pinned expectation; then both parked while an unrelated entry
-  of the other program runs. Replace the ladder's rung-3 row with Done and
-  the test names. Small.
+- **C0 rung 3 pinned across programs -- Done (`19890675e`).** Installs the
+  freer-resume artifact twice on one machine (second compile via
+  `compile_for_install`), parks one `k` from each, collects, resumes in the
+  opposite order to completion against the pinned expectation
+  (`c0_two_installed_programs_park_and_resume_out_of_order_with_a_
+  collection_between`); then both parked while an unrelated entry of the
+  other program runs
+  (`c0_unrelated_entry_of_a_second_installed_program_runs_while_the_first_
+  stays_parked`). See the ladder's rung 3 row for the scope note (session
+  protocol, not the stack-map-walk invariant S2b targets).
 - **C1 rung 4 realm-scoped cancellation.** `PreparedMachine` embeds the
   existing `ResourceLedger` (continuations empty this wave), `run_entry*`
   and `inspect_outer` take a `RealmId`, `realm_cancel_handle` returns the
@@ -318,7 +350,9 @@ call a retained function has not really retained it.
 ## Status ledger
 
 Wave 6B (2026-09-13/14), on `engine/stg-production-cutover` from
-`3f43c7d4f`. Per-task cards: `plans/actually-since-you-found-jiggly-turing.md`.
+`3f43c7d4f`. Per-task cards were drafted in a session-local plan-mode file
+(not part of this repository); their substance is captured in this
+document's Decisions, Completion plan, and this ledger.
 
 | Task | Outcome | Commits |
 |---|---|---|
@@ -338,5 +372,13 @@ Wave 6B (2026-09-13/14), on `engine/stg-production-cutover` from
 | D2 standing docs | inventory: `noDuplicate#` reasoning, admitted-import contract, remaining per-program tables | `9eb6efe99`, `6c9b00d64`, this commit |
 | dev-ux | `just changed` no longer aborts at its first failing step | `5a5df1b72` |
 | gate artifacts | fixtures-update fingerprint; `prepared_execution.rs` formatted | `3a7e6e999`, `25fe148d7` |
+| X1 constructor descriptor interning | accepted; un-ignores S3's foreign-Case finding | `958e9faa5` |
+| D1/D3 docs (rung-2 boundaries, completion plan, 6A handoff absorbed) | accepted | `754ce3347` |
+| stg-wave5-delivery addendum (three W1 gate items resolved) | accepted | `dfa75b27f` |
+| C0 rung 3 pinned across programs | accepted; scope note recorded (session protocol, not stack-map-walk) | `19890675e` |
+| S2b GC residuals | tests pass; mutation test surfaced an open, unresolved finding in `walk_frames`'s degraded-chain semantics — recorded, not fixed | `aa9001889` |
+| plans/README.md Wave 6 entry | accepted | `03029fc9d` |
 
-Gate on the final tree (`2659fce83`): see "Gate results" below.
+A fresh `just changed 3f43c7d4f` gate run on the tree through `aa9001889`
+was launched in the background; its verbatim result will be appended here
+once it completes.
