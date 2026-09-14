@@ -12,6 +12,7 @@
 //! pointer may call a Tail entry, and no unrooted host argument buffer is used.
 
 use super::plan::ProgramPlan;
+use super::resolve;
 use crate::entry_abi::{EntryAbi, EnvironmentMode, NativeAbiProfile};
 use crate::pipeline::CodegenPipeline;
 use cranelift_codegen::ir::{self, types, InstBuilder, MemFlags};
@@ -260,6 +261,7 @@ pub(super) fn emit_dispatchers(
     prepared_stack_overflow: FuncId,
     prepared_enter: FuncId,
     prepared_bad_state: FuncId,
+    prepared_resolve_call: FuncId,
     pipeline: &mut CodegenPipeline,
 ) -> Result<(), super::CompileError> {
     for (signature, output) in dispatchers.iter() {
@@ -522,6 +524,45 @@ pub(super) fn emit_dispatchers(
         }
         builder.switch_to_block(next);
         builder.seal_block(next);
+        // No local function/PAP descriptor matched. Fall back to the
+        // machine-wide resolution table before giving up: the callee may be
+        // a foreign (cross-program) function or PAP whose header this
+        // program never interned. A resolution hit is dispatched through
+        // via this dispatcher's own Cranelift signature, since a foreign
+        // Exact application uses the identical calling convention as a
+        // local one.
+        let object = builder.ins().band_imm(callee, !7_i64);
+        let header = builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), object, 0);
+        let fingerprint = resolve::signature_fingerprint(signature);
+        let fingerprint_const = builder.ins().iconst(types::I64, fingerprint as i64);
+        let resolve_ref = pipeline
+            .module
+            .declare_func_in_func(prepared_resolve_call, builder.func);
+        let resolve_call = builder
+            .ins()
+            .call(resolve_ref, &[vmctx, header, fingerprint_const]);
+        let code = builder.inst_results(resolve_call)[0];
+        let found = builder
+            .ins()
+            .icmp_imm(ir::condcodes::IntCC::NotEqual, code, 0);
+        let resolved_block = builder.create_block();
+        let still_bad_block = builder.create_block();
+        builder
+            .ins()
+            .brif(found, resolved_block, &[], still_bad_block, &[]);
+
+        builder.switch_to_block(resolved_block);
+        builder.seal_block(resolved_block);
+        let dispatcher_signature = builder.func.signature.clone();
+        let sig_ref = builder.import_signature(dispatcher_signature);
+        let call = builder.ins().call_indirect(sig_ref, code, &params);
+        let returned = builder.inst_results(call).to_vec();
+        builder.ins().return_(&returned);
+
+        builder.switch_to_block(still_bad_block);
+        builder.seal_block(still_bad_block);
         emit_bad_state(&mut builder, vmctx, prepared_bad_state, pipeline);
         builder.seal_all_blocks();
         builder.finalize();

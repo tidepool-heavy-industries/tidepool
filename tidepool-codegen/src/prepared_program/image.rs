@@ -21,12 +21,14 @@ pub(super) fn heap_top_partition(tops: &BTreeMap<ValueId, &HeapBinding>) -> BTre
             heap.insert(owner);
             pending.push(owner);
         }
-        let mut edge = |reference: &ValueRef| {
-            if let ValueRef::Local(target) = reference {
+        let mut has_global = false;
+        let mut edge = |reference: &ValueRef| match reference {
+            ValueRef::Local(target) => {
                 if tops.contains_key(target) {
                     reverse.entry(*target).or_default().push(owner);
                 }
             }
+            ValueRef::Global(_) => has_global = true,
         };
         match &binding.rhs {
             HeapRhs::Function { captures, .. } | HeapRhs::Thunk { captures, .. } => {
@@ -42,6 +44,15 @@ pub(super) fn heap_top_partition(tops: &BTreeMap<ValueId, &HeapBinding>) -> BTre
                 }
             }
             HeapRhs::Bytes(_) => {}
+        }
+        // A top whose own fields/captures reference an imported value cannot
+        // be static -- its pointer is only known once the machine installs
+        // the program and resolves the import, so it must become a heap top
+        // (initialized fresh at install time). Insert it directly, alongside
+        // the existing Thunk case above, so the reverse-closure walk below
+        // also pulls in every top that transitively depends on it.
+        if has_global && heap.insert(owner) {
+            pending.push(owner);
         }
     }
     while let Some(target) = pending.pop() {

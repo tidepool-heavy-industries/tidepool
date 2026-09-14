@@ -507,6 +507,22 @@ impl<'code> PreparedMachine<'code> {
                     return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
                 }
             };
+            // Publish every verified import before this program's own heap
+            // tops initialize: a heap top's `ValueRef::Global` field can now
+            // only resolve by reading the import's slot in `self.top_table`
+            // (see `run::write_atoms`'s `Global` arm), so the slot must
+            // already hold the import's live pointer by the time
+            // `initialize_heap_tops` runs. `resolved_imports` is always
+            // empty on this branch (the first program on a machine is
+            // always installed with no imports -- see `PreparedMachine::new`/
+            // `from_borrowed`), so this loop is a defensive no-op here, kept
+            // symmetric with the second-program branch below.
+            if let Err(error) = self.publish_imports(&resolved_imports) {
+                self.machine.free_session_heap();
+                self.machine.clear_stack_map_registry();
+                rollback_published_imports(&self.top_table, &self.machine, &resolved_imports);
+                return Err(error);
+            }
             let heap_used = match initialize_heap_tops(
                 start,
                 size,
@@ -516,11 +532,13 @@ impl<'code> PreparedMachine<'code> {
                 &statics,
                 &compiled.byte_tops,
                 &compiled.bytes,
+                &compiled.import_slots,
             ) {
                 Ok(heap_used) => heap_used,
                 Err(cause) => {
                     self.machine.free_session_heap();
                     self.machine.clear_stack_map_registry();
+                    rollback_published_imports(&self.top_table, &self.machine, &resolved_imports);
                     return Err(runtime_error(&self.machine, cause));
                 }
             };
@@ -546,6 +564,33 @@ impl<'code> PreparedMachine<'code> {
                 self.machine.pop_stack_map_registry();
                 return Err(runtime_error(&self.machine, error));
             }
+            // Publish every verified import HERE, before `collect_on`: each
+            // published slot is registered as a persistent root below, so
+            // the collection just after this can (and, for a cross-program
+            // import, generally will) relocate the object it points at --
+            // registering the root first is exactly what lets a persistent
+            // root survive a collection at all (the same mechanism this
+            // program's OWN heap tops rely on once THEY are registered,
+            // just below). The published pointer is each handle's CURRENT
+            // one (re-read here, not the value observed during the earlier
+            // verification pass above `statics.instantiate()` -- nothing
+            // between that verification and here can move it, but nothing
+            // guarantees that stays true indefinitely, so this still reads
+            // fresh rather than trusting a stale local). Once `collect_on`
+            // runs, the registered root's slot is updated in place to the
+            // post-collection address, so `initialize_heap_tops` below (which
+            // resolves a `ValueRef::Global` field by reading this same slot,
+            // see `run::write_atoms`) always observes the correct address --
+            // it no longer needs imports published AFTER collection, because
+            // it is no longer imports' own relocation this ordering protects
+            // against: it is a heap top's *own* pointer to the import, which
+            // does not exist yet until `initialize_heap_tops` writes it, so
+            // there is nothing of this program's to go stale.
+            if let Err(error) = self.publish_imports(&resolved_imports) {
+                self.machine.pop_stack_map_registry();
+                rollback_published_imports(&self.top_table, &self.machine, &resolved_imports);
+                return Err(error);
+            }
             if let Err(error) = collect_on(
                 &self.machine,
                 &mut self.vmctx,
@@ -553,12 +598,14 @@ impl<'code> PreparedMachine<'code> {
                 heap_reserve,
             ) {
                 self.machine.pop_stack_map_registry();
+                rollback_published_imports(&self.top_table, &self.machine, &resolved_imports);
                 return Err(error);
             }
             let (start, size) = match self.machine.gc_active_range() {
                 Some(range) => range,
                 None => {
                     self.machine.pop_stack_map_registry();
+                    rollback_published_imports(&self.top_table, &self.machine, &resolved_imports);
                     return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
                 }
             };
@@ -569,6 +616,7 @@ impl<'code> PreparedMachine<'code> {
                 Some(cursor) => cursor,
                 None => {
                     self.machine.pop_stack_map_registry();
+                    rollback_published_imports(&self.top_table, &self.machine, &resolved_imports);
                     return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
                 }
             };
@@ -582,10 +630,12 @@ impl<'code> PreparedMachine<'code> {
                 &statics,
                 &compiled.byte_tops,
                 &compiled.bytes,
+                &compiled.import_slots,
             ) {
                 Ok(heap_used) => heap_used,
                 Err(cause) => {
                     self.machine.pop_stack_map_registry();
+                    rollback_published_imports(&self.top_table, &self.machine, &resolved_imports);
                     return Err(runtime_error(&self.machine, cause));
                 }
             };
@@ -601,23 +651,9 @@ impl<'code> PreparedMachine<'code> {
             }
         }
 
-        // Publish every verified import: write the retained root's CURRENT
-        // pointer (re-read now, not the value observed during verification
-        // above -- the heap-reserve collection just above this comment block
-        // can have relocated it) into this program's own import slot, and
-        // register that slot as its own independent persistent root, exactly
-        // the heap-top pattern above rather than a reference to the source
-        // handle's own root slot.
-        for &(slot, raw) in &resolved_imports {
-            let pointer = self
-                .handles
-                .handle(raw)
-                .map(|entry| unsafe { entry.slot.current() } as u64)
-                .ok_or(ExecutionError::UnknownPreparedHandle)?;
-            self.top_table.write(slot, pointer)?;
-            let root = unsafe { self.top_table.as_mut_ptr().add(slot).cast::<*mut u8>() };
-            self.machine.register_persistent_root(root);
-        }
+        // Every verified import was already published above (before this
+        // program's own heap tops initialized -- see the per-branch comments
+        // above), so there is nothing left to publish here.
 
         self.statics.push(statics);
         self.descriptors
@@ -628,9 +664,59 @@ impl<'code> PreparedMachine<'code> {
                 .iter()
                 .map(|(&k, v)| (k, v.clone())),
         );
+
+        // Last step: register this program's cross-program call/enter
+        // resolution entries. Nothing after this point can fail, so no
+        // rollback path needs to touch these registrations.
+        self.machine.register_prepared_entries(
+            compiled.callables.iter().map(|c| {
+                (
+                    c.header,
+                    super::resolve::ResolvedEntry {
+                        code: compiled.pipeline.get_function_ptr(c.function),
+                        fingerprint: c.fingerprint,
+                    },
+                )
+            }),
+            compiled
+                .enter_owned_headers
+                .iter()
+                .map(|&header| (header, compiled.pipeline.get_function_ptr(compiled.enter))),
+        );
+
         self.programs.push(InstalledProgram { program });
         self.claimed_slots = base + slot_count;
         Ok(ProgramId((self.programs.len() - 1) as u32))
+    }
+
+    /// Publish every declared import already verified by [`Self::install`]'s
+    /// reservation pass: write each source handle's CURRENT pointer into
+    /// this program's own import slot, then register that slot as its own
+    /// independent persistent root (the same pattern as a heap top's own
+    /// root just below it in `install`, not a reference to the source
+    /// handle's own root slot). Called BEFORE any step that can move the
+    /// heap (`collect_on`, `initialize_heap_tops`) so that a relocating
+    /// collection sees these slots as registered roots and rewrites them in
+    /// place -- see `install`'s comments at each call site for why that
+    /// ordering is now required. A failure partway through leaves some
+    /// entries published and some not; every caller rolls back the WHOLE
+    /// `resolved_imports` list via [`rollback_published_imports`] regardless
+    /// of how far this got, so a partial publish here is never observable.
+    fn publish_imports(
+        &self,
+        resolved_imports: &[(usize, ValueHandle)],
+    ) -> Result<(), ExecutionError> {
+        for &(slot, raw) in resolved_imports {
+            let pointer = self
+                .handles
+                .handle(raw)
+                .map(|entry| unsafe { entry.slot.current() } as u64)
+                .ok_or(ExecutionError::UnknownPreparedHandle)?;
+            self.top_table.write(slot, pointer)?;
+            let root = unsafe { self.top_table.as_mut_ptr().add(slot).cast::<*mut u8>() };
+            self.machine.register_persistent_root(root);
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -1177,6 +1263,26 @@ fn collect_on(
     Ok(())
 }
 
+/// Undo [`PreparedMachine::publish_imports`] for a failure occurring between
+/// publish and `install`'s success return: deregister each slot as a
+/// persistent root and zero it, leaving the table exactly as an install
+/// that never reached publish would (T3). Safe to call unconditionally on
+/// the WHOLE `resolved_imports` list regardless of how much of it was
+/// actually published -- `deregister_persistent_root` is an idempotent
+/// no-op for a slot address it never saw registered, and zeroing an
+/// already-zero slot is harmless.
+fn rollback_published_imports(
+    top_table: &RootWords,
+    machine: &MachineState,
+    resolved_imports: &[(usize, ValueHandle)],
+) {
+    for &(slot, _) in resolved_imports {
+        let root = unsafe { top_table.as_mut_ptr().add(slot).cast::<*mut u8>() };
+        machine.deregister_persistent_root(root);
+        let _ = top_table.write(slot, 0);
+    }
+}
+
 impl<'code> InstalledProgram<'code> {
     #[expect(
         clippy::too_many_arguments,
@@ -1540,6 +1646,7 @@ impl Drop for PreparedMachine<'_> {
         self.machine.free_session_heap();
         self.machine.clear_stack_map_registry();
         self.machine.clear_cancel_flag();
+        self.machine.clear_prepared_entries();
         self.vmctx.machine_state = std::ptr::null_mut();
         self.vmctx.prepared_tops = std::ptr::null();
     }

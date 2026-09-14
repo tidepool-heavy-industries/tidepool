@@ -698,6 +698,7 @@ fn heap_top_scalar_bytes_resolve_without_a_bytes_top() {
         &statics,
         &program.byte_tops,
         &program.bytes,
+        &program.import_slots,
     )
     .unwrap();
 

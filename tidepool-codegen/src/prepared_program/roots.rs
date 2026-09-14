@@ -61,6 +61,15 @@ impl RootWords {
         Ok(())
     }
 
+    /// Read one slot's current value, mirroring [`Self::write`]'s exact
+    /// bounds-checking. Used to resolve an import slot's published pointer
+    /// during heap-top initialization, where the caller already works in
+    /// [`RuntimeError`] rather than [`ExecutionError`].
+    pub(super) fn read(&self, index: usize) -> Result<u64, RuntimeError> {
+        let word = self.0.get(index).ok_or(RuntimeError::BadPointer)?;
+        Ok(unsafe { *word.get() })
+    }
+
     pub(super) fn snapshot(&self) -> Vec<u64> {
         self.0.iter().map(|word| unsafe { *word.get() }).collect()
     }

@@ -167,6 +167,7 @@ impl<'code> PreparedInvocation<'code> {
             &statics,
             &program.byte_tops,
             &program.bytes,
+            &program.import_slots,
         ) {
             Ok(heap_used) => heap_used,
             Err(cause) => {

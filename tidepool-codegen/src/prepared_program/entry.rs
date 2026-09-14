@@ -48,6 +48,7 @@ pub(super) fn emit_prepared_enter(
     stack_overflow: FuncId,
     bad_state: FuncId,
     blackhole: FuncId,
+    prepared_resolve_enter: FuncId,
     write_barrier: FuncId,
 ) -> Result<(), super::CompileError> {
     use crate::prepared_control::CallStatus;
@@ -74,6 +75,9 @@ pub(super) fn emit_prepared_enter(
     let blackhole_ref = pipeline
         .module
         .declare_func_in_func(blackhole, builder.func);
+    let resolve_ref = pipeline
+        .module
+        .declare_func_in_func(prepared_resolve_enter, builder.func);
     let write_barrier_ref = pipeline
         .module
         .declare_func_in_func(write_barrier, builder.func);
@@ -289,6 +293,24 @@ pub(super) fn emit_prepared_enter(
         builder.switch_to_block(next);
         builder.seal_block(next);
     }
+    let call = builder.ins().call(resolve_ref, &[vmctx, header]);
+    let code = builder.inst_results(call)[0];
+    let found = builder.ins().icmp_imm(IntCC::NotEqual, code, 0);
+    let foreign_block = builder.create_block();
+    let truly_invalid_block = builder.create_block();
+    builder
+        .ins()
+        .brif(found, foreign_block, &[], truly_invalid_block, &[]);
+    builder.switch_to_block(foreign_block);
+    builder.seal_block(foreign_block);
+    let sig_ref = builder.import_signature(signature());
+    let foreign_call = builder
+        .ins()
+        .call_indirect(sig_ref, code, &[vmctx, reference]);
+    let foreign_returned = builder.inst_results(foreign_call).to_vec();
+    builder.ins().return_(&foreign_returned);
+    builder.switch_to_block(truly_invalid_block);
+    builder.seal_block(truly_invalid_block);
     builder.ins().jump(invalid, &[]);
     builder.switch_to_block(invalid);
     builder.seal_block(invalid);

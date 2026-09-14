@@ -1451,9 +1451,16 @@ fn emit_exact_call(
     owner: ValueId,
     node: usize,
 ) -> Result<Option<Vec<Value>>, CompileError> {
-    let ValueRef::Local(_) = atom_ref(callee, owner, node)? else {
-        return Err(unsupported(owner, node));
-    };
+    // A foreign (imported) callee is lowered exactly like a local one:
+    // `atom_value` already resolves a `ValueRef::Global` through the
+    // import's top-table slot, and the dispatcher itself falls back to the
+    // machine-wide resolution table when the callee's descriptor is not
+    // one of this program's own. Only a non-reference atom (a literal,
+    // `Void`, or `Rubbish`) can never be a callable, so that is the only
+    // shape this call site rejects.
+    match atom_ref(callee, owner, node)? {
+        ValueRef::Local(_) | ValueRef::Global(_) => {}
+    }
     let environment = atom_value(
         builder,
         vmctx,
@@ -1711,6 +1718,16 @@ pub(super) fn emit_algebraic_dispatch(
     builder.ins().brif(null, invalid, &[], nonnull, &[]);
     builder.switch_to_block(nonnull);
     builder.seal_block(nonnull);
+    // A default-only case (no named alternatives) never needs to inspect
+    // the scrutinee's descriptor identity -- there is nothing for a header
+    // comparison to rule out. This lets a `seq`-shaped default-only case
+    // work on a foreign/imported constructor without descriptor interning.
+    if alternatives.is_empty() {
+        if let Some(default_block) = default {
+            builder.ins().jump(default_block, &[]);
+            return;
+        }
+    }
     let header = builder
         .ins()
         .load(types::I64, MemFlags::trusted(), object, 0);

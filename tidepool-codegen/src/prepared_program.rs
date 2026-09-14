@@ -581,10 +581,10 @@ impl CompiledProgram {
         prepared_resolve_call_signature
             .returns
             .push(AbiParam::new(types::I64));
-        // Declared now so the symbol exists in the module; a later wave
-        // threads these FuncIds into `apply::emit_dispatchers` and
-        // `entry::emit_prepared_enter`'s call sites.
-        let _prepared_resolve_call = pipeline
+        // `entry::emit_prepared_enter`'s call site still awaits its own
+        // wave; `apply::emit_dispatchers`' fallback call site is wired
+        // below.
+        let prepared_resolve_call = pipeline
             .module
             .declare_function(
                 "prepared_resolve_call",
@@ -603,7 +603,7 @@ impl CompiledProgram {
         prepared_resolve_enter_signature
             .returns
             .push(AbiParam::new(types::I64));
-        let _prepared_resolve_enter = pipeline
+        let prepared_resolve_enter = pipeline
             .module
             .declare_function(
                 "prepared_resolve_enter",
@@ -694,6 +694,7 @@ impl CompiledProgram {
             prepared_stack_overflow,
             prepared_enter,
             prepared_bad_state,
+            prepared_resolve_call,
             &mut pipeline,
         )?;
         // Every function address has been declared, including recursive peers.
@@ -759,6 +760,7 @@ impl CompiledProgram {
             prepared_stack_overflow,
             prepared_bad_state,
             prepared_blackhole,
+            prepared_resolve_enter,
             write_barrier,
         )?;
         let force_adapter =

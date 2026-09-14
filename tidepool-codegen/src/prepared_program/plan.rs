@@ -228,7 +228,7 @@ impl<'a> ProgramPlan<'a> {
                     let signature = signature(program, *signature_id);
                     let capture_reps = captures
                         .iter()
-                        .map(|capture| value_ref_rep(&values, capture))
+                        .map(|capture| value_ref_rep(program, &values, capture))
                         .collect::<Result<Vec<_>, _>>()?;
                     let layout = StorageLayout::for_reps(target, &capture_reps)?;
                     let descriptor = Arc::new(ObjectDescriptor::new(
@@ -268,7 +268,7 @@ impl<'a> ProgramPlan<'a> {
                     }
                     let capture_reps = captures
                         .iter()
-                        .map(|capture| value_ref_rep(&values, capture))
+                        .map(|capture| value_ref_rep(program, &values, capture))
                         .collect::<Result<Vec<_>, _>>()?;
                     let layout = StorageLayout::for_reps(target, &capture_reps)?;
                     let descriptor = Arc::new(ObjectDescriptor::new(
@@ -340,7 +340,7 @@ impl<'a> ProgramPlan<'a> {
                     .clone(),
                 HeapRhs::Function { captures, .. } | HeapRhs::Thunk { captures, .. } => captures
                     .iter()
-                    .map(|capture| value_ref_rep(&values, capture))
+                    .map(|capture| value_ref_rep(program, &values, capture))
                     .collect::<Result<Vec<_>, _>>()?,
                 HeapRhs::Bytes(_) => Vec::new(),
             };
@@ -426,7 +426,17 @@ fn binding_rep(
     values.insert(binding.id, rep);
 }
 
+/// A capture/field's representation for layout purposes -- called for every
+/// function/thunk binding's capture list (heap top, static top, or a local
+/// `Let` binding alike), well before [`super::image::heap_top_partition`]
+/// decides which tops end up static vs. heap. A `Global` reference here
+/// needs only the import's DECLARED representation (already checked by
+/// `link_program` before this program reached `admission`) to size the
+/// capture slot -- not its runtime pointer, which is unknown until install.
+/// So this resolves through `program.globals()` (indexed by `GlobalId`,
+/// exactly as `import_slots` is later) rather than rejecting the reference.
 fn value_ref_rep(
+    program: &PreparedProgram,
     values: &BTreeMap<ValueId, RuntimeRep>,
     value: &ValueRef,
 ) -> Result<RuntimeRep, CompileError> {
@@ -435,7 +445,11 @@ fn value_ref_rep(
             .get(id)
             .copied()
             .ok_or(CompileError::MissingRepresentation(*id)),
-        ValueRef::Global(id) => Err(CompileError::Unsupported(super::Unsupported::Global(*id))),
+        ValueRef::Global(id) => program
+            .globals()
+            .get(id.0 as usize)
+            .map(|declaration| declaration.rep)
+            .ok_or(CompileError::Unsupported(super::Unsupported::Global(*id))),
     }
 }
 

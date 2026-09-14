@@ -1,5 +1,5 @@
 use super::machine::ProgramId;
-use super::plan::HeapTopSpec;
+use super::plan::{HeapTopSpec, ImportSlot};
 use super::{CompiledProgram, ObservationFailure, TopSlotBase, Unsupported};
 use crate::host_fns::RuntimeError;
 use crate::machine_state::MachineFailure;
@@ -155,6 +155,7 @@ pub(super) fn initialize_heap_tops(
     statics: &tidepool_heap::static_region::StaticRegion,
     byte_tops: &std::collections::BTreeMap<ValueId, Arc<[u8]>>,
     bytes: &super::static_bytes::PinnedBytes,
+    import_slots: &[ImportSlot],
 ) -> Result<usize, RuntimeError> {
     let mut offsets = std::collections::BTreeMap::new();
     let mut total = 0usize;
@@ -196,6 +197,8 @@ pub(super) fn initialize_heap_tops(
                     &pointer,
                     byte_tops,
                     bytes,
+                    top_table,
+                    import_slots,
                 )?;
             }
             HeapRhs::Function { captures, .. } | HeapRhs::Thunk { captures, .. } => {
@@ -208,6 +211,8 @@ pub(super) fn initialize_heap_tops(
                     &pointer,
                     byte_tops,
                     bytes,
+                    top_table,
+                    import_slots,
                 )?;
             }
             HeapRhs::Bytes(_) => return Err(RuntimeError::BadPointer),
@@ -221,6 +226,10 @@ pub(super) fn initialize_heap_tops(
     Ok(total)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "static-atom writing independently borrows the object, descriptor, atom/rep pairs, pointer resolver, byte-top and pinned-bytes storage, and (for a Global reference) the machine-wide top table and this program's import slots"
+)]
 fn write_atoms(
     object: *mut u8,
     descriptor: &ObjectDescriptor,
@@ -229,6 +238,8 @@ fn write_atoms(
     pointer: &impl Fn(ValueId) -> Result<usize, RuntimeError>,
     byte_tops: &std::collections::BTreeMap<ValueId, Arc<[u8]>>,
     bytes: &super::static_bytes::PinnedBytes,
+    top_table: &super::roots::RootWords,
+    import_slots: &[ImportSlot],
 ) -> Result<(), RuntimeError> {
     for (logical, (atom, rep)) in atoms.iter().zip(reps).enumerate() {
         let Some(stored) = descriptor
@@ -247,6 +258,31 @@ fn write_atoms(
         let value = match (rep, atom) {
             (RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef, Atom::Ref(ValueRef::Local(id))) => {
                 let value = pointer(*id)?;
+                if field.size() as usize != std::mem::size_of::<usize>() {
+                    return Err(RuntimeError::BadPointer);
+                }
+                value.to_ne_bytes().to_vec()
+            }
+            (
+                RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef,
+                Atom::Ref(ValueRef::Global(id)),
+            ) => {
+                // Read the import's CURRENT published slot value, not a
+                // cached pointer: this heap top is initialized only after
+                // `install` has already published every import slot (see
+                // `machine.rs::install`'s ordering), so the slot must
+                // already hold a live, non-zero pointer -- a zero here means
+                // an import was read before it was published, which this
+                // function must never silently trust regardless of the
+                // caller's ordering discipline.
+                let slot = import_slots
+                    .get(id.0 as usize)
+                    .ok_or(RuntimeError::BadPointer)?
+                    .slot;
+                let value = top_table.read(slot)?;
+                if value == 0 {
+                    return Err(RuntimeError::BadPointer);
+                }
                 if field.size() as usize != std::mem::size_of::<usize>() {
                     return Err(RuntimeError::BadPointer);
                 }
