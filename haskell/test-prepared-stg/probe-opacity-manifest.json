@@ -1,0 +1,45 @@
+{
+  "_dump_command": "ghc -XGHC2024 -O2 -ddump-simpl -dsuppress-all -fforce-recomp -c <Module>.hs",
+  "_toolchain": "pinned GHC 9.12.2, containers-0.7, text-2.1.2 (see flake.lock)",
+  "_marker_rule": "Each marker is a plain substring checked against the union of Tidy Core bodies reachable (by top-level identifier reference) from the probe's own binding. Markers are drawn only from primops, exported library names, or a helper name deterministically derived from the probe's own source-level identifier (e.g. 'evalExpr_$sgo'); none contain a bare compiler Unique (a short mixed letter/digit tag glued directly after an underscore, as in '$wgo1_s8Xl'), which this repo's own dumps confirmed shift across otherwise-identical recompiles.",
+  "modules": {
+    "ContainersContract": {
+      "mapToAscList": ["toAscList"],
+      "insertWithTotal": ["$sgo8_$s$sgo1"],
+      "adjustedLookup": ["$sgo8_$s$w$sgo8"],
+      "alteredSize": ["$sgo8_$s$sgo6"],
+      "foldedKeys": ["$wgo1"],
+      "unionTotals": ["$sunionWith"],
+      "setMembership": ["$wgo4"],
+      "setDifferenceList": ["$sdifference"]
+    },
+    "BignumContract": {
+      "pow2ToHundredText": ["$w$spowImpl"],
+      "factorial30Text": ["integerMul", "integerAdd"],
+      "primeProductMod": ["integerMul", "integerMod"],
+      "gcdLargeText": ["integerGcd"],
+      "negativeQuotRem": ["integerDivMod#"],
+      "largeVersusSmall": ["$w$spowImpl"]
+    },
+    "UserTypesContract": {
+      "defaultMethodPair": ["summaryOf"],
+      "updatedOrderView": ["$wopaqueInt"],
+      "functorFoldSum": ["opaquePair", "$wopaqueInt"],
+      "maybeChain": ["$wopaqueInt"],
+      "eitherTraversed": ["eitherTraversed_go1"],
+      "eitherTraverseFailure": ["eitherTraverseFailure_go1"],
+      "evalExpr": ["evalExpr_$sgo"],
+      "prettyExpr": ["prettyExpr_go"]
+    },
+    "TextContract": {
+      "splitOnParts": ["hs_text_memchr"],
+      "intercalated": ["prependToAll"],
+      "replaced": ["$wreplace"],
+      "upperWordsRoundTrip": ["$wisSpace"],
+      "nonAsciiLength": ["unpackFoldrCStringUtf8#"],
+      "packedShow": ["newByteArray#"],
+      "charFold": ["indexWord8Array#"],
+      "textKeyedLookup": ["compareByteArrays#"]
+    }
+  }
+}
