@@ -316,6 +316,37 @@ impl<'a> ObservationHeap<'a> {
         self.object(encoded).map(|_| ())
     }
 
+    /// Read exactly one constructor descriptor without forcing any child.
+    ///
+    /// The returned seeds own copied field words, so the caller may root and
+    /// promote them only after this heap borrow has ended.  This is the
+    /// prepared-machine boundary for opaque continuation fields; recursive
+    /// host materialization belongs to the legacy observer instead.
+    pub(super) fn inspect_constructor(
+        &self,
+        mut seed: ObservationSeed,
+    ) -> Result<(tidepool_repr::DataConId, Vec<ObservationSeed>), ObservationFailure> {
+        if !matches!(seed.rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
+            return Err(ObservationFailure::Representation(seed.rep));
+        }
+        loop {
+            let (descriptor, object, state) = self.object(seed.word)?;
+            if state == DescriptorState::Updated {
+                seed.word = read_object(
+                    object,
+                    descriptor,
+                    tidepool_heap::execution_descriptor::FORWARDING_POINTER_OFFSET,
+                    std::mem::size_of::<usize>(),
+                )?;
+                continue;
+            }
+            if descriptor.kind() != ObjectKind::Constructor {
+                return Err(ObservationFailure::Unobservable(descriptor.kind()));
+            }
+            return self.constructor_fields(descriptor, object);
+        }
+    }
+
     /// Result storage is already registered as roots by the invocation owner.
     /// No forcing, native call, or collection occurs anywhere in this traversal.
     #[cfg(test)]
@@ -406,75 +437,13 @@ impl<'a> ObservationHeap<'a> {
                     }
                     match descriptor.kind() {
                         ObjectKind::Constructor => {
-                            let observation = self
-                                .registry
-                                .and_then(|registry| {
-                                    registry.get(&descriptor.initial_header_word())
-                                })
-                                .and_then(|metadata| match &metadata.meaning {
-                                    DescriptorMeaning::Constructor(observation) => {
-                                        Some(observation)
-                                    }
-                                    DescriptorMeaning::Callable { .. } => None,
-                                    DescriptorMeaning::Pap => None,
-                                    DescriptorMeaning::External => None,
-                                })
-                                .or_else(|| {
-                                    self.constructors.and_then(|constructors| {
-                                        constructors.get(&descriptor.initial_header_word())
-                                    })
-                                })
-                                .ok_or(ObservationFailure::Integrity(
-                                    DescriptorTraceError::InvalidRange,
-                                ))?;
-                            let logical = descriptor.payload().logical_to_stored();
-                            if logical.len() != observation.fields.len() {
-                                return Err(ObservationFailure::Integrity(
-                                    DescriptorTraceError::InvalidRange,
-                                ));
-                            }
-                            let mut fields = Vec::new();
-                            fields.try_reserve(observation.fields.len()).map_err(|_| {
-                                ObservationFailure::Integrity(
-                                    DescriptorTraceError::MetadataAllocation,
-                                )
-                            })?;
-                            for (index, rep) in observation.fields.iter().copied().enumerate() {
-                                let Some(stored_index) = logical[index] else {
-                                    if rep == RuntimeRep::Void {
-                                        continue;
-                                    }
-                                    return Err(ObservationFailure::Integrity(
-                                        DescriptorTraceError::InvalidRange,
-                                    ));
-                                };
-                                let Some(field) =
-                                    descriptor.payload().fields().get(stored_index as usize)
-                                else {
-                                    return Err(ObservationFailure::Integrity(
-                                        DescriptorTraceError::InvalidRange,
-                                    ));
-                                };
-                                if field.rep() != rep {
-                                    return Err(ObservationFailure::Integrity(
-                                        DescriptorTraceError::InvalidRange,
-                                    ));
-                                }
-                                let offset = descriptor
-                                    .payload_base()
-                                    .checked_add(field.offset())
-                                    .ok_or(ObservationFailure::Integrity(
-                                    DescriptorTraceError::InvalidRange,
-                                ))? as usize;
-                                let word =
-                                    read_object(object, descriptor, offset, field.size() as usize)?;
-                                fields.push(ObservationSeed { word, rep });
-                            }
+                            let (identity, mut fields) =
+                                self.constructor_fields(descriptor, object)?;
                             // `recursion` visits frame children through a LIFO worklist.
                             // Keep the logical source order in the final value while
                             // presenting the first child to that worklist first.
                             fields.reverse();
-                            return Ok(ObservationFrame::Constructor(observation.identity, fields));
+                            return Ok(ObservationFrame::Constructor(identity, fields));
                         }
                         ObjectKind::External(ExternalStorageKind::Bytes) => {
                             let owner = self
@@ -503,6 +472,68 @@ impl<'a> ObservationHeap<'a> {
                 }
             }
         }
+    }
+
+    fn constructor_fields(
+        &self,
+        descriptor: &ObjectDescriptor,
+        object: *const u8,
+    ) -> Result<(tidepool_repr::DataConId, Vec<ObservationSeed>), ObservationFailure> {
+        let observation = self
+            .registry
+            .and_then(|registry| registry.get(&descriptor.initial_header_word()))
+            .and_then(|metadata| match &metadata.meaning {
+                DescriptorMeaning::Constructor(observation) => Some(observation),
+                DescriptorMeaning::Callable { .. }
+                | DescriptorMeaning::Pap
+                | DescriptorMeaning::External => None,
+            })
+            .or_else(|| {
+                self.constructors
+                    .and_then(|constructors| constructors.get(&descriptor.initial_header_word()))
+            })
+            .ok_or(ObservationFailure::Integrity(
+                DescriptorTraceError::InvalidRange,
+            ))?;
+        let logical = descriptor.payload().logical_to_stored();
+        if logical.len() != observation.fields.len() {
+            return Err(ObservationFailure::Integrity(
+                DescriptorTraceError::InvalidRange,
+            ));
+        }
+        let mut fields = Vec::new();
+        fields
+            .try_reserve(observation.fields.len())
+            .map_err(|_| ObservationFailure::Integrity(DescriptorTraceError::MetadataAllocation))?;
+        for (index, rep) in observation.fields.iter().copied().enumerate() {
+            let Some(stored_index) = logical[index] else {
+                if rep == RuntimeRep::Void {
+                    continue;
+                }
+                return Err(ObservationFailure::Integrity(
+                    DescriptorTraceError::InvalidRange,
+                ));
+            };
+            let Some(field) = descriptor.payload().fields().get(stored_index as usize) else {
+                return Err(ObservationFailure::Integrity(
+                    DescriptorTraceError::InvalidRange,
+                ));
+            };
+            if field.rep() != rep {
+                return Err(ObservationFailure::Integrity(
+                    DescriptorTraceError::InvalidRange,
+                ));
+            }
+            let offset = descriptor
+                .payload_base()
+                .checked_add(field.offset())
+                .ok_or(ObservationFailure::Integrity(
+                    DescriptorTraceError::InvalidRange,
+                ))? as usize;
+            let word = read_object(object, descriptor, offset, field.size() as usize)?;
+            fields.push(ObservationSeed { word, rep });
+        }
+        Ok((observation.identity, fields))
     }
 }
 

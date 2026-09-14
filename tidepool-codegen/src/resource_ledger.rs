@@ -47,6 +47,13 @@ pub(crate) struct RootHandleLedger {
 }
 
 impl RootHandleLedger {
+    pub(crate) fn try_reserve(
+        &mut self,
+        additional: usize,
+    ) -> Result<(), std::collections::TryReserveError> {
+        self.handles.try_reserve(additional)
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.handles.len()
     }

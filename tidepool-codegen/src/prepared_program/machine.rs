@@ -15,7 +15,7 @@ use super::safepoint::NativeStackBounds;
 use super::{CompiledProgram, ExecutionError, RunResult, Unsupported};
 use crate::context::VMContext;
 use crate::host_fns::{gc_trigger, prepared_gc_trigger, RuntimeError};
-use crate::machine_state::{MachineDisposition, MachineState};
+use crate::machine_state::{MachineDisposition, MachineFailure, MachineState};
 use crate::old_space::OldSpace;
 use crate::prepared_control::CallStatus;
 use crate::resource_ledger::RootHandleLedger;
@@ -25,6 +25,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tidepool_heap::static_region::StaticRegion;
 use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, ValueId};
+use tidepool_repr::DataConId;
 
 /// A compiled program and its one persistent mutable prepared-STG substrate.
 ///
@@ -92,6 +93,18 @@ pub enum PreparedResult {
 pub struct PreparedResultBatch {
     pub values: Vec<PreparedResult>,
     pub collections: u64,
+}
+
+/// One constructor layer read without evaluating any field.
+///
+/// Managed fields are retained as fresh handles.  Callable fields remain
+/// opaque: inspection never enters them or invokes generated code.
+#[derive(Debug)]
+pub enum PreparedOuter {
+    Constructor {
+        identity: DataConId,
+        fields: Vec<PreparedResult>,
+    },
 }
 
 struct CancelScope<'a>(&'a MachineState);
@@ -242,6 +255,126 @@ impl<'code> PreparedMachine<'code> {
         };
         self.machine.deregister_persistent_root(entry.slot.addr());
         true
+    }
+
+    /// Inspect one constructor layer of a retained value without forcing it.
+    ///
+    /// Every managed field receives its own persistent root before the
+    /// descriptor reader releases the active nursery borrow.  The source
+    /// handle remains owned by this machine and can be inspected again.
+    pub fn inspect_outer(
+        &mut self,
+        handle: PreparedHandle,
+    ) -> Result<PreparedOuter, ExecutionError> {
+        self.ensure_handle_access()?;
+        let source = self
+            .handles
+            .get(handle.raw)
+            .filter(|entry| entry.realm == RealmId::ROOT)
+            .map(|entry| entry.slot)
+            .ok_or(ExecutionError::UnknownPreparedHandle)?;
+        let word = unsafe { source.current() } as usize;
+        if word == 0 {
+            return Err(ExecutionError::UnknownPreparedHandle);
+        }
+        let (identity, fields) = self.inspect_constructor(super::observe::ObservationSeed {
+            word,
+            rep: handle.rep,
+        })?;
+        let words = RootWords::new(fields.len())?;
+        let mut managed = Vec::new();
+        let mut output = Vec::new();
+        managed
+            .try_reserve_exact(fields.len())
+            .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
+        output
+            .try_reserve_exact(fields.len())
+            .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
+        for (index, field) in fields.iter().copied().enumerate() {
+            words.write(index, field.word as u64)?;
+            match field.rep {
+                RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef => {
+                    managed.push((index, field.rep));
+                    output.push(PreparedResult::Void);
+                }
+                RuntimeRep::Void => {
+                    return Err(ExecutionError::Observation(
+                        super::ObservationFailure::Integrity(
+                            tidepool_heap::execution_descriptor::DescriptorTraceError::InvalidRange,
+                        ),
+                    ))
+                }
+                RuntimeRep::Address => {
+                    return Err(
+                        super::ObservationFailure::Representation(RuntimeRep::Address).into(),
+                    )
+                }
+                RuntimeRep::Int(_) | RuntimeRep::Word(_) | RuntimeRep::Float(_) => {
+                    output.push(PreparedResult::Scalar(field.word as u64));
+                }
+            }
+        }
+        self.handles
+            .try_reserve(managed.len())
+            .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
+        let mut selected = Vec::new();
+        selected
+            .try_reserve_exact(managed.len())
+            .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
+        for &(index, _) in &managed {
+            selected.push(unsafe { words.as_mut_ptr().add(index).cast::<*mut u8>() });
+        }
+        let mark = self.machine.rust_roots_len();
+        for &(index, _) in &managed {
+            let slot = unsafe { words.as_mut_ptr().add(index).cast::<*mut u8>() };
+            self.machine.register_rust_root(slot);
+        }
+        let _roots = TemporaryRoots {
+            machine: &self.machine,
+            mark,
+        };
+        if !managed.is_empty() {
+            if unsafe { self.machine.prepared_old_space() }.is_some() {
+                return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+            }
+            unsafe { self.machine.install_prepared_old_space(&self.old_space) };
+            let retained = unsafe {
+                self.old_space.retain_prepared(
+                    &self.machine,
+                    &mut self.vmctx,
+                    &selected,
+                    &self.program.get().descriptors,
+                )
+            };
+            self.machine.clear_prepared_old_space();
+            let roots = retained.map_err(|cause| runtime_error(&self.machine, cause))?;
+            if roots.len() != managed.len() {
+                for root in roots {
+                    self.machine.deregister_persistent_root(root.addr());
+                }
+                return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+            }
+            for ((index, rep), root) in managed.into_iter().zip(roots) {
+                let raw = self.handles.insert(root, RealmId::ROOT);
+                output[index] = PreparedResult::Managed(PreparedHandle { raw, rep });
+            }
+        }
+        Ok(PreparedOuter::Constructor {
+            identity,
+            fields: output,
+        })
+    }
+
+    fn ensure_handle_access(&self) -> Result<(), ExecutionError> {
+        if self.machine.disposition() == MachineDisposition::Unavailable {
+            return Err(ExecutionError::Runtime(
+                self.machine.last_failure().unwrap_or(MachineFailure {
+                    cause: RuntimeError::BadPointer,
+                    disposition: MachineDisposition::Unavailable,
+                }),
+            ));
+        }
+        Ok(())
     }
 
     /// Execute with representation-checked values and retain every managed
@@ -450,6 +583,40 @@ impl<'code> PreparedMachine<'code> {
         })
     }
 
+    fn inspect_constructor(
+        &self,
+        seed: super::observe::ObservationSeed,
+    ) -> Result<(DataConId, Vec<super::observe::ObservationSeed>), ExecutionError> {
+        let (start, size) = self
+            .machine
+            .gc_active_range()
+            .ok_or_else(|| runtime_error(&self.machine, RuntimeError::BadPointer))?;
+        let cursor = (self.vmctx.alloc_ptr as usize)
+            .checked_sub(start as usize)
+            .filter(|cursor| *cursor <= size && *cursor % std::mem::size_of::<u64>() == 0)
+            .ok_or_else(|| runtime_error(&self.machine, RuntimeError::BadPointer))?;
+        let nursery = unsafe {
+            std::slice::from_raw_parts(start.cast::<u64>(), cursor / std::mem::size_of::<u64>())
+        };
+        let mut starts = Vec::new();
+        let mut scanned_words = 0;
+        super::observe::append_exact_starts(
+            nursery,
+            &self.program.get().descriptor_registry,
+            &mut starts,
+            &mut scanned_words,
+        )?;
+        let heap = super::observe::ObservationHeap::new_with_registry_and_starts(
+            nursery,
+            &self.statics,
+            &self.program.get().descriptor_registry,
+            &starts,
+            Some(&*self.old_space),
+            &self.machine,
+        )?;
+        heap.inspect_constructor(seed).map_err(ExecutionError::from)
+    }
+
     #[cfg(test)]
     pub(crate) fn persistent_roots_count(&self) -> usize {
         self.machine.persistent_roots_count()
@@ -654,9 +821,11 @@ mod tests {
     };
     use std::sync::{atomic::AtomicBool, Arc};
     use tidepool_repr::execution_schema::{
-        testing, Atom, CheckedLayout, ConstructorDecl, ConstructorId, ExprFrame, Group,
-        HeapBinding, HeapRhs, MachineImports, ResultContract, RuntimeRep, ScalarLiteral, Signature,
-        SignatureId, TopBinding, UpdatePolicy, ValueId, ValueRef,
+        link_program, parse_program, testing, Architecture, Atom, CheckedLayout, ConstructorDecl,
+        ConstructorId, DecodeLimits, Endianness, ExprFrame, FieldLayout, Group, HeapBinding,
+        HeapRhs, MachineImports, ProgramRequirements, ResultContract, RuntimeRep, ScalarLiteral,
+        Signature, SignatureId, TargetDescriptor, TopBinding, UpdatePolicy, ValueId, ValueRef,
+        EXECUTION_ABI_VERSION, SCHEMA_VERSION,
     };
 
     fn machine() -> PreparedMachine<'static> {
@@ -799,6 +968,153 @@ mod tests {
             tidepool_repr::execution_schema::link_program(prepared, &MachineImports::default())
                 .expect("roundtrip links");
         CompiledProgram::compile(&linked).expect("roundtrip compiles")
+    }
+
+    fn outer_with_function_field_program() -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.signatures.push(Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        });
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("PreparedOuter", "Envelope"),
+            family: testing::identity("PreparedOuter", "Envelope"),
+            host_id: tidepool_repr::DataConId(991),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![RuntimeRep::LiftedRef, RuntimeRep::LiftedRef],
+            strict_fields: vec![false, false],
+            layout: CheckedLayout {
+                fields: vec![
+                    FieldLayout {
+                        rep: RuntimeRep::LiftedRef,
+                        offset: 0,
+                    },
+                    FieldLayout {
+                        rep: RuntimeRep::LiftedRef,
+                        offset: 8,
+                    },
+                ],
+                alignment: 8,
+                payload_size: 16,
+                root_mask: vec![true, true],
+            },
+        });
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("PreparedOuter", "Unit"),
+            family: testing::identity("PreparedOuter", "Unit"),
+            host_id: tidepool_repr::DataConId(992),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        });
+        wire.expressions.nodes = vec![
+            ExprFrame::Construct {
+                constructor: ConstructorId(0),
+                fields: vec![
+                    Atom::Ref(ValueRef::Local(ValueId(1))),
+                    Atom::Ref(ValueRef::Local(ValueId(2))),
+                ],
+            },
+            ExprFrame::Construct {
+                constructor: ConstructorId(1),
+                fields: vec![],
+            },
+            ExprFrame::Construct {
+                constructor: ConstructorId(1),
+                fields: vec![],
+            },
+        ];
+        wire.bindings = vec![
+            Group::NonRecursive(TopBinding {
+                identity: testing::identity("PreparedOuter", "producer"),
+                binding: HeapBinding {
+                    id: ValueId(0),
+                    rhs: HeapRhs::Thunk {
+                        signature: SignatureId(0),
+                        update: UpdatePolicy::Memoize,
+                        captures: vec![],
+                        body: 0,
+                    },
+                },
+            }),
+            Group::NonRecursive(TopBinding {
+                identity: testing::identity("PreparedOuter", "continuation"),
+                binding: HeapBinding {
+                    id: ValueId(1),
+                    rhs: HeapRhs::Function {
+                        signature: SignatureId(1),
+                        parameters: vec![],
+                        captures: vec![],
+                        body: 1,
+                    },
+                },
+            }),
+            Group::NonRecursive(TopBinding {
+                identity: testing::identity("PreparedOuter", "unforced"),
+                binding: HeapBinding {
+                    id: ValueId(2),
+                    rhs: HeapRhs::Thunk {
+                        signature: SignatureId(0),
+                        update: UpdatePolicy::SingleEntry,
+                        captures: vec![],
+                        body: 2,
+                    },
+                },
+            }),
+        ];
+        let prepared = testing::prepare(wire).expect("prepared outer fixture");
+        let linked =
+            tidepool_repr::execution_schema::link_program(prepared, &MachineImports::default())
+                .expect("prepared outer fixture links");
+        CompiledProgram::compile(&linked).expect("prepared outer fixture compiles")
+    }
+
+    fn freer_retention_program() -> (CompiledProgram, ValueId, DataConId) {
+        let requirements = ProgramRequirements {
+            schema_version: SCHEMA_VERSION,
+            projection_profile: "ghc-9.12-prepared-stg".into(),
+            toolchain: "ghc-9.12.2".into(),
+            execution_abi_version: EXECUTION_ABI_VERSION,
+            target: TargetDescriptor {
+                architecture: Architecture::X86_64,
+                endianness: Endianness::Little,
+                pointer_width: 64,
+                word_width: 64,
+                abi: "sysv64".into(),
+                features: vec![],
+            },
+        };
+        let prepared = parse_program(
+            include_bytes!("../../../haskell/test-prepared-stg/fixtures/freer-retention.cbor"),
+            &requirements,
+            DecodeLimits::default(),
+        )
+        .expect("FreerRetention artifact parses");
+        let entry = prepared.entry();
+        let effect = prepared
+            .constructors()
+            .iter()
+            .find(|constructor| constructor.identity.occurrence == "E")
+            .expect("FreerRetention artifact includes the real freer E constructor")
+            .host_id;
+        let linked = link_program(prepared, &MachineImports::default())
+            .expect("FreerRetention artifact links");
+        (
+            CompiledProgram::compile(&linked).expect("FreerRetention artifact compiles"),
+            entry,
+            effect,
+        )
     }
 
     #[test]
@@ -1094,5 +1410,160 @@ mod tests {
         };
         assert!(machine.release(*handle));
         assert!(machine.release(*returned));
+    }
+
+    #[test]
+    fn outer_inspection_retains_callable_fields_without_forcing_them() {
+        let options = PreparedMachineOptions { nursery_bytes: 128 };
+        let mut machine = PreparedMachine::new(outer_with_function_field_program(), options)
+            .expect("prepared outer machine");
+        let call = PreparedCallOptions {
+            observation_budget: 0,
+            collect_before_observation: true,
+        };
+        let produced = machine
+            .run_entry_retained(ValueId(0), &[], call, Arc::new(AtomicBool::new(false)))
+            .expect("retained outer result");
+        assert!(produced.collections >= 1);
+        let [PreparedResult::Managed(outer)] = produced.values.as_slice() else {
+            panic!("producer must return one managed outer result");
+        };
+        let PreparedOuter::Constructor { identity, fields } = machine
+            .inspect_outer(*outer)
+            .expect("outer inspection must not force its callable field");
+        assert_eq!(identity, tidepool_repr::DataConId(991));
+        let [PreparedResult::Managed(continuation), PreparedResult::Managed(unforced)] =
+            fields.as_slice()
+        else {
+            panic!("outer inspection must retain callable and thunk fields");
+        };
+        assert!(matches!(
+            machine.inspect_outer(*continuation),
+            Err(ExecutionError::Observation(
+                super::super::ObservationFailure::Unobservable(
+                    tidepool_heap::execution_descriptor::ObjectKind::Function
+                )
+            ))
+        ));
+        assert!(matches!(
+            machine.inspect_outer(*unforced),
+            Err(ExecutionError::Observation(
+                super::super::ObservationFailure::Unobservable(
+                    tidepool_heap::execution_descriptor::ObjectKind::Thunk
+                )
+            ))
+        ));
+
+        let PreparedOuter::Constructor { fields, .. } = machine
+            .inspect_outer(*outer)
+            .expect("source handle remains live for repeated inspection");
+        let [PreparedResult::Managed(second_continuation), PreparedResult::Managed(second_unforced)] =
+            fields.as_slice()
+        else {
+            panic!("repeated inspection must retain fresh child handles");
+        };
+
+        let mut foreign = PreparedMachine::new(outer_with_function_field_program(), options)
+            .expect("foreign prepared machine");
+        assert!(matches!(
+            foreign.inspect_outer(*outer),
+            Err(ExecutionError::UnknownPreparedHandle)
+        ));
+        assert!(machine.release(*outer));
+        assert!(matches!(
+            machine.inspect_outer(*outer),
+            Err(ExecutionError::UnknownPreparedHandle)
+        ));
+        assert!(machine.release(*continuation));
+        assert!(machine.release(*unforced));
+        assert!(machine.release(*second_continuation));
+        assert!(machine.release(*second_unforced));
+    }
+
+    #[test]
+    fn outer_inspection_refuses_an_unavailable_machine_before_handle_lookup() {
+        let mut machine = machine();
+        let batch = machine
+            .run_entry_retained(
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 0,
+                    collect_before_observation: false,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("retained source handle");
+        let [PreparedResult::Managed(handle)] = batch.values.as_slice() else {
+            panic!("CAF must return one managed value");
+        };
+        machine.machine.set_first_cause(RuntimeError::BadPointer);
+        assert!(matches!(
+            machine.inspect_outer(*handle),
+            Err(ExecutionError::Runtime(failure))
+                if failure.cause == RuntimeError::BadPointer
+                    && failure.disposition == MachineDisposition::Unavailable
+        ));
+    }
+
+    #[test]
+    fn real_freer_request_retains_its_continuation_across_another_collection() {
+        let (program, entry, effect) = freer_retention_program();
+        let mut machine = PreparedMachine::new(
+            program,
+            PreparedMachineOptions {
+                nursery_bytes: 4096,
+            },
+        )
+        .expect("FreerRetention machine");
+        let call = PreparedCallOptions {
+            observation_budget: 0,
+            collect_before_observation: false,
+        };
+        let first = machine
+            .run_entry_retained(entry, &[], call, Arc::new(AtomicBool::new(false)))
+            .expect("real freer request returns a retained outer value");
+        let [PreparedResult::Managed(outer)] = first.values.as_slice() else {
+            panic!("FreerRetention entry must return one managed E request");
+        };
+        let second = machine
+            .run_entry_retained(
+                entry,
+                &[],
+                PreparedCallOptions {
+                    collect_before_observation: true,
+                    ..call
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("second real freer request collects without losing the first");
+        assert!(second.collections >= 1);
+        let [PreparedResult::Managed(second_outer)] = second.values.as_slice() else {
+            panic!("second FreerRetention request must also be managed");
+        };
+        let PreparedOuter::Constructor { identity, fields } = machine
+            .inspect_outer(*outer)
+            .expect("first E request remains rooted after the later collection");
+        assert_eq!(
+            identity, effect,
+            "descriptor metadata, not tag, identifies E"
+        );
+        let continuation = match fields.last() {
+            Some(PreparedResult::Managed(handle)) => *handle,
+            _ => panic!("the real E continuation field must remain an opaque managed handle"),
+        };
+        let children: Vec<_> = fields
+            .iter()
+            .filter_map(|field| match field {
+                PreparedResult::Managed(handle) => Some(*handle),
+                PreparedResult::Void | PreparedResult::Scalar(_) => None,
+            })
+            .collect();
+        assert!(machine.release(*outer));
+        assert!(children.contains(&continuation));
+        for child in children {
+            assert!(machine.release(child));
+        }
+        assert!(machine.release(*second_outer));
     }
 }

@@ -43,7 +43,7 @@ pub use observe::ObservationFailure;
 mod run;
 pub use machine::{
     PreparedCallOptions, PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions,
-    PreparedResult, PreparedResultBatch,
+    PreparedOuter, PreparedResult, PreparedResultBatch,
 };
 pub use run::{ExecutionError, RunOptions, RunResult};
 #[cfg(test)]
