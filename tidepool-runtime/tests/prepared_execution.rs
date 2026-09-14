@@ -6,7 +6,7 @@ use tidepool_codegen::jit_machine::MachineDisposition;
 use tidepool_codegen::prepared_program::{
     CompiledProgram, ExecutionError, ObservationFailure, PreparedCallOptions,
     PreparedInput as CodegenPreparedInput, PreparedMachine, PreparedMachineOptions,
-    PreparedOuter as PreparedOuterCodegen, TopSlotBase,
+    PreparedOuter as PreparedOuterCodegen, ProgramId, TopSlotBase,
 };
 use tidepool_repr::execution_schema::{
     link_program, parse_program, Architecture, DecodeLimits, Endianness, ImportedValue, LinkError,
@@ -1279,6 +1279,324 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
     ));
     assert!(resumed_values.next().is_none());
     assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+}
+
+// ---- C0: rung 3 pinned across two installed programs --------------------
+//
+// E3 (`parked_continuations_resume_out_of_order_with_a_collection_between`,
+// `unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable`)
+// already pins interleaved parked work WITHIN one installed program. Rung 3
+// as stated in the acceptance ladder is about two installed programs
+// sharing one heap: `drive_freer_program_to_val`'s `PreparedRuntime`-scoped
+// calls (`run_entry_retained`, no program argument) always address the
+// session's first program, so those tests cannot exercise a second one.
+// This section installs the freer-resume artifact a second time on the
+// SAME machine (`PreparedRuntime::install`, no imports -- the two copies
+// share no data) and drives both through the program-scoped API
+// (`run_entry_retained_in`), which is the whole reason that API exists.
+
+/// [`drive_freer_program_to_val`] for a specific installed program, so C0
+/// can drive two independent copies of the freer-resume artifact -- each
+/// on its own [`ProgramId`], both on the one machine -- without either
+/// touching the other's continuation.
+fn drive_freer_program_to_val_in(
+    runtime: &mut PreparedRuntime,
+    program: ProgramId,
+    fixture: &FreerResumeFixture,
+    mut outer: PreparedValue,
+) -> i64 {
+    loop {
+        let PreparedOuter::Constructor {
+            identity,
+            mut fields,
+        } = runtime
+            .inspect_outer(&outer)
+            .expect("the retained Eff value survives its collection and inspects");
+
+        if identity == fixture.val_id {
+            assert_eq!(fields.len(), 1, "Val has exactly one field");
+            let boxed = take_managed(&mut fields, 0);
+            assert!(runtime.release(boxed));
+
+            let value_cancel = runtime.new_cancel_handle();
+            let value_result = runtime
+                .run_entry_retained_in(
+                    program,
+                    fixture.val_result_top.binding.id,
+                    &[PreparedArgument::Managed(&outer)],
+                    true,
+                    &value_cancel,
+                )
+                .expect("valResult (Val (I# n) -> n) forces the settled Int");
+            let mut value_values = value_result.values.into_iter();
+            let Some(PreparedValueResult::Scalar(word)) = value_values.next() else {
+                panic!("valResult must return one scalar Int#");
+            };
+            assert!(value_values.next().is_none());
+            assert!(runtime.release(outer));
+            return word as i64;
+        }
+
+        assert_eq!(
+            identity, fixture.e_id,
+            "an Eff value at WHNF is either Val or E"
+        );
+        assert_eq!(fields.len(), 2, "E has exactly two fields: Union and Arrs");
+        let union = take_managed(&mut fields, 0);
+        let k = take_managed(&mut fields, 1);
+        assert!(runtime.release(outer));
+
+        let PreparedOuter::Constructor {
+            identity: union_identity,
+            fields: mut union_fields,
+        } = runtime.inspect_outer(&union).expect("Union inspects");
+        assert_eq!(union_identity, fixture.union_id);
+        assert_eq!(
+            union_fields.len(),
+            2,
+            "Union has an unpacked tag word and a payload"
+        );
+        let tag = take_scalar(&union_fields, 0);
+        assert_eq!(tag, 0, "the only effect in '[Req] is index 0");
+        let payload = take_managed(&mut union_fields, 1);
+        assert!(runtime.release(union));
+
+        let ask_cancel = runtime.new_cancel_handle();
+        let ask_result = runtime
+            .run_entry_retained_in(
+                program,
+                fixture.ask_argument_top.binding.id,
+                &[PreparedArgument::Managed(&payload)],
+                true,
+                &ask_cancel,
+            )
+            .expect("askArgument (Ask (I# n) -> n) forces the Ask request's Int#");
+        let mut ask_values = ask_result.values.into_iter();
+        let Some(PreparedValueResult::Scalar(n)) = ask_values.next() else {
+            panic!("askArgument must return one scalar Int#");
+        };
+        assert!(ask_values.next().is_none());
+        assert!(runtime.release(payload));
+
+        let resume_cancel = runtime.new_cancel_handle();
+        let resumed = runtime
+            .run_entry_retained_in(
+                program,
+                fixture.resume_int_top.binding.id,
+                &[PreparedArgument::Managed(&k), PreparedArgument::Scalar(n)],
+                true,
+                &resume_cancel,
+            )
+            .expect("resumeInt (qApp k (I# n)) applies the retained continuation");
+        assert!(runtime.release(k));
+        let mut resumed_values = resumed.values.into_iter();
+        let Some(PreparedValueResult::Managed(next_outer)) = resumed_values.next() else {
+            panic!("resumeInt must return one managed `Eff` outer value");
+        };
+        assert!(resumed_values.next().is_none());
+        outer = next_outer;
+    }
+}
+
+/// Install the freer-resume artifact a second time on `runtime`'s machine
+/// (no imports: the two installed programs share no data, only the heap
+/// and machinery), run its `program` entry to first suspension, and return
+/// the program id with the parked outer value.
+fn park_second_program(
+    runtime: &mut PreparedRuntime,
+    fixture: &FreerResumeFixture,
+) -> (ProgramId, PreparedValue) {
+    let program = runtime
+        .install(
+            FREER_RESUME_ARTIFACT,
+            &requirements(),
+            DecodeLimits::default(),
+            &[],
+        )
+        .expect("a second, independent copy of freer-resume installs alongside the first");
+    let cancel = runtime.new_cancel_handle();
+    let result = runtime
+        .run_entry_retained_in(program, fixture.program_top.binding.id, &[], true, &cancel)
+        .expect("the second program's own `program` run suspends on its first Ask");
+    let Some(PreparedValueResult::Managed(outer)) = result.values.into_iter().next() else {
+        panic!("`program` must return one managed `Eff` outer value");
+    };
+    (program, outer)
+}
+
+/// Rung 3, stated: two installed PROGRAMS (not just two runs of one
+/// program) sharing one heap, resumed out of order, surviving a collection
+/// between. Park `k` from program A (the session's first program) and `k`
+/// from program B (installed here); drive B to completion first, then A,
+/// with B's own collections sitting between the two resumes -- A's `k`
+/// must survive every one of them untouched, exactly as within-program E3
+/// already proved for a single program's two parked continuations.
+#[test]
+fn c0_two_installed_programs_park_and_resume_out_of_order_with_a_collection_between() {
+    let fixture = FreerResumeFixture::load();
+    let mut runtime = PreparedRuntime::from_artifact(
+        FREER_RESUME_ARTIFACT,
+        &requirements(),
+        DecodeLimits::default(),
+        MachineImports::default(),
+    )
+    .expect("freer-resume artifact is closed and admitted");
+    let program_a = runtime.first_program().expect("the first program installs");
+
+    let a_cancel = runtime.new_cancel_handle();
+    let a_first = runtime
+        .run_entry_retained_in(
+            program_a,
+            fixture.program_top.binding.id,
+            &[],
+            true,
+            &a_cancel,
+        )
+        .expect("program A's `program` run suspends on its first Ask");
+    let Some(PreparedValueResult::Managed(outer_a)) = a_first.values.into_iter().next() else {
+        panic!("`program` must return one managed `Eff` outer value");
+    };
+
+    let (program_b, outer_b) = park_second_program(&mut runtime, &fixture);
+    assert_ne!(
+        program_a, program_b,
+        "the second install is a distinct program on the same machine"
+    );
+    assert_eq!(
+        runtime.retained_handle_count(),
+        2,
+        "both programs' parked E{{union, k}} cells are live roots at once"
+    );
+
+    // Out of order: drive B to its `Val` first. Every step forces a
+    // collection before observation, so A's `k` -- reachable only through
+    // `outer_a`, on a DIFFERENT installed program, untouched here -- must
+    // survive every one of B's collections while parked.
+    let value_b = drive_freer_program_to_val_in(&mut runtime, program_b, &fixture, outer_b);
+    assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
+
+    let value_a = drive_freer_program_to_val_in(&mut runtime, program_a, &fixture, outer_a);
+
+    assert_eq!(value_b, expected_program_value());
+    assert_eq!(value_a, expected_program_value());
+    assert_eq!(
+        runtime.retained_handle_count(),
+        0,
+        "every PreparedValue produced along both resume loops must be released"
+    );
+    assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
+}
+
+/// The second half of rung 3's statement: while program A's `k` sits
+/// parked, an ENTIRELY UNRELATED entry of program B (B's own `program`
+/// entry, run to its own fresh suspension, never touching A's parked
+/// value) runs on the same machine. A's parked `k` must remain a live,
+/// untouched value that still resumes correctly afterward, and the
+/// machine's disposition must stay `Reusable` throughout.
+#[test]
+fn c0_unrelated_entry_of_a_second_installed_program_runs_while_the_first_stays_parked() {
+    let fixture = FreerResumeFixture::load();
+    let mut runtime = PreparedRuntime::from_artifact(
+        FREER_RESUME_ARTIFACT,
+        &requirements(),
+        DecodeLimits::default(),
+        MachineImports::default(),
+    )
+    .expect("freer-resume artifact is closed and admitted");
+    let program_a = runtime.first_program().expect("the first program installs");
+
+    let a_cancel = runtime.new_cancel_handle();
+    let a_first = runtime
+        .run_entry_retained_in(
+            program_a,
+            fixture.program_top.binding.id,
+            &[],
+            true,
+            &a_cancel,
+        )
+        .expect("program A's `program` run suspends on its first Ask");
+    let Some(PreparedValueResult::Managed(outer_a)) = a_first.values.into_iter().next() else {
+        panic!("`program` must return one managed `Eff` outer value");
+    };
+    assert_eq!(runtime.retained_handle_count(), 1);
+
+    // B installs and runs its own unrelated `program` entry to its own
+    // fresh suspension, sharing no data with A's parked continuation.
+    let (program_b, outer_b) = park_second_program(&mut runtime, &fixture);
+    assert_eq!(
+        runtime.retained_handle_count(),
+        2,
+        "A's parked k plus B's own fresh suspension are both live roots"
+    );
+    assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
+
+    // A's parked k must still be a valid, opaque continuation. k1 (an
+    // `Arrs`/FTCQueue) is itself ordinary `Node(Leaf, Leaf)` data and
+    // inspects; the typed refusal is one layer deeper, at a Leaf's own
+    // field (a bare closure, never a constructor at WHNF) -- the same
+    // shape `unrelated_entry_runs_while_a_parked_k_stays_untouched_...`
+    // (single-program E3) already established for this fixture's k.
+    let PreparedOuter::Constructor {
+        fields: outer_a_fields,
+        ..
+    } = runtime
+        .inspect_outer(&outer_a)
+        .expect("A's parked E{union, k} outer still inspects");
+    let mut outer_a_fields = outer_a_fields.into_iter();
+    let Some(PreparedValueResult::Managed(union_a)) = outer_a_fields.next() else {
+        panic!("E's first field must be the managed Union");
+    };
+    assert!(runtime.release(union_a));
+    let Some(PreparedValueResult::Managed(k_a)) = outer_a_fields.next() else {
+        panic!("E's second field must be the managed continuation");
+    };
+    let PreparedOuter::Constructor {
+        fields: mut node_fields,
+        ..
+    } = runtime
+        .inspect_outer(&k_a)
+        .expect("k_a's own Node/Leaf FTCQueue cell is ordinary WHNF data and inspects");
+    assert_eq!(node_fields.len(), 2, "program's k is Node(Leaf, Leaf)");
+    let leaf = take_managed(&mut node_fields, 0);
+    let other_leaf = take_managed(&mut node_fields, 1);
+    assert!(runtime.release(other_leaf));
+    let PreparedOuter::Constructor {
+        fields: mut leaf_fields,
+        ..
+    } = runtime
+        .inspect_outer(&leaf)
+        .expect("Leaf itself is ordinary WHNF data (one field: the closure)");
+    assert_eq!(
+        leaf_fields.len(),
+        1,
+        "Leaf has exactly one field: the closure"
+    );
+    let closure = take_managed(&mut leaf_fields, 0);
+    assert!(runtime.release(leaf));
+    assert!(
+        matches!(
+            runtime.inspect_outer(&closure),
+            Err(PreparedRuntimeError::Run(ExecutionError::Observation(
+                ObservationFailure::Unobservable(_)
+            )))
+        ),
+        "a Leaf's own field is a bare closure, never a constructor at WHNF; \
+         inspect_outer must refuse it with a typed ObservationFailure"
+    );
+    assert!(runtime.release(closure));
+    assert!(runtime.release(k_a));
+
+    // A still resumes correctly to completion after B ran unrelated work.
+    let value_a = drive_freer_program_to_val_in(&mut runtime, program_a, &fixture, outer_a);
+    assert_eq!(value_a, expected_program_value());
+
+    // B's own suspension is untouched by any of the above and still
+    // resumes to the same expected value.
+    let value_b = drive_freer_program_to_val_in(&mut runtime, program_b, &fixture, outer_b);
+    assert_eq!(value_b, expected_program_value());
+
+    assert_eq!(runtime.retained_handle_count(), 0);
+    assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
 }
 
 // ---- S6: end-to-end retained import through the session runtime ---------
