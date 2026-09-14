@@ -188,7 +188,7 @@ impl PreparedRuntime {
     pub fn retained_handle_count(&self) -> usize {
         self.machine
             .as_ref()
-            .map_or(0, PreparedMachine::handle_count)
+            .map_or(0, |(machine, _)| machine.handle_count())
     }
 
     pub fn run_entry(
