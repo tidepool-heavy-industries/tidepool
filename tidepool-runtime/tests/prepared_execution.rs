@@ -6,7 +6,7 @@ use tidepool_codegen::jit_machine::MachineDisposition;
 use tidepool_codegen::prepared_program::{
     CompiledProgram, ExecutionError, ObservationFailure, PreparedCallOptions,
     PreparedInput as CodegenPreparedInput, PreparedMachine, PreparedMachineOptions,
-    PreparedOuter as PreparedOuterCodegen,
+    PreparedOuter as PreparedOuterCodegen, TopSlotBase,
 };
 use tidepool_repr::execution_schema::{
     link_program, parse_program, Architecture, DecodeLimits, Endianness, ImportedValue,
@@ -1095,9 +1095,17 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
 
     let linked = link_program(prepared, &MachineImports::default())
         .expect("freer-resume artifact is closed and admits with no imports");
-    let program = CompiledProgram::compile(&linked).expect("freer-resume artifact compiles");
-    let mut machine = PreparedMachine::new(program, PreparedMachineOptions { nursery_bytes: 4096 })
-        .expect("freer-resume program installs");
+    let program =
+        CompiledProgram::compile(&linked, TopSlotBase::ZERO).expect("freer-resume artifact compiles");
+    let top_slots = program.top_slot_count();
+    let (mut machine, program_id) = PreparedMachine::new(
+        program,
+        PreparedMachineOptions {
+            nursery_bytes: 4096,
+            top_slots,
+        },
+    )
+    .expect("freer-resume program installs");
 
     let call_options = PreparedCallOptions {
         observation_budget: 0,
@@ -1106,6 +1114,7 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
 
     let first = machine
         .run_entry_retained(
+            program_id,
             program_top.binding.id,
             &[],
             call_options,
@@ -1158,6 +1167,7 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
 
     let ask_result = machine
         .run_entry_retained(
+            program_id,
             ask_argument_top.binding.id,
             &[CodegenPreparedInput::Managed(payload)],
             call_options,
@@ -1178,6 +1188,7 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
     let cancel = Arc::new(AtomicBool::new(true));
     let cancelled = machine
         .run_entry_retained(
+            program_id,
             resume_int_top.binding.id,
             &[CodegenPreparedInput::Managed(k), CodegenPreparedInput::Scalar(n)],
             call_options,
@@ -1199,6 +1210,7 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
     // the very same k succeeds.
     let resumed = machine
         .run_entry_retained(
+            program_id,
             resume_int_top.binding.id,
             &[CodegenPreparedInput::Managed(k), CodegenPreparedInput::Scalar(n)],
             call_options,
