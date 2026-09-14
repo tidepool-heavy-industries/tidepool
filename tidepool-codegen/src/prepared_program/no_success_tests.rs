@@ -1,4 +1,4 @@
-use super::{CompiledProgram, DescriptorMeaning, ExecutionError, RunOptions};
+use super::{CompiledProgram, DescriptorMeaning, ExecutionError, RunOptions, TopSlotBase};
 use crate::host_fns::RuntimeError;
 use crate::machine_state::{MachineDisposition, MachineFailure};
 use std::sync::{atomic::AtomicBool, Arc};
@@ -28,7 +28,7 @@ fn raising_arithmetic_primops_return_typed_reusable_failure() {
         };
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        let program = CompiledProgram::compile(&linked).unwrap();
+        let program = CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap();
         assert!(matches!(
             program.run_entry(ValueId(0), &[], &RunOptions::default(), Arc::new(AtomicBool::new(false))),
             Err(ExecutionError::Runtime(MachineFailure {
@@ -368,7 +368,7 @@ fn bottoming_wire(call: BottomCall) -> WireProgram {
 fn compile(wire: WireProgram) -> CompiledProgram {
     let prepared = testing::prepare(wire).expect("NoSuccess fixture validates");
     let linked = link_program(prepared, &MachineImports::default()).expect("fixture links");
-    CompiledProgram::compile(&linked).expect("fixture compiles")
+    CompiledProgram::compile(&linked, TopSlotBase::ZERO).expect("fixture compiles")
 }
 
 fn assert_raised(program: &CompiledProgram) {
@@ -452,7 +452,7 @@ fn w5_no_success_raised_caf_uses_status_only_body_and_reusable_settlement() {
         &MachineImports::default(),
     )
     .unwrap();
-    let program = CompiledProgram::compile(&linked).unwrap();
+    let program = CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap();
     for _ in 0..2 {
         let result = program.run_entry(
             ValueId(0),

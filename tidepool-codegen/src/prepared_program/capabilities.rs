@@ -183,7 +183,7 @@ mod tests {
     ) -> Result<super::super::CompiledProgram, super::super::CompileError> {
         let prepared = testing::prepare(wire).expect("capability fixture validates");
         let linked = link_program(prepared, &MachineImports::default()).expect("fixture links");
-        super::super::CompiledProgram::compile(&linked)
+        super::super::CompiledProgram::compile(&linked, super::super::TopSlotBase::ZERO)
     }
 
     #[test]

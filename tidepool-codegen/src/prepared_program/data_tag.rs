@@ -72,7 +72,7 @@ pub(super) fn emit(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{CompiledProgram, ExecutionError, RunOptions, Unsupported};
+    use super::super::{CompiledProgram, ExecutionError, RunOptions, TopSlotBase, Unsupported};
     use crate::{host_fns::RuntimeError, machine_state::MachineDisposition};
     use std::sync::{atomic::AtomicBool, Arc};
     use tidepool_repr::{execution_schema::*, Literal};
@@ -159,7 +159,7 @@ mod tests {
     fn compile(wire: WireProgram) -> CompiledProgram {
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        CompiledProgram::compile(&linked).unwrap()
+        CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap()
     }
 
     fn run(
@@ -203,7 +203,7 @@ mod tests {
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
         assert!(matches!(
-            CompiledProgram::compile(&linked),
+            CompiledProgram::compile(&linked, TopSlotBase::ZERO),
             Err(super::super::CompileError::Unsupported(
                 Unsupported::Operation { .. }
             ))

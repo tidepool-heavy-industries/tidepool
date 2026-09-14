@@ -313,7 +313,11 @@ mod tests {
     fn compile(wire: WireProgram) -> crate::prepared_program::CompiledProgram {
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        crate::prepared_program::CompiledProgram::compile(&linked).unwrap()
+        crate::prepared_program::CompiledProgram::compile(
+            &linked,
+            crate::prepared_program::TopSlotBase::ZERO,
+        )
+        .unwrap()
     }
 
     #[test]

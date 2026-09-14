@@ -1,4 +1,4 @@
-use super::{CompiledProgram, RunOptions};
+use super::{CompiledProgram, RunOptions, TopSlotBase};
 use std::sync::{atomic::AtomicBool, Arc};
 use tidepool_repr::execution_schema::{testing, *};
 
@@ -396,7 +396,7 @@ fn touch_wire(garbage_allocations: usize) -> WireProgram {
 fn keep_alive_retains_external_bytes_during_callback_gc() {
     let prepared = testing::prepare(keep_alive_wire(16)).expect("lifetime fixture validates");
     let linked = link_program(prepared, &MachineImports::default()).expect("fixture links");
-    let program = CompiledProgram::compile(&linked).expect("fixture compiles");
+    let program = CompiledProgram::compile(&linked, TopSlotBase::ZERO).expect("fixture compiles");
     let result = program
         .run_entry(
             ValueId(0),
@@ -422,7 +422,7 @@ fn keep_alive_retains_external_bytes_during_callback_gc() {
 fn touch_retains_external_bytes_across_preceding_callback_gc() {
     let prepared = testing::prepare(touch_wire(16)).expect("touch fixture validates");
     let linked = link_program(prepared, &MachineImports::default()).expect("fixture links");
-    let program = CompiledProgram::compile(&linked).expect("fixture compiles");
+    let program = CompiledProgram::compile(&linked, TopSlotBase::ZERO).expect("fixture compiles");
     let result = program
         .run_entry(
             ValueId(0),

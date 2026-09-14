@@ -16,7 +16,7 @@ use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
     CompileError, CompiledProgram, ExecutionError, PreparedCallOptions, PreparedHandle,
     PreparedInput, PreparedMachine, PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter,
-    PreparedResult, PreparedResultBatch, RunOptions,
+    PreparedResult, PreparedResultBatch, ProgramId, RunOptions, TopSlotBase,
 };
 use tidepool_repr::execution_schema::{
     link_program, parse_program, DecodeLimits, LinkError, LinkedProgram, MachineImports,
@@ -74,7 +74,10 @@ impl PreparedRuntimeError {
                 | ExecutionError::Unsupported(_)
                 | ExecutionError::Arguments { .. }
                 | ExecutionError::ArgumentRepresentation { .. }
-                | ExecutionError::UnknownPreparedHandle => PreparedFailureKind::Rejected,
+                | ExecutionError::UnknownPreparedHandle
+                | ExecutionError::UnknownProgram(_)
+                | ExecutionError::TopTableExhausted { .. }
+                | ExecutionError::TopSlotBaseMismatch { .. } => PreparedFailureKind::Rejected,
                 ExecutionError::Runtime(failure) => {
                     if failure.disposition == MachineDisposition::Unavailable {
                         PreparedFailureKind::Integrity
@@ -142,7 +145,10 @@ pub enum PreparedOuter {
 /// a monotonic reuse decision.
 pub struct PreparedRuntime {
     linked: LinkedProgram,
-    machine: Option<PreparedMachine<'static>>,
+    /// Set together: a machine is installed with exactly one program (this
+    /// runtime is still single-program), so its id lives alongside it rather
+    /// than as a second, independently-optional field.
+    machine: Option<(PreparedMachine<'static>, ProgramId)>,
 }
 
 impl PreparedRuntime {
@@ -164,7 +170,9 @@ impl PreparedRuntime {
     pub fn disposition(&self) -> MachineDisposition {
         self.machine
             .as_ref()
-            .map_or(MachineDisposition::Reusable, PreparedMachine::disposition)
+            .map_or(MachineDisposition::Reusable, |(machine, _)| {
+                machine.disposition()
+            })
     }
 
     #[must_use]
@@ -209,12 +217,13 @@ impl PreparedRuntime {
             });
         }
         let entry = binding.unwrap_or_else(|| self.linked.prepared().entry());
-        let machine = self.ensure_machine()?;
+        let (machine, program) = self.ensure_machine()?;
         if cancel.is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
         let result = machine
             .run_entry_retained(
+                program,
                 entry,
                 &lowered,
                 PreparedCallOptions {
@@ -234,10 +243,9 @@ impl PreparedRuntime {
         value: &PreparedValue,
     ) -> Result<PreparedOuter, PreparedRuntimeError> {
         self.ensure_available()?;
-        let machine = self
-            .machine
-            .as_mut()
-            .ok_or_else(|| PreparedRuntimeError::Run(ExecutionError::UnknownPreparedHandle))?;
+        let (machine, _) = self.machine.as_mut().ok_or(PreparedRuntimeError::Run(
+            ExecutionError::UnknownPreparedHandle,
+        ))?;
         let outer = machine
             .inspect_outer(value.0)
             .map_err(Self::classify_execution)?;
@@ -249,7 +257,7 @@ impl PreparedRuntime {
     pub fn release(&mut self, value: PreparedValue) -> bool {
         self.machine
             .as_mut()
-            .is_some_and(|machine| machine.release(value.0))
+            .is_some_and(|(machine, _)| machine.release(value.0))
     }
 
     fn run_entry_with_completion_hook(
@@ -269,12 +277,12 @@ impl PreparedRuntime {
             collect_before_observation: collect,
         };
         let entry = binding.unwrap_or_else(|| self.linked.prepared().entry());
-        let machine = self.ensure_machine()?;
+        let (machine, program) = self.ensure_machine()?;
         if cancel.is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
         let result = machine
-            .run_entry(entry, arguments, options, Arc::clone(&cancel.0))
+            .run_entry(program, entry, arguments, options, Arc::clone(&cancel.0))
             .map_err(Self::classify_execution)?;
         // Lower success is the completion point. Cancellation published after
         // it may affect a later entry, but cannot rewrite this result.
@@ -286,7 +294,7 @@ impl PreparedRuntime {
     }
 
     fn ensure_available(&self) -> Result<(), PreparedRuntimeError> {
-        if let Some(machine) = &self.machine {
+        if let Some((machine, _)) = &self.machine {
             if machine.disposition() == MachineDisposition::Unavailable {
                 return Err(PreparedRuntimeError::Unavailable(
                     machine.failure().unwrap_or(MachineFailure {
@@ -299,23 +307,26 @@ impl PreparedRuntime {
         Ok(())
     }
 
-    fn ensure_machine(&mut self) -> Result<&mut PreparedMachine<'static>, PreparedRuntimeError> {
+    fn ensure_machine(
+        &mut self,
+    ) -> Result<(&mut PreparedMachine<'static>, ProgramId), PreparedRuntimeError> {
         self.ensure_available()?;
         if self.machine.is_none() {
-            let program =
-                CompiledProgram::compile(&self.linked).map_err(PreparedRuntimeError::Compile)?;
-            self.machine = Some(
-                PreparedMachine::new(
-                    program,
-                    PreparedMachineOptions {
-                        nursery_bytes: RunOptions::default().nursery_bytes,
-                    },
-                )
-                .map_err(Self::classify_execution)?,
-            );
+            let compiled = CompiledProgram::compile(&self.linked, TopSlotBase::ZERO)
+                .map_err(PreparedRuntimeError::Compile)?;
+            let top_slots = compiled.top_slot_count();
+            let installed = PreparedMachine::new(
+                compiled,
+                PreparedMachineOptions {
+                    nursery_bytes: RunOptions::default().nursery_bytes,
+                    top_slots,
+                },
+            )
+            .map_err(Self::classify_execution)?;
+            self.machine = Some(installed);
         }
         match self.machine.as_mut() {
-            Some(machine) => Ok(machine),
+            Some((machine, program)) => Ok((machine, *program)),
             None => unreachable!("prepared machine installed above"),
         }
     }
