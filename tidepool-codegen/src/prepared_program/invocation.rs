@@ -19,10 +19,10 @@ use super::run::{
 };
 use super::safepoint::NativeStackBounds;
 use super::{CompiledProgram, ExecutionError};
+use super::roots::{OldSpaceScope, RootWords};
 use crate::host_fns::{gc_trigger, prepared_gc_trigger, RuntimeError};
 use crate::prepared_control::{CallStatus, PreparedSafepoint};
 use crate::{context::VMContext, machine_state::MachineState, old_space::OldSpace};
-use std::cell::UnsafeCell;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -44,73 +44,6 @@ pub(super) struct PreparedInvocation<'code> {
     /// Boxed so the machine's borrowed admission pointer remains stable even
     /// while this invocation value is moved out of `enter`.
     old_space: Box<OldSpace>,
-}
-
-/// Admission is borrowed only while native code may collect or observe.
-/// Clear the shared-derived raw pointer before any mutable OldSpace borrow or
-/// invocation move; a stable Box address alone does not preserve provenance.
-pub(super) struct OldSpaceScope<'a> {
-    machine: &'a MachineState,
-    _owner: &'a OldSpace,
-}
-
-impl<'a> OldSpaceScope<'a> {
-    pub(super) fn new(
-        machine: &'a MachineState,
-        owner: &'a OldSpace,
-    ) -> Result<Self, ExecutionError> {
-        // Every installed pointer is owned by another live scope. Nested
-        // installation would lose its cleanup obligation, so fail closed.
-        if unsafe { machine.prepared_old_space() }.is_some() {
-            return Err(runtime_error(machine, RuntimeError::BadPointer));
-        }
-        unsafe { machine.install_prepared_old_space(owner) };
-        Ok(Self {
-            machine,
-            _owner: owner,
-        })
-    }
-}
-
-impl Drop for OldSpaceScope<'_> {
-    fn drop(&mut self) {
-        self.machine.clear_prepared_old_space();
-    }
-}
-
-/// Initialized, fixed-address storage with explicit collector interior writes.
-/// Never expose a shared slice into it across a generated call. Scalar snapshots
-/// are owned values; registered raw slots live until invocation teardown.
-/// Length and capacity never change after construction; no mutable element or
-/// slice borrows are created. Moving the Vec owner preserves registered pointers.
-pub(super) struct RootWords(Vec<UnsafeCell<u64>>);
-
-impl RootWords {
-    pub(super) fn new(length: usize) -> Result<Self, ExecutionError> {
-        let mut words = Vec::new();
-        words.try_reserve_exact(length).map_err(|_| {
-            super::run::runtime_error_without_machine(crate::host_fns::RuntimeError::HeapOverflow)
-        })?;
-        words.resize_with(length, || UnsafeCell::new(0));
-        Ok(Self(words))
-    }
-
-    pub(super) fn as_mut_ptr(&self) -> *mut u64 {
-        UnsafeCell::raw_get(self.0.as_ptr())
-    }
-
-    pub(super) fn write(&self, index: usize, value: u64) -> Result<(), ExecutionError> {
-        let word = self
-            .0
-            .get(index)
-            .ok_or_else(|| runtime_error_without_machine(RuntimeError::BadPointer))?;
-        unsafe { word.get().write(value) };
-        Ok(())
-    }
-
-    pub(super) fn snapshot(&self) -> Vec<u64> {
-        self.0.iter().map(|word| unsafe { *word.get() }).collect()
-    }
 }
 
 impl<'code> PreparedInvocation<'code> {

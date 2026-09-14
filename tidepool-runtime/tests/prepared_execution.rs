@@ -8,7 +8,7 @@ use tidepool_repr::DataConId;
 use tidepool_runtime::prepared_execution::{
     run_prepared_once, PreparedCancelHandle, PreparedFailureKind, PreparedRuntimeError,
 };
-use tidepool_runtime::session::persistent::PreparedPersistentSession;
+use tidepool_runtime::session::PreparedRuntime;
 
 const ARTIFACT: &[u8] = include_bytes!("../../haskell/test-prepared-stg/fixtures/m3-vertical.cbor");
 
@@ -206,7 +206,7 @@ fn one_shot_rejects_missing_import_malformed_and_precancel() {
 
 #[test]
 fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
-    let mut session = PreparedPersistentSession::from_artifact(
+    let mut session = PreparedRuntime::from_artifact(
         &strict_artifact(),
         &requirements(),
         DecodeLimits::default(),
@@ -230,7 +230,7 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
     ));
     assert_eq!(session.disposition(), MachineDisposition::Reusable);
 
-    let mut unclosed = PreparedPersistentSession::from_artifact(
+    let mut unclosed = PreparedRuntime::from_artifact(
         ARTIFACT,
         &requirements(),
         DecodeLimits::default(),
@@ -244,14 +244,13 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
     assert_eq!(rejected.kind(), PreparedFailureKind::Rejected);
     assert_eq!(unclosed.disposition(), MachineDisposition::Reusable);
 
-    let mut session = PreparedPersistentSession::from_artifact(
+    let mut session = PreparedRuntime::from_artifact(
         &strict_artifact(),
         &requirements(),
         DecodeLimits::default(),
         MachineImports::default(),
     )
     .unwrap();
-    let cancel = session.new_cancel_handle();
     let cancelled = session.new_cancel_handle();
     cancelled.cancel();
     assert!(matches!(

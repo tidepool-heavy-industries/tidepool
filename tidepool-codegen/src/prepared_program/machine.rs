@@ -4,7 +4,7 @@
 //! borrows it long enough to install its cancellation attachment and temporary
 //! result roots; neither attachment survives the native return.
 
-use super::invocation::{OldSpaceScope, RootWords};
+use super::roots::{OldSpaceScope, RootWords};
 use super::run::{
     heap_top_extent, initialize_heap_tops, register_result_roots, runtime_error,
     runtime_error_for_status, runtime_error_from_machine,
@@ -12,7 +12,7 @@ use super::run::{
     try_words,
 };
 use super::safepoint::NativeStackBounds;
-use super::{CompiledProgram, ExecutionError, RunOptions, RunResult, Unsupported};
+use super::{CompiledProgram, ExecutionError, RunResult, Unsupported};
 use crate::context::VMContext;
 use crate::host_fns::{gc_trigger, prepared_gc_trigger, RuntimeError};
 use crate::machine_state::{MachineDisposition, MachineState};
@@ -30,13 +30,40 @@ use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, ValueId};
 /// heap root stay on the thread that enters generated code.  A later resident
 /// owner may stow the whole machine under its existing single-owner protocol;
 /// it must not split these fields into independent registries.
-pub struct PreparedMachine {
-    program: Rc<CompiledProgram>,
+enum ProgramCustody<'code> {
+    Borrowed(&'code CompiledProgram),
+    Owned(Rc<CompiledProgram>),
+}
+
+impl ProgramCustody<'_> {
+    fn get(&self) -> &CompiledProgram {
+        match self {
+            Self::Borrowed(program) => program,
+            Self::Owned(program) => program,
+        }
+    }
+}
+
+pub struct PreparedMachine<'code> {
+    program: ProgramCustody<'code>,
     machine: Rc<MachineState>,
     vmctx: VMContext,
     statics: Arc<StaticRegion>,
     _top_table: RootWords,
     old_space: Box<OldSpace>,
+}
+
+/// Immutable capacity selected when a prepared machine is installed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreparedMachineOptions {
+    pub nursery_bytes: usize,
+}
+
+/// Per-entry behavior that does not alter the resident machine's capacity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreparedCallOptions {
+    pub observation_budget: usize,
+    pub collect_before_observation: bool,
 }
 
 struct CancelScope<'a>(&'a MachineState);
@@ -58,21 +85,43 @@ impl Drop for TemporaryRoots<'_> {
     }
 }
 
-impl PreparedMachine {
+impl PreparedMachine<'static> {
     /// Install `program` once and retain its mutable heap, static image, top
     /// table, descriptor registry and compiled code until this owner drops.
-    pub fn new(program: CompiledProgram, options: &RunOptions) -> Result<Self, ExecutionError> {
-        let program = Rc::new(program);
-        let statics = Arc::new(program.statics.instantiate()?);
-        let top_table = try_root_words(program.top_slots.len())?;
-        for (&id, &slot) in &program.top_slots {
-            if program.heap_top_specs.iter().any(|spec| spec.id == id) {
+    pub fn new(
+        program: CompiledProgram,
+        options: PreparedMachineOptions,
+    ) -> Result<Self, ExecutionError> {
+        Self::install(ProgramCustody::Owned(Rc::new(program)), options)
+    }
+}
+
+impl<'code> PreparedMachine<'code> {
+    /// Temporary compatibility owner for the direct compiled-program API.
+    /// Runtime persistence always uses [`Self::new`], whose code custody is
+    /// owned rather than borrowed.
+    pub(crate) fn from_borrowed(
+        program: &'code CompiledProgram,
+        options: PreparedMachineOptions,
+    ) -> Result<Self, ExecutionError> {
+        Self::install(ProgramCustody::Borrowed(program), options)
+    }
+
+    fn install(
+        program: ProgramCustody<'code>,
+        options: PreparedMachineOptions,
+    ) -> Result<Self, ExecutionError> {
+        let compiled = program.get();
+        let statics = Arc::new(compiled.statics.instantiate()?);
+        let top_table = try_root_words(compiled.top_slots.len())?;
+        for (&id, &slot) in &compiled.top_slots {
+            if compiled.heap_top_specs.iter().any(|spec| spec.id == id) {
                 continue;
             }
             let value = statics
                 .entry(id)
                 .or_else(|| {
-                    program
+                    compiled
                         .byte_tops
                         .get(&id)
                         .map(|bytes| bytes.as_ptr() as usize)
@@ -81,7 +130,7 @@ impl PreparedMachine {
             top_table.write(slot, value as u64)?;
         }
 
-        let heap_reserve = heap_top_extent(&program.heap_top_specs)?;
+        let heap_reserve = heap_top_extent(&compiled.heap_top_specs)?;
         let nursery = try_words(
             options
                 .nursery_bytes
@@ -89,10 +138,10 @@ impl PreparedMachine {
                 .div_ceil(std::mem::size_of::<u64>()),
         )?;
         let machine = Rc::new(MachineState::new());
-        machine.set_stack_map_registry(&program.pipeline.stack_maps);
+        machine.set_stack_map_registry(&compiled.pipeline.stack_maps);
         if let Err(error) = machine.install_prepared_buffer_with_static_region(
             nursery,
-            program.descriptors.clone(),
+            compiled.descriptors.clone(),
             Some(Arc::clone(&statics)),
         ) {
             machine.clear_stack_map_registry();
@@ -109,12 +158,12 @@ impl PreparedMachine {
         let heap_used = match initialize_heap_tops(
             start,
             size,
-            &program.heap_top_specs,
-            &program.top_slots,
+            &compiled.heap_top_specs,
+            &compiled.top_slots,
             &top_table,
             &statics,
-            &program.byte_tops,
-            &program.bytes,
+            &compiled.byte_tops,
+            &compiled.bytes,
         ) {
             Ok(heap_used) => heap_used,
             Err(cause) => {
@@ -130,8 +179,8 @@ impl PreparedMachine {
 
         // Heap tops persist with the machine.  They must not share the
         // run-scoped registry that a call frame truncates on native unwind.
-        for spec in &program.heap_top_specs {
-            if let Some(&slot) = program.top_slots.get(&spec.id) {
+        for spec in &compiled.heap_top_specs {
+            if let Some(&slot) = compiled.top_slots.get(&spec.id) {
                 let root = unsafe { top_table.as_mut_ptr().add(slot).cast::<*mut u8>() };
                 machine.register_persistent_root(root);
             }
@@ -156,17 +205,28 @@ impl PreparedMachine {
         self.machine.last_failure()
     }
 
+    #[cfg(test)]
+    pub(crate) fn persistent_roots_count(&self) -> usize {
+        self.machine.persistent_roots_count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn top_words(&self) -> Vec<u64> {
+        self._top_table.snapshot()
+    }
+
     /// Execute one scalar-only entry on the retained machine.
     pub fn run_entry(
         &mut self,
         entry: ValueId,
         arguments: &[u64],
-        options: &RunOptions,
+        options: PreparedCallOptions,
         cancel: Arc<AtomicBool>,
     ) -> Result<RunResult, ExecutionError> {
         let (adapter, expected_arguments, has_managed_arguments, result_contract, result_layout) = {
             let compiled = self
                 .program
+                .get()
                 .entries
                 .get(&entry)
                 .ok_or(ExecutionError::MissingEntry(entry))?;
@@ -193,7 +253,7 @@ impl PreparedMachine {
                 actual: arguments.len(),
             });
         }
-        let max_native_frame = self.program.pipeline.native_frame_maximum();
+        let max_native_frame = self.program.get().pipeline.native_frame_maximum();
         let native_frame_reserve = max_native_frame
             .checked_mul(2)
             .ok_or_else(|| runtime_error_without_machine(RuntimeError::StackOverflow))?;
@@ -216,7 +276,7 @@ impl PreparedMachine {
             (result_layout.payload_size() as usize).div_ceil(std::mem::size_of::<u64>());
         let results = try_root_words(result_words.max(1))?;
         let collections_before = self.machine.gc_generation();
-        let pointer = self.program.pipeline.get_function_ptr(adapter);
+        let pointer = self.program.get().pipeline.get_function_ptr(adapter);
         let raw_status = {
             let _scope = OldSpaceScope::new(&self.machine, &self.old_space)?;
             unsafe {
@@ -279,10 +339,10 @@ impl PreparedMachine {
             };
         let values = match super::forcing::observe_results(
             &self.machine,
-            &self.program,
+            self.program.get(),
             &mut self.vmctx,
             &self.statics,
-            &self.program.descriptor_registry,
+            &self.program.get().descriptor_registry,
             &self.old_space,
             &seeds,
             options.observation_budget,
@@ -323,14 +383,261 @@ impl PreparedMachine {
     }
 }
 
-impl Drop for PreparedMachine {
+impl Drop for PreparedMachine<'_> {
     fn drop(&mut self) {
         self.machine.clear_prepared_old_space();
         self.machine.clear_rust_roots();
+        for (start, end) in self.machine.old_space_arena_ranges() {
+            self.machine.retire_old_space_arena(start, end);
+        }
         self.machine.free_session_heap();
         self.machine.clear_stack_map_registry();
         self.machine.clear_cancel_flag();
         self.vmctx.machine_state = std::ptr::null_mut();
         self.vmctx.prepared_tops = std::ptr::null();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host_fns::RuntimeError;
+    use crate::machine_state::MachineDisposition;
+    use crate::prepared_program::entry_tests::caf_program;
+    use crate::prepared_program::{
+        ExecutionError, PreparedCallOptions, PreparedMachineOptions, RunOptions,
+    };
+    use std::sync::{Arc, atomic::AtomicBool};
+    use tidepool_repr::execution_schema::{
+        testing, Atom, ExprFrame, Group, HeapBinding, HeapRhs, MachineImports, ResultContract,
+        RuntimeRep, ScalarLiteral, Signature, SignatureId, TopBinding, UpdatePolicy, ValueId,
+    };
+
+    fn machine() -> PreparedMachine<'static> {
+        PreparedMachine::new(
+            caf_program(0, false, UpdatePolicy::Memoize),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("prepared machine")
+    }
+
+    fn language_failure_program() -> CompiledProgram {
+        let mut wire = super::super::no_success_tests::raised_caf();
+        wire.signatures.push(Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+        });
+        wire.expressions.nodes.push(ExprFrame::Return(vec![Atom::Scalar(
+            ScalarLiteral::Int {
+                bits: 64,
+                bytes: 7_i64.to_be_bytes().to_vec(),
+            },
+        )]));
+        wire.bindings.push(Group::NonRecursive(TopBinding {
+            identity: testing::identity("PreparedMachine", "success"),
+            binding: HeapBinding {
+                id: ValueId(2),
+                rhs: HeapRhs::Function {
+                    signature: SignatureId(2),
+                    parameters: vec![],
+                    captures: vec![],
+                    body: 1,
+                },
+            },
+        }));
+        let prepared = testing::prepare(wire).expect("language failure fixture");
+        let linked = tidepool_repr::execution_schema::link_program(prepared, &MachineImports::default())
+            .expect("language failure fixture links");
+        CompiledProgram::compile(&linked).expect("language failure fixture compiles")
+    }
+
+    #[test]
+    fn cancellation_is_recoverable_before_a_following_entry() {
+        let mut machine = machine();
+        let cancelled = Arc::new(AtomicBool::new(true));
+
+        let error = machine
+            .run_entry(
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: RunOptions::default().observation_budget,
+                    collect_before_observation: false,
+                },
+                Arc::clone(&cancelled),
+            )
+            .expect_err("cancelled entry must not publish a result");
+        assert!(matches!(
+            error,
+            ExecutionError::Runtime(failure)
+                if failure.cause == RuntimeError::Cancelled
+                    && failure.disposition == MachineDisposition::Reusable
+        ));
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+
+        let result = machine
+            .run_entry(
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: RunOptions::default().observation_budget,
+                    collect_before_observation: false,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("a settled cancellation must leave the machine reusable");
+        assert_eq!(result.values.len(), 1);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    #[test]
+    fn observation_failure_is_recoverable_before_a_following_entry() {
+        let mut machine = machine();
+        let error = machine
+            .run_entry(
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 0,
+                    collect_before_observation: false,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect_err("bounded observation must reject a constructor at zero budget");
+        assert!(matches!(
+            error,
+            ExecutionError::Observation(super::super::ObservationFailure::BudgetExceeded {
+                limit: 0
+            })
+        ));
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+
+        let result = machine
+            .run_entry(
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: RunOptions::default().observation_budget,
+                    collect_before_observation: false,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("an observation failure must not poison the prepared machine");
+        assert_eq!(result.values.len(), 1);
+    }
+
+    #[test]
+    fn language_failure_is_recoverable_before_a_following_entry() {
+        let mut machine = PreparedMachine::new(
+            language_failure_program(),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("prepared machine");
+        let error = machine
+            .run_entry(
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: RunOptions::default().observation_budget,
+                    collect_before_observation: false,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect_err("raised entry must report a language failure");
+        assert!(matches!(
+            error,
+            ExecutionError::Runtime(failure)
+                if failure.cause == RuntimeError::RaisedException
+                    && failure.disposition == MachineDisposition::Reusable
+        ));
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+
+        let result = machine
+            .run_entry(
+                ValueId(2),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: RunOptions::default().observation_budget,
+                    collect_before_observation: false,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("a language failure must not poison the prepared machine");
+        assert!(matches!(
+            result.values.as_slice(),
+            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(value))]
+                if *value == 7
+        ));
+    }
+
+    #[test]
+    fn persistent_roots_survive_collection_between_successive_entries() {
+        let mut machine = PreparedMachine::new(
+            caf_program(
+                0,
+                false,
+                tidepool_repr::execution_schema::UpdatePolicy::Memoize,
+            ),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("prepared machine");
+        let initial_tops = machine.top_words();
+        let persistent_roots = machine.persistent_roots_count();
+        assert_eq!(persistent_roots, initial_tops.len());
+        assert!(initial_tops.iter().all(|word| *word != 0));
+        let first = machine
+            .run_entry(
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: RunOptions::default().observation_budget,
+                    collect_before_observation: false,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("first entry");
+        let second = machine
+            .run_entry(
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: RunOptions::default().observation_budget,
+                    collect_before_observation: true,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("entry after collection");
+
+        assert_eq!(second.collections, 1);
+        assert!(matches!(
+            first.values.as_slice(),
+            [tidepool_bridge::Value::Con(id, fields)]
+                if *id == tidepool_repr::DataConId(900) && fields.is_empty()
+        ));
+        assert!(matches!(
+            second.values.as_slice(),
+            [tidepool_bridge::Value::Con(id, fields)]
+                if *id == tidepool_repr::DataConId(900) && fields.is_empty()
+        ));
+        assert_eq!(machine.persistent_roots_count(), persistent_roots);
+        assert!(machine.top_words().iter().all(|word| *word != 0));
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    #[test]
+    fn machine_drop_clears_registered_roots_before_storage_drops() {
+        let machine = machine();
+        let state = Rc::clone(&machine.machine);
+        assert!(state.persistent_roots_count() > 0);
+        drop(machine);
+        assert_eq!(state.persistent_roots_count(), 0);
+        assert_eq!(state.rust_roots_len(), 0);
+        assert!(state.old_space_arena_ranges().is_empty());
     }
 }

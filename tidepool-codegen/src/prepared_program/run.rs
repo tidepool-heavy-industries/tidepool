@@ -58,9 +58,21 @@ impl CompiledProgram {
         options: &RunOptions,
         cancel: Arc<AtomicBool>,
     ) -> Result<RunResult, ExecutionError> {
-        let mut invocation =
-            super::invocation::PreparedInvocation::enter(self, entry, arguments, options, cancel)?;
-        invocation.observe(options.observation_budget)
+        let mut machine = super::machine::PreparedMachine::from_borrowed(
+            self,
+            super::machine::PreparedMachineOptions {
+                nursery_bytes: options.nursery_bytes,
+            },
+        )?;
+        machine.run_entry(
+            entry,
+            arguments,
+            super::machine::PreparedCallOptions {
+                observation_budget: options.observation_budget,
+                collect_before_observation: options.collect_before_observation,
+            },
+            cancel,
+        )
     }
 }
 
@@ -73,8 +85,8 @@ pub(super) fn try_words(words: usize) -> Result<Vec<u64>, ExecutionError> {
     Ok(result)
 }
 
-pub(super) fn try_root_words(words: usize) -> Result<super::invocation::RootWords, ExecutionError> {
-    super::invocation::RootWords::new(words)
+pub(super) fn try_root_words(words: usize) -> Result<super::roots::RootWords, ExecutionError> {
+    super::roots::RootWords::new(words)
 }
 
 pub(super) fn heap_top_extent(specs: &[HeapTopSpec]) -> Result<usize, ExecutionError> {
@@ -94,7 +106,7 @@ pub(super) fn initialize_heap_tops(
     capacity: usize,
     specs: &[HeapTopSpec],
     top_slots: &std::collections::BTreeMap<ValueId, usize>,
-    top_table: &super::invocation::RootWords,
+    top_table: &super::roots::RootWords,
     statics: &tidepool_heap::static_region::StaticRegion,
     byte_tops: &std::collections::BTreeMap<ValueId, Arc<[u8]>>,
     bytes: &super::static_bytes::PinnedBytes,
@@ -242,7 +254,7 @@ fn write_atoms(
 
 pub(super) fn register_result_roots(
     machine: &MachineState,
-    result_area: &super::invocation::RootWords,
+    result_area: &super::roots::RootWords,
     layout: &tidepool_repr::execution_schema::StorageLayout,
 ) {
     for field in layout.fields() {

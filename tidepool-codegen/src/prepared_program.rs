@@ -30,8 +30,10 @@ mod admission;
 mod apply;
 mod emit;
 mod image;
+#[cfg(test)]
 mod invocation;
 mod machine;
+mod roots;
 pub(crate) mod md5_kernel;
 mod no_success;
 #[cfg(test)]
@@ -39,7 +41,7 @@ mod no_success_tests;
 mod observe;
 pub use observe::ObservationFailure;
 mod run;
-pub use machine::PreparedMachine;
+pub use machine::{PreparedCallOptions, PreparedMachine, PreparedMachineOptions};
 pub use run::{ExecutionError, RunOptions, RunResult};
 #[cfg(test)]
 mod apply_tests;

@@ -14,7 +14,8 @@ use tidepool_bridge::Value;
 use tidepool_codegen::jit_machine::MachineDisposition;
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
-    CompileError, CompiledProgram, ExecutionError, PreparedMachine, RunOptions,
+    CompileError, CompiledProgram, ExecutionError, PreparedCallOptions, PreparedMachine,
+    PreparedMachineOptions, RunOptions,
 };
 use tidepool_repr::execution_schema::{
     link_program, parse_program, DecodeLimits, LinkError, LinkedProgram, MachineImports,
@@ -107,7 +108,7 @@ pub struct PreparedRunResult {
 /// a monotonic reuse decision.
 pub struct PreparedRuntime {
     linked: LinkedProgram,
-    machine: Option<PreparedMachine>,
+    machine: Option<PreparedMachine<'static>>,
 }
 
 impl PreparedRuntime {
@@ -168,15 +169,20 @@ impl PreparedRuntime {
         if cancel.is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
-        let options = RunOptions {
+        let options = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
             collect_before_observation: collect,
-            ..RunOptions::default()
         };
         if self.machine.is_none() {
             let program =
                 CompiledProgram::compile(&self.linked).map_err(PreparedRuntimeError::Compile)?;
             self.machine = Some(
-                PreparedMachine::new(program, &options)
+                PreparedMachine::new(
+                    program,
+                    PreparedMachineOptions {
+                        nursery_bytes: RunOptions::default().nursery_bytes,
+                    },
+                )
                     .map_err(|error| self.classify_execution(error))?,
             );
         }
@@ -189,7 +195,7 @@ impl PreparedRuntime {
             None => unreachable!("prepared machine installed above"),
         };
         let result = machine
-            .run_entry(entry, arguments, &options, Arc::clone(&cancel.0))
+            .run_entry(entry, arguments, options, Arc::clone(&cancel.0))
             .map_err(|error| self.classify_execution(error))?;
         // Lower success is the completion point. Cancellation published after
         // it may affect a later entry, but cannot rewrite this result.

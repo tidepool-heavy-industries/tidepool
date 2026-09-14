@@ -44,9 +44,6 @@ use tidepool_codegen::suspension::{
 };
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
-use tidepool_repr::execution_schema::{
-    DecodeLimits, MachineImports, ProgramRequirements, ValueId as PreparedValueId,
-};
 use tidepool_repr::{
     CoreExpr, DataCon, DataConTable, Generation, SessionModule, SessionVarId, VarId,
 };
@@ -56,53 +53,7 @@ use super::{
     ExactExportError, ExactExportSurface, SessionCompileView, SessionError, SessionLib,
     SourceImports,
 };
-use crate::prepared_execution::{
-    PreparedCancelHandle, PreparedRunResult, PreparedRuntime, PreparedRuntimeError,
-};
 use crate::JitError;
-
-/// Retained prepared-program execution owner.
-///
-/// This composes the direct `LinkedProgram` runtime alongside the legacy Core
-/// session without sharing its machine slot or falling back to `CoreExpr`.
-/// Rejected entries and cancellation leave the retained program reusable;
-/// integrity failure is monotonic inside [`PreparedRuntime`].
-pub struct PreparedPersistentSession {
-    runtime: PreparedRuntime,
-}
-
-impl PreparedPersistentSession {
-    pub fn from_artifact(
-        artifact: &[u8],
-        requirements: &ProgramRequirements,
-        limits: DecodeLimits,
-        imports: MachineImports,
-    ) -> Result<Self, PreparedRuntimeError> {
-        Ok(Self {
-            runtime: PreparedRuntime::from_artifact(artifact, requirements, limits, imports)?,
-        })
-    }
-
-    #[must_use]
-    pub fn disposition(&self) -> MachineDisposition {
-        self.runtime.disposition()
-    }
-
-    #[must_use]
-    pub fn new_cancel_handle(&self) -> PreparedCancelHandle {
-        self.runtime.new_cancel_handle()
-    }
-
-    pub fn run_entry(
-        &mut self,
-        binding: Option<PreparedValueId>,
-        arguments: &[u64],
-        collect: bool,
-        cancel: &PreparedCancelHandle,
-    ) -> Result<PreparedRunResult, PreparedRuntimeError> {
-        self.runtime.run_entry(binding, arguments, collect, cancel)
-    }
-}
 
 /// Cross-thread custody for one completed bind root. The root never moves
 /// independently: it remains inside the session while that session is stowed,
