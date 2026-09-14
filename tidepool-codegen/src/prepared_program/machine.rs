@@ -654,8 +654,9 @@ mod tests {
     };
     use std::sync::{atomic::AtomicBool, Arc};
     use tidepool_repr::execution_schema::{
-        testing, Atom, ExprFrame, Group, HeapBinding, HeapRhs, MachineImports, ResultContract,
-        RuntimeRep, ScalarLiteral, Signature, SignatureId, TopBinding, UpdatePolicy, ValueId,
+        testing, Atom, CheckedLayout, ConstructorDecl, ConstructorId, ExprFrame, Group,
+        HeapBinding, HeapRhs, MachineImports, ResultContract, RuntimeRep, ScalarLiteral, Signature,
+        SignatureId, TopBinding, UpdatePolicy, ValueId, ValueRef,
     };
 
     fn machine() -> PreparedMachine<'static> {
@@ -719,6 +720,85 @@ mod tests {
             tidepool_repr::execution_schema::link_program(prepared, &MachineImports::default())
                 .expect("language failure fixture links");
         CompiledProgram::compile(&linked).expect("language failure fixture compiles")
+    }
+
+    fn managed_roundtrip_program() -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.signatures.push(Signature {
+            arguments: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        });
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("PreparedMachine", "Unit"),
+            family: testing::identity("PreparedMachine", "Unit"),
+            host_id: tidepool_repr::DataConId(990),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        });
+        wire.expressions.nodes[0] = ExprFrame::Construct {
+            constructor: ConstructorId(0),
+            fields: vec![],
+        };
+        wire.expressions
+            .nodes
+            .push(ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(
+                ValueId(99),
+            ))]));
+        let mut body = 1;
+        for id in 0..32 {
+            wire.expressions.nodes.push(ExprFrame::Let {
+                bindings: Group::NonRecursive(HeapBinding {
+                    id: ValueId(100 + id),
+                    rhs: HeapRhs::Constructor {
+                        constructor: ConstructorId(0),
+                        fields: vec![],
+                    },
+                }),
+                body,
+            });
+            body = wire.expressions.nodes.len() - 1;
+        }
+        wire.bindings = vec![
+            Group::NonRecursive(TopBinding {
+                identity: testing::identity("PreparedMachine", "producer"),
+                binding: HeapBinding {
+                    id: ValueId(0),
+                    rhs: HeapRhs::Thunk {
+                        signature: SignatureId(0),
+                        update: UpdatePolicy::Memoize,
+                        captures: vec![],
+                        body: 0,
+                    },
+                },
+            }),
+            Group::NonRecursive(TopBinding {
+                identity: testing::identity("PreparedMachine", "consumer"),
+                binding: HeapBinding {
+                    id: ValueId(1),
+                    rhs: HeapRhs::Function {
+                        signature: SignatureId(1),
+                        parameters: vec![ValueId(99)],
+                        captures: vec![],
+                        body,
+                    },
+                },
+            }),
+        ];
+        let prepared = testing::prepare(wire).expect("roundtrip fixture");
+        let linked =
+            tidepool_repr::execution_schema::link_program(prepared, &MachineImports::default())
+                .expect("roundtrip links");
+        CompiledProgram::compile(&linked).expect("roundtrip compiles")
     }
 
     #[test]
@@ -981,5 +1061,38 @@ mod tests {
             ),
             Err(ExecutionError::ArgumentRepresentation { .. })
         ));
+    }
+
+    #[test]
+    fn managed_input_stays_rooted_through_collection_in_the_callee() {
+        let mut machine = PreparedMachine::new(
+            managed_roundtrip_program(),
+            PreparedMachineOptions { nursery_bytes: 64 },
+        )
+        .expect("roundtrip machine");
+        let options = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        let producer = machine
+            .run_entry_retained(ValueId(0), &[], options, Arc::new(AtomicBool::new(false)))
+            .expect("producer result");
+        let [PreparedResult::Managed(handle)] = producer.values.as_slice() else {
+            panic!("producer must retain its constructor");
+        };
+        let consumer = machine
+            .run_entry_retained(
+                ValueId(1),
+                &[PreparedInput::Managed(*handle)],
+                options,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("managed argument survives generated allocation");
+        assert!(consumer.collections >= 1);
+        let [PreparedResult::Managed(returned)] = consumer.values.as_slice() else {
+            panic!("consumer must retain the returned managed argument");
+        };
+        assert!(machine.release(*handle));
+        assert!(machine.release(*returned));
     }
 }
