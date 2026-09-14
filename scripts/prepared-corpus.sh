@@ -14,6 +14,10 @@ recovered_root="$(mktemp -d "$output_root/recovered-base-contract.XXXXXX")"
 formatting_root="$(mktemp -d "$output_root/formatting-execution-contract.XXXXXX")"
 formatting_shadow_root="$(mktemp -d "$output_root/formatting-dependency-shadow.XXXXXX")"
 fingerprint_root="$(mktemp -d "$output_root/fingerprint-execution-contract.XXXXXX")"
+containers_root="$(mktemp -d "$output_root/containers-contract.XXXXXX")"
+bignum_root="$(mktemp -d "$output_root/bignum-contract.XXXXXX")"
+usertypes_root="$(mktemp -d "$output_root/usertypes-contract.XXXXXX")"
+text_root="$(mktemp -d "$output_root/text-contract.XXXXXX")"
 echo "==> prepared corpus executable snapshot: $run_root"
 echo "    provenance: $run_root/provenance.json"
 
@@ -170,6 +174,31 @@ fingerprint_report="$fingerprint_root/results.json"
   "$metadata" "$fingerprint_report"
 assert_contract_report fingerprint-execution 3 "$fingerprint_report"
 
+# Pure-evaluation cohorts. Each probe is a nullary monomorphic top whose value
+# comes from an oracle compiled by the pinned GHC, so a stage failure here is an
+# engine boundary rather than a disputed expectation.
+run_pure_cohort() {
+  local cohort="$1"
+  local module="$2"
+  local root="$3"
+  local expected="$4"
+  echo "==> projecting $cohort pure-eval cohort ($expected targets)"
+  "$projection_probe" \
+    "$repo_root/haskell/test-prepared-stg/${module}.hs" "$module" \
+    "$repo_root/haskell/test-prepared-stg/${module}Targets" "$root" \
+    "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+  "$prepared_runner" run \
+    "$root/manifest.json" \
+    "$repo_root/haskell/test-prepared-stg/${module}Expectations.json" \
+    "$metadata" "$root/results.json"
+  assert_contract_report "$cohort" "$expected" "$root/results.json"
+}
+
+run_pure_cohort containers ContainersContract "$containers_root" 8
+run_pure_cohort bignum BignumContract "$bignum_root" 6
+run_pure_cohort usertypes UserTypesContract "$usertypes_root" 8
+run_pure_cohort text TextContract "$text_root" 8
+
 report_totals() {
   local cohort="$1"
   local report="$2"
@@ -189,6 +218,10 @@ echo "  recovered base contract: $recovered_root"
 echo "  formatting execution contract: $formatting_root"
 echo "  formatting dependency-shadow contract: $formatting_shadow_root"
 echo "  fingerprint execution contract: $fingerprint_root"
+echo "  containers cohort: $containers_root"
+echo "  bignum cohort: $bignum_root"
+echo "  usertypes cohort: $usertypes_root"
+echo "  text cohort: $text_root"
 echo "  comparison expectations are historical and may be missing; inspect result rows"
 echo "  named limitation: awaitSettled's continuation is not executed by this dependency-only probe"
 report_totals priority "$priority_report"
@@ -199,6 +232,11 @@ report_totals recovered-base "$recovered_report"
 report_totals formatting-execution "$formatting_report"
 report_totals formatting-dependency-shadow "$formatting_shadow_report"
 report_totals fingerprint-execution "$fingerprint_report"
+echo "  pure-evaluation cohorts (oracle-backed, pinned GHC 9.12.2):"
+report_totals containers "$containers_root/results.json"
+report_totals bignum "$bignum_root/results.json"
+report_totals usertypes "$usertypes_root/results.json"
+report_totals text "$text_root/results.json"
 
 report_legacy_totals() {
   local cohort="$1"
