@@ -4205,6 +4205,27 @@ mod tests {
         }
     }
 
+    /// Test-only: force from-space poisoning for the duration of one S2b
+    /// mutation-check test, following `gc_fault_recovery.rs`'s
+    /// `DiagnosticOverrides` pattern. Poisoning fills a retired from-space
+    /// buffer with an unmistakable tag after every collection, so a missed
+    /// stack root (e.g. from a truncated stack-map chain) reads back as a
+    /// deterministic failure instead of sometimes-correct garbage.
+    struct PoisonGuard;
+
+    impl PoisonGuard {
+        fn enabled() -> Self {
+            crate::host_fns::set_gc_poison(true);
+            Self
+        }
+    }
+
+    impl Drop for PoisonGuard {
+        fn drop(&mut self) {
+            crate::host_fns::clear_gc_poison_override();
+        }
+    }
+
     /// S2b test 1: a collection triggered from WITHIN a second installed
     /// program's own live native call, tracing a value that is a bare
     /// Cranelift local (not a registered Rust root). A's own tiny CAF
@@ -4215,6 +4236,7 @@ mod tests {
     /// local across the next cell's own allocation.
     #[test]
     fn s2b_second_program_native_frame_is_walked_through_the_stack_map_chain() {
+        let _poison_guard = PoisonGuard::enabled();
         let (mut machine, program_a) = PreparedMachine::new(
             base_program(TopSlotBase::ZERO, 995),
             PreparedMachineOptions {
@@ -4291,6 +4313,7 @@ mod tests {
     /// only A's own region, when B is the one holding the handle.
     #[test]
     fn s2b_a_static_object_is_retained_through_b_via_the_shared_static_region_set() {
+        let _poison_guard = PoisonGuard::enabled();
         let (mut machine, program_a) = PreparedMachine::new(
             field_constructor_program(TopSlotBase::ZERO, 985),
             PreparedMachineOptions {

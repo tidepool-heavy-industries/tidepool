@@ -149,7 +149,10 @@ fn query_stack_top() -> Option<usize> {
 ///   Return addresses never collide across pipelines, so at most one
 ///   registry in the chain recognizes any given frame; a return address
 ///   inside registered JIT code without an exact entry in the recognizing
-///   registry fails the walk.
+///   registry fails the walk. An unregistered pipeline's frame is skipped
+///   as if it were a host frame, so soundness rests on the chain being
+///   complete, which install/rollback (see `PreparedMachine::install`'s T3
+///   acceptance) guarantees.
 /// - `bounds` must be a `StackBounds` the caller can justify contains every
 ///   frame it expects to walk (see [`StackBounds::capture`]).
 ///
