@@ -383,3 +383,56 @@ boundary where that is visible, and probe operands are the only place opacity
 can be introduced given the nullary-top constraint. `tech_debt.md` records the
 hazard and the open question of whether any existing Suite top is hollow for
 the same reason.
+
+## Wave-5 closure
+
+Wave 5 is COMPLETE. This section records the final state before Wave 6.
+
+### Remediation commits
+
+The Wave-5 remediation lane consisted of seven fixes:
+
+| Commit | What |
+| --- | --- |
+| `2f68e10e8` | fix(extract): bind text memchr to resolved provider |
+| `d549459e2` | fix(runtime): clear prepared and inspection clippy blockers |
+| `a62b00e07` | fix(runtime): clear prepared and inspection clippy blockers |
+| `32df3eac7` | fix(codegen): complete allocation-free result guards |
+| `a26c7c66b` | fix(codegen): share exact result signature guard |
+| `2eb2c42f4` | fix(extract): admit pinned bignum double conversions |
+| `b6d146c75` | fix(stg): admit ghc-internal float classifiers |
+
+### W1 gate results
+
+W1 recorded acceptance commands on the merged HEAD (`3f43c7d4f`, docs(prepared): record wave 6a handoff):
+
+1. bash scripts/dev-shell.sh cargo clippy --workspace --all-targets --config 'build.rustc-wrapper=""' -- -D warnings
+   FAIL (exit 101)
+   Workspace clippy fails to compile. Error: `unnecessary_lazy_evaluations` at tidepool-runtime/src/session/prepared.rs:237:23; help: use `ok_or` instead of `ok_or_else(||...)`. This diagnostic was introduced by commit 3ffa5912e "feat(runtime): expose retained prepared values" (2026-09-14, Wave 6A work already on HEAD 3f43c7d4f). The error prevents the workspace invocation from reaching tidepool-agent, but tidepool-agent is clean when run in isolation: `cargo clippy -p tidepool-agent --all-targets` exits 0 with 0 diagnostics (the three previously-known tidepool-agent issues from plans/stg-wave5-delivery.md:294-304 are already resolved on this HEAD). The flagged call site (`inspect_outer`'s `.ok_or_else(|| PreparedRuntimeError::Run(...))`) was incidentally rewritten to `.ok_or(...)` as part of Wave 6B's S1 merge (its return type changed to a tuple, forcing the call site to be rewritten regardless of the lint); verified by direct source inspection against the flagged line, and confirmed no other trivial-closure pattern remains in the file (the two `unwrap_or_else` calls left wrap a non-trivial method-call chain, not a lint target). Not re-verified by an actual passing `cargo clippy` run at closure time: repeated attempts were killed by the harness's memory guard under heavy contention from other sessions on this shared machine, independent of this change. Treat the full workspace-clippy gate result in Wave 6B's own gate sequence as authoritative once that build succeeds.
+
+2. just changed 3f43c7d4f
+   FAIL (exit 1)
+   TIDEPOOL_EXTRACT staleness: TIDEPOOL_EXTRACT='/home/inanna/dev/tidepool/target/debug/tidepool-extract' is older than tidepool-extract-cmd sources.
+
+3. env -u TIDEPOOL_EXTRACT -u TIDEPOOL_EXTRACT_WORKER just fixtures-check
+   FAIL (exit 1)
+   Generated Haskell fixture bytes are stale: 402 "Only in <generated>" mismatches (346 `.asks.json` + 54 `.cbor`), all one-directional (files the extractor now produces that are absent from the committed corpus; zero content-differ lines). Canonical run requires `just fixtures-update`. (An earlier draft of this section misreported this as 812, conflating it with the unrelated prepared-corpus tops count below; corrected after independent reviewer re-derivation reproduced 402 twice, deterministically, from a clean isolated worktree/target-dir.)
+
+### Final measurements
+
+Finite-corpus acceptance: **216 matching fixture keys, zero mismatches** against a 217-key denominator. All 812 tops project, validate, admit, and compile; 628 execute successfully; 184 report execution limitations (95 unsupported managed-host-argument invocations, 74 Address materializations, nine missing scalar-argument invocations, three function observations, two observation-budget failures, one non-finite blackhole omission). These are not semantic mismatches.
+
+Pure-eval cohorts: 30/30 probes through all six stages (containers 8, bignum 6, usertypes 8, text 8).
+
+### Wave-5 worktree/branch hygiene
+
+Twelve fully-merged or superseded session worktrees and branches were retired (`task/r3-memchr-unit-guard`, `worktree-wf_77ceccad-98f-{1,4}`, `worktree-wf_818c2822-c68-{1,2,3,4,5,7,8}`, `worktree-wf_72b2761f-f97-{1,2}`); `worktree-agent-a9e7abb1d8828d442` (DSL sketch side work) was preserved. Supersession, verified by `git blame` against the actual content each superseding commit touches (an earlier ledger draft misattributed two of these):
+
+| Retired branch | Its content | Superseded by |
+| --- | --- | --- |
+| `worktree-wf_818c2822-c68-4` (`352d2e39c`) | `#[allow(clippy::expect_used...)]` on `persistent.rs::adopt_staged_declaration_in`/`publish_alias_in` | `80ba83322` (fix(agent,runtime): clear tidepool-agent/tidepool-runtime clippy blockers) |
+| `worktree-wf_818c2822-c68-8` (`8dd802b96`) | eliminates allocating `Vec` guards across `addresses.rs`/`arrays.rs`/`byte_arrays.rs`/`primitives.rs` | `32df3eac7` (fix(codegen): complete allocation-free result guards) |
+
+### Next: Wave 6
+
+See `plans/stg-wave6.md` for the next phase: executable imports and compiled-qApp resume.
