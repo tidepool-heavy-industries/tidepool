@@ -296,7 +296,7 @@ impl<'code> PreparedInvocation<'code> {
             &self.machine,
             self.program,
             &mut self.vmctx,
-            &self.statics,
+            std::slice::from_ref(&self.statics),
             &self.program.descriptor_registry,
             &self.old_space,
             &result_seeds,

@@ -81,7 +81,9 @@ impl recursion::MappableFrame for ObservationFrame<recursion::PartiallyApplied> 
 
 pub(super) struct ObservationHeap<'a> {
     nursery: &'a [u64],
-    statics: &'a StaticRegion,
+    /// Every installed program's immutable static image. A pointer is static
+    /// iff SOME region in this set admits it -- see [`Self::object`].
+    statics: Vec<&'a StaticRegion>,
     old_space: Option<&'a dyn tidepool_heap::descriptor_region::DescriptorOldSpace>,
     descriptors: BTreeMap<usize, Arc<ObjectDescriptor>>,
     starts: Vec<u64>,
@@ -150,12 +152,18 @@ impl<'a> ObservationHeap<'a> {
         descriptors: impl IntoIterator<Item = Arc<ObjectDescriptor>>,
         constructors: &'a BTreeMap<usize, ConstructorObservation>,
     ) -> Result<Self, ObservationFailure> {
-        Self::build(nursery, statics, descriptors, Some(constructors), None)
+        Self::build(
+            nursery,
+            vec![statics],
+            descriptors,
+            Some(constructors),
+            None,
+        )
     }
 
     pub(super) fn new_with_registry_and_starts(
         nursery: &'a [u64],
-        statics: &'a StaticRegion,
+        statics: &'a [Arc<StaticRegion>],
         registry: &'a BTreeMap<usize, DescriptorMetadata>,
         starts: &[u64],
         old_space: Option<&'a dyn tidepool_heap::descriptor_region::DescriptorOldSpace>,
@@ -172,7 +180,7 @@ impl<'a> ObservationHeap<'a> {
             .collect();
         Ok(Self {
             nursery,
-            statics,
+            statics: statics.iter().map(Arc::as_ref).collect(),
             old_space,
             descriptors,
             starts: starts.to_vec(),
@@ -185,7 +193,7 @@ impl<'a> ObservationHeap<'a> {
     #[cfg(test)]
     fn build(
         nursery: &'a [u64],
-        statics: &'a StaticRegion,
+        statics: Vec<&'a StaticRegion>,
         descriptors: impl IntoIterator<Item = Arc<ObjectDescriptor>>,
         constructors: Option<&'a BTreeMap<usize, ConstructorObservation>>,
         registry: Option<&'a BTreeMap<usize, DescriptorMetadata>>,
@@ -246,16 +254,25 @@ impl<'a> ObservationHeap<'a> {
         encoded: usize,
     ) -> Result<(&ObjectDescriptor, *const u8, DescriptorState), ObservationFailure> {
         let address = untag(encoded);
-        let static_pointer = self.statics.admit(encoded)?.is_some();
-        let old_pointer = if static_pointer {
+        // A pointer is static iff SOME installed program's region admits it;
+        // the union, not any single program's own region, is what a
+        // cross-program static field (T4) resolves through.
+        let mut static_hit = None;
+        for region in &self.statics {
+            if region.admit(encoded)?.is_some() {
+                static_hit = Some(*region);
+                break;
+            }
+        }
+        let old_pointer = if static_hit.is_some() {
             None
         } else if let Some(owner) = self.old_space {
             owner.admit(encoded)?
         } else {
             None
         };
-        let available = if static_pointer {
-            self.statics
+        let available = if let Some(region) = static_hit {
+            region
                 .address_range()
                 .end
                 .checked_sub(address)

@@ -210,7 +210,7 @@ pub struct MachineState {
     text_con_id: Cell<Option<tidepool_repr::DataConId>>,
     json_con_ids: Cell<Option<tidepool_bridge::json_builder::JsonConIds>>,
     time_con_ids: Cell<Option<tidepool_bridge::time::TimeConIds>>,
-    stack_map_registry: RefCell<Option<*const StackMapRegistry>>,
+    stack_map_registry: RefCell<Vec<*const StackMapRegistry>>,
     call_depth: Cell<u32>,
     runtime_error: RefCell<Option<RuntimeError>>,
     /// Prepared exception operand; independent of temporary observation marks.
@@ -329,7 +329,7 @@ impl MachineState {
             text_con_id: Cell::new(None),
             json_con_ids: Cell::new(None),
             time_con_ids: Cell::new(None),
-            stack_map_registry: RefCell::new(None),
+            stack_map_registry: RefCell::new(Vec::new()),
             call_depth: Cell::new(0),
             runtime_error: RefCell::new(None),
             disposition: Cell::new(MachineDisposition::Reusable),
@@ -359,16 +359,42 @@ impl MachineState {
     // `pub`: bare-VMContext test harnesses (separate crates, no
     // JitEffectMachine) install this directly on their own MachineState.
 
+    /// Replace the whole chain with exactly this one registry. Single-program
+    /// owners (the one-shot `PreparedInvocation`, and a `PreparedMachine`'s
+    /// first installed program) use this; a later installed program on the
+    /// same machine extends the chain with [`Self::push_stack_map_registry`]
+    /// instead, so its frames are recognized without displacing an earlier
+    /// program's registry.
     pub fn set_stack_map_registry(&self, registry: &StackMapRegistry) {
-        *self.stack_map_registry.borrow_mut() = Some(registry as *const _);
+        *self.stack_map_registry.borrow_mut() = vec![registry as *const _];
+    }
+
+    /// Extend the chain with one more registry, keeping every previously
+    /// installed program's registry reachable. Return addresses never
+    /// collide across pipelines, so the frame walker tries each registry in
+    /// the chain in order until one recognizes a given frame's address.
+    pub(crate) fn push_stack_map_registry(&self, registry: &StackMapRegistry) {
+        self.stack_map_registry
+            .borrow_mut()
+            .push(registry as *const _);
+    }
+
+    /// Undo the most recent [`Self::push_stack_map_registry`]. Install-time
+    /// rollback only: a failed second-or-later program install must not
+    /// leave a dangling pointer into that program's (about to be dropped)
+    /// pipeline in the chain -- unlike the owned descriptor/static-region
+    /// unions, a raw stack-map pointer has no independent lifetime of its
+    /// own, so this one entry cannot be left as merely "inert metadata".
+    pub(crate) fn pop_stack_map_registry(&self) {
+        self.stack_map_registry.borrow_mut().pop();
     }
 
     pub fn clear_stack_map_registry(&self) {
-        *self.stack_map_registry.borrow_mut() = None;
+        self.stack_map_registry.borrow_mut().clear();
     }
 
-    pub(crate) fn stack_map_registry(&self) -> Option<*const StackMapRegistry> {
-        *self.stack_map_registry.borrow()
+    pub(crate) fn stack_map_registries(&self) -> Vec<*const StackMapRegistry> {
+        self.stack_map_registry.borrow().clone()
     }
 
     // --- call depth ------------------------------------------------------
@@ -772,6 +798,37 @@ impl MachineState {
                 used: 0,
             }),
         });
+        Ok(())
+    }
+
+    /// Union one more installed program's pinned descriptor layouts and
+    /// immutable static image into the already-active prepared descriptor
+    /// space, mutating it in place. Unlike
+    /// [`Self::install_prepared_buffer_with_static_region`] (which requires
+    /// no active `GcState`), this requires one already installed -- it is
+    /// the second-and-later-program path on a `PreparedMachine` that shares
+    /// one nursery/`GcState` across every installed program.
+    pub(crate) fn extend_prepared_descriptors(
+        &self,
+        layouts: Vec<std::sync::Arc<tidepool_heap::execution_descriptor::ObjectDescriptor>>,
+        static_region: Arc<tidepool_heap::static_region::StaticRegion>,
+    ) -> Result<(), RuntimeError> {
+        let mut active = self
+            .gc_state
+            .try_borrow_mut()
+            .map_err(|_| RuntimeError::BadPointer)?;
+        let prepared = active
+            .as_mut()
+            .and_then(|state| state.prepared.as_mut())
+            .ok_or(RuntimeError::BadPointer)?;
+        prepared
+            .space
+            .extend_descriptors(layouts)
+            .map_err(|_| RuntimeError::HeapOverflow)?;
+        prepared
+            .space
+            .extend_static_region(static_region)
+            .map_err(|_| RuntimeError::HeapOverflow)?;
         Ok(())
     }
 
