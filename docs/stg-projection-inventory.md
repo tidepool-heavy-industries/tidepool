@@ -381,6 +381,40 @@ heap. In that model, entering the suspended evaluation's blackhole means wait,
 not `<<loop>>`, and evaluator identity plus wakeup/settlement must become an
 explicit runtime contract before concurrency is admitted.
 
+Wave 6B's compiled-`qApp` resume path (`freerRequest`/`resumeInt`, projected
+via `haskell/test-prepared-stg/FreerResume.hs`) exercises exactly this
+boundary without yet needing an evaluator-identity contract, because
+suspension there is a plain call/return: `run_entry`/`run_entry_retained`
+returns the freer `E` constructor at WHNF, no native stack is captured, and
+every thunk on the path to that return has already settled -- the only
+`Evaluating` headers a resume can find are single-entry thunks deliberately
+retained after consumption (pinned by
+`prepared_program::freer_boundary_tests`). A parked continuation is therefore
+inert heap data, and `&mut self` on `PreparedMachine` already serializes
+every call, so two parked continuations sharing one heap do not create the
+blackhole-ownership ambiguity this section describes -- there is still only
+ever one evaluator, taking turns. `tidepool-runtime/tests/prepared_execution.rs`
+pins this directly: `parked_continuations_resume_out_of_order_with_a_collection_between`
+resumes two independently-parked continuations in reverse order with a forced
+collection between them; `unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable`
+runs an unrelated entry to completion while a continuation sits parked and
+asserts the machine's disposition stays `Reusable` throughout, plus that
+inspecting a parked continuation's own closure field is a typed
+`ObservationFailure::Unobservable` refusal, never a forced value; and
+`cancellation_before_commit_leaves_a_parked_k_valid_for_retry` drives the
+compiled adapter directly (not through `PreparedRuntime`'s own precondition
+check) to confirm cancellation observed at `resumeInt`'s `prepared_poll_at`
+safepoint leaves the continuation handle valid for an uncancelled retry.
+
+This is a narrower claim than the general problem above, not a resolution of
+it: it holds only because nothing here ever captures a native stack or lets
+a second call begin before the first returns. The evaluator-identity /
+blackhole-vs-loop distinction this section already names remains required
+before any design admits concurrent native-stack suspension on one heap, and
+before rung 3's registry-generalization work (porting the old engine's
+parked-continuation registry onto this heap) is attempted -- see
+`plans/stg-wave6.md`'s acceptance ladder and "Remaining rung owners".
+
 `MutVar#` has its own object descriptor but reuses the external boxed-storage
 owner. Any future external-value observation must classify by descriptor
 identity; `ExternalStorageKind::BoxedArray` is storage layout, not language
