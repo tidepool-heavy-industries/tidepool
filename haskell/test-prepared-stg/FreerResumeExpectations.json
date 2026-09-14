@@ -1,0 +1,6 @@
+{
+  "source_revision": "FreerResumeOracle.hs (program from FreerResume.hs) native GHC 9.12.2, runghc -i. FreerResumeOracle.hs",
+  "expectations": {
+    "program": { "kind": "int", "value": 7 }
+  }
+}

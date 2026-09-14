@@ -247,6 +247,14 @@ impl<'code> PreparedMachine<'code> {
         self.machine.last_failure()
     }
 
+    /// Number of value handles this machine currently retains. Diagnostic
+    /// surface only, mirroring `JitMachine::value_handle_count`: it exists so
+    /// a caller can confirm every retained `PreparedHandle` was released.
+    #[must_use]
+    pub fn handle_count(&self) -> usize {
+        self.handles.len()
+    }
+
     /// Release one retained managed result. Unknown or foreign values do not
     /// expose a slot and therefore cannot affect a later entry.
     pub fn release(&mut self, handle: PreparedHandle) -> bool {

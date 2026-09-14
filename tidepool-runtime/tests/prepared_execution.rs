@@ -6,8 +6,8 @@ use tidepool_repr::execution_schema::{
 };
 use tidepool_repr::DataConId;
 use tidepool_runtime::prepared_execution::{
-    run_prepared_once, PreparedCancelHandle, PreparedFailureKind, PreparedOuter,
-    PreparedRuntimeError, PreparedValueResult,
+    run_prepared_once, PreparedArgument, PreparedCancelHandle, PreparedFailureKind, PreparedOuter,
+    PreparedRuntimeError, PreparedValue, PreparedValueResult,
 };
 use tidepool_runtime::session::PreparedRuntime;
 
@@ -16,6 +16,11 @@ const FREER_RETENTION_ARTIFACT: &[u8] =
     include_bytes!("../../haskell/test-prepared-stg/fixtures/freer-retention.cbor");
 const FREER_RESUME_ARTIFACT: &[u8] =
     include_bytes!("../../haskell/test-prepared-stg/fixtures/freer-resume.cbor");
+/// `program`'s GHC-computed final `Int`, transcribed from
+/// `FreerResumeOracle.hs` run under the pinned GHC 9.12.2 (see that file's
+/// header and `FreerResume.md`). Never hand-derived.
+const FREER_RESUME_EXPECTATIONS: &str =
+    include_str!("../../haskell/test-prepared-stg/FreerResumeExpectations.json");
 
 fn head(major: u8, length: usize) -> Vec<u8> {
     assert!(length < 24);
@@ -426,4 +431,245 @@ fn freer_resume_artifact_admits_program_and_resume_int_as_two_entries() {
     // `resumeInt` itself: doing so needs a real retained `Arrs` continuation
     // (a `Managed` argument, not a fabricated `Scalar`), and building one is
     // E2's resume-loop concern, not E1's admission probe.
+}
+
+/// `program`'s expected final `Int`, read out of `FreerResumeExpectations.json`.
+fn expected_program_value() -> i64 {
+    let parsed: serde_json::Value = serde_json::from_str(FREER_RESUME_EXPECTATIONS)
+        .expect("FreerResumeExpectations.json parses as JSON");
+    parsed["expectations"]["program"]["value"]
+        .as_i64()
+        .expect("FreerResumeExpectations.json's program expectation is an integer")
+}
+
+/// One constructor's host identity in `FREER_RESUME_ARTIFACT`, found by
+/// occurrence name. Every occurrence the resume loop below inspects by
+/// identity (`E`, `Val`, `Union`) appears exactly once in the artifact's
+/// constructor table.
+fn freer_resume_constructor_identity(occurrence: &str) -> DataConId {
+    let prepared = parse_program(
+        FREER_RESUME_ARTIFACT,
+        &requirements(),
+        DecodeLimits::default(),
+    )
+    .expect("freer-resume artifact parses");
+    prepared
+        .constructors()
+        .iter()
+        .find(|constructor| constructor.identity.occurrence == occurrence)
+        .unwrap_or_else(|| panic!("freer-resume artifact has no constructor named {occurrence}"))
+        .host_id
+}
+
+/// Take one field as a managed value, replacing it with `Void` so the
+/// `Vec` stays a valid (if partially consumed) field list.
+fn take_managed(fields: &mut [PreparedValueResult], index: usize) -> PreparedValue {
+    match std::mem::replace(&mut fields[index], PreparedValueResult::Void) {
+        PreparedValueResult::Managed(value) => value,
+        PreparedValueResult::Void | PreparedValueResult::Scalar(_) => {
+            panic!("field {index} expected a managed value")
+        }
+    }
+}
+
+fn take_scalar(fields: &[PreparedValueResult], index: usize) -> u64 {
+    match fields[index] {
+        PreparedValueResult::Scalar(word) => word,
+        PreparedValueResult::Void | PreparedValueResult::Managed(_) => {
+            panic!("field {index} expected a scalar value")
+        }
+    }
+}
+
+/// Drives the compiled `qApp` resume loop (Wave 6B decision D2) end to end,
+/// with no Rust-side freer walker: `PreparedRuntime::inspect_outer` reads
+/// every constructor layer this loop looks at (`E`/`Val`, and `Union`'s
+/// unpacked tag/payload shape), and `resumeInt`/`askArgument`/`valResult`
+/// are the only things that ever force a field, and they do it as ordinary
+/// compiled Haskell (a `qApp` application and two pattern matches), never as
+/// Rust reading raw heap words.
+///
+/// `program`'s first suspension is `E { union = Union { tag = 0, payload =
+/// Ask 3 } , k }`. The task card's original plan was to keep descending with
+/// `inspect_outer` alone (`Union`'s payload -> `Ask` -> `I#`), but
+/// `Union`'s payload field (`Data.OpenUnion.Internal`, a library type this
+/// probe does not own) is an ordinary lazy field, so the retained payload is
+/// still a `Thunk` object at that point -- and `inspect_outer` is
+/// deliberately observation-only (see its doc comment in
+/// `tidepool-codegen/src/prepared_program/observe.rs`): it errors
+/// (`Unobservable(Thunk)`) rather than force it. This is not a Rust-side
+/// limitation to work around by decoding bytes by hand; the fix is the
+/// engine's own idiom for forcing a value from Rust, used the same way
+/// `resumeInt` already is: a tiny compiled Haskell top that pattern-matches
+/// (`askArgument`, `valResult` in `FreerResume.hs`) is called through
+/// `run_entry_retained` with the retained value as a `Managed` argument, and
+/// returns the forced `Int#` as a `Scalar`. `inspect_outer` still does all
+/// the *shape* reading this loop needs (`E` vs `Val`, `Union`'s tag/payload
+/// split); only the two fields nothing forces (`Ask`'s argument, `Val`'s
+/// boxed `Int`) route through a compiled accessor instead.
+///
+/// Each suspension is answered by calling `resumeInt` with
+/// `[PreparedArgument::Managed(&k), PreparedArgument::Scalar(answer)]` (the
+/// compiled `resumeInt k n = qApp k (I# n)`), until the result is `Val`.
+/// `collect_before_observation: true` on every `run_entry_retained` call
+/// (the initial `program` run, every `askArgument`/`resumeInt` call, and the
+/// final `valResult` call) forces a moving collection between suspension and
+/// resume at every step, so this loop only completes if `k` and the retained
+/// request are real GC roots, not raw pointers into a heap that already
+/// moved.
+///
+/// The final `Int` is checked against `FreerResumeExpectations.json`
+/// (`FreerResumeOracle.hs` run under the pinned GHC, never hand-typed).
+/// Every `PreparedValue` this loop allocates is released as soon as it is no
+/// longer needed, and the runtime's handle ledger must read back to zero at
+/// the end: no leaked handles, and nothing forces `k` itself anywhere in
+/// this loop (it is only ever inspected as an opaque `Managed` field and
+/// handed back to `resumeInt`).
+#[test]
+fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments() {
+    let prepared = parse_program(
+        FREER_RESUME_ARTIFACT,
+        &requirements(),
+        DecodeLimits::default(),
+    )
+    .expect("freer-resume artifact parses");
+    let program_top = freer_resume_top(&prepared, "program");
+    let resume_int_top = freer_resume_top(&prepared, "resumeInt");
+    let ask_argument_top = freer_resume_top(&prepared, "askArgument");
+    let val_result_top = freer_resume_top(&prepared, "valResult");
+
+    let e_id = freer_resume_constructor_identity("E");
+    let val_id = freer_resume_constructor_identity("Val");
+    let union_id = freer_resume_constructor_identity("Union");
+
+    let mut runtime = PreparedRuntime::from_artifact(
+        FREER_RESUME_ARTIFACT,
+        &requirements(),
+        DecodeLimits::default(),
+        MachineImports::default(),
+    )
+    .expect("freer-resume artifact is closed and admitted");
+
+    let cancel = runtime.new_cancel_handle();
+    let first = runtime
+        .run_entry_retained(Some(program_top.binding.id), &[], true, &cancel)
+        .expect("running `program` compiles the artifact and suspends on the first Ask");
+    let mut first_values = first.values.into_iter();
+    let Some(PreparedValueResult::Managed(mut outer)) = first_values.next() else {
+        panic!("`program` must return one managed `Eff` outer value");
+    };
+    assert!(first_values.next().is_none());
+
+    let mut seen_answers = Vec::new();
+    let final_value = loop {
+        let PreparedOuter::Constructor {
+            identity,
+            mut fields,
+        } = runtime
+            .inspect_outer(&outer)
+            .expect("the retained Eff value survives its collection and inspects");
+
+        if identity == val_id {
+            assert_eq!(fields.len(), 1, "Val has exactly one field");
+            // The boxed `Int` field itself is an ordinary lazy field (`pure
+            // (a + b)` is never forced by anything on the path back to
+            // Rust); `valResult` forces it below via `&outer` directly, so
+            // this field is released unread.
+            let boxed = take_managed(&mut fields, 0);
+            assert!(runtime.release(boxed));
+
+            let value_cancel = runtime.new_cancel_handle();
+            let value_result = runtime
+                .run_entry_retained(
+                    Some(val_result_top.binding.id),
+                    &[PreparedArgument::Managed(&outer)],
+                    true,
+                    &value_cancel,
+                )
+                .expect("valResult (Val (I# n) -> n) forces program's final Int");
+            let mut value_values = value_result.values.into_iter();
+            let Some(PreparedValueResult::Scalar(word)) = value_values.next() else {
+                panic!("valResult must return one scalar Int#");
+            };
+            assert!(value_values.next().is_none());
+            assert!(runtime.release(outer));
+            break word as i64;
+        }
+
+        assert_eq!(identity, e_id, "an Eff value at WHNF is either Val or E");
+        assert_eq!(fields.len(), 2, "E has exactly two fields: Union and Arrs");
+        let union = take_managed(&mut fields, 0);
+        let k = take_managed(&mut fields, 1);
+        assert!(runtime.release(outer));
+
+        let PreparedOuter::Constructor {
+            identity: union_identity,
+            fields: mut union_fields,
+        } = runtime.inspect_outer(&union).expect("Union inspects");
+        assert_eq!(union_identity, union_id);
+        assert_eq!(
+            union_fields.len(),
+            2,
+            "Union has an unpacked tag word and a payload"
+        );
+        let tag = take_scalar(&union_fields, 0);
+        assert_eq!(tag, 0, "the only effect in '[Req] is index 0");
+        let payload = take_managed(&mut union_fields, 1);
+        assert!(runtime.release(union));
+
+        // `payload` (`Union`'s second field) is an ordinary lazy field, so
+        // it is still a `Thunk` object here; `askArgument` forces it (and,
+        // since `Ask :: !Int -> Req Int` is strict, unboxes straight to
+        // `Int#`) via an ordinary pattern match, compiled and called like
+        // any other top -- not a Rust-side freer walker.
+        let ask_cancel = runtime.new_cancel_handle();
+        let ask_result = runtime
+            .run_entry_retained(
+                Some(ask_argument_top.binding.id),
+                &[PreparedArgument::Managed(&payload)],
+                true,
+                &ask_cancel,
+            )
+            .expect("askArgument (Ask (I# n) -> n) forces the Ask request's Int#");
+        let mut ask_values = ask_result.values.into_iter();
+        let Some(PreparedValueResult::Scalar(n)) = ask_values.next() else {
+            panic!("askArgument must return one scalar Int#");
+        };
+        assert!(ask_values.next().is_none());
+        assert!(runtime.release(payload));
+        seen_answers.push(n);
+
+        let resume_cancel = runtime.new_cancel_handle();
+        let resumed = runtime
+            .run_entry_retained(
+                Some(resume_int_top.binding.id),
+                &[PreparedArgument::Managed(&k), PreparedArgument::Scalar(n)],
+                true,
+                &resume_cancel,
+            )
+            .expect("resumeInt (qApp k (I# n)) applies the retained continuation");
+        assert!(runtime.release(k));
+        let mut resumed_values = resumed.values.into_iter();
+        let Some(PreparedValueResult::Managed(next_outer)) = resumed_values.next() else {
+            panic!("resumeInt must return one managed `Eff` outer value");
+        };
+        assert!(resumed_values.next().is_none());
+        outer = next_outer;
+    };
+
+    assert_eq!(
+        seen_answers,
+        vec![3, 4],
+        "program's own Ask arguments: a <- send (Ask 3), then send (Ask (a + 1))"
+    );
+    assert_eq!(
+        final_value,
+        expected_program_value(),
+        "resume loop result must match FreerResumeOracle.hs's GHC-computed value"
+    );
+    assert_eq!(
+        runtime.retained_handle_count(),
+        0,
+        "every PreparedValue produced along the resume loop must be released"
+    );
 }
