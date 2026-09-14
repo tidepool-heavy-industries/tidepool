@@ -48,8 +48,9 @@ pub use persistent::{
 };
 
 pub use prepared::{
-    run_prepared_once, PreparedCancelHandle, PreparedFailureKind, PreparedRunResult,
-    PreparedRuntime, PreparedRuntimeError,
+    run_prepared_once, PreparedArgument, PreparedCancelHandle, PreparedFailureKind, PreparedOuter,
+    PreparedRetainedResult, PreparedRunResult, PreparedRuntime, PreparedRuntimeError,
+    PreparedValue, PreparedValueResult,
 };
 
 pub use recovery::{DeclarationRecoveryReport, LostDeclaration, ReplayedDeclaration};

@@ -14,8 +14,9 @@ use tidepool_bridge::Value;
 use tidepool_codegen::jit_machine::MachineDisposition;
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
-    CompileError, CompiledProgram, ExecutionError, PreparedCallOptions, PreparedMachine,
-    PreparedMachineOptions, RunOptions,
+    CompileError, CompiledProgram, ExecutionError, PreparedCallOptions, PreparedHandle,
+    PreparedInput, PreparedMachine, PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter,
+    PreparedResult, PreparedResultBatch, RunOptions,
 };
 use tidepool_repr::execution_schema::{
     link_program, parse_program, DecodeLimits, LinkError, LinkedProgram, MachineImports,
@@ -106,6 +107,37 @@ pub struct PreparedRunResult {
     pub collections: u64,
 }
 
+/// An opaque value retained by one [`PreparedRuntime`].
+///
+/// The value is intentionally linear at the runtime boundary: pass and
+/// inspect it by borrow, then consume it with [`PreparedRuntime::release`].
+/// Its codegen root never escapes this wrapper.
+pub struct PreparedValue(PreparedHandle);
+
+pub enum PreparedArgument<'a> {
+    Scalar(u64),
+    Managed(&'a PreparedValue),
+}
+
+pub enum PreparedValueResult {
+    Void,
+    Scalar(u64),
+    Managed(PreparedValue),
+}
+
+pub struct PreparedRetainedResult {
+    pub values: Vec<PreparedValueResult>,
+    pub collections: u64,
+}
+
+/// One constructor layer of a retained value, read without forcing children.
+pub enum PreparedOuter {
+    Constructor {
+        identity: tidepool_repr::DataConId,
+        fields: Vec<PreparedValueResult>,
+    },
+}
+
 /// A linked program and its lazily compiled owner retained across entries with
 /// a monotonic reuse decision.
 pub struct PreparedRuntime {
@@ -150,6 +182,76 @@ impl PreparedRuntime {
         self.run_entry_with_completion_hook(binding, arguments, collect, cancel, || {})
     }
 
+    /// Execute with scalar or borrowed retained arguments and retain managed
+    /// results under this runtime's machine owner.
+    pub fn run_entry_retained(
+        &mut self,
+        binding: Option<ValueId>,
+        arguments: &[PreparedArgument<'_>],
+        collect: bool,
+        cancel: &PreparedCancelHandle,
+    ) -> Result<PreparedRetainedResult, PreparedRuntimeError> {
+        self.ensure_available()?;
+        if cancel.is_cancelled() {
+            return Err(PreparedRuntimeError::Cancelled);
+        }
+        let mut lowered = Vec::new();
+        lowered.try_reserve_exact(arguments.len()).map_err(|_| {
+            PreparedRuntimeError::Run(ExecutionError::Runtime(MachineFailure {
+                cause: tidepool_codegen::host_fns::RuntimeError::HeapOverflow,
+                disposition: MachineDisposition::Reusable,
+            }))
+        })?;
+        for argument in arguments {
+            lowered.push(match argument {
+                PreparedArgument::Scalar(word) => PreparedInput::Scalar(*word),
+                PreparedArgument::Managed(value) => PreparedInput::Managed(value.0),
+            });
+        }
+        let entry = binding.unwrap_or_else(|| self.linked.prepared().entry());
+        let machine = self.ensure_machine()?;
+        if cancel.is_cancelled() {
+            return Err(PreparedRuntimeError::Cancelled);
+        }
+        let result = machine
+            .run_entry_retained(
+                entry,
+                &lowered,
+                PreparedCallOptions {
+                    observation_budget: 0,
+                    collect_before_observation: collect,
+                },
+                Arc::clone(&cancel.0),
+            )
+            .map_err(Self::classify_execution)?;
+        Ok(Self::retain_result(result))
+    }
+
+    /// Inspect one retained constructor layer without evaluating its fields.
+    /// This never installs a machine for a fabricated value.
+    pub fn inspect_outer(
+        &mut self,
+        value: &PreparedValue,
+    ) -> Result<PreparedOuter, PreparedRuntimeError> {
+        self.ensure_available()?;
+        let machine = self
+            .machine
+            .as_mut()
+            .ok_or_else(|| PreparedRuntimeError::Run(ExecutionError::UnknownPreparedHandle))?;
+        let outer = machine
+            .inspect_outer(value.0)
+            .map_err(Self::classify_execution)?;
+        Ok(Self::outer_result(outer))
+    }
+
+    /// Consume one retained value's runtime wrapper and release its root.
+    /// Releasing an already-closed or foreign value is a no-op.
+    pub fn release(&mut self, value: PreparedValue) -> bool {
+        self.machine
+            .as_mut()
+            .is_some_and(|machine| machine.release(value.0))
+    }
+
     fn run_entry_with_completion_hook(
         &mut self,
         binding: Option<ValueId>,
@@ -158,6 +260,32 @@ impl PreparedRuntime {
         cancel: &PreparedCancelHandle,
         after_lower_success: impl FnOnce(),
     ) -> Result<PreparedRunResult, PreparedRuntimeError> {
+        self.ensure_available()?;
+        if cancel.is_cancelled() {
+            return Err(PreparedRuntimeError::Cancelled);
+        }
+        let options = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: collect,
+        };
+        let entry = binding.unwrap_or_else(|| self.linked.prepared().entry());
+        let machine = self.ensure_machine()?;
+        if cancel.is_cancelled() {
+            return Err(PreparedRuntimeError::Cancelled);
+        }
+        let result = machine
+            .run_entry(entry, arguments, options, Arc::clone(&cancel.0))
+            .map_err(Self::classify_execution)?;
+        // Lower success is the completion point. Cancellation published after
+        // it may affect a later entry, but cannot rewrite this result.
+        after_lower_success();
+        Ok(PreparedRunResult {
+            values: result.values,
+            collections: result.collections,
+        })
+    }
+
+    fn ensure_available(&self) -> Result<(), PreparedRuntimeError> {
         if let Some(machine) = &self.machine {
             if machine.disposition() == MachineDisposition::Unavailable {
                 return Err(PreparedRuntimeError::Unavailable(
@@ -168,13 +296,11 @@ impl PreparedRuntime {
                 ));
             }
         }
-        if cancel.is_cancelled() {
-            return Err(PreparedRuntimeError::Cancelled);
-        }
-        let options = PreparedCallOptions {
-            observation_budget: RunOptions::default().observation_budget,
-            collect_before_observation: collect,
-        };
+        Ok(())
+    }
+
+    fn ensure_machine(&mut self) -> Result<&mut PreparedMachine<'static>, PreparedRuntimeError> {
+        self.ensure_available()?;
         if self.machine.is_none() {
             let program =
                 CompiledProgram::compile(&self.linked).map_err(PreparedRuntimeError::Compile)?;
@@ -185,30 +311,40 @@ impl PreparedRuntime {
                         nursery_bytes: RunOptions::default().nursery_bytes,
                     },
                 )
-                .map_err(|error| self.classify_execution(error))?,
+                .map_err(Self::classify_execution)?,
             );
         }
-        if cancel.is_cancelled() {
-            return Err(PreparedRuntimeError::Cancelled);
-        }
-        let entry = binding.unwrap_or_else(|| self.linked.prepared().entry());
-        let machine = match self.machine.as_mut() {
-            Some(machine) => machine,
+        match self.machine.as_mut() {
+            Some(machine) => Ok(machine),
             None => unreachable!("prepared machine installed above"),
-        };
-        let result = machine
-            .run_entry(entry, arguments, options, Arc::clone(&cancel.0))
-            .map_err(|error| self.classify_execution(error))?;
-        // Lower success is the completion point. Cancellation published after
-        // it may affect a later entry, but cannot rewrite this result.
-        after_lower_success();
-        Ok(PreparedRunResult {
-            values: result.values,
-            collections: result.collections,
-        })
+        }
     }
 
-    fn classify_execution(&mut self, error: ExecutionError) -> PreparedRuntimeError {
+    fn retain_result(result: PreparedResultBatch) -> PreparedRetainedResult {
+        PreparedRetainedResult {
+            values: result.values.into_iter().map(Self::value_result).collect(),
+            collections: result.collections,
+        }
+    }
+
+    fn outer_result(outer: CodegenPreparedOuter) -> PreparedOuter {
+        match outer {
+            CodegenPreparedOuter::Constructor { identity, fields } => PreparedOuter::Constructor {
+                identity,
+                fields: fields.into_iter().map(Self::value_result).collect(),
+            },
+        }
+    }
+
+    fn value_result(result: PreparedResult) -> PreparedValueResult {
+        match result {
+            PreparedResult::Void => PreparedValueResult::Void,
+            PreparedResult::Scalar(word) => PreparedValueResult::Scalar(word),
+            PreparedResult::Managed(handle) => PreparedValueResult::Managed(PreparedValue(handle)),
+        }
+    }
+
+    fn classify_execution(error: ExecutionError) -> PreparedRuntimeError {
         PreparedRuntimeError::Run(error)
     }
 }
@@ -394,7 +530,8 @@ mod tests {
             cause: RuntimeError::Cancelled,
             disposition: MachineDisposition::Unavailable,
         };
-        let reported = runtime.classify_execution(ExecutionError::Runtime(failure.clone()));
+        let reported =
+            PreparedRuntime::classify_execution(ExecutionError::Runtime(failure.clone()));
         assert!(matches!(
             reported,
             PreparedRuntimeError::Run(ExecutionError::Runtime(retained))

@@ -6,11 +6,14 @@ use tidepool_repr::execution_schema::{
 };
 use tidepool_repr::DataConId;
 use tidepool_runtime::prepared_execution::{
-    run_prepared_once, PreparedCancelHandle, PreparedFailureKind, PreparedRuntimeError,
+    run_prepared_once, PreparedCancelHandle, PreparedFailureKind, PreparedOuter,
+    PreparedRuntimeError, PreparedValueResult,
 };
 use tidepool_runtime::session::PreparedRuntime;
 
 const ARTIFACT: &[u8] = include_bytes!("../../haskell/test-prepared-stg/fixtures/m3-vertical.cbor");
+const FREER_RETENTION_ARTIFACT: &[u8] =
+    include_bytes!("../../haskell/test-prepared-stg/fixtures/freer-retention.cbor");
 
 fn head(major: u8, length: usize) -> Vec<u8> {
     assert!(length < 24);
@@ -148,6 +151,21 @@ fn imports() -> MachineImports {
     }
 }
 
+fn freer_effect_identity() -> DataConId {
+    let prepared = parse_program(
+        FREER_RETENTION_ARTIFACT,
+        &requirements(),
+        DecodeLimits::default(),
+    )
+    .expect("FreerRetention artifact parses");
+    prepared
+        .constructors()
+        .iter()
+        .find(|constructor| constructor.identity.occurrence == "E")
+        .expect("FreerRetention artifact includes the real freer E constructor")
+        .host_id
+}
+
 #[test]
 fn one_shot_runs_closed_compiled_program_and_returns_values() {
     let cancel = PreparedCancelHandle::default();
@@ -258,4 +276,56 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
         Err(PreparedRuntimeError::Cancelled)
     ));
     assert_eq!(session.disposition(), MachineDisposition::Reusable);
+}
+
+#[test]
+fn runtime_retains_a_real_freer_continuation_without_observing_it() {
+    let mut runtime = PreparedRuntime::from_artifact(
+        FREER_RETENTION_ARTIFACT,
+        &requirements(),
+        DecodeLimits::default(),
+        MachineImports::default(),
+    )
+    .expect("FreerRetention artifact is closed and admitted");
+    let first_cancel = runtime.new_cancel_handle();
+    let first = runtime
+        .run_entry_retained(None, &[], false, &first_cancel)
+        .expect("first Freer request is retained");
+    let mut first_values = first.values.into_iter();
+    let Some(PreparedValueResult::Managed(outer)) = first_values.next() else {
+        panic!("Freer request must return one managed outer value");
+    };
+    assert!(first_values.next().is_none());
+
+    let second_cancel = runtime.new_cancel_handle();
+    let second = runtime
+        .run_entry_retained(None, &[], true, &second_cancel)
+        .expect("a later collection retains the first Freer request");
+    assert!(second.collections >= 1);
+    let mut second_values = second.values.into_iter();
+    let Some(PreparedValueResult::Managed(second_outer)) = second_values.next() else {
+        panic!("second Freer request must return one managed outer value");
+    };
+    assert!(second_values.next().is_none());
+
+    let PreparedOuter::Constructor { identity, fields } = runtime
+        .inspect_outer(&outer)
+        .expect("retained outer request survives the later collection");
+    assert_eq!(identity, freer_effect_identity());
+    let mut children: Vec<_> = fields
+        .into_iter()
+        .filter_map(|field| match field {
+            PreparedValueResult::Managed(value) => Some(value),
+            PreparedValueResult::Void | PreparedValueResult::Scalar(_) => None,
+        })
+        .collect();
+    let Some(continuation) = children.pop() else {
+        panic!("the real E continuation remains an opaque managed child");
+    };
+    assert!(runtime.release(outer));
+    assert!(runtime.release(continuation));
+    for child in children {
+        assert!(runtime.release(child));
+    }
+    assert!(runtime.release(second_outer));
 }
