@@ -36,6 +36,60 @@ pub(crate) struct HandleEntry {
     pub(crate) realm: RealmId,
 }
 
+/// The one machine-local owner for opaque rooted-value identities.
+///
+/// Continuation policy composes this ledger; prepared execution uses the same
+/// ledger directly with `RealmId::ROOT`.  Neither path mints a second handle
+/// namespace or exposes a raw root slot to its caller.
+#[derive(Default)]
+pub(crate) struct RootHandleLedger {
+    handles: HashMap<u64, HandleEntry>,
+}
+
+impl RootHandleLedger {
+    pub(crate) fn len(&self) -> usize {
+        self.handles.len()
+    }
+
+    pub(crate) fn insert(&mut self, slot: RootSlot, realm: RealmId) -> ValueHandle {
+        let handle = ValueHandle::fresh();
+        let replaced = self.handles.insert(handle.0, HandleEntry { slot, realm });
+        debug_assert!(replaced.is_none(), "fresh value handle must not collide");
+        handle
+    }
+
+    pub(crate) fn get(&self, handle: ValueHandle) -> Option<&HandleEntry> {
+        self.handles.get(&handle.0)
+    }
+
+    pub(crate) fn take(&mut self, handle: ValueHandle) -> Option<HandleEntry> {
+        self.handles.remove(&handle.0)
+    }
+
+    pub(crate) fn rehome(&mut self, handle: ValueHandle, realm: RealmId) -> bool {
+        let Some(entry) = self.handles.get_mut(&handle.0) else {
+            return false;
+        };
+        entry.realm = realm;
+        true
+    }
+
+    pub(crate) fn holds_root(&self, slot: RootSlot) -> bool {
+        self.handles
+            .values()
+            .any(|entry| std::ptr::eq(entry.slot.addr(), slot.addr()))
+    }
+
+    pub(crate) fn take_realm(&mut self, realm: RealmId) -> Vec<HandleEntry> {
+        let ids: Vec<_> = self
+            .handles
+            .iter()
+            .filter_map(|(&id, entry)| (entry.realm == realm).then_some(id))
+            .collect();
+        ids.into_iter().filter_map(|id| self.handles.remove(&id)).collect()
+    }
+}
+
 /// Entries removed by one scope closure.
 pub(crate) struct ClosedRealm {
     pub(crate) frames: Vec<ContinuationFrame>,
@@ -55,7 +109,7 @@ pub struct ResourceCounts {
 pub(crate) struct ResourceLedger {
     continuations: HashMap<ContinuationId, ContinuationFrame>,
     next_continuation_id: u64,
-    handles: HashMap<u64, HandleEntry>,
+    handles: RootHandleLedger,
     cancel_flags: HashMap<RealmId, Arc<AtomicBool>>,
 }
 
@@ -118,32 +172,23 @@ impl ResourceLedger {
     }
 
     pub(crate) fn insert_handle(&mut self, slot: RootSlot, realm: RealmId) -> ValueHandle {
-        let handle = ValueHandle::fresh();
-        let replaced = self.handles.insert(handle.0, HandleEntry { slot, realm });
-        debug_assert!(replaced.is_none(), "fresh value handle must not collide");
-        handle
+        self.handles.insert(slot, realm)
     }
 
     pub(crate) fn handle(&self, handle: ValueHandle) -> Option<&HandleEntry> {
-        self.handles.get(&handle.0)
+        self.handles.get(handle)
     }
 
     pub(crate) fn take_handle(&mut self, handle: ValueHandle) -> Option<HandleEntry> {
-        self.handles.remove(&handle.0)
+        self.handles.take(handle)
     }
 
     pub(crate) fn rehome_handle(&mut self, handle: ValueHandle, realm: RealmId) -> bool {
-        let Some(entry) = self.handles.get_mut(&handle.0) else {
-            return false;
-        };
-        entry.realm = realm;
-        true
+        self.handles.rehome(handle, realm)
     }
 
     pub(crate) fn handle_holds_root(&self, slot: RootSlot) -> bool {
-        self.handles
-            .values()
-            .any(|entry| std::ptr::eq(entry.slot.addr(), slot.addr()))
+        self.handles.holds_root(slot)
     }
 
     pub(crate) fn close_realm(&mut self, realm: RealmId) -> ClosedRealm {
@@ -157,15 +202,7 @@ impl ResourceLedger {
             .filter_map(|id| self.continuations.remove(&id))
             .collect();
 
-        let handle_ids: Vec<_> = self
-            .handles
-            .iter()
-            .filter_map(|(&id, entry)| (entry.realm == realm).then_some(id))
-            .collect();
-        let handles = handle_ids
-            .into_iter()
-            .filter_map(|id| self.handles.remove(&id))
-            .collect();
+        let handles = self.handles.take_realm(realm);
 
         self.cancel_flags.remove(&realm);
         ClosedRealm { frames, handles }
