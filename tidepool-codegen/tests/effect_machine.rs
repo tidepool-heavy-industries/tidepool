@@ -75,10 +75,11 @@ where
 
         let vmctx = builder.block_params(block)[0];
 
-        // Declare gc_trigger signature for the alloc slow path
-        let mut gc_sig = ir::Signature::new(pipeline.isa.default_call_conv());
-        gc_sig.params.push(AbiParam::new(types::I64));
-        let gc_sig_ref = builder.import_signature(gc_sig);
+        // The gc_trigger signature for the alloc slow path: one spelling,
+        // shared with the emitters.
+        let gc_sig_ref = builder.import_signature(
+            tidepool_codegen::alloc::gc_trigger_signature(pipeline.isa.default_call_conv()),
+        );
 
         let oom_func = {
             let mut sig = ir::Signature::new(pipeline.isa.default_call_conv());

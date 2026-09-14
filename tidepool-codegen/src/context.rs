@@ -16,8 +16,12 @@ pub struct VMContext {
     pub alloc_ptr: *mut u8,
     /// End of the current nursery region.
     pub alloc_limit: *const u8,
-    /// Host function called when alloc_ptr exceeds alloc_limit.
-    pub gc_trigger: unsafe extern "C" fn(*mut VMContext),
+    /// Host function called when alloc_ptr exceeds alloc_limit. The second
+    /// argument is the size in bytes of the allocation that failed to bump,
+    /// so the collector's growth decision can guarantee room for it (zero for
+    /// a host-initiated collection with no pending request). Same contract as
+    /// the prepared engine's `prepared_gc_trigger(vmctx, reserve)`.
+    pub gc_trigger: unsafe extern "C" fn(*mut VMContext, usize),
     /// TCO: pending tail-call callee (closure pointer), null if no pending tail call.
     pub tail_callee: *mut u8,
     /// TCO: pending tail-call argument, null if no pending tail call.
@@ -42,7 +46,7 @@ impl VMContext {
     pub fn new(
         nursery_start: *mut u8,
         nursery_end: *const u8,
-        gc_trigger: unsafe extern "C" fn(*mut VMContext),
+        gc_trigger: unsafe extern "C" fn(*mut VMContext, usize),
     ) -> Self {
         Self {
             alloc_ptr: nursery_start,

@@ -39,7 +39,10 @@ impl Nursery {
     ///
     /// The returned VMContext is valid as long as this Nursery is alive
     /// and not moved.
-    pub fn make_vmctx(&mut self, gc_trigger: unsafe extern "C" fn(*mut VMContext)) -> VMContext {
+    pub fn make_vmctx(
+        &mut self,
+        gc_trigger: unsafe extern "C" fn(*mut VMContext, usize),
+    ) -> VMContext {
         let start = self.buffer.as_mut_ptr() as *mut u8;
         // SAFETY: start points to a Vec<u64> buffer of `self.size()` bytes;
         // adding that length stays within the allocation.
@@ -52,7 +55,7 @@ impl Nursery {
 mod tests {
     use super::*;
 
-    extern "C" fn dummy_gc_trigger(_vmctx: *mut VMContext) {}
+    extern "C" fn dummy_gc_trigger(_vmctx: *mut VMContext, _reserve: usize) {}
 
     #[test]
     fn test_nursery_new() {

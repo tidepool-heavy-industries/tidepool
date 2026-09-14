@@ -137,7 +137,7 @@ mod tests {
     use crate::prepared_control::CallStatus;
     use std::sync::{atomic::AtomicBool, Arc};
 
-    unsafe extern "C" fn no_gc(_: *mut VMContext) {}
+    unsafe extern "C" fn no_gc(_: *mut VMContext, _: usize) {}
 
     #[test]
     fn w5_a1_allocation_cancel_records_on_invocation_without_tls() {

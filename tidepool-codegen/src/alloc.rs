@@ -4,6 +4,19 @@ use tidepool_heap::execution_descriptor::ObjectDescriptor;
 
 use crate::layout::*;
 
+/// The one Cranelift signature of the legacy GC trigger
+/// (`VMContext::gc_trigger`): `(vmctx, requested_bytes)`. Every emitter and
+/// test that reaches the trigger through `emit_alloc_fast_path` or a direct
+/// `gc_trigger` import builds its signature here, so the ABI has exactly one
+/// spelling on the Cranelift side and one (`host_fns::gc_trigger`) on the
+/// Rust side.
+pub fn gc_trigger_signature(call_conv: cranelift_codegen::isa::CallConv) -> ir::Signature {
+    let mut signature = ir::Signature::new(call_conv);
+    signature.params.push(ir::AbiParam::new(types::I64)); // vmctx
+    signature.params.push(ir::AbiParam::new(types::I64)); // requested bytes
+    signature
+}
+
 /// Failure does not publish payload components. Cranelift nevertheless needs
 /// ABI-shaped returns; callers branch on status before observing any payload.
 pub(crate) fn emit_prepared_failure_return(builder: &mut FunctionBuilder<'_>, status: Value) {
@@ -174,7 +187,8 @@ pub fn emit_prepared_reserve_fast_path(
 ///
 /// `vmctx_val` is the SSA value holding the VMContext pointer.
 /// `size` is the number of bytes to allocate (will be rounded up to 8-byte alignment).
-/// `gc_trigger_sig` is the signature reference for the gc_trigger call.
+/// `gc_trigger_sig` is the signature reference for the gc_trigger call,
+/// built by [`gc_trigger_signature`].
 ///
 /// Returns the SSA value pointing to the start of the allocated memory.
 pub fn emit_alloc_fast_path(
@@ -240,12 +254,16 @@ pub fn emit_alloc_fast_path(
     builder.switch_to_block(slow_block);
     builder.seal_block(slow_block);
 
+    // The trigger takes the failed allocation's size so the collector's
+    // growth decision can guarantee room for it: a live set near the growth
+    // threshold plus one object larger than the free remainder used to
+    // report `HeapOverflow` with the heap ceiling untouched.
     let gc_trigger_ptr = builder
         .ins()
         .load(types::I64, flags, vmctx_val, VMCTX_GC_TRIGGER_OFFSET);
     builder
         .ins()
-        .call_indirect(gc_trigger_sig, gc_trigger_ptr, &[vmctx_val]);
+        .call_indirect(gc_trigger_sig, gc_trigger_ptr, &[vmctx_val, size_val]);
 
     // After GC: reload alloc_ptr and alloc_limit, bump, check, then store or fail.
     let post_gc_ptr = builder

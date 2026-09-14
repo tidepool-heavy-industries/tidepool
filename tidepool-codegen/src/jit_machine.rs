@@ -2305,7 +2305,7 @@ impl JitEffectMachine {
         // gc_trigger reads the caller's own frame pointer to start its stack
         // walk, which is sound to call from plain Rust (no JIT frame on the
         // stack) per `walk_frames`'s doc — degrades to zero stack roots.
-        crate::host_fns::gc_trigger(vmctx_ptr);
+        crate::host_fns::gc_trigger(vmctx_ptr, 0);
         // SAFETY: vmctx is a local in this frame, live until `guard` drops at
         // the end of this function — the same arm-last discipline
         // `with_active_run` uses. Reclaims the (possibly relocated) heap

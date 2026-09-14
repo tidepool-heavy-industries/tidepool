@@ -1173,9 +1173,9 @@ fn emit_nested_body(
         inner_builder.declare_value_needs_stack_map(arg_val);
     }
 
-    let mut inner_gc_sig = Signature::new(pipeline.isa.default_call_conv());
-    inner_gc_sig.params.push(AbiParam::new(types::I64));
-    let inner_gc_sig_ref = inner_builder.import_signature(inner_gc_sig);
+    let inner_gc_sig_ref = inner_builder.import_signature(crate::alloc::gc_trigger_signature(
+        pipeline.isa.default_call_conv(),
+    ));
 
     let inner_oom_func = {
         let mut sig = Signature::new(pipeline.isa.default_call_conv());
@@ -1510,9 +1510,9 @@ fn compile_expr_inner(
 
     let vmctx = builder.block_params(entry_block)[0];
 
-    let mut gc_sig = Signature::new(pipeline.isa.default_call_conv());
-    gc_sig.params.push(AbiParam::new(types::I64));
-    let gc_sig_ref = builder.import_signature(gc_sig);
+    let gc_sig_ref = builder.import_signature(crate::alloc::gc_trigger_signature(
+        pipeline.isa.default_call_conv(),
+    ));
 
     let oom_func = {
         let mut sig = Signature::new(pipeline.isa.default_call_conv());

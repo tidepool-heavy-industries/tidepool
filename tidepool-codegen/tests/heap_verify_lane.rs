@@ -440,6 +440,50 @@ fn heap_verify_fires_on_gc_forcing_shapes() {
 /// ran ON THE DOUBLING PATH, which is the coverage `verify_heap_post_gc` used
 /// to have a known gap on (the intermediate to-space was an untracked
 /// from-space).
+/// Growth must honour the allocation that triggered the collection, not only
+/// the utilization ratio. 100 boxed `Lit`s (24 bytes each, all live as
+/// pending constructor fields) under a 400-byte nursery grow the heap
+/// 400 -> 800 -> 1600 -> 3200 through the ratio rule; at 3200 the live set
+/// (2400 + a few words) sits exactly on the `live*4 > from*3` boundary, so the
+/// fourth collection used not to grow, and the 824-byte `Con` that needed the
+/// room failed the post-GC re-check as `HeapOverflow` with the ceiling
+/// untouched. `emit_alloc_fast_path` now passes the pending size as
+/// `gc_trigger`'s `reserve` argument and `heap_growth_target` grows to fit it
+/// (the same policy the prepared collector uses). Same shape and
+/// sizes as `apply_acceptance::apply_gc_during_application_relocates_forced_callee`'s
+/// failing sweep step, isolated from the application protocol.
+#[test]
+fn growth_fits_a_pending_allocation_larger_than_the_free_remainder() {
+    let mut b = TreeBuilder::new();
+    let fields: Vec<usize> = (0..100)
+        .map(|i| b.push(CoreFrame::Lit(Literal::LitInt(i))))
+        .collect();
+    let con = b.push(CoreFrame::Con {
+        tag: DataConId(77),
+        fields,
+    });
+    let body = b.push(CoreFrame::Lit(Literal::LitInt(42)));
+    let root = b.push(CoreFrame::Case {
+        scrutinee: con,
+        binder: VarId(0x7700),
+        alts: vec![Alt {
+            con: AltCon::Default,
+            binders: vec![],
+            body,
+        }],
+    });
+    let mut tree = b.build();
+    let expr = fixup_root(&mut tree, root);
+    let before = gc_doubling_run_count();
+    run_verified(expr, 400, 42, "growth_fits_pending_request");
+    let after = gc_doubling_run_count();
+    assert!(
+        after > before,
+        "gc_doubling_run_count did not increase ({before} -> {after}) — \
+         a 400-byte nursery cannot hold 100 live Lits without growing"
+    );
+}
+
 #[test]
 fn heap_verify_fires_on_doubling_path() {
     let (expr, expected) = build_big_con(4);

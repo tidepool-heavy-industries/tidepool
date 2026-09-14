@@ -444,7 +444,7 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
-    extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext) {}
+    extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext, _reserve: usize) {}
 
     thread_local! {
         static TEST_RESULT: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };

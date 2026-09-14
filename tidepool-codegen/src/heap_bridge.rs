@@ -671,7 +671,7 @@ pub(crate) unsafe fn gc_retry<T>(
         return first;
     }
     GC_RETRY_FIRED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    crate::host_fns::gc_trigger(vmctx);
+    crate::host_fns::gc_trigger(vmctx, 0);
     alloc()
 }
 
@@ -704,7 +704,7 @@ mod tests {
     use crate::nursery::Nursery;
     use tidepool_repr::Literal;
 
-    extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext) {}
+    extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext, _reserve: usize) {}
 
     fn setup_vmctx(size: usize) -> (Nursery, VMContext) {
         let mut nursery = Nursery::new(size);

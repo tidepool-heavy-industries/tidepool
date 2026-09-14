@@ -161,7 +161,11 @@ mod tests {
     // harness reports false `<ByteArray# len=0>` divergences against eval's real
     // bytes. Builds the heap objects through the canonical
     // `heap_bridge::value_to_heap` and reads them back through this reader.
-    extern "C" fn mock_gc_trigger(_vmctx: *mut tidepool_codegen::context::VMContext) {}
+    extern "C" fn mock_gc_trigger(
+        _vmctx: *mut tidepool_codegen::context::VMContext,
+        _reserve: usize,
+    ) {
+    }
 
     #[test]
     fn jit_heap_litstring_roundtrips_bytes_through_compare_reader() {

@@ -4,7 +4,7 @@ use tidepool_heap::layout;
 use tidepool_repr::*;
 use tidepool_testing::jit_run::{compile_and_run, read_lit_int, JitRun};
 
-extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext) {}
+extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext, _reserve: usize) {}
 
 #[test]
 fn test_heap_force_on_evaluated_thunk() {

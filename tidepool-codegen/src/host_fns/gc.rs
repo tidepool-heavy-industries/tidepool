@@ -144,45 +144,55 @@ pub unsafe fn remembered_slots_count(vmctx: *mut VMContext) -> usize {
         .unwrap_or(0)
 }
 
-/// Process-global test override: forces `write_barrier` to no-op (as if
-/// unarmed) regardless of the machine's actual armed state. Default off. This
-/// is the mutation-check kill switch (#[doc(hidden)], test-only) — flipping
-/// it on and re-running a barrier-dependent test must reproduce the SAME
-/// pre-fix corruption signature, or the test proves nothing.
-static WRITE_BARRIER_DISABLED_FOR_TEST: AtomicBool = AtomicBool::new(false);
+/// Process-global test override: makes the remembered set refuse every new
+/// slot -- from the write barrier AND from tenure-time payload remembering
+/// (`MachineState::retain_external_payloads`) -- regardless of the machine's
+/// armed state. Default off. This is the mutation-check kill switch
+/// (#[doc(hidden)], test-only): flipping it on and re-running a test that
+/// depends on an old-to-young edge being remembered must reproduce the SAME
+/// pre-fix corruption signature, or the test proves nothing. It sits at the
+/// one sink both recording paths share, so it cannot be dodged by whichever
+/// path happens to cover a given scenario.
+static REMEMBERED_SET_DISABLED_FOR_TEST: AtomicBool = AtomicBool::new(false);
 
-/// Test-only: disable (or re-enable) the write barrier process-wide,
-/// independent of any machine's armed state. Not part of the public API.
+/// Test-only: disable (or re-enable) remembered-set recording process-wide.
+/// Not part of the public API.
 #[doc(hidden)]
-pub fn set_write_barrier_disabled_for_test(on: bool) {
-    WRITE_BARRIER_DISABLED_FOR_TEST.store(on, Ordering::Relaxed);
+pub fn set_remembered_set_disabled_for_test(on: bool) {
+    REMEMBERED_SET_DISABLED_FOR_TEST.store(on, Ordering::Relaxed);
 }
 
-fn write_barrier_disabled_for_test() -> bool {
-    WRITE_BARRIER_DISABLED_FOR_TEST.load(Ordering::Relaxed)
+pub(crate) fn remembered_set_disabled_for_test() -> bool {
+    REMEMBERED_SET_DISABLED_FOR_TEST.load(Ordering::Relaxed)
 }
 
-/// THE write barrier (see `old_space.rs`'s module doc for the invariant):
-/// every store of a possibly-young pointer into an already-tenured or
-/// external-to-nursery location routes through this ONE function —
-/// `OldSpace::tenure`'s thunk-indirection cells, `WriteSmallArray`/
-/// `WriteArray`, `casSmallArray#`, and the boxed-array copy family's
-/// destination range. `slot` is the ADDRESS of the pointer-sized location
-/// that was just written (or, for tenure, a thunk's indirection cell) — NOT
-/// the value stored there. Records `slot` in the machine's remembered set so
-/// `perform_gc` traces and rewrites it on every collection, exactly like a
-/// stack or persistent root.
+/// THE write barrier for old-space OBJECT FIELDS (see `old_space.rs`'s module
+/// doc, "Old-to-young edges"): every store of a possibly-young pointer into a
+/// pointer field of an already-tenured object routes through this ONE
+/// function -- thunk memoization/indirection cells (`OldSpace::tenure`, the
+/// prepared enter's update) and `deep_force`'s constructor field rewrites.
+/// `slot` is the ADDRESS of the pointer-sized location that was just written
+/// -- NOT the value stored there. Records `slot` in the machine's remembered
+/// set so `perform_gc` traces and rewrites it on every collection, exactly
+/// like a stack or persistent root.
+///
+/// Boxed-array payload slots are NOT this barrier's job: a tenured array's
+/// external payload has every slot remembered once, at tenure
+/// (`MachineState::retain_external_payloads`), and a nursery array's payload
+/// is discovered by the collection's own reachability expansion
+/// (`trace_heap_region` -> `external_payload_view`). Array write sites
+/// therefore call no barrier.
 ///
 /// Cheap when unarmed: a relaxed load and return, before any hashing or
 /// `RefCell` borrow — same shape as `maybe_raise_gc_fault`'s disarmed check.
 /// Sound to skip while unarmed: before the first `OldSpace::tenure` call
 /// there is no old-space, so no old-to-young store is possible yet.
 ///
-/// `extern "C"` so the JIT can call it directly from emitted
-/// `WriteSmallArray`/`WriteArray` IR (no Rust host-fn wrapper in between);
-/// Rust call sites (`OldSpace::tenure`, the CAS/copy host fns) call the exact
-/// same function. No-op when `vmctx`/`vmctx.machine_state` is null (see the
-/// module doc) — same null-vmctx invariant as `register_persistent_root`.
+/// `extern "C"` so generated code can call it directly (the prepared enter's
+/// thunk update does); Rust call sites (`OldSpace::tenure`, `deep_force`)
+/// call the exact same function. No-op when `vmctx`/`vmctx.machine_state` is
+/// null (see the module doc) -- same null-vmctx invariant as
+/// `register_persistent_root`.
 ///
 /// # Safety
 /// `slot` must be non-null and point to a valid, dereferenceable
@@ -190,9 +200,6 @@ fn write_barrier_disabled_for_test() -> bool {
 /// (arena teardown / machine drop forgets it — see `forget_remembered_range`).
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn write_barrier(vmctx: *mut VMContext, slot: *mut *mut u8) {
-    if write_barrier_disabled_for_test() {
-        return;
-    }
     // SAFETY: vmctx is valid; machine_state was installed before entering
     // JIT code (same contract as every other vmctx-reached GC-cluster fn).
     if let Some(ms) = unsafe { machine_state_opt(vmctx) } {
@@ -271,9 +278,13 @@ unsafe impl Send for GcState {}
 /// should have force-frame-pointers = true for the gc path).
 ///
 /// The frame walker in gc_trigger reads RBP to walk the JIT stack.
+///
+/// `reserve` is the size in bytes of the allocation that failed to bump (see
+/// `VMContext::gc_trigger`); the growth decision guarantees room for it.
+/// Host-initiated collections pass zero.
 #[inline(never)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
+pub extern "C" fn gc_trigger(vmctx: *mut VMContext, reserve: usize) {
     // Force a frame to be created
     let mut _dummy = [0u64; 2];
     std::hint::black_box(&mut _dummy);
@@ -304,7 +315,7 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
         unsafe {
             std::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack));
         }
-        perform_gc(fp, vmctx);
+        perform_gc_request(fp, vmctx, reserve);
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -314,7 +325,7 @@ pub extern "C" fn gc_trigger(vmctx: *mut VMContext) {
         unsafe {
             std::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack));
         }
-        perform_gc(fp, vmctx);
+        perform_gc_request(fp, vmctx, reserve);
     }
 }
 
@@ -381,7 +392,7 @@ pub(crate) fn run_minor_collection_for_tenure_fixup(vmctx: *mut VMContext) {
         unsafe {
             std::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack));
         }
-        perform_gc(fp, vmctx);
+        perform_gc_request(fp, vmctx, 0);
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -391,7 +402,7 @@ pub(crate) fn run_minor_collection_for_tenure_fixup(vmctx: *mut VMContext) {
         unsafe {
             std::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack));
         }
-        perform_gc(fp, vmctx);
+        perform_gc_request(fp, vmctx, 0);
     }
 }
 
@@ -531,6 +542,42 @@ fn gc_poison_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     let env = *ON.get_or_init(|| std::env::var("TIDEPOOL_GC_POISON").is_ok_and(|v| v == "1"));
     resolve_override(&GC_POISON_FORCE, env)
+}
+
+/// The one heap-growth policy, shared by the legacy (`perform_gc_request`)
+/// and prepared (`collect_prepared`) collectors. After a copy that left
+/// `live_bytes` in a `from_size`-byte space, decide the space's next size
+/// given the allocation (`reserve` bytes) whose failure triggered the
+/// collection:
+///
+/// - grow when utilization is high (`live*4 > from*3`, the thrash guard) OR
+///   when `live + reserve` does not fit -- the pending request is part of the
+///   decision, never a separate post-collection re-check that can only fail;
+/// - the new size is at least double and at least `live + reserve`, capped at
+///   `ceiling`;
+/// - `Ok(None)` means no growth is needed; `Err(HeapOverflow)` means the
+///   request cannot fit even at the ceiling.
+///
+/// Both collectors decide growth once per collection with this function, so
+/// a live set exactly on the utilization boundary plus one object larger
+/// than the free remainder cannot fall between two rules.
+pub(crate) fn heap_growth_target(
+    from_size: usize,
+    live_bytes: usize,
+    reserve: usize,
+    ceiling: usize,
+) -> Result<Option<usize>, crate::host_fns::RuntimeError> {
+    let needed = live_bytes
+        .checked_add(reserve)
+        .ok_or(crate::host_fns::RuntimeError::HeapOverflow)?;
+    if needed > ceiling {
+        return Err(crate::host_fns::RuntimeError::HeapOverflow);
+    }
+    let high_utilization = live_bytes.saturating_mul(4) > from_size.saturating_mul(3);
+    if (high_utilization || needed > from_size) && from_size < ceiling {
+        return Ok(Some(from_size.saturating_mul(2).max(needed).min(ceiling)));
+    }
+    Ok(None)
 }
 
 /// Count of completed `verify_heap_post_gc` runs, process-wide. Lets a test
@@ -1000,21 +1047,15 @@ fn collect_prepared(
                 state.active_start = active.as_mut_ptr().cast();
                 state.active_size = std::mem::size_of_val(active.as_slice());
                 prepared.used = result.bytes_copied;
-                let needed = prepared
-                    .used
-                    .checked_add(reserve)
-                    .ok_or(RuntimeError::HeapOverflow)?;
-                if needed > ceiling {
-                    return Err(RuntimeError::HeapOverflow);
-                }
-                if needed <= state.active_size {
+                let Some(size) =
+                    heap_growth_target(state.active_size, prepared.used, reserve, ceiling)?
+                else {
                     // Only the final successful copy's marks decide Young
                     // payload liveness. Growth recopies reuse root-slot
                     // addresses, so sweeping between copies is forbidden.
                     sweep_prepared_young(machine, &prepared.space)?;
                     return Ok(prepared.used);
-                }
-                let size = state.active_size.saturating_mul(2).max(needed).min(ceiling);
+                };
                 let words = size.div_ceil(8);
                 prepared
                     .spare
@@ -1085,10 +1126,6 @@ pub(crate) unsafe extern "C" fn prepared_gc_trigger(vmctx: *mut VMContext, reser
         ms.set_first_cause(crate::host_fns::RuntimeError::BadPointer);
     }
     ms.prepared_call_status() as i32
-}
-
-fn perform_gc(fp: usize, vmctx: *mut VMContext) {
-    perform_gc_request(fp, vmctx, 0);
 }
 
 fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
@@ -1297,13 +1334,12 @@ fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
 
         maybe_raise_gc_fault(GcFaultPoint::AfterCopy);
 
-        // Heap growth: a fixed-size heap turns large live sets into
-        // premature OOM after GC thrash. When utilization is high,
-        // immediately re-evacuate into a doubled space. The root slot
-        // ADDRESSES collected above remain valid; their values now
-        // point into `tospace`, so a second Cheney pass with
-        // from = tospace relocates everything and re-updates them.
-        let max_heap = max_heap_bytes();
+        // Heap growth, decided by `heap_growth_target` (shared with the
+        // prepared collector): re-evacuate once into a bigger space when
+        // utilization is high or the triggering request would not fit. The
+        // root slot ADDRESSES collected above remain valid; their values now
+        // point into `tospace`, so a second Cheney pass with from = tospace
+        // relocates everything and re-updates them.
         let mut active = tospace;
         let mut live_bytes = result.bytes_copied;
         let mut new_size = from_size;
@@ -1313,8 +1349,14 @@ fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
         // time.
         let mut retired_ranges: Vec<(*const u8, *const u8)> =
             vec![(from_start as *const u8, from_end as *const u8)];
-        if live_bytes * 4 > from_size * 3 && from_size < max_heap {
-            new_size = (from_size * 2).min(max_heap);
+        // `Err` (the request cannot fit even at the ceiling) is left to the
+        // caller's post-GC re-check, which reports `HeapOverflow` through
+        // `runtime_oom`; the copy just completed is still published below.
+        let growth = heap_growth_target(from_size, live_bytes, reserve, max_heap_bytes())
+            .ok()
+            .flatten();
+        if let Some(target) = growth {
+            new_size = target;
             let mut bigger = alloc_aligned_zeroed(new_size);
             // SAFETY: same contract as above; from-space is the live
             // prefix of `active`, disjoint from `bigger`.
@@ -1828,7 +1870,7 @@ mod tests {
         vmctx.machine_state = &ms as *const _ as *mut _;
         let before_range = ms.gc_active_range();
 
-        perform_gc(0, &mut vmctx);
+        perform_gc_request(0, &mut vmctx, 0);
 
         assert_eq!(ms.gc_generation(), 0, "collection must not begin");
         assert_eq!(

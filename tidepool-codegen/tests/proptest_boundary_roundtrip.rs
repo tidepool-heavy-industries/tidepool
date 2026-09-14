@@ -38,7 +38,7 @@ use tidepool_repr::{DataCon, DataConId, DataConTable, Literal, SrcBang};
 // VMContext setup (mirrors heap_bridge.rs / heap_bridge_tests.rs).
 // ---------------------------------------------------------------------------
 
-extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext) {}
+extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext, _reserve: usize) {}
 
 /// Build a nursery and a `VMContext` pointing into it. The returned `Nursery`
 /// must outlive the `VMContext`: the context holds raw pointers into the

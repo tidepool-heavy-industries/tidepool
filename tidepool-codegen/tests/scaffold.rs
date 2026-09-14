@@ -137,6 +137,7 @@ fn test_gc_trigger_called_from_jit() {
     let gc_sig = {
         let mut sig = ir::Signature::new(pipeline.isa.default_call_conv());
         sig.params.push(AbiParam::new(types::I64)); // vmctx ptr
+        sig.params.push(AbiParam::new(types::I64)); // requested bytes
         sig
     };
     let gc_id = pipeline
@@ -160,9 +161,10 @@ fn test_gc_trigger_called_from_jit() {
 
         let vmctx = builder.block_params(block)[0];
 
-        // Call gc_trigger(vmctx)
+        // Call gc_trigger(vmctx, 0): no pending allocation request
         let gc_ref = pipeline.module.declare_func_in_func(gc_id, builder.func);
-        builder.ins().call(gc_ref, &[vmctx]);
+        let no_request = builder.ins().iconst(types::I64, 0);
+        builder.ins().call(gc_ref, &[vmctx, no_request]);
 
         let val = builder.ins().iconst(types::I64, 99);
         builder.ins().return_(&[val]);
@@ -217,10 +219,11 @@ fn test_alloc_fast_path() {
 
         let vmctx = builder.block_params(block)[0];
 
-        // Declare gc_trigger signature for the alloc slow path
-        let mut gc_sig = ir::Signature::new(pipeline.isa.default_call_conv());
-        gc_sig.params.push(AbiParam::new(types::I64));
-        let gc_sig_ref = builder.import_signature(gc_sig);
+        // The gc_trigger signature for the alloc slow path: one spelling,
+        // shared with the emitters.
+        let gc_sig_ref = builder.import_signature(
+            tidepool_codegen::alloc::gc_trigger_signature(pipeline.isa.default_call_conv()),
+        );
 
         let oom_func = {
             let mut sig = ir::Signature::new(pipeline.isa.default_call_conv());
@@ -269,7 +272,8 @@ fn test_stack_map_end_to_end() {
     // Declare gc_trigger as import
     let gc_sig_ext = {
         let mut sig = ir::Signature::new(pipeline.isa.default_call_conv());
-        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64)); // vmctx ptr
+        sig.params.push(AbiParam::new(types::I64)); // requested bytes
         sig
     };
     let gc_id = pipeline
@@ -301,7 +305,8 @@ fn test_stack_map_end_to_end() {
 
         // Call gc_trigger (safepoint — both ptrs must be in stack map)
         let gc_ref = pipeline.module.declare_func_in_func(gc_id, builder.func);
-        builder.ins().call(gc_ref, &[vmctx]);
+        let no_request = builder.ins().iconst(types::I64, 0);
+        builder.ins().call(gc_ref, &[vmctx, no_request]);
 
         // Use both ptrs after the call
         let sum = builder.ins().iadd(ptr1, ptr2);
