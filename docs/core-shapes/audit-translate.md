@@ -8,7 +8,7 @@
 - **Mode:** `always-on`
 - **Motivation:** GHC's `unpackCString#` unfolding relies on `Addr#` arithmetic which the JIT avoids; this provides a safe runtime implementation for dynamic strings.
 - **Test coverage:** `uncovered` (most strings in tests are static literals)
-- **Notes:** Used only for genuine dynamic `Addr#` strings; Double rendering no longer passes through this path.
+- **Notes:** Used only for genuine dynamic `Addr#` strings; `Tidepool.Double` rendering is intercepted by its own intrinsic recognition (see below) and never reaches this fallback.
 
 ## emitRuntimeUnpackAppendCString
 

@@ -83,6 +83,13 @@ default or family member; the existing case-failure path handles an invalid
 tag. The focused fixture checks three-way `Colour` and two-way `Bool` families
 in [`ExecutionProjectionTest.hs`](../haskell/test-prepared-stg/ExecutionProjectionTest.hs).
 
+Prepared `Enter` uses the shared `prepared_enter` provenance-checked
+inspection path; it does not grow a second inline header-chain path. Top-level
+internal identities use the `local` namespace, external exact names use
+`value`, and suffix reservation remains namespace-local before target
+filtering. Retained-generation matching is external-name-only, so an internal
+same-spelled identity cannot capture an import generation.
+
 The validator checks bounds, ownership, scopes, unique wire binders, canonical
 layouts, constructor family/tag evidence, host-ID uniqueness, callable
 saturation, and result-contract evidence before a program can be linked.
@@ -225,6 +232,13 @@ path is owned by
 Focused native cases for exact, PAP, excess, logical `Void`, and unused-join
 behavior are in
 [`no_success_tests.rs`](../tidepool-codegen/src/prepared_program/no_success_tests.rs).
+Focused settlement, application, entry, and retention tests are in
+[`settlement_tests.rs`](../tidepool-codegen/src/prepared_program/settlement_tests.rs),
+[`apply_tests.rs`](../tidepool-codegen/src/prepared_program/apply_tests.rs),
+[`entry_tests.rs`](../tidepool-codegen/src/prepared_program/entry_tests.rs), and
+[`retention_tests.rs`](../tidepool-codegen/src/prepared_program/retention_tests.rs),
+alongside the heap GC tests under
+[`tidepool-heap/src/gc`](../tidepool-heap/src/gc).
 
 This is an executable connected subset, not a producer cutover. Globals/imports,
 effects, other foreign/primitive operations, and managed host arguments remain
@@ -388,46 +402,9 @@ remain separate work. No session-retention or effect-support contract is
 asserted here. No production cutover or compatibility promise is implied by
 this inventory.
 
-## Wave 5 checkpoint — 2026-09-13
+## Identity and corpus manifest contract
 
-At the historical `50beeb099` checkpoint, focused checks passed 79 prepared-program tests, 64
-heap tests, and the workspace test compilation. The generated fixtures were
-then refreshed with the extractor variables unset and the freshness check
-passed; only `.source-fingerprint` changed and all 695 generated fixture files
-were byte-identical. Freshness is not semantic-green evidence: that checkpoint's
-Suite report had 109 comparison matches out of 812 tops, 67 missing
-expectations, 11 projection failures, 501 admission failures, 124 execution
-failures, and zero comparison mismatches. The optimized divergent
-`thunk_blackhole` row still hit the 120-second watchdog. Test anchors are
-[`settlement_tests.rs`](../tidepool-codegen/src/prepared_program/settlement_tests.rs),
-[`apply_tests.rs`](../tidepool-codegen/src/prepared_program/apply_tests.rs),
-[`entry_tests.rs`](../tidepool-codegen/src/prepared_program/entry_tests.rs),
-[`retention_tests.rs`](../tidepool-codegen/src/prepared_program/retention_tests.rs),
-and the heap GC tests under
-[`tidepool-heap/src/gc`](../tidepool-heap/src/gc).
-
-A later historical focused fold passed 103 prepared-program tests and compiled
-the workspace before the external-graph seed landed; those counts do not
-validate the current graph source. No new corpus match count is asserted here.
-
-## Reviewed Wave 4 contracts — 2026-09-12
-
-Prepared `Enter` uses the shared `prepared_enter_slow` provenance-checked
-inspection path; it does not grow a second inline header-chain path. Top-level
-internal identities use the `local` namespace, external exact names use
-`value`, and suffix reservation remains namespace-local before target
-filtering. Retained-generation matching is external-name-only, so an internal
-same-spelled identity cannot capture an import generation.
-
-Focused evidence is repr 2/2, runtime 6/6, comparator 7/7, and runner 6/6.
-The prepared engine is 26/27: the remaining
-`nested_function_rejection_reports_the_nested_expression_owner` fixture fails
-with `InvalidScope("value ValueId(1) is out of scope")`. These counts are
-boundary evidence only; they do not claim a green corpus or workspace gate.
-
-## Identity and corpus follow-up — 2026-09-13
-
-Reachability now follows GHC binder `Unique` values throughout the prepared
+Reachability follows GHC binder `Unique` values throughout the prepared
 inventory walk. Only the complete-module `VarEnv` converts that identity to a
 stable wire symbol. A projected home top that is absent from that map is a
 typed projection failure; an unknown internal name cannot be turned into an
@@ -443,11 +420,3 @@ Suffix stripping and guessed aliases are not mapping rules; duplicate or
 ambiguous exact external matches reject the producer. All-tops compilation or
 identity-enumeration failure aborts instead of writing a successful empty
 corpus. Consumer validation likewise rejects suffix-alias oracle keys.
-
-That historical Suite run contained 812 actual tops: 801 projected and validated,
-with 11 projection rejections. Historical coverage is a separate denominator:
-255 of 347 legacy names mapped and 92 remained unmapped. The comparator has
-109 matches and 0 failures among reached rows, but 67 rows have missing
-expectations, so this is not full corpus coverage. The original closed-global
-cohort has 0 of 516 matches; this is not a semantic parity claim. Runtime
-admission, execution, and workspace freshness limits remain.
