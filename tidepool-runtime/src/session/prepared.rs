@@ -76,6 +76,8 @@ pub enum PreparedRuntimeError {
     Unavailable(MachineFailure),
     #[error("session binding {0:?} is not a live prepared binding")]
     UnknownBinding(SessionVarId),
+    #[error("no value generation has been started: advance or set the session generation before binding")]
+    GenerationNotStarted,
     #[error(
         "session binding {id:?} is leased by {leases} installed program(s) and cannot be released"
     )]
@@ -89,6 +91,7 @@ impl PreparedRuntimeError {
             Self::Parse(_)
             | Self::Link(_)
             | Self::UnknownBinding(_)
+            | Self::GenerationNotStarted
             | Self::BindingLeased { .. } => PreparedFailureKind::Rejected,
             Self::Cancelled => PreparedFailureKind::Cancelled,
             Self::Unavailable(_) => PreparedFailureKind::Integrity,
@@ -185,9 +188,12 @@ pub struct PreparedRuntime {
     /// Every installed program, for entry defaults and export lookup.
     programs: BTreeMap<ProgramId, LinkedProgram>,
     bindings: BindingTable,
-    /// The session's single value generation counter: every `bind_top`
-    /// mints the next one, and an importer's `required_generation` is
-    /// checked against the generation the named binding was minted at.
+    /// The session's single value generation counter. A generation is a
+    /// turn: every binding made before the next `advance_generation` shares
+    /// it (as every binder of one Core turn shares its `Val.G<g>` module),
+    /// and an importer's `required_generation` is checked against the
+    /// generation the named binding was made at. `Generation(0)` is the
+    /// empty session; binding at it is refused.
     val_gen: Generation,
     binding_ids: MonotonicIdIssuer,
 }
@@ -233,15 +239,42 @@ impl PreparedRuntime {
         &self.bindings
     }
 
+    /// The current value generation (`Generation(0)` before any turn).
+    #[must_use]
+    pub fn val_gen(&self) -> Generation {
+        self.val_gen
+    }
+
+    /// Set the current value generation, e.g. to the generation a caller's
+    /// projection was told to retain against. Generations only ever move
+    /// forward: a value at or below the current one is refused.
+    pub fn set_val_gen(&mut self, generation: Generation) -> Result<(), PreparedRuntimeError> {
+        if generation <= self.val_gen {
+            return Err(PreparedRuntimeError::GenerationNotStarted);
+        }
+        self.val_gen = generation;
+        Ok(())
+    }
+
+    /// Start the next turn's generation and return it.
+    pub fn advance_generation(&mut self) -> Generation {
+        self.val_gen = self.val_gen.next();
+        self.val_gen
+    }
+
     /// Retain one of an installed program's top-level bindings under `name`
-    /// at the session's next value generation, without running it. The
+    /// at the session's current value generation, without running it. The
     /// returned id is what a later [`Self::install`] names an import by.
+    /// Refused at `Generation(0)`: advance or set the generation first.
     pub fn bind_top(
         &mut self,
         program: ProgramId,
         value: ValueId,
         name: &str,
     ) -> Result<SessionVarId, PreparedRuntimeError> {
+        if self.val_gen == Generation::default() {
+            return Err(PreparedRuntimeError::GenerationNotStarted);
+        }
         self.ensure_machine()?;
         let machine = self.machine_mut()?;
         let handle = machine
@@ -252,7 +285,6 @@ impl PreparedRuntime {
             .ok_or(PreparedRuntimeError::Run(
                 ExecutionError::UnknownPreparedHandle,
             ))?;
-        self.val_gen = self.val_gen.next();
         let id = SessionVarId::from_var(VarId(self.binding_ids.next_raw()));
         let entry = BindingEntry {
             name: BindingName(name.to_string()),
@@ -1035,6 +1067,9 @@ mod tests {
             PreparedRuntime::from_prepared(producer_program(), MachineImports::default())
                 .expect("producer links closed");
         let first = runtime.first_program().expect("first program installs");
+        runtime
+            .set_val_gen(Generation(1))
+            .expect("the first turn starts at generation 1");
         (runtime, first)
     }
 
@@ -1052,7 +1087,7 @@ mod tests {
         assert_eq!(
             runtime.bindings().get(id).map(|entry| entry.module.gen()),
             Some(Generation(1)),
-            "the first bind mints generation 1 from the session's one counter"
+            "a binding is made at the session's current generation"
         );
         let consumer = runtime
             .install_prepared(
@@ -1161,6 +1196,7 @@ mod tests {
         let leased = runtime
             .bind_top(first, ValueId(0), "leased")
             .expect("binds");
+        runtime.advance_generation();
         let free = runtime
             .bind_top(first, ValueId(0), "free")
             .expect("binds again at the next generation");
