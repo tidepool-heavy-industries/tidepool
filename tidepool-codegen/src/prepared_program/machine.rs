@@ -674,6 +674,10 @@ mod tests {
             arguments: vec![],
             results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
         });
+        wire.signatures.push(Signature {
+            arguments: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+        });
         wire.expressions
             .nodes
             .push(ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::Int {
@@ -689,6 +693,24 @@ mod tests {
                     parameters: vec![],
                     captures: vec![],
                     body: 1,
+                },
+            },
+        }));
+        wire.expressions
+            .nodes
+            .push(ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::Int {
+                bits: 64,
+                bytes: 7_i64.to_be_bytes().to_vec(),
+            })]));
+        wire.bindings.push(Group::NonRecursive(TopBinding {
+            identity: testing::identity("PreparedMachine", "managed"),
+            binding: HeapBinding {
+                id: ValueId(3),
+                rhs: HeapRhs::Function {
+                    signature: SignatureId(3),
+                    parameters: vec![ValueId(77)],
+                    captures: vec![],
+                    body: 2,
                 },
             },
         }));
@@ -907,5 +929,57 @@ mod tests {
         };
         assert!(machine.release(*handle));
         assert!(!machine.release(*handle));
+    }
+
+    #[test]
+    fn managed_inputs_reject_foreign_and_rep_mismatches_before_entry() {
+        let mut source = machine();
+        let batch = source
+            .run_entry_retained(
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: RunOptions::default().observation_budget,
+                    collect_before_observation: true,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("source handle");
+        let [PreparedResult::Managed(handle)] = batch.values.as_slice() else {
+            panic!("source result must be managed");
+        };
+        let mut target = PreparedMachine::new(
+            language_failure_program(),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("target machine");
+        let options = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        assert!(matches!(
+            target.run_entry_retained(
+                ValueId(3),
+                &[PreparedInput::Managed(*handle)],
+                options,
+                Arc::new(AtomicBool::new(false)),
+            ),
+            Err(ExecutionError::UnknownPreparedHandle)
+        ));
+        let wrong_rep = PreparedHandle {
+            raw: handle.raw,
+            rep: RuntimeRep::UnliftedRef,
+        };
+        assert!(matches!(
+            target.run_entry_retained(
+                ValueId(3),
+                &[PreparedInput::Managed(wrong_rep)],
+                options,
+                Arc::new(AtomicBool::new(false)),
+            ),
+            Err(ExecutionError::ArgumentRepresentation { .. })
+        ));
     }
 }
