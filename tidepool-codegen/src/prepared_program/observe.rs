@@ -366,11 +366,18 @@ impl<'a> ObservationHeap<'a> {
 
     /// Non-forcing check for `PreparedMachine::install_program`'s
     /// `required_evaluated` import re-verification: does this reference,
-    /// after following any already-settled thunk indirection, resolve to an
-    /// evaluated constructor value? Never forces an unsettled thunk (an
-    /// unforced or actively-forcing thunk answers `false`, not an error) and
-    /// never walks fields.
-    pub(super) fn resolves_to_evaluated_constructor(
+    /// after following any already-settled thunk indirection, resolve to a
+    /// value already in weak head normal form?
+    ///
+    /// "Evaluated" here means what the projection means when it declares a
+    /// global `required_evaluated` (`haskell/src/Tidepool/ExecutionProjection.hs`,
+    /// `importedEntry`): a re-entrant function (`LFReEntrant`), a constructor
+    /// (`LFCon`) or an unlifted value is evaluated; a thunk (`LFThunk`) is not.
+    /// So a function or PAP object satisfies the check exactly as a
+    /// constructor does -- a function-typed retained binding is a routine
+    /// import -- while an unforced or actively-forcing thunk answers `false`
+    /// (not an error). Never forces anything and never walks fields.
+    pub(super) fn resolves_to_whnf_value(
         &self,
         encoded: usize,
     ) -> Result<bool, ObservationFailure> {
@@ -389,11 +396,10 @@ impl<'a> ObservationHeap<'a> {
             if state == DescriptorState::Evaluating {
                 return Ok(false);
             }
-            let meaning = self
-                .registry
-                .and_then(|registry| registry.get(&descriptor.initial_header_word()))
-                .map(|metadata| &metadata.meaning);
-            return Ok(matches!(meaning, Some(DescriptorMeaning::Constructor(_))));
+            return Ok(matches!(
+                descriptor.kind(),
+                ObjectKind::Constructor | ObjectKind::Function | ObjectKind::Pap
+            ));
         }
     }
 

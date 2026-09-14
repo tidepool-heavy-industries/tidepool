@@ -400,7 +400,7 @@ impl<'code> PreparedMachine<'code> {
                 let Some(heap) = observation.as_ref() else {
                     return Err(ExecutionError::UnknownPreparedHandle);
                 };
-                let evaluated = heap.resolves_to_evaluated_constructor(pointer)?;
+                let evaluated = heap.resolves_to_whnf_value(pointer)?;
                 if !evaluated {
                     return Err(ExecutionError::ImportShape {
                         identity: Box::new(slot.identity.clone()),
@@ -3641,6 +3641,75 @@ mod tests {
         assert!(machine.release(*handle_f_via_b_before));
         assert!(machine.release(*handle_f_after));
         assert!(machine.release(*handle_f_via_b_after));
+        assert_eq!(machine.handle_count(), 0);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// A function-typed import satisfies `required_evaluated`. The projection
+    /// declares a re-entrant function global as evaluated
+    /// (`ExecutionProjection.hs`, `importedEntry`: `LFReEntrant` -> `True`),
+    /// so a retained function binding imported by a later program must
+    /// install; only an unforced thunk fails the check (test 3 below).
+    #[test]
+    fn s3_test2b_imported_function_satisfies_required_evaluated() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            s3_closure_producer_program(TopSlotBase::ZERO),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+                top_slots: 16,
+            },
+        )
+        .expect("A installs");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        let produced = machine
+            .run_entry_retained(
+                program_a,
+                ValueId(0),
+                &[],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("A produces its retained closure f");
+        let [PreparedResult::Managed(handle_f)] = produced.values.as_slice() else {
+            panic!("A must return one managed closure");
+        };
+
+        let base_b = machine.next_top_slot_base();
+        let mut imports = ImportBindings::new();
+        imports.insert(s3_closure_producer_identity(), *handle_f);
+        let program_b = machine
+            .install_program(
+                s3_import_consumer_program(
+                    base_b,
+                    s3_closure_producer_identity(),
+                    RuntimeRep::LiftedRef,
+                    true,
+                ),
+                imports,
+            )
+            .expect("a function object is in WHNF and satisfies required_evaluated");
+        let read = machine
+            .run_entry_retained(
+                program_b,
+                ValueId(0),
+                &[],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("B reads its function import");
+        let [PreparedResult::Managed(handle_f_via_b)] = read.values.as_slice() else {
+            panic!("B must retain the imported function handle");
+        };
+        assert_eq!(
+            machine.handle_current_pointer(*handle_f),
+            machine.handle_current_pointer(*handle_f_via_b),
+            "identity: B's import slot resolves to A's own function object"
+        );
+        assert!(machine.release(*handle_f));
+        assert!(machine.release(*handle_f_via_b));
         assert_eq!(machine.handle_count(), 0);
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
