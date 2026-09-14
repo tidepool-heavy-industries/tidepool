@@ -1,6 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module ExecutionProjectionTest (projectProjectionContract) where
+module ExecutionProjectionTest
+  ( projectProjectionContract
+  , verifyRetainedImportProjection
+  ) where
 
 import Control.Monad (forM_, unless)
 import Data.ByteString qualified as BS
@@ -1097,3 +1100,87 @@ topBindersForTest (StgTopStringLit binder _) = [binder]
 topBindersForTest (StgTopLifted binding) = case binding of
   StgNonRec binder _ -> [binder]
   StgRec pairs -> map fst pairs
+
+-- | A retained-generation symbol is an executable import: the projection (a)
+-- excludes it from recovery (no recovered top-level body in the wire
+-- program), and (b) declares it a 'GlobalDecl' carrying 'required_generation'
+-- even though 'ImportProducer' is compiled alongside 'ImportConsumer' as a
+-- home module (the retained check must come before the home-module
+-- rejection, never inferred from module membership). With the map empty,
+-- both bindings resolve as ordinary local home tops -- today's behavior.
+verifyRetainedImportProjection :: IO ()
+verifyRetainedImportProjection = do
+  root <- getCurrentDirectory
+  let fixtureDir = root </> "test-prepared-stg"
+  prepared <- runPipelineSelected PreparedStg
+    (fixtureDir </> "ImportConsumer.hs") [fixtureDir]
+  let modules = pprModules prepared
+      entry = SymbolIdentity "main" "ImportConsumer" "value" "consumerResult" Nothing
+      producerValueId = SymbolIdentity "main" "ImportProducer" "value" "producerValue" Nothing
+      producerFnId = SymbolIdentity "main" "ImportProducer" "value" "producerFn" Nothing
+      baseContext = ProjectionContext
+        { projectionProfile = "ghc-9.12-prepared-stg"
+        , projectionToolchain = "ghc-9.12.2"
+        , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []
+        , projectionRetainedGenerations = Map.empty
+        , projectionEntry = entry
+        , projectionFormattingAuthority = Nothing
+        , projectionTextUnit = Nothing
+        }
+  -- map empty -> current behavior: both producer bindings are recovered
+  -- locally, and neither is declared as a global.
+  case projectPreparedTarget baseContext modules of
+    Left failure -> ioError (userError
+      ("retained-import baseline projection failed: " <> show failure))
+    Right program -> do
+      unless (Set.member "producerValue" (recoveredOccurrences program))
+        (ioError (userError
+          "retained-import baseline omitted producerValue's recovered body"))
+      unless (Set.member "producerFn" (recoveredOccurrences program))
+        (ioError (userError
+          "retained-import baseline omitted producerFn's recovered body"))
+      unless (all ((/= producerValueId) . globalIdentity) (programGlobals program))
+        (ioError (userError
+          "retained-import baseline declared producerValue a global"))
+      unless (all ((/= producerFnId) . globalIdentity) (programGlobals program))
+        (ioError (userError
+          "retained-import baseline declared producerFn a global"))
+  -- map set -> both become GlobalDecls carrying the generation, and neither
+  -- top-level body is recovered.
+  let retainedContext = baseContext
+        { projectionRetainedGenerations = Map.fromList
+            [(producerValueId, 11), (producerFnId, 11)]
+        }
+  case projectPreparedTarget retainedContext modules of
+    Left failure -> ioError (userError
+      ("retained-import projection failed: " <> show failure))
+    Right program -> do
+      unless (not (Set.member "producerValue" (recoveredOccurrences program)))
+        (ioError (userError
+          "retained-import projection recovered producerValue's body"))
+      unless (not (Set.member "producerFn" (recoveredOccurrences program)))
+        (ioError (userError
+          "retained-import projection recovered producerFn's body"))
+      let globalsByIdentity = [(globalIdentity g, g) | g <- programGlobals program]
+      producerValueGlobal <- case lookup producerValueId globalsByIdentity of
+        Just value -> pure value
+        Nothing -> ioError (userError
+          "retained-import projection omitted producerValue's global")
+      producerFnGlobal <- case lookup producerFnId globalsByIdentity of
+        Just value -> pure value
+        Nothing -> ioError (userError
+          "retained-import projection omitted producerFn's global")
+      unless (globalRequiredGeneration producerValueGlobal == Just 11)
+        (ioError (userError
+          "retained-import projection did not carry producerValue's generation"))
+      unless (globalRequiredGeneration producerFnGlobal == Just 11)
+        (ioError (userError
+          "retained-import projection did not carry producerFn's generation"))
+  where
+    recoveredOccurrences program = Set.fromList
+      [ symbolOccurrence symbol
+      | group <- programBindings program
+      , TopBinding symbol _ <- groupItems group
+      ]
+    groupItems (NonRecursive item) = [item]
+    groupItems (Recursive items) = items

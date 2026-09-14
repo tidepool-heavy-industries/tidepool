@@ -13,6 +13,7 @@ import Control.Exception
   , fromException, toException )
 import Data.List (isPrefixOf, intercalate)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
+import Data.Word (Word64)
 import Control.Monad (foldM, forM, forM_, void)
 import System.Exit (ExitCode(..), exitWith)
 import System.IO (hPutStrLn, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8)
@@ -417,6 +418,7 @@ processFile compiler timing args path = do
           targets@(_ : _) -> targets
           [] -> maybe [] pure mTarget
     writePreparedArtifacts outDir path hscEnv (pprModules prepared) preparedTargets
+      (requestRetainedGenerations args)
 
   reportDiags res
 
@@ -429,8 +431,9 @@ trySynchronous action = do
       Nothing -> pure (Left exception)
     Right value -> pure (Right value)
 
-writePreparedArtifacts :: FilePath -> FilePath -> HscEnv -> [PreparedModule] -> [String] -> IO ()
-writePreparedArtifacts outDir input hscEnv modules targets = do
+writePreparedArtifacts :: FilePath -> FilePath -> HscEnv -> [PreparedModule] -> [String]
+  -> Map.Map SymbolIdentity Word64 -> IO ()
+writePreparedArtifacts outDir input hscEnv modules targets retainedGenerations = do
   formattingAuthority <- resolveFormattingAuthority hscEnv
   textAuthority <- resolveTextPackageUnit hscEnv
   source <- readFile input
@@ -452,7 +455,7 @@ writePreparedArtifacts outDir input hscEnv modules targets = do
           { projectionProfile = "ghc-9.12-prepared-stg"
           , projectionToolchain = "ghc-9.12.2"
           , projectionTarget = TargetDescriptor architecture LittleEndian 64 64 abi []
-          , projectionRetainedGenerations = Map.empty
+          , projectionRetainedGenerations = retainedGenerations
           , projectionEntry = entry
           , projectionFormattingAuthority = formattingAuthority
           , projectionTextUnit = textAuthority

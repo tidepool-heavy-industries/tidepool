@@ -14,11 +14,14 @@ module Tidepool.ExtractRequest
   ) where
 
 import qualified Data.ByteString as BS
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Bits ((.|.), shiftL, shiftR)
 import Data.Char (digitToInt, isHexDigit)
 import Data.Word (Word32, Word64, Word8)
+import Tidepool.ExecutionSchema (SymbolIdentity(..))
 
 data RequestField
   = Input FilePath
@@ -52,6 +55,7 @@ data RequestField
   | InspectStructuredInfo StructuredInspection
   | InspectStructuredType StructuredInspection
   | InspectOut FilePath
+  | RetainedGeneration SymbolIdentity Word64
   deriving (Eq, Show)
 
 -- | A decoded compiler-worker invocation. This is the Haskell boundary's
@@ -82,6 +86,11 @@ data WorkerRequest = WorkerRequest
   , requestBuildProductsDir :: Maybe FilePath
   , requestInspections :: [InspectionRequest]
   , requestInspectOut :: Maybe FilePath
+  -- | Executable imports: symbols the caller has already retained at a prior
+  -- generation. The projection excludes each one from recovery and declares
+  -- it as a global carrying that generation, even when its defining module
+  -- is compiled alongside this request as a home module.
+  , requestRetainedGenerations :: Map SymbolIdentity Word64
   }
   deriving (Eq, Show)
 
@@ -112,6 +121,7 @@ emptyWorkerRequest = WorkerRequest
   , requestBuildProductsDir = Nothing
   , requestInspections = []
   , requestInspectOut = Nothing
+  , requestRetainedGenerations = Map.empty
   }
 
 data InspectionRequest
@@ -192,6 +202,9 @@ requestFromFields = foldl apply emptyWorkerRequest
       InspectStructuredType query -> request
         { requestInspections = requestInspections request ++ [InspectStructuredTypeOf query] }
       InspectOut path -> request { requestInspectOut = Just path }
+      RetainedGeneration identity generation -> request
+        { requestRetainedGenerations =
+            Map.insert identity generation (requestRetainedGenerations request) }
 
 workerRequestFlag :: String
 workerRequestFlag = "--worker-request-v7"
@@ -258,6 +271,20 @@ encodeField field = case field of
   InspectSearch value -> taggedText 35 value
   InspectStructuredInfo query -> BS.singleton 36 <> encodeStructuredInspection query
   InspectStructuredType query -> BS.singleton 37 <> encodeStructuredInspection query
+  RetainedGeneration identity generation ->
+    BS.singleton 38 <> encodeSymbolIdentity identity <> putU64 generation
+
+encodeSymbolIdentity :: SymbolIdentity -> BS.ByteString
+encodeSymbolIdentity identity =
+  textFrame (T.unpack (symbolUnit identity))
+    <> textFrame (T.unpack (symbolModule identity))
+    <> textFrame (T.unpack (symbolNamespace identity))
+    <> textFrame (T.unpack (symbolOccurrence identity))
+    <> encodeMaybeText (symbolRecordParent identity)
+
+encodeMaybeText :: Maybe T.Text -> BS.ByteString
+encodeMaybeText Nothing = BS.singleton 0
+encodeMaybeText (Just value) = BS.singleton 1 <> textFrame (T.unpack value)
 
 encodeStructuredInspection :: StructuredInspection -> BS.ByteString
 encodeStructuredInspection query =
@@ -341,6 +368,10 @@ pField bytes = do
     35 -> mapParser InspectSearch pText rest
     36 -> mapParser InspectStructuredInfo pStructuredInspection rest
     37 -> mapParser InspectStructuredType pStructuredInspection rest
+    38 -> do
+      (identity, rest') <- pSymbolIdentity rest
+      (generation, rest'') <- pWord64 rest'
+      Right (RetainedGeneration identity generation, rest'')
     _  -> Left ("worker request: unknown field tag " ++ show tag)
   where
     retired tag = Left ("worker request: retired field tag " ++ show tag)
@@ -368,6 +399,27 @@ pStructuredInspection bytes = do
   (generation, rest'''') <- pWord64 rest'''
   (fingerprint, trailing) <- pText rest''''
   Right (StructuredInspection scope namespace name (InspectionProvenance generation fingerprint), trailing)
+
+pSymbolIdentity :: Parser SymbolIdentity
+pSymbolIdentity bytes = do
+  (unit, r1) <- pText bytes
+  (modul, r2) <- pText r1
+  (namespace, r3) <- pText r2
+  (occurrence, r4) <- pText r3
+  (recordParent, r5) <- pMaybeText r4
+  Right
+    ( SymbolIdentity (T.pack unit) (T.pack modul) (T.pack namespace) (T.pack occurrence)
+        (T.pack <$> recordParent)
+    , r5
+    )
+
+pMaybeText :: Parser (Maybe String)
+pMaybeText bytes = do
+  (tag, rest) <- pWord8 bytes
+  case tag of
+    0 -> Right (Nothing, rest)
+    1 -> mapParser Just pText rest
+    _ -> Left ("worker request: unknown optional-text tag " ++ show tag)
 
 pN :: Int -> Parser a -> Parser [a]
 pN 0 _ bytes = Right ([], bytes)
