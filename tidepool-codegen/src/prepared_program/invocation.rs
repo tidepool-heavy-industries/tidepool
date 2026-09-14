@@ -12,6 +12,7 @@
 //! through shared access even when this owner moves. There is no self-borrowed
 //! cleanup guard: Drop removes registries before releasing their allocations.
 
+use super::roots::{OldSpaceScope, RootWords};
 use super::run::{
     heap_top_extent, initialize_heap_tops, runtime_error, runtime_error_for_status,
     runtime_error_from_machine, runtime_error_from_machine_or_observation,
@@ -19,7 +20,6 @@ use super::run::{
 };
 use super::safepoint::NativeStackBounds;
 use super::{CompiledProgram, ExecutionError};
-use super::roots::{OldSpaceScope, RootWords};
 use crate::host_fns::{gc_trigger, prepared_gc_trigger, RuntimeError};
 use crate::prepared_control::{CallStatus, PreparedSafepoint};
 use crate::{context::VMContext, machine_state::MachineState, old_space::OldSpace};

@@ -86,7 +86,9 @@ impl RootHandleLedger {
             .iter()
             .filter_map(|(&id, entry)| (entry.realm == realm).then_some(id))
             .collect();
-        ids.into_iter().filter_map(|id| self.handles.remove(&id)).collect()
+        ids.into_iter()
+            .filter_map(|id| self.handles.remove(&id))
+            .collect()
     }
 }
 

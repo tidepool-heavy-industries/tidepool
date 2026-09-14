@@ -407,7 +407,7 @@ mod tests {
     use crate::prepared_program::{
         ExecutionError, PreparedCallOptions, PreparedMachineOptions, RunOptions,
     };
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::sync::{atomic::AtomicBool, Arc};
     use tidepool_repr::execution_schema::{
         testing, Atom, ExprFrame, Group, HeapBinding, HeapRhs, MachineImports, ResultContract,
         RuntimeRep, ScalarLiteral, Signature, SignatureId, TopBinding, UpdatePolicy, ValueId,
@@ -429,12 +429,12 @@ mod tests {
             arguments: vec![],
             results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
         });
-        wire.expressions.nodes.push(ExprFrame::Return(vec![Atom::Scalar(
-            ScalarLiteral::Int {
+        wire.expressions
+            .nodes
+            .push(ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::Int {
                 bits: 64,
                 bytes: 7_i64.to_be_bytes().to_vec(),
-            },
-        )]));
+            })]));
         wire.bindings.push(Group::NonRecursive(TopBinding {
             identity: testing::identity("PreparedMachine", "success"),
             binding: HeapBinding {
@@ -448,8 +448,9 @@ mod tests {
             },
         }));
         let prepared = testing::prepare(wire).expect("language failure fixture");
-        let linked = tidepool_repr::execution_schema::link_program(prepared, &MachineImports::default())
-            .expect("language failure fixture links");
+        let linked =
+            tidepool_repr::execution_schema::link_program(prepared, &MachineImports::default())
+                .expect("language failure fixture links");
         CompiledProgram::compile(&linked).expect("language failure fixture compiles")
     }
 

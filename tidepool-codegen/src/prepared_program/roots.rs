@@ -14,12 +14,18 @@ pub(super) struct OldSpaceScope<'a> {
 }
 
 impl<'a> OldSpaceScope<'a> {
-    pub(super) fn new(machine: &'a MachineState, owner: &'a OldSpace) -> Result<Self, ExecutionError> {
+    pub(super) fn new(
+        machine: &'a MachineState,
+        owner: &'a OldSpace,
+    ) -> Result<Self, ExecutionError> {
         if unsafe { machine.prepared_old_space() }.is_some() {
             return Err(runtime_error(machine, RuntimeError::BadPointer));
         }
         unsafe { machine.install_prepared_old_space(owner) };
-        Ok(Self { machine, _owner: owner })
+        Ok(Self {
+            machine,
+            _owner: owner,
+        })
     }
 }
 
@@ -35,7 +41,9 @@ pub(super) struct RootWords(Vec<UnsafeCell<u64>>);
 impl RootWords {
     pub(super) fn new(length: usize) -> Result<Self, ExecutionError> {
         let mut words = Vec::new();
-        words.try_reserve_exact(length).map_err(|_| runtime_error_without_machine(RuntimeError::HeapOverflow))?;
+        words
+            .try_reserve_exact(length)
+            .map_err(|_| runtime_error_without_machine(RuntimeError::HeapOverflow))?;
         words.resize_with(length, || UnsafeCell::new(0));
         Ok(Self(words))
     }
@@ -45,7 +53,10 @@ impl RootWords {
     }
 
     pub(super) fn write(&self, index: usize, value: u64) -> Result<(), ExecutionError> {
-        let word = self.0.get(index).ok_or_else(|| runtime_error_without_machine(RuntimeError::BadPointer))?;
+        let word = self
+            .0
+            .get(index)
+            .ok_or_else(|| runtime_error_without_machine(RuntimeError::BadPointer))?;
         unsafe { word.get().write(value) };
         Ok(())
     }

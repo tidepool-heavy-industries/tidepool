@@ -56,16 +56,25 @@ impl super::OldSpace {
         selected: &[*mut *mut u8],
         descriptors: &[Arc<ObjectDescriptor>],
     ) -> Result<Vec<super::RootSlot>, RuntimeError> {
-        self.promote_prepared(machine, vmctx, selected, descriptors)?;
+        // Every fallible bookkeeping step is completed before promotion
+        // mutates the nursery.  After promotion only infallible Box ownership
+        // publication remains, so a multi-result transfer is all-or-nothing
+        // from the caller's perspective.
         let mut retained = Vec::new();
         retained
             .try_reserve_exact(selected.len())
             .map_err(|_| RuntimeError::HeapOverflow)?;
+        self.slots
+            .try_reserve(selected.len())
+            .map_err(|_| RuntimeError::HeapOverflow)?;
         for &source in selected {
-            let pointer = *source;
-            if pointer.is_null() {
+            if source.is_null() || (*source).is_null() {
                 return Err(RuntimeError::BadPointer);
             }
+        }
+        self.promote_prepared(machine, vmctx, selected, descriptors)?;
+        for &source in selected {
+            let pointer = *source;
             let mut cell = Box::new(pointer);
             let address: *mut *mut u8 = &mut *cell;
             self.slots.push(cell);

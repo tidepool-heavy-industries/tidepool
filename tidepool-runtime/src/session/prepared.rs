@@ -183,7 +183,7 @@ impl PreparedRuntime {
                         nursery_bytes: RunOptions::default().nursery_bytes,
                     },
                 )
-                    .map_err(|error| self.classify_execution(error))?,
+                .map_err(|error| self.classify_execution(error))?,
             );
         }
         if cancel.is_cancelled() {

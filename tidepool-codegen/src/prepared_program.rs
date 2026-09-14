@@ -33,12 +33,12 @@ mod image;
 #[cfg(test)]
 mod invocation;
 mod machine;
-mod roots;
 pub(crate) mod md5_kernel;
 mod no_success;
 #[cfg(test)]
 mod no_success_tests;
 mod observe;
+mod roots;
 pub use observe::ObservationFailure;
 mod run;
 pub use machine::{PreparedCallOptions, PreparedMachine, PreparedMachineOptions};
