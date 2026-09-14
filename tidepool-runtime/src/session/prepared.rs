@@ -146,6 +146,17 @@ impl PreparedRuntime {
         collect: bool,
         cancel: &PreparedCancelHandle,
     ) -> Result<PreparedRunResult, PreparedRuntimeError> {
+        self.run_entry_with_completion_hook(binding, arguments, collect, cancel, || {})
+    }
+
+    fn run_entry_with_completion_hook(
+        &mut self,
+        binding: Option<ValueId>,
+        arguments: &[u64],
+        collect: bool,
+        cancel: &PreparedCancelHandle,
+        after_lower_success: impl FnOnce(),
+    ) -> Result<PreparedRunResult, PreparedRuntimeError> {
         if let Some(failure) = &self.terminal {
             return Err(PreparedRuntimeError::Unavailable(failure.clone()));
         }
@@ -176,9 +187,9 @@ impl PreparedRuntime {
                 Arc::clone(&cancel.0),
             )
             .map_err(|error| self.classify_execution(error))?;
-        if cancel.is_cancelled() {
-            return Err(PreparedRuntimeError::Cancelled);
-        }
+        // Lower success is the completion point. Cancellation published after
+        // it may affect a later entry, but cannot rewrite this result.
+        after_lower_success();
         Ok(PreparedRunResult {
             values: result.values,
             collections: result.collections,
@@ -268,10 +279,6 @@ mod tests {
         result
     }
 
-    fn boolean(value: bool) -> Vec<u8> {
-        vec![if value { 0xf5 } else { 0xf4 }]
-    }
-
     fn rep_lifted() -> Vec<u8> {
         array([uint(1)])
     }
@@ -282,6 +289,7 @@ mod tests {
             text(module),
             text(namespace),
             text(occurrence),
+            array([uint(0)]),
         ])
     }
 
@@ -296,14 +304,6 @@ mod tests {
             uint(1),
             uint(1),
             uint(100),
-        ]);
-        let imported = array([
-            symbol("value", "PreparedStrict", "imported"),
-            rep_lifted(),
-            array([uint(0)]),
-            boolean(false),
-            array([uint(1), uint(7)]),
-            boolean(false),
         ]);
         let expression = array([uint(4), uint(0), array([])]);
         let function = array([uint(0), uint(0), array([]), array([]), uint(0)]);
@@ -326,8 +326,8 @@ mod tests {
                 text("sysv64"),
                 array([]),
             ]),
-            array([array([array([]), array([rep_lifted()])])]),
-            array([imported]),
+            array([array([array([]), array([uint(0), array([rep_lifted()])])])]),
+            array([]),
             array([constructor]),
             array([]),
             array([expression]),
@@ -414,6 +414,19 @@ mod tests {
             replayed,
             PreparedRuntimeError::Unavailable(retained) if retained == failure
         ));
+    }
+
+    #[test]
+    fn cancellation_after_compiled_success_does_not_veto_completion() {
+        let mut runtime = m3_runtime();
+        let cancel = runtime.new_cancel_handle();
+
+        let result = runtime.run_entry_with_completion_hook(None, &[], false, &cancel, || {
+            cancel.cancel();
+        });
+
+        assert!(result.is_ok());
+        assert!(cancel.is_cancelled());
     }
 
     #[test]
