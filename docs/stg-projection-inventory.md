@@ -106,14 +106,41 @@ admission, authenticated external payloads, and admitted scalar and array
 families. It is still a subset: this inventory does not claim full imported,
 primitive, effect, or session-retention execution.
 
-`tidepool-codegen::prepared_program::CompiledProgram` is a closed, pinned
-execution path for the Linux x86-64 little-endian 64-bit SysV profile. Its
-whole-program admission pass rejects globals/imports, unsupported thunk
+`tidepool-codegen::prepared_program::CompiledProgram` is a pinned execution
+path for the Linux x86-64 little-endian 64-bit SysV profile. Its
+whole-program admission pass admits a global per declaration when its
+representation is `LiftedRef` or `UnliftedRef` and rejects any other global
+representation with the declaring `GlobalId`; it rejects unsupported thunk
 signatures, unsupported operations, and application signatures/forms without
 an admitted exact/partial/excess classification. Admission
 walks nested expression ownership iteratively and reports the owning binding
 and arena node for unsupported expressions. `run_entry` also rejects managed
 host arguments.
+
+An admitted global is an executable import: `plan.rs` assigns it a
+machine-wide top-table slot immediately after the program's own tops,
+`ValueRef::Global` lowers to a load of that slot, and
+`PreparedMachine::install_program` takes an `ImportBindings` map of one
+retained `PreparedHandle` per declared identity. Identity, signature and
+generation agreement are `link_program`'s contract; install re-verifies only
+the live handle's runtime shape (representation, and weak-head-normal-form
+settledness when the declaration requires an evaluated value, where a
+function or PAP counts as evaluated exactly as a constructor does) before
+publishing the slot from the handle's current pointer and registering the
+slot as its own persistent root. A rejected import leaves the table, the
+roots and every installed program untouched. The import is read by
+identity, not copied: the slot resolves to the producing program's own
+object on the shared heap.
+
+Two per-program tables in generated code still see only their own program:
+`apply.rs`'s call dispatchers and `CaseKind::Algebraic` dispatch match a
+callee's or scrutinee's descriptor against the compiling program's own
+function/PAP and constructor tables. So generated code can load, hold, pass
+and return an imported value, but a generated call *of* an imported
+closure, or a generated `Case` *on* an imported constructor, traps. Host
+observation (`inspect_outer`) resolves either through the machine-wide
+descriptor union. Cross-program invocation and dispatch are recorded as the
+next codegen step, not implied by import admission.
 
 The currently emitted strict subset is:
 
@@ -240,9 +267,11 @@ Focused settlement, application, entry, and retention tests are in
 alongside the heap GC tests under
 [`tidepool-heap/src/gc`](../tidepool-heap/src/gc).
 
-This is an executable connected subset, not a producer cutover. Globals/imports,
-effects, other foreign/primitive operations, and managed host arguments remain
-outside this closed path. `Atom::Rubbish`
+This is an executable connected subset, not a producer cutover. Imports are
+admitted as described under the compiled-program path above (read by slot;
+not yet callable or case-dispatched from generated code); effects, other
+foreign/primitive operations, and managed host arguments through
+`run_entry` remain outside this path. `Atom::Rubbish`
 is represented by the schema but native `atom_value` demand currently reports
 `Unsupported`; `NullAddress` has only the explicit `Address` lowering and is
 still rejected by observation, which does not materialize addresses. No
@@ -430,7 +459,7 @@ allocating its checked external byte payload; that temporary formatting
 allocation is not fallible and can abort on process OOM rather than returning
 the runtime's typed heap-overflow status.
 
-Imported/global resolution outside the owned executable subset, effects,
+Generated-code invocation and case dispatch over imported values, effects,
 foreign calls, unsupported primitive operations, and full corpus execution
 remain separate work. No session-retention or effect-support contract is
 asserted here. No production cutover or compatibility promise is implied by
