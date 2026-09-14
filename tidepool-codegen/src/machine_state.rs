@@ -63,6 +63,7 @@ use std::sync::Arc;
 
 use crate::context::VMContext;
 use crate::host_fns::{GcState, RuntimeError};
+use crate::prepared_program::resolve;
 use crate::stack_map::StackMapRegistry;
 
 pub use tidepool_heap::external_storage::{ExternalStorageKind, ExternalStorageValidationError};
@@ -291,6 +292,20 @@ pub struct MachineState {
     external_allocated_objects: Cell<usize>,
     external_freed_bytes: Cell<usize>,
     external_freed_objects: Cell<usize>,
+    /// Cross-program call targets, keyed by the callee's descriptor header
+    /// word: registered at install (a later wave), read by the
+    /// `prepared_resolve_call` host fn a foreign dispatcher call falls back
+    /// to. Holds raw code pointers into an installed pipeline's finalized
+    /// module -- valid exactly as long as that pipeline (owned by the
+    /// installed program, which the stack-map chain's lifetime rule also
+    /// governs) is alive, and must be cleared before the machine's programs
+    /// drop (`clear_prepared_entries`, called from `Drop for PreparedMachine`).
+    prepared_callables: RefCell<HashMap<usize, resolve::ResolvedEntry>>,
+    /// Cross-program force targets: a thunk/function/PAP descriptor header ->
+    /// the OWNING program's `prepared_enter` code pointer, so a foreign
+    /// `Enter` can force an imported thunk through the program that knows how
+    /// to run it. Same lifetime contract as `prepared_callables`.
+    prepared_enters: RefCell<HashMap<usize, *const u8>>,
 }
 
 // SAFETY: MachineState is only ever accessed from the single thread driving
@@ -352,6 +367,8 @@ impl MachineState {
             external_allocated_objects: Cell::new(0),
             external_freed_bytes: Cell::new(0),
             external_freed_objects: Cell::new(0),
+            prepared_callables: RefCell::new(HashMap::new()),
+            prepared_enters: RefCell::new(HashMap::new()),
         }
     }
 
@@ -1036,8 +1053,14 @@ impl MachineState {
         self.write_barrier_armed.get()
     }
 
-    /// Record `slot` in the remembered set.
+    /// Record `slot` in the remembered set. The one sink for every
+    /// old-to-young edge recorder (`host_fns::write_barrier`,
+    /// `retain_external_payloads`); the test-only kill switch lives here so a
+    /// mutation check disables recording as a whole, not one recorder.
     pub(crate) fn register_remembered_slot(&self, slot: *mut *mut u8) {
+        if crate::host_fns::remembered_set_disabled_for_test() {
+            return;
+        }
         self.remembered_slots.borrow_mut().insert(slot);
     }
 
@@ -1056,6 +1079,84 @@ impl MachineState {
     /// sibling of `extend_stowed_roots`, used by `perform_gc`.
     pub(crate) fn extend_remembered_slots(&self, out: &mut Vec<*mut *mut u8>) {
         out.extend(self.remembered_slots.borrow().iter().copied());
+    }
+
+    // --- cross-program call/enter resolution ------------------------------
+    // Substrate for the prepared engine's cross-program call and force
+    // fallback (see `prepared_program::resolve`); a later wave adds the
+    // dispatcher-side call sites that actually read these tables at a miss.
+
+    /// Register one installed program's exported call targets and owned
+    /// enter headers. Called at install time (a later wave); additive only
+    /// -- a header already registered by an earlier program is left alone
+    /// by `extend`'s "later entries overwrite" semantics, which is fine here
+    /// because header words are unique per descriptor across the machine.
+    #[allow(
+        dead_code,
+        reason = "called by install/rollback logic a later wave adds"
+    )]
+    pub(crate) fn register_prepared_entries(
+        &self,
+        callables: impl IntoIterator<Item = (usize, resolve::ResolvedEntry)>,
+        enters: impl IntoIterator<Item = (usize, *const u8)>,
+    ) {
+        self.prepared_callables.borrow_mut().extend(callables);
+        self.prepared_enters.borrow_mut().extend(enters);
+    }
+
+    /// Install rollback: undo exactly the headers a failed install already
+    /// registered (its own list, not a blanket clear -- earlier programs'
+    /// entries must survive).
+    #[allow(
+        dead_code,
+        reason = "called by install/rollback logic a later wave adds"
+    )]
+    pub(crate) fn remove_prepared_entries(&self, headers: &[usize]) {
+        let mut callables = self.prepared_callables.borrow_mut();
+        let mut enters = self.prepared_enters.borrow_mut();
+        for header in headers {
+            callables.remove(header);
+            enters.remove(header);
+        }
+    }
+
+    /// Machine-teardown path (`Drop for PreparedMachine`): drop every raw
+    /// code pointer before the pipelines they point into are freed.
+    #[allow(
+        dead_code,
+        reason = "wired into Drop for PreparedMachine by a later wave (B3)"
+    )]
+    pub(crate) fn clear_prepared_entries(&self) {
+        self.prepared_callables.borrow_mut().clear();
+        self.prepared_enters.borrow_mut().clear();
+    }
+
+    pub(crate) fn resolve_prepared_call(&self, header: usize) -> Option<resolve::ResolvedEntry> {
+        self.prepared_callables.borrow().get(&header).copied()
+    }
+
+    pub(crate) fn resolve_prepared_enter(&self, header: usize) -> Option<*const u8> {
+        self.prepared_enters.borrow().get(&header).copied()
+    }
+
+    /// Whether `header` (a masked object header word) is a descriptor this
+    /// machine's shared descriptor space knows about at all -- used to
+    /// distinguish "a real cross-program object with no resolvable entry yet"
+    /// (typed, `Reusable` failure) from "not a live object header" (integrity
+    /// failure).
+    ///
+    /// Deliberate simplification for this substrate-only card: there is no
+    /// existing read-only accessor onto the live `DescriptorSpace` (it lives
+    /// behind `take_gc_state`/`put_gc_state`, which is awkward and
+    /// reentrant-unsafe to call from here), and adding one safely is
+    /// `host_fns::gc`'s call, not this card's. Unconditionally reporting the
+    /// header as known means every resolution miss classifies as
+    /// `RuntimeError::UnresolvedCallee` (reusable) rather than
+    /// `BadThunkState` (unavailable) -- the safer direction to be wrong in,
+    /// since it never turns a real integrity failure into a silently
+    /// swallowed one. A later wave can tighten this once it owns `gc.rs`.
+    pub(crate) fn prepared_descriptor_known(&self, _header: usize) -> bool {
+        true
     }
 
     /// Join a successful generated-frame walk with every ambient root registry.
@@ -1767,8 +1868,12 @@ impl MachineState {
                 record.generation = ExternalGeneration::Retained;
             }
         }
-        for slot in slots {
-            remembered.insert(slot);
+        // Same sink as `register_remembered_slot` (inlined to reuse the
+        // reserved borrow), so the test kill switch covers this recorder too.
+        if !crate::host_fns::remembered_set_disabled_for_test() {
+            for slot in slots {
+                remembered.insert(slot);
+            }
         }
         if !selected.is_empty() {
             self.external_changed();

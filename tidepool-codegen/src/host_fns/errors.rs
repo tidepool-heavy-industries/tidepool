@@ -95,6 +95,13 @@ pub enum RuntimeError {
     /// retained through unwind; the invocation is permanently unavailable.
     #[error("incomplete retention promotion: {0}")]
     IncompletePromotion(tidepool_heap::execution_descriptor::DescriptorTraceError),
+    /// A cross-program call/enter fallback (`prepared_resolve_call`/
+    /// `prepared_resolve_enter`) found no registered entry -- or a
+    /// fingerprint mismatch -- for an otherwise-known descriptor header. The
+    /// decision is made before any call runs and the heap is untouched, so
+    /// this is a reusable, ordinary runtime failure, not an integrity one.
+    #[error("unresolved cross-program callee (no installed program exports this descriptor's entry, or its signature fingerprint does not match)")]
+    UnresolvedCallee,
 }
 
 impl RuntimeError {
@@ -138,6 +145,7 @@ impl RuntimeError {
             | Self::StackOverflow
             | Self::BlackHole
             | Self::UserErrorMsg(_)
+            | Self::UnresolvedCallee
             | Self::Cancelled => MachineDisposition::Reusable,
         }
     }
@@ -1266,7 +1274,7 @@ mod tests {
             assert_eq!(take_runtime_error(), Some(RuntimeError::Cancelled));
         });
     }
-    extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext) {}
+    extern "C" fn mock_gc_trigger(_vmctx: *mut VMContext, _reserve: usize) {}
 
     /// `materialize_message`'s Text branch (`nf == 3`) reads the offset/len
     /// fields directly from the Con — like every other field access in this

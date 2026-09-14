@@ -38,6 +38,7 @@ mod no_success;
 #[cfg(test)]
 mod no_success_tests;
 mod observe;
+pub(crate) mod resolve;
 mod roots;
 pub use observe::ObservationFailure;
 mod interner;
@@ -199,6 +200,57 @@ unsafe extern "C" fn prepared_blackhole(vmctx: *mut crate::context::VMContext) -
     machine.prepared_call_status() as i32
 }
 
+/// Resolve a foreign callee for `emit_dispatchers`' fallback (a later
+/// wave wires the call site): `header` is the callee object's masked
+/// header word, `fingerprint` is the CALLER's expectation of that
+/// callee's signature shape (see `resolve::signature_fingerprint`).
+/// Returns the code pointer on a fingerprint-matching hit, 0 on any
+/// miss -- a fingerprint mismatch is treated exactly like "nothing
+/// registered", never a silent wrong-ABI jump.
+unsafe extern "C" fn prepared_resolve_call(
+    vmctx: *mut crate::context::VMContext,
+    header: u64,
+    fingerprint: u64,
+) -> u64 {
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    let masked = (header as usize) & !7;
+    match machine.resolve_prepared_call(masked) {
+        Some(entry) if entry.fingerprint == fingerprint => entry.code as u64,
+        _ => {
+            if machine.prepared_descriptor_known(masked) {
+                machine.set_first_cause(crate::host_fns::RuntimeError::UnresolvedCallee);
+            } else {
+                machine.set_first_cause(crate::host_fns::RuntimeError::BadThunkState(0));
+            }
+            0
+        }
+    }
+}
+
+/// Resolve the owning program's `prepared_enter` for a foreign
+/// thunk/function/PAP header, so `entry.rs`'s per-program enter chain
+/// can fall back to it (a later wave wires the call site). Returns 0
+/// on any miss, with the same cause classification as
+/// `prepared_resolve_call`.
+unsafe extern "C" fn prepared_resolve_enter(
+    vmctx: *mut crate::context::VMContext,
+    header: u64,
+) -> u64 {
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    let masked = (header as usize) & !7;
+    match machine.resolve_prepared_enter(masked) {
+        Some(code) => code as u64,
+        None => {
+            if machine.prepared_descriptor_known(masked) {
+                machine.set_first_cause(crate::host_fns::RuntimeError::UnresolvedCallee);
+            } else {
+                machine.set_first_cause(crate::host_fns::RuntimeError::BadThunkState(0));
+            }
+            0
+        }
+    }
+}
+
 /// Pins generated entries, descriptors and immutable images together. Each run
 /// owns its mutable heap; materialization may force values before releasing it.
 pub struct CompiledProgram {
@@ -227,6 +279,32 @@ pub struct CompiledProgram {
     /// Platform C-ABI adapter `(vmctx, result_out, managed_ref) -> status`.
     /// The target is generated code which calls Tail `prepared_enter`.
     pub(crate) force_adapter: FuncId,
+    /// Every function this program exports as a cross-program call target,
+    /// for the installing machine to register in its resolution table. A
+    /// later wave's dispatcher fallback (X2b/X2c) is the actual consumer.
+    #[allow(
+        dead_code,
+        reason = "consumed by the install-time registration a later wave adds"
+    )]
+    pub(crate) callables: Vec<resolve::CallableExport>,
+    /// This program's own `prepared_enter` FuncId, exported so an
+    /// installing machine can register it as the owner for every header in
+    /// `enter_owned_headers`.
+    #[allow(
+        dead_code,
+        reason = "consumed by the install-time registration a later wave adds"
+    )]
+    pub(crate) enter: FuncId,
+    /// Every thunk/function/PAP descriptor header THIS program's own
+    /// `prepared_enter` (the `enter` field above) knows how to force --
+    /// i.e. the union of `plan.thunks`' and the evaluated-chain descriptors'
+    /// header words, mirroring what `entry::emit_prepared_enter`'s
+    /// `thunks`/`evaluated` parameters already cover for this program.
+    #[allow(
+        dead_code,
+        reason = "consumed by the install-time registration a later wave adds"
+    )]
+    pub(crate) enter_owned_headers: Vec<usize>,
 }
 
 impl CompiledProgram {
@@ -280,6 +358,11 @@ impl CompiledProgram {
                 ("prepared_case_trap", prepared_case_trap as *const u8),
                 ("prepared_bad_state", prepared_bad_state as *const u8),
                 ("prepared_blackhole", prepared_blackhole as *const u8),
+                ("prepared_resolve_call", prepared_resolve_call as *const u8),
+                (
+                    "prepared_resolve_enter",
+                    prepared_resolve_enter as *const u8,
+                ),
                 ("prepared_raise", no_success::raise as *const u8),
                 ("prepared_keep_alive", lifetime::keep_alive as *const u8),
                 (
@@ -482,6 +565,50 @@ impl CompiledProgram {
                 "prepared_blackhole",
                 Linkage::Import,
                 &prepared_status_signature,
+            )
+            .map_err(|error| PipelineError::Declaration(error.to_string()))?;
+        let mut prepared_resolve_call_signature =
+            ir::Signature::new(pipeline.isa.default_call_conv());
+        prepared_resolve_call_signature
+            .params
+            .push(AbiParam::new(types::I64));
+        prepared_resolve_call_signature
+            .params
+            .push(AbiParam::new(types::I64));
+        prepared_resolve_call_signature
+            .params
+            .push(AbiParam::new(types::I64));
+        prepared_resolve_call_signature
+            .returns
+            .push(AbiParam::new(types::I64));
+        // Declared now so the symbol exists in the module; a later wave
+        // threads these FuncIds into `apply::emit_dispatchers` and
+        // `entry::emit_prepared_enter`'s call sites.
+        let _prepared_resolve_call = pipeline
+            .module
+            .declare_function(
+                "prepared_resolve_call",
+                Linkage::Import,
+                &prepared_resolve_call_signature,
+            )
+            .map_err(|error| PipelineError::Declaration(error.to_string()))?;
+        let mut prepared_resolve_enter_signature =
+            ir::Signature::new(pipeline.isa.default_call_conv());
+        prepared_resolve_enter_signature
+            .params
+            .push(AbiParam::new(types::I64));
+        prepared_resolve_enter_signature
+            .params
+            .push(AbiParam::new(types::I64));
+        prepared_resolve_enter_signature
+            .returns
+            .push(AbiParam::new(types::I64));
+        let _prepared_resolve_enter = pipeline
+            .module
+            .declare_function(
+                "prepared_resolve_enter",
+                Linkage::Import,
+                &prepared_resolve_enter_signature,
             )
             .map_err(|error| PipelineError::Declaration(error.to_string()))?;
         let mut write_barrier_signature = ir::Signature::new(pipeline.isa.default_call_conv());
@@ -748,6 +875,28 @@ impl CompiledProgram {
                 },
             );
         }
+        let callables = plan
+            .functions
+            .iter()
+            .filter_map(|(id, function)| {
+                functions
+                    .get(id)
+                    .map(|&function_id| resolve::CallableExport {
+                        header: function.descriptor.initial_header_word(),
+                        function: function_id,
+                        fingerprint: resolve::signature_fingerprint(function.signature),
+                    })
+            })
+            .collect::<Vec<_>>();
+        let enter_owned_headers = thunk_entries
+            .iter()
+            .map(|thunk_entry| thunk_entry.descriptor.initial_header_word())
+            .chain(
+                enter_evaluated
+                    .iter()
+                    .map(|descriptor| descriptor.initial_header_word()),
+            )
+            .collect::<Vec<_>>();
         let byte_tops = plan
             .top_bindings
             .iter()
@@ -776,6 +925,9 @@ impl CompiledProgram {
             bytes: plan.bytes,
             heap_top_specs: plan.heap_top_specs,
             force_adapter,
+            callables,
+            enter: prepared_enter,
+            enter_owned_headers,
         })
     }
 
