@@ -1047,6 +1047,18 @@ internOperation op signature = do
       , unitString unit == "ghc-prim"
       , operationSignature == Signature [AddressRep, VoidRep] (Returns [IntRep 64]) ->
           pure (Schema.IntrinsicIdentity "strlen" Schema.CCall)
+    -- ghc-bignum keeps these final integer-to-Double conversions in C. Their
+    -- ABI is fixed by the pinned GHC, and native lowering delegates to the
+    -- existing tidepool-bignum implementation rather than loading package code.
+    StgFCallOp (Foreign.CCall (Foreign.CCallSpec
+      (Foreign.StaticTarget _ label (Just unit) _) Foreign.CCallConv Foreign.PlayRisky)) _
+      | unitString unit == "ghc-bignum"
+      , Just arguments <- lookup (unpackFS label)
+          [ ("__int_encodeDouble", [IntRep 64, IntRep 64, VoidRep])
+          , ("__word_encodeDouble", [WordRep 64, IntRep 64, VoidRep])
+          ]
+      , operationSignature == Signature arguments (Returns [FloatRep 64]) ->
+          pure (Schema.IntrinsicIdentity (Text.pack (unpackFS label)) Schema.CCall)
     -- text's byte-search kernel is a C implementation with no Haskell body.
     -- The compiler-resolved provider and exact ABI jointly authorize it.
     StgFCallOp (Foreign.CCall (Foreign.CCallSpec
