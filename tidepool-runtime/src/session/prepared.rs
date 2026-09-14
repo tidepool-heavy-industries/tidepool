@@ -7,21 +7,36 @@
 //! and retained-program reuse cross this boundary in that order. The legacy
 //! `CoreExpr` machine is not a fallback for any operation in this module.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tidepool_bridge::Value;
+use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
 use tidepool_codegen::jit_machine::MachineDisposition;
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
-    CompileError, CompiledProgram, ExecutionError, PreparedCallOptions, PreparedHandle,
-    PreparedInput, PreparedMachine, PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter,
-    PreparedResult, PreparedResultBatch, ProgramId, RunOptions, TopSlotBase,
+    CompileError, CompiledProgram, ExecutionError, ImportBindings, PreparedCallOptions,
+    PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions,
+    PreparedOuter as CodegenPreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
+    RunOptions, TopSlotBase,
 };
+use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::execution_schema::{
-    link_program, parse_program, DecodeLimits, LinkError, LinkedProgram, MachineImports,
-    ParseError, ProgramRequirements, ValueId,
+    link_program, parse_program, DecodeLimits, Group, HeapRhs, ImportedValue, LinkError,
+    LinkedProgram, MachineImports, ParseError, PreparedProgram, ProgramRequirements, Signature,
+    SymbolIdentity, ValueId,
 };
+use tidepool_repr::{
+    BindingName, Generation, MonotonicIdIssuer, SessionModule, SessionVarId, VarId,
+};
+
+/// Machine-wide top-table capacity a session machine reserves up front:
+/// every later `install` claims its tops and import slots from this fixed
+/// range, and registered root addresses must never move, so it is sized for
+/// a whole session rather than one program. Exhaustion is the typed
+/// `ExecutionError::TopTableExhausted`, never a reallocation.
+const SESSION_TOP_SLOTS: usize = 4096;
 
 #[derive(Clone, Debug, Default)]
 pub struct PreparedCancelHandle(Arc<AtomicBool>);
@@ -59,13 +74,22 @@ pub enum PreparedRuntimeError {
     Run(ExecutionError),
     #[error("prepared runtime is unavailable after an integrity failure")]
     Unavailable(MachineFailure),
+    #[error("session binding {0:?} is not a live prepared binding")]
+    UnknownBinding(SessionVarId),
+    #[error(
+        "session binding {id:?} is leased by {leases} installed program(s) and cannot be released"
+    )]
+    BindingLeased { id: SessionVarId, leases: usize },
 }
 
 impl PreparedRuntimeError {
     #[must_use]
     pub fn kind(&self) -> PreparedFailureKind {
         match self {
-            Self::Parse(_) | Self::Link(_) => PreparedFailureKind::Rejected,
+            Self::Parse(_)
+            | Self::Link(_)
+            | Self::UnknownBinding(_)
+            | Self::BindingLeased { .. } => PreparedFailureKind::Rejected,
             Self::Cancelled => PreparedFailureKind::Cancelled,
             Self::Unavailable(_) => PreparedFailureKind::Integrity,
             Self::Compile(_) => PreparedFailureKind::Rejected,
@@ -142,14 +166,30 @@ pub enum PreparedOuter {
     },
 }
 
-/// A linked program and its lazily compiled owner retained across entries with
-/// a monotonic reuse decision.
+/// One prepared session: a lazily installed machine shared by every program
+/// installed into it, the session's retained bindings, and the one
+/// generation counter later programs link against.
+///
+/// The first program is linked at construction and installed on first use;
+/// later programs are installed through [`Self::install`] against bindings
+/// made by [`Self::bind_top`]. Root registration stays with the machine
+/// ([`PreparedMachine::release`] is the only deregistration path); the
+/// [`BindingTable`] is the name/generation/lease ledger, reused from the Core
+/// session rather than duplicated.
 pub struct PreparedRuntime {
-    linked: LinkedProgram,
-    /// Set together: a machine is installed with exactly one program (this
-    /// runtime is still single-program), so its id lives alongside it rather
-    /// than as a second, independently-optional field.
+    /// The first program, until the machine exists and takes custody of it.
+    pending: Option<LinkedProgram>,
+    /// Set together: the machine and the id of the first program it was
+    /// created with (the program `run_entry` addresses by default).
     machine: Option<(PreparedMachine<'static>, ProgramId)>,
+    /// Every installed program, for entry defaults and export lookup.
+    programs: BTreeMap<ProgramId, LinkedProgram>,
+    bindings: BindingTable,
+    /// The session's single value generation counter: every `bind_top`
+    /// mints the next one, and an importer's `required_generation` is
+    /// checked against the generation the named binding was minted at.
+    val_gen: Generation,
+    binding_ids: MonotonicIdIssuer,
 }
 
 impl PreparedRuntime {
@@ -160,11 +200,186 @@ impl PreparedRuntime {
         imports: MachineImports,
     ) -> Result<Self, PreparedRuntimeError> {
         let prepared = parse_program(artifact, requirements, limits)?;
+        Self::from_prepared(prepared, imports)
+    }
+
+    /// Start a session from an already-decoded program (the artifact-bytes
+    /// path above parses and then comes here).
+    pub fn from_prepared(
+        prepared: PreparedProgram,
+        imports: MachineImports,
+    ) -> Result<Self, PreparedRuntimeError> {
         let linked = link_program(prepared, &imports)?;
         Ok(Self {
-            linked,
+            pending: Some(linked),
             machine: None,
+            programs: BTreeMap::new(),
+            bindings: BindingTable::new(),
+            val_gen: Generation::default(),
+            binding_ids: MonotonicIdIssuer::starting_at("prepared-binding", 1),
         })
+    }
+
+    /// The id of the session's first program, installing the machine if it
+    /// has not been yet.
+    pub fn first_program(&mut self) -> Result<ProgramId, PreparedRuntimeError> {
+        self.ensure_machine()
+    }
+
+    /// The session's retained bindings (read-only; mutation goes through
+    /// [`Self::bind_top`], [`Self::install`] and [`Self::release_binding`]).
+    #[must_use]
+    pub fn bindings(&self) -> &BindingTable {
+        &self.bindings
+    }
+
+    /// Retain one of an installed program's top-level bindings under `name`
+    /// at the session's next value generation, without running it. The
+    /// returned id is what a later [`Self::install`] names an import by.
+    pub fn bind_top(
+        &mut self,
+        program: ProgramId,
+        value: ValueId,
+        name: &str,
+    ) -> Result<SessionVarId, PreparedRuntimeError> {
+        self.ensure_machine()?;
+        let machine = self.machine_mut()?;
+        let handle = machine
+            .retain_top(program, value)
+            .map_err(Self::classify_execution)?;
+        let root = machine
+            .handle_root(handle)
+            .ok_or(PreparedRuntimeError::Run(
+                ExecutionError::UnknownPreparedHandle,
+            ))?;
+        self.val_gen = self.val_gen.next();
+        let id = SessionVarId::from_var(VarId(self.binding_ids.next_raw()));
+        let entry = BindingEntry {
+            name: BindingName(name.to_string()),
+            id,
+            module: SessionModule::val(self.val_gen),
+            value: BoundValue::Prepared {
+                root,
+                handle,
+                origin: Some((program, value)),
+            },
+            type_display: None,
+            defining_expr: None,
+            scope: ScopeId::ROOT,
+        };
+        Ok(self.bindings.bind(entry))
+    }
+
+    /// Install a later program that imports session bindings by identity.
+    /// `imports` pairs each identity the artifact declares with the binding
+    /// that satisfies it. The artifact is linked against those bindings'
+    /// live shape (representation, settledness, exporting signature,
+    /// generation) BEFORE anything is compiled or installed, so a stale
+    /// generation (`LinkError::ImportContract`) or an undeclared identity
+    /// (`LinkError::MissingImport`) has no machine side effect. On success
+    /// every named binding is leased for the program's lifetime.
+    pub fn install(
+        &mut self,
+        artifact: &[u8],
+        requirements: &ProgramRequirements,
+        limits: DecodeLimits,
+        imports: &[(SymbolIdentity, SessionVarId)],
+    ) -> Result<ProgramId, PreparedRuntimeError> {
+        let prepared = parse_program(artifact, requirements, limits)?;
+        self.install_prepared(prepared, imports)
+    }
+
+    /// [`Self::install`] for an already-decoded program.
+    pub fn install_prepared(
+        &mut self,
+        prepared: PreparedProgram,
+        imports: &[(SymbolIdentity, SessionVarId)],
+    ) -> Result<ProgramId, PreparedRuntimeError> {
+        self.ensure_machine()?;
+        let mut values = MachineImports::default();
+        let mut bindings = ImportBindings::new();
+        for (identity, id) in imports {
+            let entry = self
+                .bindings
+                .get(*id)
+                .ok_or(PreparedRuntimeError::UnknownBinding(*id))?;
+            let BoundValue::Prepared { handle, origin, .. } = entry.value else {
+                return Err(PreparedRuntimeError::UnknownBinding(*id));
+            };
+            let generation = entry.module.gen().0;
+            let entry_signature = origin.and_then(|origin| self.export_signature(origin));
+            let evaluated = self
+                .machine_ref()?
+                .handle_is_evaluated(handle)
+                .map_err(Self::classify_execution)?;
+            values.values.insert(
+                identity.clone(),
+                ImportedValue {
+                    identity: identity.clone(),
+                    rep: handle.rep(),
+                    entry_signature,
+                    evaluated,
+                    generation,
+                },
+            );
+            bindings.insert(identity.clone(), handle);
+        }
+        let linked = link_program(prepared, &values)?;
+        let machine = self.machine_mut()?;
+        let compiled = CompiledProgram::compile(&linked, machine.next_top_slot_base())
+            .map_err(PreparedRuntimeError::Compile)?;
+        let program = machine
+            .install_program(compiled, bindings)
+            .map_err(Self::classify_execution)?;
+        self.bindings
+            .acquire_leases(imports.iter().map(|(_, id)| *id));
+        self.programs.insert(program, linked);
+        Ok(program)
+    }
+
+    /// Release a session binding's root. Refused, with the lease count,
+    /// while any installed program imports it; leases are held for the
+    /// importing program's lifetime, which this wave ends only with the
+    /// machine.
+    pub fn release_binding(&mut self, id: SessionVarId) -> Result<(), PreparedRuntimeError> {
+        let leases = self.bindings.lease_count(id);
+        if leases > 0 {
+            return Err(PreparedRuntimeError::BindingLeased { id, leases });
+        }
+        let entry = self
+            .bindings
+            .remove_live(id)
+            .ok_or(PreparedRuntimeError::UnknownBinding(id))?;
+        let BoundValue::Prepared { handle, .. } = entry.value else {
+            return Err(PreparedRuntimeError::UnknownBinding(id));
+        };
+        if !self.machine_mut()?.release(handle) {
+            return Err(PreparedRuntimeError::Run(
+                ExecutionError::UnknownPreparedHandle,
+            ));
+        }
+        Ok(())
+    }
+
+    /// The signature a bound top exports, from its producing program's own
+    /// declaration: a function's or thunk's entry signature, none for a
+    /// constructor or byte top. What an importer's `entry_signature`
+    /// declaration must equal at link time.
+    fn export_signature(&self, (program, value): (ProgramId, ValueId)) -> Option<Signature> {
+        let prepared = self.programs.get(&program)?.prepared();
+        let binding = prepared
+            .bindings()
+            .iter()
+            .flat_map(|group| match group {
+                Group::NonRecursive(top) => std::slice::from_ref(top),
+                Group::Recursive(tops) => tops.as_slice(),
+            })
+            .find(|top| top.binding.id == value)?;
+        let signature = match &binding.binding.rhs {
+            HeapRhs::Function { signature, .. } | HeapRhs::Thunk { signature, .. } => *signature,
+            HeapRhs::Constructor { .. } | HeapRhs::Bytes(_) => return None,
+        };
+        prepared.signatures().get(signature.0 as usize).cloned()
     }
 
     #[must_use]
@@ -192,6 +407,8 @@ impl PreparedRuntime {
             .map_or(0, |(machine, _)| machine.handle_count())
     }
 
+    /// Run an entry of the session's first program (`None` selects that
+    /// program's declared entry).
     pub fn run_entry(
         &mut self,
         binding: Option<ValueId>,
@@ -199,14 +416,43 @@ impl PreparedRuntime {
         collect: bool,
         cancel: &PreparedCancelHandle,
     ) -> Result<PreparedRunResult, PreparedRuntimeError> {
-        self.run_entry_with_completion_hook(binding, arguments, collect, cancel, || {})
+        let program = self.ensure_machine()?;
+        let entry = self.entry_of(program, binding)?;
+        self.run_entry_with_completion_hook(program, entry, arguments, collect, cancel, || {})
+    }
+
+    /// [`Self::run_entry`] for any installed program.
+    pub fn run_entry_in(
+        &mut self,
+        program: ProgramId,
+        entry: ValueId,
+        arguments: &[u64],
+        collect: bool,
+        cancel: &PreparedCancelHandle,
+    ) -> Result<PreparedRunResult, PreparedRuntimeError> {
+        self.run_entry_with_completion_hook(program, entry, arguments, collect, cancel, || {})
     }
 
     /// Execute with scalar or borrowed retained arguments and retain managed
-    /// results under this runtime's machine owner.
+    /// results under this runtime's machine owner. Runs the session's first
+    /// program (`None` selects its declared entry).
     pub fn run_entry_retained(
         &mut self,
         binding: Option<ValueId>,
+        arguments: &[PreparedArgument<'_>],
+        collect: bool,
+        cancel: &PreparedCancelHandle,
+    ) -> Result<PreparedRetainedResult, PreparedRuntimeError> {
+        let program = self.ensure_machine()?;
+        let entry = self.entry_of(program, binding)?;
+        self.run_entry_retained_in(program, entry, arguments, collect, cancel)
+    }
+
+    /// [`Self::run_entry_retained`] for any installed program.
+    pub fn run_entry_retained_in(
+        &mut self,
+        program: ProgramId,
+        entry: ValueId,
         arguments: &[PreparedArgument<'_>],
         collect: bool,
         cancel: &PreparedCancelHandle,
@@ -228,8 +474,8 @@ impl PreparedRuntime {
                 PreparedArgument::Managed(value) => PreparedInput::Managed(value.0),
             });
         }
-        let entry = binding.unwrap_or_else(|| self.linked.prepared().entry());
-        let (machine, program) = self.ensure_machine()?;
+        self.ensure_machine()?;
+        let machine = self.machine_mut()?;
         if cancel.is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
@@ -274,7 +520,8 @@ impl PreparedRuntime {
 
     fn run_entry_with_completion_hook(
         &mut self,
-        binding: Option<ValueId>,
+        program: ProgramId,
+        entry: ValueId,
         arguments: &[u64],
         collect: bool,
         cancel: &PreparedCancelHandle,
@@ -288,8 +535,8 @@ impl PreparedRuntime {
             observation_budget: RunOptions::default().observation_budget,
             collect_before_observation: collect,
         };
-        let entry = binding.unwrap_or_else(|| self.linked.prepared().entry());
-        let (machine, program) = self.ensure_machine()?;
+        self.ensure_machine()?;
+        let machine = self.machine_mut()?;
         if cancel.is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
@@ -319,28 +566,76 @@ impl PreparedRuntime {
         Ok(())
     }
 
-    fn ensure_machine(
-        &mut self,
-    ) -> Result<(&mut PreparedMachine<'static>, ProgramId), PreparedRuntimeError> {
+    /// Install the machine with the first program if that has not happened
+    /// yet; returns the first program's id either way.
+    fn ensure_machine(&mut self) -> Result<ProgramId, PreparedRuntimeError> {
         self.ensure_available()?;
-        if self.machine.is_none() {
-            let compiled = CompiledProgram::compile(&self.linked, TopSlotBase::ZERO)
-                .map_err(PreparedRuntimeError::Compile)?;
-            let top_slots = compiled.top_slot_count();
-            let installed = PreparedMachine::new(
-                compiled,
-                PreparedMachineOptions {
-                    nursery_bytes: RunOptions::default().nursery_bytes,
-                    top_slots,
-                },
-            )
-            .map_err(Self::classify_execution)?;
-            self.machine = Some(installed);
+        if let Some((_, program)) = &self.machine {
+            return Ok(*program);
         }
-        match self.machine.as_mut() {
-            Some((machine, program)) => Ok((machine, *program)),
-            None => unreachable!("prepared machine installed above"),
+        let linked = self.pending.take().ok_or(PreparedRuntimeError::Run(
+            ExecutionError::UnknownProgram(ProgramId::FIRST),
+        ))?;
+        let compiled = match CompiledProgram::compile(&linked, TopSlotBase::ZERO) {
+            Ok(compiled) => compiled,
+            Err(error) => {
+                self.pending = Some(linked);
+                return Err(PreparedRuntimeError::Compile(error));
+            }
+        };
+        let top_slots = compiled.top_slot_count().max(SESSION_TOP_SLOTS);
+        let installed = match PreparedMachine::new(
+            compiled,
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+                top_slots,
+            },
+        ) {
+            Ok(installed) => installed,
+            Err(error) => {
+                self.pending = Some(linked);
+                return Err(Self::classify_execution(error));
+            }
+        };
+        let program = installed.1;
+        self.machine = Some(installed);
+        self.programs.insert(program, linked);
+        Ok(program)
+    }
+
+    fn machine_mut(&mut self) -> Result<&mut PreparedMachine<'static>, PreparedRuntimeError> {
+        self.machine
+            .as_mut()
+            .map(|(machine, _)| machine)
+            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                ProgramId::FIRST,
+            )))
+    }
+
+    fn machine_ref(&self) -> Result<&PreparedMachine<'static>, PreparedRuntimeError> {
+        self.machine
+            .as_ref()
+            .map(|(machine, _)| machine)
+            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                ProgramId::FIRST,
+            )))
+    }
+
+    /// `binding`, or the program's declared entry when `None`.
+    fn entry_of(
+        &self,
+        program: ProgramId,
+        binding: Option<ValueId>,
+    ) -> Result<ValueId, PreparedRuntimeError> {
+        if let Some(entry) = binding {
+            return Ok(entry);
         }
+        self.programs
+            .get(&program)
+            .map(|linked| linked.prepared().entry())
+            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                program,
+            )))
     }
 
     fn retain_result(result: PreparedResultBatch) -> PreparedRetainedResult {
@@ -572,9 +867,14 @@ mod tests {
         let mut runtime = m3_runtime();
         let cancel = runtime.new_cancel_handle();
 
-        let result = runtime.run_entry_with_completion_hook(None, &[], false, &cancel, || {
-            cancel.cancel();
-        });
+        let program = runtime.first_program().expect("first program installs");
+        let entry = runtime
+            .entry_of(program, None)
+            .expect("first program has an entry");
+        let result =
+            runtime.run_entry_with_completion_hook(program, entry, &[], false, &cancel, || {
+                cancel.cancel();
+            });
 
         assert!(result.is_ok());
         assert!(cancel.is_cancelled());
@@ -639,5 +939,257 @@ mod tests {
             }));
             assert_eq!(error.kind(), expected);
         }
+    }
+
+    // ---- S4: session custody -- bind, import by generation, leases --------
+
+    use tidepool_repr::execution_schema::{
+        testing, Atom, CheckedLayout, ConstructorDecl, ConstructorId, ExprFrame, FieldLayout,
+        GlobalDecl, GlobalId, Group, HeapRhs, ResultContract, RuntimeRep, ScalarLiteral, Signature,
+        SignatureId, UpdatePolicy, ValueRef,
+    };
+
+    fn producer_identity() -> SymbolIdentity {
+        testing::identity("S4Session", "producer")
+    }
+
+    /// A memoized CAF returning `Field(99)`: unevaluated until first run,
+    /// then an updated indirection to an evaluated constructor.
+    fn producer_program() -> PreparedProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("S4Session", "Field"),
+            family: testing::identity("S4Session", "Field"),
+            host_id: tidepool_repr::DataConId(980),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![RuntimeRep::Int(64)],
+            strict_fields: vec![true],
+            layout: CheckedLayout {
+                fields: vec![FieldLayout {
+                    rep: RuntimeRep::Int(64),
+                    offset: 0,
+                }],
+                alignment: 8,
+                payload_size: 8,
+                root_mask: vec![false],
+            },
+        });
+        wire.expressions.nodes[0] = ExprFrame::Construct {
+            constructor: ConstructorId(0),
+            fields: vec![Atom::Scalar(ScalarLiteral::Int {
+                bits: 64,
+                bytes: 99_i64.to_be_bytes().to_vec(),
+            })],
+        };
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.identity = producer_identity();
+        top.binding.rhs = HeapRhs::Thunk {
+            signature: SignatureId(0),
+            update: UpdatePolicy::Memoize,
+            captures: vec![],
+            body: 0,
+        };
+        testing::prepare(wire).expect("producer fixture")
+    }
+
+    /// A program whose only entry returns its one imported global. The
+    /// declaration carries the producer top's own `[] -> LiftedRef` entry
+    /// signature, so linking also exercises the exported-signature check.
+    fn consumer_program(
+        required_evaluated: bool,
+        required_generation: Option<u64>,
+    ) -> PreparedProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0] = Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        };
+        wire.globals = vec![GlobalDecl {
+            identity: producer_identity(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: Some(SignatureId(0)),
+            required_evaluated,
+            required_generation,
+        }];
+        wire.expressions.nodes[0] =
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Function {
+            signature: SignatureId(0),
+            parameters: vec![],
+            captures: vec![],
+            body: 0,
+        };
+        testing::prepare(wire).expect("consumer fixture")
+    }
+
+    fn session() -> (PreparedRuntime, ProgramId) {
+        let mut runtime =
+            PreparedRuntime::from_prepared(producer_program(), MachineImports::default())
+                .expect("producer links closed");
+        let first = runtime.first_program().expect("first program installs");
+        (runtime, first)
+    }
+
+    #[test]
+    fn bind_install_run_reads_the_bound_top_by_generation() {
+        let (mut runtime, first) = session();
+        let cancel = runtime.new_cancel_handle();
+        // Force the CAF once so it is an evaluated (updated) constructor.
+        runtime
+            .run_entry(None, &[], true, &cancel)
+            .expect("producer entry runs");
+        let id = runtime
+            .bind_top(first, ValueId(0), "producer")
+            .expect("producer top binds");
+        assert_eq!(
+            runtime.bindings().get(id).map(|entry| entry.module.gen()),
+            Some(Generation(1)),
+            "the first bind mints generation 1 from the session's one counter"
+        );
+        let consumer = runtime
+            .install_prepared(
+                consumer_program(true, Some(1)),
+                &[(producer_identity(), id)],
+            )
+            .expect("consumer links against generation 1 and installs");
+        assert_ne!(consumer, first);
+        assert_eq!(runtime.bindings().lease_count(id), 1);
+
+        let read = runtime
+            .run_entry_retained_in(consumer, ValueId(0), &[], true, &cancel)
+            .expect("consumer reads its import through the slot");
+        let mut values = read.values;
+        let PreparedValueResult::Managed(value) = values.remove(0) else {
+            panic!("consumer must return the imported managed value");
+        };
+        let PreparedOuter::Constructor { identity, fields } = runtime
+            .inspect_outer(&value)
+            .expect("imported value inspects through the shared machine");
+        assert_eq!(identity, tidepool_repr::DataConId(980));
+        assert!(matches!(
+            fields.as_slice(),
+            [PreparedValueResult::Scalar(99)]
+        ));
+        assert!(runtime.release(value));
+        assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
+    }
+
+    #[test]
+    fn stale_generation_is_refused_by_link_before_any_install_side_effect() {
+        let (mut runtime, first) = session();
+        let id = runtime
+            .bind_top(first, ValueId(0), "producer")
+            .expect("producer top binds at generation 1");
+        let handles_before = runtime.retained_handle_count();
+        let error = runtime
+            .install_prepared(
+                consumer_program(false, Some(7)),
+                &[(producer_identity(), id)],
+            )
+            .expect_err("a consumer linked against generation 7 must not install");
+        assert!(
+            matches!(&error, PreparedRuntimeError::Link(link) if matches!(**link, LinkError::ImportContract(_))),
+            "expected ImportContract, got {error:?}"
+        );
+        assert_eq!(error.kind(), PreparedFailureKind::Rejected);
+        assert_eq!(runtime.retained_handle_count(), handles_before);
+        assert_eq!(
+            runtime.bindings().lease_count(id),
+            0,
+            "a refused link leases nothing"
+        );
+        // The same session still installs a correctly-linked consumer.
+        runtime
+            .install_prepared(
+                consumer_program(false, Some(1)),
+                &[(producer_identity(), id)],
+            )
+            .expect("the refused link left the machine installable");
+    }
+
+    #[test]
+    fn missing_import_is_refused_by_link() {
+        let (mut runtime, _first) = session();
+        let error = runtime
+            .install_prepared(consumer_program(false, None), &[])
+            .expect_err("a declared global with no binding must not install");
+        assert!(
+            matches!(&error, PreparedRuntimeError::Link(link) if matches!(**link, LinkError::MissingImport(_))),
+            "expected MissingImport, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn required_evaluated_is_checked_against_the_live_value() {
+        let (mut runtime, first) = session();
+        let id = runtime
+            .bind_top(first, ValueId(0), "producer")
+            .expect("the unforced CAF binds");
+        let error = runtime
+            .install_prepared(
+                consumer_program(true, Some(1)),
+                &[(producer_identity(), id)],
+            )
+            .expect_err("an unforced thunk does not satisfy required_evaluated");
+        assert!(
+            matches!(&error, PreparedRuntimeError::Link(link) if matches!(**link, LinkError::ImportContract(_))),
+            "expected ImportContract, got {error:?}"
+        );
+        let cancel = runtime.new_cancel_handle();
+        runtime
+            .run_entry(None, &[], true, &cancel)
+            .expect("forcing the CAF updates the bound top in place");
+        runtime
+            .install_prepared(
+                consumer_program(true, Some(1)),
+                &[(producer_identity(), id)],
+            )
+            .expect("the same binding now satisfies required_evaluated");
+    }
+
+    #[test]
+    fn release_refuses_a_leased_binding_and_releases_an_unleased_one() {
+        let (mut runtime, first) = session();
+        let leased = runtime
+            .bind_top(first, ValueId(0), "leased")
+            .expect("binds");
+        let free = runtime
+            .bind_top(first, ValueId(0), "free")
+            .expect("binds again at the next generation");
+        assert_eq!(
+            runtime.bindings().get(free).map(|entry| entry.module.gen()),
+            Some(Generation(2))
+        );
+        runtime
+            .install_prepared(
+                consumer_program(false, Some(1)),
+                &[(producer_identity(), leased)],
+            )
+            .expect("consumer installs against the leased binding");
+        let error = runtime
+            .release_binding(leased)
+            .expect_err("a leased binding must not release");
+        assert!(matches!(
+            error,
+            PreparedRuntimeError::BindingLeased { id, leases: 1 } if id == leased
+        ));
+        let handles_before = runtime.retained_handle_count();
+        runtime
+            .release_binding(free)
+            .expect("an unleased binding releases");
+        assert_eq!(runtime.retained_handle_count(), handles_before - 1);
+        assert!(matches!(
+            runtime.release_binding(free),
+            Err(PreparedRuntimeError::UnknownBinding(id)) if id == free
+        ));
+        assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
     }
 }

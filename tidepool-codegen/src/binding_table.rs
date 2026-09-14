@@ -81,6 +81,21 @@ pub enum BoundValue {
     /// A closure/PAP (Tier-1): tenured as-is (NOT deep-forced), valid while the
     /// session machine lives — its code stays callable across later fragments.
     Tier1Closure(RootSlot),
+    /// A value retained by a prepared-STG `PreparedMachine`: tenured as-is
+    /// (never deep-forced, so its preparation policy is Tier-1's), rooted by
+    /// `root` for the machine's life. `handle` is the machine's own custody of
+    /// that same root (what a later program's `ImportBindings` names), and
+    /// `origin` is the installed program and top-level binding it was
+    /// retained from, when it is a top rather than an entry result -- the
+    /// exporting signature an importer's declaration is linked against.
+    Prepared {
+        root: RootSlot,
+        handle: crate::prepared_program::PreparedHandle,
+        origin: Option<(
+            crate::prepared_program::ProgramId,
+            tidepool_repr::execution_schema::ValueId,
+        )>,
+    },
 }
 
 impl BoundValue {
@@ -88,7 +103,9 @@ impl BoundValue {
     #[must_use]
     pub fn root(&self) -> RootSlot {
         match self {
-            BoundValue::Tier0Forced(r) | BoundValue::Tier1Closure(r) => *r,
+            BoundValue::Tier0Forced(r)
+            | BoundValue::Tier1Closure(r)
+            | BoundValue::Prepared { root: r, .. } => *r,
         }
     }
 
@@ -602,6 +619,14 @@ impl BindingTable {
             }
         }
         released
+    }
+
+    /// How many outstanding leases retain `id` right now; zero for an
+    /// unleased or unknown identity. [`Self::remove_live`] refuses a leased
+    /// entry, and an owner that must report *why* reads this first.
+    #[must_use]
+    pub fn lease_count(&self, id: SessionVarId) -> usize {
+        self.leases.get(&id).copied().unwrap_or(0)
     }
 
     /// Resolve a name to its CURRENT binding (newest gen) in the ROOT frame,

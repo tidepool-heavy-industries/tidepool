@@ -1277,7 +1277,10 @@ where
         let entry = self.core.resolve_in(scope, name)?;
         let tier = match entry.value {
             BoundValue::Tier0Forced(_) => ValueTier::Tier0Data,
-            BoundValue::Tier1Closure(_) => ValueTier::Tier1Closure,
+            // A prepared-engine value is tenured as-is, never deep-forced:
+            // Tier-1's preparation policy. The Core resident never mints
+            // one; this arm only keeps the shared enum total.
+            BoundValue::Tier1Closure(_) | BoundValue::Prepared { .. } => ValueTier::Tier1Closure,
         };
         Some((entry.id, entry.module, tier, entry.type_display.clone()))
     }
@@ -1323,7 +1326,9 @@ where
         let resolved = self.core.resolve_in(scope, name).map(|entry| {
             let tier = match entry.value {
                 BoundValue::Tier0Forced(_) => ValueTier::Tier0Data,
-                BoundValue::Tier1Closure(_) => ValueTier::Tier1Closure,
+                BoundValue::Tier1Closure(_) | BoundValue::Prepared { .. } => {
+                    ValueTier::Tier1Closure
+                }
             };
             (entry.id, entry.module, tier, entry.type_display.clone())
         });

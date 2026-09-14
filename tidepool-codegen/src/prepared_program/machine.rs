@@ -100,6 +100,12 @@ impl ProgramCustody<'_> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ProgramId(u32);
 
+impl ProgramId {
+    /// The program a machine is created with ([`PreparedMachine::new`]):
+    /// always the first installed, so always this id.
+    pub const FIRST: Self = Self(0);
+}
+
 /// One installed program's code custody. Its top-table range lives in the
 /// owning [`PreparedMachine`]'s shared `RootWords`; the range itself is
 /// recoverable from `program.get().top_slots` (its own compiled slot
@@ -163,6 +169,15 @@ pub struct PreparedCallOptions {
 pub struct PreparedHandle {
     raw: ValueHandle,
     rep: RuntimeRep,
+}
+
+impl PreparedHandle {
+    /// The representation this handle was retained with; what an importing
+    /// program's declaration must match.
+    #[must_use]
+    pub fn rep(&self) -> RuntimeRep {
+        self.rep
+    }
 }
 
 /// Caller-owned import resolution for [`PreparedMachine::install_program`]:
@@ -883,6 +898,101 @@ impl<'code> PreparedMachine<'code> {
         self.handles
             .get(handle.raw)
             .map(|entry| unsafe { entry.slot.current() } as usize)
+    }
+
+    /// Retain one of an installed program's own top-level bindings as a
+    /// handle, without running anything: the value a later program can
+    /// import by identity. `value` must name a heap or static top of
+    /// `program` (a raw byte top has no managed representation and is
+    /// `Unsupported::HostArguments`-class refused as `MissingEntry`); the
+    /// handle roots the top's current object through its own persistent
+    /// slot, exactly as a retained entry result does, so the top table's
+    /// own slot and this handle stay two roots to one object.
+    pub fn retain_top(
+        &mut self,
+        id: ProgramId,
+        value: ValueId,
+    ) -> Result<PreparedHandle, ExecutionError> {
+        self.ensure_handle_access()?;
+        let compiled = self
+            .programs
+            .get(id.0 as usize)
+            .ok_or(ExecutionError::UnknownProgram(id))?
+            .program
+            .get();
+        if compiled.byte_tops.contains_key(&value) {
+            return Err(ExecutionError::MissingEntry(value));
+        }
+        let slot = *compiled
+            .top_slots
+            .get(&value)
+            .ok_or(ExecutionError::MissingEntry(value))?;
+        let word = self.top_table.snapshot()[slot];
+        if word == 0 {
+            return Err(ExecutionError::MissingEntry(value));
+        }
+        let words = RootWords::new(1)?;
+        words.write(0, word)?;
+        let source = words.as_mut_ptr().cast::<*mut u8>();
+        let mark = self.machine.rust_roots_len();
+        self.machine.register_rust_root(source);
+        let _roots = TemporaryRoots {
+            machine: &self.machine,
+            mark,
+        };
+        self.handles
+            .try_reserve(1)
+            .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
+        if unsafe { self.machine.prepared_old_space() }.is_some() {
+            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+        }
+        unsafe { self.machine.install_prepared_old_space(&self.old_space) };
+        let retained = unsafe {
+            self.old_space.retain_prepared(
+                &self.machine,
+                &mut self.vmctx,
+                &[source],
+                &self.descriptors,
+            )
+        };
+        self.machine.clear_prepared_old_space();
+        let mut roots = retained.map_err(|cause| runtime_error(&self.machine, cause))?;
+        let Some(root) = roots.pop().filter(|_| roots.is_empty()) else {
+            for root in roots {
+                self.machine.deregister_persistent_root(root.addr());
+            }
+            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+        };
+        let raw = self.handles.insert(root, RealmId::ROOT);
+        Ok(PreparedHandle {
+            raw,
+            rep: RuntimeRep::LiftedRef,
+        })
+    }
+
+    /// The persistent root slot behind a retained handle, for an owner that
+    /// records roots by slot (the session `BindingTable`). The slot stays
+    /// registered until [`Self::release`] takes the handle; a caller holding
+    /// the slot must therefore refuse to release the handle first.
+    #[must_use]
+    pub fn handle_root(&self, handle: PreparedHandle) -> Option<crate::old_space::RootSlot> {
+        self.handles.get(handle.raw).map(|entry| entry.slot)
+    }
+
+    /// Whether a retained handle's value is already in weak head normal form
+    /// (a constructor, function or PAP, following any settled thunk
+    /// indirection), read without forcing -- the fact an importing program's
+    /// `required_evaluated` declaration is checked against.
+    pub fn handle_is_evaluated(&self, handle: PreparedHandle) -> Result<bool, ExecutionError> {
+        let word = self
+            .handles
+            .get(handle.raw)
+            .map(|entry| unsafe { entry.slot.current() } as usize)
+            .filter(|word| *word != 0)
+            .ok_or(ExecutionError::UnknownPreparedHandle)?;
+        let heap = self.observation_heap()?;
+        heap.resolves_to_whnf_value(word)
+            .map_err(ExecutionError::from)
     }
 
     /// Execute with representation-checked values and retain every managed
