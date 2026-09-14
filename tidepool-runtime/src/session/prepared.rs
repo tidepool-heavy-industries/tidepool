@@ -410,6 +410,11 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(cancel.is_cancelled());
+
+        let next_cancel = runtime.new_cancel_handle();
+        runtime
+            .run_entry(None, &[], false, &next_cancel)
+            .expect("cancellation published after completion must not poison reuse");
     }
 
     #[test]

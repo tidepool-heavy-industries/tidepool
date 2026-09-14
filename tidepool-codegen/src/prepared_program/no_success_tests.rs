@@ -40,7 +40,7 @@ fn raising_arithmetic_primops_return_typed_reusable_failure() {
 
 /// A real raised CAF: its exception is an ordinary owned constructor, not a
 /// fake pointer or a diagnostic string manufactured by the runtime.
-fn raised_caf() -> WireProgram {
+pub(super) fn raised_caf() -> WireProgram {
     let mut wire = testing::wire_program();
     wire.signatures[0].results = ResultContract::NoSuccess;
     wire.signatures.push(Signature {

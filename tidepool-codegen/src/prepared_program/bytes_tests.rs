@@ -687,7 +687,7 @@ fn heap_top_scalar_bytes_resolve_without_a_bytes_top() {
         .any(|spec| spec.id == ValueId(2)));
 
     let mut nursery = vec![0_u64; 128];
-    let roots = super::invocation::RootWords::new(program.top_slots.len()).unwrap();
+    let roots = super::roots::RootWords::new(program.top_slots.len()).unwrap();
     let statics = program.statics.instantiate().unwrap();
     super::run::initialize_heap_tops(
         nursery.as_mut_ptr().cast(),
