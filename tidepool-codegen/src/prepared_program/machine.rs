@@ -426,15 +426,19 @@ impl<'code> PreparedMachine<'code> {
             };
             self.machine.clear_prepared_old_space();
             let roots = retained.map_err(|cause| runtime_error(&self.machine, cause))?;
-            let mut roots = roots.into_iter();
-            for (logical, rep) in result_reps.iter().copied().enumerate() {
-                if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
-                    let raw = self.handles.insert(
-                        roots.next().expect("one retained root per managed result"),
-                        RealmId::ROOT,
-                    );
-                    output[logical] = PreparedResult::Managed(PreparedHandle { raw, rep });
+            if roots.len() != slots.len() {
+                for root in roots {
+                    self.machine.deregister_persistent_root(root.addr());
                 }
+                return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+            }
+            let managed =
+                result_reps.iter().copied().enumerate().filter(|(_, rep)| {
+                    matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef)
+                });
+            for ((logical, rep), root) in managed.zip(roots) {
+                let raw = self.handles.insert(root, RealmId::ROOT);
+                output[logical] = PreparedResult::Managed(PreparedHandle { raw, rep });
             }
         }
         Ok(PreparedResultBatch {
