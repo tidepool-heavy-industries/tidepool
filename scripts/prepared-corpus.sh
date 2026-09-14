@@ -78,6 +78,41 @@ assert_contract_report() {
   }
 }
 
+# Suite.hs legitimately carries missing expectations and known execution
+# limitations, so it cannot use assert_contract_report's all-six-stages
+# contract. Its invariant is narrower: the denominator must not shrink,
+# structural stages (projection/validation/admission/compilation) must be
+# fully clean, comparison must never mismatch, and comparison/execution pass
+# counts are floors a later run is free to exceed but never fall under.
+assert_suite_report() {
+  local cohort="$1"
+  local report="$2"
+  local expected_programs="$3"
+  local min_execution_passed="$4"
+  local min_comparison_passed="$5"
+  jq -e \
+    --argjson expected "$expected_programs" \
+    --argjson min_execution "$min_execution_passed" \
+    --argjson min_comparison "$min_comparison_passed" '
+    def stage($name): [.stage_totals[] | select(.stage == $name)][0];
+    .stg_programs == $expected
+    and (.programs | length) == $expected
+    and (stage("projection").passed == $expected and stage("projection").failed == 0)
+    and (stage("validation").passed == $expected and stage("validation").failed == 0)
+    and (stage("admission").passed == $expected and stage("admission").failed == 0)
+    and (stage("compilation").passed == $expected and stage("compilation").failed == 0)
+    and (stage("comparison").failed == 0)
+    and (stage("comparison").passed >= $min_comparison)
+    and (stage("execution").passed >= $min_execution)
+  ' "$report" >/dev/null || {
+    echo "suite cohort $cohort regressed: expected stg_programs == $expected_programs" \
+      "with projection/validation/admission/compilation fully passing," \
+      "zero comparison failures, comparison passed >= $min_comparison_passed," \
+      "and execution passed >= $min_execution_passed: $report" >&2
+    return 1
+  }
+}
+
 priority_source="$repo_root/haskell/test-prepared-stg/ProjectWorkCandidate.hs"
 priority_include="$priority_root/source"
 mkdir -p "$priority_include/Project"
@@ -124,6 +159,15 @@ suite_report="$suite_root/results.json"
   "$suite_root/manifest.json" \
   "$repo_root/tidepool-testing/fixtures/prepared-corpus-expectations.json" \
   "$metadata" "$suite_report"
+suite_expected_programs=812
+suite_min_execution_passed=628
+suite_min_comparison_passed=216
+assert_suite_report suite "$suite_report" \
+  "$suite_expected_programs" "$suite_min_execution_passed" "$suite_min_comparison_passed"
+suite_execution_failed="$(jq '[.stage_totals[] | select(.stage == "execution")][0].failed' "$suite_report")"
+echo "  known limitation: $suite_execution_failed Suite execution failures (managed host" \
+  "arguments, Address materializations, missing scalar arguments, function observations," \
+  "observation budgets, one omitted non-finite blackhole) — not newly discovered defects"
 
 echo "==> projecting recovered base-call contract (1 target)"
 "$projection_probe" \
