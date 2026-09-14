@@ -666,9 +666,10 @@ fn decode_query_error(value: &CborValue) -> Result<QueryError, CompileError> {
         .ok_or_else(|| invalid("empty StructuredError"))
         .and_then(|value| text(value, "StructuredError tag"))?;
     match tag {
-        "Unknown" => Ok(QueryError::Unknown(decode_query(
-            array_len(value, 2, "Unknown error")?.get(1).unwrap(),
-        )?)),
+        "Unknown" => {
+            let fields = array_len(value, 2, "Unknown error")?;
+            Ok(QueryError::Unknown(decode_query(&fields[1])?))
+        }
         "Ambiguous" => {
             let fields = array_len(value, 3, "Ambiguous error")?;
             Ok(QueryError::Ambiguous(
@@ -679,20 +680,18 @@ fn decode_query_error(value: &CborValue) -> Result<QueryError, CompileError> {
                     .collect::<Result<_, _>>()?,
             ))
         }
-        "UnknownModule" => Ok(QueryError::UnknownModule(
-            text(
-                array_len(value, 2, "UnknownModule error")?.get(1).unwrap(),
-                "UnknownModule module",
-            )?
-            .into(),
-        )),
-        "Unsupported" => Ok(QueryError::Unsupported(
-            text(
-                array_len(value, 2, "Unsupported error")?.get(1).unwrap(),
-                "Unsupported detail",
-            )?
-            .into(),
-        )),
+        "UnknownModule" => {
+            let fields = array_len(value, 2, "UnknownModule error")?;
+            Ok(QueryError::UnknownModule(
+                text(&fields[1], "UnknownModule module")?.into(),
+            ))
+        }
+        "Unsupported" => {
+            let fields = array_len(value, 2, "Unsupported error")?;
+            Ok(QueryError::Unsupported(
+                text(&fields[1], "Unsupported detail")?.into(),
+            ))
+        }
         other => Err(invalid(format!("unknown StructuredError tag {other:?}"))),
     }
 }
