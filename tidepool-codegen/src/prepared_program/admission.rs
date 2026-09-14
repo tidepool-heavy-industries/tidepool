@@ -79,9 +79,23 @@ pub fn admit_program(linked: &LinkedProgram) -> Result<(), Unsupported> {
 
 /// Closed admission does not require inventing import handles merely to reject
 /// them. Artifact tooling and compiled owners share this checked boundary.
+///
+/// A global is admitted per-declaration: its representation must be
+/// `LiftedRef` or `UnliftedRef` (the only reps [`super::emit`]'s tops-load
+/// lowering and [`super::machine::PreparedMachine::install_program`]'s
+/// handle-shape check know how to carry). Anything else (a raw scalar,
+/// `Address`, ...) is rejected with the real [`GlobalId`] so the caller can
+/// name the offending import; identity, signature and generation agreement
+/// were already proven by [`tidepool_repr::execution_schema::link_program`]
+/// before this program reached admission.
 pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
-    if !program.globals().is_empty() {
-        return Err(Unsupported::Global(GlobalId(0)));
+    for (index, declaration) in program.globals().iter().enumerate() {
+        if !matches!(
+            declaration.rep,
+            RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef
+        ) {
+            return Err(Unsupported::Global(GlobalId(index as u32)));
+        }
     }
     let mut functions = BTreeMap::new();
     let mut admit_binding = |binding: &HeapBinding, _top: bool| -> Result<(), Unsupported> {
@@ -175,8 +189,10 @@ pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
                                             program.signatures().get(actual.0 as usize).is_some_and(
                                                 |entry| {
                                                     (0..entry.arguments.len()).any(|pending| {
-                                                        super::apply::classify(entry, pending, demand)
-                                                            .is_some()
+                                                        super::apply::classify(
+                                                            entry, pending, demand,
+                                                        )
+                                                        .is_some()
                                                     })
                                                 },
                                             )
@@ -261,6 +277,7 @@ mod tests {
             RuntimeRep::LiftedRef => array([uint(1)]),
             RuntimeRep::Int(bits) => array([uint(4), uint(u64::from(bits))]),
             RuntimeRep::Word(bits) => array([uint(5), uint(u64::from(bits))]),
+            RuntimeRep::Float(bits) => array([uint(6), uint(u64::from(bits))]),
             other => panic!("unsupported fixture representation {other:?}"),
         }
     }
@@ -288,13 +305,10 @@ mod tests {
         array([uint(0)])
     }
     fn global(name: &str) -> Vec<u8> {
-        array([
-            symbol(name),
-            rep(RuntimeRep::LiftedRef),
-            none(),
-            boolean(false),
-            none(),
-        ])
+        global_with_rep(name, RuntimeRep::LiftedRef)
+    }
+    fn global_with_rep(name: &str, rep_value: RuntimeRep) -> Vec<u8> {
+        array([symbol(name), rep(rep_value), none(), boolean(false), none()])
     }
     fn scalar_int(value: u8) -> Vec<u8> {
         array([uint(0), uint(64), bytes(&[value, 0, 0, 0, 0, 0, 0, 0])])
@@ -477,11 +491,30 @@ mod tests {
         assert_eq!(admit_program(&linked(bytes)), Ok(()));
     }
 
+    /// S3 test (4): admission admits a `LiftedRef` global (replaces the old
+    /// blanket-rejection semantics of `admission_rejects_globals_with_typed_id`).
     #[test]
-    fn admission_rejects_globals_with_typed_id() {
+    fn admission_admits_a_lifted_ref_global() {
         let bytes = wire(
             vec![sig(&[], &[RuntimeRep::Int(64)])],
             vec![global("imported")],
+            vec![],
+            vec![],
+            vec![ret([atom_int(1)])],
+            vec![array([uint(0), top(0, function(0, &[], 0))])],
+        );
+        assert_eq!(admit_program(&linked(bytes)), Ok(()));
+    }
+
+    /// S3 test (4): a global whose representation is neither `LiftedRef` nor
+    /// `UnliftedRef` is rejected with the real `GlobalId`, unlike a supported
+    /// import. `Float(64)` is the plan card's named example (this wave carries
+    /// no lowering for a raw scalar/float import).
+    #[test]
+    fn admission_rejects_a_float_global_with_typed_id() {
+        let bytes = wire(
+            vec![sig(&[], &[RuntimeRep::Int(64)])],
+            vec![global_with_rep("imported", RuntimeRep::Float(64))],
             vec![],
             vec![],
             vec![ret([atom_int(1)])],

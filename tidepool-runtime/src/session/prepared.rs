@@ -75,6 +75,7 @@ impl PreparedRuntimeError {
                 | ExecutionError::Arguments { .. }
                 | ExecutionError::ArgumentRepresentation { .. }
                 | ExecutionError::UnknownPreparedHandle
+                | ExecutionError::ImportShape { .. }
                 | ExecutionError::UnknownProgram(_)
                 | ExecutionError::TopTableExhausted { .. }
                 | ExecutionError::TopSlotBaseMismatch { .. } => PreparedFailureKind::Rejected,

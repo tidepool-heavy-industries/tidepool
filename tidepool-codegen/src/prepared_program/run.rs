@@ -9,7 +9,7 @@ use std::sync::{atomic::AtomicBool, Arc};
 use tidepool_bridge::Value;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_repr::execution_schema::ValueId;
-use tidepool_repr::execution_schema::{Atom, HeapRhs, RuntimeRep, ValueRef};
+use tidepool_repr::execution_schema::{Atom, HeapRhs, RuntimeRep, SymbolIdentity, ValueRef};
 
 pub struct RunOptions {
     pub nursery_bytes: usize,
@@ -35,6 +35,17 @@ pub struct RunResult {
     pub collections: u64,
 }
 
+/// One runtime shape fact compared while resolving a declared import against
+/// the live [`super::PreparedHandle`] a caller actually supplied --
+/// representation, or settledness. Identity, signature and generation were
+/// already proven by [`tidepool_repr::execution_schema::link_program`]; this
+/// is what codegen alone can only know once a live handle exists.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImportShapeFact {
+    Representation(RuntimeRep),
+    Evaluated(bool),
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ExecutionError {
     #[error("entry {0:?} is not exported by this program")]
@@ -49,6 +60,16 @@ pub enum ExecutionError {
     },
     #[error("prepared managed handle is unknown, foreign, or released")]
     UnknownPreparedHandle,
+    #[error("import {identity:?} shape mismatch: expected {expected:?}, found {found:?}")]
+    ImportShape {
+        // Boxed: `SymbolIdentity` carries four owned `String`s, which would
+        // otherwise make this the dominant variant in `ExecutionError`'s
+        // size (clippy::result_large_err on every `Result<_, ExecutionError>`
+        // return, workspace-wide).
+        identity: Box<SymbolIdentity>,
+        expected: ImportShapeFact,
+        found: ImportShapeFact,
+    },
     #[error("program {0:?} is not installed on this machine")]
     UnknownProgram(ProgramId),
     #[error("top table exhausted: program requests {requested} slots, {available} available")]
@@ -82,7 +103,7 @@ impl CompiledProgram {
             self,
             super::machine::PreparedMachineOptions {
                 nursery_bytes: options.nursery_bytes,
-                top_slots: self.top_slots.len(),
+                top_slots: self.top_slot_count(),
             },
         )?;
         machine.run_entry(

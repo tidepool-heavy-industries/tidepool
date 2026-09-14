@@ -1546,7 +1546,27 @@ fn atom_value(
             }
             Ok(value)
         }
-        Atom::Ref(ValueRef::Global(_)) => Err(unsupported(owner, node)),
+        Atom::Ref(ValueRef::Global(id)) => {
+            let Some(slot) = plan.import_slots.get(id.0 as usize) else {
+                return Err(unsupported(owner, node));
+            };
+            let tops = builder.ins().load(
+                types::I64,
+                MemFlags::trusted(),
+                vmctx,
+                crate::layout::VMCTX_PREPARED_TOPS_OFFSET,
+            );
+            let value = builder.ins().load(
+                types::I64,
+                MemFlags::trusted(),
+                tops,
+                (slot.slot * std::mem::size_of::<usize>()) as i32,
+            );
+            if matches!(expected, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
+                builder.declare_value_needs_stack_map(value);
+            }
+            Ok(value)
+        }
         Atom::Scalar(scalar) => scalar_value(builder, scalar, expected, plan, owner, node),
         Atom::Void | Atom::Rubbish(_) => Err(unsupported(owner, node)),
     }

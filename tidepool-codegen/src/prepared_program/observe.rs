@@ -364,6 +364,39 @@ impl<'a> ObservationHeap<'a> {
         }
     }
 
+    /// Non-forcing check for `PreparedMachine::install_program`'s
+    /// `required_evaluated` import re-verification: does this reference,
+    /// after following any already-settled thunk indirection, resolve to an
+    /// evaluated constructor value? Never forces an unsettled thunk (an
+    /// unforced or actively-forcing thunk answers `false`, not an error) and
+    /// never walks fields.
+    pub(super) fn resolves_to_evaluated_constructor(
+        &self,
+        encoded: usize,
+    ) -> Result<bool, ObservationFailure> {
+        let mut word = encoded;
+        loop {
+            let (descriptor, object, state) = self.object(word)?;
+            if state == DescriptorState::Updated {
+                word = read_object(
+                    object,
+                    descriptor,
+                    tidepool_heap::execution_descriptor::FORWARDING_POINTER_OFFSET,
+                    std::mem::size_of::<usize>(),
+                )?;
+                continue;
+            }
+            if state == DescriptorState::Evaluating {
+                return Ok(false);
+            }
+            let meaning = self
+                .registry
+                .and_then(|registry| registry.get(&descriptor.initial_header_word()))
+                .map(|metadata| &metadata.meaning);
+            return Ok(matches!(meaning, Some(DescriptorMeaning::Constructor(_))));
+        }
+    }
+
     /// Result storage is already registered as roots by the invocation owner.
     /// No forcing, native call, or collection occurs anywhere in this traversal.
     #[cfg(test)]
