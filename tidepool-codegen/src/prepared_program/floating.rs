@@ -2,7 +2,9 @@
 
 use super::primitives::ScalarFamily;
 use cranelift_codegen::ir::{
-    self, condcodes::FloatCC, types, AbiParam, InstBuilder, MemFlags, Value,
+    self, AbiParam, InstBuilder, MemFlags, Value,
+    condcodes::{FloatCC, IntCC},
+    types,
 };
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
@@ -14,6 +16,18 @@ fn returns_exact(signature: &Signature, expected: &[RuntimeRep]) -> bool {
     match &signature.results {
         ResultContract::Returns(reps) => reps == expected,
         ResultContract::NoSuccess => false,
+    }
+}
+
+fn classify_symbol(symbol: &str) -> Option<(u8, ClassificationKind)> {
+    match symbol {
+        "isFloatNaN" => Some((32, ClassificationKind::NaN)),
+        "isFloatInfinite" => Some((32, ClassificationKind::Infinite)),
+        "isFloatNegativeZero" => Some((32, ClassificationKind::NegativeZero)),
+        "isDoubleNaN" => Some((64, ClassificationKind::NaN)),
+        "isDoubleInfinite" => Some((64, ClassificationKind::Infinite)),
+        "isDoubleNegativeZero" => Some((64, ClassificationKind::NegativeZero)),
+        _ => None,
     }
 }
 
@@ -79,6 +93,14 @@ pub(super) enum FloatingOperation {
     Binary(BinaryKind),
     Compare(CompareKind),
     Convert { from_float: bool },
+    Classify { width: u8, kind: ClassificationKind },
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ClassificationKind {
+    NaN,
+    Infinite,
+    NegativeZero,
 }
 
 #[derive(Clone, Copy)]
@@ -191,7 +213,11 @@ impl ScalarFamily for FloatingFamily {
             {
                 Some(FloatingOperation::NearestDouble)
             }
-            _ => None,
+            _ => classify_symbol(symbol).and_then(|(width, kind)| {
+                (signature.arguments == [RuntimeRep::Float(width), RuntimeRep::Void]
+                    && returns_exact(signature, &[RuntimeRep::Int(64)]))
+                .then_some(FloatingOperation::Classify { width, kind })
+            }),
         }
     }
 
@@ -232,6 +258,48 @@ impl ScalarFamily for FloatingFamily {
                 };
                 vec![value]
             }
+            FloatingOperation::Classify { width, kind } => {
+                let result = if width == 32 {
+                    let bits = builder
+                        .ins()
+                        .bitcast(types::I32, MemFlags::new(), arguments[0]);
+                    let magnitude = builder.ins().band_imm(bits, 0x7fff_ffff);
+                    match kind {
+                        ClassificationKind::NaN => builder.ins().icmp_imm(
+                            IntCC::UnsignedGreaterThan,
+                            magnitude,
+                            0x7f80_0000,
+                        ),
+                        ClassificationKind::Infinite => {
+                            builder.ins().icmp_imm(IntCC::Equal, magnitude, 0x7f80_0000)
+                        }
+                        ClassificationKind::NegativeZero => {
+                            builder.ins().icmp_imm(IntCC::Equal, bits, 0x8000_0000)
+                        }
+                    }
+                } else {
+                    let bits = builder
+                        .ins()
+                        .bitcast(types::I64, MemFlags::new(), arguments[0]);
+                    let magnitude = builder.ins().band_imm(bits, 0x7fff_ffff_ffff_ffff);
+                    match kind {
+                        ClassificationKind::NaN => builder.ins().icmp_imm(
+                            IntCC::UnsignedGreaterThan,
+                            magnitude,
+                            0x7ff0_0000_0000_0000,
+                        ),
+                        ClassificationKind::Infinite => {
+                            builder
+                                .ins()
+                                .icmp_imm(IntCC::Equal, magnitude, 0x7ff0_0000_0000_0000)
+                        }
+                        ClassificationKind::NegativeZero => {
+                            builder.ins().icmp_imm(IntCC::Equal, bits, i64::MIN)
+                        }
+                    }
+                };
+                vec![builder.ins().uextend(types::I64, result)]
+            }
         }
     }
 }
@@ -239,11 +307,25 @@ impl ScalarFamily for FloatingFamily {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{atomic::AtomicBool, Arc};
+    use std::sync::{Arc, atomic::AtomicBool};
     use tidepool_repr::execution_schema::{testing, *};
 
     fn run(
         identity: &str,
+        arguments: Vec<RuntimeRep>,
+        results: Vec<RuntimeRep>,
+        atoms: Vec<Atom>,
+    ) -> Vec<tidepool_bridge::Value> {
+        run_identity(
+            OperationIdentity::PrimOp(identity.into()),
+            arguments,
+            results,
+            atoms,
+        )
+    }
+
+    fn run_identity(
+        identity: OperationIdentity,
         arguments: Vec<RuntimeRep>,
         results: Vec<RuntimeRep>,
         atoms: Vec<Atom>,
@@ -255,7 +337,7 @@ mod tests {
             results: ResultContract::Returns(results),
         });
         wire.operations.push(OperationDecl {
-            identity: OperationIdentity::PrimOp(identity.into()),
+            identity,
             signature: SignatureId(1),
         });
         wire.expressions.nodes[0] = ExprFrame::Operation {
@@ -402,22 +484,26 @@ mod tests {
 
     #[test]
     fn ghc_float_family_rejects_wrong_signatures() {
-        assert!(FloatingFamily::recognize(
-            &OperationIdentity::PrimOp("plusFloat#".into()),
-            &Signature {
-                arguments: vec![RuntimeRep::Float(64), RuntimeRep::Float(64)],
-                results: ResultContract::Returns(vec![RuntimeRep::Float(64)])
-            }
-        )
-        .is_none());
-        assert!(FloatingFamily::recognize(
-            &OperationIdentity::PrimOp("eqFloat#".into()),
-            &Signature {
-                arguments: vec![RuntimeRep::Float(32), RuntimeRep::Float(32)],
-                results: ResultContract::Returns(vec![RuntimeRep::Float(32)])
-            }
-        )
-        .is_none());
+        assert!(
+            FloatingFamily::recognize(
+                &OperationIdentity::PrimOp("plusFloat#".into()),
+                &Signature {
+                    arguments: vec![RuntimeRep::Float(64), RuntimeRep::Float(64)],
+                    results: ResultContract::Returns(vec![RuntimeRep::Float(64)])
+                }
+            )
+            .is_none()
+        );
+        assert!(
+            FloatingFamily::recognize(
+                &OperationIdentity::PrimOp("eqFloat#".into()),
+                &Signature {
+                    arguments: vec![RuntimeRep::Float(32), RuntimeRep::Float(32)],
+                    results: ResultContract::Returns(vec![RuntimeRep::Float(32)])
+                }
+            )
+            .is_none()
+        );
         for (name, arguments, results) in [
             (
                 "negateDouble#",
@@ -440,14 +526,114 @@ mod tests {
                 vec![RuntimeRep::Float(64)],
             ),
         ] {
-            assert!(FloatingFamily::recognize(
-                &OperationIdentity::PrimOp(name.into()),
-                &Signature {
-                    arguments,
-                    results: ResultContract::Returns(results),
-                }
-            )
-            .is_none());
+            assert!(
+                FloatingFamily::recognize(
+                    &OperationIdentity::PrimOp(name.into()),
+                    &Signature {
+                        arguments,
+                        results: ResultContract::Returns(results),
+                    }
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn ghc_internal_float_classifiers_require_exact_catalogued_abis() {
+        for (name, width) in [
+            ("isFloatNaN", 32),
+            ("isFloatInfinite", 32),
+            ("isFloatNegativeZero", 32),
+            ("isDoubleNaN", 64),
+            ("isDoubleInfinite", 64),
+            ("isDoubleNegativeZero", 64),
+        ] {
+            let identity = OperationIdentity::Intrinsic {
+                symbol: name.into(),
+                convention: ForeignConvention::CCall,
+            };
+            let exact = Signature {
+                arguments: vec![RuntimeRep::Float(width), RuntimeRep::Void],
+                results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+            };
+            assert!(
+                FloatingFamily::recognize(&identity, &exact).is_some(),
+                "{name}"
+            );
+            assert!(
+                FloatingFamily::recognize(
+                    &identity,
+                    &Signature {
+                        arguments: vec![RuntimeRep::Float(width)],
+                        ..exact.clone()
+                    }
+                )
+                .is_none()
+            );
+            assert!(
+                FloatingFamily::recognize(
+                    &identity,
+                    &Signature {
+                        arguments: vec![
+                            RuntimeRep::Float(if width == 32 { 64 } else { 32 }),
+                            RuntimeRep::Void,
+                        ],
+                        ..exact.clone()
+                    }
+                )
+                .is_none()
+            );
+            assert!(
+                FloatingFamily::recognize(
+                    &identity,
+                    &Signature {
+                        results: ResultContract::Returns(vec![RuntimeRep::Int(32)]),
+                        ..exact.clone()
+                    }
+                )
+                .is_none()
+            );
+            assert!(
+                FloatingFamily::recognize(
+                    &OperationIdentity::Intrinsic {
+                        symbol: format!("{name}Suffix"),
+                        convention: ForeignConvention::CCall,
+                    },
+                    &exact,
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn ghc_internal_float_classifiers_lower_ieee_bit_patterns() {
+        for (name, width, bits, expected) in [
+            ("isFloatNaN", 32, 0x7fc0_0001, 1),
+            ("isFloatInfinite", 32, 0x7f80_0000, 1),
+            ("isFloatNegativeZero", 32, 0x8000_0000, 1),
+            ("isDoubleNaN", 64, 0x7ff8_0000_0000_0001, 1),
+            ("isDoubleInfinite", 64, 0x7ff0_0000_0000_0000, 1),
+            ("isDoubleNegativeZero", 64, 0x8000_0000_0000_0000, 1),
+        ] {
+            let values = run_identity(
+                OperationIdentity::Intrinsic {
+                    symbol: name.into(),
+                    convention: ForeignConvention::CCall,
+                },
+                vec![RuntimeRep::Float(width), RuntimeRep::Void],
+                vec![RuntimeRep::Int(64)],
+                vec![float(width, bits), Atom::Void],
+            );
+            assert!(
+                matches!(
+                    values.as_slice(),
+                    [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(value))]
+                        if *value == expected
+                ),
+                "{name} returned {values:?}"
+            );
         }
     }
 

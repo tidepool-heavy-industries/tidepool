@@ -1059,6 +1059,22 @@ internOperation op signature = do
           ]
       , operationSignature == Signature arguments (Returns [FloatRep 64]) ->
           pure (Schema.IntrinsicIdentity (Text.pack (unpackFS label)) Schema.CCall)
+    -- ghc-internal's Float/Double classifiers are exact C leaves. Keep the
+    -- package and ABI evidence in the catalog so same-named user calls cannot
+    -- acquire native lowering by occurrence-name coincidence.
+    StgFCallOp (Foreign.CCall (Foreign.CCallSpec
+      (Foreign.StaticTarget _ label (Just unit) _) Foreign.CCallConv Foreign.PlayRisky)) _
+      | unitString unit == "ghc-internal"
+      , Just arguments <- lookup (unpackFS label)
+          [ ("isFloatNaN", [FloatRep 32, VoidRep])
+          , ("isFloatInfinite", [FloatRep 32, VoidRep])
+          , ("isFloatNegativeZero", [FloatRep 32, VoidRep])
+          , ("isDoubleNaN", [FloatRep 64, VoidRep])
+          , ("isDoubleInfinite", [FloatRep 64, VoidRep])
+          , ("isDoubleNegativeZero", [FloatRep 64, VoidRep])
+          ]
+      , operationSignature == Signature arguments (Returns [IntRep 64]) ->
+          pure (Schema.IntrinsicIdentity (Text.pack (unpackFS label)) Schema.CCall)
     -- text's byte-search kernel is a C implementation with no Haskell body.
     -- The compiler-resolved provider and exact ABI jointly authorize it.
     StgFCallOp (Foreign.CCall (Foreign.CCallSpec
