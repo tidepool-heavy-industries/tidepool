@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
@@ -25,6 +26,19 @@ pub struct StructuredInspection {
     pub name: String,
     pub generation: u64,
     pub fingerprint: String,
+}
+
+/// Mirrors `tidepool_repr::execution_schema::SymbolIdentity` field-for-field.
+/// This crate stays a dependency leaf for proc macros (see this crate's
+/// `CLAUDE.md`), so the shape is duplicated here rather than the type reused;
+/// keep the fields in lockstep with that authoritative definition by hand.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct SymbolIdentity {
+    pub unit: String,
+    pub module: String,
+    pub namespace: String,
+    pub occurrence: String,
+    pub record_parent: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -60,6 +74,7 @@ enum Field {
     InspectStructuredInfo(StructuredInspection),
     InspectStructuredType(StructuredInspection),
     InspectOut(OsString),
+    RetainedGeneration(SymbolIdentity, u64),
 }
 
 /// A versioned, typed request for the Haskell compiler worker.
@@ -212,6 +227,10 @@ impl ExtractRequest {
                 35 => Field::InspectSearch(decoder.string()?),
                 36 => Field::InspectStructuredInfo(decoder.structured_inspection()?),
                 37 => Field::InspectStructuredType(decoder.structured_inspection()?),
+                38 => {
+                    let identity = decoder.symbol_identity()?;
+                    Field::RetainedGeneration(identity, decoder.u64()?)
+                }
                 other => return Err(ProtocolError::UnknownFieldTag(other)),
             };
             fields.push(field);
@@ -249,6 +268,21 @@ impl ExtractRequest {
                 Field::Target(value) => vec![value.to_string_lossy().into_owned()],
                 Field::Targets(values) => values.clone(),
                 _ => Vec::new(),
+            })
+            .collect()
+    }
+
+    /// Executable imports this request has retained, keyed by identity in
+    /// request order (a later entry for the same identity wins, matching the
+    /// Haskell decoder's `Map.insert` fold).
+    pub fn retained_generations(&self) -> BTreeMap<SymbolIdentity, u64> {
+        self.fields
+            .iter()
+            .filter_map(|field| match field {
+                Field::RetainedGeneration(identity, generation) => {
+                    Some((identity.clone(), *generation))
+                }
+                _ => None,
             })
             .collect()
     }
@@ -347,6 +381,11 @@ impl ExtractRequest {
         self.fields.push(Field::BindGen(value));
     }
 
+    pub(crate) fn retained_generation(&mut self, identity: SymbolIdentity, generation: u64) {
+        self.fields
+            .push(Field::RetainedGeneration(identity, generation));
+    }
+
     pub(crate) fn inspect_type(&mut self, expression: &str) {
         self.fields.push(Field::InspectType(expression.to_owned()));
     }
@@ -436,6 +475,18 @@ impl ExtractRequest {
                     structured_flag(&mut flags, "--inspect-structured-type", query)
                 }
                 Field::InspectOut(value) => flag(&mut flags, "--inspect-out", value),
+                Field::RetainedGeneration(identity, generation) => flag(
+                    &mut flags,
+                    "--retained-generation",
+                    OsStr::new(&format!(
+                        "{}:{}:{}:{}:{}={generation}",
+                        identity.unit,
+                        identity.module,
+                        identity.namespace,
+                        identity.occurrence,
+                        identity.record_parent.as_deref().unwrap_or(""),
+                    )),
+                ),
             }
         }
         inputs.extend(flags);
@@ -514,6 +565,24 @@ impl<'a> Decoder<'a> {
         Ok(self.string()?.into())
     }
 
+    fn maybe_string(&mut self) -> Result<Option<String>, ProtocolError> {
+        match self.byte()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.string()?)),
+            tag => Err(ProtocolError::UnknownOptionalTextTag(tag)),
+        }
+    }
+
+    fn symbol_identity(&mut self) -> Result<SymbolIdentity, ProtocolError> {
+        Ok(SymbolIdentity {
+            unit: self.string()?,
+            module: self.string()?,
+            namespace: self.string()?,
+            occurrence: self.string()?,
+            record_parent: self.maybe_string()?,
+        })
+    }
+
     fn structured_inspection(&mut self) -> Result<StructuredInspection, ProtocolError> {
         let scope = match self.byte()? {
             0 => InspectionScope::Current,
@@ -560,6 +629,7 @@ pub enum ProtocolError {
     UnknownFieldTag(u8),
     UnknownInspectionScope(u8),
     UnknownInspectionNamespace(u8),
+    UnknownOptionalTextTag(u8),
 }
 
 impl std::fmt::Display for ProtocolError {
@@ -582,6 +652,9 @@ impl std::fmt::Display for ProtocolError {
             }
             Self::UnknownInspectionNamespace(tag) => {
                 write!(f, "unknown structured inspection namespace tag {tag}")
+            }
+            Self::UnknownOptionalTextTag(tag) => {
+                write!(f, "unknown optional-text tag {tag}")
             }
         }
     }
@@ -655,6 +728,25 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         Field::InspectSearch(value) => tagged_frame(out, 35, OsStr::new(value)),
         Field::InspectStructuredInfo(query) => encode_structured(out, 36, query),
         Field::InspectStructuredType(query) => encode_structured(out, 37, query),
+        Field::RetainedGeneration(identity, generation) => {
+            out.push(38);
+            encode_symbol_identity(out, identity);
+            out.extend_from_slice(&generation.to_le_bytes());
+        }
+    }
+}
+
+fn encode_symbol_identity(out: &mut Vec<u8>, identity: &SymbolIdentity) {
+    push_frame(out, OsStr::new(&identity.unit));
+    push_frame(out, OsStr::new(&identity.module));
+    push_frame(out, OsStr::new(&identity.namespace));
+    push_frame(out, OsStr::new(&identity.occurrence));
+    match &identity.record_parent {
+        None => out.push(0),
+        Some(parent) => {
+            out.push(1);
+            push_frame(out, OsStr::new(parent));
+        }
     }
 }
 
@@ -785,6 +877,68 @@ mod tests {
         assert_eq!(bytes[12], 1);
         assert_eq!(bytes[24], 11);
         assert_eq!(&bytes[25..33], &0x0102_0304_0506_0708u64.to_le_bytes());
+    }
+
+    #[test]
+    fn retained_generation_round_trips_through_the_typed_protocol() {
+        let mut request = ExtractRequest::default();
+        request.input("ImportConsumer.hs");
+        let identity = SymbolIdentity {
+            unit: "main".to_owned(),
+            module: "ImportProducer".to_owned(),
+            namespace: "value".to_owned(),
+            occurrence: "producerValue".to_owned(),
+            record_parent: None,
+        };
+        request.retained_generation(identity.clone(), 7);
+        let decoded = ExtractRequest::decode(&request.encode()).unwrap();
+        assert_eq!(
+            decoded.retained_generations(),
+            request.retained_generations()
+        );
+        assert_eq!(decoded.retained_generations().get(&identity), Some(&7u64));
+    }
+
+    #[test]
+    fn retained_generation_with_a_record_parent_round_trips() {
+        let mut request = ExtractRequest::default();
+        request.input("Expr.hs");
+        let identity = SymbolIdentity {
+            unit: "main".to_owned(),
+            module: "Records".to_owned(),
+            namespace: "value".to_owned(),
+            occurrence: "field".to_owned(),
+            record_parent: Some("Parent".to_owned()),
+        };
+        request.retained_generation(identity.clone(), 3);
+        let decoded = ExtractRequest::decode(&request.encode()).unwrap();
+        assert_eq!(decoded.retained_generations().get(&identity), Some(&3u64));
+    }
+
+    #[test]
+    fn retained_generation_is_absent_from_the_cli_flag_parser() {
+        // "extend, do not add a flag parser": the field exists only in the
+        // typed builder/encoder, never as CLI text a human or a caller could
+        // pass to `from_cli`. `cli_argv()` still RENDERS it (for cache-key
+        // and diagnostic purposes), but nothing parses that rendering back.
+        let mut request = ExtractRequest::default();
+        request.input("Expr.hs");
+        request.retained_generation(
+            SymbolIdentity {
+                unit: "main".to_owned(),
+                module: "M".to_owned(),
+                namespace: "value".to_owned(),
+                occurrence: "x".to_owned(),
+                record_parent: None,
+            },
+            1,
+        );
+        let argv = request.cli_argv();
+        assert!(argv.iter().any(|arg| arg == "--retained-generation"));
+        // The allowlisted CLI flags in `from_cli` do not include it.
+        let error =
+            ExtractRequest::from_cli(&["--retained-generation".into(), "x".into()]).unwrap_err();
+        assert_eq!(error.to_string(), "unknown option: --retained-generation");
     }
 
     #[test]

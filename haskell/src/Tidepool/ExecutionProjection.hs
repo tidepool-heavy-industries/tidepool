@@ -174,7 +174,13 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
              Text.pack (moduleNameString (moduleName (pmModule prepared))))
           | prepared <- modules, pmCoverage prepared == CompleteSourceModule ])
         (projectionFormattingAuthority context) (projectionTextUnit context)
-  (bindingGroups, final) <- runStateT (preallocate modules >> concat <$> mapM projectModule modules) initial
+      -- An executable import's own top-level definition is never walked:
+      -- 'homeModules'/'topIdentityMap' above still see the real, unfiltered
+      -- module set (so a same-name internal identity cannot borrow home-module
+      -- standing from the retained one), but nothing here recovers its body.
+      projectable = map (dropRetainedTops context) modules
+  (bindingGroups, final) <- runStateT
+    (preallocate projectable >> concat <$> mapM projectModule projectable) initial
   entry <- maybe (Left (MissingPreparedEntry (projectionEntry context)))
     (pure . topValue) (findTop bindingGroups)
   pure WireProgram
@@ -222,18 +228,35 @@ preparedTargetReferences context modules =
             (concatMap (recoveryReferences context . fst) (pmBindings prepared)))
         , isExternalName (varName binder)
         , isNothing (nullaryWorkerConstructor binder)
-        , not (elementOfUniqSet (varUnique binder) defined) ]
+        , not (elementOfUniqSet (varUnique binder) defined)
+        -- An executable import is resolved by generation, never by pulling
+        -- its defining module's source into this program's recovery closure.
+        , isNothing (retainedGenerationOf context binder) ]
   in Map.elems (Map.fromList [(idSymbol "value" binder, binder) | binder <- referenced])
 
 -- A registered replacement has no source-body dependencies. Split recursive
 -- groups for this fact query so unrelated siblings retain their own references.
+-- A retained-generation import is the same shape: its own body is never
+-- recovered, so its internal references are moot for this query too.
 recoveryReferences :: ProjectionContext -> CgStgTopBinding -> [CgStgTopBinding]
 recoveryReferences context (StgTopLifted (StgRec pairs)) =
   [ StgTopLifted (StgNonRec binder rhs)
-  | (binder, rhs) <- pairs, not (registeredReplacement context binder) ]
+  | (binder, rhs) <- pairs, not (skippedFromRecovery context binder) ]
 recoveryReferences context binding
-  | any (registeredReplacement context) (topBinders binding) = []
+  | any (skippedFromRecovery context) (topBinders binding) = []
   | otherwise = [binding]
+
+-- | Retention is looked up by external identity only (namespace "value"),
+-- never inferred from module membership: a symbol present in the caller's
+-- retained-generation map is an executable import regardless of whether its
+-- defining module happens to be compiled alongside the referencing program.
+retainedGenerationOf :: ProjectionContext -> Id -> Maybe Word64
+retainedGenerationOf context binder =
+  Map.lookup (idSymbol "value" binder) (projectionRetainedGenerations context)
+
+skippedFromRecovery :: ProjectionContext -> Id -> Bool
+skippedFromRecovery context binder =
+  registeredReplacement context binder || isJust (retainedGenerationOf context binder)
 
 formattingSpec :: ProjectionContext -> Id -> Either ProjectionError (Maybe FormattingSpec)
 formattingSpec context binder = case projectionFormattingAuthority context of
@@ -318,6 +341,18 @@ individualTops (StgTopLifted (StgRec pairs)) =
 topBinders :: CgStgTopBinding -> [Id]
 topBinders (StgTopStringLit binder _) = [binder]
 topBinders (StgTopLifted binding) = bindingBinders binding
+
+-- | Drop a module's own definitions of its retained-generation imports. A
+-- group is dropped only when every one of its binders is retained, so an
+-- ordinary sibling recursive with a retained import still gets a body.
+-- References to the dropped binder still resolve (as a 'Global'):
+-- 'topSymbols'/'homeModules' are built from the unfiltered module list
+-- upstream of this filter, never from this one.
+dropRetainedTops :: ProjectionContext -> PreparedModule -> PreparedModule
+dropRetainedTops context prepared = prepared
+  { pmBindings = filter keep (pmBindings prepared) }
+  where
+    keep (binding, _) = not (all (isJust . retainedGenerationOf context) (topBinders binding))
 
 -- | Assign stable identities to internal tops before any target reachability
 -- filtering.  Internal names may repeat (and a generated suffix may already
@@ -724,16 +759,23 @@ projectReference binder = do
   case lookupVarEnv known binder of
     Just identity -> pure (Local identity)
     Nothing -> do
-      topNames <- gets topSymbols
-      tops <- gets topValues
-      let symbol = lookupVarEnv topNames binder
-      case symbol of
-        Just home -> case Map.lookup home tops of
-          Just identity -> pure (Local identity)
-          Nothing -> lift (Left (MissingPreparedTop home))
-        Nothing -> case nullaryWorkerConstructor binder of
-          Just con -> Local <$> internNullaryWorker binder con
-          Nothing -> Global <$> internGlobal binder
+      generations <- gets retainedGenerations
+      -- An executable import always resolves as a Global, regardless of
+      -- whether its defining module is also being compiled alongside this
+      -- one: retention is never inferred from module membership.
+      if Map.member (idSymbol "value" binder) generations
+        then Global <$> internGlobal binder
+        else do
+          topNames <- gets topSymbols
+          tops <- gets topValues
+          let symbol = lookupVarEnv topNames binder
+          case symbol of
+            Just home -> case Map.lookup home tops of
+              Just identity -> pure (Local identity)
+              Nothing -> lift (Left (MissingPreparedTop home))
+            Nothing -> case nullaryWorkerConstructor binder of
+              Just con -> Local <$> internNullaryWorker binder con
+              Nothing -> Global <$> internGlobal binder
 
 deferredFunctionReference :: Id -> DeferredFunction -> P ValueId
 deferredFunctionReference binder deferred = do
@@ -925,10 +967,19 @@ internGlobal binder
         ("global has no defining module: "
           <> Text.pack (occNameString (nameOccName (varName binder))))))
       Just module_ -> do
-        homes <- gets homeModules
-        if homeKey module_ `Set.member` homes
-          then lift (Left (MissingPreparedTop (idSymbol "value" binder)))
-          else internExternalGlobal binder
+        let symbol = idSymbol "value" binder
+        generations <- gets retainedGenerations
+        -- A retained-generation symbol is an executable import even when its
+        -- defining module is compiled alongside this one as a home module:
+        -- the retained check comes first, and is never inferred from module
+        -- membership.
+        if Map.member symbol generations
+          then internExternalGlobal binder
+          else do
+            homes <- gets homeModules
+            if homeKey module_ `Set.member` homes
+              then lift (Left (MissingPreparedTop symbol))
+              else internExternalGlobal binder
   where
     homeKey module_ =
       (Text.pack (unitString (moduleUnit module_)),

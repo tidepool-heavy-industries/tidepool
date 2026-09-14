@@ -32,6 +32,7 @@ pub use endpoint::{CompilerEndpoint, CompilerIdentity};
 use exec_check::is_readable_executable_file;
 pub use request::{
     ExtractRequest, InspectionNamespace, InspectionScope, ProtocolError, StructuredInspection,
+    SymbolIdentity,
 };
 
 /// Verify that `socket` is served by a compatible resident compiler daemon.
@@ -557,6 +558,16 @@ impl ExtractCmd {
     /// `--bind-gen <n>` — the session generation this turn binds into.
     pub fn bind_gen(&mut self, gen: u64) -> &mut Self {
         self.request.bind_gen(gen);
+        self
+    }
+
+    /// Declare `identity` an executable import already retained at
+    /// `generation`: the projection excludes its own body from recovery and
+    /// declares it as a global carrying that generation, even when its
+    /// defining module is compiled alongside this request as a home module.
+    /// Repeatable; a later call for the same identity wins.
+    pub fn retained_generation(&mut self, identity: SymbolIdentity, generation: u64) -> &mut Self {
+        self.request.retained_generation(identity, generation);
         self
     }
 
