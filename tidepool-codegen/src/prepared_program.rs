@@ -768,4 +768,6 @@ pub(crate) fn emit_direct_call(
 #[cfg(test)]
 mod entry_tests;
 #[cfg(test)]
+mod freer_boundary_tests;
+#[cfg(test)]
 mod tests;
