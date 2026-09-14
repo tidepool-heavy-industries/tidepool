@@ -18,6 +18,8 @@ use crate::host_fns::{gc_trigger, prepared_gc_trigger, RuntimeError};
 use crate::machine_state::{MachineDisposition, MachineState};
 use crate::old_space::OldSpace;
 use crate::prepared_control::CallStatus;
+use crate::resource_ledger::RootHandleLedger;
+use crate::suspension::ValueHandle;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -51,6 +53,7 @@ pub struct PreparedMachine<'code> {
     statics: Arc<StaticRegion>,
     _top_table: RootWords,
     old_space: Box<OldSpace>,
+    handles: RootHandleLedger,
 }
 
 /// Immutable capacity selected when a prepared machine is installed.
@@ -64,6 +67,31 @@ pub struct PreparedMachineOptions {
 pub struct PreparedCallOptions {
     pub observation_budget: usize,
     pub collect_before_observation: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreparedHandle {
+    raw: ValueHandle,
+    rep: RuntimeRep,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreparedInput {
+    Scalar(u64),
+    Managed(PreparedHandle),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreparedResult {
+    Void,
+    Scalar(u64),
+    Managed(PreparedHandle),
+}
+
+#[derive(Debug)]
+pub struct PreparedResultBatch {
+    pub values: Vec<PreparedResult>,
+    pub collections: u64,
 }
 
 struct CancelScope<'a>(&'a MachineState);
@@ -192,6 +220,7 @@ impl<'code> PreparedMachine<'code> {
             statics,
             _top_table: top_table,
             old_space: Box::new(OldSpace::new()),
+            handles: RootHandleLedger::default(),
         })
     }
 
@@ -203,6 +232,16 @@ impl<'code> PreparedMachine<'code> {
     #[must_use]
     pub fn failure(&self) -> Option<crate::machine_state::MachineFailure> {
         self.machine.last_failure()
+    }
+
+    /// Release one retained managed result. Unknown or foreign values do not
+    /// expose a slot and therefore cannot affect a later entry.
+    pub fn release(&mut self, handle: PreparedHandle) -> bool {
+        let Some(entry) = self.handles.take(handle.raw) else {
+            return false;
+        };
+        self.machine.deregister_persistent_root(entry.slot.addr());
+        true
     }
 
     #[cfg(test)]

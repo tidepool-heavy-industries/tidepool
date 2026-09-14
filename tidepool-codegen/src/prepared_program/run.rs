@@ -40,6 +40,14 @@ pub enum ExecutionError {
     MissingEntry(ValueId),
     #[error("entry arguments: expected {expected} physical scalar slots, got {actual}")]
     Arguments { expected: usize, actual: usize },
+    #[error("entry argument {index} has representation {actual:?}; expected {expected:?}")]
+    ArgumentRepresentation {
+        index: usize,
+        expected: RuntimeRep,
+        actual: RuntimeRep,
+    },
+    #[error("prepared managed handle is unknown, foreign, or released")]
+    UnknownPreparedHandle,
     #[error(transparent)]
     Unsupported(#[from] Unsupported),
     #[error("{cause}", cause = .0.cause)]
