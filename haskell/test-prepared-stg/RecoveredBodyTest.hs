@@ -79,6 +79,7 @@ main = do
           , projectionRetainedGenerations = mempty
           , projectionEntry = entry
           , projectionFormattingAuthority = Nothing
+          , projectionTextUnit = Nothing
           }
         references = preparedTargetReferences context [caller]
     liftIO $ assert (any isFst references)
@@ -202,6 +203,7 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
             (Text.pack "main") (Text.pack "RecoveredBody") (Text.pack "value")
             (Text.pack "foldableCaller") Nothing
         , projectionFormattingAuthority = Nothing
+        , projectionTextUnit = Nothing
         }
       references = preparedTargetReferences context [prepared]
       semigroupReferences = filter isSemigroupOwner references
@@ -299,6 +301,7 @@ assertRecoveredKindRep root = do
         , projectionRetainedGenerations = mempty
         , projectionEntry = entry
         , projectionFormattingAuthority = Nothing
+        , projectionTextUnit = Nothing
         }
   closure <- recoverPreparedClosure (prHscEnv pipeline) context home
   let modules = closureModules closure
@@ -340,6 +343,7 @@ assertPatErrorBody root = do
         , projectionRetainedGenerations = mempty
         , projectionEntry = entry
         , projectionFormattingAuthority = Nothing
+        , projectionTextUnit = Nothing
         }
       patErrors = filter isPatError (preparedTargetReferences context home)
   patError <- case patErrors of
@@ -429,6 +433,7 @@ assertRaiseContracts root = do
         , projectionRetainedGenerations = mempty
         , projectionEntry = entry
         , projectionFormattingAuthority = Nothing
+        , projectionTextUnit = Nothing
         }
   program <- case projectPreparedTarget context (pprModules prepared) of
     Left failure -> ioError (userError
@@ -508,6 +513,7 @@ assertBottomingApplications root = do
                 (Text.pack "RaiseContract") (Text.pack "value")
                 (Text.pack occurrence) Nothing
             , projectionFormattingAuthority = Nothing
+            , projectionTextUnit = Nothing
             }
           modules = if occurrence == "bottomingPartial"
             then map preservePartialCall (pprModules prepared)

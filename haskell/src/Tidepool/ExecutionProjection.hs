@@ -7,13 +7,15 @@ module Tidepool.ExecutionProjection
   , preparedTargetReferences
   , projectLiteralAtomForTest
   , assignTopIdentitySpellings
+  , resolveTextPackageUnit
+  , TextMemchrAuthority(..)
   ) where
 
 import Control.Monad (foldM, forM, unless)
 import Control.Monad.State.Strict
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
-import Data.List (find, isPrefixOf)
+import Data.List (find)
 import Data.Maybe (isJust, isNothing, listToMaybe)
 import Tidepool.PreparedBuiltins
   ( DeferredFunction(..), deferredFunction, wiredInErrorKind )
@@ -33,7 +35,8 @@ import GHC.Core.DataCon
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
 import GHC.Core.Type (splitTyConApp_maybe)
 import GHC.Core.TyCon qualified as GHC
-import GHC.Data.FastString (unpackFS)
+import GHC.Data.FastString (fsLit, unpackFS)
+import GHC.Driver.Env.Types (HscEnv, hsc_unit_env)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
 import GHC.Stg.Syntax
 import GHC.Stg.Syntax qualified as Stg
@@ -53,8 +56,13 @@ import GHC.Types.Unique.FM (UniqFM, listToUFM, lookupUFM)
 import GHC.Types.Var (Id, varName, varType, varUnique)
 import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
 import GHC.Types.Var.Set (dVarSetElems)
-import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
-import GHC.Unit.Types (Module, unitString)
+import GHC.Unit.Env (ue_units)
+import GHC.Unit.Info (PackageName(..))
+import GHC.Unit.Module (mkModuleName, moduleName, moduleNameString, moduleUnit)
+import GHC.Unit.Finder (FindResult(..), findImportedModule)
+import GHC.Types.PkgQual (PkgQual(OtherPkg))
+import GHC.Unit.State (lookupPackageName)
+import GHC.Unit.Types (Module, Unit, unitString)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.ExecutionIR (topBindingReferences)
 import Tidepool.ExecutionSchema
@@ -72,6 +80,8 @@ data ProjectionContext = ProjectionContext
   , projectionRetainedGenerations :: Map SymbolIdentity Word64
   , projectionEntry :: SymbolIdentity
   , projectionFormattingAuthority :: Maybe FormattingAuthority
+  -- | Missing authority rejects text's kernel, not unrelated projection.
+  , projectionTextUnit :: Maybe TextMemchrAuthority
   } deriving stock (Eq, Show)
 
 data ProjectionError
@@ -103,14 +113,35 @@ data PState = PState
   , retainedGenerations :: Map SymbolIdentity Word64
   , homeModules :: Set (Text, Text)
   , formattingAuthority :: Maybe FormattingAuthority
+  , textUnit :: Maybe TextMemchrAuthority
   }
 
 type P a = StateT PState (Either ProjectionError) a
 
+-- | Authority is a compiler-resolved unit, never a package-name prefix.
+newtype TextMemchrAuthority = TextMemchrAuthority Unit deriving stock (Eq)
+
+instance Show TextMemchrAuthority where
+  show (TextMemchrAuthority unit) = unitString unit
+
+-- | Resolve the text package selected by GHC's unit database, then ask its
+-- module finder for the kernel's provider in that exact package. The explicit
+-- package qualifier excludes home-module shadows. Failure grants no authority.
+resolveTextPackageUnit :: HscEnv -> IO (Maybe TextMemchrAuthority)
+resolveTextPackageUnit hscEnv =
+  case lookupPackageName (ue_units (hsc_unit_env hscEnv)) (PackageName (fsLit "text")) of
+    Nothing -> pure Nothing
+    Just selected -> do
+      found <- findImportedModule hscEnv (mkModuleName "Data.Text.Internal.Search")
+        (OtherPkg selected)
+      pure $ case found of
+        Found _ owner -> Just (TextMemchrAuthority (moduleUnit owner))
+        _ -> Nothing
+
 -- | Narrow test seam for GHC literals which cannot be written in source Haskell.
 projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionError Atom
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
-  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty Nothing)
+  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty Nothing Nothing)
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
@@ -142,7 +173,7 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
           [ (Text.pack (unitString (moduleUnit (pmModule prepared))),
              Text.pack (moduleNameString (moduleName (pmModule prepared))))
           | prepared <- modules, pmCoverage prepared == CompleteSourceModule ])
-        (projectionFormattingAuthority context)
+        (projectionFormattingAuthority context) (projectionTextUnit context)
   (bindingGroups, final) <- runStateT (preallocate modules >> concat <$> mapM projectModule modules) initial
   entry <- maybe (Left (MissingPreparedEntry (projectionEntry context)))
     (pure . topValue) (findTop bindingGroups)
@@ -992,6 +1023,7 @@ checkedWord32 label value
 internOperation :: StgOp -> SignatureId -> P OperationId
 internOperation op signature = do
   operationSignature <- signatureForId signature
+  pinnedTextUnit <- gets textUnit
   operationIdentity <- case op of
     StgPrimOp GetCurrentCCSOp
       | operationSignature == Signature [LiftedRefRep, VoidRep] (Returns [AddressRep]) ->
@@ -1016,14 +1048,11 @@ internOperation op signature = do
       , operationSignature == Signature [AddressRep, VoidRep] (Returns [IntRep 64]) ->
           pure (Schema.IntrinsicIdentity "strlen" Schema.CCall)
     -- text's byte-search kernel is a C implementation with no Haskell body.
-    -- Its unit id carries a version and package hash ("text-2.1.2-<hash>"),
-    -- so only the package-name prefix is stable across toolchains; the exact
-    -- label and signature carry the rest of the guard. The unit is a
-    -- projection-time guard only: the emitted identity is the bare symbol.
+    -- The compiler-resolved provider and exact ABI jointly authorize it.
     StgFCallOp (Foreign.CCall (Foreign.CCallSpec
       (Foreign.StaticTarget _ label (Just unit) _) Foreign.CCallConv Foreign.PlayRisky)) _
       | unpackFS label == "_hs_text_memchr"
-      , "text-" `isPrefixOf` unitString unit
+      , pinnedTextUnit == Just (TextMemchrAuthority unit)
       , operationSignature == Signature
           [UnliftedRefRep, WordRep 64, WordRep 64, WordRep 8, VoidRep]
           (Returns [IntRep 64]) ->

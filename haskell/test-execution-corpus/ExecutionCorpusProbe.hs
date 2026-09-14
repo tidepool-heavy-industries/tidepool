@@ -35,7 +35,8 @@ import ExecutionCorpusInventory
   , unavailableTargetInventory, renderPreparedFactsForTest )
 import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionProjection
-  ( ProjectionContext(..), preparedTopIdentities, projectPreparedTarget )
+  ( ProjectionContext(..), TextMemchrAuthority, resolveTextPackageUnit
+  , preparedTopIdentities, projectPreparedTarget )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..) )
 import Tidepool.GhcPipeline
@@ -86,6 +87,7 @@ runProbe arguments = do
     Right prepared -> do
       formattingAuthority <- resolveFormattingAuthority
         (prHscEnv (pprPipelineResult prepared))
+      textAuthority <- resolveTextPackageUnit (prHscEnv (pprPipelineResult prepared))
       enumerated <- trySync (evaluate (forceIdentities
         (preparedTopIdentities (pprModules prepared))))
       case enumerated of
@@ -114,9 +116,9 @@ runProbe arguments = do
           legacy <- mapLegacyTargets moduleNameArg identities targets
           rowsWithInventory <- if allTops
             then forM (zip [0 :: Int ..] selected) $ \(index, identity) ->
-              projectOneIdentity prepared formattingAuthority outputDir index identity
+              projectOneIdentity prepared formattingAuthority textAuthority outputDir index identity
             else forM (zip [0 :: Int ..] (zip targets legacy)) $ \(index, (occurrence, legacyTarget)) ->
-              projectOneTarget prepared formattingAuthority moduleNameArg outputDir index occurrence
+              projectOneTarget prepared formattingAuthority textAuthority moduleNameArg outputDir index occurrence
                 (legacyTargetIdentity legacyTarget)
           let (rows, targetInventories) = unzip rowsWithInventory
           pure (rows, legacy, targetInventories)
@@ -185,13 +187,14 @@ matchesExternal moduleNameArg occurrence identity =
 projectOneTarget
   :: PreparedPipelineResult
   -> Maybe FormattingAuthority
+  -> Maybe TextMemchrAuthority
   -> String
   -> FilePath
   -> Int
   -> String
   -> Maybe SymbolIdentity
   -> IO (Record, TargetInventory)
-projectOneTarget prepared formattingAuthority moduleNameArg outputDir index occurrence mapped = do
+projectOneTarget prepared formattingAuthority textAuthority moduleNameArg outputDir index occurrence mapped = do
   let name = missingName moduleNameArg occurrence
       reject reason = pure
         ( Record name Nothing [] (Rejected reason)
@@ -199,17 +202,18 @@ projectOneTarget prepared formattingAuthority moduleNameArg outputDir index occu
         )
   case mapped of
     Nothing -> reject ("target " <> show occurrence <> " is missing from module " <> moduleNameArg)
-    Just selected -> projectOneIdentity prepared formattingAuthority outputDir index selected
+    Just selected -> projectOneIdentity prepared formattingAuthority textAuthority outputDir index selected
 
 projectOneIdentity
   :: PreparedPipelineResult
   -> Maybe FormattingAuthority
+  -> Maybe TextMemchrAuthority
   -> FilePath
   -> Int
   -> SymbolIdentity
   -> IO (Record, TargetInventory)
-projectOneIdentity prepared formattingAuthority outputDir index selected = do
-  let context = projectionContext formattingAuthority selected
+projectOneIdentity prepared formattingAuthority textAuthority outputDir index selected = do
+  let context = projectionContext formattingAuthority textAuthority selected
       artifactName = numericArtifactName index
       name = identityName selected
       expectationKey = externalExpectationKey selected
@@ -334,8 +338,9 @@ mapLegacyTargetsPure
 mapLegacyTargetsPure moduleNameArg identities = map $ \legacyName ->
   fmap (LegacyTarget legacyName) (exactExternalMapping moduleNameArg identities legacyName)
 
-projectionContext :: Maybe FormattingAuthority -> SymbolIdentity -> ProjectionContext
-projectionContext formattingAuthority identity =
+projectionContext :: Maybe FormattingAuthority -> Maybe TextMemchrAuthority
+  -> SymbolIdentity -> ProjectionContext
+projectionContext formattingAuthority textAuthority identity =
   ProjectionContext
     { projectionProfile = "ghc-9.12-prepared-stg"
     , projectionToolchain = "ghc-9.12.2"
@@ -343,6 +348,7 @@ projectionContext formattingAuthority identity =
     , projectionRetainedGenerations = mempty
     , projectionEntry = identity
     , projectionFormattingAuthority = formattingAuthority
+    , projectionTextUnit = textAuthority
     }
 
 targetDescriptor :: TargetDescriptor

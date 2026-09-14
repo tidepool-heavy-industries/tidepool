@@ -73,6 +73,7 @@ main = do
           , projectionRetainedGenerations = mempty
           , projectionEntry = entry
           , projectionFormattingAuthority = Nothing
+          , projectionTextUnit = Nothing
           }
     closure <- liftIO $ recoverPreparedClosure hsc context modules
     liftIO $ assert (any recoveredFst (closureModules closure))

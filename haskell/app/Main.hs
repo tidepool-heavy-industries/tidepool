@@ -45,7 +45,7 @@ import Tidepool.GhcPipeline
   , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..), dumpCore
   , withResidentPipelineSelected, CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances )
 import Tidepool.ExecutionEncode (encodeWireProgram)
-import Tidepool.ExecutionProjection (ProjectionContext(..), projectPreparedTarget)
+import Tidepool.ExecutionProjection (ProjectionContext(..), projectPreparedTarget, resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..) )
@@ -432,6 +432,7 @@ trySynchronous action = do
 writePreparedArtifacts :: FilePath -> FilePath -> HscEnv -> [PreparedModule] -> [String] -> IO ()
 writePreparedArtifacts outDir input hscEnv modules targets = do
   formattingAuthority <- resolveFormattingAuthority hscEnv
+  textAuthority <- resolveTextPackageUnit hscEnv
   source <- readFile input
   let targetModule = fromMaybe (capitalize (takeBaseName input)) (extractModuleName source)
       matching = [prepared | prepared <- modules,
@@ -447,8 +448,15 @@ writePreparedArtifacts outDir input hscEnv modules targets = do
     let entry = SymbolIdentity
           (T.pack (unitString (moduleUnit (pmModule preparedModule))))
           (T.pack targetModule) "value" (T.pack target) Nothing
-        context = ProjectionContext "ghc-9.12-prepared-stg" "ghc-9.12.2"
-          (TargetDescriptor architecture LittleEndian 64 64 abi []) Map.empty entry formattingAuthority
+        context = ProjectionContext
+          { projectionProfile = "ghc-9.12-prepared-stg"
+          , projectionToolchain = "ghc-9.12.2"
+          , projectionTarget = TargetDescriptor architecture LittleEndian 64 64 abi []
+          , projectionRetainedGenerations = Map.empty
+          , projectionEntry = entry
+          , projectionFormattingAuthority = formattingAuthority
+          , projectionTextUnit = textAuthority
+          }
     recovered <- recoverPreparedClosure hscEnv context modules
     reportRecoveryResiduals target (closureFailures recovered)
     program <- either (ioError . userError . ("prepared projection failed: " <>) . show) pure
