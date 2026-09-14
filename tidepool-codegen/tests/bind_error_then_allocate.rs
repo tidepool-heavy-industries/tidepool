@@ -12,19 +12,19 @@
 //!
 //! A session machine driven turn-by-turn via `add_function` + a bind
 //! primitive, with a reference fragment reading back a tenured value to
-//! prove correctness: an ordinary runtime error in a bind turn (`head
-//! []`-shaped — a genuine case-miss trap, not a test bug), immediately
-//! followed by an allocating turn, which must succeed cleanly (no crash,
-//! correct result) rather than computing a bad alloc pointer from a stale
-//! cursor.
+//! prove correctness: an ordinary, `Reusable`-disposition runtime error in a
+//! bind turn (division by zero, not a test bug and not a heap-shape
+//! integrity failure), immediately followed by an allocating turn, which
+//! must succeed cleanly (no crash, correct result) rather than computing a
+//! bad alloc pointer from a stale cursor.
 
 use serial_test::serial;
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::host_fns::{heap_verify_run_count, set_heap_verify};
-use tidepool_codegen::jit_machine::JitEffectMachine;
+use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_repr::datacon::DataCon;
 use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, VarId};
-use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, TreeBuilder};
+use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, PrimOpKind, TreeBuilder};
 
 use crate::session_scaffold;
 use crate::session_scaffold_expect;
@@ -37,13 +37,6 @@ use session_scaffold_gc_forcing::build_gc_forcing_fragment;
 use session_scaffold_reference::build_reference_fragment;
 use session_scaffold_value::build_value_fragment;
 
-/// The value actually constructed by the error fragment's scrutinee (arity 0).
-const ERR_SCRUT: DataConId = DataConId(60);
-/// The case's lone alternative — deliberately a DIFFERENT tag than `ERR_SCRUT`,
-/// so the scrutinee matches no alt (case-miss trap), exactly like `head []`'s
-/// pattern-match-failure-on-`[]` shape.
-const ERR_ALT: DataConId = DataConId(61);
-
 fn table() -> DataConTable {
     let mut table = DataConTable::new();
     table.insert(DataCon {
@@ -55,52 +48,36 @@ fn table() -> DataConTable {
         qualified_name: None,
         type_name: String::new(),
     });
-    table.insert(DataCon {
-        id: ERR_SCRUT,
-        name: "ErrScrut".to_string(),
-        tag: 2,
-        rep_arity: 0,
-        field_bangs: vec![],
-        qualified_name: None,
-        type_name: String::new(),
-    });
-    table.insert(DataCon {
-        id: ERR_ALT,
-        name: "ErrAlt".to_string(),
-        tag: 3,
-        rep_arity: 0,
-        field_bangs: vec![],
-        qualified_name: None,
-        type_name: String::new(),
-    });
     table
 }
 
-/// `case ErrScrut of { ErrAlt -> 0 }` — the scrutinee's tag matches no
-/// alternative: a genuine runtime case-miss trap (`RuntimeError::CaseTrap`),
-/// not a compile-time or test-construction error.
+/// `1 \`quot\` 0` — a genuine runtime division-by-zero
+/// (`RuntimeError::DivisionByZero`), not a compile-time or test-construction
+/// error. Deliberately NOT a case-miss trap (`RuntimeError::CaseTrap`): since
+/// `71f23ffda` (2026-09-12), `CaseTrap` maps to `MachineDisposition::Unavailable`
+/// (`host_fns/errors.rs`, "shape ... failures mean the live machine can no
+/// longer prove heap integrity"), which makes the machine permanently refuse
+/// further `add_function` calls -- a genuinely different, and correct,
+/// contract this test must not fight. `DivisionByZero` stays `Reusable`
+/// (an ordinary runtime error, not a heap-shape integrity failure), matching
+/// `head []`'s `PatternMatchFailure`/`UserError` shape and this test's actual
+/// target: proving `run_pure_and_bind`'s error path still arms
+/// `_guard.arm_reclaim` so the FOLLOWING bind turn computes a correct
+/// `alloc_ptr`, not whether the machine survives an integrity failure.
 fn build_error_fragment() -> CoreExpr {
     let mut b = TreeBuilder::new();
-    let scrut = b.push(CoreFrame::Con {
-        tag: ERR_SCRUT,
-        fields: vec![],
-    });
-    let body = b.push(CoreFrame::Lit(Literal::LitInt(0)));
-    b.push(CoreFrame::Case {
-        scrutinee: scrut,
-        binder: VarId(999),
-        alts: vec![Alt {
-            con: AltCon::DataAlt(ERR_ALT),
-            binders: vec![],
-            body,
-        }],
+    let one = b.push(CoreFrame::Lit(Literal::LitInt(1)));
+    let zero = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    b.push(CoreFrame::PrimOp {
+        op: PrimOpKind::IntQuot,
+        args: vec![one, zero],
     });
     b.build()
 }
 
-/// `x <- pure (head ([] :: [Int]))` (error turn) followed by an allocating
-/// turn: the error turn must fail cleanly (not crash, not corrupt session
-/// state), and the FOLLOWING bind turn must succeed with a correct value.
+/// `x <- pure (1 \`quot\` 0)` (error turn) followed by an allocating turn:
+/// the error turn must fail cleanly (not crash, not corrupt session state),
+/// and the FOLLOWING bind turn must succeed with a correct value.
 #[test]
 #[serial]
 fn error_bind_turn_then_allocating_bind_turn_stays_sane() {
@@ -137,8 +114,8 @@ fn error_bind_turn_then_allocating_bind_turn_stays_sane() {
                  (before={gc_before}, after={gc_after})"
             );
 
-            // Turn 2 (error): a genuine runtime case-miss trap in a BIND turn
-            // — the exact function under test, `run_pure_and_bind`.
+            // Turn 2 (error): a genuine runtime division-by-zero in a BIND
+            // turn — the exact function under test, `run_pure_and_bind`.
             let err_frag = machine
                 .add_function(
                     "err_turn",
@@ -203,6 +180,120 @@ fn error_bind_turn_then_allocating_bind_turn_stays_sane() {
                 "heap_verify_run_count did not increase ({verify_before} -> {verify_after}) — \
                  the verifier never ran, so this test guarded nothing"
             );
+
+            drop(machine);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// Value constructed by the case-miss scrutinee (arity 0), and the case's
+/// lone alternative — deliberately a DIFFERENT tag, so the scrutinee matches
+/// no alt: a genuine runtime case-miss trap (`RuntimeError::CaseTrap`).
+const CASE_TRAP_SCRUT: DataConId = DataConId(60);
+const CASE_TRAP_ALT: DataConId = DataConId(61);
+
+fn case_trap_table() -> DataConTable {
+    let mut table = DataConTable::new();
+    table.insert(DataCon {
+        id: CASE_TRAP_SCRUT,
+        name: "CaseTrapScrut".to_string(),
+        tag: 2,
+        rep_arity: 0,
+        field_bangs: vec![],
+        qualified_name: None,
+        type_name: String::new(),
+    });
+    table.insert(DataCon {
+        id: CASE_TRAP_ALT,
+        name: "CaseTrapAlt".to_string(),
+        tag: 3,
+        rep_arity: 0,
+        field_bangs: vec![],
+        qualified_name: None,
+        type_name: String::new(),
+    });
+    table
+}
+
+/// `case CaseTrapScrut of { CaseTrapAlt -> 0 }` — the scrutinee's tag
+/// matches no alternative: a genuine runtime case-miss trap.
+fn build_case_trap_fragment() -> CoreExpr {
+    let mut b = TreeBuilder::new();
+    let scrut = b.push(CoreFrame::Con {
+        tag: CASE_TRAP_SCRUT,
+        fields: vec![],
+    });
+    let body = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    b.push(CoreFrame::Case {
+        scrutinee: scrut,
+        binder: VarId(999),
+        alts: vec![Alt {
+            con: AltCon::DataAlt(CASE_TRAP_ALT),
+            binders: vec![],
+            body,
+        }],
+    });
+    b.build()
+}
+
+/// Pins the disposition contract `build_error_fragment` above deliberately
+/// avoids exercising: a case-trap is a heap-shape integrity failure, not an
+/// ordinary runtime error, so it must leave the machine `Unavailable` —
+/// permanently refusing further `add_function` calls with
+/// `JitError::MachineUnavailable { failure: Some(MachineFailure { cause:
+/// CaseTrap, .. }) }` — rather than staying `Reusable` the way
+/// `DivisionByZero`/`PatternMatchFailure`/`UserError` do.
+#[test]
+#[serial]
+fn case_trap_makes_the_machine_permanently_unavailable() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tidepool_codegen::host_fns::reset_test_counters();
+            let table = case_trap_table();
+
+            let dummy = build_value_fragment(0);
+            let mut machine =
+                JitEffectMachine::compile_session(&dummy, &table, 2048).expect("compile_session");
+
+            let trap_frag = machine
+                .add_function(
+                    "trap_turn",
+                    &build_case_trap_fragment(),
+                    &table,
+                    &ExternalEnv::new(),
+                )
+                .expect("add_function trap_turn");
+            let trap_result = machine.run_pure_and_bind(trap_frag);
+            assert!(
+                trap_result.is_err(),
+                "a case trap must fail cleanly, got {trap_result:?}"
+            );
+
+            // The machine must now permanently refuse further add_function
+            // calls: the exact contract `bind_error_then_allocate` above must
+            // NOT trigger with its own (Reusable-class) error turn.
+            let refusal = machine.add_function(
+                "after_trap",
+                &build_value_fragment(1),
+                &table,
+                &ExternalEnv::new(),
+            );
+            match refusal {
+                Err(JitError::MachineUnavailable { failure }) => {
+                    let cause = failure.map(|f| f.cause);
+                    assert_eq!(
+                        cause,
+                        Some(tidepool_codegen::host_fns::RuntimeError::CaseTrap),
+                        "machine refused for the wrong cause: {cause:?}"
+                    );
+                }
+                other => panic!(
+                    "expected JitError::MachineUnavailable after a case trap, got {other:?}"
+                ),
+            }
 
             drop(machine);
         })

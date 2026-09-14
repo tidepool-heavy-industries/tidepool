@@ -83,7 +83,7 @@ if [[ "$code_changed" -eq 1 ]]; then
     cargo clippy --workspace --all-targets -- -D warnings
   run_step "scripts/test-suite-check.sh" scripts/test-suite-check.sh
   run_step "cargo nextest run" \
-    cargo nextest run --status-level fail --final-status-level fail
+    cargo nextest run --no-fail-fast --status-level fail --final-status-level fail
 fi
 
 heavy=' tidepool-runtime tidepool-repl tidepool-mcp tidepool-handlers tidepool-harness tidepool-testing '
