@@ -7,7 +7,8 @@ use std::sync::Arc;
 use tidepool_heap::execution_descriptor::{EntryMetadata, ObjectDescriptor, ObjectKind};
 use tidepool_repr::execution_schema::{
     AlternativePattern, Atom, CaseKind, ExprFrame, Group, HeapBinding, HeapRhs, PreparedProgram,
-    ResultContract, RuntimeRep, ScalarLiteral, Signature, StorageLayout, ValueId, ValueRef,
+    ResultContract, RuntimeRep, ScalarLiteral, Signature, StorageLayout, SymbolIdentity, ValueId,
+    ValueRef,
 };
 
 pub(super) struct FunctionPlan<'a> {
@@ -39,6 +40,23 @@ pub(crate) struct HeapTopSpec {
     pub reps: Vec<RuntimeRep>,
 }
 
+/// One admitted import's machine-wide top-table slot. Imports occupy the
+/// contiguous range immediately after this program's own top slots (see
+/// [`ProgramPlan::top_slots`]), so `PreparedMachine::install_program`'s
+/// contiguity check spans both without distinguishing them. `rep` and
+/// `required_evaluated` are copied from the checked [`GlobalDecl`] --
+/// identity/signature/generation agreement was already proven by
+/// `tidepool_repr::execution_schema::link_program` before this program
+/// reached [`admission`](super::admission); only the runtime shape (handle
+/// representation, evaluatedness) remains for the installing machine to
+/// re-verify against the live handle it is actually given.
+pub(crate) struct ImportSlot {
+    pub identity: SymbolIdentity,
+    pub slot: usize,
+    pub rep: RuntimeRep,
+    pub required_evaluated: bool,
+}
+
 pub(super) struct ProgramPlan<'a> {
     pub program: &'a PreparedProgram,
     pub functions: BTreeMap<ValueId, FunctionPlan<'a>>,
@@ -52,6 +70,11 @@ pub(super) struct ProgramPlan<'a> {
     pub bytes_array: Arc<ObjectDescriptor>,
     /// Compact slots, not ValueId-indexed allocation controlled by wire IDs.
     pub top_slots: BTreeMap<ValueId, usize>,
+    /// Admitted imports' slots, indexed by `GlobalId` (dense from 0, matching
+    /// `program.globals()`'s own order) -- `emit.rs`'s `ValueRef::Global(id)`
+    /// lowering reads `import_slots[id.0]`. Occupies the machine-wide range
+    /// immediately after `top_slots`.
+    pub import_slots: Vec<ImportSlot>,
     /// Pinned literal payloads; emitters never embed a borrowed artifact buffer.
     pub bytes: Arc<PinnedBytes>,
     pub heap_tops: BTreeSet<ValueId>,
@@ -266,6 +289,22 @@ impl<'a> ProgramPlan<'a> {
             }
         }
 
+        // Imports occupy the contiguous range immediately after this
+        // program's own top slots. Admission already proved every declared
+        // global's representation is supported, so no rep check is repeated
+        // here -- this pass only assigns slots in `GlobalId` order.
+        let import_slots = program
+            .globals()
+            .iter()
+            .enumerate()
+            .map(|(index, declaration)| ImportSlot {
+                identity: declaration.identity.clone(),
+                slot: base + top_slots.len() + index,
+                rep: declaration.rep,
+                required_evaluated: declaration.required_evaluated,
+            })
+            .collect::<Vec<_>>();
+
         let heap_tops = super::image::heap_top_partition(&top_bindings);
         let pap_layouts = super::apply::layouts(
             target,
@@ -327,6 +366,7 @@ impl<'a> ProgramPlan<'a> {
                 target,
             )?),
             top_slots,
+            import_slots,
             bytes: Arc::new(PinnedBytes::new(bytes)),
             heap_tops,
             heap_top_specs,

@@ -55,7 +55,8 @@ use super::run::{
 };
 use super::safepoint::NativeStackBounds;
 use super::{
-    CompiledProgram, DescriptorMetadata, ExecutionError, RunResult, TopSlotBase, Unsupported,
+    CompiledProgram, DescriptorMetadata, ExecutionError, ImportShapeFact, RunResult, TopSlotBase,
+    Unsupported,
 };
 use crate::context::VMContext;
 use crate::host_fns::{gc_trigger, prepared_gc_trigger, RuntimeError};
@@ -70,7 +71,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_heap::static_region::StaticRegion;
-use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, ValueId};
+use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, SymbolIdentity, ValueId};
 use tidepool_repr::DataConId;
 
 /// A compiled program and its custody. Deliberately !Send: code custody, its
@@ -164,6 +165,12 @@ pub struct PreparedHandle {
     rep: RuntimeRep,
 }
 
+/// Caller-owned import resolution for [`PreparedMachine::install_program`]:
+/// one live [`PreparedHandle`], retained by this same machine, per declared
+/// import identity. A declared import whose identity is absent here is
+/// [`ExecutionError::UnknownPreparedHandle`], never a silently-skipped slot.
+pub type ImportBindings = BTreeMap<SymbolIdentity, PreparedHandle>;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreparedInput {
     Scalar(u64),
@@ -226,7 +233,10 @@ impl PreparedMachine<'static> {
         options: PreparedMachineOptions,
     ) -> Result<(Self, ProgramId), ExecutionError> {
         let mut machine = Self::empty(options)?;
-        let id = machine.install(ProgramCustody::Owned(Rc::new(program)))?;
+        let id = machine.install(
+            ProgramCustody::Owned(Rc::new(program)),
+            &ImportBindings::new(),
+        )?;
         Ok((machine, id))
     }
 }
@@ -240,7 +250,7 @@ impl<'code> PreparedMachine<'code> {
         options: PreparedMachineOptions,
     ) -> Result<(Self, ProgramId), ExecutionError> {
         let mut machine = Self::empty(options)?;
-        let id = machine.install(ProgramCustody::Borrowed(program))?;
+        let id = machine.install(ProgramCustody::Borrowed(program), &ImportBindings::new())?;
         Ok((machine, id))
     }
 
@@ -281,16 +291,31 @@ impl<'code> PreparedMachine<'code> {
     /// claimed-slot advance, no persistent root -- unless the whole install
     /// succeeds, and every already-installed program is untouched by a
     /// failed install.
+    /// `imports` resolves every one of `program`'s declared globals by
+    /// identity, one live [`PreparedHandle`] retained by THIS machine per
+    /// import (an identity absent here is [`ExecutionError::UnknownPreparedHandle`]).
+    /// Every import is verified -- handle known, representation matches, and
+    /// (when the declaration requires it) the referenced value already
+    /// resolves to a settled, evaluated constructor -- before anything is
+    /// written; a single bad import leaves the table, the roots and every
+    /// already-installed program exactly as before, same as a capacity or
+    /// heap-reserve failure (see [`Self::install`]'s "reserve, verify all,
+    /// then publish" ordering).
     pub fn install_program(
         &mut self,
         program: CompiledProgram,
+        imports: ImportBindings,
     ) -> Result<ProgramId, ExecutionError> {
-        self.install(ProgramCustody::Owned(Rc::new(program)))
+        self.install(ProgramCustody::Owned(Rc::new(program)), &imports)
     }
 
-    fn install(&mut self, program: ProgramCustody<'code>) -> Result<ProgramId, ExecutionError> {
+    fn install(
+        &mut self,
+        program: ProgramCustody<'code>,
+        imports: &ImportBindings,
+    ) -> Result<ProgramId, ExecutionError> {
         let compiled = program.get();
-        let slot_count = compiled.top_slots.len();
+        let slot_count = compiled.top_slots.len() + compiled.import_slots.len();
         let base = self.claimed_slots;
         let available = self.top_capacity.saturating_sub(self.claimed_slots);
         if slot_count > available {
@@ -300,7 +325,12 @@ impl<'code> PreparedMachine<'code> {
             });
         }
         if slot_count > 0 {
-            let mut claimed: Vec<usize> = compiled.top_slots.values().copied().collect();
+            let mut claimed: Vec<usize> = compiled
+                .top_slots
+                .values()
+                .copied()
+                .chain(compiled.import_slots.iter().map(|slot| slot.slot))
+                .collect();
             claimed.sort_unstable();
             let contiguous_from_base = claimed
                 .iter()
@@ -313,6 +343,75 @@ impl<'code> PreparedMachine<'code> {
                 });
             }
         }
+
+        // Reserve (capacity/contiguity, above) then verify EVERY declared
+        // import before any other install side effect -- no statics
+        // instantiated, no descriptor/stack-map union extended, no heap
+        // touched. A bad import must look, from every already-installed
+        // program's perspective, exactly like an install that never
+        // happened. `link_program` already proved identity/signature/
+        // generation agreement for each declaration; only the runtime shape
+        // of the actual handle this caller supplied remains to check here.
+        // The handle's CURRENT pointer is deliberately NOT cached here: the
+        // second-or-later-program branch below runs its own `collect_on` to
+        // reserve heap-top room, which can relocate this very object (it is
+        // already reachable, and therefore a legitimate root, through
+        // whichever program produced it) -- publishing must re-read each
+        // handle's slot fresh, after every GC-triggering step, or the
+        // published cell would carry a pointer stale by exactly that
+        // collection.
+        let mut resolved_imports: Vec<(usize, ValueHandle)> =
+            Vec::with_capacity(compiled.import_slots.len());
+        // Built once, eagerly, only if some declared import actually needs
+        // the evaluatedness check -- most installs need no heap read at all.
+        let observation = if compiled
+            .import_slots
+            .iter()
+            .any(|slot| slot.required_evaluated)
+        {
+            Some(self.observation_heap()?)
+        } else {
+            None
+        };
+        for slot in &compiled.import_slots {
+            let handle = imports
+                .get(&slot.identity)
+                .copied()
+                .ok_or(ExecutionError::UnknownPreparedHandle)?;
+            if handle.rep != slot.rep {
+                return Err(ExecutionError::ImportShape {
+                    identity: Box::new(slot.identity.clone()),
+                    expected: ImportShapeFact::Representation(slot.rep),
+                    found: ImportShapeFact::Representation(handle.rep),
+                });
+            }
+            let entry = self
+                .handles
+                .get(handle.raw)
+                .ok_or(ExecutionError::UnknownPreparedHandle)?;
+            let pointer = unsafe { entry.slot.current() } as usize;
+            if pointer == 0 {
+                return Err(ExecutionError::UnknownPreparedHandle);
+            }
+            if slot.required_evaluated {
+                // `observation` was built above whenever any slot needs this
+                // check, so this one always does; the fallback error keeps
+                // this branch fail-closed rather than relying on that.
+                let Some(heap) = observation.as_ref() else {
+                    return Err(ExecutionError::UnknownPreparedHandle);
+                };
+                let evaluated = heap.resolves_to_whnf_value(pointer)?;
+                if !evaluated {
+                    return Err(ExecutionError::ImportShape {
+                        identity: Box::new(slot.identity.clone()),
+                        expected: ImportShapeFact::Evaluated(true),
+                        found: ImportShapeFact::Evaluated(false),
+                    });
+                }
+            }
+            resolved_imports.push((slot.slot, handle.raw));
+        }
+        drop(observation);
 
         let statics = Arc::new(compiled.statics.instantiate()?);
         for (&id, &slot) in &compiled.top_slots {
@@ -452,6 +551,24 @@ impl<'code> PreparedMachine<'code> {
                 let root = unsafe { self.top_table.as_mut_ptr().add(slot).cast::<*mut u8>() };
                 self.machine.register_persistent_root(root);
             }
+        }
+
+        // Publish every verified import: write the retained root's CURRENT
+        // pointer (re-read now, not the value observed during verification
+        // above -- the heap-reserve collection just above this comment block
+        // can have relocated it) into this program's own import slot, and
+        // register that slot as its own independent persistent root, exactly
+        // the heap-top pattern above rather than a reference to the source
+        // handle's own root slot.
+        for &(slot, raw) in &resolved_imports {
+            let pointer = self
+                .handles
+                .get(raw)
+                .map(|entry| unsafe { entry.slot.current() } as u64)
+                .ok_or(ExecutionError::UnknownPreparedHandle)?;
+            self.top_table.write(slot, pointer)?;
+            let root = unsafe { self.top_table.as_mut_ptr().add(slot).cast::<*mut u8>() };
+            self.machine.register_persistent_root(root);
         }
 
         self.statics.push(statics);
@@ -630,6 +747,17 @@ impl<'code> PreparedMachine<'code> {
         &self,
         seed: super::observe::ObservationSeed,
     ) -> Result<(DataConId, Vec<super::observe::ObservationSeed>), ExecutionError> {
+        let heap = self.observation_heap()?;
+        heap.inspect_constructor(seed).map_err(ExecutionError::from)
+    }
+
+    /// Build a non-forcing view over the machine-wide nursery/static/old-space
+    /// union as it stands right now -- the shared construction behind
+    /// [`Self::inspect_constructor`] and [`Self::install`]'s import
+    /// re-verification. Requires a live heap (at least one program already
+    /// installed); [`Self::install`] only reaches this after a declared
+    /// import's handle has resolved, which itself requires a live heap.
+    fn observation_heap(&self) -> Result<super::observe::ObservationHeap<'_>, ExecutionError> {
         let (start, size) = self
             .machine
             .gc_active_range()
@@ -649,15 +777,15 @@ impl<'code> PreparedMachine<'code> {
             &mut starts,
             &mut scanned_words,
         )?;
-        let heap = super::observe::ObservationHeap::new_with_registry_and_starts(
+        super::observe::ObservationHeap::new_with_registry_and_starts(
             nursery,
             &self.statics,
             &self.descriptor_registry,
             &starts,
             Some(&*self.old_space),
             &self.machine,
-        )?;
-        heap.inspect_constructor(seed).map_err(ExecutionError::from)
+        )
+        .map_err(ExecutionError::from)
     }
 
     #[cfg(test)]
@@ -690,6 +818,41 @@ impl<'code> PreparedMachine<'code> {
                 address >= range_start && address < range_end
             })
             .count()
+    }
+
+    /// Whether `identity`'s import slot on program `id` is itself a
+    /// registered persistent root right now -- the direct root-accounting
+    /// proof (`tidepool-codegen/CLAUDE.md` "Root accounting") that
+    /// `install_program` actually registered it, distinct from and stronger
+    /// than any GC-survival inference: an already-`retain_prepared`d value's
+    /// OWN root slot is never relocated by a minor collection (old space is
+    /// compacted only on an explicit major pass this machine never runs), so
+    /// a skipped registration for the import slot specifically would not be
+    /// exposed by the underlying object moving -- it is exposed here, and by
+    /// the deregistration-count check callers can build from it.
+    #[cfg(test)]
+    pub(crate) fn import_slot_is_registered_root(
+        &self,
+        id: ProgramId,
+        identity: &tidepool_repr::execution_schema::SymbolIdentity,
+    ) -> bool {
+        let Some(program) = self.programs.get(id.0 as usize) else {
+            return false;
+        };
+        let Some(slot) = program
+            .program
+            .get()
+            .import_slots
+            .iter()
+            .find(|candidate| &candidate.identity == identity)
+            .map(|candidate| candidate.slot)
+        else {
+            return false;
+        };
+        let address = unsafe { self.top_table.as_mut_ptr().add(slot) } as usize;
+        let mut roots = Vec::new();
+        self.machine.extend_persistent_roots(&mut roots);
+        roots.into_iter().any(|root| root as usize == address)
     }
 
     #[cfg(test)]
@@ -1174,10 +1337,11 @@ mod tests {
     };
     use std::sync::{atomic::AtomicBool, Arc};
     use tidepool_repr::execution_schema::{
-        link_program, parse_program, testing, Architecture, Atom, CheckedLayout, ConstructorDecl,
-        ConstructorId, DecodeLimits, Endianness, ExprFrame, FieldLayout, Group, HeapBinding,
-        HeapRhs, MachineImports, ProgramRequirements, ResultContract, RuntimeRep, ScalarLiteral,
-        Signature, SignatureId, TargetDescriptor, TopBinding, UpdatePolicy, ValueId, ValueRef,
+        link_program, parse_program, testing, Alternative, AlternativePattern, Architecture, Atom,
+        CaseKind, CheckedLayout, ConstructorDecl, ConstructorId, DecodeLimits, Endianness,
+        ExprFrame, FieldLayout, GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs, ImportedValue,
+        MachineImports, ProgramRequirements, ResultContract, RuntimeRep, ScalarLiteral, Signature,
+        SignatureId, SymbolIdentity, TargetDescriptor, TopBinding, UpdatePolicy, ValueId, ValueRef,
         EXECUTION_ABI_VERSION, SCHEMA_VERSION,
     };
 
@@ -2027,7 +2191,7 @@ mod tests {
         let base_b = machine.next_top_slot_base();
         assert_eq!(base_b, TopSlotBase(1));
         let program_b = machine
-            .install_program(base_program(base_b, 951))
+            .install_program(base_program(base_b, 951), ImportBindings::new())
             .expect("second program installs alongside the first, on the same machine");
 
         let options = PreparedCallOptions {
@@ -2154,7 +2318,7 @@ mod tests {
 
         let base_b = machine.next_top_slot_base();
         let error = machine
-            .install_program(base_program(base_b, 953))
+            .install_program(base_program(base_b, 953), ImportBindings::new())
             .expect_err("no capacity remains for a second program's one top slot");
         assert!(matches!(
             error,
@@ -2323,7 +2487,10 @@ mod tests {
         .expect("A installs");
         let base_b = machine.next_top_slot_base();
         let program_b = machine
-            .install_program(managed_argument_consumer_program(base_b))
+            .install_program(
+                managed_argument_consumer_program(base_b),
+                ImportBindings::new(),
+            )
             .expect("B (64-byte-class nursery pressure via 32 allocations) installs alongside A");
 
         let call = PreparedCallOptions {
@@ -2444,7 +2611,7 @@ mod tests {
 
         let base_b = machine.next_top_slot_base();
         let error = machine
-            .install_program(base_program(base_b, 991))
+            .install_program(base_program(base_b, 991), ImportBindings::new())
             .expect_err("B's heap-top reserve cannot fit under the forced test ceiling, even after a collection");
         crate::host_fns::clear_max_heap_bytes_override();
 
@@ -2696,7 +2863,7 @@ mod tests {
         .expect("A installs");
         let base_b = machine.next_top_slot_base();
         let program_b = machine
-            .install_program(closure_caller_program(base_b))
+            .install_program(closure_caller_program(base_b), ImportBindings::new())
             .expect(
                 "B installs alongside A, extending the shared descriptor space and stack-map chain",
             );
@@ -2763,5 +2930,972 @@ mod tests {
         assert!(machine.release(*unforced));
         assert!(machine.release(*result));
         assert_eq!(machine.handle_count(), 0);
+    }
+
+    // ---- S3: global lowering, per-global admission, import bindings ------
+    //
+    // CORRECTION carried from the plan card: cross-program CLOSURE
+    // invocation has no mechanism this wave (S2's T2 finding). Test (2)
+    // below imports a closure, holds it live and never enters or calls it.
+    //
+    // A second, independent finding surfaced while building test (1):
+    // `CaseKind::Algebraic` dispatch (`emit.rs::emit_case_dispatch`,
+    // `emit_algebraic_dispatch`) matches a scrutinee's header word against
+    // only the COMPILING program's own `plan.constructors` descriptor
+    // addresses (`emit.rs` ~1699-1728, "Checked algebraic dispatch uses full
+    // descriptor identity, not a family-relative low-bit tag") -- the exact
+    // same per-program-baked-table shape as the apply dispatcher S2's T2
+    // hit, just for `Case` instead of `Call`. A foreign program's
+    // constructor object can never match a locally-declared descriptor's
+    // address, so a genuine generated `Case` over an imported constructor
+    // always falls through to the integrity trap, confirmed empirically
+    // below (`s3_finding_generated_case_cannot_recognize_a_foreign_constructor`,
+    // pinned `#[ignore]`d). Test (1) is therefore adapted to the same
+    // achievable shape as test (2): B reads the import through
+    // `PreparedMachine::inspect_outer` (the host-boundary, non-forcing path
+    // through the SAME machine-wide descriptor union a real `Case` would
+    // need), never through a generated `Case`. This is still real,
+    // meaningful coverage: it proves the import slot, its independent
+    // persistent root, and the shared descriptor/static union all resolve a
+    // cross-program CONSTRUCTOR correctly across collections on both sides
+    // -- the property the reviewer's root-registration mutation targets.
+
+    fn s3_field_producer_identity() -> SymbolIdentity {
+        testing::identity("S3Import", "producer")
+    }
+
+    /// A's producer for S3 tests (1) and (3): a memoized CAF returning
+    /// `Field(99)`, one strict `Int(64)` field.
+    fn s3_field_producer_program(base: TopSlotBase) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("S3Import", "Field"),
+            family: testing::identity("S3Import", "Field"),
+            host_id: tidepool_repr::DataConId(960),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![RuntimeRep::Int(64)],
+            strict_fields: vec![true],
+            layout: CheckedLayout {
+                fields: vec![FieldLayout {
+                    rep: RuntimeRep::Int(64),
+                    offset: 0,
+                }],
+                alignment: 8,
+                payload_size: 8,
+                root_mask: vec![false],
+            },
+        });
+        wire.expressions.nodes[0] = ExprFrame::Construct {
+            constructor: ConstructorId(0),
+            fields: vec![Atom::Scalar(ScalarLiteral::Int {
+                bits: 64,
+                bytes: 99_i64.to_be_bytes().to_vec(),
+            })],
+        };
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.identity = s3_field_producer_identity();
+        top.binding.rhs = HeapRhs::Thunk {
+            signature: SignatureId(0),
+            update: UpdatePolicy::Memoize,
+            captures: vec![],
+            body: 0,
+        };
+        let prepared = testing::prepare(wire).expect("s3 field producer fixture");
+        let linked = link_program(prepared, &MachineImports::default())
+            .expect("s3 field producer fixture links");
+        CompiledProgram::compile(&linked, base).expect("s3 field producer fixture compiles")
+    }
+
+    /// B: declares one global of `identity`/`rep`/`required_evaluated` and
+    /// its entry does nothing but read and return it -- shared by S3 tests
+    /// (1) and (3). Linking is checked against a `MachineImports` snapshot
+    /// that mirrors the declaration exactly (identity/rep/evaluatedness
+    /// agreement is `link_program`'s job, proven once here; the machine-level
+    /// `install_program` re-verification under test is a separate, later
+    /// check against the REAL live handle).
+    fn s3_import_consumer_program(
+        base: TopSlotBase,
+        identity: SymbolIdentity,
+        rep: RuntimeRep,
+        required_evaluated: bool,
+    ) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0] = Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![rep]),
+        };
+        wire.globals = vec![GlobalDecl {
+            identity: identity.clone(),
+            rep,
+            entry_signature: None,
+            required_evaluated,
+            required_generation: None,
+        }];
+        wire.expressions.nodes[0] =
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Function {
+            signature: SignatureId(0),
+            parameters: vec![],
+            captures: vec![],
+            body: 0,
+        };
+        let prepared = testing::prepare(wire).expect("s3 import consumer fixture");
+        let mut imports = MachineImports::default();
+        imports.values.insert(
+            identity.clone(),
+            ImportedValue {
+                identity,
+                rep,
+                entry_signature: None,
+                evaluated: required_evaluated,
+                generation: 0,
+            },
+        );
+        let linked = link_program(prepared, &imports).expect("s3 import consumer fixture links");
+        CompiledProgram::compile(&linked, base).expect("s3 import consumer fixture compiles")
+    }
+
+    #[test]
+    fn s3_test1_imported_constructor_field_reads_correctly_before_and_after_collections_both_sides()
+    {
+        let (mut machine, program_a) = PreparedMachine::new(
+            s3_field_producer_program(TopSlotBase::ZERO),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+                top_slots: 16,
+            },
+        )
+        .expect("A installs");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        let produced = machine
+            .run_entry_retained(
+                program_a,
+                ValueId(0),
+                &[],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("A produces its retained Field(99)");
+        let [PreparedResult::Managed(handle_a)] = produced.values.as_slice() else {
+            panic!("A must return one managed constructor");
+        };
+
+        let base_b = machine.next_top_slot_base();
+        let mut imports = ImportBindings::new();
+        imports.insert(s3_field_producer_identity(), *handle_a);
+        let program_b = machine
+            .install_program(
+                s3_import_consumer_program(
+                    base_b,
+                    s3_field_producer_identity(),
+                    RuntimeRep::LiftedRef,
+                    true,
+                ),
+                imports,
+            )
+            .expect("B installs, importing A's Field as a required-evaluated global");
+
+        let before = machine
+            .run_entry_retained(
+                program_b,
+                ValueId(0),
+                &[],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("B reads its import slot and returns the same handle");
+        let [PreparedResult::Managed(handle_b_before)] = before.values.as_slice() else {
+            panic!("B must retain the imported handle");
+        };
+        assert_eq!(
+            machine.handle_current_pointer(*handle_a),
+            machine.handle_current_pointer(*handle_b_before),
+            "identity, not a copy: B's import slot resolves to A's own object"
+        );
+        assert!(
+            machine.import_slot_is_registered_root(program_b, &s3_field_producer_identity()),
+            "B's import slot must be registered as its own independent persistent root"
+        );
+        let PreparedOuter::Constructor {
+            identity: field_identity,
+            fields: field_fields,
+        } = machine
+            .inspect_outer(*handle_b_before)
+            .expect("B's imported handle inspects through the machine-wide descriptor union");
+        assert_eq!(field_identity, tidepool_repr::DataConId(960));
+        let [PreparedResult::Scalar(field_value)] = field_fields.as_slice() else {
+            panic!("Field must have exactly one scalar field");
+        };
+        assert_eq!(*field_value, 99);
+
+        let before_pointer = machine
+            .handle_current_pointer(*handle_b_before)
+            .expect("B's handle is live");
+
+        // Force real collections on both sides -- A's own entry (already
+        // memoized, so this is a harness-driven collection, not one A's own
+        // code triggers) and then B's -- and re-read the import through B's
+        // OWN generated code again. `handle_a`/`handle_b_before` were minted
+        // through `retain_prepared`, which promotes into old space; old
+        // space here is compacted only on an explicit major pass this
+        // machine never runs, so the object's address is expected to stay
+        // put (an equality check, matching `t1_managed_argument_crosses_
+        // installed_programs_with_identity_preserved`'s own established
+        // pattern for a retained value) -- the mutation this proves against
+        // is caught directly by `import_slot_is_registered_root` above and
+        // again below, not by relocation.
+        let collect = PreparedCallOptions {
+            collect_before_observation: true,
+            ..call
+        };
+        let after_a = machine
+            .run_entry_retained(
+                program_a,
+                ValueId(0),
+                &[],
+                collect,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("A's own entry still runs and forces a collection");
+        let [PreparedResult::Managed(handle_a_after)] = after_a.values.as_slice() else {
+            panic!("A must still return one managed constructor");
+        };
+        let after = machine
+            .run_entry_retained(
+                program_b,
+                ValueId(0),
+                &[],
+                collect,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("B's own entry still runs and forces a collection");
+        let [PreparedResult::Managed(handle_b_after)] = after.values.as_slice() else {
+            panic!("B must still retain the imported handle");
+        };
+        let after_pointer = machine
+            .handle_current_pointer(*handle_b_after)
+            .expect("B's post-collection handle is live");
+        assert_eq!(
+            before_pointer, after_pointer,
+            "a retained value's own root slot is stable across a minor collection"
+        );
+        assert_eq!(
+            machine.handle_current_pointer(*handle_a_after),
+            Some(after_pointer),
+            "B's import slot still resolves to A's own object after both collections"
+        );
+        assert!(
+            machine.import_slot_is_registered_root(program_b, &s3_field_producer_identity()),
+            "B's import slot root registration survives a forced collection on both sides"
+        );
+        let PreparedOuter::Constructor {
+            identity: field_identity_after,
+            fields: field_fields_after,
+        } = machine
+            .inspect_outer(*handle_b_after)
+            .expect("B's re-read handle still classifies correctly after collection");
+        assert_eq!(field_identity_after, tidepool_repr::DataConId(960));
+        let [PreparedResult::Scalar(field_value_after)] = field_fields_after.as_slice() else {
+            panic!("Field must still have exactly one scalar field");
+        };
+        assert_eq!(*field_value_after, 99);
+
+        assert!(machine.release(*handle_a));
+        assert!(machine.release(*handle_b_before));
+        assert!(machine.release(*handle_a_after));
+        assert!(machine.release(*handle_b_after));
+        assert_eq!(machine.handle_count(), 0);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// Pinned FINDING, not an acceptance test: a genuine generated `Case`
+    /// dispatch (`CaseKind::Algebraic`) can never recognize a constructor
+    /// produced by a DIFFERENT installed program, because
+    /// `emit_algebraic_dispatch` matches the scrutinee's header word against
+    /// the COMPILING program's own `plan.constructors` descriptor addresses
+    /// only (`emit.rs`'s `emit_case_dispatch`/`emit_algebraic_dispatch`,
+    /// doc comment at ~1674: "Checked algebraic dispatch uses full
+    /// descriptor identity, not a family-relative low-bit tag"). B below
+    /// declares its OWN, separately-allocated copy of the SAME logical
+    /// `Field` constructor (same tag/family/layout) and cases on A's
+    /// imported value; A's object's header holds A's descriptor's address,
+    /// which never equals B's descriptor's address, so the dispatch always
+    /// falls through to the integrity trap. This is why test (1) above
+    /// reads the import through `inspect_outer` instead.
+    #[test]
+    #[ignore = "FINDING: CaseKind::Algebraic dispatch cannot recognize a foreign program's \
+        constructor -- see the doc comment on this test and the S3 acceptance-test-1 \
+        correction note above. Confirmed empirically: this test reproduces an \
+        IntegrityFailure/case-trap, not the field value."]
+    fn s3_finding_generated_case_cannot_recognize_a_foreign_constructor() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            s3_field_producer_program(TopSlotBase::ZERO),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+                top_slots: 16,
+            },
+        )
+        .expect("A installs");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        let produced = machine
+            .run_entry_retained(
+                program_a,
+                ValueId(0),
+                &[],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("A produces its retained Field(99)");
+        let [PreparedResult::Managed(handle_a)] = produced.values.as_slice() else {
+            panic!("A must return one managed constructor");
+        };
+
+        let base_b = machine.next_top_slot_base();
+        let mut imports = ImportBindings::new();
+        imports.insert(s3_field_producer_identity(), *handle_a);
+
+        // B's own case-dispatching consumer: declares the SAME logical
+        // `Field` constructor as A (same tag/family/layout, but a distinct
+        // Arc<ObjectDescriptor> allocation) and cases on the import.
+        let mut wire = testing::wire_program();
+        wire.signatures[0] = Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+        };
+        wire.globals = vec![GlobalDecl {
+            identity: s3_field_producer_identity(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: true,
+            required_generation: None,
+        }];
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("S3Import", "Field"),
+            family: testing::identity("S3Import", "Field"),
+            host_id: tidepool_repr::DataConId(960),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![RuntimeRep::Int(64)],
+            strict_fields: vec![true],
+            layout: CheckedLayout {
+                fields: vec![FieldLayout {
+                    rep: RuntimeRep::Int(64),
+                    offset: 0,
+                }],
+                alignment: 8,
+                payload_size: 8,
+                root_mask: vec![false],
+            },
+        });
+        wire.expressions.nodes = vec![
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]),
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(50)))]),
+            ExprFrame::Case {
+                scrutinee: 0,
+                binder: ValueId(49),
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+                kind: CaseKind::Algebraic(testing::identity("S3Import", "Field")),
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Constructor(ConstructorId(0)),
+                    binders: vec![ValueId(50)],
+                    body: 1,
+                }],
+            },
+        ];
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Function {
+            signature: SignatureId(0),
+            parameters: vec![],
+            captures: vec![],
+            body: 2,
+        };
+        let prepared = testing::prepare(wire).expect("case-dispatch consumer fixture");
+        let mut machine_imports = MachineImports::default();
+        machine_imports.values.insert(
+            s3_field_producer_identity(),
+            ImportedValue {
+                identity: s3_field_producer_identity(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                evaluated: true,
+                generation: 0,
+            },
+        );
+        let linked =
+            link_program(prepared, &machine_imports).expect("case-dispatch consumer fixture links");
+        let compiled = CompiledProgram::compile(&linked, base_b)
+            .expect("case-dispatch consumer fixture compiles");
+        let program_b = machine
+            .install_program(compiled, imports)
+            .expect("B installs, importing A's Field");
+
+        let result = machine
+            .run_entry(
+                program_b,
+                ValueId(0),
+                &[],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("if this succeeds, the FINDING above is stale and should be revisited");
+        assert!(matches!(
+            result.values.as_slice(),
+            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(
+                99
+            ))]
+        ));
+    }
+
+    fn s3_closure_producer_identity() -> SymbolIdentity {
+        testing::identity("S3ImportClosure", "producer")
+    }
+
+    /// A's producer for S3 test (2): a memoized CAF that returns `f`, a
+    /// distinct zero-argument top-level closure, directly (no wrapping
+    /// constructor). `f`'s own body is never reached by this test (S2's T2
+    /// finding: no cross-program apply primitive exists this wave) so its
+    /// exact contents do not matter; it stays trivial.
+    fn s3_closure_producer_program(base: TopSlotBase) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.signatures.push(Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+        });
+        wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(1)))]);
+        wire.expressions
+            .nodes
+            .push(ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::Int {
+                bits: 64,
+                bytes: 7_i64.to_be_bytes().to_vec(),
+            })]));
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.identity = s3_closure_producer_identity();
+        top.binding.rhs = HeapRhs::Thunk {
+            signature: SignatureId(0),
+            update: UpdatePolicy::Memoize,
+            captures: vec![],
+            body: 0,
+        };
+        wire.bindings.push(Group::NonRecursive(TopBinding {
+            identity: testing::identity("S3ImportClosure", "f"),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Function {
+                    signature: SignatureId(1),
+                    parameters: vec![],
+                    captures: vec![],
+                    body: 1,
+                },
+            },
+        }));
+        let prepared = testing::prepare(wire).expect("s3 closure producer fixture");
+        let linked = link_program(prepared, &MachineImports::default())
+            .expect("s3 closure producer fixture links");
+        CompiledProgram::compile(&linked, base).expect("s3 closure producer fixture compiles")
+    }
+
+    /// B for S3 test (2): imports `identity` as a global it never enters or
+    /// calls, allocating 32 throwaway constructors under a tiny nursery
+    /// (forcing a real collection FROM WITHIN this same call, before the
+    /// final read of the import slot) before reading and returning it.
+    fn s3_closure_import_holder_program(
+        base: TopSlotBase,
+        identity: SymbolIdentity,
+    ) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0] = Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        };
+        wire.globals = vec![GlobalDecl {
+            identity: identity.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        }];
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("S3ImportClosure", "Filler"),
+            family: testing::identity("S3ImportClosure", "Filler"),
+            host_id: tidepool_repr::DataConId(970),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        });
+        wire.expressions.nodes[0] =
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
+        let mut body = 0;
+        for id in 0..32 {
+            wire.expressions.nodes.push(ExprFrame::Let {
+                bindings: Group::NonRecursive(HeapBinding {
+                    id: ValueId(100 + id),
+                    rhs: HeapRhs::Constructor {
+                        constructor: ConstructorId(0),
+                        fields: vec![],
+                    },
+                }),
+                body,
+            });
+            body = wire.expressions.nodes.len() - 1;
+        }
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Function {
+            signature: SignatureId(0),
+            parameters: vec![],
+            captures: vec![],
+            body,
+        };
+        let prepared = testing::prepare(wire).expect("s3 closure import holder fixture");
+        let mut imports = MachineImports::default();
+        imports.values.insert(
+            identity.clone(),
+            ImportedValue {
+                identity,
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                evaluated: false,
+                generation: 0,
+            },
+        );
+        let linked =
+            link_program(prepared, &imports).expect("s3 closure import holder fixture links");
+        CompiledProgram::compile(&linked, base).expect("s3 closure import holder fixture compiles")
+    }
+
+    /// S3 test (2): A produces a closure (function-shaped object, not data).
+    /// B imports it as a global and holds it live -- reads/stores the
+    /// handle -- but NEVER enters or calls it (S2's T2 finding: no
+    /// cross-program apply primitive exists this wave). B allocates enough
+    /// on its own side, under a tiny nursery, to force a collection FROM
+    /// WITHIN its own generated code before it finishes reading the import;
+    /// a further collection is forced on A's side too. The imported
+    /// closure's slot still resolves to valid, correctly-relocated memory on
+    /// both sides, and its descriptor/header still classifies as Callable
+    /// (not Constructor) through the machine-wide descriptor union.
+    #[test]
+    fn s3_test2_imported_closure_held_live_never_entered_survives_collections_both_sides() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            s3_closure_producer_program(TopSlotBase::ZERO),
+            PreparedMachineOptions {
+                nursery_bytes: 64,
+                top_slots: 16,
+            },
+        )
+        .expect("A installs");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        let produced = machine
+            .run_entry_retained(
+                program_a,
+                ValueId(0),
+                &[],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("A produces its retained closure f");
+        let [PreparedResult::Managed(handle_f)] = produced.values.as_slice() else {
+            panic!("A must return one managed closure");
+        };
+
+        let base_b = machine.next_top_slot_base();
+        let mut imports = ImportBindings::new();
+        imports.insert(s3_closure_producer_identity(), *handle_f);
+        let program_b = machine
+            .install_program(
+                s3_closure_import_holder_program(base_b, s3_closure_producer_identity()),
+                imports,
+            )
+            .expect("B installs, importing A's closure as a non-evaluated-required global");
+
+        let before = machine
+            .run_entry_retained(
+                program_b,
+                ValueId(0),
+                &[],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("B's own 32 allocations under a tiny nursery force a collection, then it reads the import");
+        assert!(
+            before.collections >= 1,
+            "B's 32 throwaway allocations in a tiny nursery must force at least one collection \
+             BEFORE B's own generated code finally reads the import slot"
+        );
+        let [PreparedResult::Managed(handle_f_via_b_before)] = before.values.as_slice() else {
+            panic!("B must retain the imported handle");
+        };
+        assert_eq!(
+            machine.handle_current_pointer(*handle_f),
+            machine.handle_current_pointer(*handle_f_via_b_before),
+            "identity, not a copy: B's import slot resolves to A's own closure object"
+        );
+        assert!(
+            machine.import_slot_is_registered_root(program_b, &s3_closure_producer_identity()),
+            "B's import slot must be registered as its own independent persistent root"
+        );
+        match machine.inspect_outer(*handle_f_via_b_before) {
+            Err(ExecutionError::Observation(super::super::ObservationFailure::Unobservable(kind))) => {
+                assert_eq!(
+                    kind,
+                    tidepool_heap::execution_descriptor::ObjectKind::Function,
+                    "the imported value must still classify as a callable Function, never entered"
+                );
+            }
+            other => panic!(
+                "inspecting a callable-shaped import as a constructor must be the typed \
+                 Unobservable(Function) refusal, never a value and never a different failure: {other:?}"
+            ),
+        }
+
+        let before_pointer = machine
+            .handle_current_pointer(*handle_f_via_b_before)
+            .expect("B's handle is live");
+
+        let collect = PreparedCallOptions {
+            collect_before_observation: true,
+            ..call
+        };
+        let after_a = machine
+            .run_entry_retained(
+                program_a,
+                ValueId(0),
+                &[],
+                collect,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("A's own entry still runs and forces a further collection");
+        let [PreparedResult::Managed(handle_f_after)] = after_a.values.as_slice() else {
+            panic!("A must still return one managed closure");
+        };
+        let after = machine
+            .run_entry_retained(
+                program_b,
+                ValueId(0),
+                &[],
+                collect,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("B's own entry still runs, allocates, and forces another collection");
+        assert!(after.collections >= 1);
+        let [PreparedResult::Managed(handle_f_via_b_after)] = after.values.as_slice() else {
+            panic!("B must still retain the imported handle");
+        };
+        let after_pointer = machine
+            .handle_current_pointer(*handle_f_via_b_after)
+            .expect("B's post-collection handle is live");
+        assert_eq!(
+            before_pointer, after_pointer,
+            "a retained value's own root slot is stable across a minor collection"
+        );
+        assert_eq!(
+            machine.handle_current_pointer(*handle_f_after),
+            Some(after_pointer),
+            "B's import slot still resolves to A's own closure after both collections"
+        );
+        assert!(
+            machine.import_slot_is_registered_root(program_b, &s3_closure_producer_identity()),
+            "B's import slot root registration survives a forced collection on both sides"
+        );
+        match machine.inspect_outer(*handle_f_via_b_after) {
+            Err(ExecutionError::Observation(super::super::ObservationFailure::Unobservable(kind))) => {
+                assert_eq!(kind, tidepool_heap::execution_descriptor::ObjectKind::Function);
+            }
+            other => panic!(
+                "the re-read handle must still classify as Callable after collection, not: {other:?}"
+            ),
+        }
+
+        assert!(machine.release(*handle_f));
+        assert!(machine.release(*handle_f_via_b_before));
+        assert!(machine.release(*handle_f_after));
+        assert!(machine.release(*handle_f_via_b_after));
+        assert_eq!(machine.handle_count(), 0);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// A function-typed import satisfies `required_evaluated`. The projection
+    /// declares a re-entrant function global as evaluated
+    /// (`ExecutionProjection.hs`, `importedEntry`: `LFReEntrant` -> `True`),
+    /// so a retained function binding imported by a later program must
+    /// install; only an unforced thunk fails the check (test 3 below).
+    #[test]
+    fn s3_test2b_imported_function_satisfies_required_evaluated() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            s3_closure_producer_program(TopSlotBase::ZERO),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+                top_slots: 16,
+            },
+        )
+        .expect("A installs");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        let produced = machine
+            .run_entry_retained(
+                program_a,
+                ValueId(0),
+                &[],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("A produces its retained closure f");
+        let [PreparedResult::Managed(handle_f)] = produced.values.as_slice() else {
+            panic!("A must return one managed closure");
+        };
+
+        let base_b = machine.next_top_slot_base();
+        let mut imports = ImportBindings::new();
+        imports.insert(s3_closure_producer_identity(), *handle_f);
+        let program_b = machine
+            .install_program(
+                s3_import_consumer_program(
+                    base_b,
+                    s3_closure_producer_identity(),
+                    RuntimeRep::LiftedRef,
+                    true,
+                ),
+                imports,
+            )
+            .expect("a function object is in WHNF and satisfies required_evaluated");
+        let read = machine
+            .run_entry_retained(
+                program_b,
+                ValueId(0),
+                &[],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("B reads its function import");
+        let [PreparedResult::Managed(handle_f_via_b)] = read.values.as_slice() else {
+            panic!("B must retain the imported function handle");
+        };
+        assert_eq!(
+            machine.handle_current_pointer(*handle_f),
+            machine.handle_current_pointer(*handle_f_via_b),
+            "identity: B's import slot resolves to A's own function object"
+        );
+        assert!(machine.release(*handle_f));
+        assert!(machine.release(*handle_f_via_b));
+        assert_eq!(machine.handle_count(), 0);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    // ---- S3 test (3): rep mismatch, evaluatedness mismatch, unknown handle:
+    // typed errors, machine Reusable, no slot claimed. ---------------------
+
+    #[test]
+    fn s3_test3_rep_mismatch_is_a_typed_import_shape_error_no_slot_claimed() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            s3_field_producer_program(TopSlotBase::ZERO),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+                top_slots: 16,
+            },
+        )
+        .expect("A installs");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        let produced = machine
+            .run_entry_retained(
+                program_a,
+                ValueId(0),
+                &[],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("A produces its retained Field(99)");
+        let [PreparedResult::Managed(handle_a)] = produced.values.as_slice() else {
+            panic!("A must return one managed constructor");
+        };
+
+        let base_before = machine.next_top_slot_base();
+        let mut imports = ImportBindings::new();
+        imports.insert(s3_field_producer_identity(), *handle_a);
+        let error = machine
+            .install_program(
+                s3_import_consumer_program(
+                    base_before,
+                    s3_field_producer_identity(),
+                    RuntimeRep::UnliftedRef,
+                    false,
+                ),
+                imports,
+            )
+            .expect_err("a declared UnliftedRef import must not accept a LiftedRef handle");
+        assert!(
+            matches!(
+                error,
+                ExecutionError::ImportShape {
+                    expected: ImportShapeFact::Representation(RuntimeRep::UnliftedRef),
+                    found: ImportShapeFact::Representation(RuntimeRep::LiftedRef),
+                    ..
+                }
+            ),
+            "expected a typed rep-mismatch ImportShape error, got {error:?}"
+        );
+        assert_eq!(
+            machine.next_top_slot_base(),
+            base_before,
+            "no slot may be claimed by a rejected install"
+        );
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+
+        let result = machine
+            .run_entry(
+                program_a,
+                ValueId(0),
+                &[],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("A still runs correctly after the rejected install");
+        assert!(matches!(
+            result.values.as_slice(),
+            [tidepool_bridge::Value::Con(id, fields)]
+                if *id == tidepool_repr::DataConId(960)
+                    && matches!(
+                        fields.as_slice(),
+                        [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(99))]
+                    )
+        ));
+        assert!(machine.release(*handle_a));
+    }
+
+    #[test]
+    fn s3_test3_evaluatedness_mismatch_is_a_typed_import_shape_error_no_slot_claimed() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            outer_with_function_field_program(),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+                top_slots: 16,
+            },
+        )
+        .expect("A installs");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        let produced = machine
+            .run_entry_retained(
+                program_a,
+                ValueId(0),
+                &[],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("A produces its Envelope(f, unforced)");
+        let [PreparedResult::Managed(outer)] = produced.values.as_slice() else {
+            panic!("A's producer must return one managed Envelope");
+        };
+        let PreparedOuter::Constructor { fields, .. } = machine
+            .inspect_outer(*outer)
+            .expect("A's outer inspects without forcing its unforced field");
+        let [PreparedResult::Managed(f), PreparedResult::Managed(unforced)] = fields.as_slice()
+        else {
+            panic!("Envelope's fields must both remain retained, opaque managed handles");
+        };
+
+        let base_before = machine.next_top_slot_base();
+        let identity = testing::identity("S3ImportMismatch", "unforced");
+        let mut imports = ImportBindings::new();
+        imports.insert(identity.clone(), *unforced);
+        let error = machine
+            .install_program(
+                s3_import_consumer_program(base_before, identity, RuntimeRep::LiftedRef, true),
+                imports,
+            )
+            .expect_err("an unforced, never-entered thunk must not satisfy required_evaluated");
+        assert!(
+            matches!(
+                error,
+                ExecutionError::ImportShape {
+                    expected: ImportShapeFact::Evaluated(true),
+                    found: ImportShapeFact::Evaluated(false),
+                    ..
+                }
+            ),
+            "expected a typed evaluatedness-mismatch ImportShape error, got {error:?}"
+        );
+        assert_eq!(
+            machine.next_top_slot_base(),
+            base_before,
+            "no slot may be claimed by a rejected install"
+        );
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+
+        assert!(machine.release(*outer));
+        assert!(machine.release(*f));
+        assert!(machine.release(*unforced));
+    }
+
+    #[test]
+    fn s3_test3_unknown_handle_is_typed_no_slot_claimed() {
+        let (mut machine, _program_a) = PreparedMachine::new(
+            s3_field_producer_program(TopSlotBase::ZERO),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+                top_slots: 16,
+            },
+        )
+        .expect("A installs");
+
+        let base_before = machine.next_top_slot_base();
+        let error = machine
+            .install_program(
+                s3_import_consumer_program(
+                    base_before,
+                    s3_field_producer_identity(),
+                    RuntimeRep::LiftedRef,
+                    false,
+                ),
+                ImportBindings::new(),
+            )
+            .expect_err("a declared import with no supplied handle must be refused");
+        assert!(
+            matches!(error, ExecutionError::UnknownPreparedHandle),
+            "expected the typed UnknownPreparedHandle error, got {error:?}"
+        );
+        assert_eq!(
+            machine.next_top_slot_base(),
+            base_before,
+            "no slot may be claimed by a rejected install"
+        );
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 }

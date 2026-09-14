@@ -42,10 +42,10 @@ mod roots;
 pub use observe::ObservationFailure;
 mod run;
 pub use machine::{
-    PreparedCallOptions, PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions,
-    PreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
+    ImportBindings, PreparedCallOptions, PreparedHandle, PreparedInput, PreparedMachine,
+    PreparedMachineOptions, PreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
 };
-pub use run::{ExecutionError, RunOptions, RunResult};
+pub use run::{ExecutionError, ImportShapeFact, RunOptions, RunResult};
 #[cfg(test)]
 mod apply_tests;
 mod arrays;
@@ -202,6 +202,9 @@ pub struct CompiledProgram {
     pub(crate) descriptor_registry: BTreeMap<usize, DescriptorMetadata>,
     pub(crate) statics: StaticImage,
     pub(crate) top_slots: BTreeMap<ValueId, usize>,
+    /// Admitted imports' slots -- see [`plan::ImportSlot`]. Indexed by
+    /// `GlobalId`, occupying the machine-wide range right after `top_slots`.
+    pub(crate) import_slots: Vec<plan::ImportSlot>,
     pub(crate) byte_tops: BTreeMap<ValueId, Arc<[u8]>>,
     /// Own every address embedded in generated code, including scalar literals
     /// with no top-level Bytes binding. Keys are logical bytes; values are the
@@ -739,6 +742,7 @@ impl CompiledProgram {
             descriptor_registry,
             statics,
             top_slots: plan.top_slots,
+            import_slots: plan.import_slots,
             byte_tops,
             bytes: plan.bytes,
             heap_top_specs: plan.heap_top_specs,
@@ -751,12 +755,12 @@ impl CompiledProgram {
     }
 
     /// The number of machine-wide top-table slots this program claims when
-    /// installed. A caller sizing a fresh [`PreparedMachine`]'s
-    /// [`PreparedMachineOptions::top_slots`] for exactly one program reads
-    /// this after compiling, before installing.
+    /// installed -- its own tops plus every admitted import's slot. A caller
+    /// sizing a fresh [`PreparedMachine`]'s [`PreparedMachineOptions::top_slots`]
+    /// for exactly one program reads this after compiling, before installing.
     #[must_use]
     pub fn top_slot_count(&self) -> usize {
-        self.top_slots.len()
+        self.top_slots.len() + self.import_slots.len()
     }
 }
 
