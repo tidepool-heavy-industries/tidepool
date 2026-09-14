@@ -21,7 +21,23 @@ printf '  %s\n' "${changed[@]}"
 
 code_changed=0
 haskell_changed=0
+overall_status=0
 declare -A crates=()
+
+# Run one verification step without letting its failure abort the rest of
+# the inner loop. A crate's pre-existing, unrelated debt (e.g. one crate's
+# own clippy backlog) must not hide every other step's result behind it;
+# `just changed`'s exit code still reflects the worst step, and every
+# failure is printed with a stable "==> FAILED:" marker so `just verify`
+# remains the actual pre-review gate, not this best-effort inner loop.
+run_step() {
+  local desc="$1"
+  shift
+  if ! "$@"; then
+    echo "==> FAILED: $desc"
+    overall_status=1
+  fi
+}
 
 mapfile -t workspace_crates < <(cargo metadata --no-deps --format-version 1 \
   | jq -r '.packages[] | select(.source == null) | [.name, .manifest_path] | @tsv')
@@ -62,31 +78,41 @@ fi
 
 if [[ "$code_changed" -eq 1 ]]; then
   resolve_tidepool_extract
-  cargo fmt --all -- --check
-  cargo clippy --workspace --all-targets -- -D warnings
-  scripts/test-suite-check.sh
-  cargo nextest run --status-level fail --final-status-level fail
+  run_step "cargo fmt --all -- --check" cargo fmt --all -- --check
+  run_step "cargo clippy --workspace --all-targets -- -D warnings" \
+    cargo clippy --workspace --all-targets -- -D warnings
+  run_step "scripts/test-suite-check.sh" scripts/test-suite-check.sh
+  run_step "cargo nextest run" \
+    cargo nextest run --status-level fail --final-status-level fail
 fi
 
 heavy=' tidepool-runtime tidepool-repl tidepool-mcp tidepool-handlers tidepool-harness tidepool-testing '
 for crate in "${!crates[@]}"; do
   if [[ "$heavy" == *" $crate "* ]]; then
-    scripts/battery.sh -p "$crate" --lib
+    run_step "scripts/battery.sh -p $crate --lib" scripts/battery.sh -p "$crate" --lib
     echo "note: broader coverage is available with: just suite $crate"
   else
-    cargo nextest run -p "$crate" --status-level fail --final-status-level fail
+    run_step "cargo nextest run -p $crate" \
+      cargo nextest run -p "$crate" --status-level fail --final-status-level fail
   fi
 done
 
 if [[ "$haskell_changed" -eq 1 ]]; then
-  scripts/fixtures.sh check
-  scripts/battery.sh -p tidepool-runtime \
+  run_step "scripts/fixtures.sh check" scripts/fixtures.sh check
+  run_step "scripts/battery.sh -p tidepool-runtime (jit/session/evaluation)" \
+    scripts/battery.sh -p tidepool-runtime \
     --test jit --test session --test evaluation \
     -E 'test(jit_surface::) or test(user_library::) or test(cross_mode_targeted::)'
 fi
 
 if [[ "$code_changed" -eq 0 && "$haskell_changed" -eq 0 ]]; then
   echo "documentation-only change: no executable checks selected"
+fi
+
+if [[ "$overall_status" -ne 0 ]]; then
+  echo "changed-file checks: one or more steps FAILED (see \"==> FAILED:\" markers above)."
+  echo "Unrelated steps still ran and were reported; this is inner-loop signal, not 'just verify'."
+  exit "$overall_status"
 fi
 
 echo "changed-file checks passed (inner-loop selection; use 'just verify' before review)"
