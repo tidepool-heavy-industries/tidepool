@@ -432,6 +432,28 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_admission_does_not_poison_the_retained_machine() {
+        let mut runtime = m3_runtime();
+        let first_cancel = runtime.new_cancel_handle();
+        runtime
+            .run_entry(None, &[], false, &first_cancel)
+            .expect("first prepared entry installs the machine");
+
+        let cancelled = runtime.new_cancel_handle();
+        cancelled.cancel();
+        assert!(matches!(
+            runtime.run_entry(None, &[], false, &cancelled),
+            Err(PreparedRuntimeError::Cancelled)
+        ));
+
+        let retry_cancel = runtime.new_cancel_handle();
+        runtime
+            .run_entry(None, &[], true, &retry_cancel)
+            .expect("cancelled admission leaves machine reusable");
+        assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
+    }
+
+    #[test]
     fn compiled_language_and_cancellation_are_not_integrity_failures() {
         for (cause, expected) in [
             (RuntimeError::Cancelled, PreparedFailureKind::Cancelled),
