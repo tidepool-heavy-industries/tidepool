@@ -4099,4 +4099,333 @@ mod tests {
         );
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
+
+    // ---- S2b: GC residuals -------------------------------------------
+    //
+    // T1's managed-argument crossing (`t1_managed_argument_crosses_...`)
+    // forces collections while B is live, but the value that must survive
+    // (the argument) is threaded through `argument_area`'s explicit
+    // `register_rust_root` calls -- a root source independent of native
+    // frame walking entirely. So it proves the collector correctly moves
+    // and updates a *registered root*, but not that the stack-map CHAIN
+    // (`MachineState::stack_map_registries`, `gc/frame_walker.rs`) is
+    // consulted correctly for a SECOND installed program's own live
+    // native frames: a mutation truncating the chain to only the
+    // first-installed program's registry passes every existing test
+    // (confirmed empirically; recorded in `plans/stg-wave6.md`'s S2b
+    // entry). `s2b_second_program_native_frame` below closes that gap: a
+    // cons-list built entirely by nested `Let`s within ONE native call,
+    // where each cell is a bare Cranelift-tracked local (never wrapped in
+    // an explicit root) that must stay live and correctly relocatable
+    // across the NEXT cell's allocation -- exactly the case a
+    // stack-map-chain bug corrupts.
+
+    /// A `List` family: `Nil` (tag 1, no fields) and `Cons { tail: LiftedRef }`
+    /// (tag 2, one field). `field_reps`/`layout` deliberately carry only the
+    /// recursive link -- no `head` -- so the fixture stays minimal while
+    /// still giving every non-base cell one managed field a collector must
+    /// trace and relocate.
+    fn push_list_constructors(
+        wire: &mut tidepool_repr::execution_schema::WireProgram,
+        family: &str,
+    ) {
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity(family, "Nil"),
+            family: testing::identity(family, "List"),
+            host_id: tidepool_repr::DataConId(0), // overwritten per call site below
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 2,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        });
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity(family, "Cons"),
+            family: testing::identity(family, "List"),
+            host_id: tidepool_repr::DataConId(0), // overwritten per call site below
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 2,
+            family_size: 2,
+            field_reps: vec![RuntimeRep::LiftedRef],
+            strict_fields: vec![false],
+            layout: CheckedLayout {
+                fields: vec![FieldLayout {
+                    rep: RuntimeRep::LiftedRef,
+                    offset: 0,
+                }],
+                alignment: 8,
+                payload_size: 8,
+                root_mask: vec![true],
+            },
+        });
+    }
+
+    /// B's own entry: build a `length`-long `Cons` chain entirely within
+    /// one native call via nested `Let`s (no Rust-registered root touches
+    /// any cell but the function's own final return value), then return
+    /// it. Each `Cons(tail)` cell's `tail` field is a bare Cranelift local
+    /// live across the NEXT cell's own allocation -- the property a
+    /// truncated stack-map chain corrupts. `family` distinguishes this
+    /// program's constructor identities from a second installed program's
+    /// (two programs may not declare one identity differently).
+    fn stack_map_chain_list_program(
+        base: TopSlotBase,
+        family: &str,
+        nil_host_id: u64,
+        cons_host_id: u64,
+        length: u32,
+    ) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0] = Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        };
+        push_list_constructors(&mut wire, family);
+        wire.constructors[0].host_id = tidepool_repr::DataConId(nil_host_id);
+        wire.constructors[1].host_id = tidepool_repr::DataConId(cons_host_id);
+
+        let base_local = ValueId(200);
+        wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(base_local))]);
+        let mut body = 0;
+        // Loop-iteration i is allocated LAST-to-FIRST as i goes 0..length
+        // (each new Let wraps the previous as its own body, and a Let
+        // allocates its own binding before entering its body -- see the
+        // module's other Let-chain fixtures). So i == length - 1 (the
+        // LAST pushed, OUTERMOST Let) is allocated FIRST and is the base
+        // case (Nil); every other i is Cons(Local(id for i + 1)), the
+        // cell allocated immediately before it.
+        for i in 0..length {
+            let id = ValueId(200 + i);
+            let (constructor, fields) = if i == length - 1 {
+                (ConstructorId(0), vec![])
+            } else {
+                let next_id = ValueId(200 + i + 1);
+                (ConstructorId(1), vec![Atom::Ref(ValueRef::Local(next_id))])
+            };
+            wire.expressions.nodes.push(ExprFrame::Let {
+                bindings: Group::NonRecursive(HeapBinding {
+                    id,
+                    rhs: HeapRhs::Constructor {
+                        constructor,
+                        fields,
+                    },
+                }),
+                body,
+            });
+            body = wire.expressions.nodes.len() - 1;
+        }
+
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Function {
+            signature: SignatureId(0),
+            parameters: vec![],
+            captures: vec![],
+            body,
+        };
+        let prepared = testing::prepare(wire).expect("stack_map_chain_list_program fixture");
+        let linked = link_program(prepared, &MachineImports::default())
+            .expect("stack_map_chain_list_program fixture links");
+        CompiledProgram::compile(&linked, base)
+            .expect("stack_map_chain_list_program fixture compiles")
+    }
+
+    /// The length-`n` `Cons` chain `program` returns, read back through
+    /// `inspect_outer` (non-forcing, host-boundary observation -- a
+    /// separate correctness signal from the collector's own internal
+    /// tracing, confirming the chain a GC-surviving collector produced is
+    /// actually the right shape and length, not merely non-crashing).
+    fn read_list_length(
+        machine: &mut PreparedMachine<'static>,
+        cons_host_id: tidepool_repr::DataConId,
+        nil_host_id: tidepool_repr::DataConId,
+        mut handle: PreparedHandle,
+    ) -> u32 {
+        let mut length = 0;
+        loop {
+            let PreparedOuter::Constructor { identity, fields } =
+                machine.inspect_outer(handle).expect("list cell inspects");
+            assert!(machine.release(handle));
+            if identity == nil_host_id {
+                assert!(fields.is_empty());
+                return length;
+            }
+            assert_eq!(identity, cons_host_id);
+            let [PreparedResult::Managed(tail)] = fields.as_slice() else {
+                panic!("Cons must have exactly one managed field");
+            };
+            length += 1;
+            handle = *tail;
+        }
+    }
+
+    /// S2b test 1: a collection triggered from WITHIN a second installed
+    /// program's own live native call, tracing a value that is a bare
+    /// Cranelift local (not a registered Rust root). A's own tiny CAF
+    /// installs first (so its stack-map registry occupies the chain's
+    /// first slot); B, installed second under a small nursery, builds a
+    /// 40-cell chain that cannot fit without at least one mid-call
+    /// collection, and each cell but the last is live only as a Cranelift
+    /// local across the next cell's own allocation.
+    #[test]
+    fn s2b_second_program_native_frame_is_walked_through_the_stack_map_chain() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            base_program(TopSlotBase::ZERO, 995),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+                top_slots: 8,
+            },
+        )
+        .expect("A installs first, occupying the chain's first stack-map slot");
+        let base_b = machine.next_top_slot_base();
+        let program_b = machine
+            .install_program(
+                stack_map_chain_list_program(base_b, "S2bChain", 920, 921, 40),
+                ImportBindings::new(),
+            )
+            .expect("B installs second, extending the shared stack-map chain");
+
+        let call_bridged = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        let call_retained = PreparedCallOptions {
+            observation_budget: 0,
+            collect_before_observation: false,
+        };
+        let a_result = machine
+            .run_entry(
+                program_a,
+                ValueId(0),
+                &[],
+                call_bridged,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("A's own entry still runs correctly alongside B");
+        assert!(matches!(
+            a_result.values.as_slice(),
+            [tidepool_bridge::Value::Con(id, fields)]
+                if *id == tidepool_repr::DataConId(995) && fields.is_empty()
+        ));
+
+        let b_result = machine
+            .run_entry_retained(
+                program_b,
+                ValueId(0),
+                &[],
+                call_retained,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect(
+                "B builds its 40-cell chain across at least one mid-call collection; if the \
+                 stack-map chain only resolved A's registry, B's own live locals at that \
+                 collection would be missed and the run would corrupt or crash rather than \
+                 return cleanly",
+            );
+        assert!(
+            b_result.collections >= 1,
+            "40 Cons cells in a default-sized nursery must force at least one collection \
+             DURING B's own native call (collect_before_observation is false here)"
+        );
+        let [PreparedResult::Managed(list)] = b_result.values.as_slice() else {
+            panic!("B must return one managed list head");
+        };
+        let length = read_list_length(
+            &mut machine,
+            tidepool_repr::DataConId(921),
+            tidepool_repr::DataConId(920),
+            *list,
+        );
+        assert_eq!(
+            length, 39,
+            "the full 39-Cons/1-Nil chain must read back intact after collection(s) \
+             during its own construction"
+        );
+        assert_eq!(machine.handle_count(), 0);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// S2b test 2: retention of one of A's genuinely STATIC (not nursery)
+    /// objects through B, exercising the machine-wide static-region SET
+    /// (`observe.rs`'s `self.statics` union, `machine.rs`'s
+    /// `prepared_static_reference` promotion check) rather than a single
+    /// program's own region. `field_constructor_program`'s CAF is
+    /// memoized: A's own repeated entry calls make its result an
+    /// old-space-stable value the SECOND time it is read, which
+    /// `promote_prepared`'s already-stable fast path (`admit`/
+    /// `prepared_static_reference`) must recognize through the union, not
+    /// only A's own region, when B is the one holding the handle.
+    #[test]
+    fn s2b_a_static_object_is_retained_through_b_via_the_shared_static_region_set() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            field_constructor_program(TopSlotBase::ZERO, 985),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+                top_slots: 8,
+            },
+        )
+        .expect("A installs first, occupying the chain's first static-region slot");
+        let base_b = machine.next_top_slot_base();
+        let program_b = machine
+            .install_program(
+                managed_argument_consumer_program(base_b),
+                ImportBindings::new(),
+            )
+            .expect("B installs second, extending the shared static-region set");
+
+        let call = PreparedCallOptions {
+            observation_budget: 0,
+            collect_before_observation: false,
+        };
+        let produced = machine
+            .run_entry_retained(
+                program_a,
+                ValueId(0),
+                &[],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("A produces its retained constructor");
+        let [PreparedResult::Managed(handle)] = produced.values.as_slice() else {
+            panic!("A must return one managed constructor");
+        };
+
+        // B accepts A's already-retained (old-space-stable) handle as a
+        // managed argument; its own 32 throwaway allocations force a
+        // collection whose promotion path must recognize the argument as
+        // already stable through the machine-wide static/old-space union,
+        // not corrupt or duplicate it.
+        let consumed = machine
+            .run_entry_retained(
+                program_b,
+                ValueId(0),
+                &[PreparedInput::Managed(*handle)],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("B accepts A's already-stable handle and collects during its own call");
+        let [PreparedResult::Managed(returned)] = consumed.values.as_slice() else {
+            panic!("B must retain the returned argument");
+        };
+        let PreparedOuter::Constructor { identity, .. } = machine
+            .inspect_outer(*returned)
+            .expect("the returned handle inspects through the machine-wide union");
+        assert_eq!(identity, tidepool_repr::DataConId(985));
+        assert_eq!(
+            machine.handle_current_pointer(*handle),
+            machine.handle_current_pointer(*returned),
+            "identity: B returned the SAME already-stable object A produced"
+        );
+        assert!(machine.release(*handle));
+        assert!(machine.release(*returned));
+        assert_eq!(machine.handle_count(), 0);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
 }
