@@ -8,6 +8,7 @@
 !.tidepool/lib/
 !.tidepool/PATTERNS.md
 target/
+/target-*/
 dist-newstyle/
 # scripts/bench-turn.sh results (timestamped, machine-specific — not committed)
 bench/

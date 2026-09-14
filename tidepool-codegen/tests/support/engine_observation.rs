@@ -40,31 +40,3 @@ impl<Success, CompileFailure, RuntimeFailure, HarnessFailure>
         }
     }
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SupportCategory {
-    Expression,
-    RightHandSide,
-    Binding,
-    Alternative,
-    UpdatePolicy,
-    RuntimeRepresentation,
-    Primitive,
-    ResidentValue,
-    Effect,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SupportStatus {
-    Verified,
-    Unverified,
-    Unsupported,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SupportItem {
-    pub category: SupportCategory,
-    pub name: &'static str,
-    pub status: SupportStatus,
-    pub evidence: &'static str,
-}

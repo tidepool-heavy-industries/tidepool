@@ -2,9 +2,9 @@
 
 use super::primitives::ScalarFamily;
 use cranelift_codegen::ir::{
-    self, AbiParam, InstBuilder, MemFlags, Value,
+    self,
     condcodes::{FloatCC, IntCC},
-    types,
+    types, AbiParam, InstBuilder, MemFlags, Value,
 };
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
@@ -307,7 +307,7 @@ impl ScalarFamily for FloatingFamily {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, atomic::AtomicBool};
+    use std::sync::{atomic::AtomicBool, Arc};
     use tidepool_repr::execution_schema::{testing, *};
 
     fn run(
@@ -488,26 +488,22 @@ mod tests {
 
     #[test]
     fn ghc_float_family_rejects_wrong_signatures() {
-        assert!(
-            FloatingFamily::recognize(
-                &OperationIdentity::PrimOp("plusFloat#".into()),
-                &Signature {
-                    arguments: vec![RuntimeRep::Float(64), RuntimeRep::Float(64)],
-                    results: ResultContract::Returns(vec![RuntimeRep::Float(64)])
-                }
-            )
-            .is_none()
-        );
-        assert!(
-            FloatingFamily::recognize(
-                &OperationIdentity::PrimOp("eqFloat#".into()),
-                &Signature {
-                    arguments: vec![RuntimeRep::Float(32), RuntimeRep::Float(32)],
-                    results: ResultContract::Returns(vec![RuntimeRep::Float(32)])
-                }
-            )
-            .is_none()
-        );
+        assert!(FloatingFamily::recognize(
+            &OperationIdentity::PrimOp("plusFloat#".into()),
+            &Signature {
+                arguments: vec![RuntimeRep::Float(64), RuntimeRep::Float(64)],
+                results: ResultContract::Returns(vec![RuntimeRep::Float(64)])
+            }
+        )
+        .is_none());
+        assert!(FloatingFamily::recognize(
+            &OperationIdentity::PrimOp("eqFloat#".into()),
+            &Signature {
+                arguments: vec![RuntimeRep::Float(32), RuntimeRep::Float(32)],
+                results: ResultContract::Returns(vec![RuntimeRep::Float(32)])
+            }
+        )
+        .is_none());
         for (name, arguments, results) in [
             (
                 "negateDouble#",
@@ -530,16 +526,14 @@ mod tests {
                 vec![RuntimeRep::Float(64)],
             ),
         ] {
-            assert!(
-                FloatingFamily::recognize(
-                    &OperationIdentity::PrimOp(name.into()),
-                    &Signature {
-                        arguments,
-                        results: ResultContract::Returns(results),
-                    }
-                )
-                .is_none()
-            );
+            assert!(FloatingFamily::recognize(
+                &OperationIdentity::PrimOp(name.into()),
+                &Signature {
+                    arguments,
+                    results: ResultContract::Returns(results),
+                }
+            )
+            .is_none());
         }
     }
 
@@ -565,49 +559,41 @@ mod tests {
                 FloatingFamily::recognize(&identity, &exact).is_some(),
                 "{name}"
             );
-            assert!(
-                FloatingFamily::recognize(
-                    &identity,
-                    &Signature {
-                        arguments: vec![RuntimeRep::Float(width)],
-                        ..exact.clone()
-                    }
-                )
-                .is_none()
-            );
-            assert!(
-                FloatingFamily::recognize(
-                    &identity,
-                    &Signature {
-                        arguments: vec![
-                            RuntimeRep::Float(if width == 32 { 64 } else { 32 }),
-                            RuntimeRep::Void,
-                        ],
-                        ..exact.clone()
-                    }
-                )
-                .is_none()
-            );
-            assert!(
-                FloatingFamily::recognize(
-                    &identity,
-                    &Signature {
-                        results: ResultContract::Returns(vec![RuntimeRep::Int(32)]),
-                        ..exact.clone()
-                    }
-                )
-                .is_none()
-            );
-            assert!(
-                FloatingFamily::recognize(
-                    &OperationIdentity::Intrinsic {
-                        symbol: format!("{name}Suffix"),
-                        convention: ForeignConvention::CCall,
-                    },
-                    &exact,
-                )
-                .is_none()
-            );
+            assert!(FloatingFamily::recognize(
+                &identity,
+                &Signature {
+                    arguments: vec![RuntimeRep::Float(width)],
+                    ..exact.clone()
+                }
+            )
+            .is_none());
+            assert!(FloatingFamily::recognize(
+                &identity,
+                &Signature {
+                    arguments: vec![
+                        RuntimeRep::Float(if width == 32 { 64 } else { 32 }),
+                        RuntimeRep::Void,
+                    ],
+                    ..exact.clone()
+                }
+            )
+            .is_none());
+            assert!(FloatingFamily::recognize(
+                &identity,
+                &Signature {
+                    results: ResultContract::Returns(vec![RuntimeRep::Int(32)]),
+                    ..exact.clone()
+                }
+            )
+            .is_none());
+            assert!(FloatingFamily::recognize(
+                &OperationIdentity::Intrinsic {
+                    symbol: format!("{name}Suffix"),
+                    convention: ForeignConvention::CCall,
+                },
+                &exact,
+            )
+            .is_none());
         }
     }
 
