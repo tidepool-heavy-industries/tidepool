@@ -165,7 +165,7 @@ must not be conflated with this.
 ## Status ledger (updated as tasks land)
 
 Wave 6B tracks (see `plans/actually-since-you-found-jiggly-turing.md` for the
-per-task cards): W1-W3 (independent prep, Haiku), E1-E3 (effect resume,
+per-task cards): W1-W3 (independent prep), E1-E3 (effect resume,
 same-program, no codegen change — rungs 0-1), S1-S6 (imports substrate,
 codegen then runtime — rung 2), S5 (Haskell retained globals, parallel with
 S1-S4), D1-D3 (this document and its follow-on updates).
