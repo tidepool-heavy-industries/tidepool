@@ -355,8 +355,8 @@ impl Drop for CustodyTransfer {
 /// extra to resume; a [`ParkKind::Binding`] turn's hole must materialize its
 /// binder into the value plane on completion; and a [`ParkKind::Project`]
 /// hole must atomically materialize every GHC-reported pattern binder. Binding
-/// obligations retain the SAME binder metadata and generation carried by the
-/// initiating operation.
+/// obligations retain the SAME binder metadata, generation, and lexical scope
+/// carried by the initiating operation.
 ///
 /// None of the hole payloads have public constructors or fields. The session
 /// creates them at suspension time, keeping each completion obligation
@@ -373,6 +373,7 @@ pub struct BindingHole {
     binder: BoundBinder,
     generation: Generation,
     observation: Option<Vec<tidepool_repr::VarId>>,
+    lexical_scope: ScopeId,
 }
 
 /// See [`ResidentHole`]'s doc — a projected pattern bind retains every GHC
@@ -382,6 +383,7 @@ pub struct ProjectedBindingHole {
     id: String,
     binders: Vec<BoundBinder>,
     generation: Generation,
+    lexical_scope: ScopeId,
 }
 
 /// The public continuation token: a sum over a parked turn's completion
@@ -414,26 +416,30 @@ impl ResidentHole {
                 binder,
                 generation,
                 observation,
+                lexical_scope,
             } => ResidentHole::Binding(BindingHole {
                 id,
                 binder,
                 generation,
                 observation,
+                lexical_scope,
             }),
             HoleSeed::ProjectedBinding {
                 binders,
                 generation,
+                lexical_scope,
             } => ResidentHole::ProjectedBinding(ProjectedBindingHole {
                 id,
                 binders,
                 generation,
+                lexical_scope,
             }),
         }
     }
 
     /// This hole's own seed — what [`ResidentSession::resume`] re-mints a
     /// fresh hole as, should this resume re-suspend: a Binding hole's chain
-    /// of re-suspensions all carry the SAME binder/generation through to
+    /// of re-suspensions all carry the SAME binder/generation/scope through to
     /// whichever one finally completes.
     fn seed(&self) -> HoleSeed {
         match self {
@@ -442,10 +448,12 @@ impl ResidentHole {
                 binder: h.binder.clone(),
                 generation: h.generation,
                 observation: h.observation.clone(),
+                lexical_scope: h.lexical_scope,
             },
             ResidentHole::ProjectedBinding(h) => HoleSeed::ProjectedBinding {
                 binders: h.binders.clone(),
                 generation: h.generation,
+                lexical_scope: h.lexical_scope,
             },
         }
     }
@@ -476,10 +484,12 @@ enum HoleSeed {
         binder: BoundBinder,
         generation: Generation,
         observation: Option<Vec<tidepool_repr::VarId>>,
+        lexical_scope: ScopeId,
     },
     ProjectedBinding {
         binders: Vec<BoundBinder>,
         generation: Generation,
+        lexical_scope: ScopeId,
     },
 }
 
@@ -2019,6 +2029,7 @@ where
         // tenured as-is.
         let forced = matches!(binder.tier, ValueTier::Tier0Data);
         let realm = self.run_context.resource_scope;
+        let lexical_scope = self.run_context.lexical_scope;
         let principal = self.run_context.principal;
         let run_exec_started = std::time::Instant::now();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
@@ -2056,10 +2067,11 @@ where
             binder: binder.clone(),
             generation: gen,
             observation: observation.clone(),
+            lexical_scope,
         };
         let resident_outcome = self.classify_parked(outcome, None, seed, Arc::clone(&provenance));
         if completed {
-            self.materialize_binder(binder, gen, bound)?;
+            self.materialize_binder(binder, gen, bound, lexical_scope)?;
             self.binding_provenance.insert(binder.var_id, provenance);
             if let Some(dependencies) = observation {
                 self.finish_observation(binder, &dependencies);
@@ -2116,6 +2128,7 @@ where
         let effect_policy = self.core.effect_policy();
         let live_payload = self.core.live_payload_policy();
         let realm = self.run_context.resource_scope;
+        let lexical_scope = self.run_context.lexical_scope;
         let principal = self.run_context.principal;
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
             let run = SuspensionRun::fragment(
@@ -2140,10 +2153,11 @@ where
         let seed = HoleSeed::ProjectedBinding {
             binders: binders.to_vec(),
             generation: gen,
+            lexical_scope,
         };
         let resident_outcome = self.classify_parked(outcome, None, seed, Arc::clone(&provenance));
         if completed {
-            self.materialize_binders(binders, gen, projected, provenance)?;
+            self.materialize_binders(binders, gen, projected, provenance, lexical_scope)?;
         }
         Ok(resident_outcome)
     }
@@ -2656,9 +2670,12 @@ where
         // is the sole owner of the parked set on a real outcome. The frame
         // replays its own kind/table/tag, so bind-vs-plain needs no
         // re-declaration here (`bind` is only used for materialization
-        // below).
-        let realm = self.run_context.resource_scope;
+        // below). Completion handles likewise belong to the frame's retained
+        // realm, which must be captured before resume consumes that frame.
         let outcome = self.on_eval_thread(move |machine, _table, handlers, captured| {
+            let realm = machine
+                .parked_realm(frame_id)
+                .ok_or(JitError::UnknownContinuation(frame_id))?;
             machine
                 .resume_continuation(frame_id, handlers, captured, input)
                 .and_then(|o| project_parked(machine, o, realm))
@@ -2707,8 +2724,9 @@ where
                     binder,
                     generation,
                     observation,
+                    lexical_scope,
                 } => {
-                    self.materialize_binder(&binder, generation, bound)?;
+                    self.materialize_binder(&binder, generation, bound, lexical_scope)?;
                     self.binding_provenance.insert(binder.var_id, provenance);
                     if let Some(dependencies) = observation {
                         self.finish_observation(&binder, &dependencies);
@@ -2717,8 +2735,15 @@ where
                 HoleSeed::ProjectedBinding {
                     binders,
                     generation,
+                    lexical_scope,
                 } => {
-                    self.materialize_binders(&binders, generation, projected, provenance)?;
+                    self.materialize_binders(
+                        &binders,
+                        generation,
+                        projected,
+                        provenance,
+                        lexical_scope,
+                    )?;
                 }
             }
         }
@@ -2739,8 +2764,8 @@ where
         binder: &BoundBinder,
         gen: Generation,
         bound: Option<ValueHandle>,
+        scope: ScopeId,
     ) -> Result<(), ResidentError> {
-        let scope = self.run_context.lexical_scope;
         tracing::debug!(
             binder = %binder.name,
             generation = gen.0,
@@ -2813,6 +2838,7 @@ where
         gen: Generation,
         handles: Vec<ValueHandle>,
         provenance: Arc<ProgramProvenance>,
+        scope: ScopeId,
     ) -> Result<(), ResidentError> {
         if binders.len() != handles.len() {
             let produced = handles.len();
@@ -2829,7 +2855,6 @@ where
                 )),
             ))));
         }
-        let scope = self.run_context.lexical_scope;
         if !self.core.scope_tree().is_live(scope) {
             for handle in handles {
                 if let Some(machine) = self.core.machine_mut() {

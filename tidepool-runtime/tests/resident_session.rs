@@ -23,11 +23,16 @@
 //! anti-pattern).
 
 use tidepool_bridge::Value;
+use tidepool_codegen::scope::ScopeId;
+use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{request_constructor, DispatchEffect, EffectContext};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy, Response};
-use tidepool_repr::Literal;
-use tidepool_runtime::session::{ResidentError, ResidentOutcome, ResidentSession};
+use tidepool_repr::{Generation, Literal, PrincipalId, SessionModule};
+use tidepool_runtime::session::{
+    BoundBinder, ResidentError, ResidentOutcome, ResidentSession, SessionError, SessionRunContext,
+    ValueTier,
+};
 use tidepool_runtime::{value_to_json, DEFAULT_NURSERY_SIZE};
 
 use tidepool_testing::eval_harness::{self, mock, EvalHarness};
@@ -126,6 +131,16 @@ fn setup() -> EvalHarness {
     // self-contained GADT preamble means NO `.tidepool/lib` verb-library
     // dependency.
     EvalHarness::new().with_stdlib()
+}
+
+fn binder(name: &str, var_id: u64, generation: Generation) -> BoundBinder {
+    BoundBinder {
+        name: name.to_string(),
+        var_id,
+        module: SessionModule::val(generation).module_name(),
+        tier: ValueTier::Tier0Data,
+        type_display: "Int".to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -443,4 +458,155 @@ fn plain_turns_reuse_the_machine() {
         }
         assert!(session.is_idle());
     }
+}
+
+#[test]
+fn resumed_bind_keeps_its_originating_resource_and_lexical_scopes() {
+    let harness = setup();
+    let mut session = bootstrap(&harness, "result :: M Int\nresult = pure (0 :: Int)");
+    let scope_one = session.mint_scope(ScopeId::ROOT).expect("mint scope one");
+    let scope_two = session.mint_scope(ScopeId::ROOT).expect("mint scope two");
+    let realm_one = RealmId::fresh();
+    let realm_two = RealmId::fresh();
+    let context_one = SessionRunContext::new(realm_one, scope_one, PrincipalId::new(1, 1));
+    let context_two = SessionRunContext::new(realm_two, scope_two, PrincipalId::new(2, 1));
+    session
+        .set_run_context(context_one)
+        .expect("select origin context");
+
+    let generation = session.val_gen().next();
+    let bound = binder("answer", (0xFE << 56) | 101, generation);
+    let (expr, table) = compile_turn(
+        &harness,
+        "result :: M Int\nresult = do\n  _ <- send (Ask \"first\")\n  _ <- send (Ask \"second\")\n  pure (41 :: Int)",
+    );
+    let first_hole = match session
+        .run_bind("scoped_bind", &expr, &table, &bound, generation)
+        .expect("bind parks at its first ask")
+    {
+        ResidentOutcome::Suspended { hole, .. } => hole,
+        other => panic!("bind must suspend, got {other:?}"),
+    };
+    assert_eq!(session.parked_realm(&first_hole), Some(realm_one));
+
+    session
+        .set_run_context(context_two)
+        .expect("select ambient context");
+    let second_hole = match session
+        .resume(first_hole, int(0))
+        .expect("first resume re-suspends")
+    {
+        ResidentOutcome::Suspended { hole, .. } => hole,
+        other => panic!("first resume must re-suspend, got {other:?}"),
+    };
+    assert_eq!(
+        session.parked_realm(&second_hole),
+        Some(realm_one),
+        "the frame's realm survives re-suspension instead of adopting the ambient realm"
+    );
+
+    match session
+        .resume(second_hole, int(0))
+        .expect("second resume completes")
+    {
+        ResidentOutcome::Completed { .. } => {}
+        other => panic!("second resume must complete the bind, got {other:?}"),
+    }
+    assert!(session.current_binding_in(scope_one, "answer").is_some());
+    assert!(session.current_binding_in(scope_two, "answer").is_none());
+
+    session
+        .set_run_context(context_one)
+        .expect("restore origin context");
+    let failed_generation = session.val_gen().next();
+    let failed_bound = binder("orphan", (0xFE << 56) | 104, failed_generation);
+    let (failed_expr, failed_table) = compile_turn(
+        &harness,
+        "result :: M Int\nresult = do\n  _ <- send (Ask \"fail\")\n  pure (42 :: Int)",
+    );
+    let failed_hole = match session
+        .run_bind(
+            "failed_scoped_bind",
+            &failed_expr,
+            &failed_table,
+            &failed_bound,
+            failed_generation,
+        )
+        .expect("second bind parks")
+    {
+        ResidentOutcome::Suspended { hole, .. } => hole,
+        other => panic!("second bind must suspend, got {other:?}"),
+    };
+    session
+        .set_run_context(context_two)
+        .expect("restore ambient context");
+    session.retire_scope(scope_one);
+    let result = session.resume(failed_hole, int(0));
+    assert!(
+        matches!(result, Err(ResidentError::Session(SessionError::DeadScope(scope))) if scope == scope_one),
+        "materialization must reject its retired initiating scope, got {result:?}"
+    );
+    assert!(
+        session.is_idle(),
+        "the consumed frame must not leave a stale hole"
+    );
+    assert_eq!(session.close_realm(realm_two), (0, 0));
+    assert_eq!(
+        session.close_realm(realm_one),
+        (0, 1),
+        "the unadopted completion handle remains in the frame's originating realm"
+    );
+}
+
+#[test]
+fn resumed_projected_bind_keeps_its_originating_lexical_scope() {
+    let harness = setup();
+    let mut session = bootstrap(&harness, "result :: M Int\nresult = pure (0 :: Int)");
+    let scope_one = session.mint_scope(ScopeId::ROOT).expect("mint scope one");
+    let scope_two = session.mint_scope(ScopeId::ROOT).expect("mint scope two");
+    let realm_one = RealmId::fresh();
+    let realm_two = RealmId::fresh();
+    session
+        .set_run_context(SessionRunContext::new(
+            realm_one,
+            scope_one,
+            PrincipalId::new(1, 1),
+        ))
+        .expect("select origin context");
+
+    let generation = session.val_gen().next();
+    let binders = [
+        binder("left", (0xFE << 56) | 102, generation),
+        binder("right", (0xFE << 56) | 103, generation),
+    ];
+    let (expr, table) = compile_turn(
+        &harness,
+        "result :: M (Int, Int)\nresult = do\n  _ <- send (Ask \"project\")\n  pure (41 :: Int, 42 :: Int)",
+    );
+    let hole = match session
+        .run_projected_bind_with_sites("scoped_project", &expr, &table, &binders, generation, &[])
+        .expect("projected bind parks")
+    {
+        ResidentOutcome::Suspended { hole, .. } => hole,
+        other => panic!("projected bind must suspend, got {other:?}"),
+    };
+
+    session
+        .set_run_context(SessionRunContext::new(
+            realm_two,
+            scope_two,
+            PrincipalId::new(2, 1),
+        ))
+        .expect("select ambient context");
+    match session
+        .resume(hole, int(0))
+        .expect("projected bind completes")
+    {
+        ResidentOutcome::BindingsCommitted { .. } => {}
+        other => panic!("projected bind must commit its fields, got {other:?}"),
+    }
+    assert!(session.current_binding_in(scope_one, "left").is_some());
+    assert!(session.current_binding_in(scope_one, "right").is_some());
+    assert!(session.current_binding_in(scope_two, "left").is_none());
+    assert!(session.current_binding_in(scope_two, "right").is_none());
 }
