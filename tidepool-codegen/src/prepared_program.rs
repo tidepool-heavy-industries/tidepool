@@ -142,6 +142,7 @@ pub(crate) struct CompiledEntry {
     pub abi: EntryAbi,
 }
 
+#[derive(Clone)]
 pub(crate) struct ConstructorObservation {
     pub identity: DataConId,
     pub fields: Vec<RuntimeRep>,
@@ -151,11 +152,17 @@ pub(crate) struct ConstructorObservation {
 /// entry dispatch uses the same descriptors, whose code remains pinned by the
 /// compiled pipeline and is never exposed as a Rust function pointer.
 /// Constructor metadata is authoritative independent of family-relative tags.
+#[derive(Clone)]
 pub(crate) struct DescriptorMetadata {
     pub descriptor: Arc<ObjectDescriptor>,
     pub meaning: DescriptorMeaning,
 }
 
+/// A machine-wide union of every installed program's registry -- see
+/// `PreparedMachine`'s `descriptor_registry` field -- clones each entry
+/// (cheap: an `Arc` clone plus small owned metadata) rather than borrowing,
+/// since it must outlive any one program's own registry.
+#[derive(Clone)]
 pub(crate) enum DescriptorMeaning {
     External,
     Constructor(ConstructorObservation),

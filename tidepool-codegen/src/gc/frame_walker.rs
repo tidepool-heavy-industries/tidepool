@@ -142,8 +142,14 @@ fn query_stack_top() -> Option<usize> {
 ///   (typically gc_trigger's FP, read via inline asm), OR any value at all —
 ///   an invalid `start_fp` is a controlled failure, not UB, PROVIDED `bounds`
 ///   correctly excludes it.
-/// - `stack_maps` must contain entries for every live JIT safepoint. A return
-///   address inside registered JIT code without an exact entry fails the walk.
+/// - `stack_maps` is a chain, tried in order for every frame: the union of
+///   every registered JIT pipeline's registry (one per installed program on
+///   a `PreparedMachine`). It must contain entries for every live JIT
+///   safepoint across every pipeline that may appear in this call chain.
+///   Return addresses never collide across pipelines, so at most one
+///   registry in the chain recognizes any given frame; a return address
+///   inside registered JIT code without an exact entry in the recognizing
+///   registry fails the walk.
 /// - `bounds` must be a `StackBounds` the caller can justify contains every
 ///   frame it expects to walk (see [`StackBounds::capture`]).
 ///
@@ -169,7 +175,7 @@ fn query_stack_top() -> Option<usize> {
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub unsafe fn walk_frames(
     start_fp: usize,
-    stack_maps: &StackMapRegistry,
+    stack_maps: &[&StackMapRegistry],
     bounds: StackBounds,
     diagnostic_mode: bool,
 ) -> Result<Vec<StackRoot>, FrameWalkError> {
@@ -217,7 +223,12 @@ pub unsafe fn walk_frames(
         let return_addr = unsafe { *(return_addr_slot as *const usize) };
         let saved_fp = unsafe { *(fp as *const usize) };
 
-        if !stack_maps.contains_address(return_addr) {
+        // Try each registry in the chain in order: return addresses never
+        // collide across pipelines, so at most one recognizes this frame.
+        let Some(owning_registry) = stack_maps
+            .iter()
+            .find(|registry| registry.contains_address(return_addr))
+        else {
             // Native frames in a JIT -> host -> JIT sandwich carry no map.
             // A zero saved FP is the explicit clean activation boundary.
             if saved_fp == 0 {
@@ -228,11 +239,11 @@ pub unsafe fn walk_frames(
             }
             fp = saved_fp;
             continue;
-        }
+        };
 
         // A PC inside registered JIT code must be an exact safepoint. Merely
         // belonging to the function range is not enough to trace its roots.
-        let Some(info) = stack_maps.lookup(return_addr) else {
+        let Some(info) = owning_registry.lookup(return_addr) else {
             return Err(fail(FrameWalkError::MissingStackMap { return_addr }));
         };
         let caller_fp = saved_fp;

@@ -24,6 +24,7 @@ use crate::old_space::OldSpace;
 use crate::prepared_control::CallStatus;
 use std::cell::UnsafeCell;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use tidepool_bridge::Value;
 use tidepool_heap::static_region::StaticRegion;
 use tidepool_repr::execution_schema::RuntimeRep;
@@ -148,7 +149,7 @@ pub(super) fn observe_results(
     machine: &MachineState,
     program: &CompiledProgram,
     vmctx: &mut VMContext,
-    statics: &StaticRegion,
+    statics: &[Arc<StaticRegion>],
     registry: &BTreeMap<usize, super::DescriptorMetadata>,
     old_space: &OldSpace,
     seeds: &[super::observe::ObservationSeed],
@@ -262,7 +263,7 @@ pub(super) fn observe_results(
 fn current_heap<'a>(
     machine: &'a MachineState,
     vmctx: &VMContext,
-    statics: &'a StaticRegion,
+    statics: &'a [Arc<StaticRegion>],
     registry: &'a BTreeMap<usize, super::DescriptorMetadata>,
     old_space: &'a OldSpace,
     starts: &mut Vec<u64>,

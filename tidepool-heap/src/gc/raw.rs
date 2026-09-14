@@ -21,7 +21,12 @@ pub struct CopyResult {
 /// Descriptor addresses are the header identities; object addresses are found
 /// afresh from the exact initialized region on every collection.
 pub struct DescriptorSpace {
-    static_region: Option<Arc<crate::static_region::StaticRegion>>,
+    /// Every immutable static image admitted into this space. A prepared
+    /// machine hosting several installed programs extends this set one
+    /// region per install (`extend_static_region`); each region's admission
+    /// is independent, so a pointer is static iff SOME region in the set
+    /// admits it.
+    static_regions: Vec<Arc<crate::static_region::StaticRegion>>,
     descriptors: HashMap<usize, Arc<ObjectDescriptor>>,
     object_starts: Vec<u64>,
     root_slots: Vec<usize>,
@@ -50,7 +55,7 @@ impl DescriptorSpace {
             owners.insert(descriptor.initial_header_word(), descriptor);
         }
         Ok(Self {
-            static_region: None,
+            static_regions: Vec::new(),
             descriptors: owners,
             object_starts: Vec::new(),
             root_slots: Vec::new(),
@@ -58,6 +63,39 @@ impl DescriptorSpace {
             updated_path: Vec::new(),
             external_payloads: HashMap::new(),
         })
+    }
+
+    /// Union another installed program's pinned layouts into this space.
+    /// Descriptor headers are unique addresses, so union is a plain insert;
+    /// a duplicate header (the same descriptor pinned twice) is idempotent.
+    pub fn extend_descriptors(
+        &mut self,
+        descriptors: impl IntoIterator<Item = Arc<ObjectDescriptor>>,
+    ) -> Result<(), DescriptorTraceError> {
+        for descriptor in descriptors {
+            let key = descriptor.initial_header_word();
+            if self.descriptors.contains_key(&key) {
+                continue;
+            }
+            self.descriptors
+                .try_reserve(1)
+                .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
+            self.descriptors.insert(key, descriptor);
+        }
+        Ok(())
+    }
+
+    /// Union another installed program's immutable static image into this
+    /// space's admitted set. See [`Self::admit_static_reference`].
+    pub fn extend_static_region(
+        &mut self,
+        region: Arc<crate::static_region::StaticRegion>,
+    ) -> Result<(), DescriptorTraceError> {
+        self.static_regions
+            .try_reserve(1)
+            .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
+        self.static_regions.push(region);
+        Ok(())
     }
 
     /// External payloads authenticated during the most recent copy phase.
@@ -111,7 +149,7 @@ impl DescriptorSpace {
     /// Pin the closed immutable allocation before installing this space in a
     /// machine. Its fields cannot acquire nursery edges, so GC never scans it.
     pub fn with_static_region(mut self, region: Arc<crate::static_region::StaticRegion>) -> Self {
-        self.static_region = Some(region);
+        self.static_regions.push(region);
         self
     }
 
@@ -187,15 +225,19 @@ impl DescriptorSpace {
     }
 
     fn static_reference(&self, encoded: usize) -> Result<Option<usize>, DescriptorTraceError> {
-        self.static_region
-            .as_ref()
-            .map_or(Ok(None), |region| region.admit(encoded))
+        for region in &self.static_regions {
+            if let Some(reference) = region.admit(encoded)? {
+                return Ok(Some(reference));
+            }
+        }
+        Ok(None)
     }
 
-    /// Validate a reference against the immutable static region without
-    /// admitting nursery or retained-owner addresses. Runtime promotion uses
-    /// this before treating an outside-nursery result as an already-stable
-    /// value.
+    /// Validate a reference against the immutable static regions this space
+    /// admits, without admitting nursery or retained-owner addresses.
+    /// Runtime promotion uses this before treating an outside-nursery result
+    /// as an already-stable value. A pointer is static iff some region in
+    /// the admitted set (every installed program's static image) admits it.
     pub fn admit_static_reference(
         &self,
         encoded: usize,
@@ -204,7 +246,7 @@ impl DescriptorSpace {
     }
 
     fn root_slot_overlaps_static(&self, address: usize) -> bool {
-        self.static_region.as_ref().is_some_and(|region| {
+        self.static_regions.iter().any(|region| {
             let range = region.address_range();
             let Some(end) = address.checked_add(std::mem::size_of::<*mut u8>()) else {
                 return true;

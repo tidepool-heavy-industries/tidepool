@@ -22,6 +22,7 @@
 use crate::context::VMContext;
 use crate::gc::frame_walker;
 use crate::machine_state::{machine_state, machine_state_opt, MachineState};
+use crate::stack_map::StackMapRegistry;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
@@ -394,12 +395,41 @@ pub(crate) fn run_minor_collection_for_tenure_fixup(vmctx: *mut VMContext) {
     }
 }
 
+/// Process-global test override for [`max_heap_bytes`]: 0 = unset (defer to
+/// `TIDEPOOL_MAX_HEAP`/the 1 GiB default), nonzero = forced ceiling in bytes.
+/// Same tri-state-free rationale as the write-barrier kill switch: nextest
+/// isolates one test per process, so a test that sets this before its first
+/// collection observes it deterministically without perturbing any other
+/// test's process.
+static MAX_HEAP_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+
+/// Test-only: force the heap growth ceiling to exactly `bytes`, independent
+/// of `TIDEPOOL_MAX_HEAP`. Lets a test reach a genuine "cannot fit even after
+/// growth" `HeapOverflow` without constructing a multi-gigabyte program. Not
+/// part of the public API.
+#[doc(hidden)]
+pub fn set_max_heap_bytes_for_test(bytes: usize) {
+    MAX_HEAP_OVERRIDE.store(bytes, Ordering::Relaxed);
+}
+
+/// Test-only: clear the heap-ceiling override and defer back to
+/// `TIDEPOOL_MAX_HEAP`/the default. Not part of the public API.
+#[doc(hidden)]
+pub fn clear_max_heap_bytes_override() {
+    MAX_HEAP_OVERRIDE.store(0, Ordering::Relaxed);
+}
+
 #[inline(never)]
 /// Heap growth ceiling. Defaults to 1 GiB; override with `TIDEPOOL_MAX_HEAP`
-/// (bytes). Reaching the cap with a full live set ends in a clean
+/// (bytes), or with [`set_max_heap_bytes_for_test`] independent of the
+/// environment. Reaching the cap with a full live set ends in a clean
 /// `HeapOverflow` via the post-GC allocation re-check, never a signal.
 fn max_heap_bytes() -> usize {
     use std::sync::OnceLock;
+    let overridden = MAX_HEAP_OVERRIDE.load(Ordering::Relaxed);
+    if overridden != 0 {
+        return overridden;
+    }
     static CAP: OnceLock<usize> = OnceLock::new();
     *CAP.get_or_init(|| {
         std::env::var("TIDEPOOL_MAX_HEAP")
@@ -1064,14 +1094,17 @@ fn perform_gc(fp: usize, vmctx: *mut VMContext) {
 fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
     // SAFETY: vmctx is valid; machine_state was installed before entering JIT code.
     let ms = unsafe { machine_state(vmctx) };
-    let Some(registry_ptr) = ms.stack_map_registry() else {
+    let registry_ptrs = ms.stack_map_registries();
+    if registry_ptrs.is_empty() {
         ms.set_first_cause(crate::host_fns::RuntimeError::IncompleteRootSnapshot(
             frame_walker::FrameWalkError::RegistryUnavailable,
         ));
         return;
-    };
-    // SAFETY: registry_ptr was set by set_stack_map_registry and outlives JIT execution.
-    let registry = unsafe { &*registry_ptr };
+    }
+    // SAFETY: every pointer was set by set_stack_map_registry/
+    // push_stack_map_registry and outlives JIT execution.
+    let registries: Vec<&StackMapRegistry> =
+        registry_ptrs.iter().map(|&p| unsafe { &*p }).collect();
     // `stack_low` is a local in THIS frame. perform_gc is always called
     // beneath the JIT call chain (gc_trigger → perform_gc, never the
     // reverse), and the stack grows down, so this address is a sound
@@ -1080,17 +1113,20 @@ fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
     let stack_low: u8 = 0;
     let bounds = frame_walker::StackBounds::capture(&stack_low as *const u8 as usize);
     // SAFETY: fp is a valid frame pointer read from gc_trigger's caller.
-    // registry contains stack maps for all JIT functions in the call chain.
-    // A violation of that contract is now a controlled failure, not UB —
-    // see `walk_frames`'s doc.
-    let roots =
-        match unsafe { frame_walker::walk_frames(fp, registry, bounds, heap_verify_enabled()) } {
-            Ok(roots) => roots,
-            Err(error) => {
-                ms.set_first_cause(crate::host_fns::RuntimeError::IncompleteRootSnapshot(error));
-                return;
-            }
-        };
+    // The chain covers stack maps for every JIT pipeline installed on this
+    // machine, tried in order per frame -- return addresses never collide
+    // across pipelines, so at most one registry in the chain recognizes any
+    // given frame. A violation of that contract is now a controlled failure,
+    // not UB -- see `walk_frames`'s doc.
+    let roots = match unsafe {
+        frame_walker::walk_frames(fp, &registries, bounds, heap_verify_enabled())
+    } {
+        Ok(roots) => roots,
+        Err(error) => {
+            ms.set_first_cause(crate::host_fns::RuntimeError::IncompleteRootSnapshot(error));
+            return;
+        }
+    };
 
     // ── Cheney copying GC ──────────────────────────────
     // SAFETY: vmctx is valid; machine_state was installed before entering

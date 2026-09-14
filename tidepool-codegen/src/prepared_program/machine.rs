@@ -1,24 +1,50 @@
 //! Persistent ownership for every prepared compiled program installed on one
-//! machine-wide top table.
+//! machine-wide top table AND one shared heap.
 //!
-//! Each installed program keeps its own mutable heap, static image,
-//! descriptor registry, and `MachineState`; the state genuinely shared across
-//! every installed program is the top table (`RootWords`) itself, a fixed-
-//! capacity array sliced into disjoint per-program ranges by `TopSlotBase`.
-//! Generated code addresses every top through `vmctx.prepared_tops`, and
-//! every installed program's own vmctx points at this same shared table --
-//! so a heap-top slot claimed for program A, once registered as a persistent
-//! root on A's own machine, keeps that exact table-cell address stable no
-//! matter how many later programs install: the table never reallocates, only
-//! the machine-wide claimed-slot watermark advances. A call only borrows a
-//! program's machine long enough to install its cancellation attachment and
-//! temporary result roots; neither attachment survives the native return.
+//! `PreparedMachine` owns exactly one `MachineState`, one `VMContext`, one
+//! nursery (inside that `MachineState`'s `GcState`), and one `OldSpace`.
+//! Every installed program shares all of it. An `InstalledProgram` keeps only
+//! its code custody (`CompiledProgram`/`ProgramCustody`) -- its claimed
+//! top-table range lives implicitly in `program.get().top_slots`, and its
+//! contribution to the shared heap (pinned descriptor layouts, instantiated
+//! static image) is folded into the machine-wide `descriptors`/
+//! `descriptor_registry`/`statics` sets and the shared `MachineState`'s
+//! descriptor space at install time, not kept per-program.
 //!
-//! Genuinely sharing one heap, descriptor registry, and stack-map registry
-//! across installed programs -- so one program's generated code can safely
-//! call into another's -- is later work (the executable-imports substrate);
-//! this machine keeps every program's own GC state independent, which is
-//! sound as long as installed programs never call into each other.
+//! This is Path A from the design pass (see `plans/` "S2 restated"): a
+//! mediated copy-at-import-time alternative was rejected because a closure
+//! applied across programs runs the PRODUCER's code with the CONSUMER's
+//! frame live, so the consumer's collector needs the producer's descriptors,
+//! statics and stack maps regardless -- the unions this module builds are
+//! required either way, and only sharing one heap gives identity (rung 2:
+//! "reads the same persistent heap", not a re-imported copy).
+//!
+//! Generated code addresses every top through `vmctx.prepared_tops` (the
+//! shared top table, a fixed-capacity `RootWords` sliced into disjoint
+//! per-program ranges by `TopSlotBase`) and every heap-managed value through
+//! the one shared nursery/`OldSpace` -- so a value handle produced by one
+//! program's code is, structurally, just as usable as an argument to another
+//! program's entry as a handle produced by that program itself: there is no
+//! "owner" to check. `handle_owner` (a Wave-6A relic from the one-machine-
+//! per-program design S1 shipped) is gone; a handle from a genuinely
+//! different `PreparedMachine` is rejected because `ValueHandle`s are
+//! process-unique (`suspension::ValueHandle::fresh`) and this machine's own
+//! `RootHandleLedger` simply never saw it minted -- ledger emptiness is what
+//! rejects a foreign handle, today as before.
+//!
+//! Install order for the second and later program (the first program's
+//! install additionally creates the shared `MachineState`/nursery/`vmctx`/
+//! `OldSpace`, since nothing exists yet): claim the next top-slot range;
+//! instantiate the program's own statics; write its non-heap-top top-table
+//! cells; extend the shared descriptor space (layouts + static region) and
+//! the shared stack-map chain; run a real collection reserving room for this
+//! program's heap tops (`collect_on`, safe because no generated frames are
+//! live between installs); initialize this program's heap tops into the
+//! now-live shared nursery at the current `vmctx.alloc_ptr` (not nursery
+//! start -- the earlier program's objects are already there) and advance the
+//! cursor; register each as a persistent root; publish. Any failure before
+//! publish leaves every already-installed program's roots, top-table cells
+//! and running state untouched (T3).
 
 use super::roots::{OldSpaceScope, RootWords};
 use super::run::{
@@ -28,7 +54,9 @@ use super::run::{
     try_words,
 };
 use super::safepoint::NativeStackBounds;
-use super::{CompiledProgram, ExecutionError, RunResult, TopSlotBase, Unsupported};
+use super::{
+    CompiledProgram, DescriptorMetadata, ExecutionError, RunResult, TopSlotBase, Unsupported,
+};
 use crate::context::VMContext;
 use crate::host_fns::{gc_trigger, prepared_gc_trigger, RuntimeError};
 use crate::machine_state::{MachineDisposition, MachineFailure, MachineState};
@@ -36,10 +64,11 @@ use crate::old_space::OldSpace;
 use crate::prepared_control::CallStatus;
 use crate::resource_ledger::RootHandleLedger;
 use crate::suspension::{RealmId, ValueHandle};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_heap::static_region::StaticRegion;
 use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, ValueId};
 use tidepool_repr::DataConId;
@@ -70,17 +99,15 @@ impl ProgramCustody<'_> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ProgramId(u32);
 
-/// One installed program's persistent mutable prepared-STG substrate: its own
-/// heap, static image, descriptor registry, and `MachineState`. Its top-table
-/// range lives in the owning [`PreparedMachine`]'s shared `RootWords`; the
-/// range itself is recoverable from `program.get().top_slots` (its own
-/// compiled slot assignment), so it is not duplicated here.
+/// One installed program's code custody. Its top-table range lives in the
+/// owning [`PreparedMachine`]'s shared `RootWords`; the range itself is
+/// recoverable from `program.get().top_slots` (its own compiled slot
+/// assignment), so it is not duplicated here. Its contribution to the shared
+/// heap (pinned descriptor layouts, instantiated static image, stack maps)
+/// was folded into the machine-wide sets at install time and is not kept
+/// here either -- see the module doc.
 struct InstalledProgram<'code> {
     program: ProgramCustody<'code>,
-    machine: Rc<MachineState>,
-    vmctx: VMContext,
-    statics: Arc<StaticRegion>,
-    old_space: Box<OldSpace>,
 }
 
 pub struct PreparedMachine<'code> {
@@ -90,10 +117,25 @@ pub struct PreparedMachine<'code> {
     claimed_slots: usize,
     nursery_bytes: usize,
     handles: RootHandleLedger,
-    /// Which installed program (index into `programs`) owns each live handle.
-    /// Kept in lock-step with `handles`: every insert into one is paired with
-    /// an insert into the other at the same call site.
-    handle_owner: HashMap<u64, usize>,
+    /// The one heap shared by every installed program -- see the module doc.
+    machine: Rc<MachineState>,
+    vmctx: VMContext,
+    old_space: Box<OldSpace>,
+    /// Every installed program's instantiated static image, kept alive for
+    /// the machine's lifetime. Unioned into `machine`'s descriptor space at
+    /// install time (`extend_prepared_descriptors`); observation reads this
+    /// slice directly (see `descriptor_region`/`observe.rs`) rather than one
+    /// program's own region, so a cross-program static field resolves
+    /// through whichever region actually admits it (T4).
+    statics: Vec<Arc<StaticRegion>>,
+    /// Union of every installed program's pinned descriptor layouts, passed
+    /// to `retain_prepared`/`promote_prepared` so a promoted value's
+    /// transitive graph is covered no matter which program produced the
+    /// objects it reaches.
+    descriptors: Vec<Arc<ObjectDescriptor>>,
+    /// Union of every installed program's descriptor registry (constructor
+    /// identity/field-representation metadata for non-forcing observation).
+    descriptor_registry: BTreeMap<usize, DescriptorMetadata>,
 }
 
 /// Immutable capacity selected when a prepared machine is installed.
@@ -210,7 +252,16 @@ impl<'code> PreparedMachine<'code> {
             claimed_slots: 0,
             nursery_bytes: options.nursery_bytes,
             handles: RootHandleLedger::default(),
-            handle_owner: HashMap::new(),
+            // No heap exists until the first program installs
+            // (`MachineState::new` is plain ambient state -- it owns no GC
+            // region yet -- and `VMContext::new` merely stores raw pointers,
+            // so a null placeholder is sound until `install` fills it in).
+            machine: Rc::new(MachineState::new()),
+            vmctx: VMContext::new(std::ptr::null_mut(), std::ptr::null(), gc_trigger),
+            old_space: Box::new(OldSpace::new()),
+            statics: Vec::new(),
+            descriptors: Vec::new(),
+            descriptor_registry: BTreeMap::new(),
         })
     }
 
@@ -281,85 +332,150 @@ impl<'code> PreparedMachine<'code> {
         }
 
         let heap_reserve = heap_top_extent(&compiled.heap_top_specs)?;
-        let nursery = try_words(
-            self.nursery_bytes
-                .max(heap_reserve)
-                .div_ceil(std::mem::size_of::<u64>()),
-        )?;
-        let machine = Rc::new(MachineState::new());
-        machine.set_stack_map_registry(&compiled.pipeline.stack_maps);
-        if let Err(error) = machine.install_prepared_buffer_with_static_region(
-            nursery,
-            compiled.descriptors.clone(),
-            Some(Arc::clone(&statics)),
-        ) {
-            machine.clear_stack_map_registry();
-            return Err(runtime_error(&machine, error));
+        if self.programs.is_empty() {
+            // First program: nothing exists yet. Create the shared nursery
+            // and GcState from scratch, exactly as a single-program machine
+            // always did; every later program extends this same heap instead
+            // (the branch below).
+            let nursery = try_words(
+                self.nursery_bytes
+                    .max(heap_reserve)
+                    .div_ceil(std::mem::size_of::<u64>()),
+            )?;
+            self.machine
+                .set_stack_map_registry(&compiled.pipeline.stack_maps);
+            if let Err(error) = self.machine.install_prepared_buffer_with_static_region(
+                nursery,
+                compiled.descriptors.clone(),
+                Some(Arc::clone(&statics)),
+            ) {
+                self.machine.clear_stack_map_registry();
+                return Err(runtime_error(&self.machine, error));
+            }
+            let (start, size) = match self.machine.gc_active_range() {
+                Some(range) => range,
+                None => {
+                    self.machine.clear_gc_state();
+                    self.machine.clear_stack_map_registry();
+                    return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+                }
+            };
+            let heap_used = match initialize_heap_tops(
+                start,
+                size,
+                &compiled.heap_top_specs,
+                &compiled.top_slots,
+                &self.top_table,
+                &statics,
+                &compiled.byte_tops,
+                &compiled.bytes,
+            ) {
+                Ok(heap_used) => heap_used,
+                Err(cause) => {
+                    self.machine.free_session_heap();
+                    self.machine.clear_stack_map_registry();
+                    return Err(runtime_error(&self.machine, cause));
+                }
+            };
+            self.vmctx.alloc_ptr = unsafe { start.add(heap_used) };
+            self.vmctx.alloc_limit = unsafe { start.add(size) };
+            self.vmctx.machine_state = Rc::as_ptr(&self.machine).cast_mut();
+            self.vmctx.prepared_tops = self.top_table.as_mut_ptr().cast::<usize>().cast_const();
+        } else {
+            // Second-and-later program: the shared heap is already live,
+            // possibly holding an earlier program's persistent objects. Union
+            // this program's layouts/static image into the same descriptor
+            // space and stack-map chain (never swap), then reserve room in
+            // the LIVE nursery via a real collection -- sound because no
+            // generated frames are live between installs -- before writing
+            // this program's own heap tops at the current cursor (not
+            // nursery start).
+            self.machine
+                .push_stack_map_registry(&compiled.pipeline.stack_maps);
+            if let Err(error) = self
+                .machine
+                .extend_prepared_descriptors(compiled.descriptors.clone(), Arc::clone(&statics))
+            {
+                self.machine.pop_stack_map_registry();
+                return Err(runtime_error(&self.machine, error));
+            }
+            if let Err(error) = collect_on(
+                &self.machine,
+                &mut self.vmctx,
+                &self.old_space,
+                heap_reserve,
+            ) {
+                self.machine.pop_stack_map_registry();
+                return Err(error);
+            }
+            let (start, size) = match self.machine.gc_active_range() {
+                Some(range) => range,
+                None => {
+                    self.machine.pop_stack_map_registry();
+                    return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+                }
+            };
+            let cursor = match (self.vmctx.alloc_ptr as usize)
+                .checked_sub(start as usize)
+                .filter(|cursor| *cursor <= size)
+            {
+                Some(cursor) => cursor,
+                None => {
+                    self.machine.pop_stack_map_registry();
+                    return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+                }
+            };
+            let remaining = size - cursor;
+            let heap_used = match initialize_heap_tops(
+                self.vmctx.alloc_ptr,
+                remaining,
+                &compiled.heap_top_specs,
+                &compiled.top_slots,
+                &self.top_table,
+                &statics,
+                &compiled.byte_tops,
+                &compiled.bytes,
+            ) {
+                Ok(heap_used) => heap_used,
+                Err(cause) => {
+                    self.machine.pop_stack_map_registry();
+                    return Err(runtime_error(&self.machine, cause));
+                }
+            };
+            self.vmctx.alloc_ptr = unsafe { self.vmctx.alloc_ptr.add(heap_used) };
         }
-        let (start, size) = match machine.gc_active_range() {
-            Some(range) => range,
-            None => {
-                machine.clear_gc_state();
-                machine.clear_stack_map_registry();
-                return Err(runtime_error(&machine, RuntimeError::BadPointer));
-            }
-        };
-        let heap_used = match initialize_heap_tops(
-            start,
-            size,
-            &compiled.heap_top_specs,
-            &compiled.top_slots,
-            &self.top_table,
-            &statics,
-            &compiled.byte_tops,
-            &compiled.bytes,
-        ) {
-            Ok(heap_used) => heap_used,
-            Err(cause) => {
-                machine.free_session_heap();
-                machine.clear_stack_map_registry();
-                return Err(runtime_error(&machine, cause));
-            }
-        };
-        let mut vmctx = unsafe { VMContext::new(start, start.add(size), gc_trigger) };
-        vmctx.alloc_ptr = unsafe { start.add(heap_used) };
-        vmctx.machine_state = Rc::as_ptr(&machine).cast_mut();
-        vmctx.prepared_tops = self.top_table.as_mut_ptr().cast::<usize>().cast_const();
 
         // Heap tops persist with the machine. They must not share the
         // run-scoped registry that a call frame truncates on native unwind.
         for spec in &compiled.heap_top_specs {
             if let Some(&slot) = compiled.top_slots.get(&spec.id) {
                 let root = unsafe { self.top_table.as_mut_ptr().add(slot).cast::<*mut u8>() };
-                machine.register_persistent_root(root);
+                self.machine.register_persistent_root(root);
             }
         }
 
-        self.programs.push(InstalledProgram {
-            program,
-            machine,
-            vmctx,
-            statics,
-            old_space: Box::new(OldSpace::new()),
-        });
+        self.statics.push(statics);
+        self.descriptors
+            .extend(compiled.descriptors.iter().cloned());
+        self.descriptor_registry.extend(
+            compiled
+                .descriptor_registry
+                .iter()
+                .map(|(&k, v)| (k, v.clone())),
+        );
+        self.programs.push(InstalledProgram { program });
         self.claimed_slots = base + slot_count;
         Ok(ProgramId((self.programs.len() - 1) as u32))
     }
 
     #[must_use]
     pub fn disposition(&self) -> MachineDisposition {
-        self.programs
-            .iter()
-            .map(|program| program.machine.disposition())
-            .find(|disposition| *disposition == MachineDisposition::Unavailable)
-            .unwrap_or(MachineDisposition::Reusable)
+        self.machine.disposition()
     }
 
     #[must_use]
     pub fn failure(&self) -> Option<MachineFailure> {
-        self.programs
-            .iter()
-            .find_map(|program| program.machine.last_failure())
+        self.machine.last_failure()
     }
 
     /// Number of value handles this machine currently retains. Diagnostic
@@ -371,30 +487,22 @@ impl<'code> PreparedMachine<'code> {
     }
 
     /// Release one retained managed result. Unknown or foreign values do not
-    /// expose a slot and therefore cannot affect a later entry.
+    /// expose a slot and therefore cannot affect a later entry. A handle from
+    /// a genuinely different `PreparedMachine` is rejected here: `ValueHandle`
+    /// ids are process-unique, so this machine's ledger simply never saw it
+    /// minted (see the module doc).
     pub fn release(&mut self, handle: PreparedHandle) -> bool {
-        let Some(&program_index) = self.handle_owner.get(&handle.raw.0) else {
-            return false;
-        };
         let Some(entry) = self.handles.take(handle.raw) else {
             return false;
         };
-        self.handle_owner.remove(&handle.raw.0);
-        if let Some(program) = self.programs.get(program_index) {
-            program
-                .machine
-                .deregister_persistent_root(entry.slot.addr());
-        }
+        self.machine.deregister_persistent_root(entry.slot.addr());
         true
     }
 
-    fn ensure_handle_access(&self, program_index: usize) -> Result<(), ExecutionError> {
-        let Some(program) = self.programs.get(program_index) else {
-            return Err(ExecutionError::UnknownPreparedHandle);
-        };
-        if program.machine.disposition() == MachineDisposition::Unavailable {
+    fn ensure_handle_access(&self) -> Result<(), ExecutionError> {
+        if self.machine.disposition() == MachineDisposition::Unavailable {
             return Err(ExecutionError::Runtime(
-                program.machine.last_failure().unwrap_or(MachineFailure {
+                self.machine.last_failure().unwrap_or(MachineFailure {
                     cause: RuntimeError::BadPointer,
                     disposition: MachineDisposition::Unavailable,
                 }),
@@ -412,11 +520,7 @@ impl<'code> PreparedMachine<'code> {
         &mut self,
         handle: PreparedHandle,
     ) -> Result<PreparedOuter, ExecutionError> {
-        let program_index = *self
-            .handle_owner
-            .get(&handle.raw.0)
-            .ok_or(ExecutionError::UnknownPreparedHandle)?;
-        self.ensure_handle_access(program_index)?;
+        self.ensure_handle_access()?;
         let source = self
             .handles
             .get(handle.raw)
@@ -427,24 +531,23 @@ impl<'code> PreparedMachine<'code> {
         if word == 0 {
             return Err(ExecutionError::UnknownPreparedHandle);
         }
-        let (identity, fields) = self
-            .programs
-            .get(program_index)
-            .ok_or(ExecutionError::UnknownPreparedHandle)?
-            .inspect_constructor(super::observe::ObservationSeed {
-                word,
-                rep: handle.rep,
-            })?;
+        // The object this handle roots may belong to ANY installed program --
+        // that is the whole point of a shared heap -- so inspection always
+        // reads through the machine-wide descriptor registry/static union,
+        // never one program's own metadata.
+        let (identity, fields) = self.inspect_constructor(super::observe::ObservationSeed {
+            word,
+            rep: handle.rep,
+        })?;
         let words = RootWords::new(fields.len())?;
         let mut managed = Vec::new();
         let mut output = Vec::new();
-        let machine = Rc::clone(&self.programs[program_index].machine);
         managed
             .try_reserve_exact(fields.len())
-            .map_err(|_| runtime_error(&machine, RuntimeError::HeapOverflow))?;
+            .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
         output
             .try_reserve_exact(fields.len())
-            .map_err(|_| runtime_error(&machine, RuntimeError::HeapOverflow))?;
+            .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
         for (field_index, field) in fields.iter().copied().enumerate() {
             words.write(field_index, field.word as u64)?;
             match field.rep {
@@ -471,54 +574,46 @@ impl<'code> PreparedMachine<'code> {
         }
         self.handles
             .try_reserve(managed.len())
-            .map_err(|_| runtime_error(&machine, RuntimeError::HeapOverflow))?;
-        self.handle_owner
-            .try_reserve(managed.len())
-            .map_err(|_| runtime_error(&machine, RuntimeError::HeapOverflow))?;
+            .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
         let mut selected = Vec::new();
         selected
             .try_reserve_exact(managed.len())
-            .map_err(|_| runtime_error(&machine, RuntimeError::HeapOverflow))?;
+            .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
         for &(field_index, _) in &managed {
             selected.push(unsafe { words.as_mut_ptr().add(field_index).cast::<*mut u8>() });
         }
-        let mark = machine.rust_roots_len();
+        let mark = self.machine.rust_roots_len();
         for &(field_index, _) in &managed {
             let slot = unsafe { words.as_mut_ptr().add(field_index).cast::<*mut u8>() };
-            machine.register_rust_root(slot);
+            self.machine.register_rust_root(slot);
         }
         let _roots = TemporaryRoots {
-            machine: &machine,
+            machine: &self.machine,
             mark,
         };
         if !managed.is_empty() {
-            let program = self
-                .programs
-                .get_mut(program_index)
-                .ok_or(ExecutionError::UnknownPreparedHandle)?;
-            if unsafe { machine.prepared_old_space() }.is_some() {
-                return Err(runtime_error(&machine, RuntimeError::BadPointer));
+            if unsafe { self.machine.prepared_old_space() }.is_some() {
+                return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
             }
-            unsafe { machine.install_prepared_old_space(&program.old_space) };
+            unsafe { self.machine.install_prepared_old_space(&self.old_space) };
             let retained = unsafe {
-                program.old_space.retain_prepared(
-                    &machine,
-                    &mut program.vmctx,
+                self.old_space.retain_prepared(
+                    &self.machine,
+                    &mut self.vmctx,
                     &selected,
-                    &program.program.get().descriptors,
+                    &self.descriptors,
                 )
             };
-            machine.clear_prepared_old_space();
-            let roots = retained.map_err(|cause| runtime_error(&machine, cause))?;
+            self.machine.clear_prepared_old_space();
+            let roots = retained.map_err(|cause| runtime_error(&self.machine, cause))?;
             if roots.len() != managed.len() {
                 for root in roots {
-                    machine.deregister_persistent_root(root.addr());
+                    self.machine.deregister_persistent_root(root.addr());
                 }
-                return Err(runtime_error(&machine, RuntimeError::BadPointer));
+                return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
             }
             for ((field_index, rep), root) in managed.into_iter().zip(roots) {
                 let raw = self.handles.insert(root, RealmId::ROOT);
-                self.handle_owner.insert(raw.0, program_index);
                 output[field_index] = PreparedResult::Managed(PreparedHandle { raw, rep });
             }
         }
@@ -528,11 +623,73 @@ impl<'code> PreparedMachine<'code> {
         })
     }
 
+    /// Read one constructor layer through the machine-wide descriptor/static
+    /// union and the shared nursery/old-space -- the object may have been
+    /// produced by any installed program.
+    fn inspect_constructor(
+        &self,
+        seed: super::observe::ObservationSeed,
+    ) -> Result<(DataConId, Vec<super::observe::ObservationSeed>), ExecutionError> {
+        let (start, size) = self
+            .machine
+            .gc_active_range()
+            .ok_or_else(|| runtime_error(&self.machine, RuntimeError::BadPointer))?;
+        let cursor = (self.vmctx.alloc_ptr as usize)
+            .checked_sub(start as usize)
+            .filter(|cursor| *cursor <= size && *cursor % std::mem::size_of::<u64>() == 0)
+            .ok_or_else(|| runtime_error(&self.machine, RuntimeError::BadPointer))?;
+        let nursery = unsafe {
+            std::slice::from_raw_parts(start.cast::<u64>(), cursor / std::mem::size_of::<u64>())
+        };
+        let mut starts = Vec::new();
+        let mut scanned_words = 0;
+        super::observe::append_exact_starts(
+            nursery,
+            &self.descriptor_registry,
+            &mut starts,
+            &mut scanned_words,
+        )?;
+        let heap = super::observe::ObservationHeap::new_with_registry_and_starts(
+            nursery,
+            &self.statics,
+            &self.descriptor_registry,
+            &starts,
+            Some(&*self.old_space),
+            &self.machine,
+        )?;
+        heap.inspect_constructor(seed).map_err(ExecutionError::from)
+    }
+
     #[cfg(test)]
     pub(crate) fn persistent_roots_count(&self, id: ProgramId) -> usize {
-        self.programs
-            .get(id.0 as usize)
-            .map_or(0, |program| program.machine.persistent_roots_count())
+        let Some(program) = self.programs.get(id.0 as usize) else {
+            return 0;
+        };
+        let Some((low, high)) = program.program.get().top_slots.values().copied().fold(
+            None,
+            |range: Option<(usize, usize)>, slot| {
+                Some(range.map_or((slot, slot), |(l, h)| (l.min(slot), h.max(slot))))
+            },
+        ) else {
+            return 0;
+        };
+        // A program-scoped count: filter the machine's registered persistent
+        // roots to just this program's own claimed top-table cells, since
+        // every program now shares one registry. Proves the actual
+        // registration happened (not merely that metadata implies it should
+        // have) -- see `two_closed_programs_share_one_machine_across_a_forced_collection`.
+        let base = self.top_table.as_mut_ptr();
+        let range_start = unsafe { base.add(low) } as usize;
+        let range_end = unsafe { base.add(high + 1) } as usize;
+        let mut roots = Vec::new();
+        self.machine.extend_persistent_roots(&mut roots);
+        roots
+            .into_iter()
+            .filter(|&slot| {
+                let address = slot as usize;
+                address >= range_start && address < range_end
+            })
+            .count()
     }
 
     #[cfg(test)]
@@ -553,8 +710,24 @@ impl<'code> PreparedMachine<'code> {
         snapshot[low..=high].to_vec()
     }
 
+    /// The live heap pointer a retained handle's root slot currently holds
+    /// (not the slot's own bookkeeping address). Two handles that read the
+    /// SAME value here -- across a collection, and regardless of which
+    /// installed program produced either handle -- point at the identical
+    /// heap object: identity, not a copy. `None` for an unknown handle.
+    #[cfg(test)]
+    pub(crate) fn handle_current_pointer(&self, handle: PreparedHandle) -> Option<usize> {
+        self.handles
+            .get(handle.raw)
+            .map(|entry| unsafe { entry.slot.current() } as usize)
+    }
+
     /// Execute with representation-checked values and retain every managed
-    /// result before its temporary adapter storage can disappear.
+    /// result before its temporary adapter storage can disappear. A managed
+    /// argument may be a handle produced by ANY installed program on this
+    /// machine -- they share one heap, so there is no "wrong owner" to
+    /// reject (see the module doc); a handle from a different
+    /// `PreparedMachine` is still rejected, by ledger emptiness.
     pub fn run_entry_retained(
         &mut self,
         id: ProgramId,
@@ -563,19 +736,20 @@ impl<'code> PreparedMachine<'code> {
         options: PreparedCallOptions,
         cancel: Arc<AtomicBool>,
     ) -> Result<PreparedResultBatch, ExecutionError> {
-        let program_index = id.0 as usize;
         let program = self
             .programs
-            .get_mut(program_index)
+            .get(id.0 as usize)
             .ok_or(ExecutionError::UnknownProgram(id))?;
         program.run_entry_retained(
-            program_index,
             entry,
             arguments,
             options,
             cancel,
+            &self.machine,
+            &mut self.vmctx,
+            &mut self.old_space,
+            &self.descriptors,
             &mut self.handles,
-            &mut self.handle_owner,
         )
     }
 
@@ -590,9 +764,19 @@ impl<'code> PreparedMachine<'code> {
     ) -> Result<RunResult, ExecutionError> {
         let program = self
             .programs
-            .get_mut(id.0 as usize)
+            .get(id.0 as usize)
             .ok_or(ExecutionError::UnknownProgram(id))?;
-        program.run_entry(entry, arguments, options, cancel)
+        program.run_entry(
+            entry,
+            arguments,
+            options,
+            cancel,
+            &self.machine,
+            &mut self.vmctx,
+            &self.old_space,
+            &self.statics,
+            &self.descriptor_registry,
+        )
     }
 }
 
@@ -613,53 +797,21 @@ fn collect_on(
 }
 
 impl<'code> InstalledProgram<'code> {
-    fn inspect_constructor(
-        &self,
-        seed: super::observe::ObservationSeed,
-    ) -> Result<(DataConId, Vec<super::observe::ObservationSeed>), ExecutionError> {
-        let (start, size) = self
-            .machine
-            .gc_active_range()
-            .ok_or_else(|| runtime_error(&self.machine, RuntimeError::BadPointer))?;
-        let cursor = (self.vmctx.alloc_ptr as usize)
-            .checked_sub(start as usize)
-            .filter(|cursor| *cursor <= size && *cursor % std::mem::size_of::<u64>() == 0)
-            .ok_or_else(|| runtime_error(&self.machine, RuntimeError::BadPointer))?;
-        let nursery = unsafe {
-            std::slice::from_raw_parts(start.cast::<u64>(), cursor / std::mem::size_of::<u64>())
-        };
-        let mut starts = Vec::new();
-        let mut scanned_words = 0;
-        super::observe::append_exact_starts(
-            nursery,
-            &self.program.get().descriptor_registry,
-            &mut starts,
-            &mut scanned_words,
-        )?;
-        let heap = super::observe::ObservationHeap::new_with_registry_and_starts(
-            nursery,
-            &self.statics,
-            &self.program.get().descriptor_registry,
-            &starts,
-            Some(&*self.old_space),
-            &self.machine,
-        )?;
-        heap.inspect_constructor(seed).map_err(ExecutionError::from)
-    }
-
     #[expect(
         clippy::too_many_arguments,
-        reason = "retained entry execution independently borrows the shared handle ledger and its owner index alongside this program's own machine, vmctx and old space"
+        reason = "retained entry execution independently borrows this program's own compiled entry alongside the machine-wide shared heap (machine, vmctx, old space, descriptor union) and the shared handle ledger"
     )]
     fn run_entry_retained(
-        &mut self,
-        program_index: usize,
+        &self,
         entry: ValueId,
         arguments: &[PreparedInput],
         options: PreparedCallOptions,
         cancel: Arc<AtomicBool>,
+        machine: &MachineState,
+        vmctx: &mut VMContext,
+        old_space: &mut OldSpace,
+        descriptors: &[Arc<ObjectDescriptor>],
         handles: &mut RootHandleLedger,
-        handle_owner: &mut HashMap<u64, usize>,
     ) -> Result<PreparedResultBatch, ExecutionError> {
         let (adapter, reps, result_contract, result_layout) = {
             let compiled = self
@@ -694,9 +846,10 @@ impl<'code> InstalledProgram<'code> {
                     if *actual == handle.rep
                         && matches!(actual, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) =>
                 {
-                    if handle_owner.get(&handle.raw.0) != Some(&program_index) {
-                        return Err(ExecutionError::UnknownPreparedHandle);
-                    }
+                    // Every installed program shares this machine's ledger:
+                    // a handle produced by ANY of them is a legitimate
+                    // argument here, so long as it is still live in this
+                    // machine's ledger (see the module doc).
                     let entry = handles
                         .get(handle.raw)
                         .ok_or(ExecutionError::UnknownPreparedHandle)?;
@@ -724,7 +877,7 @@ impl<'code> InstalledProgram<'code> {
             };
             argument_area.write(argument_index, word)?;
         }
-        let argument_mark = self.machine.rust_roots_len();
+        let argument_mark = machine.rust_roots_len();
         for argument_index in managed_arguments {
             let slot = unsafe {
                 argument_area
@@ -732,10 +885,10 @@ impl<'code> InstalledProgram<'code> {
                     .add(argument_index)
                     .cast::<*mut u8>()
             };
-            self.machine.register_rust_root(slot);
+            machine.register_rust_root(slot);
         }
         let _arguments = TemporaryRoots {
-            machine: &self.machine,
+            machine,
             mark: argument_mark,
         };
         let max_native_frame = self.program.get().pipeline.native_frame_maximum();
@@ -746,49 +899,40 @@ impl<'code> InstalledProgram<'code> {
         bounds
             .ensure_current_frame_reserve(reserve)
             .map_err(runtime_error_without_machine)?;
-        self.vmctx.prepared_stack_limit = bounds
+        vmctx.prepared_stack_limit = bounds
             .limit_with_frame_reserve(max_native_frame)
             .map_err(runtime_error_without_machine)?;
-        self.machine
+        machine
             .begin_prepared_call()
             .map_err(ExecutionError::Runtime)?;
-        self.machine.set_cancel_flag(cancel);
-        let _cancel = CancelScope(&self.machine);
+        machine.set_cancel_flag(cancel);
+        let _cancel = CancelScope(machine);
         let result_words =
             (result_layout.payload_size() as usize).div_ceil(std::mem::size_of::<u64>());
         let results = try_root_words(result_words.max(1))?;
-        let collections_before = self.machine.gc_generation();
+        let collections_before = machine.gc_generation();
         let pointer = self.program.get().pipeline.get_function_ptr(adapter);
         let raw = {
-            let _scope = OldSpaceScope::new(&self.machine, &self.old_space)?;
+            let _scope = OldSpaceScope::new(machine, old_space)?;
             unsafe {
                 let adapter: extern "C" fn(*mut VMContext, *mut u64, *const u64) -> i32 =
                     std::mem::transmute(pointer);
-                adapter(
-                    &mut self.vmctx,
-                    results.as_mut_ptr(),
-                    argument_area.as_mut_ptr(),
-                )
+                adapter(vmctx, results.as_mut_ptr(), argument_area.as_mut_ptr())
             }
         };
         let status = CallStatus::from_raw(i64::from(raw))
-            .map_err(|_| runtime_error(&self.machine, RuntimeError::BadPointer))?;
-        if status != CallStatus::Success
-            || self.machine.prepared_call_status() != CallStatus::Success
-        {
-            return Err(runtime_error_for_status(&self.machine, status));
+            .map_err(|_| runtime_error(machine, RuntimeError::BadPointer))?;
+        if status != CallStatus::Success || machine.prepared_call_status() != CallStatus::Success {
+            return Err(runtime_error_for_status(machine, status));
         }
         let result_reps = result_contract
             .returned_reps()
-            .ok_or_else(|| runtime_error(&self.machine, RuntimeError::NoSuccessReturned))?;
-        let mark = self.machine.rust_roots_len();
-        register_result_roots(&self.machine, &results, &result_layout);
-        let _results = TemporaryRoots {
-            machine: &self.machine,
-            mark,
-        };
+            .ok_or_else(|| runtime_error(machine, RuntimeError::NoSuccessReturned))?;
+        let mark = machine.rust_roots_len();
+        register_result_roots(machine, &results, &result_layout);
+        let _results = TemporaryRoots { machine, mark };
         if options.collect_before_observation {
-            collect_on(&self.machine, &mut self.vmctx, &self.old_space, 0)?;
+            collect_on(machine, vmctx, old_space, 0)?;
         }
         let mut slots = Vec::new();
         let mut output = Vec::new();
@@ -825,60 +969,56 @@ impl<'code> InstalledProgram<'code> {
             }
         }
         if !slots.is_empty() {
-            if unsafe { self.machine.prepared_old_space() }.is_some() {
-                return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+            if unsafe { machine.prepared_old_space() }.is_some() {
+                return Err(runtime_error(machine, RuntimeError::BadPointer));
             }
             // Promotion mutates OldSpace, so its admission pointer is scoped
             // manually rather than held through an immutable Rust borrow.
-            unsafe { self.machine.install_prepared_old_space(&self.old_space) };
-            let retained = unsafe {
-                self.old_space.retain_prepared(
-                    &self.machine,
-                    &mut self.vmctx,
-                    &slots,
-                    &self.program.get().descriptors,
-                )
-            };
-            self.machine.clear_prepared_old_space();
-            let roots = retained.map_err(|cause| runtime_error(&self.machine, cause))?;
+            unsafe { machine.install_prepared_old_space(old_space) };
+            let retained =
+                unsafe { old_space.retain_prepared(machine, vmctx, &slots, descriptors) };
+            machine.clear_prepared_old_space();
+            let roots = retained.map_err(|cause| runtime_error(machine, cause))?;
             if roots.len() != slots.len() {
                 for root in roots {
-                    self.machine.deregister_persistent_root(root.addr());
+                    machine.deregister_persistent_root(root.addr());
                 }
-                return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+                return Err(runtime_error(machine, RuntimeError::BadPointer));
             }
             handles
                 .try_reserve(roots.len())
-                .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
-            handle_owner
-                .try_reserve(roots.len())
-                .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
+                .map_err(|_| runtime_error(machine, RuntimeError::HeapOverflow))?;
             let managed =
                 result_reps.iter().copied().enumerate().filter(|(_, rep)| {
                     matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef)
                 });
             for ((logical, rep), root) in managed.zip(roots) {
                 let raw = handles.insert(root, RealmId::ROOT);
-                handle_owner.insert(raw.0, program_index);
                 output[logical] = PreparedResult::Managed(PreparedHandle { raw, rep });
             }
         }
         Ok(PreparedResultBatch {
             values: output,
-            collections: self
-                .machine
-                .gc_generation()
-                .saturating_sub(collections_before),
+            collections: machine.gc_generation().saturating_sub(collections_before),
         })
     }
 
-    /// Execute one scalar-only entry on this program's own machine.
+    /// Execute one scalar-only entry on the shared machine.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "entry execution independently borrows this program's own compiled entry alongside the machine-wide shared heap (machine, vmctx, old space, static/descriptor-registry unions)"
+    )]
     fn run_entry(
-        &mut self,
+        &self,
         entry: ValueId,
         arguments: &[u64],
         options: PreparedCallOptions,
         cancel: Arc<AtomicBool>,
+        machine: &MachineState,
+        vmctx: &mut VMContext,
+        old_space: &OldSpace,
+        statics: &[Arc<StaticRegion>],
+        descriptor_registry: &BTreeMap<usize, DescriptorMetadata>,
     ) -> Result<RunResult, ExecutionError> {
         let (adapter, expected_arguments, has_managed_arguments, result_contract, result_layout) = {
             let compiled = self
@@ -918,126 +1058,108 @@ impl<'code> InstalledProgram<'code> {
         bounds
             .ensure_current_frame_reserve(native_frame_reserve)
             .map_err(runtime_error_without_machine)?;
-        self.vmctx.prepared_stack_limit = bounds
+        vmctx.prepared_stack_limit = bounds
             .limit_with_frame_reserve(max_native_frame)
             .map_err(runtime_error_without_machine)?;
 
-        self.machine
+        machine
             .begin_prepared_call()
             .map_err(ExecutionError::Runtime)?;
-        self.machine.set_cancel_flag(cancel);
-        let _cancel = CancelScope(&self.machine);
+        machine.set_cancel_flag(cancel);
+        let _cancel = CancelScope(machine);
         let mut argument_area = try_words(arguments.len())?;
         argument_area.copy_from_slice(arguments);
         let result_words =
             (result_layout.payload_size() as usize).div_ceil(std::mem::size_of::<u64>());
         let results = try_root_words(result_words.max(1))?;
-        let collections_before = self.machine.gc_generation();
+        let collections_before = machine.gc_generation();
         let pointer = self.program.get().pipeline.get_function_ptr(adapter);
         let raw_status = {
-            let _scope = OldSpaceScope::new(&self.machine, &self.old_space)?;
+            let _scope = OldSpaceScope::new(machine, old_space)?;
             unsafe {
                 let adapter: extern "C" fn(*mut VMContext, *mut u64, *const u64) -> i32 =
                     std::mem::transmute(pointer);
-                adapter(
-                    &mut self.vmctx,
-                    results.as_mut_ptr(),
-                    argument_area.as_ptr(),
-                )
+                adapter(vmctx, results.as_mut_ptr(), argument_area.as_ptr())
             }
         };
         let status = match CallStatus::from_raw(i64::from(raw_status)) {
             Ok(status) => status,
             Err(_) => {
-                self.machine.set_first_cause(RuntimeError::BadPointer);
-                return Err(runtime_error_from_machine(&self.machine));
+                machine.set_first_cause(RuntimeError::BadPointer);
+                return Err(runtime_error_from_machine(machine));
             }
         };
         if status == CallStatus::IntegrityFailure {
-            self.machine.set_first_cause(RuntimeError::BadPointer);
+            machine.set_first_cause(RuntimeError::BadPointer);
         }
-        if status != CallStatus::Success
-            || self.machine.prepared_call_status() != CallStatus::Success
-        {
-            return Err(runtime_error_for_status(&self.machine, status));
+        if status != CallStatus::Success || machine.prepared_call_status() != CallStatus::Success {
+            return Err(runtime_error_for_status(machine, status));
         }
         if result_contract == ResultContract::NoSuccess {
-            return Err(runtime_error(
-                &self.machine,
-                RuntimeError::NoSuccessReturned,
-            ));
+            return Err(runtime_error(machine, RuntimeError::NoSuccessReturned));
         }
 
-        let root_mark = self.machine.rust_roots_len();
-        register_result_roots(&self.machine, &results, &result_layout);
+        let root_mark = machine.rust_roots_len();
+        register_result_roots(machine, &results, &result_layout);
         let _roots = TemporaryRoots {
-            machine: &self.machine,
+            machine,
             mark: root_mark,
         };
         if options.collect_before_observation {
-            collect_on(&self.machine, &mut self.vmctx, &self.old_space, 0)?;
+            collect_on(machine, vmctx, old_space, 0)?;
         }
         let result_reps = result_contract
             .returned_reps()
-            .ok_or_else(|| runtime_error(&self.machine, RuntimeError::NoSuccessReturned))?;
-        let _scope = OldSpaceScope::new(&self.machine, &self.old_space)?;
+            .ok_or_else(|| runtime_error(machine, RuntimeError::NoSuccessReturned))?;
+        let _scope = OldSpaceScope::new(machine, old_space)?;
         let result_words = results.snapshot();
         let seeds =
             match super::observe::snapshot_results(&result_words, result_reps, &result_layout) {
                 Ok(seeds) => seeds,
                 Err(error @ super::ObservationFailure::Integrity(_)) => {
-                    self.machine.set_first_cause(RuntimeError::BadPointer);
-                    return Err(runtime_error_from_machine_or_observation(
-                        &self.machine,
-                        error,
-                    ));
+                    machine.set_first_cause(RuntimeError::BadPointer);
+                    return Err(runtime_error_from_machine_or_observation(machine, error));
                 }
                 Err(error) => return Err(error.into()),
             };
         let values = match super::forcing::observe_results(
-            &self.machine,
+            machine,
             self.program.get(),
-            &mut self.vmctx,
-            &self.statics,
-            &self.program.get().descriptor_registry,
-            &self.old_space,
+            vmctx,
+            statics,
+            descriptor_registry,
+            old_space,
             &seeds,
             options.observation_budget,
         ) {
             Ok(values) => values,
             Err(ExecutionError::Observation(error @ super::ObservationFailure::Integrity(_))) => {
-                self.machine.set_first_cause(RuntimeError::BadPointer);
-                return Err(runtime_error_from_machine_or_observation(
-                    &self.machine,
-                    error,
-                ));
+                machine.set_first_cause(RuntimeError::BadPointer);
+                return Err(runtime_error_from_machine_or_observation(machine, error));
             }
             Err(error) => return Err(error),
         };
         Ok(RunResult {
             values,
-            collections: self
-                .machine
-                .gc_generation()
-                .saturating_sub(collections_before),
+            collections: machine.gc_generation().saturating_sub(collections_before),
         })
     }
 }
 
 impl Drop for PreparedMachine<'_> {
     fn drop(&mut self) {
-        for program in &mut self.programs {
-            program.machine.clear_prepared_old_space();
-            program.machine.clear_rust_roots();
-            for (start, end) in program.machine.old_space_arena_ranges() {
-                program.machine.retire_old_space_arena(start, end);
-            }
-            program.machine.free_session_heap();
-            program.machine.clear_stack_map_registry();
-            program.machine.clear_cancel_flag();
-            program.vmctx.machine_state = std::ptr::null_mut();
-            program.vmctx.prepared_tops = std::ptr::null();
+        // Clear every registry and root before `self.programs` (and their
+        // compiled pipelines, whose stack maps the chain points into) drop.
+        self.machine.clear_prepared_old_space();
+        self.machine.clear_rust_roots();
+        for (start, end) in self.machine.old_space_arena_ranges() {
+            self.machine.retire_old_space_arena(start, end);
         }
+        self.machine.free_session_heap();
+        self.machine.clear_stack_map_registry();
+        self.machine.clear_cancel_flag();
+        self.vmctx.machine_state = std::ptr::null_mut();
+        self.vmctx.prepared_tops = std::ptr::null();
     }
 }
 
@@ -1586,8 +1708,8 @@ mod tests {
 
     #[test]
     fn machine_drop_clears_registered_roots_before_storage_drops() {
-        let (machine, program) = machine();
-        let state = Rc::clone(&machine.programs[program.0 as usize].machine);
+        let (machine, _program) = machine();
+        let state = Rc::clone(&machine.machine);
         assert!(state.persistent_roots_count() > 0);
         drop(machine);
         assert_eq!(state.persistent_roots_count(), 0);
@@ -1814,9 +1936,7 @@ mod tests {
         let [PreparedResult::Managed(handle)] = batch.values.as_slice() else {
             panic!("CAF must return one managed value");
         };
-        machine.programs[program.0 as usize]
-            .machine
-            .set_first_cause(RuntimeError::BadPointer);
+        machine.machine.set_first_cause(RuntimeError::BadPointer);
         assert!(matches!(
             machine.inspect_outer(*handle),
             Err(ExecutionError::Runtime(failure))
@@ -2065,5 +2185,583 @@ mod tests {
             [tidepool_bridge::Value::Con(id, fields)]
                 if *id == tidepool_repr::DataConId(952) && fields.is_empty()
         ));
+    }
+
+    // ---- S2 acceptance: T1, T3 pass; T2 is a pinned, `#[ignore]`d FINDING; --
+    // ---- T4 is not attempted -----------------------------------------------
+    //
+    // T2 (closure application across programs via emit_exact_call) does not
+    // pass -- see the FINDING recorded on its #[ignore] attribute below: the
+    // per-program dispatcher only recognizes descriptors from ITS OWN
+    // compiled function table, so a foreign closure falls through to
+    // BadThunkState/Unavailable, confirmed empirically. T4 ("a variant of
+    // T2") is not attempted for the same underlying reason (it needs a
+    // cross-program closure CALL to reach the returned static object in the
+    // first place) plus its own new-fixture cost (a genuinely static,
+    // StaticImage-embedded, not nursery-allocated object). `admit_static_
+    // reference`'s machine-wide `static_regions` set
+    // (`tidepool-heap/src/gc/raw.rs`) IS implemented and exercised
+    // indirectly (every `PreparedMachine` install instantiates and unions a
+    // program's statics into it), but the specific proof that a
+    // cross-program *closure result* takes the already-stable path through
+    // that union (not a manufactured arena) is not pinned by a test
+    // here. See the implementer report's OPEN section.
+
+    /// A constructor with one scalar field, as a zero-argument CAF -- used as
+    /// program A's producer for T1 (cross-program managed argument/result).
+    fn field_constructor_program(base: TopSlotBase, host_id: u64) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("MachineImports", "Field"),
+            family: testing::identity("MachineImports", "Field"),
+            host_id: tidepool_repr::DataConId(host_id),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![RuntimeRep::Int(64)],
+            strict_fields: vec![true],
+            layout: CheckedLayout {
+                fields: vec![FieldLayout {
+                    rep: RuntimeRep::Int(64),
+                    offset: 0,
+                }],
+                alignment: 8,
+                payload_size: 8,
+                root_mask: vec![false],
+            },
+        });
+        wire.expressions.nodes[0] = ExprFrame::Construct {
+            constructor: ConstructorId(0),
+            fields: vec![Atom::Scalar(ScalarLiteral::Int {
+                bits: 64,
+                bytes: 42_i64.to_be_bytes().to_vec(),
+            })],
+        };
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Thunk {
+            signature: SignatureId(0),
+            update: UpdatePolicy::Memoize,
+            captures: vec![],
+            body: 0,
+        };
+        let prepared = testing::prepare(wire).expect("field_constructor_program fixture");
+        let linked = link_program(prepared, &MachineImports::default())
+            .expect("field_constructor_program fixture links");
+        CompiledProgram::compile(&linked, base).expect("field_constructor_program fixture compiles")
+    }
+
+    /// A one-argument entry `consume :: LiftedRef -> LiftedRef` that
+    /// allocates 32 throwaway constructors (forcing a collection in a tiny
+    /// nursery) before returning its own managed argument unchanged -- used
+    /// as program B for T1.
+    fn managed_argument_consumer_program(base: TopSlotBase) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0] = Signature {
+            arguments: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        };
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("MachineImports", "Filler"),
+            family: testing::identity("MachineImports", "Filler"),
+            host_id: tidepool_repr::DataConId(971),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        });
+        wire.expressions.nodes[0] =
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(99)))]);
+        let mut body = 0;
+        for id in 0..32 {
+            wire.expressions.nodes.push(ExprFrame::Let {
+                bindings: Group::NonRecursive(HeapBinding {
+                    id: ValueId(100 + id),
+                    rhs: HeapRhs::Constructor {
+                        constructor: ConstructorId(0),
+                        fields: vec![],
+                    },
+                }),
+                body,
+            });
+            body = wire.expressions.nodes.len() - 1;
+        }
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Function {
+            signature: SignatureId(0),
+            parameters: vec![ValueId(99)],
+            captures: vec![],
+            body,
+        };
+        let prepared = testing::prepare(wire).expect("managed_argument_consumer_program fixture");
+        let linked = link_program(prepared, &MachineImports::default())
+            .expect("managed_argument_consumer_program fixture links");
+        CompiledProgram::compile(&linked, base)
+            .expect("managed_argument_consumer_program fixture compiles")
+    }
+
+    #[test]
+    fn t1_managed_argument_crosses_installed_programs_with_identity_preserved() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            field_constructor_program(TopSlotBase::ZERO, 980),
+            PreparedMachineOptions {
+                nursery_bytes: 64,
+                top_slots: 8,
+            },
+        )
+        .expect("A installs");
+        let base_b = machine.next_top_slot_base();
+        let program_b = machine
+            .install_program(managed_argument_consumer_program(base_b))
+            .expect("B (64-byte-class nursery pressure via 32 allocations) installs alongside A");
+
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        let produced = machine
+            .run_entry_retained(
+                program_a,
+                ValueId(0),
+                &[],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("A produces a retained constructor with a field");
+        let [PreparedResult::Managed(handle)] = produced.values.as_slice() else {
+            panic!("A must return one managed constructor");
+        };
+        let original_pointer = machine
+            .handle_current_pointer(*handle)
+            .expect("A's handle is live");
+
+        let consumed = machine
+            .run_entry_retained(
+                program_b,
+                ValueId(0),
+                &[PreparedInput::Managed(*handle)],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("B accepts A's handle as a managed argument");
+        assert!(
+            consumed.collections >= 1,
+            "B's 32 throwaway allocations in a tiny nursery must force at least one collection"
+        );
+        let [PreparedResult::Managed(returned)] = consumed.values.as_slice() else {
+            panic!("B must retain the returned argument");
+        };
+
+        let PreparedOuter::Constructor { identity, .. } = machine
+            .inspect_outer(*returned)
+            .expect("the returned handle inspects through the machine-wide union");
+        assert_eq!(
+            identity,
+            tidepool_repr::DataConId(980),
+            "the value crossing programs keeps A's constructor identity"
+        );
+        let returned_pointer = machine
+            .handle_current_pointer(*returned)
+            .expect("B's returned handle is live");
+        assert_eq!(
+            original_pointer, returned_pointer,
+            "identity, not a copy: B returned the SAME heap object A produced"
+        );
+
+        // Repeat after a forced collection driven from A's own entry: an
+        // already-stable (old-space) pointer must not move, and both
+        // handles must still agree.
+        let after = machine
+            .run_entry(
+                program_a,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    collect_before_observation: true,
+                    ..call
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("A's own entry still runs and forces a collection");
+        assert!(after.collections >= 1);
+        assert_eq!(
+            machine.handle_current_pointer(*handle),
+            machine.handle_current_pointer(*returned)
+        );
+        assert_eq!(
+            machine.handle_current_pointer(*handle),
+            Some(original_pointer)
+        );
+
+        assert!(machine.release(*handle));
+        assert!(machine.release(*returned));
+        assert_eq!(machine.handle_count(), 0);
+    }
+
+    #[test]
+    fn t3_install_failure_after_registries_extend_leaves_every_installed_program_functional() {
+        // A tiny forced ceiling makes ANY nonzero second-program heap-top
+        // reserve exceed it, deterministically, regardless of exact object
+        // byte sizes -- see `collect_prepared`'s `reserve > ceiling` check
+        // (tidepool-codegen/src/host_fns/gc.rs), which this override targets
+        // without needing a multi-gigabyte test program.
+        crate::host_fns::set_max_heap_bytes_for_test(8);
+        let (mut machine, program_a) = PreparedMachine::new(
+            base_program(TopSlotBase::ZERO, 990),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+                top_slots: 8,
+            },
+        )
+        .expect("A installs");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        machine
+            .run_entry(
+                program_a,
+                ValueId(0),
+                &[],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("A runs once before B's install is attempted");
+
+        let base_before = machine.next_top_slot_base();
+        let a_roots_before = machine.persistent_roots_count(program_a);
+
+        let base_b = machine.next_top_slot_base();
+        let error = machine
+            .install_program(base_program(base_b, 991))
+            .expect_err("B's heap-top reserve cannot fit under the forced test ceiling, even after a collection");
+        crate::host_fns::clear_max_heap_bytes_override();
+
+        assert!(matches!(
+            error,
+            ExecutionError::Runtime(failure)
+                if failure.disposition == MachineDisposition::Reusable
+        ));
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+        assert_eq!(machine.next_top_slot_base(), base_before);
+        assert_eq!(machine.persistent_roots_count(program_a), a_roots_before);
+
+        let result = machine
+            .run_entry(
+                program_a,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    collect_before_observation: true,
+                    ..call
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect(
+                "A still runs correctly with collect_before_observation after the rejected install",
+            );
+        assert!(matches!(
+            result.values.as_slice(),
+            [tidepool_bridge::Value::Con(id, fields)]
+                if *id == tidepool_repr::DataConId(990) && fields.is_empty()
+        ));
+    }
+
+    /// Program A for T2: a memoized CAF `producer` returning
+    /// `Envelope(f, unforced)`, where `f` is a zero-argument closure
+    /// (reachable only through the constructor field, never forced by
+    /// inspection) whose body -- once actually CALLED -- allocates 32
+    /// throwaway constructors before constructing and returning a fresh,
+    /// distinctly-tagged `MakeResult` value. Mirrors
+    /// `outer_with_function_field_program`'s shape.
+    fn closure_producer_program(base: TopSlotBase) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.signatures.push(Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        });
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("MachineClosure", "Envelope"),
+            family: testing::identity("MachineClosure", "Envelope"),
+            host_id: tidepool_repr::DataConId(981),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![RuntimeRep::LiftedRef, RuntimeRep::LiftedRef],
+            strict_fields: vec![false, false],
+            layout: CheckedLayout {
+                fields: vec![
+                    FieldLayout {
+                        rep: RuntimeRep::LiftedRef,
+                        offset: 0,
+                    },
+                    FieldLayout {
+                        rep: RuntimeRep::LiftedRef,
+                        offset: 8,
+                    },
+                ],
+                alignment: 8,
+                payload_size: 16,
+                root_mask: vec![true, true],
+            },
+        });
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("MachineClosure", "Unit"),
+            family: testing::identity("MachineClosure", "Unit"),
+            host_id: tidepool_repr::DataConId(982),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        });
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("MachineClosure", "MakeResult"),
+            family: testing::identity("MachineClosure", "MakeResult"),
+            host_id: tidepool_repr::DataConId(983),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        });
+        // node 0: Envelope(f, unforced) -- producer's body.
+        // node 1: MakeResult -- the seed f's let-chain wraps.
+        // node 2: Unit -- unforced's body.
+        wire.expressions.nodes = vec![
+            ExprFrame::Construct {
+                constructor: ConstructorId(0),
+                fields: vec![
+                    Atom::Ref(ValueRef::Local(ValueId(1))),
+                    Atom::Ref(ValueRef::Local(ValueId(2))),
+                ],
+            },
+            ExprFrame::Construct {
+                constructor: ConstructorId(2),
+                fields: vec![],
+            },
+            ExprFrame::Construct {
+                constructor: ConstructorId(1),
+                fields: vec![],
+            },
+        ];
+        let mut f_body = 1;
+        for id in 0..32 {
+            wire.expressions.nodes.push(ExprFrame::Let {
+                bindings: Group::NonRecursive(HeapBinding {
+                    id: ValueId(200 + id),
+                    rhs: HeapRhs::Constructor {
+                        constructor: ConstructorId(1),
+                        fields: vec![],
+                    },
+                }),
+                body: f_body,
+            });
+            f_body = wire.expressions.nodes.len() - 1;
+        }
+        wire.bindings = vec![
+            Group::NonRecursive(TopBinding {
+                identity: testing::identity("MachineClosure", "producer"),
+                binding: HeapBinding {
+                    id: ValueId(0),
+                    rhs: HeapRhs::Thunk {
+                        signature: SignatureId(0),
+                        update: UpdatePolicy::Memoize,
+                        captures: vec![],
+                        body: 0,
+                    },
+                },
+            }),
+            Group::NonRecursive(TopBinding {
+                identity: testing::identity("MachineClosure", "f"),
+                binding: HeapBinding {
+                    id: ValueId(1),
+                    rhs: HeapRhs::Function {
+                        signature: SignatureId(1),
+                        parameters: vec![],
+                        captures: vec![],
+                        body: f_body,
+                    },
+                },
+            }),
+            Group::NonRecursive(TopBinding {
+                identity: testing::identity("MachineClosure", "unforced"),
+                binding: HeapBinding {
+                    id: ValueId(2),
+                    rhs: HeapRhs::Thunk {
+                        signature: SignatureId(0),
+                        update: UpdatePolicy::SingleEntry,
+                        captures: vec![],
+                        body: 2,
+                    },
+                },
+            }),
+        ];
+        let prepared = testing::prepare(wire).expect("closure_producer_program fixture");
+        let linked = link_program(prepared, &MachineImports::default())
+            .expect("closure_producer_program fixture links");
+        CompiledProgram::compile(&linked, base).expect("closure_producer_program fixture compiles")
+    }
+
+    /// Program B for T2: a one-argument entry `caller :: LiftedRef ->
+    /// LiftedRef` that calls its argument as a zero-argument closure through
+    /// `emit_exact_call`'s generic dispatcher (a `Local` callee, never a
+    /// same-program top reference) and returns the call's own result in tail
+    /// position (no separate `Return` needed -- `ExprFrame::Call` at body
+    /// position already finishes the entry).
+    fn closure_caller_program(base: TopSlotBase) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0] = Signature {
+            arguments: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        };
+        wire.signatures.push(Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        });
+        wire.expressions.nodes[0] = ExprFrame::Call {
+            callee: Atom::Ref(ValueRef::Local(ValueId(50))),
+            signature: SignatureId(1),
+            arguments: vec![],
+        };
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Function {
+            signature: SignatureId(0),
+            parameters: vec![ValueId(50)],
+            captures: vec![],
+            body: 0,
+        };
+        let prepared = testing::prepare(wire).expect("closure_caller_program fixture");
+        let linked = link_program(prepared, &MachineImports::default())
+            .expect("closure_caller_program fixture links");
+        CompiledProgram::compile(&linked, base).expect("closure_caller_program fixture compiles")
+    }
+
+    #[test]
+    #[ignore = "FINDING (S2, not a regression from this card): emit_exact_call's \
+        dispatcher (apply.rs::emit_dispatchers, ~L321 and ~L417) matches the entered \
+        callee's header word against ONLY the COMPILING program's own plan.functions / \
+        plan.pap_layouts -- a closed, closed-world table baked in at that program's own \
+        codegen time. A closure produced by a DIFFERENT installed program has a \
+        descriptor that program never declared, so the match loop finds nothing and \
+        falls through to emit_bad_state -> BadThunkState(0), Unavailable. Confirmed \
+        empirically: this test reproduces that exact failure. This contradicts the S2 \
+        card's 'S2 restated' text (\"emit_exact_call ... accepts a ValueRef::Local \
+        callee through the signature dispatchers, so B can apply an A closure passed \
+        as a managed argument today\") -- that claim does not hold for a GENUINELY \
+        cross-program closure with S1+S2 alone. S2's shared DescriptorSpace (this \
+        card) fixes GC-time recognition (the collector walking an object by tag), \
+        which is a different concern from compile-time call-target recognition (which \
+        native function to jump to) -- the latter needs S3's global/import lowering \
+        (ValueRef::Global) or a generic indirect-call path (reading the callee's own \
+        embedded code pointer, as qApp's real apply presumably does) neither of which \
+        this card adds. Left in as a pinned repro (fixtures below are otherwise sound: \
+        program A's own entry, Envelope construction and field retention all pass) \
+        rather than deleted, since it is exactly the reproduction S3's implementer \
+        will want. See the S2 implementer report's FINDINGS section."]
+    fn t2_closure_crosses_programs_and_collects_inside_the_producing_program() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            closure_producer_program(TopSlotBase::ZERO),
+            PreparedMachineOptions {
+                nursery_bytes: 128,
+                top_slots: 16,
+            },
+        )
+        .expect("A installs");
+        let base_b = machine.next_top_slot_base();
+        let program_b = machine
+            .install_program(closure_caller_program(base_b))
+            .expect(
+                "B installs alongside A, extending the shared descriptor space and stack-map chain",
+            );
+
+        let call = PreparedCallOptions {
+            observation_budget: 0,
+            collect_before_observation: true,
+        };
+        let produced = machine
+            .run_entry_retained(
+                program_a,
+                ValueId(0),
+                &[],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("A produces its Envelope(f, unforced)");
+        let [PreparedResult::Managed(outer)] = produced.values.as_slice() else {
+            panic!("A's producer must return one managed Envelope");
+        };
+        let PreparedOuter::Constructor { identity, fields } = machine
+            .inspect_outer(*outer)
+            .expect("A's outer inspects without forcing its callable field");
+        assert_eq!(identity, tidepool_repr::DataConId(981));
+        let [PreparedResult::Managed(f), PreparedResult::Managed(unforced)] = fields.as_slice()
+        else {
+            panic!("Envelope's fields must both remain retained, opaque managed handles");
+        };
+
+        let called = machine
+            .run_entry_retained(
+                program_b,
+                ValueId(0),
+                &[PreparedInput::Managed(*f)],
+                call,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect(
+                "B calls A's closure through the shared dispatcher; A's code runs with B's frame live",
+            );
+        assert!(
+            called.collections >= 1,
+            "f's 32 allocations, running as B's callee, must force a collection that walks BOTH \
+             B's calling frame and A's executing frame -- this is the proof that the stack-map \
+             chain (not just the first program's registry) is consulted"
+        );
+        let [PreparedResult::Managed(result)] = called.values.as_slice() else {
+            panic!("the call's result must be retained as one managed value");
+        };
+        let PreparedOuter::Constructor {
+            identity: result_identity,
+            ..
+        } = machine
+            .inspect_outer(*result)
+            .expect("the call's result inspects through the machine-wide descriptor union");
+        assert_eq!(
+            result_identity,
+            tidepool_repr::DataConId(983),
+            "the returned value is A's fresh MakeResult constructor"
+        );
+
+        assert!(machine.release(*outer));
+        assert!(machine.release(*f));
+        assert!(machine.release(*unforced));
+        assert!(machine.release(*result));
+        assert_eq!(machine.handle_count(), 0);
     }
 }
