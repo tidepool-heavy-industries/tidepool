@@ -433,6 +433,29 @@ Twelve fully-merged or superseded session worktrees and branches were retired (`
 | `worktree-wf_818c2822-c68-4` (`352d2e39c`) | `#[allow(clippy::expect_used...)]` on `persistent.rs::adopt_staged_declaration_in`/`publish_alias_in` | `80ba83322` (fix(agent,runtime): clear tidepool-agent/tidepool-runtime clippy blockers) |
 | `worktree-wf_818c2822-c68-8` (`8dd802b96`) | eliminates allocating `Vec` guards across `addresses.rs`/`arrays.rs`/`byte_arrays.rs`/`primitives.rs` | `32df3eac7` (fix(codegen): complete allocation-free result guards) |
 
+### Addendum: the three W1 gate failures, resolved by Wave 6B's gate (2026-09-14)
+
+1. Workspace clippy: the `unnecessary_lazy_evaluations` diagnostic at
+   `prepared.rs` is gone (the call site was rewritten in Wave 6B's S1
+   merge). The workspace invocation still exits non-zero, but every one of
+   its 23 remaining diagnostics is in `tidepool-actor` (a crate no Wave 5
+   or Wave 6 commit touches; it carries the in-progress cutover lineage),
+   and `tidepool-agent` is clean. Recorded, not fixed here: that lineage
+   owns it.
+2. `just changed`: the `TIDEPOOL_EXTRACT` staleness was a stale build of
+   the frontend; rebuilt, the inner loop proceeds. `scripts/test-changed.sh`
+   also no longer aborts at its first failing step (`5a5df1b72`), so one
+   crate's debt no longer hides every other step's result.
+3. Fixtures: exactly one `just fixtures-update` on the merged tree changed
+   only the recorded source fingerprint (`3a7e6e999`), and the canonical
+   `env -u TIDEPOOL_EXTRACT -u TIDEPOOL_EXTRACT_WORKER just fixtures-check`
+   passed twice with every cohort stage at `failed=0` and the opacity check
+   reporting 30 probes retaining their claimed mechanism.
+
+What remains from Wave 5 is only the 184 catalogued execution
+limitations, which are Wave 7 non-goals per `plans/stg-wave6.md`, not
+failures of this wave.
+
 ### Next: Wave 6
 
 See `plans/stg-wave6.md` for the next phase: executable imports and compiled-qApp resume.
