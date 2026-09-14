@@ -775,14 +775,15 @@ erase valid local usage information throughout the program.
 
 ### 6.4 Reference semantics
 
-Adapt tidepool-eval to the same parsed execution language with an explicit
-evaluation/update stack. Keep its implementation simple enough to inspect.
-It may use Rust-owned values rather than the production heap representation.
-
-The reference evaluator is a debugging and differential aid. GHC remains the
-independent language oracle. Sharing the schema, primitive signatures, and
-identity definitions is useful; copying the JIT's execution algorithm into
-the oracle would reduce its ability to expose shared mistakes.
+Superseded: `tidepool-eval`, the standalone tree-walking reference
+interpreter this section originally planned to adapt, has been removed from
+the workspace. Interactive/notebook execution of Haskell now runs through
+this engine itself (the prepared-STG path, `tidepool-codegen`'s
+`PreparedMachine` driven from `tidepool-runtime`'s session substrate,
+consumed by Shoal's notebook-use model) rather than a separate Rust
+reference evaluator. GHC remains the independent language oracle for
+differential testing; there is no second Rust-owned execution algorithm to
+keep in sync with the JIT.
 
 ### 6.5 Select calls once and give fast paths a concrete ABI
 
@@ -1551,7 +1552,7 @@ current unsafe failure paths do not depend on adopting STG.
 
 ### M3 — Land the execution schema and Rust construction boundary
 
-Owners: haskell projection/encoding, tidepool-repr parsing, tidepool-eval.
+Owners: haskell projection/encoding, tidepool-repr parsing.
 The codegen owner supplies the native ABI proof before emitter work starts.
 
 Deliver:

@@ -27,7 +27,7 @@ is not ordered lexically. Chrono supplies timezone-aware parsing.
 
 Root integration request (not edits): tidepool-agent/Cargo.toml add
 `chrono = { version = "0.4", default-features = false, features = ["alloc"] }`
-matching tidepool-eval's existing dependency. node.rs exports the bounded reader
+matching tidepool-bridge's existing dependency. node.rs exports the bounded reader
 and neutral UsageSelection/UsageReadLimits/BoundedUsageReport and supporting
 report types from rollout_usage. lib.rs exports them and aliases the reader as
 `read_native_usage`. Exact declared type names will accompany the candidate.

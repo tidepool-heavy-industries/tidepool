@@ -1,10 +1,9 @@
-//! serde_json → eval `Value` (the vendored `Tidepool.Aeson.Value` ADT).
+//! serde_json → the runtime `Value` (the vendored `Tidepool.Aeson.Value` ADT).
 //!
 //! This is the ONE source of truth for how a parsed JSON document is built as a
 //! Tidepool Core `Value`, shared by:
-//!   - the pure `JsonDecode` primop, on BOTH the tree-walker (`eval.rs`) and the
-//!     Cranelift JIT (via the `runtime_json_decode` host fn in
-//!     `tidepool-codegen`), so the two agree by construction, and
+//!   - the pure `JsonDecode` primop, via the `runtime_json_decode` host fn in
+//!     `tidepool-codegen`, and
 //!   - `tidepool-bridge`'s `impl ToCore for serde_json::Value` (effect results
 //!     that hand JSON back to Haskell), which delegates here.
 //!

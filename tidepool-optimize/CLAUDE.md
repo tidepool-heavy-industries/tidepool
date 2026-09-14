@@ -2,5 +2,5 @@
 
 **Charter.** Belongs: optimization passes over `CoreExpr` — beta reduction,
 case reduction, dead code elimination, inlining, occurrence analysis, partial
-evaluation. Does NOT belong: evaluation (`tidepool-eval`), JIT codegen
-(`tidepool-codegen`), the `CoreExpr` IR itself (`tidepool-repr`).
+evaluation. Does NOT belong: evaluation (JIT-only, `tidepool-codegen`), the
+`CoreExpr` IR itself (`tidepool-repr`).

@@ -127,7 +127,7 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
         ("String", 1),
         ("Number", 1),
         // JSON numbers ride Number(Scientific coeff exp) — the coefficient an
-        // exact Integer (IS/IP/IN), the exponent an Int (BUG-8, tidepool-eval/src/json.rs).
+        // exact Integer (IS/IP/IN), the exponent an Int (BUG-8, tidepool-bridge/src/json_builder.rs).
         // Must be in the table for kvInfo and any handler that returns serde_json
         // objects containing numeric fields.
         ("Scientific", 2),

@@ -22,11 +22,12 @@
 //!
 //! Runs on the JIT (`tidepool_runtime::compile_and_run`, via
 //! `JitEffectMachine::compile`, the only caller of `normalize()` — see
-//! `tidepool-codegen/src/jit_machine.rs`). The tree-walking oracle
-//! (`tidepool_eval::eval`) never calls `normalize()` at all, so this specific
-//! fix has no oracle-side counterpart to differential-test here; the oracle's
-//! OWN equivalent collision (`EffectMachine::new`'s constructor resolution)
-//! was already fixed in plan 03 via the same `freer_names::resolve` helper,
+//! `tidepool-codegen/src/jit_machine.rs`). At the time of this fix, the
+//! tree-walking reference interpreter (since removed from the workspace)
+//! never called `normalize()` at all, so this specific fix had no
+//! oracle-side counterpart to differential-test there; that oracle's OWN
+//! equivalent collision (`EffectMachine::new`'s constructor resolution) was
+//! already fixed in plan 03 via the same `freer_names::resolve` helper,
 //! prior to this work — see `repro_qq_union.rs` for that class of regression.
 //!
 //! Requires a worktree extract binary — panics loudly when unavailable (see

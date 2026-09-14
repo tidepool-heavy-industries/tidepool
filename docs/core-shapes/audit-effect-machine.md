@@ -36,7 +36,9 @@ PR #295 no longer exists in the code and has been removed from this file.
 - **Failure mode on shape mismatch:** `YieldError variant returned` (`YieldError::BadValFields` if `num_fields < 1`)
 - **Mode:** `always-on`
 - **Test coverage:** `tidepool-codegen/tests/effect_machine.rs:test_yield_done_val`
-- **Notes:** Writer: `codegen/src/emit/expr.rs` (Con emission). Pair: `tidepool-eval/src/eval.rs` (Value::Done).
+- **Notes:** Writer: `codegen/src/emit/expr.rs` (Con emission). The paired
+  tree-walking reference interpreter (`tidepool-eval`) has been removed from
+  the workspace; GHC remains the independent language oracle.
 
 ## parse_result: E shape extraction
 
@@ -102,7 +104,10 @@ PR #295 no longer exists in the code and has been removed from this file.
 - **Failure mode on shape mismatch:** Hardened (PR #295) — the `_` arm calls `runtime_error_with_msg` (`RuntimeError::UserError`) via `push_diagnostic` + `runtime_error_with_msg`, then returns `null_mut`. The `null_mut` is not silent: an error is set and callers must check `has_runtime_error()`/`take_runtime_error()`.
 - **Mode:** `always-on`
 - **Test coverage:** `tidepool-codegen/tests/effect_machine.rs:test_resume_leaf_identity`
-- **Notes:** Writer: `tidepool-eval/src/eval.rs` or `alloc_con` in `effect_machine.rs`. `k.is_null()` (no continuation at all) is a separate, non-error early return — not this check.
+- **Notes:** Writer: `alloc_con` in `effect_machine.rs` (the paired
+  tree-walking reference interpreter, `tidepool-eval`, has been removed from
+  the workspace). `k.is_null()` (no continuation at all) is a separate,
+  non-error early return — not this check.
 
 ## apply_cont_heap: Leaf/Node con_tag dispatch
 

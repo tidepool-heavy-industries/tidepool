@@ -448,12 +448,12 @@ define_primops! {
     WriteWideCharOffAddr => "WriteWideCharOffAddr", "writeWideCharOffAddr#";
     // Pure JSON decode: `eitherDecodeValue :: Text -> Either Text Value`. Dispatches to Rust
     // serde_json and builds the vendored aeson `Value` ADT on the heap (Rust
-    // side in `tidepool-eval::json` / the `runtime_json_decode` JIT host fn).
+    // side in `tidepool-bridge::json_builder` / the `runtime_json_decode` JIT host fn).
     // Not a real GHC primop; surfaced via Translate.hs binding interception.
     JsonDecode => "JsonDecode", "jsonDecode#";
     // Pure ISO-8601/RFC-3339 parse: `parseISO8601 :: Text -> Either Text UTCTime`.
     // Dispatches to Rust `chrono` and builds the `Either Text UTCTime` ADT
-    // (`tidepool-eval::json::parse_iso8601_str` / the `runtime_parse_iso8601` JIT
+    // (`tidepool-bridge::time::parse_iso8601_str` / the `runtime_parse_iso8601` JIT
     // host fn). Not a real GHC primop; surfaced via Translate.hs interception.
     ParseISO8601 => "ParseISO8601", "parseISO8601#";
 }

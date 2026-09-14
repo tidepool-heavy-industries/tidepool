@@ -1,6 +1,6 @@
 # Publishing to crates.io
 
-**Verified 2026-08-31** against `cargo metadata`. Re-run the recipe below
+**Verified 2026-09-14** against `cargo metadata`. Re-run the recipe below
 after adding a crate or changing inter-crate dependencies.
 
 ## Publish Order
@@ -8,33 +8,33 @@ after adding a crate or changing inter-crate dependencies.
 Crates must be published in dependency order. Wait for each crate to appear on crates.io before publishing the next.
 
 ```
- 1.  tidepool-bignum
- 2.  tidepool-repr
- 3.  tidepool-eval
- 4.  tidepool-bridge
- 5.  tidepool-bridge-derive
- 6.  tidepool-effect
- 7.  tidepool-heap
- 8.  tidepool-codegen
- 9.  tidepool-extract-cmd
-10.  tidepool-extract-report
-11.  tidepool-atomic-write
-12.  tidepool-worktree
-13.  tidepool-agent
-14.  tidepool-bridge-effects
-15.  tidepool-toolchain
-16.  tidepool-runtime
-17.  tidepool-mcp
-18.  tidepool-handlers
-19.  tidepool-model
-20.  tidepool-model-output
+ 1.  tidepool-model-output
+ 2.  tidepool-model
+ 3.  tidepool-atomic-write
+ 4.  tidepool-repr
+ 5.  tidepool-heap
+ 6.  tidepool-bignum
+ 7.  tidepool-bridge
+ 8.  tidepool-bridge-derive
+ 9.  tidepool-bridge-effects
+10.  tidepool-extract-cmd
+11.  tidepool-tool
+12.  tidepool-node
+13.  tidepool-worktree
+14.  tidepool-agent
+15.  tidepool-effect
+16.  tidepool-codegen
+17.  tidepool-extract-report
+18.  tidepool-toolchain
+19.  tidepool-runtime
+20.  tidepool-optimize
 21.  tidepool-actor
-22.  tidepool-harness
-23.  tidepool-web (binary)
-24.  tidepool (binary)
-25.  tidepool-optimize
-26.  tidepool-protocol
-27.  tidepool-repl (binary)
+22.  tidepool-mcp
+23.  tidepool-handlers
+24.  tidepool-harness
+25.  tidepool-web (binary)
+26.  tidepool (binary)
+27.  tidepool-protocol
 ```
 
 This order is topologically sorted from the workspace dependency graph
@@ -42,6 +42,14 @@ This order is topologically sorted from the workspace dependency graph
 "Regenerating this order" below for the exact recipe. Any order that keeps
 each crate after all its own workspace dependencies is valid; this is one
 such order, not the only one.
+
+`tidepool-eval` (the standalone tree-walking reference interpreter) has
+been removed from the workspace; it no longer appears above. `tidepool-repl`
+is not currently a Cargo workspace member (its directory exists on disk but
+carries no `Cargo.toml` workspace entry) despite still being named as an
+active area in `CLAUDE.md`'s workspace map — flagged here rather than
+resolved, since removing or restoring it is an architecture decision, not a
+docs fix.
 
 `tidepool-testing` has `publish = false` — crates.io ignores it. Everything
 else in the workspace publishes, including the binary packages in the list
@@ -115,17 +123,17 @@ grep -E '^tidepool-[a-z-]+ = \{ path = ' Cargo.toml
 ## Dry Run
 
 ```bash
-cargo publish --dry-run -p tidepool-repr
-cargo publish --dry-run -p tidepool-eval
+cargo publish --dry-run -p tidepool-model-output
+cargo publish --dry-run -p tidepool-model
 # ... etc
 ```
 
 ## Publish
 
 ```bash
-cargo publish -p tidepool-repr
+cargo publish -p tidepool-model-output
 # wait for it to appear on crates.io
-cargo publish -p tidepool-eval
+cargo publish -p tidepool-model
 # ... continue in order
 ```
 

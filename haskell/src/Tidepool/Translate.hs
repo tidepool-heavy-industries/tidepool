@@ -1864,9 +1864,9 @@ translate expr =
             altData <- forM (zip [0..] dcs) $ \(i :: Int, dc) -> do
               recordDC dc
               idxIdx <- emitNode $ NLit (LEInt (fromIntegral i))
-              -- Field binders are unused but must be arity-exact: the
-              -- interpreter checks `fields.len() == alt.binders.len()` and
-              -- reports ArityMismatch otherwise (tidepool-eval eval.rs).
+              -- Field binders are unused but must be arity-exact: the Rust
+              -- side checks `fields.len() == alt.binders.len()` and reports
+              -- ArityMismatch otherwise.
               fieldIds <- replicateM (valueRepArity dc) freshSynthVarId
               return $ FlatAlt (FDataAlt (varId (dataConWorkId dc))) fieldIds idxIdx
             emitNode $ NCase argIdx binderId altData

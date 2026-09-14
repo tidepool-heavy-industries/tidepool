@@ -2,9 +2,9 @@
 //!
 //! Chrono does the spec-compliant RFC-3339/ISO-8601 parse; a parse failure is
 //! TYPED (`Left msg`) rather than the old hand-rolled parser's silent
-//! corruption. The SAME builder ([`parse_iso8601_str`]) backs the tree-walker
-//! (`eval.rs`) and the JIT host fn (`runtime_parse_iso8601`), so the two agree
-//! by construction — mirroring the `JsonDecode` rail in `json.rs`.
+//! corruption. [`parse_iso8601_str`] backs the JIT host fn
+//! (`runtime_parse_iso8601`) — mirroring the `JsonDecode` rail in
+//! `json_builder.rs`.
 
 use tidepool_repr::{DataConId, DataConTable, Literal};
 

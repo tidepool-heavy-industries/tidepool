@@ -24,7 +24,6 @@ services its effects.
 |---|---|
 | `haskell/` | GHC Core extractor and the Haskell stdlib |
 | `tidepool-repr` | Core IR, constructor metadata, CBOR, shared identifiers |
-| `tidepool-eval` | Tree-walking reference interpreter |
 | `tidepool-heap` | JIT heap layout and copying-GC primitives |
 | `tidepool-codegen` | Cranelift compiler and effect machine |
 | `tidepool-toolchain` | Toolchain discovery, fingerprints, paths, and compile cache |

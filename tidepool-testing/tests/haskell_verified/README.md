@@ -28,7 +28,7 @@ fn gen_fmap_maybe() -> impl Strategy<Value = (String, serde_json::Value)> {
 ## Adding a New Template
 
 1.  **Create a generator:** Write an `impl Strategy` function in the appropriate category module (`fmap.rs`, `text.rs`, etc.).
-2.  **Compute the expected value natively:** The expected value MUST be computed by standard Rust operations (e.g., `iterator.sum()`, `string.to_ascii_uppercase()`), not via `tidepool_eval` or tree-walking. This ensures an independent oracle.
+2.  **Compute the expected value natively:** The expected value MUST be computed by standard Rust operations (e.g., `iterator.sum()`, `string.to_ascii_uppercase()`), not via a tree-walking reproduction of the JIT's own algorithm. This ensures an independent oracle.
 3.  **Avoid problematic bounds:** Do not use `f32`/`f64` because precision and `Show` differences lead to false positives. Restrict text characters to ASCII to bypass Unicode case-folding divergence between `std::char` and GHC's `Data.Char`.
 4.  **Register the test:** Provide a standard `#[test]` function wrapping the generator with `run_template(50, ...)` inside your module.
 

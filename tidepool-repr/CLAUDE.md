@@ -2,12 +2,13 @@
 
 **Charter.** Belongs: `CoreExpr`/`CoreFrame` IR types, `DataConTable`,
 free-variable analysis, and the CBOR wire format — the shared representation
-every downstream crate consumes. Does NOT belong: evaluation (`tidepool-eval`),
+every downstream crate consumes. Does NOT belong: evaluation (JIT-only; there
+is no separate Rust reference interpreter — GHC is the independent oracle),
 JIT compilation or heap byte layout (`tidepool-codegen`), Cast/Tick/Type
 erasure (stays in the Haskell serializer, never ported to Rust).
 
-The shared IR and serialization boundary: everything downstream (`tidepool-eval`
-the oracle, `tidepool-optimize`, `tidepool-codegen` the JIT) consumes `CoreExpr`
+The shared IR and serialization boundary: everything downstream
+(`tidepool-optimize`, `tidepool-codegen` the JIT) consumes `CoreExpr`
 built here. **Read the repo-root `CLAUDE.md` Key Decisions Reference FIRST** —
 it defines the `CoreFrame` variants this doc's traversal code is written
 against; nothing here re-lists them. This doc goes deeper on 4 of the crate's

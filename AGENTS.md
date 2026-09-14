@@ -53,8 +53,9 @@ providers, scheduling, resources, persistence, and argument parsing.
 ## Repository navigation
 
 - `haskell/`: extractor worker and the model-facing `Tidepool` library.
-- `tidepool-repr`, `tidepool-eval`, `tidepool-heap`, `tidepool-codegen`: IR,
-  reference semantics, heap, and JIT/effect machine.
+- `tidepool-repr`, `tidepool-heap`, `tidepool-codegen`: IR, heap, and
+  JIT/effect machine. GHC is the independent language oracle for
+  differential testing; there is no separate Rust reference interpreter.
 - `tidepool-toolchain`, `tidepool-runtime`: compilation policy and resident
   machine/session substrate.
 - `tidepool-protocol`, `tidepool-mcp`, `tidepool-handlers`: effect schemas,

@@ -6,7 +6,7 @@
 //!
 //! HYGIENE
 //! - All adversarial Values are built by *iterative* folds over `Vec`s. Deep
-//!   `Value` spines are dropped by the iterative `Drop` in `tidepool-eval`, but
+//!   `Value` spines are dropped by the iterative `Drop` in `tidepool-bridge`, but
 //!   a *recursive* builder would overflow the host thread at construction time.
 //!   Every helper here loops.
 //! - proptest strategies map from primitive inputs (sizes, byte vecs, content
