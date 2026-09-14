@@ -798,6 +798,132 @@ pub(crate) fn extract_and_read(
     Ok((meta_bytes, raw))
 }
 
+/// A prepared program's constructor declaration RESOLVES in the accompanying
+/// `DataConTable` (by `host_id`) but disagrees with the entry it resolves
+/// to — a different occurrence name, or a different field count. Both sides
+/// mint `host_id` identically (`varId (dataConWorkId con)`, in
+/// `Tidepool.Translate` and `Tidepool.ExecutionProjection` respectively), so
+/// a correctly paired artifact and table can never produce this — it is
+/// exactly the signal that the two were NOT compiled together (e.g. metadata
+/// from one compile assembled with a prepared program from another), caught
+/// at the moment it is dangerous: `host_id` coincidentally resolving to some
+/// OTHER real constructor a handler would then silently misinterpret fields
+/// under, rather than failing to resolve at all. See
+/// `check_constructor_identity_agreement`'s doc for why a host_id that
+/// resolves to NOTHING is deliberately not a variant here.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ConstructorIdentityMismatch {
+    /// The `host_id` resolves, but to a differently-named constructor —
+    /// nominal disagreement, not merely a missing entry.
+    #[error(
+        "target {target:?} constructor {prepared_name:?} (host_id {:#018x}) resolves in the \
+         DataConTable to {table_name:?} instead",
+        host_id.0
+    )]
+    NameMismatch {
+        target: String,
+        host_id: tidepool_repr::DataConId,
+        prepared_name: String,
+        table_name: String,
+    },
+    /// The `host_id` resolves to the right name, but the two sides disagree
+    /// on field count — a corrupt or mismatched metadata source, not a
+    /// harmless re-encounter (mirrors `DataConTable::insert_checked`'s
+    /// tag/rep_arity agreement guard on the metadata side alone).
+    #[error(
+        "target {target:?} constructor {name:?} (host_id {:#018x}) declares {prepared_fields} \
+         field(s) in the prepared program but {table_rep_arity} in the DataConTable",
+        host_id.0
+    )]
+    ArityMismatch {
+        target: String,
+        host_id: tidepool_repr::DataConId,
+        name: String,
+        prepared_fields: usize,
+        table_rep_arity: u32,
+    },
+}
+
+/// Verify every constructor `target`'s prepared program declares that
+/// RESOLVES in `table` agrees with the entry it resolves to. `PreparedProgram`
+/// validation (`tidepool_repr::execution_schema::validate_program`) already
+/// enforces `host_id` uniqueness WITHIN one prepared program; it has no way
+/// to check those ids against a metadata table compiled elsewhere, since the
+/// two are parsed independently in `assemble`.
+///
+/// SCOPE: a `host_id` with NO table entry at all is deliberately not
+/// rejected here — only a `host_id` that resolves to a DIFFERENT constructor
+/// is. Two things independently justify drawing the line there rather than
+/// at "every declared constructor must resolve":
+///
+/// - It would reject currently-valid, exercised pipelines. The STG
+///   projection's closure (`Tidepool.ExecutionProjection.projectPreparedTarget`)
+///   pulls in whatever the entry's REAL reachable STG needs, and GHC's own
+///   exception-raising sites transitively need real `SomeException`/
+///   `Typeable` evidence (`TrNameS`/`TrNameD` and friends) for native
+///   exception settlement — reachable from virtually any nontrivial entry
+///   (any partial pattern match, `error`, div-by-zero, ...), independent of
+///   whether the user's source ever mentions `Typeable`. The legacy
+///   metadata's four collection sources
+///   (`wiredInDataCons`/`collectDataCons`/`collectUsedDataCons`/
+///   `collectTransitiveDCons`, merged in
+///   `Tidepool.Translate.mergeMetaPreserving`) were never built against that
+///   requirement and do not reliably cover it — confirmed empirically: a
+///   real compile (`tidepool-runtime`'s
+///   `build_products_dir_differential` fixture) declares a prepared
+///   `TrNameS` with no metadata entry despite artifact and table coming
+///   from the exact same extractor invocation.
+/// - It is not the dangerous case. `tidepool_runtime::render::con_name`
+///   already renders an unresolved id as `"<unknown>"` rather than
+///   panicking or guessing — a `host_id` genuinely absent from the table
+///   degrades exactly as gracefully whether that absence comes from this
+///   legitimate coverage gap or a cross-paired table. The case that
+///   silently misinterprets data — `host_id` coincidentally present in the
+///   WRONG table under a different constructor's shape — has no such
+///   fallback, which is exactly what this check catches instead.
+///
+/// Field count is the one arity fact both sides carry in genuinely
+/// comparable form: `DataConTable::rep_arity` is `length
+/// (dataConRepArgTys dc)`, and `ConstructorDecl::field_reps` is built by
+/// mapping each of those same `dataConRepArgTys` entries through
+/// `repsForType` and concatenating — an ordinary heap-constructor field (the
+/// only kind `internConstructor` accepts; see its `result_rep` check) always
+/// has exactly one representation component, so the flatten never actually
+/// changes the count. Tag is deliberately NOT compared here: it is already
+/// pinned by each side independently (both read `dataConTag` directly), and
+/// disagreeing tags at agreeing name+id would indicate the SAME bug this
+/// check exists to catch, just observed through a different field.
+fn check_constructor_identity_agreement(
+    target: &str,
+    artifact: &PreparedArtifact,
+    table: &DataConTable,
+) -> Result<(), ConstructorIdentityMismatch> {
+    for constructor in artifact.prepared().constructors() {
+        let Some(dc) = table.get(constructor.host_id) else {
+            continue;
+        };
+        let occurrence = &constructor.identity.occurrence;
+        if &dc.name != occurrence {
+            return Err(ConstructorIdentityMismatch::NameMismatch {
+                target: target.to_string(),
+                host_id: constructor.host_id,
+                prepared_name: occurrence.clone(),
+                table_name: dc.name.clone(),
+            });
+        }
+        if usize::try_from(dc.rep_arity).unwrap_or(usize::MAX) != constructor.field_reps.len() {
+            return Err(ConstructorIdentityMismatch::ArityMismatch {
+                target: target.to_string(),
+                host_id: constructor.host_id,
+                name: dc.name.clone(),
+                prepared_fields: constructor.field_reps.len(),
+                table_rep_arity: dc.rep_arity,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Deserialize a `(meta_bytes, raw)` pair — from a fresh spawn or a memo hit
 /// — into a [`CompiledArtifacts`]. Both paths landing here (rather than each
 /// deserializing separately) is what makes a cache hit observationally
@@ -817,6 +943,9 @@ pub(crate) fn assemble(
         .iter()
         .map(|r| PreparedArtifact::parse(r.prepared_bytes.clone(), DecodeLimits::default()))
         .collect::<Result<_, _>>()?;
+    for (r, artifact) in raw.iter().zip(&prepared) {
+        check_constructor_identity_agreement(&r.target, artifact, &table)?;
+    }
     on_stage(
         timing::STAGE_CBOR_DESERIALIZE,
         deserialize_start.elapsed(),
@@ -1069,5 +1198,227 @@ mod typed_site_tests {
         assert_eq!(selections.len(), 2);
         assert_ne!(selections[0].0, selections[1].0);
         assert_ne!(selections[0].1, selections[1].1);
+    }
+}
+
+#[cfg(test)]
+mod constructor_identity_tests {
+    use super::*;
+    use tidepool_repr::execution_schema::ConstructorDecl;
+    use tidepool_repr::serial::{write_cbor, write_metadata, MetaWarnings};
+    use tidepool_repr::{CoreFrame, DataCon, Literal, SrcBang};
+
+    /// A real, GHC-produced prepared program — `M3Vertical.hs`'s `entry`,
+    /// which allocates a user `Box` constructor. `PreparedArtifact` has no
+    /// Rust-side encoder (the wire format is Haskell-authored, decode-only
+    /// here — see `execution_schema::decode::parse_program`), so this
+    /// checked-in fixture is the only way to exercise `assemble` against a
+    /// real prepared program without shelling out to GHC.
+    fn prepared_fixture_bytes() -> Vec<u8> {
+        include_bytes!("../../haskell/test-prepared-stg/fixtures/m3-vertical.cbor").to_vec()
+    }
+
+    /// A table entry that agrees with `decl` on every fact this crate checks
+    /// (id, occurrence name, field count) — what a table from the SAME
+    /// compile as `decl`'s prepared program necessarily contains.
+    fn matching_dc(decl: &ConstructorDecl) -> DataCon {
+        DataCon {
+            id: decl.host_id,
+            name: decl.identity.occurrence.clone(),
+            tag: decl.tag,
+            rep_arity: decl.field_reps.len() as u32,
+            field_bangs: vec![SrcBang::NoSrcBang; decl.field_reps.len()],
+            qualified_name: None,
+            type_name: decl.family.occurrence.clone(),
+        }
+    }
+
+    /// A minimal legacy Core tree — `assemble` still deserializes it
+    /// unconditionally, independent of the prepared program under test.
+    fn trivial_expr_bytes() -> Vec<u8> {
+        write_cbor(&tidepool_repr::CoreExpr {
+            nodes: vec![CoreFrame::Lit(Literal::LitInt(42))],
+        })
+        .expect("trivial tree encodes")
+    }
+
+    /// A table that agrees with EVERY constructor `artifact` declares, except
+    /// `decl`'s entry, which is passed through `mutate` first. Anchors a
+    /// single deliberate disagreement without leaving every OTHER
+    /// constructor unresolved (which would fail for an unrelated reason: the
+    /// check walks every declared constructor, not just the one under test).
+    fn table_with_one_entry_mutated(
+        artifact: &PreparedArtifact,
+        decl: &ConstructorDecl,
+        mutate: impl Fn(&mut DataCon),
+    ) -> DataConTable {
+        let mut table = DataConTable::new();
+        for candidate in artifact.prepared().constructors() {
+            let mut dc = matching_dc(candidate);
+            if candidate.host_id == decl.host_id {
+                mutate(&mut dc);
+            }
+            table.insert(dc);
+        }
+        table
+    }
+
+    fn raw_target(target: &str, prepared_bytes: Vec<u8>) -> RawTargetOutput {
+        RawTargetOutput {
+            target: target.to_string(),
+            expr_bytes: trivial_expr_bytes(),
+            asks_bytes: b"[]".to_vec(),
+            prepared_bytes,
+        }
+    }
+
+    /// TEST 1: a table built to agree with every constructor the real
+    /// prepared fixture declares — exactly what one compile's own metadata
+    /// and prepared output look like paired together — must assemble.
+    #[test]
+    fn correctly_paired_artifact_and_table_assembles() {
+        let prepared_bytes = prepared_fixture_bytes();
+        let artifact =
+            PreparedArtifact::parse(prepared_bytes.clone(), DecodeLimits::default()).unwrap();
+        assert!(
+            !artifact.prepared().constructors().is_empty(),
+            "fixture must declare at least one constructor for this test to mean anything"
+        );
+
+        let mut table = DataConTable::new();
+        for decl in artifact.prepared().constructors() {
+            table.insert(matching_dc(decl));
+        }
+        let meta_bytes = write_metadata(&table, &MetaWarnings::default()).unwrap();
+        let raw = vec![raw_target("entry", prepared_bytes)];
+
+        assemble(&meta_bytes, &raw, |_, _, _| {}).expect("correctly paired artifact must assemble");
+    }
+
+    /// TEST 3 (scope boundary, primary case): a table missing the fixture's
+    /// constructor ENTIRELY — an otherwise-empty table — must still assemble.
+    /// This is the empirically-forced scope line documented on
+    /// `check_constructor_identity_agreement`: a real compile
+    /// (`tidepool-runtime`'s `build_products_dir_differential` fixture, a
+    /// plain Tidepool eval with no explicit `Typeable`/exception use) was
+    /// caught by an earlier, blanket "every declared constructor must
+    /// resolve" version of this check over a prepared `TrNameS` — real GHC
+    /// exception-settlement evidence with no metadata entry, from an
+    /// artifact and table that came from the exact same compile. Requiring
+    /// resolution would reject that currently-valid pipeline, so it is
+    /// deliberately not enforced.
+    #[test]
+    fn table_missing_a_declared_constructor_entirely_is_outside_this_checks_scope() {
+        let prepared_bytes = prepared_fixture_bytes();
+        let artifact =
+            PreparedArtifact::parse(prepared_bytes.clone(), DecodeLimits::default()).unwrap();
+        assert!(
+            !artifact.prepared().constructors().is_empty(),
+            "fixture must declare at least one constructor for this test to mean anything"
+        );
+
+        // Totally empty: no host_id in the fixture's prepared program
+        // resolves in this table at all.
+        let table = DataConTable::new();
+        let meta_bytes = write_metadata(&table, &MetaWarnings::default()).unwrap();
+        let raw = vec![raw_target("entry", prepared_bytes)];
+
+        assemble(&meta_bytes, &raw, |_, _, _| {}).expect(
+            "a host_id absent from the table entirely must not reject assembly — only a \
+             host_id that resolves to a DIFFERENT constructor does",
+        );
+    }
+
+    /// TEST 2 (cross-pairing rejects): the id resolves to the WRONG
+    /// constructor — the dangerous case a totally-missing entry is not,
+    /// since a handler would silently misinterpret fields under the wrong
+    /// name rather than merely finding nothing. Must fail assembly with the
+    /// typed error, before `CompiledArtifacts` (and therefore any handler)
+    /// ever exists.
+    #[test]
+    fn cross_paired_table_wrong_name_at_same_id_rejects() {
+        let prepared_bytes = prepared_fixture_bytes();
+        let artifact =
+            PreparedArtifact::parse(prepared_bytes.clone(), DecodeLimits::default()).unwrap();
+        let decl = artifact
+            .prepared()
+            .constructors()
+            .first()
+            .expect("fixture declares at least one constructor")
+            .clone();
+
+        let table = table_with_one_entry_mutated(&artifact, &decl, |dc| {
+            dc.name = format!("{}NotThis", dc.name);
+        });
+        let meta_bytes = write_metadata(&table, &MetaWarnings::default()).unwrap();
+        let raw = vec![raw_target("entry", prepared_bytes)];
+
+        let err = match assemble(&meta_bytes, &raw, |_, _, _| {}) {
+            Ok(_) => panic!("a same-id, different-name table entry must reject assembly"),
+            Err(e) => e,
+        };
+        assert!(matches!(
+            err,
+            CompileError::ConstructorIdentity(ConstructorIdentityMismatch::NameMismatch { .. })
+        ));
+    }
+
+    /// A second, narrower scope line: tag is deliberately NOT one of the
+    /// compared facts (see `check_constructor_identity_agreement`'s doc) — id,
+    /// name, and field count all still agree, so a table entry disagreeing
+    /// ONLY on tag must still assemble. Pins that the check does not
+    /// duplicate `DataConTable::insert_checked`'s own tag/rep_arity guard,
+    /// and is not accidentally stricter than the facts both wire formats
+    /// actually carry in agreeing form.
+    #[test]
+    fn tag_disagreement_alone_is_outside_this_checks_scope() {
+        let prepared_bytes = prepared_fixture_bytes();
+        let artifact =
+            PreparedArtifact::parse(prepared_bytes.clone(), DecodeLimits::default()).unwrap();
+        let decl = artifact
+            .prepared()
+            .constructors()
+            .first()
+            .expect("fixture declares at least one constructor")
+            .clone();
+
+        let table = table_with_one_entry_mutated(&artifact, &decl, |dc| {
+            dc.tag = dc.tag.wrapping_add(1).max(1);
+        });
+        let meta_bytes = write_metadata(&table, &MetaWarnings::default()).unwrap();
+        let raw = vec![raw_target("entry", prepared_bytes)];
+
+        assemble(&meta_bytes, &raw, |_, _, _| {})
+            .expect("a tag-only disagreement is out of this check's scope and must not reject");
+    }
+
+    /// Arity IS checked: a table entry agreeing on id and name but declaring
+    /// a different field count must reject.
+    #[test]
+    fn field_count_disagreement_rejects() {
+        let prepared_bytes = prepared_fixture_bytes();
+        let artifact =
+            PreparedArtifact::parse(prepared_bytes.clone(), DecodeLimits::default()).unwrap();
+        let decl = artifact
+            .prepared()
+            .constructors()
+            .first()
+            .expect("fixture declares at least one constructor")
+            .clone();
+
+        let table = table_with_one_entry_mutated(&artifact, &decl, |dc| {
+            dc.rep_arity += 1;
+        });
+        let meta_bytes = write_metadata(&table, &MetaWarnings::default()).unwrap();
+        let raw = vec![raw_target("entry", prepared_bytes)];
+
+        let err = match assemble(&meta_bytes, &raw, |_, _, _| {}) {
+            Ok(_) => panic!("a field-count disagreement at agreeing id+name must reject assembly"),
+            Err(e) => e,
+        };
+        assert!(matches!(
+            err,
+            CompileError::ConstructorIdentity(ConstructorIdentityMismatch::ArityMismatch { .. })
+        ));
     }
 }
