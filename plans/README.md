@@ -58,6 +58,11 @@ archive).
   and required code deletion with semantic and performance gates.
 - [Test-time cut](test-time-cut.md): diagnosis landed; family bundling
   merged, turn-count top-5 lane in flight.
+- [Wave 6](stg-wave6.md): prepared-STG effect suspension, retained imports
+  and resume. Wave 6A landed the persistent-heap and closure-decode substrate
+  (rung 0); Wave 6B targets single-turn suspend/resume and retained-binding
+  imports (rungs 1-2). Interleaved parked work, realm cancellation, and actor
+  authority (rungs 3-5) remain open past this wave.
 
 ## Supporting actor designs and separate harness work
 
