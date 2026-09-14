@@ -20,7 +20,7 @@ fn result_reps(signature: &Signature) -> Option<&[RuntimeRep]> {
     }
 }
 
-fn returns_exact(signature: &Signature, expected: &[RuntimeRep]) -> bool {
+pub(super) fn returns_exact(signature: &Signature, expected: &[RuntimeRep]) -> bool {
     result_reps(signature) == Some(expected)
 }
 
