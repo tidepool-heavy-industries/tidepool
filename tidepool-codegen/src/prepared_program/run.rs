@@ -1,5 +1,6 @@
+use super::machine::ProgramId;
 use super::plan::HeapTopSpec;
-use super::{CompiledProgram, ObservationFailure, Unsupported};
+use super::{CompiledProgram, ObservationFailure, TopSlotBase, Unsupported};
 use crate::host_fns::RuntimeError;
 use crate::machine_state::MachineFailure;
 use crate::machine_state::{MachineDisposition, MachineState};
@@ -48,6 +49,17 @@ pub enum ExecutionError {
     },
     #[error("prepared managed handle is unknown, foreign, or released")]
     UnknownPreparedHandle,
+    #[error("program {0:?} is not installed on this machine")]
+    UnknownProgram(ProgramId),
+    #[error("top table exhausted: program requests {requested} slots, {available} available")]
+    TopTableExhausted { requested: usize, available: usize },
+    #[error(
+        "program compiled against {found:?} cannot install where the machine next requires {expected:?}"
+    )]
+    TopSlotBaseMismatch {
+        expected: TopSlotBase,
+        found: TopSlotBase,
+    },
     #[error(transparent)]
     Unsupported(#[from] Unsupported),
     #[error("{cause}", cause = .0.cause)]
@@ -66,13 +78,15 @@ impl CompiledProgram {
         options: &RunOptions,
         cancel: Arc<AtomicBool>,
     ) -> Result<RunResult, ExecutionError> {
-        let mut machine = super::machine::PreparedMachine::from_borrowed(
+        let (mut machine, program) = super::machine::PreparedMachine::from_borrowed(
             self,
             super::machine::PreparedMachineOptions {
                 nursery_bytes: options.nursery_bytes,
+                top_slots: self.top_slots.len(),
             },
         )?;
         machine.run_entry(
+            program,
             entry,
             arguments,
             super::machine::PreparedCallOptions {

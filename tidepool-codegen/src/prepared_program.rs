@@ -43,7 +43,7 @@ pub use observe::ObservationFailure;
 mod run;
 pub use machine::{
     PreparedCallOptions, PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions,
-    PreparedOuter, PreparedResult, PreparedResultBatch,
+    PreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
 };
 pub use run::{ExecutionError, RunOptions, RunResult};
 #[cfg(test)]
@@ -71,6 +71,22 @@ mod static_bytes;
 mod text_search;
 mod wide_words;
 pub use admission::{admit_prepared, admit_program, supports_operation};
+
+/// Absolute machine-wide top-table slot at which one compiled program's own
+/// top slots begin. Generated code addresses every top through
+/// [`crate::layout::VMCTX_PREPARED_TOPS_OFFSET`] using an immediate baked in
+/// at compile time (`slot * size_of::<usize>()`), so a program's base must be
+/// fixed before [`CompiledProgram::compile`] runs; nothing later can rebase
+/// already-emitted code. [`PreparedMachine::install_program`] validates that
+/// a program was compiled against the base it actually claims.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct TopSlotBase(pub u32);
+
+impl TopSlotBase {
+    /// The base every single-program caller (`PreparedMachine::new`,
+    /// `CompiledProgram::run_entry`) compiles against.
+    pub const ZERO: TopSlotBase = TopSlotBase(0);
+}
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Unsupported {
@@ -191,7 +207,7 @@ pub struct CompiledProgram {
 }
 
 impl CompiledProgram {
-    pub fn compile(linked: &LinkedProgram) -> Result<Self, CompileError> {
+    pub fn compile(linked: &LinkedProgram, base: TopSlotBase) -> Result<Self, CompileError> {
         let target = &linked.prepared().envelope().target;
         let host_matches = cfg!(all(target_os = "linux", target_arch = "x86_64"))
             && target.architecture == Architecture::X86_64;
@@ -208,7 +224,7 @@ impl CompiledProgram {
         use cranelift_codegen::isa::CallConv;
         use cranelift_module::Linkage;
         use tidepool_repr::execution_schema::{HeapRhs, RuntimeRep};
-        let plan = plan::ProgramPlan::new(linked.prepared())?;
+        let plan = plan::ProgramPlan::new(linked.prepared(), base)?;
         let profile = NativeAbiProfile::new(plan.program.envelope().target.clone(), 0)?;
         let statics = image::build_static_image(&plan)?;
         let mut pipeline = CodegenPipeline::new(
@@ -725,6 +741,15 @@ impl CompiledProgram {
 
     pub(crate) fn prepared_force_adapter(&self) -> FuncId {
         self.force_adapter
+    }
+
+    /// The number of machine-wide top-table slots this program claims when
+    /// installed. A caller sizing a fresh [`PreparedMachine`]'s
+    /// [`PreparedMachineOptions::top_slots`] for exactly one program reads
+    /// this after compiling, before installing.
+    #[must_use]
+    pub fn top_slot_count(&self) -> usize {
+        self.top_slots.len()
     }
 }
 

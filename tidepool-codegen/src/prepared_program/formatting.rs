@@ -243,7 +243,9 @@ mod tests {
         }
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        let program = super::super::CompiledProgram::compile(&linked).unwrap();
+        let program =
+            super::super::CompiledProgram::compile(&linked, super::super::TopSlotBase::ZERO)
+                .unwrap();
         program
             .run_entry(
                 ValueId(0),
@@ -376,7 +378,7 @@ mod tests {
         }
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        super::super::CompiledProgram::compile(&linked).unwrap()
+        super::super::CompiledProgram::compile(&linked, super::super::TopSlotBase::ZERO).unwrap()
     }
     #[test]
     fn signed_zero_nan_and_subnormal_follow_ghc_precedence() {

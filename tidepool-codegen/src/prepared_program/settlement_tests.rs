@@ -2,6 +2,7 @@
 
 use super::{
     entry_tests::caf_program, safepoint::NativeStackBounds, CompiledProgram, DescriptorMeaning,
+    TopSlotBase,
 };
 use crate::prepared_control::{CallStatus, PreparedSafepoint};
 use crate::{
@@ -193,7 +194,7 @@ fn captured_caf_program(policy: UpdatePolicy) -> CompiledProgram {
         },
     ])];
     let linked = link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-    CompiledProgram::compile(&linked).unwrap()
+    CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap()
 }
 
 fn captured_raise_io_caf_program(policy: UpdatePolicy) -> CompiledProgram {
@@ -252,7 +253,7 @@ fn captured_raise_io_caf_program(policy: UpdatePolicy) -> CompiledProgram {
         },
     ])];
     let linked = link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-    CompiledProgram::compile(&linked).unwrap()
+    CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap()
 }
 
 impl Drop for Invocation<'_> {
@@ -423,7 +424,7 @@ fn w5_a1_native_recursive_entry_reaches_typed_stack_bound() {
             wire.bindings.push(Group::Recursive(vec![top]));
             let linked =
                 link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-            let program = CompiledProgram::compile(&linked).unwrap();
+            let program = CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap();
             let result = program.run_entry(
                 ValueId(0),
                 &[],
@@ -475,7 +476,7 @@ fn w5_a1_join_backedge_cancellation_settles_thunk() {
         body: 2,
     };
     let linked = link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-    let program = CompiledProgram::compile(&linked).unwrap();
+    let program = CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap();
     let mut invocation = Invocation::new(&program);
     for _ in 0..2 {
         invocation.machine.fail_prepared_at(

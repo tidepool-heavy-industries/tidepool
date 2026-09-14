@@ -1,7 +1,7 @@
 //! Checked binder and closure layout facts used by every emitter consumer.
 
 use super::static_bytes::PinnedBytes;
-use super::CompileError;
+use super::{CompileError, TopSlotBase};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tidepool_heap::execution_descriptor::{EntryMetadata, ObjectDescriptor, ObjectKind};
@@ -63,7 +63,12 @@ pub(super) struct ProgramPlan<'a> {
 }
 
 impl<'a> ProgramPlan<'a> {
-    pub fn new(program: &'a PreparedProgram) -> Result<Self, CompileError> {
+    /// `base` is the machine-wide top-table slot this program's own tops
+    /// begin at. A single-program caller always passes `TopSlotBase::ZERO`;
+    /// `PreparedMachine::install_program` chooses a nonzero base for every
+    /// program after the first so every installed program's slots occupy a
+    /// disjoint, contiguous range of one shared table.
+    pub fn new(program: &'a PreparedProgram, base: TopSlotBase) -> Result<Self, CompileError> {
         // wave4:LAYOUT_PLAN — collect top/local RHS types, function and join
         // parameter reps, case binder/alternative reps from checked signatures
         // and ConstructorDecl. Multi-component case binder is non-value Void.
@@ -74,11 +79,12 @@ impl<'a> ProgramPlan<'a> {
         let mut top_bindings = BTreeMap::new();
         let mut top_slots = BTreeMap::new();
         let mut bytes = BTreeMap::new();
+        let base = base.0 as usize;
 
         for group in program.bindings() {
             for top in group_items(group) {
                 top_bindings.insert(top.binding.id, &top.binding);
-                let slot = top_slots.len();
+                let slot = base + top_slots.len();
                 top_slots.insert(top.binding.id, slot);
                 binding_rep(program, &top.binding, &mut values);
                 collect_binding_literals(&top.binding, &mut bytes);

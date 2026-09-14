@@ -1,4 +1,4 @@
-use super::{CompileError, CompiledProgram, ExecutionError, RunOptions, Unsupported};
+use super::{CompileError, CompiledProgram, ExecutionError, RunOptions, TopSlotBase, Unsupported};
 use crate::host_fns::RuntimeError;
 use cranelift_codegen::ir::{InstructionData, Opcode};
 use std::sync::{atomic::AtomicBool, Arc};
@@ -6,7 +6,7 @@ use tidepool_repr::execution_schema::{testing, *};
 
 fn compile(wire: WireProgram) -> CompiledProgram {
     let linked = link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-    CompiledProgram::compile(&linked).unwrap()
+    CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap()
 }
 
 fn resize_wire(new_len: i64, use_old_alias: bool) -> WireProgram {
@@ -899,7 +899,7 @@ fn c_string_len_requires_exact_intrinsic_identity_and_signature() {
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
         assert!(matches!(
-            CompiledProgram::compile(&linked),
+            CompiledProgram::compile(&linked, TopSlotBase::ZERO),
             Err(CompileError::Unsupported(Unsupported::Operation { .. }))
         ));
     }
@@ -916,7 +916,7 @@ fn c_string_len_requires_exact_intrinsic_identity_and_signature() {
         )
         .unwrap();
         assert!(matches!(
-            CompiledProgram::compile(&linked),
+            CompiledProgram::compile(&linked, TopSlotBase::ZERO),
             Err(CompileError::Unsupported(Unsupported::Operation { .. }))
         ));
     }
@@ -1142,7 +1142,7 @@ fn index_char_rejects_wrong_char_rep_before_native_emission() {
     )
     .unwrap();
     assert!(matches!(
-        CompiledProgram::compile(&linked),
+        CompiledProgram::compile(&linked, TopSlotBase::ZERO),
         Err(CompileError::Unsupported(Unsupported::Operation { .. }))
     ));
 }

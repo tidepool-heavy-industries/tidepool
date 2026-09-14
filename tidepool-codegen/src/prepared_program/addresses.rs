@@ -989,7 +989,9 @@ mod tests {
 
         let prepared = testing::prepare(wire).unwrap();
         let linked = link_program(prepared, &MachineImports::default()).unwrap();
-        let compiled = super::super::CompiledProgram::compile(&linked).unwrap();
+        let compiled =
+            super::super::CompiledProgram::compile(&linked, super::super::TopSlotBase::ZERO)
+                .unwrap();
         let result = compiled
             .run_entry(
                 ValueId(0),
@@ -1037,7 +1039,9 @@ mod tests {
         };
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        let compiled = super::super::CompiledProgram::compile(&linked).unwrap();
+        let compiled =
+            super::super::CompiledProgram::compile(&linked, super::super::TopSlotBase::ZERO)
+                .unwrap();
         let mut values = compiled
             .run_entry(
                 ValueId(0),
