@@ -172,6 +172,17 @@ impl PreparedRuntime {
         PreparedCancelHandle::default()
     }
 
+    /// Number of `PreparedValue`s this runtime's machine currently retains.
+    /// Diagnostic surface for confirming a caller released every value it
+    /// produced (e.g. through a resume loop); zero before any machine is
+    /// installed.
+    #[must_use]
+    pub fn retained_handle_count(&self) -> usize {
+        self.machine
+            .as_ref()
+            .map_or(0, PreparedMachine::handle_count)
+    }
+
     pub fn run_entry(
         &mut self,
         binding: Option<ValueId>,
