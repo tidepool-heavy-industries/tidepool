@@ -5,8 +5,9 @@ use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::MachineDisposition;
 use tidepool_codegen::prepared_program::{
     CompiledProgram, ExecutionError, ObservationFailure, PreparedCallOptions,
-    PreparedInput as CodegenPreparedInput, PreparedMachine, PreparedMachineOptions,
-    PreparedOuter as PreparedOuterCodegen, ProgramId, TopSlotBase,
+    PreparedHandle, PreparedInput as CodegenPreparedInput, PreparedMachine,
+    PreparedMachineOptions, PreparedOuter as PreparedOuterCodegen, PreparedResult, ProgramId,
+    TopSlotBase,
 };
 use tidepool_repr::execution_schema::{
     link_program, parse_program, Architecture, DecodeLimits, Endianness, ImportedValue, LinkError,
@@ -1269,6 +1270,413 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
         ))
     ));
     assert!(resumed_values.next().is_none());
+    assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+}
+
+/// [`take_managed`], but for the raw `PreparedMachine` API's own
+/// `PreparedResult`, used by the direct-`PreparedMachine` cancellation
+/// tests below instead of `PreparedRuntime`'s `PreparedValueResult`.
+fn take_managed_result(fields: &mut [PreparedResult], index: usize) -> PreparedHandle {
+    match std::mem::replace(&mut fields[index], PreparedResult::Void) {
+        PreparedResult::Managed(handle) => handle,
+        other => panic!("field {index} expected a managed value, got {other:?}"),
+    }
+}
+
+/// [`take_scalar`], but for [`PreparedResult`].
+fn take_scalar_result(fields: &[PreparedResult], index: usize) -> u64 {
+    match fields[index] {
+        PreparedResult::Scalar(word) => word,
+        other => panic!("field {index} expected a scalar value, got {other:?}"),
+    }
+}
+
+/// [`drive_freer_program_to_val_in`]'s own loop, but against the raw
+/// `PreparedMachine`/`ProgramId` primitives (the same layer
+/// `cancellation_before_commit_leaves_a_parked_k_valid_for_retry` drives
+/// directly) and tagged with an explicit `realm`, so the two-realm
+/// cancellation test below can drive each realm's own suspension without
+/// going through `PreparedRuntime`'s realm-agnostic convenience wrapper.
+/// Every intermediate root this loop mints under `realm` (`union`, `k`,
+/// `payload`) is released as soon as it is consumed, exactly as
+/// `drive_freer_program_to_val_in` does; unlike that helper, the settled
+/// `Val` cell itself is handed back to the caller UNRELEASED, so a caller
+/// that wants to keep proving the settled value is still reachable through
+/// `realm` after some unrelated event (here, a sibling realm's
+/// `close_realm`) can do so before releasing it.
+fn drive_direct_to_val(
+    machine: &mut PreparedMachine,
+    program_id: ProgramId,
+    call_options: PreparedCallOptions,
+    fixture: &FreerResumeFixture,
+    realm: RealmId,
+    mut outer: PreparedHandle,
+) -> (i64, PreparedHandle) {
+    loop {
+        let PreparedOuterCodegen::Constructor {
+            identity,
+            mut fields,
+        } = machine
+            .inspect_outer(outer, realm)
+            .expect("the retained Eff value survives its collection and inspects");
+
+        if identity == fixture.val_id {
+            assert_eq!(fields.len(), 1, "Val has exactly one field");
+            let boxed = take_managed_result(&mut fields, 0);
+            assert!(machine.release(boxed));
+
+            let value_result = machine
+                .run_entry_retained(
+                    program_id,
+                    fixture.val_result_top.binding.id,
+                    &[CodegenPreparedInput::Managed(outer)],
+                    call_options,
+                    realm,
+                )
+                .expect("valResult (Val (I# n) -> n) forces the settled Int");
+            let mut value_values = value_result.values.into_iter();
+            let Some(PreparedResult::Scalar(word)) = value_values.next() else {
+                panic!("valResult must return one scalar Int#");
+            };
+            assert!(value_values.next().is_none());
+            return (word as i64, outer);
+        }
+
+        assert_eq!(
+            identity, fixture.e_id,
+            "an Eff value at WHNF is either Val or E"
+        );
+        assert_eq!(fields.len(), 2, "E has exactly two fields: Union and Arrs");
+        let union = take_managed_result(&mut fields, 0);
+        let k = take_managed_result(&mut fields, 1);
+        assert!(machine.release(outer));
+
+        let PreparedOuterCodegen::Constructor {
+            identity: union_identity,
+            fields: mut union_fields,
+        } = machine
+            .inspect_outer(union, realm)
+            .expect("Union inspects");
+        assert_eq!(union_identity, fixture.union_id);
+        assert_eq!(
+            union_fields.len(),
+            2,
+            "Union has an unpacked tag word and a payload"
+        );
+        let tag = take_scalar_result(&union_fields, 0);
+        assert_eq!(tag, 0, "the only effect in '[Req] is index 0");
+        let payload = take_managed_result(&mut union_fields, 1);
+        assert!(machine.release(union));
+
+        let ask_result = machine
+            .run_entry_retained(
+                program_id,
+                fixture.ask_argument_top.binding.id,
+                &[CodegenPreparedInput::Managed(payload)],
+                call_options,
+                realm,
+            )
+            .expect("askArgument (Ask (I# n) -> n) forces the Ask request's Int#");
+        let mut ask_values = ask_result.values.into_iter();
+        let Some(PreparedResult::Scalar(n)) = ask_values.next() else {
+            panic!("askArgument must return one scalar Int#");
+        };
+        assert!(ask_values.next().is_none());
+        assert!(machine.release(payload));
+
+        let resumed = machine
+            .run_entry_retained(
+                program_id,
+                fixture.resume_int_top.binding.id,
+                &[
+                    CodegenPreparedInput::Managed(k),
+                    CodegenPreparedInput::Scalar(n),
+                ],
+                call_options,
+                realm,
+            )
+            .expect("resumeInt (qApp k (I# n)) applies the retained continuation");
+        assert!(machine.release(k));
+        let mut resumed_values = resumed.values.into_iter();
+        let Some(PreparedResult::Managed(next_outer)) = resumed_values.next() else {
+            panic!("resumeInt must return one managed `Eff` outer value");
+        };
+        assert!(resumed_values.next().is_none());
+        outer = next_outer;
+    }
+}
+
+/// C1 follow-up: `cancellation_before_commit_leaves_a_parked_k_valid_for_retry`
+/// above pins realm-scoped cancellation for exactly ONE realm on ONE
+/// installed program; the task card that landed it deliberately scoped that
+/// coverage down to a single realm and left two-realm independence as
+/// follow-up work. This test closes that gap: TWO fresh, independent
+/// realms (`r1`, `r2`) share ONE `PreparedMachine` and ONE installed
+/// program, each parking its own continuation from the same freer-resume
+/// artifact, with cancel/reset/resume/`close_realm` exercised across both.
+///
+/// Per that same test's own reasoning (repeated here because it is exactly
+/// what makes this a real cancellation proof rather than a precondition
+/// check): `PreparedMachine::run_entry_retained` installs the ACTIVE call's
+/// cancel flag onto the shared `MachineState` and then calls straight into
+/// the compiled adapter with no Rust-side cancellation check of its own --
+/// the `Cancelled` status this test observes for `r1` can only have come
+/// back from `resumeInt`'s own `prepared_poll_at` safepoint, reached from
+/// inside the generated code that call actually starts. `r1`'s cancel flag
+/// is set only AFTER `k1` is already parked and its Ask answer already
+/// known (not before the scenario begins), so there is no way the flag
+/// could have been observed before generated code for that specific call
+/// started running. Throughout, `r2`'s own parked continuation, its
+/// resume-to-completion, and its settled value are proven untouched by any
+/// of `r1`'s cancellation, reset, or eventual `close_realm`.
+#[test]
+fn two_realms_share_one_machine_cancel_reset_close_independently_of_each_other() {
+    let fixture = FreerResumeFixture::load();
+    let prepared = parse_program(
+        FREER_RESUME_ARTIFACT,
+        &requirements(),
+        DecodeLimits::default(),
+    )
+    .expect("freer-resume artifact parses");
+    let linked = link_program(prepared, &MachineImports::default())
+        .expect("freer-resume artifact is closed and admits with no imports");
+    let program = CompiledProgram::compile(&linked, TopSlotBase::ZERO)
+        .expect("freer-resume artifact compiles");
+    let top_slots = program.top_slot_count();
+    let (mut machine, program_id) = PreparedMachine::new(
+        program,
+        PreparedMachineOptions {
+            nursery_bytes: 4096,
+            top_slots,
+        },
+    )
+    .expect("freer-resume program installs");
+
+    let call_options = PreparedCallOptions {
+        observation_budget: 0,
+        collect_before_observation: true,
+    };
+
+    let r1 = RealmId::fresh();
+    let r2 = RealmId::fresh();
+
+    // Park one continuation per realm on the SAME installed program: run
+    // `program` to its first suspension once tagged r1, once tagged r2.
+    // `collect_before_observation: true` on every call below (including
+    // both of these) forces a moving collection between the two runs and
+    // at every following step, the same "collection between" guarantee
+    // `parked_continuations_resume_out_of_order_with_a_collection_between`
+    // relies on for two parked continuations within one realm.
+    let first_r1 = machine
+        .run_entry_retained(
+            program_id,
+            fixture.program_top.binding.id,
+            &[],
+            call_options,
+            r1,
+        )
+        .expect("r1's `program` run suspends on its first Ask");
+    let mut first_r1_values = first_r1.values.into_iter();
+    let Some(PreparedResult::Managed(outer_r1)) = first_r1_values.next() else {
+        panic!("`program` must return one managed `Eff` outer value");
+    };
+    assert!(first_r1_values.next().is_none());
+
+    let first_r2 = machine
+        .run_entry_retained(
+            program_id,
+            fixture.program_top.binding.id,
+            &[],
+            call_options,
+            r2,
+        )
+        .expect("r2's `program` run suspends on its first Ask");
+    let mut first_r2_values = first_r2.values.into_iter();
+    let Some(PreparedResult::Managed(outer_r2)) = first_r2_values.next() else {
+        panic!("`program` must return one managed `Eff` outer value");
+    };
+    assert!(first_r2_values.next().is_none());
+    assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+
+    // Split r1's parked suspension into its own union/k -- k1 is now parked
+    // and its Ask answer (n1) already forced, exactly the state
+    // `cancellation_before_commit_leaves_a_parked_k_valid_for_retry` reaches
+    // before it sets its own cancel flag.
+    let PreparedOuterCodegen::Constructor {
+        identity: id_r1,
+        fields: mut fields_r1,
+    } = machine
+        .inspect_outer(outer_r1, r1)
+        .expect("r1's suspended Eff value inspects");
+    assert_eq!(id_r1, fixture.e_id);
+    assert_eq!(fields_r1.len(), 2);
+    let union_r1 = take_managed_result(&mut fields_r1, 0);
+    let k1 = take_managed_result(&mut fields_r1, 1);
+    assert!(machine.release(outer_r1));
+
+    let PreparedOuterCodegen::Constructor {
+        identity: union_id_r1,
+        fields: mut union_fields_r1,
+    } = machine
+        .inspect_outer(union_r1, r1)
+        .expect("r1's Union inspects");
+    assert_eq!(union_id_r1, fixture.union_id);
+    let payload_r1 = take_managed_result(&mut union_fields_r1, 1);
+    assert!(machine.release(union_r1));
+
+    let ask_r1 = machine
+        .run_entry_retained(
+            program_id,
+            fixture.ask_argument_top.binding.id,
+            &[CodegenPreparedInput::Managed(payload_r1)],
+            call_options,
+            r1,
+        )
+        .expect("askArgument forces r1's Ask request's Int#");
+    let mut ask_r1_values = ask_r1.values.into_iter();
+    let Some(PreparedResult::Scalar(n1)) = ask_r1_values.next() else {
+        panic!("askArgument must return one scalar Int#");
+    };
+    assert!(ask_r1_values.next().is_none());
+    assert!(machine.release(payload_r1));
+
+    // Cancel ONLY r1, and only now -- after k1 is already parked. r2's own
+    // cancel flag (never requested) stays clear.
+    machine.realm_cancel_handle(r1).cancel();
+
+    let cancelled = machine
+        .run_entry_retained(
+            program_id,
+            fixture.resume_int_top.binding.id,
+            &[
+                CodegenPreparedInput::Managed(k1),
+                CodegenPreparedInput::Scalar(n1),
+            ],
+            call_options,
+            r1,
+        )
+        .expect_err(
+            "r1's cancel flag, set before this call starts, must still be caught by \
+             resumeInt's own entry safepoint, not skip execution",
+        );
+    assert!(matches!(
+        &cancelled,
+        ExecutionError::Runtime(failure)
+            if failure.cause == RuntimeError::Cancelled
+                && failure.disposition == MachineDisposition::Reusable
+    ));
+    assert_eq!(
+        machine.disposition(),
+        MachineDisposition::Reusable,
+        "a cancelled call alone must never poison the machine"
+    );
+
+    // `MachineState::last_failure` is a machine-wide "first cause" latch,
+    // cleared only at the START of the next entry call
+    // (`begin_prepared_call`, `tidepool-codegen/src/machine_state.rs`) --
+    // NOT by `inspect_outer`, which never begins a call. So the very next
+    // machine call after the cancelled `resumeInt` above must itself be an
+    // entry call, not an observation, or it would spuriously read back the
+    // stale `Cancelled` failure the cancelled call recorded (a real
+    // engine-level latch, not a bug in this test's realm scoping: the latch
+    // is machine-wide, not realm-scoped, and `close_realm`/`reset` do not
+    // touch it). Reset r1 and retry with the very same `k1`/`n1` here,
+    // immediately, before either realm is inspected again: the retry
+    // succeeds (proving `k1` was never consumed by the cancelled call, the
+    // same proof `cancellation_before_commit_leaves_a_parked_k_valid_for_retry`
+    // relies on) and its own `begin_prepared_call` clears the stale latch
+    // for every call that follows, on either realm.
+    machine.realm_cancel_handle(r1).reset();
+    let resumed_r1 = machine
+        .run_entry_retained(
+            program_id,
+            fixture.resume_int_top.binding.id,
+            &[
+                CodegenPreparedInput::Managed(k1),
+                CodegenPreparedInput::Scalar(n1),
+            ],
+            call_options,
+            r1,
+        )
+        .expect("k1 remains valid after a cancellation that committed nothing, and now proceeds");
+    let mut resumed_r1_values = resumed_r1.values.into_iter();
+    let Some(PreparedResult::Managed(next_outer_r1)) = resumed_r1_values.next() else {
+        panic!("resumeInt must return one managed `Eff` outer value");
+    };
+    assert!(resumed_r1_values.next().is_none());
+
+    // Drive r1 the rest of the way (program's second Ask still remains) to
+    // its own settled `Val`.
+    let (value_r1, outer_r1_final) = drive_direct_to_val(
+        &mut machine,
+        program_id,
+        call_options,
+        &fixture,
+        r1,
+        next_outer_r1,
+    );
+    assert_eq!(value_r1, expected_program_value());
+    // r1's own settled cell is fully drained now: release it immediately,
+    // so the only handle left under r1 is k1 itself, never explicitly
+    // released above.
+    assert!(machine.release(outer_r1_final));
+    assert_eq!(
+        machine.disposition(),
+        MachineDisposition::Reusable,
+        "r1's cancel/reset/resume history alone must never poison the machine"
+    );
+
+    // r2 was wholly unaffected by any of r1's cancel/reset/resume history
+    // above: drive it all the way to its own settled `Val` now, keeping
+    // that settled cell's handle alive (not released yet) so it can be
+    // re-checked after r1's close_realm below.
+    let (value_r2, outer_r2_final) =
+        drive_direct_to_val(&mut machine, program_id, call_options, &fixture, r2, outer_r2);
+    assert_eq!(
+        value_r2, value_r1,
+        "r1 and r2 run the same deterministic computation from the same fixture"
+    );
+
+    // SCOPE EXIT: close r1. k1 is the only handle this test left live under
+    // r1 (every other r1 root above was released as soon as it was
+    // consumed), so close_realm must release exactly one handle. Frames are
+    // always 0 for this engine: `PreparedMachine::close_realm`'s own doc
+    // comment (`tidepool-codegen/src/prepared_program/machine.rs`) says the
+    // prepared engine never parks a continuation in the frame-ledger sense,
+    // so `frames_closed` cannot be anything but 0 here or for any prepared
+    // program.
+    let (frames_closed, handles_closed) = machine.close_realm(r1);
+    assert_eq!(
+        (frames_closed, handles_closed),
+        (0, 1),
+        "closing r1 must release exactly k1 -- the one r1 handle this test left live"
+    );
+
+    // r2's own settled cell is untouched by r1's close_realm: it still
+    // resolves through r2, exactly as before.
+    let PreparedOuterCodegen::Constructor {
+        identity: id_check,
+        fields: mut check_fields,
+    } = machine
+        .inspect_outer(outer_r2_final, r2)
+        .expect("r2's settled Val cell still resolves through its own realm after r1's close");
+    assert_eq!(id_check, fixture.val_id);
+    assert_eq!(check_fields.len(), 1);
+    let boxed_r2 = take_managed_result(&mut check_fields, 0);
+
+    // Idempotent: closing an already-closed (or never-populated) realm
+    // releases nothing.
+    assert_eq!(machine.close_realm(r1), (0, 0));
+
+    // Clean up r2's own remaining handles and confirm nothing leaked
+    // anywhere on the machine.
+    assert!(machine.release(boxed_r2));
+    assert!(machine.release(outer_r2_final));
+    assert_eq!(
+        machine.handle_count(),
+        0,
+        "every handle either realm produced has been released or closed"
+    );
     assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 }
 
