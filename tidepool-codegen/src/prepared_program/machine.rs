@@ -19,7 +19,7 @@ use crate::machine_state::{MachineDisposition, MachineState};
 use crate::old_space::OldSpace;
 use crate::prepared_control::CallStatus;
 use crate::resource_ledger::RootHandleLedger;
-use crate::suspension::ValueHandle;
+use crate::suspension::{RealmId, ValueHandle};
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -242,6 +242,208 @@ impl<'code> PreparedMachine<'code> {
         };
         self.machine.deregister_persistent_root(entry.slot.addr());
         true
+    }
+
+    /// Execute with representation-checked values and retain every managed
+    /// result before its temporary adapter storage can disappear.
+    pub fn run_entry_retained(
+        &mut self,
+        entry: ValueId,
+        arguments: &[PreparedInput],
+        options: PreparedCallOptions,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<PreparedResultBatch, ExecutionError> {
+        let (adapter, reps, result_contract, result_layout) = {
+            let compiled = self
+                .program
+                .get()
+                .entries
+                .get(&entry)
+                .ok_or(ExecutionError::MissingEntry(entry))?;
+            (
+                compiled.adapter,
+                compiled.abi.physical_arguments().to_vec(),
+                compiled.abi.semantic_results().clone(),
+                compiled.abi.result_layout().clone(),
+            )
+        };
+        if arguments.len() != reps.len() {
+            return Err(ExecutionError::Arguments {
+                expected: reps.len(),
+                actual: arguments.len(),
+            });
+        }
+        let argument_area = RootWords::new(arguments.len())?;
+        let mut managed_arguments = Vec::new();
+        for (index, (argument, expected)) in arguments.iter().zip(&reps).enumerate() {
+            let word = match (argument, expected) {
+                (PreparedInput::Scalar(word), actual)
+                    if !matches!(actual, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) =>
+                {
+                    *word
+                }
+                (PreparedInput::Managed(handle), actual)
+                    if *actual == handle.rep
+                        && matches!(actual, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) =>
+                {
+                    let entry = self
+                        .handles
+                        .get(handle.raw)
+                        .ok_or(ExecutionError::UnknownPreparedHandle)?;
+                    let word = unsafe { entry.slot.current() } as usize as u64;
+                    if word == 0 {
+                        return Err(ExecutionError::UnknownPreparedHandle);
+                    }
+                    managed_arguments.push(index);
+                    word
+                }
+                (PreparedInput::Managed(handle), actual) => {
+                    return Err(ExecutionError::ArgumentRepresentation {
+                        index,
+                        expected: *actual,
+                        actual: handle.rep,
+                    });
+                }
+                (PreparedInput::Scalar(_), actual) => {
+                    return Err(ExecutionError::ArgumentRepresentation {
+                        index,
+                        expected: *actual,
+                        actual: RuntimeRep::Word(64),
+                    });
+                }
+            };
+            argument_area.write(index, word)?;
+        }
+        let argument_mark = self.machine.rust_roots_len();
+        for index in managed_arguments {
+            let slot = unsafe { argument_area.as_mut_ptr().add(index).cast::<*mut u8>() };
+            self.machine.register_rust_root(slot);
+        }
+        let _arguments = TemporaryRoots {
+            machine: &self.machine,
+            mark: argument_mark,
+        };
+        let max_native_frame = self.program.get().pipeline.native_frame_maximum();
+        let reserve = max_native_frame
+            .checked_mul(2)
+            .ok_or_else(|| runtime_error_without_machine(RuntimeError::StackOverflow))?;
+        let bounds = NativeStackBounds::current().map_err(runtime_error_without_machine)?;
+        bounds
+            .ensure_current_frame_reserve(reserve)
+            .map_err(runtime_error_without_machine)?;
+        self.vmctx.prepared_stack_limit = bounds
+            .limit_with_frame_reserve(max_native_frame)
+            .map_err(runtime_error_without_machine)?;
+        self.machine
+            .begin_prepared_call()
+            .map_err(ExecutionError::Runtime)?;
+        self.machine.set_cancel_flag(cancel);
+        let _cancel = CancelScope(&self.machine);
+        let result_words =
+            (result_layout.payload_size() as usize).div_ceil(std::mem::size_of::<u64>());
+        let results = try_root_words(result_words.max(1))?;
+        let collections_before = self.machine.gc_generation();
+        let pointer = self.program.get().pipeline.get_function_ptr(adapter);
+        let raw = {
+            let _scope = OldSpaceScope::new(&self.machine, &self.old_space)?;
+            unsafe {
+                let adapter: extern "C" fn(*mut VMContext, *mut u64, *const u64) -> i32 =
+                    std::mem::transmute(pointer);
+                adapter(
+                    &mut self.vmctx,
+                    results.as_mut_ptr(),
+                    argument_area.as_mut_ptr(),
+                )
+            }
+        };
+        let status = CallStatus::from_raw(i64::from(raw))
+            .map_err(|_| runtime_error(&self.machine, RuntimeError::BadPointer))?;
+        if status != CallStatus::Success
+            || self.machine.prepared_call_status() != CallStatus::Success
+        {
+            return Err(runtime_error_for_status(&self.machine, status));
+        }
+        let result_reps = result_contract
+            .returned_reps()
+            .ok_or_else(|| runtime_error(&self.machine, RuntimeError::NoSuccessReturned))?;
+        let mark = self.machine.rust_roots_len();
+        register_result_roots(&self.machine, &results, &result_layout);
+        let _results = TemporaryRoots {
+            machine: &self.machine,
+            mark,
+        };
+        if options.collect_before_observation {
+            Self::collect_on(&self.machine, &mut self.vmctx, &self.old_space, 0)?;
+        }
+        let mut slots = Vec::new();
+        let mut output = Vec::new();
+        for (logical, rep) in result_reps.iter().copied().enumerate() {
+            let Some(stored) = result_layout
+                .logical_to_stored()
+                .get(logical)
+                .copied()
+                .flatten()
+            else {
+                output.push(PreparedResult::Void);
+                continue;
+            };
+            let field = &result_layout.fields()[stored as usize];
+            let address = unsafe {
+                results
+                    .as_mut_ptr()
+                    .cast::<u8>()
+                    .add(field.offset() as usize)
+            };
+            if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
+                slots.push(address.cast::<*mut u8>());
+                output.push(PreparedResult::Void);
+            } else {
+                let mut bytes = [0_u8; 8];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        address,
+                        bytes.as_mut_ptr(),
+                        field.size() as usize,
+                    )
+                };
+                output.push(PreparedResult::Scalar(u64::from_ne_bytes(bytes)));
+            }
+        }
+        if !slots.is_empty() {
+            if unsafe { self.machine.prepared_old_space() }.is_some() {
+                return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+            }
+            // Promotion mutates OldSpace, so its admission pointer is scoped
+            // manually rather than held through an immutable Rust borrow.
+            unsafe { self.machine.install_prepared_old_space(&self.old_space) };
+            let retained = unsafe {
+                self.old_space.retain_prepared(
+                    &self.machine,
+                    &mut self.vmctx,
+                    &slots,
+                    &self.program.get().descriptors,
+                )
+            };
+            self.machine.clear_prepared_old_space();
+            let roots = retained.map_err(|cause| runtime_error(&self.machine, cause))?;
+            let mut roots = roots.into_iter();
+            for (logical, rep) in result_reps.iter().copied().enumerate() {
+                if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
+                    let raw = self.handles.insert(
+                        roots.next().expect("one retained root per managed result"),
+                        RealmId::ROOT,
+                    );
+                    output[logical] = PreparedResult::Managed(PreparedHandle { raw, rep });
+                }
+            }
+        }
+        Ok(PreparedResultBatch {
+            values: output,
+            collections: self
+                .machine
+                .gc_generation()
+                .saturating_sub(collections_before),
+        })
     }
 
     #[cfg(test)]
@@ -679,5 +881,27 @@ mod tests {
         assert_eq!(state.persistent_roots_count(), 0);
         assert_eq!(state.rust_roots_len(), 0);
         assert!(state.old_space_arena_ranges().is_empty());
+    }
+
+    #[test]
+    fn retained_managed_result_survives_collection_and_releases() {
+        let mut machine = machine();
+        let batch = machine
+            .run_entry_retained(
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: RunOptions::default().observation_budget,
+                    collect_before_observation: true,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("managed result is retained before frame cleanup");
+        assert!(batch.collections >= 1);
+        let [PreparedResult::Managed(handle)] = batch.values.as_slice() else {
+            panic!("CAF must return one retained managed value");
+        };
+        assert!(machine.release(*handle));
+        assert!(!machine.release(*handle));
     }
 }

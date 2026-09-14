@@ -71,7 +71,9 @@ impl PreparedRuntimeError {
             Self::Run(error) => match error {
                 ExecutionError::MissingEntry(_)
                 | ExecutionError::Unsupported(_)
-                | ExecutionError::Arguments { .. } => PreparedFailureKind::Rejected,
+                | ExecutionError::Arguments { .. }
+                | ExecutionError::ArgumentRepresentation { .. }
+                | ExecutionError::UnknownPreparedHandle => PreparedFailureKind::Rejected,
                 ExecutionError::Runtime(failure) => {
                     if failure.disposition == MachineDisposition::Unavailable {
                         PreparedFailureKind::Integrity
