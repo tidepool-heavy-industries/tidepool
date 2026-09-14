@@ -2,6 +2,7 @@
 //! remain owned by MachineState. No payload is allocated across a collecting call
 //! until its wrapper has been reserved and its header initialized.
 
+use super::primitives::returns_exact;
 use cranelift_codegen::ir::{self, types, AbiParam, InstBuilder, MemFlags, Value};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{FuncId, Linkage, Module};
@@ -11,7 +12,7 @@ use tidepool_heap::{
     external_storage::{ExternalStorageKind, ExternalStorageValidationError},
     managed_reference::untag,
 };
-use tidepool_repr::execution_schema::{OperationIdentity, ResultContract, RuntimeRep, Signature};
+use tidepool_repr::execution_schema::{OperationIdentity, RuntimeRep, Signature};
 
 /// Only exact pinned-GHC signatures are admitted. Void remains in the logical
 /// signature and disappears only at the native argument boundary.
@@ -33,6 +34,7 @@ pub(super) enum ArrayOperation {
 #[cfg(test)]
 #[test]
 fn w5_bulk_mutable_copy_signature() {
+    use tidepool_repr::execution_schema::ResultContract;
     use RuntimeRep::*;
     let signature = Signature {
         arguments: vec![UnliftedRef, Int(64), UnliftedRef, Int(64), Int(64), Void],
@@ -54,43 +56,43 @@ pub(super) fn recognize(
     match name.as_str() {
         "newSmallArray#" | "newArray#"
             if signature.arguments == [Int(64), LiftedRef, Void]
-                && signature.results == ResultContract::Returns(vec![UnliftedRef]) =>
+                && returns_exact(signature, &[UnliftedRef]) =>
         {
             Some(ArrayOperation::NewBoxed)
         }
         "readSmallArray#" | "readArray#"
             if signature.arguments == [UnliftedRef, Int(64), Void]
-                && signature.results == ResultContract::Returns(vec![LiftedRef]) =>
+                && returns_exact(signature, &[LiftedRef]) =>
         {
             Some(ArrayOperation::ReadBoxed)
         }
         "indexSmallArray#" | "indexArray#"
             if signature.arguments == [UnliftedRef, Int(64)]
-                && signature.results == ResultContract::Returns(vec![LiftedRef]) =>
+                && returns_exact(signature, &[LiftedRef]) =>
         {
             Some(ArrayOperation::ReadBoxed)
         }
         "writeSmallArray#" | "writeArray#"
             if signature.arguments == [UnliftedRef, Int(64), LiftedRef, Void]
-                && signature.results == ResultContract::Returns(vec![]) =>
+                && returns_exact(signature, &[]) =>
         {
             Some(ArrayOperation::WriteBoxed)
         }
         "newMutVar#"
             if signature.arguments == [LiftedRef, Void]
-                && signature.results == ResultContract::Returns(vec![UnliftedRef]) =>
+                && returns_exact(signature, &[UnliftedRef]) =>
         {
             Some(ArrayOperation::NewMutVar)
         }
         "readMutVar#"
             if signature.arguments == [UnliftedRef, Void]
-                && signature.results == ResultContract::Returns(vec![LiftedRef]) =>
+                && returns_exact(signature, &[LiftedRef]) =>
         {
             Some(ArrayOperation::ReadMutVar)
         }
         "writeMutVar#"
             if signature.arguments == [UnliftedRef, LiftedRef, Void]
-                && signature.results == ResultContract::Returns(vec![]) =>
+                && returns_exact(signature, &[]) =>
         {
             Some(ArrayOperation::WriteMutVar)
         }
@@ -98,33 +100,32 @@ pub(super) fn recognize(
         | "sizeofSmallMutableArray#"
         | "sizeofArray#"
         | "sizeofMutableArray#"
-            if signature.arguments == [UnliftedRef]
-                && signature.results == ResultContract::Returns(vec![Int(64)]) =>
+            if signature.arguments == [UnliftedRef] && returns_exact(signature, &[Int(64)]) =>
         {
             Some(ArrayOperation::SizeofBoxed)
         }
         "unsafeFreezeSmallArray#" | "unsafeFreezeArray#"
             if signature.arguments == [UnliftedRef, Void]
-                && signature.results == ResultContract::Returns(vec![UnliftedRef]) =>
+                && returns_exact(signature, &[UnliftedRef]) =>
         {
             Some(ArrayOperation::UnsafeFreezeBoxed)
         }
         "shrinkSmallMutableArray#"
             if signature.arguments == [UnliftedRef, Int(64), Void]
-                && signature.results == ResultContract::Returns(vec![]) =>
+                && returns_exact(signature, &[]) =>
         {
             Some(ArrayOperation::ShrinkSmallBoxed)
         }
         "copySmallMutableArray#" | "copyMutableArray#"
             if signature.arguments
                 == [UnliftedRef, Int(64), UnliftedRef, Int(64), Int(64), Void]
-                && signature.results == ResultContract::Returns(vec![]) =>
+                && returns_exact(signature, &[]) =>
         {
             Some(ArrayOperation::CopyBoxed)
         }
         "casSmallArray#" | "casArray#"
             if signature.arguments == [UnliftedRef, Int(64), LiftedRef, LiftedRef, Void]
-                && signature.results == ResultContract::Returns(vec![Int(64), LiftedRef]) =>
+                && returns_exact(signature, &[Int(64), LiftedRef]) =>
         {
             Some(ArrayOperation::CasBoxed)
         }

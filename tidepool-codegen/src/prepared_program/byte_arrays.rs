@@ -1,6 +1,7 @@
 //! Descriptor-backed byte arrays. Host calls do not collect; wrappers are
 //! reserved and initialized before allocating external bytes.
 
+use super::primitives::returns_exact;
 use crate::{host_fns::RuntimeError, prepared_control::CallStatus};
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
 use cranelift_frontend::FunctionBuilder;
@@ -9,7 +10,7 @@ use tidepool_heap::{
     execution_descriptor::ObjectDescriptor,
     external_storage::{ExternalStorageKind, ExternalStorageValidationError},
 };
-use tidepool_repr::execution_schema::{OperationIdentity, ResultContract, RuntimeRep, Signature};
+use tidepool_repr::execution_schema::{OperationIdentity, RuntimeRep, Signature};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Element {
@@ -55,128 +56,126 @@ pub(super) fn recognize(
     match name.as_str() {
         "newByteArray#"
             if signature.arguments == [Int(64), Void]
-                && signature.results == ResultContract::Returns(vec![UnliftedRef]) =>
+                && returns_exact(signature, &[UnliftedRef]) =>
         {
             Some(ByteOperation::New)
         }
         "newPinnedByteArray#"
             if signature.arguments == [Int(64), Void]
-                && signature.results == ResultContract::Returns(vec![UnliftedRef]) =>
+                && returns_exact(signature, &[UnliftedRef]) =>
         {
             Some(ByteOperation::New)
         }
         "newAlignedPinnedByteArray#"
             if signature.arguments == [Int(64), Int(64), Void]
-                && signature.results == ResultContract::Returns(vec![UnliftedRef]) =>
+                && returns_exact(signature, &[UnliftedRef]) =>
         {
             Some(ByteOperation::NewAligned)
         }
         "byteArrayContents#" | "mutableByteArrayContents#"
-            if signature.arguments == [UnliftedRef]
-                && signature.results == ResultContract::Returns(vec![Address]) =>
+            if signature.arguments == [UnliftedRef] && returns_exact(signature, &[Address]) =>
         {
             Some(ByteOperation::Contents)
         }
         "resizeMutableByteArray#"
             if signature.arguments == [UnliftedRef, Int(64), Void]
-                && signature.results == ResultContract::Returns(vec![UnliftedRef]) =>
+                && returns_exact(signature, &[UnliftedRef]) =>
         {
             Some(ByteOperation::Resize)
         }
         "unsafeFreezeByteArray#"
             if signature.arguments == [UnliftedRef, Void]
-                && signature.results == ResultContract::Returns(vec![UnliftedRef]) =>
+                && returns_exact(signature, &[UnliftedRef]) =>
         {
             Some(ByteOperation::Freeze)
         }
         "sizeofByteArray#"
-            if signature.arguments == [UnliftedRef]
-                && signature.results == ResultContract::Returns(vec![Int(64)]) =>
+            if signature.arguments == [UnliftedRef] && returns_exact(signature, &[Int(64)]) =>
         {
             Some(ByteOperation::Size)
         }
         "getSizeofMutableByteArray#"
             if signature.arguments == [UnliftedRef, Void]
-                && signature.results == ResultContract::Returns(vec![Int(64)]) =>
+                && returns_exact(signature, &[Int(64)]) =>
         {
             Some(ByteOperation::Size)
         }
         "shrinkMutableByteArray#"
             if signature.arguments == [UnliftedRef, Int(64), Void]
-                && signature.results == ResultContract::Returns(vec![]) =>
+                && returns_exact(signature, &[]) =>
         {
             Some(ByteOperation::Shrink)
         }
         "copyByteArray#"
             if signature.arguments
                 == [UnliftedRef, Int(64), UnliftedRef, Int(64), Int(64), Void]
-                && signature.results == ResultContract::Returns(vec![]) =>
+                && returns_exact(signature, &[]) =>
         {
             Some(ByteOperation::Copy)
         }
         "compareByteArrays#"
             if signature.arguments == [UnliftedRef, Int(64), UnliftedRef, Int(64), Int(64)]
-                && signature.results == ResultContract::Returns(vec![Int(64)]) =>
+                && returns_exact(signature, &[Int(64)]) =>
         {
             Some(ByteOperation::Compare)
         }
         "readWord8Array#"
             if signature.arguments == [UnliftedRef, Int(64), Void]
-                && signature.results == ResultContract::Returns(vec![Word(8)]) =>
+                && returns_exact(signature, &[Word(8)]) =>
         {
             Some(ByteOperation::Read(Element::Word8))
         }
         "indexWord8Array#"
             if signature.arguments == [UnliftedRef, Int(64)]
-                && signature.results == ResultContract::Returns(vec![Word(8)]) =>
+                && returns_exact(signature, &[Word(8)]) =>
         {
             Some(ByteOperation::Read(Element::Word8))
         }
         "writeWord8Array#"
             if signature.arguments == [UnliftedRef, Int(64), Word(8), Void]
-                && signature.results == ResultContract::Returns(vec![]) =>
+                && returns_exact(signature, &[]) =>
         {
             Some(ByteOperation::Write(Element::Word8))
         }
         "readWordArray#"
             if signature.arguments == [UnliftedRef, Int(64), Void]
-                && signature.results == ResultContract::Returns(vec![Word(64)]) =>
+                && returns_exact(signature, &[Word(64)]) =>
         {
             Some(ByteOperation::Read(Element::Word64))
         }
         "indexWordArray#"
             if signature.arguments == [UnliftedRef, Int(64)]
-                && signature.results == ResultContract::Returns(vec![Word(64)]) =>
+                && returns_exact(signature, &[Word(64)]) =>
         {
             Some(ByteOperation::Read(Element::Word64))
         }
         "indexAddrArray#"
             if signature.arguments == [UnliftedRef, Int(64)]
-                && signature.results == ResultContract::Returns(vec![Address]) =>
+                && returns_exact(signature, &[Address]) =>
         {
             Some(ByteOperation::Read(Element::Address))
         }
         "writeWordArray#"
             if signature.arguments == [UnliftedRef, Int(64), Word(64), Void]
-                && signature.results == ResultContract::Returns(vec![]) =>
+                && returns_exact(signature, &[]) =>
         {
             Some(ByteOperation::Write(Element::Word64))
         }
         "readIntArray#"
             if signature.arguments == [UnliftedRef, Int(64), Void]
-                && signature.results == ResultContract::Returns(vec![Int(64)]) =>
+                && returns_exact(signature, &[Int(64)]) =>
         {
             Some(ByteOperation::Read(Element::Int64))
         }
         "indexIntArray#"
             if signature.arguments == [UnliftedRef, Int(64)]
-                && signature.results == ResultContract::Returns(vec![Int(64)]) =>
+                && returns_exact(signature, &[Int(64)]) =>
         {
             Some(ByteOperation::Read(Element::Int64))
         }
         "writeIntArray#"
             if signature.arguments == [UnliftedRef, Int(64), Int(64), Void]
-                && signature.results == ResultContract::Returns(vec![]) =>
+                && returns_exact(signature, &[]) =>
         {
             Some(ByteOperation::Write(Element::Int64))
         }

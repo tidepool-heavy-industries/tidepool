@@ -4,10 +4,11 @@
 
 use std::sync::Arc;
 
+use super::primitives::returns_exact;
 use crate::{host_fns::RuntimeError, prepared_control::CallStatus};
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
 use cranelift_frontend::FunctionBuilder;
-use tidepool_repr::execution_schema::{OperationIdentity, ResultContract, RuntimeRep, Signature};
+use tidepool_repr::execution_schema::{OperationIdentity, RuntimeRep, Signature};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AddressOperation {
@@ -31,49 +32,49 @@ pub(super) fn recognize(
     match name.as_str() {
         "readWord8OffAddr#"
             if signature.arguments == [Address, Int(64), Void]
-                && signature.results == ResultContract::Returns(vec![Word(8)]) =>
+                && returns_exact(signature, &[Word(8)]) =>
         {
             Some(AddressOperation::ReadWord8)
         }
         "indexWord8OffAddr#"
             if signature.arguments == [Address, Int(64)]
-                && signature.results == ResultContract::Returns(vec![Word(8)]) =>
+                && returns_exact(signature, &[Word(8)]) =>
         {
             Some(AddressOperation::ReadWord8)
         }
         "readInt8OffAddr#"
             if signature.arguments == [Address, Int(64), Void]
-                && signature.results == ResultContract::Returns(vec![Int(8)]) =>
+                && returns_exact(signature, &[Int(8)]) =>
         {
             Some(AddressOperation::ReadInt8)
         }
         "readWord32OffAddr#"
             if signature.arguments == [Address, Int(64), Void]
-                && signature.results == ResultContract::Returns(vec![Word(32)]) =>
+                && returns_exact(signature, &[Word(32)]) =>
         {
             Some(AddressOperation::ReadWord32)
         }
         "readAddrOffAddr#"
             if signature.arguments == [Address, Int(64), Void]
-                && signature.results == ResultContract::Returns(vec![Address]) =>
+                && returns_exact(signature, &[Address]) =>
         {
             Some(AddressOperation::ReadAddress)
         }
         "readWideCharOffAddr#"
             if signature.arguments == [Address, Int(64), Void]
-                && signature.results == ResultContract::Returns(vec![Word(64)]) =>
+                && returns_exact(signature, &[Word(64)]) =>
         {
             Some(AddressOperation::ReadWideChar)
         }
         "writeWord8OffAddr#"
             if signature.arguments == [Address, Int(64), Word(8), Void]
-                && signature.results == ResultContract::Returns(vec![]) =>
+                && returns_exact(signature, &[]) =>
         {
             Some(AddressOperation::WriteWord8)
         }
         "writeWideCharOffAddr#"
             if signature.arguments == [Address, Int(64), Word(64), Void]
-                && signature.results == ResultContract::Returns(vec![]) =>
+                && returns_exact(signature, &[]) =>
         {
             Some(AddressOperation::WriteWideChar)
         }
@@ -493,6 +494,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use tidepool_heap::external_storage::ExternalStorageKind;
+    use tidepool_repr::execution_schema::ResultContract;
 
     fn vmctx(machine: &crate::machine_state::MachineState) -> crate::context::VMContext {
         let mut vmctx = crate::context::VMContext::new(
