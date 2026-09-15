@@ -460,15 +460,23 @@ assertRaiseContracts root = do
             other -> error ("raisePrimitive has non-executable RHS: " ++ show other)
       assert (entryResult == NoSuccess)
         ("zero-argument bottoming thunk entry was not NoSuccess: " ++ show entryResult)
-      case rhs of
-        Function _ _ _ (Operation operation _) -> assert
+      -- The contract is that nothing can follow the raise: the body demands a
+      -- NoSuccess operation, either directly or as the scrutinee of a case
+      -- with no alternatives (the shape projection may give a demanded raise).
+      let nonReturningOperation body = case body of
+            Operation operation _ -> Just operation
+            Case scrutinee _ _ _ [] -> nonReturningOperation scrutinee
+            _ -> Nothing
+          body = case rhs of
+            Function _ _ _ expression -> Just expression
+            Thunk _ _ _ expression -> Just expression
+            _ -> Nothing
+      case body >>= nonReturningOperation of
+        Just operation -> assert
           (operationResult operation == NoSuccess)
           "zero-argument bottoming thunk did not retain NoSuccess at its operation"
-        Thunk _ _ _ (Operation operation _) -> assert
-          (operationResult operation == NoSuccess)
-          "zero-argument bottoming thunk did not retain NoSuccess at its operation"
-        other -> ioError (userError
-          ("raisePrimitive was not projected as a direct operation: " ++ show other))
+        Nothing -> ioError (userError
+          ("raisePrimitive does not end in a non-returning operation: " ++ show rhs))
     found -> ioError (userError
       ("expected one raisePrimitive top, got " ++ show (length found)))
   let signatures = programSignatures program
