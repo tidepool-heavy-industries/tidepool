@@ -252,3 +252,21 @@ leaked checkout would look like a slow compile.
   on a missing `TIDEPOOL_INTERACTIVE_CODEX_BIN`: mark it
   `#[ignore = "requires TIDEPOOL_INTERACTIVE_CODEX_BIN (pinned Codex) and tmux"]`,
   matching `tidepool/tests/shoal_namespace_entry.rs:122`.
+
+### Shared constructor enter rows after retirement — yes, with conditions
+Any surviving owner's `prepared_enter` can serve a shared evaluated-constructor
+header: the constructor branch (`entry.rs:130-145`) only compares the header
+with descriptor addresses and returns the reference, with no program-local
+state, and `enter_owned_headers` (`prepared_program.rs:917`) is built from the
+same `enter_evaluated` list, so every registered owner has the compare.
+Conditions for `lifetime-contract-v2.md`: rows share only identical
+descriptor addresses (interner keeps the first); re-point the row to a
+surviving owner before freeing the retiring pipeline; "any owner" holds only
+for evaluated rows (thunk rows run one program's body) — store a kind flag;
+the ownerless-but-live state needs a machine-owned evaluated-identity enter
+stub or the enter row removed (non-declaring programs then hit
+`BadThunkState`). Rows must store the owner set plus per-owner code (or a
+`ProgramId` lookup). Also check: `owns_prepared_entry` returns true for
+constructor headers, so a call miss on a constructor is a reusable
+`UnresolvedCallee` — contrary to its doc comment.
+
