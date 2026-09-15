@@ -197,8 +197,10 @@ Step 1 evidence at `413f8cea4` (G1 committed; recorded 2026-09-15):
   G1 adds 12-21% compile time; dispatcher emission is 35-48% of the total,
   so header chains do not dominate compilation. Emitted dispatcher code is
   large relative to the artifact and has no pre-G1 byte baseline. Owner
-  adapters specialized per known header stay on this step's list before
-  default routing, not as a prerequisite for connecting the first notebook turn.
+  adapters specialized per known header are not a prerequisite for any step.
+  Measure representative session growth first (code bytes and compile time per
+  turn across a long notebook session); specialize only if that shows
+  resource pressure.
 
 - Lane V follow-up checks on the G1 tree: full codegen suite 849 passed, 3
   skipped; `tidepool-testing` 32 passed; two new G1 gap tests pass (an owned
@@ -219,6 +221,62 @@ Step 1 evidence at `413f8cea4` (G1 committed; recorded 2026-09-15):
   binary. `selectPreparedTarget` walked retained bodies for reachability
   while recovery skipped them; both now use `skippedFromRecovery`, and the
   Haskell test requires that no producer top is recovered.
+
+- Broad gate at `ff73dfde0` (`just verify`, independent steps, nothing else
+  running): lint, suite registration and fixtures passed, and every prepared
+  corpus stage held its floor. Default tier: 2970 run, 2913 passed, 55 failed,
+  2 timed out, 69 skipped (list: the gate log's `FAIL`/`TIMEOUT` lines).
+  Triage by shared cause, not by test:
+  - Stale contract outputs, fixed and verified: a hand-edited generated
+    decoder (`818eb8b5d`) and stale schema pins (`373f19abc`).
+  - Core engine integrity failure (the raw `bash` actor tests): compiled
+    `String#`/`ByteArray#` literals pointed at module data the external-storage
+    ledger never registered, so a tenure's fixup collection reported
+    `Untracked` and latched `BadPointer`. Not Unicode: the ASCII variant
+    failed identically. Fix: literal payloads are ledger-owned byte arrays;
+    the new codegen regression test failed before and passes after, and both
+    raw `bash` tests pass.
+  - Prepared projection rejected text's `_hs_text_measure_off` (five MCP
+    print/capture tests); an unused polymorphic typed-site helper rejected
+    whole modules (two facade tests); `Tidepool.Actor.Record` exports a
+    signature naming the unexported `Message` (two command-job tests).
+  - Loaded-gate hang, not a defect: `stack_safety::test_deep_add_small_stack`
+    passes in the full codegen suite (856 passed) after `76718e6c7`.
+  - Remaining failures, grouped by panic text (read-only triage):
+    likely lifecycle defects after `drainActor`/`awaitExit` (machine
+    `BadPointer` or a zeroed closure in three actor-source/drain tests, an
+    owned child's exit not visible after `replaceActor`, and the hang in
+    `stateful_handler_failure_after_effect_pauses_without_replay_or_closing_mailbox`);
+    stale Haskell fixtures after `request` took an `Assignment` (four tests)
+    and `sendMessage` took an `AgentRef` (one); stale contracts for designed
+    behavior changes (seven tests, including `failed_command_display_*` and
+    `command_presentation_*`, which are not engine bugs); load timeouts
+    hiding two real assertions (`custody_precedes_first_bootstrap_worktree_use_for_two_siblings`,
+    `research_admission_obeys_configured_width_and_consumes_depth`); an
+    ungated live-PTY test. The two command-job timeouts lean load; one needs
+    a solo timed rerun.
+- STG defects found while triaging, not yet fixed:
+  - Typed-site elaboration: both elaborators place the site literal by
+    counting value arguments from the right, so an eta-reduced
+    `Member`-constrained verb gets the literal in its dictionary slot (untyped
+    garbage on the Core path, ill-typed Core on the prepared path), and the
+    prepared elaborator does not strip GHC's `nospec` wrapper. Recognized
+    verbs should be rewritten or rejected, never passed through; one shared
+    classifier should place the literal from the verb's type.
+  - Projection has no result contract for a function whose result
+    representation is chosen by its caller (a pattern-synonym matcher,
+    `$mActorDefinition`, reached from `startActor`/`startActorFork`); it needs
+    a caller-supplied return contract in the schema and machine, not a guessed
+    representation.
+  - `Address` values cannot reach the host (`observe.rs`, `inspect_outer`,
+    `PreparedResult`), which is the one engine gap in the 184 corpus execution
+    failures; the other 183 are harness-driven (function-typed tops run with no
+    arguments, cyclic values, unobserved dictionaries). No corpus result
+    disagreed with its oracle, but 595 executable programs have no expectation.
+  - Cell pins: `Tidepool.Actor.Record` indexes protocols by
+    `Schema api = Rep (api Shape)`, which renders as an unexported synonym or
+    as the generic representation; exporting `Message` fixes only the
+    constructor. Index by the record type (`Message api`).
 
 This is not a green broad gate; the exit criterion above still requires one.
 
@@ -266,6 +324,59 @@ names differ from the notebook contract.
   sanitation separately. Keep request-local state out of reusable memo entries;
   use the existing owner if evidence justifies a narrower reuse contract.
 
+#### Typed-resume contract (proposed, for review before implementation)
+
+Source facts:
+- Site evidence is computed and then dropped. `Tidepool.PreparedSites`
+  yields `YieldSite { site, origin, ordinal, answer, inputs, replyDeclaration }`,
+  whose `SiteType` carries rendered type, defining modules and nominal heads,
+  into `PreparedModule.pmYieldSites`. Nothing encodes it into
+  `.prepared.cbor`; only the Core `asks.json` sidecar carries sites.
+- Answers are typed Haskell values. `Replies` returns polymorphic payloads
+  (`ObserveProgressWith :: Int -> Replies (ProgressState progress)`), so
+  answer construction must follow the site's type evidence.
+- The continuation's representation is uniform. `qApp :: Arrs effs a b -> a -> Eff effs b`
+  receives a lifted `a` for every answer type. A single compiled resume entry
+  therefore serves every site. Validation happens before that call and
+  never relies on native signatures, since distinct types share
+  representations.
+- Host construction has its parts. The machine-wide `DescriptorInterner`
+  maps a constructor's `SymbolIdentity` to its declaration and descriptor,
+  and the declaration's `host_id` is the bridge `DataConId`.
+  `descriptor_bridge::marshal_descriptor_object` validates every field
+  before writing a header. No production path builds prepared objects from
+  the host yet.
+- The Core contract to preserve is `ResumeInput::{Answer, Handle, FramedHandle, Abort}`,
+  bottom rejection before consumption, and the workbench's resume by handle
+  and framed custody.
+
+Decisions:
+1. **Evidence in the artifact.** The prepared schema gains a site table:
+   each site's answer and input nominal heads, plus each constructor's
+   normalized qualified name from `Tidepool.Identity.qualifiedName`, so the
+   module alias table stays in one place. The encoder, decoder and schema
+   version change together, and fixtures regenerate through the canonical
+   owner.
+2. **One resume entry.** A library top applies `qApp` to the retained
+   continuation and the answer. It replaces the per-type `resumeInt` wrapper.
+3. **Host-built answers.** A prepared value builder resolves each bridge
+   `Value` constructor by `host_id` through the interner. It checks the
+   constructor's family against the site's nominal heads and builds
+   iteratively for deep and list answers. On failure it publishes nothing.
+   The same builder supplies the prepared `DataConTable` the workbench's
+   encode and decode sites need.
+4. **Live answers.** An existing handle or framed handle, closures included,
+   passes as a managed argument after realm custody is checked. The
+   continuation is not consumed until construction and custody both succeed.
+5. **One settlement routine.** Initial and resumed completion share one
+   routine: `Val` completes, `E` parks with its site and request.
+
+Acceptance: scalar, record, `Maybe`, `Either`, list and managed answers; every
+production verb answer type; a wrong-family answer and a bottom answer are both
+rejected with the continuation still resumable. The first slice is the
+`FreerResume` fixture resumed through the single entry, then a structured
+answer, then a handle answer.
+
 Exit: a real notebook declares a function, retains and applies a PAP on a later
 turn, performs an authorized effect, parks, allows sibling work, resumes, and
 looks up its result. Repeat through cancellation, rejection after a committed
@@ -291,6 +402,52 @@ it can be implemented alongside step 2 after the lifetime contract is fixed.
   after no live code or root can address its previous generation.
 - Keep failure cleanup metadata-driven after an integrity failure; retain
   native owners until execution has unwound.
+
+#### Lifetime contract (proposed, designed alongside the typed-resume contract)
+
+Source facts:
+- `PreparedMachine::install` bump-claims a contiguous slot range from
+  `claimed_slots` and never returns it. Generated code addresses tops and
+  imports through those slot immediates.
+- Each install pushes its instantiated `StaticRegion` onto `statics` and
+  its descriptors onto `descriptors`. It absorbs constructors into the
+  machine-wide `DescriptorInterner` and extends `descriptor_registry` and
+  the stack-map chain.
+- `MachineState.prepared_callables` maps a header and signature to a code
+  pointer, and `prepared_enters` maps a header to a code pointer. Both are
+  machine-wide, record no owning program, and are cleared only when the
+  machine drops.
+- `ProgramCustody` keeps each compiled pipeline alive for the machine's
+  whole life. `release` and `close_realm` deregister handle roots only.
+
+Decisions:
+1. **Ownership is recorded, not merged.** Every machine-wide entry an
+   install creates carries its `ProgramId`: resolution entries, enter
+   headers, descriptor registry rows, statics, stack-map links and slot
+   ranges. Merged views are indexes over owned rows, so retiring a program
+   removes exactly its rows.
+2. **Roots come from outside.** External roots are bindings, handles,
+   parked continuations and actor placements. From a root, tracing reaches
+   heap objects. An object's descriptor header names its owning program,
+   and that program's code references its imported globals. A program is
+   live only if some live object or live frame reaches it.
+3. **Globals are conditional edges.** A program's top and import slots stay
+   roots only while the program is live. Unreachable program cycles are
+   therefore collectable; reference counting would keep them alive.
+4. **Reclamation at quiescence only.** With no native frame inside the
+   machine, a major collection marks live programs, then retires the
+   unreachable ones in this order: resolution entries, enter headers,
+   descriptor rows and interner entries no live program shares, stack-map
+   links, slot ranges, statics, and finally code.
+5. **Slot reuse by generation.** A freed slot range returns to a free list,
+   and a later install of the same width reuses it. Generated code for a
+   retired program can no longer run, so the old addresses are unreachable.
+
+Acceptance: escaped closures and cross-program PAPs still run after their
+producer's binding and actor retire; repeated install, run, retire and collect
+cycles beyond 4096 cumulative slots keep live residency bounded; counters for
+handles, import and top roots, slots, old and external bytes, and installed
+code owners are reported separately.
 
 Exit: repeated install/run/retire/full-collect cycles beyond the present slot
 budget have bounded live residency. Escaped closures and cross-program PAPs
