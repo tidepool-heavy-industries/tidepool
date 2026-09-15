@@ -21,23 +21,12 @@ printf '  %s\n' "${changed[@]}"
 
 code_changed=0
 haskell_changed=0
-overall_status=0
 declare -A crates=()
 
-# Run one verification step without letting its failure abort the rest of
-# the inner loop. A crate's pre-existing, unrelated debt (e.g. one crate's
-# own clippy backlog) must not hide every other step's result behind it;
-# `just changed`'s exit code still reflects the worst step, and every
-# failure is printed with a stable "==> FAILED:" marker so `just verify`
-# remains the actual pre-review gate, not this best-effort inner loop.
-run_step() {
-  local desc="$1"
-  shift
-  if ! "$@"; then
-    echo "==> FAILED: $desc"
-    overall_status=1
-  fi
-}
+# Steps run independently (scripts/lib-steps.sh): a crate's pre-existing,
+# unrelated debt must not hide every other step's result; the exit code still
+# reflects the worst step, and `just verify` remains the pre-review gate.
+source scripts/lib-steps.sh
 
 mapfile -t workspace_crates < <(cargo metadata --no-deps --format-version 1 \
   | jq -r '.packages[] | select(.source == null) | [.name, .manifest_path] | @tsv')
@@ -78,9 +67,7 @@ fi
 
 if [[ "$code_changed" -eq 1 ]]; then
   resolve_tidepool_extract
-  run_step "cargo fmt --all -- --check" cargo fmt --all -- --check
-  run_step "cargo clippy --workspace --all-targets -- -D warnings" \
-    cargo clippy --workspace --all-targets -- -D warnings
+  run_step "scripts/lint.sh (fmt, clippy)" scripts/lint.sh
   run_step "scripts/test-suite-check.sh" scripts/test-suite-check.sh
   run_step "cargo nextest run" \
     cargo nextest run --no-fail-fast --status-level fail --final-status-level fail

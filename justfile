@@ -10,7 +10,11 @@ default:
 quick:
     {{ nix }} scripts/quick.sh
 
-# Format, lint, and run the default-filter test tier in one shell activation.
+# Formatting check and strict clippy over every target, reporting all errors.
+lint:
+    {{ nix }} scripts/lint.sh
+
+# Lint and the default-filter test tier as independent steps; both always run.
 check:
     {{ nix }} scripts/check.sh
 
@@ -101,5 +105,6 @@ shoal-repl *args:
     test -e "$HOME/dev/shoal-repl/.git" || { echo "missing $HOME/dev/shoal-repl; run shoal new ~/dev/shoal-repl first" >&2; exit 1; }
     {{ shoal_nix }} scripts/shoal-init.sh "$@" --workspace "$HOME/dev/shoal-repl" --model gpt-6-astra --effort medium
 
-# Pre-review gate: checks, suite registration checks, and fixture freshness.
-verify: check suite-check fixtures-check
+# Pre-review gate: check, suite registration, fixtures; all run, all failures reported.
+verify:
+    {{ nix }} scripts/verify.sh
