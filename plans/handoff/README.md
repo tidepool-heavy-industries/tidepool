@@ -46,7 +46,7 @@ this, then `plans/stg-completion.md` (the governing plan), then `CLAUDE.md`.
    `elaboratePreparedSites` (removed only by CorePrep); today such a fully
    applied `runLLMTurn`/`fork`/`finalize` site silently goes out as site 0, and
    `request`/`child`/`receive`/`serve`/`forkMap`/`forkCata` get a false
-   rejection. Fix: one shared classifier (strip `nospec`, classify the whole
+   rejection. Implementation plan: `designs/site-classifier.md`. Fix: one shared classifier (strip `nospec`, classify the whole
    call once, literal index from the verb's type, rewrite or defer-reject,
    delete `vsMisShapeIsError`). Test with open-tail and eta-reduced fixtures.
    Probe evidence: `/home/inanna/.claude/jobs/4940a626/tmp/nospec/rep/` (may be
@@ -140,4 +140,72 @@ replace them with the v2 drafts after peer review.
 
 ## Investigations folded in after handoff
 
-(Filled in as read-only investigators finish.)
+
+### Notification test "expected never-assigned recipient policy" — stale test
+`notification_admission_and_poll_preserve_typed_request_bindings`
+(`tidepool/src/actor_host.rs` ~7227-7240) requires the next deployment after
+`startAgent (readonlyAgent ...)` to be `PolicyInstalled`. `assignment`
+defaults to `NotifyOwner` (`haskell/lib/Tidepool/Agent/Assignment.hs:62`), so
+when the child replies `reevaluate_watches` (`tidepool-actor/src/request.rs`
+~1635-1660) queues a `SettlementNotification` for root, published as
+`SettlementChanged` (`resident_actor.rs` ~847-852) before `PolicyInstalled`;
+`pollResponse` is not a watch, so it does not suppress the notice. The notice
+was added deliberately in bbf724ae1; the assertion predates it (b4fab4757).
+Fix (test only): right after the answer (~7221) receive and assert
+`SettlementChanged` for root, label `"notification-original"`, transition
+`Ready`; keep the `PolicyInstalled` match and make its `_` arm print the event.
+Unverified: whether later parts of the test pass once the notice is drained.
+
+### Extractor prepared turn mode (first unit of the production slice) — map
+- Request: nullary `PreparedTurn` field, tag 39 (`RetainedGeneration` is 38).
+  Rust `tidepool-extract-cmd/src/request.rs` (`enum Field`, setter beside
+  `turn()`, `encode_field`, decoder tag match, CLI rendering or exclusion like
+  `retained_generation_is_absent_from_the_cli_flag_parser`); consider bumping
+  `MAGIC` (`TPREQ007`). Haskell `ExtractRequest.hs` (`RequestField`,
+  `requestPreparedTurn`, fold, encoder, decoder). Round-trip test beside
+  `retained_generation_round_trips_through_the_typed_protocol`.
+- `haskell/app/Main.hs` `runTurnMode`/`compileVariants`: when set, compile with
+  `PreparedStg` and the request's retained generations (as `processFile` does)
+  and call `writePreparedArtifacts ... [targetName]`. Project the single
+  `__result` entry (tuple for multi-binder binds), not one artifact per binder.
+  Every live session binder a turn references must be a retained generation,
+  identified exactly as `mkBoundBinders`/`sessionBinderName` mint it; session
+  value modules are thin interfaces with no unfoldings.
+- Rust: `CompiledTurn.prepared: Option<PreparedProgram>` read from the
+  `__result.prepared.cbor` sidecar in `read_compiled_turn`;
+  `TurnRequest.{retained, prepared}` forwarded in `run_turn_with_pin`; callers
+  (`resident_workbench.rs`, harness `lifecycle.rs`, `hosted_lifecycle_tests.rs`)
+  pass `prepared: false` until cutover.
+- `prepared_turn.rs`: fold the retained-set derivation, identity extraction,
+  artifact parse and install sequence into `session/prepared.rs`; delete
+  `SessionTurns`, `TurnForm`, `project()`, `turn::prepared_turn_module`.
+- Test: rewrite `tidepool-runtime/tests/prepared_turn.rs` on
+  `resident_workbench_templates` + `eval_import_lines` (model:
+  `turn_classification_corpus_old_and_new_path_agree`), three `run_turn`
+  calls plus a two-name bind; register in `tests/suites/`.
+- Risks: `Tidepool.Prelude`/generated `Tidepool.Effects`/`Control.Lens`
+  visibility under prepared projection is unproven (no corpus imports them;
+  `lens` needs fat-interface bodies) — try a one-line production-template turn
+  first; heap custody for retained imports is not settled (avoid GC across
+  turns); asks and Core `result.cbor` are still written in parallel.
+
+### Corrected stale-fixture patches (`patches/stale-fixtures/v2/`, not compiled)
+Supersede 03, 04e and 04f:
+- 03 `hosted_lookup_and_status_use_actor_owned_views`: nothing replaced
+  `available`; `lookup_tool.rs::render_text` now prefixes value lines with an
+  availability label (`  [available] awaitSettled :: …`), so the test's name
+  parse took the label too. Keep the doc-sentence swap; take the last token of
+  the name part.
+- 04e `unix_http_live_workbench_and_graph`: the runtime-failure cell must use
+  the proven committed-prefix shape (`notebook_prefix_failure.hs`:
+  `x <- pure ...` then a failing pattern bind), not `let` + `if error`. Open
+  question worth checking: whether a `let` prefix before a runtime failure
+  should stay committed (possible product gap vs the "earlier bindings remain
+  committed" contract).
+- 04f `failed_command_display_retains_result_without_reexecution`: the earlier
+  diagnosis was wrong. `Right (result)` is the Either `Display` instance
+  rendering `Cmd.stdout`; the failing assertion is most likely the stale needle
+  `"Right result"` (l.651), not the display-failure path, which can still fail
+  at runtime. Keep the explicit erroring `Display` instance, change the needle
+  to `Right (result)`, bind with `<-`. The same stale needle is at l.993 in
+  `command_presentation_is_automatic_scoped_and_retains_quiet_results`.

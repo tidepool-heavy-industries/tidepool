@@ -1,0 +1,21 @@
+--- a/tidepool/src/actor_host/command_display_failure.hs
++++ b/tidepool/src/actor_host/command_display_failure.hs
+@@ -1,4 +1,5 @@
++import Tidepool.Inspection (Display (..))
+ data BrokenDisplay = BrokenDisplay { savedResult :: Cmd.RunResult }
+-instance Show BrokenDisplay where show _ = error "deliberate display failure"
+-let broken = BrokenDisplay finished
++instance Display BrokenDisplay where displayTree _ = error "deliberate display failure"
++broken <- pure (BrokenDisplay finished)
+ broken
+--- a/tidepool/src/actor_host/command_jobs_tests.rs
++++ b/tidepool/src/actor_host/command_jobs_tests.rs
+@@ -648,7 +648,7 @@
+     assert!(!text.contains("Expand: inspectFull"), "{text}");
+     let recovered = committed(&campaign, "Cmd.stdout (savedResult broken)").await;
+     assert!(
+-        recovered.to_string().contains("Right result"),
++        recovered.to_string().contains("Right (result)"),
+         "{recovered}"
+     );
+     assert_eq!(backend.specs.lock().len(), 1);

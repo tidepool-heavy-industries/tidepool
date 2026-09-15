@@ -1,0 +1,21 @@
+--- a/tidepool-actor/src/hosted_lifecycle_tests.rs
++++ b/tidepool-actor/src/hosted_lifecycle_tests.rs
+@@ -413,7 +413,7 @@
+     let doc_output = docs["items"][0]["output"].as_str().unwrap();
+     assert!(doc_output.contains("Shoal topics:"), "{doc_output}");
+     assert!(
+-        doc_output.contains("Send raw Haskell to the tool"),
++        doc_output.contains("Send one notebook cell of ordinary Haskell"),
+         "{doc_output}"
+     );
+     assert!(
+@@ -477,7 +477,8 @@
+         })
+         .and_then(|section| section.lines().nth(1))
+         .and_then(|line| line.trim().split_once(" :: "))
+-        .map(|(name, _)| name)
++        // Value lines carry an availability label: `[available] name :: type`.
++        .and_then(|(labelled, _)| labelled.rsplit(' ').next())
+         .expect("type query must return a callable spelling");
+ 
+     let source = format!("({returned} probe :: Await (Settlement Int))");
