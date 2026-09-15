@@ -822,3 +822,105 @@ Order: G0 first (smallest change, unblocks every direct call to an import,
 flips B2's turn 3 to asserting the oracle's `6`), then G2 (a real session
 is wrong without it), then G1, G3, G4. G0, G1 and the `plan.rs`/`apply.rs`
 halves of G2 are Fable-direct; G3, G4 and G5 are ordinary cards.
+
+### Stage G ledger
+
+| Card | Outcome | Commit |
+|---|---|---|
+| Review docs | the section above | `2b1d18dda` |
+| G0 one call-site classification | `plan::Callee` shared by admission and emission; direct import calls, dynamic callees without a locally shaped function, and stage F's `Int(64)` shape all admitted and served; two masked bugs fixed (dispatcher double-seal with no local candidate; `install` building an observation heap before checking an import's handle exists, latching `BadPointer` on an unclosed first program) -- `s6_direct_global_call_runs_against_the_oracle` and `prepared_turn.rs` turn 3 assert the oracle's 6 | `1cfc71f67` |
+| I1 hygiene + one realm ledger | `PreparedMachine::handle_realm` replaces the runtime's realm mirror; stale dead-code allows removed; `remove_prepared_entries` (no callers) deleted | `64b07712d` |
+| I4 retirement on `ActorRunTarget`; rung-5 actor-crate proof | `retire_placement` + `type Hole` on the mount trait, both engines implement it, `retire_root_placement` goes through it; `tidepool-actor/tests/placement_retirement.rs` drives real `ActorRef`/`Incarnation`/`ActorPlacement` values -- retiring incarnation 1 releases exactly its hole and leases, incarnation 2 resumes to the oracle. The request-layer stale-incarnation half stays pinned by `request.rs`'s crate-private test | `cc3cda421` |
+| I3 Haskell: per-request retained set on the daemon; parsed target module name | plugin installed once, reads an `IORef` per request; `GutsMemoEntry.gmeRetained` makes a memo hit under a different retained set invalid (stale-guts hazard found in review); `targetModuleNameFor` replaces five basename derivations | `34e307dc5` |
+| G2 identity and leases from the program | `PreparedOrigin { program, value, identity, export }` on every prepared binding; installs resolve and lease exactly the program's declared globals (phantom leases fixed); `turn(prepared, introduces)`; `programs` keeps only `ProgramFacts`; session turns compile as `Tidepool.Session.Val.G<g>` through `turn::prepared_turn_module` | `85112edc1` |
+| dispatcher environment fix (found while designing G1) | the foreign-resolution fallback passed the ORIGINAL callee as the environment; a direct call to an imported CAF returning a closure read captures from the thunk. Now the entered callee, with a discriminating test; then made structural: dispatcher bodies receive only the entered callee (`emit_dispatch_entry` -> `DispatchInput`) and every application builds arguments through one `call_arguments` helper | `1b681681a`, `330ddd641` |
+| G1 resolution keyed by (header, demand) | design written below; stopped for peer review before implementation | |
+
+### G1 design, for review before implementation
+
+**What is missing.** A foreign callee reaches a caller's dispatcher only
+through the terminal fallback, which resolves `(header) -> code` and
+serves one case: an exact application of a foreign *function* whose
+signature fingerprint equals the demand. A foreign PAP, a partial
+application of a foreign function, and an over-application of one all
+miss and fail as `UnresolvedCallee` (typed, `Reusable`). Local callees
+already get all four shapes, because the compiling program's dispatcher
+matches its own function and PAP headers and knows their layouts
+(`apply::emit_dispatchers`, `apply::layouts`).
+
+**Facts the design rests on (verified in code).**
+1. A dispatcher for demand `D` and a function whose signature is `D` have
+   the identical native signature: both are
+   `EntryAbi::lower_internal(profile, D, EnvironmentMode::Captured)`
+   lowered with `CallConv::Tail` (`apply::declare_dispatchers`,
+   `prepared_program.rs` function declarations), with the environment in
+   the second position. So either is a valid target of a
+   `call_indirect` shaped like `D`.
+2. A descriptor's header word is the descriptor's own address
+   (`ObjectDescriptor::initial_header_word`). Function and PAP descriptors
+   are per-program `Arc`s (only constructors are interned), so a header
+   names exactly one owning program and one callable/PAP layout.
+3. The owner's dispatchers already know how to apply its own PAP headers
+   (flatten pending fields, then exact/partial/excess), and
+   `prepared_enters` already registers every owned function and PAP
+   header, which is what makes `owns_prepared_entry` the
+   Reusable/Unavailable split.
+
+**Proposed shape (option A).** Key the resolution table by
+`(header, fingerprint(D))`, values are code pointers, and let OWNER
+dispatchers be targets:
+- at install, a program registers `(h_F, fp(sig_F)) -> F` for each
+  function (today's exact entries), and `(h, fp(D_i)) -> dispatcher_i`
+  for each owned function/PAP header `h` and each of its dispatchers `D_i`
+  where `classify(h's signature, pending, D_i)` hits;
+- the caller's fallback looks up `(header, fp(D))` and calls the hit with
+  `[vmctx, entered callee, args]` -- the owner's dispatcher then does the
+  flattening/PAP allocation with the owner's layouts, under the owner's
+  rooting discipline, with no new emission primitive;
+- over-application is caller-side: on a miss for `D`, walk
+  `c = len-1 ..= 1`, look up `(header, fp(D.args[..c] -> [LiftedRef]))`,
+  call it at that statically known shape, root the result, and apply the
+  suffix through the caller's own dispatcher for
+  `D.args[c..] -> D.results`. `declare_dispatchers` must then close its
+  demand set over all suffixes, not only those `classify` proves against
+  local functions. The walk terminates: each step strictly consumes
+  arguments.
+- the fingerprint moves from a compare-after-lookup guard into the key.
+
+**Open questions for the reviewer.**
+1. *Coverage vs. code size.* An owner can only serve demands it emitted a
+   dispatcher for. Guaranteeing coverage means pre-declaring, per
+   function of arity `n`, every partial demand `args[p..p+k] -> LiftedRef`
+   (at most `n(n+1)/2` distinct signatures). Each dispatcher is a linear
+   header chain over all of the program's callables, so this is
+   quadratic in program size. Should pre-declaration be limited to
+   callables that can escape the program (tops and closures stored in
+   heap objects), or is the resulting `UnresolvedCallee` for undeclared
+   shapes acceptable? This needs a measurement on a real prepared
+   artifact before choosing.
+2. *Fingerprint collisions.* With `(header, fp)` as the key, a wrong-ABI
+   jump needs two dispatchers of the SAME owner program whose distinct
+   signatures collide under FNV-1a. Proposed: an install-time check that
+   refuses (typed) two registered keys for one header with equal
+   fingerprints and unequal signatures. Is that sufficient, or should the
+   key be the full signature (`Signature: Ord + Hash`)?
+3. *Caller-side excess vs. owner-side.* Is the prefix walk (up to
+   `len-1` host lookups on a miss) acceptable on this cold path, or should
+   the owner register its own excess suffixes too?
+4. *Alternative (option B): caller-side runtime classification.* A host
+   fn could return a foreign function's remaining signature and PAP
+   descriptors from `EntryMetadata`, and the caller could allocate PAPs
+   itself: field offsets are a pure function of the prefix reps. That
+   works for a foreign FUNCTION (prefix reps = the demand's, known
+   statically) but not for a foreign PAP, whose existing pending fields
+   are unknown to the caller and would need generic runtime copying --
+   which conflicts with `apply.rs`'s "no unrooted host argument buffer"
+   rule. Option A avoids that by delegating to the owner. Is there a
+   cheaper design the review sees that option A misses?
+
+Tests the implementation must add (either option): B applies A's PAP
+exactly; B partially applies A's 2-ary function and completes it; B
+over-applies A's 1-ary function returning a function; a GC inside A's
+body while B's frame is live on each path; the existing
+`x2_foreign_callee_with_mismatching_signature...` stays a typed Reusable
+miss.
