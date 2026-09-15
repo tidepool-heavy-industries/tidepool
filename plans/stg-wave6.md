@@ -608,3 +608,24 @@ builds/tests/commits.
    `ActorRef`/`Incarnation` refusal (`tidepool-runtime` cannot depend on
    `tidepool-actor`). See Stage 3's rung 5 entry above for exactly what a
    closing test needs to assert.
+
+Full verification after Wave 6C-3 (`cargo fmt --all -- --check`;
+`cargo check --workspace --tests`; both clean): `tidepool-codegen`
+(`cargo nextest run -p tidepool-codegen --no-fail-fast`) 843 passed (2
+slow), 2 skipped; `tidepool-runtime`, EVERY non-`#[ignore]`d lib and
+integration test in one sweep (`cargo nextest run -p tidepool-runtime
+--no-fail-fast --ignore-default-filter -E 'kind(lib) or
+binary_id(=tidepool-runtime::prepared_execution) or
+binary_id(=tidepool-runtime::prepared_resident_composite)'` --
+`prepared_turn` is `#[ignore]`d, needs a resolved `$TIDEPOOL_EXTRACT`,
+verified separately below) 186 passed, 0 skipped; `tidepool-testing`
+(`cargo nextest run -p tidepool-testing --no-fail-fast`) 32 passed, 0
+skipped. `prepared_turn`'s one `#[ignore]`d test, run explicitly twice
+with a freshly resolved extractor
+(`source scripts/lib-extract.sh && resolve_tidepool_extract && cargo
+nextest run -p tidepool-runtime --test prepared_turn
+--ignore-default-filter --run-ignored all`): 1 passed both times. `just
+fixtures-update` run once this wave (Haskell source changed); only the
+source fingerprint moved, the generated corpus bytes were unchanged.
+Every number here was reproduced by the orchestrator directly, not taken
+from an implementing agent's own report.
