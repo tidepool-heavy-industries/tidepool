@@ -64,14 +64,21 @@ archive).
   imports (rungs 1-2) plus machine-wide constructor descriptor interning;
   Wave 6C landed cross-program call/force dispatch and import-holding
   top-level constructors (closing the rest of rung 2 for exact application),
-  interleaved parked work across programs (rung 3), and realm-scoped
+  interleaved parked work across programs (rung 3), realm-scoped
   cancellation (rung 4, with the reusable-vs-latch failure distinction this
-  found and fixed). Remaining: foreign PAP/partial/excess application
-  (typed reusable failure today, dispatch itself not yet built), S5's
-  contract for unfoldings of retained symbols, rung 5 (an STG session in
-  the registry, actor-turn authority) and rung 6 (the composite resident-
-  session test and the workbench routing decision), per the plan's
-  "Completion plan" section.
+  found and fixed), retained-generation unfoldings withheld without a user
+  pragma (S5), a `PreparedRuntime` hostable in the session registry with
+  realm-scoped leases (rung 5's substrate), a composite test proving rungs
+  2-5 together through that registry, and a live session-turn mechanism
+  through the real prepared-STG projection (rung 6's substrate). Remaining:
+  foreign PAP/partial/excess application (a typed reusable failure today,
+  dispatch not yet built) and a found, more fundamental gap -- admission
+  has no case at all for a direct call to an imported function, which
+  fails the whole program's install, not just that call; rung 5's proof
+  through `tidepool-actor`'s own registry (the session substrate cannot
+  depend on the actor crate); and the workbench routing decision itself
+  (three options recorded, none taken -- see "Routing options" in the
+  plan).
 
 ## Supporting actor designs and separate harness work
 

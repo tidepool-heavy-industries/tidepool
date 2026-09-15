@@ -28,8 +28,8 @@ passes once it does. Ordered by minimal new surface first.
 | 2 | Retained bindings across turns: turn N+1's program links against turn N's binding via `required_generation`, reads it off the same persistent heap (identity, not re-import by value) | **Done with recorded limits** (Wave 6B, S1-S6: `retained_import_end_to_end_links_consumer_against_bound_producer_tops`; limits under "Rung 2 boundaries" below) |
 | 3 | Interleaved parked work: two suspended continuations share one heap, resumed out of order, survive an intervening nursery GC | **Done** (C0, cross-program: `c0_two_installed_programs_park_and_resume_out_of_order_with_a_collection_between`, `c0_unrelated_entry_of_a_second_installed_program_runs_while_the_first_stays_parked`; scope note below) |
 | 4 | Cancellation of one parked turn among siblings, via a realm-scoped `CancelHandle`; sibling and `close_realm` counts unaffected | **Done** (C1 `e398de760`, C1b `90cecaf49`) |
-| 5 | Actor-turn authority: retiring an incarnation releases its parked frame; a different incarnation cannot resume it | Not started this wave |
-| 6 | Composite: rungs 2-5 together in one resident session — the actual gate for calling Wave 6 done | Not started this wave |
+| 5 | Actor-turn authority: retiring an incarnation releases its parked frame; a different incarnation cannot resume it | **Substrate done, actor-crate proof still open** (A4 `1fb9fcda9`: `PreparedRuntime` is `Send`, registry-hostable, realm-scoped import leases, cross-realm argument refusal, `ActorRunTarget` impl; B1 `3d2b3909d` proves two independent realms behave exactly this way through `SessionRegistry` -- but `tidepool-runtime` cannot depend on `tidepool-actor`, so B1 stands in an actor incarnation with a bare `RealmId`, not a real `ActorRef`/`Incarnation`. No test yet drives `tidepool-actor`'s own exact-incarnation refusal through a real `PreparedRuntime`) |
+| 6 | Composite: rungs 2-5 together in one resident session — the actual gate for calling Wave 6 done | **Session/registry substrate done; the actor-authority and workbench-routing halves are not** (B1 `3d2b3909d`: bind, import, cross-program call, park/resume out of order across a collection, realm cancellation, and independent realm retirement, all driven through one `SessionRegistry`-hosted `PreparedRuntime`, in one test; B2 `c8db43f3c`: a live session turn compiles through the real prepared-STG projection and a later turn imports an earlier one by retained generation -- the actual mechanism a notebook turn would use. Neither goes through `tidepool-actor`'s registry, and the workbench routing decision itself is not made -- see "Routing options" below) |
 
 Rung 3's blackhole question is settled by D3 below for this engine's
 suspension model: a freer request is returned as an `E` value at WHNF, no
@@ -323,32 +323,56 @@ call a retained function has not really retained it.
   step. Medium. Depends on nothing in stage 1 but shares `machine.rs`, so
   after X2.
 
-### Stage 3: sessions and actors (rungs 5-6), design-gated
+### Stage 3: sessions and actors (rungs 5-6)
 
-- **Rung 5 actor-turn authority.** Owner named in "Remaining rung owners"
-  is `PreparedPersistentSession`, which does not exist; `PreparedRuntime`
-  is the closest thing and now carries bindings, generations and leases.
-  Design question for the user before any card: does `PreparedRuntime`
-  become the STG analogue of `PersistentSession`'s stow-XOR-run discipline
-  (a `MachineLease`-shaped affine borrow around `PreparedMachine`), with
-  `tidepool-actor`'s unchanged authority contract (exact-incarnation
-  ownership, one outstanding update per request, retirement ends the
-  incarnation) layered on top -- or does `PersistentSession` itself grow
-  an engine enum? `tidepool-actor` is mid-cutover under the user's own
-  commits and carries 23 clippy diagnostics; that lineage must be read
-  first. Acceptance sketch: retiring an incarnation releases its parked
-  frame (its realm closes); a different incarnation cannot resume it
-  (typed refusal by realm); leases held by an incarnation's installed
-  programs release on retirement.
-- **Rung 6 workbench cutover, the composite gate.** One resident-session
-  test that exercises rungs 2-5 together: a turn binds a value, a later
-  turn imports and calls it, two turns park and resume out of order, one
-  is cancelled by realm, an incarnation retires and its work is released.
-  Then, and only then, the routing decision in
-  `tidepool-runtime::session::workbench`: real notebook turns through the
-  prepared engine instead of Core (`session/prepared.rs`'s note that
-  production `resident_workbench` still dispatches Core stands until this
-  lands). Wave 7 non-goals stay non-goals (no stack snapshots, no atomic
+- **Rung 5 actor-turn authority -- substrate done (A4 `1fb9fcda9`), actor-crate
+  proof open.** The design question this section used to pose (does
+  `PreparedRuntime` become the STG analogue of `PersistentSession`'s
+  stow-XOR-run discipline, with `tidepool-actor`'s unchanged authority
+  contract layered on top) is answered: yes, and it is built.
+  `PreparedRuntime` is `unsafe impl Send` under the exact stowed-XOR-running
+  argument `PersistentSession`/`JitEffectMachine` already use; it hosts
+  cleanly in `SessionRegistry<PreparedRuntime, PreparedHole>` (proven by B1);
+  `install_in`/`install_prepared_in` scope import leases to a `RealmId`,
+  `close_realm_report` releases them and reports a `RealmRetirement`
+  receipt; a managed argument minted under one realm is refused before any
+  machine call if used under another (`PreparedRuntimeError::CrossRealmArgument`);
+  `impl ActorRunTarget for PreparedRuntime` in `tidepool-actor::mount`
+  mounts it exactly as `ResidentSession` already is. What remains: no test
+  drives this through `tidepool-actor`'s OWN registry
+  (`ActorMachineRegistry<H, O> = SessionRegistry<ResidentSession<H, O>, String>`)
+  with a real `ActorRef`/`Incarnation` -- B1 could only stand in an
+  incarnation with a bare `RealmId::fresh()`, since `tidepool-runtime`
+  cannot depend on `tidepool-actor` (the dependency runs the other way).
+  Closing this needs a `tidepool-actor`-side test (or a small
+  `ActorMachineRegistry<H, O>` instantiated with `PreparedRuntime` in place
+  of `ResidentSession<H, O>`) asserting the actual thing rung 5 promises:
+  retiring one `ActorRef` incarnation's placement releases its parked
+  frame via `retire_root_placement`, and a stale `Incarnation` is refused
+  by the request layer exactly as `stale_incarnation_cannot_settle_a_request`
+  already pins for the Core engine.
+- **Rung 6 composite -- session/registry substrate done (B1 `3d2b3909d`),
+  live-turn mechanism done (B2 `c8db43f3c`), actor-authority and routing
+  halves open.** B1 is the first test to put a `PreparedRuntime` inside a
+  `SessionRegistry` at all: six sequential checkouts prove bind, import,
+  cross-program call, park/resume out of order across a collection,
+  realm-scoped cancellation, and independent two-realm retirement all work
+  TOGETHER through the real checkout/settle protocol, not just each in
+  isolation the way the rung-by-rung tests pin them. B2 proves the actual
+  cutover prerequisite: a turn shaped exactly like a notebook cell (one
+  top-level declaration) compiles through the real prepared-STG projection
+  (`tidepool-extract --target`, not the Core `--turn` path) and a LATER
+  turn imports an EARLIER one's binding by retained generation, through a
+  new `SessionTurns` mechanism (`tidepool-runtime/src/session/prepared_turn.rs`).
+  B2 also confirms, independently of A2's finding, that a turn calling an
+  imported binding directly hits the same admission gap (see "New findings"
+  below) -- not a new problem, but now proven from two unrelated angles.
+  What rung 6 as originally scoped still needs: rung 5's actor-crate proof
+  above, and the workbench routing decision itself (see "Routing options").
+- **The routing decision itself** -- `tidepool-runtime::session::workbench`
+  choosing the prepared engine over Core for real notebook turns -- is
+  covered in "Routing options" below, not taken by this wave. Wave 7
+  non-goals stay non-goals regardless (no stack snapshots, no atomic
   `MutVar#`, no Core JIT deletion).
 
 ### Hygiene that rides along
@@ -361,6 +385,46 @@ call a retained function has not really retained it.
   owner unknown, not this wave.
 - Update "Rung 2 boundaries" and the inventory as X1/X2/S3b land; each
   removes a bullet there.
+
+## Routing options (for the user, not decided by this wave)
+
+The substrate rung 6 needs is built and tested (B1, B2), but routing real
+notebook turns through the prepared engine instead of Core
+(`tidepool-runtime::session::workbench`'s choice, `session/prepared.rs`'s
+note that production `resident_workbench` still dispatches Core) is a
+product decision, not a mechanical follow-on. Three shapes, roughly in
+order of how much they commit to:
+
+1. **Stay on Core; keep the prepared engine as a parallel, explicitly
+   opt-in path.** Lowest risk. `SessionTurns`/`PreparedRuntime` remain
+   usable directly (as B2's test already does) for whatever calls them,
+   but `resident_workbench` keeps routing ordinary turns through
+   `PersistentSession`. Defers the two remaining real gaps (rung 5's
+   actor-crate proof; the direct-`Global`-call admission gap) indefinitely,
+   since nothing forces closing them.
+2. **Route new sessions through the prepared engine behind a flag,
+   Core remains for existing/legacy sessions.** Forces closing rung 5's
+   actor-crate proof and the admission gap first (a flagged session that
+   cannot call an imported function directly, or whose actor authority is
+   unverified, is not a real notebook backend). Gives real production
+   signal before committing further, and keeps a fallback if the admission
+   gap or something like it turns out to be deeper than expected.
+3. **Prepared becomes the default engine for new sessions; Core is kept
+   only for the cutover's own retirement schedule
+   (`plans/stg-production-cutover.md` phase 6).** The actual destination
+   the cutover plan describes. Requires everything option 2 requires, plus
+   real turn classification (`TurnKind`/`classify_block`, not the
+   caller-supplies-the-shape stand-in `SessionTurns::TurnForm` uses today),
+   IO/bind-effect turn semantics (out of scope for `SessionTurns` as built),
+   and session-root lifecycle policy (currently caller-owned, fine for a
+   test, not for a real resident session's directory/process lifetime).
+
+None of these is blocked on more codegen work beyond closing the admission
+gap (stage G, see "New findings" below) -- the session/registry mechanism
+itself (B1) and the turn-compile mechanism (B2) are both proven. The
+decision is about product risk tolerance and how much of `SessionTurns`'s
+deliberately-cut scope to build out first, not about remaining engine
+capability.
 
 ## Status ledger
 
@@ -515,21 +579,32 @@ builds/tests/commits.
 | A2 S6 end-to-end consumerResult | Fixtures regenerated with the real withholding pass; found and pinned a real admission gap (a direct `Global`-callee call is never admitted, whole-program) rather than papering over it -- `consumerResultAt` projects to its own artifact so the gap doesn't regress the working `consumerValueAt`/`consumerEntries` fixture; new `s6_direct_global_call_is_not_yet_admitted` | `3b41d44d4` |
 | A4 PreparedRuntime registry-hostable | `unsafe impl Send`, `PreparedHole`, realm-scoped import leases, `CrossRealmArgument` refusal, `ActorRunTarget` impl; two test fixtures fixed in review | `1fb9fcda9` |
 | A5 standing docs | `docs/stg-projection-inventory.md`, `plans/stg-wave6.md`, `plans/README.md` rewritten to the current X2/S3b/F1/F2 contract; later corrected (see A2 row) once the direct-`Global`-call admission gap was found | `54a035aa8` |
-| B1 | not started | TBD |
-| B2 | not started | TBD |
-| B3 | not started | TBD |
-| G1 | not started | TBD |
+| B1 rung 6 composite through `SessionRegistry` | First test to host `PreparedRuntime` in `SessionRegistry`; six checkouts prove bind/import/call, park/resume out of order across a collection, realm cancellation, and independent two-realm retirement all work together | `3d2b3909d` |
+| B2 live prepared-STG session turns | New `SessionTurns` mechanism projects a turn through `--target` mode, not `--turn`; a later turn imports an earlier one by retained generation; independently reconfirms the direct-`Global`-call admission gap from an unrelated angle (a same-session call, not an S6 fixture) | `c8db43f3c` |
+| B3 rung 5/6 docs + routing memo | this section, the ladder table, and "Routing options" above | (docs, see this commit) |
+| G1 | not started (Fable) | TBD |
 
-**New finding this wave, upgraded from A1's hypothesis to a confirmed
-blocker:** `admission.rs`'s `ExprFrame::Call` arm has no case for a
-`ValueRef::Global` callee at all -- broader than A1's originally-reported
-`apply::classify` Partial-arm gap (which only covers calls through an
-unknown-signature local). ANY direct call to an imported function,
-anywhere in a program's reachable closure, blocks that whole program from
-installing. This is real, GHC-Core-confirmed (not just a synthetic
-repro), and belongs in the same Fable-direct codegen-invariant pass as
-the planned X2 phase 2 (foreign PAP/partial/excess) work -- likely
-before it, since it blocks the far more common case of an ordinary
-direct function call to an import. See "Rung 2 boundaries" above and
-`s6_direct_global_call_is_not_yet_admitted`
-(`tidepool-runtime/tests/prepared_execution.rs`) for the pinned repro.
+**Findings this wave, both real and both left for a Fable-direct pass:**
+
+1. **Confirmed from two independent angles (A2's Haskell fixture, B2's
+   live turn compile): `admission.rs`'s `ExprFrame::Call` arm has no case
+   for a `ValueRef::Global` callee at all** -- broader than A1's
+   originally-reported `apply::classify` Partial-arm gap (which only
+   covers calls through an unknown-signature local). ANY direct call to an
+   imported function, anywhere in a program's reachable closure, blocks
+   that whole program from installing. This is real, GHC-Core-confirmed
+   twice over (not just a synthetic repro), and belongs in the same
+   Fable-direct codegen-invariant pass as the planned X2 phase 2 (foreign
+   PAP/partial/excess) work -- likely before it, since it blocks the far
+   more common case of an ordinary direct function call to an import. See
+   "Rung 2 boundaries" above,
+   `s6_direct_global_call_is_not_yet_admitted`
+   (`tidepool-runtime/tests/prepared_execution.rs`), and B2's turn-3
+   assertion (`tidepool-runtime/tests/prepared_turn.rs`) for the two pinned
+   repros.
+2. **Rung 5's actor-crate proof remains open**: B1 proves the
+   `PreparedRuntime`/`SessionRegistry` substrate behaves correctly for two
+   independent realms, but cannot exercise `tidepool-actor`'s own
+   `ActorRef`/`Incarnation` refusal (`tidepool-runtime` cannot depend on
+   `tidepool-actor`). See Stage 3's rung 5 entry above for exactly what a
+   closing test needs to assert.
