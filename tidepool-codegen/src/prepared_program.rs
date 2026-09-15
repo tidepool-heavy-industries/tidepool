@@ -28,6 +28,8 @@ use tidepool_repr::DataConId;
 mod adapter;
 mod admission;
 mod apply;
+#[cfg(test)]
+mod caller_result_tests;
 mod emit;
 mod image;
 #[cfg(test)]
@@ -699,23 +701,33 @@ impl CompiledProgram {
         // state machine, while its body call uses the private body ID.
         let mut functions = BTreeMap::new();
         let mut abis = BTreeMap::new();
+        let result_instances = plan::result_instances(plan.program);
         for (&id, signature) in &signatures {
-            let abi = EntryAbi::lower_internal(&profile, signature, EnvironmentMode::Captured)?;
-            if plan.thunks.contains_key(&id) {
-                abis.insert(id, abi);
-                continue;
+            let results = if signature.results.is_caller_result() {
+                result_instances.iter().cloned().collect::<Vec<_>>()
+            } else {
+                vec![signature.results.clone()]
+            };
+            for (instance, results) in results.into_iter().enumerate() {
+                let concrete = Signature {
+                    arguments: signature.arguments.clone(),
+                    results: results.clone(),
+                };
+                let abi = EntryAbi::lower_internal(&profile, &concrete, EnvironmentMode::Captured)?;
+                if plan.thunks.contains_key(&id) {
+                    abis.insert((id, results.clone()), abi);
+                    functions.insert((id, results), prepared_enter);
+                    continue;
+                }
+                let native = abi.cranelift_signature(&profile, CallConv::Tail)?;
+                let function = pipeline.declare_function_with_signature(
+                    &format!("prepared_entry_{}_{}", id.0, instance),
+                    Linkage::Local,
+                    &native,
+                )?;
+                functions.insert((id, results.clone()), function);
+                abis.insert((id, results), abi);
             }
-            let native = abi.cranelift_signature(&profile, CallConv::Tail)?;
-            let function = pipeline.declare_function_with_signature(
-                &format!("prepared_entry_{}", id.0),
-                Linkage::Local,
-                &native,
-            )?;
-            functions.insert(id, function);
-            abis.insert(id, abi);
-        }
-        for &id in plan.thunks.keys() {
-            functions.insert(id, prepared_enter);
         }
         let dispatchers = apply::declare_dispatchers(&plan, &profile, &mut pipeline)?;
         apply::emit_dispatchers(
@@ -733,14 +745,16 @@ impl CompiledProgram {
             &mut pipeline,
         )?;
         // Every function address has been declared, including recursive peers.
-        for &id in functions.keys() {
+        for ((id, results), &output) in &functions {
+            let id = *id;
             if plan.thunks.contains_key(&id) {
                 continue;
             }
             emit::emit_function(
                 &plan,
                 id,
-                &functions,
+                output,
+                results,
                 &dispatchers,
                 prepared_gc,
                 prepared_poll,
@@ -755,7 +769,6 @@ impl CompiledProgram {
                 &plan,
                 id,
                 body,
-                &functions,
                 &dispatchers,
                 prepared_gc,
                 prepared_poll,
@@ -803,14 +816,19 @@ impl CompiledProgram {
             adapter::emit_force_adapter(&mut pipeline, "prepared_force_adapter", prepared_enter)?;
         let mut entries = BTreeMap::new();
         for (&id, &slot) in &plan.top_slots {
-            let abi = abis[&id].clone();
+            let signature = &signatures[&id];
+            if signature.results.is_caller_result() {
+                continue;
+            }
+            let key = (id, signature.results.clone());
+            let abi = abis[&key].clone();
             let adapter = adapter::emit_adapter(
                 &mut pipeline,
                 &format!("prepared_adapter_{}", id.0),
                 if plan.thunks.contains_key(&id) {
                     prepared_enter
                 } else {
-                    functions[&id]
+                    functions[&key]
                 },
                 &abi,
                 slot,
@@ -819,7 +837,7 @@ impl CompiledProgram {
                 id,
                 CompiledEntry {
                     #[cfg(test)]
-                    function: functions[&id],
+                    function: functions[&key],
                     adapter,
                     abi,
                 },

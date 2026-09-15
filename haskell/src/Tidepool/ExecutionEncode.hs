@@ -81,6 +81,7 @@ encodeResultContract :: ResultContract -> Encoding
 encodeResultContract contract = case contract of
   Returns reps -> tagged 0 [list encodeRep reps]
   NoSuccess -> tag 1
+  CallerResult -> tag 2
 
 encodeFieldLayout :: FieldLayout -> Encoding
 encodeFieldLayout field = array

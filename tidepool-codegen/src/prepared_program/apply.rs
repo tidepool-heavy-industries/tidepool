@@ -138,7 +138,13 @@ pub(super) fn classify(
         {
             Some(Application::NoSuccess { consumed })
         }
-        std::cmp::Ordering::Equal if demand.results == entry.results => Some(Application::Exact),
+        std::cmp::Ordering::Equal
+            if demand.results == entry.results
+                || (entry.results.is_caller_result()
+                    && matches!(demand.results, super::ResultContract::Returns(_))) =>
+        {
+            Some(Application::Exact)
+        }
         std::cmp::Ordering::Greater
             if demand.results != tidepool_repr::execution_schema::ResultContract::NoSuccess
                 && entry.results
@@ -199,6 +205,7 @@ pub(super) fn declare_dispatchers(
     profile: &NativeAbiProfile,
     pipeline: &mut CodegenPipeline,
 ) -> Result<Dispatchers, super::CompileError> {
+    let result_instances = super::plan::result_instances(plan.program);
     let mut demanded = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for declaration in plan.program.operations() {
@@ -221,8 +228,19 @@ pub(super) fn declare_dispatchers(
                 signature.0,
             )))?
             .clone();
-        if seen.insert(semantic.clone()) {
-            demanded.push(semantic.clone());
+        let results = if semantic.results.is_caller_result() {
+            result_instances.iter().cloned().collect::<Vec<_>>()
+        } else {
+            vec![semantic.results.clone()]
+        };
+        for results in results {
+            let concrete = Signature {
+                arguments: semantic.arguments.clone(),
+                results,
+            };
+            if seen.insert(concrete.clone()) {
+                demanded.push(concrete);
+            }
         }
     }
     // Every owner serves exact PAP suffixes and all proper partial prefixes,
@@ -231,12 +249,19 @@ pub(super) fn declare_dispatchers(
         let entry = function.signature;
         for pending in 0..entry.arguments.len().max(1) {
             let remaining = &entry.arguments[pending..];
-            let exact = Signature {
-                arguments: remaining.to_vec(),
-                results: entry.results.clone(),
+            let results = if entry.results.is_caller_result() {
+                result_instances.iter().cloned().collect::<Vec<_>>()
+            } else {
+                vec![entry.results.clone()]
             };
-            if seen.insert(exact.clone()) {
-                demanded.push(exact);
+            for results in results {
+                let exact = Signature {
+                    arguments: remaining.to_vec(),
+                    results,
+                };
+                if seen.insert(exact.clone()) {
+                    demanded.push(exact);
+                }
             }
             for supplied in 0..remaining.len() {
                 let partial = Signature {
@@ -303,7 +328,7 @@ pub(super) fn declare_dispatchers(
 pub(super) fn emit_dispatchers(
     plan: &ProgramPlan<'_>,
     dispatchers: &Dispatchers,
-    functions: &BTreeMap<ValueId, FuncId>,
+    functions: &BTreeMap<(ValueId, super::ResultContract), FuncId>,
     profile: &NativeAbiProfile,
     prepared_gc: FuncId,
     prepared_poll: FuncId,
@@ -344,7 +369,12 @@ pub(super) fn emit_dispatchers(
             let Some(application) = classify(function.signature, 0, signature) else {
                 continue;
             };
-            let Some(&callee_function) = functions.get(&id) else {
+            let results = if function.signature.results.is_caller_result() {
+                &signature.results
+            } else {
+                &function.signature.results
+            };
+            let Some(&callee_function) = functions.get(&(id, results.clone())) else {
                 continue;
             };
             let hit = builder.create_block();
@@ -425,8 +455,7 @@ pub(super) fn emit_dispatchers(
                     0,
                     consumed,
                     &remainder,
-                    id,
-                    functions,
+                    callee_function,
                     dispatchers,
                     pipeline,
                     prepared_bad_state,
@@ -441,7 +470,12 @@ pub(super) fn emit_dispatchers(
             let Some(application) = classify(function.signature, pending, signature) else {
                 continue;
             };
-            let Some(&callee_function) = functions.get(&id) else {
+            let results = if function.signature.results.is_caller_result() {
+                &signature.results
+            } else {
+                &function.signature.results
+            };
+            let Some(&callee_function) = functions.get(&(id, results.clone())) else {
                 continue;
             };
             let hit = builder.create_block();
@@ -533,8 +567,7 @@ pub(super) fn emit_dispatchers(
                     pending,
                     consumed,
                     &remainder,
-                    id,
-                    functions,
+                    callee_function,
                     dispatchers,
                     pipeline,
                     prepared_bad_state,
@@ -831,17 +864,13 @@ fn emit_excess(
     pending: usize,
     consumed: usize,
     remainder: &Signature,
-    function_id: ValueId,
-    functions: &BTreeMap<ValueId, FuncId>,
+    target_id: FuncId,
     dispatchers: &Dispatchers,
     pipeline: &mut CodegenPipeline,
     prepared_bad_state: FuncId,
 ) -> Result<(), super::CompileError> {
     // The first call is saturated against the original function. Its lifted
     // result is then treated as a fresh callee for the suffix dispatcher.
-    let Some(&target_id) = functions.get(&function_id) else {
-        return Err(super::CompileError::MissingRepresentation(function_id));
-    };
     let first_args = call_arguments(vmctx, function, arguments.iter().take(pending + consumed));
     let target = pipeline
         .module

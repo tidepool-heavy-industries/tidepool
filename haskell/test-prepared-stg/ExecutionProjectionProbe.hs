@@ -1,6 +1,7 @@
 module Main (main) where
 
 import Data.ByteString qualified as BS
+import CallerResultProjectionTest (verifyCallerResultProjection)
 import DeferredFunctionProjectionTest (verifyDeferredFunctionProjection)
 import ExecutionProjectionTest
   (projectProjectionContract, verifyRetainedImportProjection)
@@ -14,6 +15,14 @@ import System.FilePath ((</>))
 
 main :: IO ()
 main = do
+  arguments <- getArgs
+  case arguments of
+    ["--caller-result"] -> verifyCallerResultProjection
+    _ -> fullProbe arguments
+
+fullProbe :: [String] -> IO ()
+fullProbe arguments = do
+  verifyCallerResultProjection
   root <- getCurrentDirectory
   verifyDeferredFunctionProjection
   verifyRetainedImportProjection
@@ -21,7 +30,6 @@ main = do
   result <- runPipelineSelected PreparedStg
     (fixtureDir </> "M3Vertical.hs") [fixtureDir]
   program <- projectProjectionContract (pprModules result)
-  arguments <- getArgs
   case arguments of
     [] -> pure ()
     [output] -> BS.writeFile output (encodeWireProgram program)

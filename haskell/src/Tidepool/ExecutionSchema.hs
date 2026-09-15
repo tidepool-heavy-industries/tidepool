@@ -21,7 +21,7 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 
 schemaVersion, executionAbiVersion :: Word64
-schemaVersion = 8
+schemaVersion = 9
 executionAbiVersion = 5
 
 newtype ValueId = ValueId Word32 deriving stock (Eq, Ord, Show, Generic)
@@ -53,7 +53,9 @@ data RuntimeRep = VoidRep | LiftedRefRep | UnliftedRefRep | AddressRep
   | IntRep Word8 | WordRep Word8 | FloatRep Word8
   deriving stock (Eq, Ord, Show, Generic)
 
-data ResultContract = Returns [RuntimeRep] | NoSuccess
+-- | CallerResult is a nonzero-arity callable convention, instantiated by
+-- each caller; it is distinct from a body that cannot return successfully.
+data ResultContract = Returns [RuntimeRep] | NoSuccess | CallerResult
   deriving stock (Eq, Ord, Show, Generic)
 
 data Signature = Signature

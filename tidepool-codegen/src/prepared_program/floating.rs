@@ -15,7 +15,7 @@ use tidepool_repr::execution_schema::{
 fn returns_exact(signature: &Signature, expected: &[RuntimeRep]) -> bool {
     match &signature.results {
         ResultContract::Returns(reps) => reps == expected,
-        ResultContract::NoSuccess => false,
+        ResultContract::NoSuccess | ResultContract::CallerResult => false,
     }
 }
 

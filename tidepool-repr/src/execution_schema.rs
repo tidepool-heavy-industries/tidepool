@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u64 = 8;
+pub const SCHEMA_VERSION: u64 = 9;
 pub const EXECUTION_ABI_VERSION: u64 = 5;
 
 macro_rules! dense_id {
@@ -75,22 +75,29 @@ pub enum RuntimeRep {
     Float(u8),
 }
 
-/// Successful result representations, or authoritative evidence that saturation
-/// cannot return successfully. `Returns([])` is a successful zero-result call;
-/// it is never interchangeable with `NoSuccess`. Partial application does not
-/// discharge the latter contract: it still produces a lifted function value.
+/// Known successful results, caller-chosen results, or authoritative evidence
+/// that saturation cannot return. `Returns([])` is a successful zero-result
+/// call, distinct from both other cases. Partial application still produces a
+/// lifted function value regardless of the saturated result contract.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ResultContract {
     Returns(Vec<RuntimeRep>),
     NoSuccess,
+    /// The caller supplies a concrete successful result representation.
+    CallerResult,
 }
 
 impl ResultContract {
-    /// Successful logical result representations, if the expression may return.
+    pub fn is_caller_result(&self) -> bool {
+        matches!(self, Self::CallerResult)
+    }
+
+    /// Known logical results. None means either nonreturning or caller-chosen;
+    /// consumers lowering an ABI must distinguish those contracts explicitly.
     pub fn returned_reps(&self) -> Option<&[RuntimeRep]> {
         match self {
             Self::Returns(reps) => Some(reps),
-            Self::NoSuccess => None,
+            Self::NoSuccess | Self::CallerResult => None,
         }
     }
 

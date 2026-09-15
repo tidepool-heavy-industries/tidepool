@@ -60,7 +60,8 @@ enum Work {
 pub(super) fn emit_function(
     plan: &ProgramPlan<'_>,
     id: ValueId,
-    functions: &BTreeMap<ValueId, FuncId>,
+    output: FuncId,
+    results: &ResultContract,
     dispatchers: &super::apply::Dispatchers,
     prepared_gc: FuncId,
     prepared_poll: FuncId,
@@ -69,12 +70,11 @@ pub(super) fn emit_function(
     case_trap: FuncId,
     pipeline: &mut CodegenPipeline,
 ) -> Result<(), CompileError> {
-    let output = *functions.get(&id).ok_or_else(|| unsupported(id, 0))?;
     emit_function_at(
         plan,
         id,
         output,
-        functions,
+        Some(results),
         dispatchers,
         prepared_gc,
         prepared_poll,
@@ -93,7 +93,6 @@ pub(super) fn emit_thunk_body(
     plan: &ProgramPlan<'_>,
     id: ValueId,
     output: FuncId,
-    functions: &BTreeMap<ValueId, FuncId>,
     dispatchers: &super::apply::Dispatchers,
     prepared_gc: FuncId,
     prepared_poll: FuncId,
@@ -106,7 +105,7 @@ pub(super) fn emit_thunk_body(
         plan,
         id,
         output,
-        functions,
+        None,
         dispatchers,
         prepared_gc,
         prepared_poll,
@@ -125,7 +124,7 @@ fn emit_function_at(
     plan: &ProgramPlan<'_>,
     id: ValueId,
     output: FuncId,
-    functions: &BTreeMap<ValueId, FuncId>,
+    results: Option<&ResultContract>,
     dispatchers: &super::apply::Dispatchers,
     prepared_gc: FuncId,
     prepared_poll: FuncId,
@@ -134,7 +133,7 @@ fn emit_function_at(
     case_trap: FuncId,
     pipeline: &mut CodegenPipeline,
 ) -> Result<(), CompileError> {
-    let (signature, body) = match plan.functions.get(&id) {
+    let (mut signature, body) = match plan.functions.get(&id) {
         Some(function) => (function.signature.clone(), Some(function.body)),
         None if plan.thunks.contains_key(&id) => {
             let thunk = &plan.thunks[&id];
@@ -148,6 +147,11 @@ fn emit_function_at(
             (top_signature(plan, binding, id)?, None)
         }
     };
+    if signature.results.is_caller_result() {
+        signature.results = results
+            .cloned()
+            .ok_or(crate::entry_abi::AbiError::UninstantiatedResult)?;
+    }
     let profile = NativeAbiProfile::new(plan.program.envelope().target.clone(), 0)?;
     let abi = EntryAbi::lower_internal(&profile, &signature, EnvironmentMode::Captured)?;
     let mut context = Context::new();
@@ -311,8 +315,11 @@ fn emit_function_at(
                         let declared: Vec<_> = group_items(bindings)
                             .iter()
                             .map(|binding| {
-                                let signature =
+                                let mut signature =
                                     plan.program.signatures()[binding.signature.0 as usize].clone();
+                                if signature.results.is_caller_result() {
+                                    signature.results = destination.results.clone();
+                                }
                                 let join_block = builder.create_block();
                                 (
                                     binding,
@@ -526,7 +533,7 @@ fn emit_function_at(
                             &mut builder,
                             vmctx,
                             pipeline,
-                            functions,
+                            &destination.results,
                             dispatchers,
                             &values,
                             callee,
@@ -1441,7 +1448,7 @@ fn emit_exact_call(
     builder: &mut FunctionBuilder<'_>,
     vmctx: Value,
     pipeline: &mut CodegenPipeline,
-    functions: &BTreeMap<ValueId, FuncId>,
+    caller_results: &ResultContract,
     dispatchers: &super::apply::Dispatchers,
     values: &BTreeMap<ValueId, Value>,
     callee: &Atom,
@@ -1471,14 +1478,17 @@ fn emit_exact_call(
         owner,
         node,
     )?;
-    let _ = functions;
     let signature = plan
         .program
         .signatures()
         .get(signature.0 as usize)
         .ok_or_else(|| unsupported(owner, node))?;
+    let mut signature = signature.clone();
+    if signature.results.is_caller_result() {
+        signature.results = caller_results.clone();
+    }
     let callee_ref = dispatchers
-        .find(signature)
+        .find(&signature)
         .ok_or_else(|| CompileError::MissingDemand(signature.clone()))?;
     let callee_ref = pipeline
         .module

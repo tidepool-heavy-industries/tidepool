@@ -95,6 +95,19 @@ fn valid_closed_shape_reaches_semantic_validation() {
 }
 
 #[test]
+fn codec_rejects_schema_v8_after_caller_result_bump() {
+    let mut old = root(Cbor::Array(vec![]));
+    let Cbor::Array(fields) = &mut old else {
+        unreachable!()
+    };
+    fields[1] = int(8);
+    assert!(matches!(
+        parse_program(&bytes(&old), &requirements(), DecodeLimits::default()),
+        Err(ParseError::UnsupportedVersion(8))
+    ));
+}
+
+#[test]
 fn codec_rejects_abi_v2_after_tag_abi_bump() {
     let mut old = root(Cbor::Array(vec![]));
     let Cbor::Array(fields) = &mut old else {
@@ -128,6 +141,7 @@ fn result_contract_tags_are_distinct_and_have_exact_arity() {
     for result in [
         Cbor::Array(vec![int(0), Cbor::Array(vec![])]),
         Cbor::Array(vec![int(1)]),
+        Cbor::Array(vec![int(2)]),
     ] {
         let signatures = Cbor::Array(vec![Cbor::Array(vec![Cbor::Array(vec![]), result])]);
         assert!(matches!(
@@ -142,6 +156,7 @@ fn result_contract_tags_are_distinct_and_have_exact_arity() {
     for result in [
         Cbor::Array(vec![int(0)]),
         Cbor::Array(vec![int(1), Cbor::Array(vec![])]),
+        Cbor::Array(vec![int(2), Cbor::Array(vec![])]),
     ] {
         let signatures = Cbor::Array(vec![Cbor::Array(vec![Cbor::Array(vec![]), result])]);
         assert!(matches!(

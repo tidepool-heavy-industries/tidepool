@@ -346,7 +346,8 @@ impl Decoder {
                 |this, value| this.rep(value),
             )?)),
             (1, 1) => Ok(super::ResultContract::NoSuccess),
-            (0..=1, _) => Err(ParseError::Malformed(
+            (2, 1) => Ok(super::ResultContract::CallerResult),
+            (0..=2, _) => Err(ParseError::Malformed(
                 "wrong result contract field count".into(),
             )),
             (tag, _) => Err(ParseError::InvalidTag(tag)),

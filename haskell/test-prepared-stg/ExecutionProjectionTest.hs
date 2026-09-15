@@ -10,6 +10,7 @@ module ExecutionProjectionTest
 import Control.Monad (forM_, unless)
 import Data.ByteString qualified as BS
 import Data.List (nub)
+import Data.Word (Word64)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as Text
@@ -240,7 +241,7 @@ topIdentityAllocationContract = do
 
   let internal = symbol "A" "local" "reverse"
       external = symbol "A" "value" "reverse"
-      retained = Map.singleton internal 7
+      retained = Map.singleton internal (7 :: Word64)
   unless (Map.notMember external retained)
     (ioError (userError
       "internal and external same-spelled identities shared retained-generation state"))
@@ -627,7 +628,7 @@ verifyMissingHomeTop context modules = case projectPrepared context stripped of
 verifySuiteCollisionRegression :: IO ()
 verifySuiteCollisionRegression = do
   prepared <- runPipelineSelected PreparedStg "test/Suite.hs" ["lib", "test"]
-  let context identity = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = identity, projectionFormattingAuthority = Nothing, projectionTextUnit = Nothing }
+  let context targetIdentity = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionEntry = targetIdentity, projectionFormattingAuthority = Nothing, projectionTextUnit = Nothing }
       identity = SymbolIdentity "main" "Suite" "value" "ho_myany" Nothing
   case projectPreparedTarget (context identity) (pprModules prepared) of
     Left failure -> ioError (userError ("Suite collision repro changed: " <> show failure))

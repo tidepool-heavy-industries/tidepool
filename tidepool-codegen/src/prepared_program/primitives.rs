@@ -16,7 +16,7 @@ use tidepool_repr::execution_schema::{
 fn result_reps(signature: &Signature) -> Option<&[RuntimeRep]> {
     match &signature.results {
         ResultContract::Returns(reps) => Some(reps),
-        ResultContract::NoSuccess => None,
+        ResultContract::NoSuccess | ResultContract::CallerResult => None,
     }
 }
 

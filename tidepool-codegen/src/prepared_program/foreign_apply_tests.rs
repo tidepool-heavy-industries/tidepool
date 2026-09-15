@@ -110,6 +110,9 @@ fn owner(results: ResultContract) -> WireProgram {
         },
     });
     wire.expressions.nodes = match &results {
+        ResultContract::CallerResult => {
+            panic!("concrete foreign fixture requires an instantiated result")
+        }
         ResultContract::Returns(reps) => vec![ExprFrame::Return(
             reps.iter()
                 .map(|rep| match rep {

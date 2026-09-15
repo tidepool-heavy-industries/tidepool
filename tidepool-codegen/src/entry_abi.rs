@@ -81,6 +81,9 @@ impl EntryAbi {
         signature: &SemanticSignature,
         environment: EnvironmentMode,
     ) -> Result<Self, AbiError> {
+        if signature.results.is_caller_result() {
+            return Err(AbiError::UninstantiatedResult);
+        }
         let physical_arguments = signature
             .arguments
             .iter()
@@ -231,6 +234,8 @@ fn cranelift_components(reps: &[RuntimeRep], pointer: Type) -> Result<Vec<Type>,
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AbiError {
+    #[error("caller-chosen result representation has not been instantiated")]
+    UninstantiatedResult,
     #[error("unsupported native ABI target {0:?}")]
     UnsupportedTarget(TargetDescriptor),
     #[error("native ABI component count overflow")]

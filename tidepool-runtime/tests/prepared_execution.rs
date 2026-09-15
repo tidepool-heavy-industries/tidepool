@@ -31,6 +31,66 @@ const FREER_RESUME_ARTIFACT: &[u8] =
 const FREER_RESUME_EXPECTATIONS: &str =
     include_str!("../../haskell/test-prepared-stg/FreerResumeExpectations.json");
 
+#[test]
+fn caller_result_matches_ghc_for_boxed_unboxed_and_join_forwarding() {
+    use tidepool_extract_cmd::{resolve_bin, ExtractCmd, ResolvedExtractBin};
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let source = root.join("haskell/test-prepared-stg/RepPoly.hs");
+    let oracle = std::process::Command::new("ghc")
+        .arg(&source)
+        .args(["-e", "print [RepPoly.result, RepPoly.joined]"])
+        .output()
+        .expect("run the pinned GHC oracle in the repository development shell");
+    assert!(
+        oracle.status.success(),
+        "{}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+    let expected: Vec<i64> = serde_json::from_slice(&oracle.stdout).expect("GHC Int list");
+    assert_eq!(expected.len(), 2);
+
+    let output = tempfile::tempdir().unwrap();
+    let mut command = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(
+        resolve_bin()
+            .expect("resolve the repository extractor")
+            .path,
+    ));
+    command
+        .input(&source)
+        .targets(["result", "joined"])
+        .include(root.join("haskell/lib"))
+        .output_dir(output.path());
+    let extracted = command
+        .bind()
+        .and_then(|endpoint| endpoint.execute(&command))
+        .expect("extract CallerResult programs");
+    assert!(
+        extracted.output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&extracted.output.stderr)
+    );
+
+    let requirements = tidepool_toolchain::prepared_artifact::production_requirements()
+        .expect("resolve the production artifact requirements");
+    for (target, expected) in ["result", "joined"].into_iter().zip(expected) {
+        let bytes = std::fs::read(output.path().join(format!("{target}.prepared.cbor")))
+            .expect("extractor wrote the prepared artifact");
+        let result = run_prepared_once(
+            &bytes,
+            &requirements,
+            DecodeLimits::default(),
+            MachineImports::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap_or_else(|error| panic!("{target}: {error:?}"));
+        assert_eq!(result.values.len(), 1, "{target}");
+        assert_eq!(observed_int(&result.values[0]), expected, "{target}");
+    }
+}
+
 fn head(major: u8, length: usize) -> Vec<u8> {
     assert!(length < 24);
     vec![(major << 5) | length as u8]

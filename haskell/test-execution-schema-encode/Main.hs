@@ -21,7 +21,12 @@ main = do
   assert (BS.take 7 first == BS.pack [0x8d, 0x65, 0x54, 0x50, 0x53, 0x54, 0x47])
     "prepared execution root does not start with [\"TPSTG\", ...]"
   assert (termNumber (termList (decode first) !! 1) == fromIntegral schemaVersion)
-    "prepared execution schema is not v8"
+    "prepared execution schema is not v9"
+  let callerProgram = representative
+        { programSignatures = [Signature [LiftedRefRep] CallerResult] }
+      callerSignatures = termList (termList (decode (encodeWireProgram callerProgram)) !! 6)
+  assert (map (last . termList) callerSignatures == [TList [TInt 2]])
+    "caller-chosen result contract did not use tag 2"
   let globalFields = termList (firstTerm (termList (termList (decode first) !! 7)))
   assert (drop 3 globalFields == [TBool False, TList [TInt 1, TInt 7]])
     "global wire fields must end with evaluated, tagged generation"

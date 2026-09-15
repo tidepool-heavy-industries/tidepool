@@ -138,6 +138,20 @@ pub(super) fn callee<'a>(
     }
 }
 
+/// Finite concrete results served by representation-polymorphic entries.
+/// Lifted results are always offered to independently compiled consumers.
+pub(super) fn result_instances(program: &PreparedProgram) -> BTreeSet<ResultContract> {
+    program
+        .signatures()
+        .iter()
+        .filter_map(|signature| match &signature.results {
+            results @ ResultContract::Returns(_) => Some(results.clone()),
+            _ => None,
+        })
+        .chain([ResultContract::Returns(vec![RuntimeRep::LiftedRef])])
+        .collect()
+}
+
 pub(super) struct ProgramPlan<'a> {
     pub program: &'a PreparedProgram,
     pub value_reps: BTreeMap<ValueId, RuntimeRep>,

@@ -107,6 +107,7 @@ pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
                     .ok_or(Unsupported::ThunkSignature(binding.id))?;
                 let supported_result = match &checked.results {
                     ResultContract::NoSuccess => true,
+                    ResultContract::CallerResult => false,
                     ResultContract::Returns(reps) => reps.as_slice() == [RuntimeRep::LiftedRef],
                 };
                 if !checked.arguments.is_empty() || !supported_result {
@@ -147,6 +148,7 @@ pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
             .get(&id)
             .and_then(|actual| program.signatures().get(actual.0 as usize))
     };
+    let result_instances = super::plan::result_instances(program);
     for (node, frame) in program.expressions().nodes.iter().enumerate() {
         let rejected = match frame {
             ExprFrame::Operation { operation, .. } => {
@@ -186,7 +188,21 @@ pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
                 super::plan::callee(program, &known, callee),
                 program.signatures().get(signature.0 as usize),
             ) {
-                (Some(callee), Some(demand)) => !callee.admits(&profile, demand),
+                (Some(callee), Some(demand)) => {
+                    if demand.results.is_caller_result() {
+                        result_instances.iter().any(|results| {
+                            !callee.admits(
+                                &profile,
+                                &Signature {
+                                    arguments: demand.arguments.clone(),
+                                    results: results.clone(),
+                                },
+                            )
+                        })
+                    } else {
+                        !callee.admits(&profile, demand)
+                    }
+                }
                 _ => true,
             },
             _ => false,

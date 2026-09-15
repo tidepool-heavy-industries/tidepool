@@ -468,7 +468,7 @@ impl<'w, 'p> Walker<'w, 'p> {
     ) -> Result<super::Signature, ParseError> {
         let signature = self.validator.signature(declared)?.clone();
         let ty = self.atom_type(atom)?;
-        if enter_only && !signature.arguments.is_empty() {
+        if enter_only && (!signature.arguments.is_empty() || signature.results.is_caller_result()) {
             return Err(ParseError::InvalidSignature(
                 "entry demand cannot supply function arguments".into(),
             ));
@@ -490,7 +490,11 @@ impl<'w, 'p> Walker<'w, 'p> {
                         "partial application must return a function reference".into(),
                     ))
                 }
-                std::cmp::Ordering::Equal if !actual.results.satisfies(&signature.results) => {
+                std::cmp::Ordering::Equal
+                    if !(actual.results.satisfies(&signature.results)
+                        || (actual.results.is_caller_result()
+                            && matches!(signature.results, ResultContract::Returns(_)))) =>
+                {
                     return Err(ParseError::InvalidSignature(
                         "saturated application result disagrees with entry signature".into(),
                     ))
@@ -618,9 +622,9 @@ impl<'w, 'p> Walker<'w, 'p> {
                 ..
             } => {
                 let signature = self.validator.signature(*signature)?.clone();
-                if !signature.arguments.is_empty() {
+                if !signature.arguments.is_empty() || signature.results.is_caller_result() {
                     return Err(ParseError::InvalidSignature(
-                        "thunk signature has arguments".into(),
+                        "thunk requires a concrete zero-argument signature".into(),
                     ));
                 }
                 actions.push(Action::Closure {
@@ -1038,6 +1042,11 @@ impl<'w, 'p> Walker<'w, 'p> {
         children: &mut Vec<Seed>,
     ) -> Result<(), ParseError> {
         let scrutinee_reps = match scrutinee_results {
+            ResultContract::CallerResult => {
+                return Err(ParseError::InvalidSignature(
+                    "case scrutinee requires concrete results".into(),
+                ))
+            }
             ResultContract::Returns(reps) => {
                 for rep in reps {
                     self.validator.check_rep(*rep)?;
@@ -1351,6 +1360,15 @@ impl<'a> Validator<'a> {
 
         let mut operation_contracts = BTreeSet::new();
         for operation in &self.wire.operations {
+            if self
+                .signature(operation.signature)?
+                .results
+                .is_caller_result()
+            {
+                return Err(ParseError::InvalidSignature(
+                    "operation requires concrete results".into(),
+                ));
+            }
             self.bump_work(1)?;
             self.check_operation_identity(&operation.identity)?;
             let signature = self.signature(operation.signature)?;
@@ -1415,6 +1433,24 @@ impl<'a> Validator<'a> {
                 "entry value {:?} is not a top-level binding",
                 self.wire.entry
             )));
+        }
+
+        for group in &self.wire.bindings {
+            let tops = match group {
+                Group::NonRecursive(top) => std::slice::from_ref(top),
+                Group::Recursive(tops) => tops,
+            };
+            for top in tops {
+                if top.binding.id == self.wire.entry {
+                    if let HeapRhs::Function { signature, .. } = &top.binding.rhs {
+                        if self.signature(*signature)?.results.is_caller_result() {
+                            return Err(ParseError::InvalidSignature(
+                                "program entry requires concrete results".into(),
+                            ));
+                        }
+                    }
+                }
+            }
         }
 
         if self.wire.expressions.nodes.len() > self.limits.max_nodes {

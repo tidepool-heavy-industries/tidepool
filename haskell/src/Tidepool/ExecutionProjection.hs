@@ -196,8 +196,16 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
       projectable = map (dropRetainedTops context) modules
   (bindingGroups, final) <- runStateT
     (preallocate projectable >> concat <$> mapM projectModule projectable) initial
-  entry <- maybe (Left (MissingPreparedEntry (projectionEntry context)))
-    (pure . topValue) (findTop bindingGroups)
+  entryTop <- maybe (Left (MissingPreparedEntry (projectionEntry context)))
+    pure (findTop bindingGroups)
+  let entry = topValue entryTop
+      TopBinding _ entryBinding = entryTop
+  case heapBindingRhs entryBinding of
+    Function signature _ _ _
+      | lookup signature [(identity, signatureResults contract)
+          | (contract, identity) <- signatures final] == Just CallerResult ->
+          Left (InvalidPreparedRepresentation "program entry requires a concrete result contract")
+    _ -> pure ()
   pure WireProgram
     { programEnvelope = ProgramEnvelope schemaVersion (projectionProfile context)
         (projectionToolchain context) executionAbiVersion (projectionTarget context)
@@ -604,7 +612,10 @@ projectRhs :: Id -> CgStgRhs -> P HeapRhs
 projectRhs binder (StgRhsClosure captures _ update parameters body resultType) = withScope $ do
   captureRefs <- mapM projectReference (dVarSetElems captures)
   parameterIds <- mapM bindValue parameters
-  resultContract <- resultContractFor binder (length parameters) resultType
+  let callableArity = case update of
+        ReEntrant -> length parameters
+        _ -> 0
+  resultContract <- resultContractFor binder callableArity resultType
   projectedBody <- projectBody resultContract resultType body
   case update of
     ReEntrant -> Function <$> (internSignature =<< signatureFor parameters resultContract)
@@ -1238,22 +1249,15 @@ importedEntry :: Id -> P (Maybe Signature, Bool)
 importedEntry binder = case importedIdLFInfo binder of
   LFReEntrant _ arity _ _ -> do
     (arguments, result) <- splitRepArguments arity (varType binder)
-    signature <- Signature arguments <$> entryResults arity result
+    signature <- Signature arguments <$> resultContractFor binder arity result
     pure (Just signature, True)
   LFThunk{} -> do
-    signature <- Signature [] <$> entryResults 0 (varType binder)
+    signature <- Signature [] <$> resultContractFor binder 0 (varType binder)
     pure (Just signature, False)
   LFCon{} -> pure (Nothing, True)
   LFUnlifted -> pure (Nothing, True)
   LFUnknown{} -> pure (Nothing, False)
   LFLetNoEscape -> failShape "imported join has no heap/global entry"
-  where
-    entryResults actual ty = do
-      if isDeadEndId binder
-        then do
-          threshold <- demandRepThreshold binder
-          if actual >= threshold then pure NoSuccess else Returns <$> repsForType ty
-        else Returns <$> repsForType ty
 
 signatureForArgs :: [StgArg] -> Type -> P Signature
 signatureForArgs args result = Signature <$> (concat <$> mapM argReps args) <*> (Returns <$> repsForType result)
@@ -1270,6 +1274,7 @@ signatureForApplication args demandedResult = Signature
   where
     demandedResultForApplication = case demandedResult of
       Returns reps -> pure (Returns reps)
+      CallerResult -> pure CallerResult
       NoSuccess -> failShape "demanded NoSuccess lacks callee evidence"
     argReps (StgVarArg binder) = argumentRepsForType (varType binder)
     argReps (StgLitArg literal) = argumentRepsForType (literalType literal)
@@ -1304,8 +1309,14 @@ resultContractFor :: Id -> Int -> Type -> P ResultContract
 resultContractFor binder actual ty
   | isDeadEndId binder = do
       threshold <- demandRepThreshold binder
-      if actual >= threshold then pure NoSuccess else Returns <$> repsForType ty
-  | otherwise = Returns <$> repsForType ty
+      if actual >= threshold then pure NoSuccess else returning
+  | otherwise = returning
+  where
+    -- A callable body can inherit the caller's concrete result convention.
+    -- Zero-arity closures have no call boundary at which to instantiate it.
+    returning
+      | actual > 0, Nothing <- typePrimRep_maybe ty = pure CallerResult
+      | otherwise = Returns <$> repsForType ty
 
 signatureForArgsNoSuccess :: [StgArg] -> P Signature
 signatureForArgsNoSuccess args = Signature <$> (concat <$> mapM argReps args) <*> pure NoSuccess

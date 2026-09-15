@@ -5,6 +5,8 @@ build-type:    Simple
 extra-source-files:
   lib/Tidepool/Double.hs
   test-prepared-stg/site-fixtures/*.hs
+  test-prepared-stg/RepPoly.hs
+  test-prepared-stg/RepPolyImport.hs
 
 -- Internal (unexposed) sub-library: the genuinely shared extractor
 -- implementation, compiled ONCE per configuration instead of once per
@@ -172,6 +174,7 @@ test-suite execution-schema-projection
   main-is:          ExecutionProjectionProbe.hs
   hs-source-dirs:   test-prepared-stg
   other-modules:
+    CallerResultProjectionTest
     DeferredFunctionProjectionTest
     ExecutionProjectionTest
   build-depends:
