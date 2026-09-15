@@ -2866,13 +2866,11 @@ fn emit_lit(
 
 /// Emit a `LitByteArray` (e.g. a `BigNat#` payload) as a heap Lit object.
 ///
-/// Identical data-section layout to `emit_lit_string` (`[len: u64][bytes...]`),
-/// but tagged `LIT_TAG_BYTEARRAY` instead of `LIT_TAG_STRING`. The tag matters at
-/// read time: `unbox_bytearray` adds `+8` for STRING (to skip the length prefix,
-/// for `unpackCString#`), but returns the data pointer as-is for BYTEARRAY — so
-/// `sizeofByteArray#` reads the length and `indexWordArray#`/the mpn intercepts
-/// (which add their own `+8`) read the limbs. Using STRING here would
-/// double-offset and make `sizeofByteArray#` read a limb as the length.
+/// Tagged `LIT_TAG_BYTEARRAY`, not `LIT_TAG_STRING`: `unbox_bytearray` adds `+8`
+/// for STRING (to skip the length prefix, for `unpackCString#`) but returns the
+/// data pointer as-is for BYTEARRAY, so `sizeofByteArray#` reads the length and
+/// `indexWordArray#`/the mpn intercepts (which add their own `+8`) read the
+/// limbs. See [`emit_ledger_literal`] for the payload.
 fn emit_lit_bytearray_literal(
     pipeline: &mut CodegenPipeline,
     builder: &mut FunctionBuilder,
@@ -2882,48 +2880,19 @@ fn emit_lit_bytearray_literal(
     bytes: &[u8],
     _counter: &mut u32,
 ) -> Result<SsaVal, EmitError> {
-    // Anonymous data: same `add_function` multi-round collision concern as
-    // `emit_lit_string` (a `__litba_<n>` name would clash in the live JITModule).
-    let data_id = pipeline
-        .module
-        .declare_anonymous_data(false, false)
-        .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-
-    let mut data_desc = DataDescription::new();
-    data_desc.set_align(8);
-    let mut contents = Vec::with_capacity(8 + bytes.len());
-    contents.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-    contents.extend_from_slice(bytes);
-    data_desc.define(contents.into_boxed_slice());
-
-    pipeline
-        .module
-        .define_data(data_id, &data_desc)
-        .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-
-    let local_data = pipeline.module.declare_data_in_func(data_id, builder.func);
-    let data_ptr = builder.ins().symbol_value(types::I64, local_data);
-
-    let ptr = emit_alloc_fast_path(builder, vmctx, LIT_TOTAL_SIZE, gc_sig, oom_func);
-    let tag = builder.ins().iconst(types::I8, layout::TAG_LIT as i64);
-    builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
-    let size = builder.ins().iconst(types::I32, LIT_TOTAL_SIZE as i64);
-    builder.ins().store(MemFlags::trusted(), size, ptr, 1);
-    let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_BYTEARRAY as i64);
-    builder
-        .ins()
-        .store(MemFlags::trusted(), lit_tag, ptr, LIT_TAG_OFFSET);
-    builder
-        .ins()
-        .store(MemFlags::trusted(), data_ptr, ptr, LIT_VALUE_OFFSET);
-    builder.declare_value_needs_stack_map(ptr);
-    Ok(SsaVal::HeapPtr(ptr))
+    emit_ledger_literal(
+        pipeline,
+        builder,
+        vmctx,
+        gc_sig,
+        oom_func,
+        bytes,
+        LIT_TAG_BYTEARRAY,
+    )
 }
 
-/// Emit a LitString as a heap Lit object pointing to a JIT data section.
-///
-/// Data section layout: [len: u64][bytes...]
-/// Heap object layout: TAG_LIT at [0], size at [1..3], LIT_TAG_STRING at [8], data_ptr at [16]
+/// Emit a `LitString` as a heap Lit object tagged `LIT_TAG_STRING`. See
+/// [`emit_ledger_literal`] for the payload.
 fn emit_lit_string(
     pipeline: &mut CodegenPipeline,
     builder: &mut FunctionBuilder,
@@ -2933,44 +2902,81 @@ fn emit_lit_string(
     bytes: &[u8],
     _counter: &mut u32,
 ) -> Result<SsaVal, EmitError> {
-    // Create data object: [len: u64][bytes...]. Anonymous: a session machine
-    // adds fragments into the SAME live JITModule via `add_function`, so a
-    // per-compile counter name (`__litstr_<n>`) would collide across rounds
-    // ("Duplicate definition of identifier"). The blob needs no stable name.
+    emit_ledger_literal(
+        pipeline,
+        builder,
+        vmctx,
+        gc_sig,
+        oom_func,
+        bytes,
+        LIT_TAG_STRING,
+    )
+}
+
+/// The one emission of a literal byte payload. The module keeps an immutable
+/// copy of the bytes, but the heap object never points at it: each evaluation
+/// builds a ledger-owned byte array (`runtime_new_literal_bytes`), so the
+/// collector and every checked reader authenticate a literal exactly like any
+/// other byte array. Module data is not external storage and must never be
+/// reachable under a byte-array or string tag.
+///
+/// The wrapper is allocated first: that allocation is the only step that can
+/// collect, and the payload does not exist yet. The host allocation that
+/// follows cannot collect, so the payload is stored before anything can trace
+/// the wrapper.
+fn emit_ledger_literal(
+    pipeline: &mut CodegenPipeline,
+    builder: &mut FunctionBuilder,
+    vmctx: Value,
+    gc_sig: ir::SigRef,
+    oom_func: ir::FuncRef,
+    bytes: &[u8],
+    lit_tag: layout::LitTag,
+) -> Result<SsaVal, EmitError> {
+    // Anonymous: a session machine adds fragments into the SAME live JITModule
+    // via `add_function`, so a per-compile counter name would collide across
+    // rounds ("Duplicate definition of identifier").
     let data_id = pipeline
         .module
         .declare_anonymous_data(false, false)
         .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
-
     let mut data_desc = DataDescription::new();
-    data_desc.set_align(8); // Ensure 8-byte alignment for u64 length prefix
-    let mut contents = Vec::with_capacity(8 + bytes.len() + 1);
-    contents.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-    contents.extend_from_slice(bytes);
-    contents.push(0); // Null terminator for GHC's Addr# string iteration
+    data_desc.set_align(8);
+    // A one-byte blob for the empty literal: a data object needs content.
+    let mut contents = bytes.to_vec();
+    if contents.is_empty() {
+        contents.push(0);
+    }
     data_desc.define(contents.into_boxed_slice());
-
     pipeline
         .module
         .define_data(data_id, &data_desc)
         .map_err(|e| EmitError::CraneliftError(e.to_string()))?;
 
-    let local_data = pipeline.module.declare_data_in_func(data_id, builder.func);
-    let data_ptr = builder.ins().symbol_value(types::I64, local_data);
-
     let ptr = emit_alloc_fast_path(builder, vmctx, LIT_TOTAL_SIZE, gc_sig, oom_func);
-
     let tag = builder.ins().iconst(types::I8, layout::TAG_LIT as i64);
     builder.ins().store(MemFlags::trusted(), tag, ptr, 0);
     let size = builder.ins().iconst(types::I32, LIT_TOTAL_SIZE as i64);
     builder.ins().store(MemFlags::trusted(), size, ptr, 1);
-    let lit_tag = builder.ins().iconst(types::I8, LIT_TAG_STRING as i64);
+    let tag_value = builder.ins().iconst(types::I8, lit_tag as i64);
     builder
         .ins()
-        .store(MemFlags::trusted(), lit_tag, ptr, LIT_TAG_OFFSET);
+        .store(MemFlags::trusted(), tag_value, ptr, LIT_TAG_OFFSET);
+
+    let local_data = pipeline.module.declare_data_in_func(data_id, builder.func);
+    let source = builder.ins().symbol_value(types::I64, local_data);
+    let length = builder.ins().iconst(types::I64, bytes.len() as i64);
+    let payload = crate::emit::primop::emit_runtime_call(
+        pipeline,
+        builder,
+        "runtime_new_literal_bytes",
+        &[ir::AbiParam::new(types::I64), ir::AbiParam::new(types::I64)],
+        &[ir::AbiParam::new(types::I64)],
+        &[source, length],
+    )?;
     builder
         .ins()
-        .store(MemFlags::trusted(), data_ptr, ptr, LIT_VALUE_OFFSET);
+        .store(MemFlags::trusted(), payload, ptr, LIT_VALUE_OFFSET);
 
     builder.declare_value_needs_stack_map(ptr);
     Ok(SsaVal::HeapPtr(ptr))

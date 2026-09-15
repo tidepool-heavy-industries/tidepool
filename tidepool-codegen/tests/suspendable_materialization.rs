@@ -180,6 +180,68 @@ fn build_suspending_pair(captured_n: i64, req: i64) -> CoreExpr {
     b.build()
 }
 
+/// A SUSPENDING fragment whose pre-suspension capture holds a COMPILED string
+/// literal, so the resume's tenure copies a `String#` literal object and its
+/// fixup collection traces the literal's payload:
+///
+/// ```text
+/// let captured = C1 "static-literal"# in
+///   E (Union (W# ASK_TAG) (I# req)) (Leaf (\v -> Val (Pair captured (C1 v))))
+/// ```
+///
+/// Every heap payload a collection reaches must be authenticated by the
+/// external-storage ledger; an emitted literal is no exception.
+fn build_suspending_literal_pair(literal: &[u8], req: i64) -> CoreExpr {
+    let mut b = TreeBuilder::new();
+
+    let text = b.push(CoreFrame::Lit(Literal::LitString(literal.to_vec())));
+    let captured = b.push(CoreFrame::Con {
+        tag: C1,
+        fields: vec![text],
+    });
+
+    let var_v = b.push(CoreFrame::Var(VarId(0)));
+    let c1_v = b.push(CoreFrame::Con {
+        tag: C1,
+        fields: vec![var_v],
+    });
+    let var_captured = b.push(CoreFrame::Var(VarId(1)));
+    let pair = b.push(CoreFrame::Con {
+        tag: PAIR_ID,
+        fields: vec![var_captured, c1_v],
+    });
+    let val = b.push(CoreFrame::Con {
+        tag: VAL_ID,
+        fields: vec![pair],
+    });
+    let lam = b.push(CoreFrame::Lam {
+        binder: VarId(0),
+        body: val,
+    });
+    let leaf = b.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![lam],
+    });
+
+    let tag_word = b.push(CoreFrame::Lit(Literal::LitWord(ASK_TAG)));
+    let request = b.push(CoreFrame::Lit(Literal::LitInt(req)));
+    let union = b.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![tag_word, request],
+    });
+    let e = b.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![union, leaf],
+    });
+
+    b.push(CoreFrame::LetNonRec {
+        binder: VarId(1),
+        rhs: captured,
+        body: e,
+    });
+    b.build()
+}
+
 /// The ALIASING shape: a SUSPENDING fragment whose continuation puts the SAME
 /// heap object in both tuple fields — the `toWire = id` case
 /// (`pure (it, toWire it)` where `toWire :: Value -> Value`):
@@ -388,6 +450,70 @@ fn projected_turn_suspends_then_tenures_every_field_on_resume() {
         let field1 = unsafe { heap_bridge::heap_to_value(slots[1].current()) }.expect("re-bridge");
         assert_eq!(expect_int(&field0), 111, "field 0 survives a later turn");
         assert_eq!(expect_int(&field1), 222, "field 1 survives a later turn");
+
+        disarm_gc_hazards();
+        drop(machine);
+    });
+}
+
+/// Regression: a compiled string literal captured before a suspension is
+/// tenured on resume. Its payload used to be unregistered module data, so the
+/// tenure's fixup collection reported `Untracked` and latched the machine
+/// `BadPointer` (the raw `bash` actor-host failures).
+#[test]
+#[serial]
+fn tenured_compiled_string_literal_survives_its_fixup_collection() {
+    in_test_thread(|| {
+        arm_gc_hazards();
+        let table = synthetic_table();
+        let (mut machine, fid) = session_with_fragment(
+            &table,
+            "literal_ask",
+            &build_suspending_literal_pair(b"static-literal", 42),
+        );
+
+        let outcome = machine
+            .run_fragment_suspendable_projected(fid, &table, &mut NoDispatch, &(), 2)
+            .expect("projected suspendable run");
+        expect_suspended(outcome, 42);
+
+        let slots = expect_completed(
+            machine
+                .resume_suspended_projected(
+                    &table,
+                    &mut NoDispatch,
+                    &(),
+                    ResumeInput::Answer(Value::Lit(Literal::LitInt(7))),
+                    2,
+                )
+                .expect("resume tenures the literal without an integrity failure"),
+        );
+        let field0 = unsafe { heap_bridge::heap_to_value(slots[0].current()) }.expect("bridge f0");
+        assert!(
+            matches!(
+                &field0,
+                Value::Con(_, fields)
+                    if matches!(fields.as_slice(), [Value::Lit(Literal::LitString(bytes))] if bytes == b"static-literal")
+            ),
+            "the tenured literal keeps its exact bytes: {field0:?}"
+        );
+
+        // A later allocating turn collects over the tenured literal again.
+        let churn = machine
+            .add_function("churn", &build_val_fragment(9), &table, &ExternalEnv::new())
+            .expect("add churn fragment");
+        let _ = machine
+            .run_fragment(churn, &table, &mut NoDispatch, &())
+            .expect("post-resume turn");
+        let field0 = unsafe { heap_bridge::heap_to_value(slots[0].current()) }.expect("re-bridge");
+        assert!(
+            matches!(
+                &field0,
+                Value::Con(_, fields)
+                    if matches!(fields.as_slice(), [Value::Lit(Literal::LitString(bytes))] if bytes == b"static-literal")
+            ),
+            "the literal survives a later collection: {field0:?}"
+        );
 
         disarm_gc_hazards();
         drop(machine);

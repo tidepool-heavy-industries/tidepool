@@ -105,6 +105,50 @@ pub extern "C" fn runtime_new_byte_array(size: i64) -> i64 {
     }
 }
 
+/// A compiled literal's bytes as a ledger-owned byte array. The logical length
+/// is `len`; one zeroed byte follows it inside the same allocation, which is
+/// the terminator an `Addr#` reader of a `String#` literal stops at. `src` is
+/// the module's immutable copy of the bytes. Collection and every checked byte
+/// reader authenticate the result like any other byte array; nothing reachable
+/// from the heap points at unregistered module data.
+pub extern "C" fn runtime_new_literal_bytes(src: i64, len: i64) -> i64 {
+    if len < 0 {
+        overwrite_runtime_error(RuntimeError::UserErrorMsg(
+            "negative literal length".to_string(),
+        ));
+        return error_poison_ptr() as i64;
+    }
+    if check_ptr_invalid(src as *const u8, "runtime_new_literal_bytes") {
+        return error_poison_ptr() as i64;
+    }
+    let size = len as usize;
+    let Some(total) = (2 * BYTE_ARRAY_BASE_OFFSET)
+        .checked_add(size)
+        .and_then(|total| total.checked_add(1))
+    else {
+        return external_allocation_failure(ExternalStorageKind::Bytes, usize::MAX);
+    };
+    let ba = match allocate_external(
+        total,
+        BYTE_ARRAY_BASE_OFFSET,
+        ExternalStorageKind::Bytes,
+        size,
+        true,
+    ) {
+        Ok(ptr) => ptr,
+        Err(poison) => return poison,
+    };
+    // SAFETY: a fresh zeroed allocation of `total` bytes: capacity word at the
+    // base, length prefix at `ba`, `size` data bytes, then the zero terminator.
+    unsafe {
+        let base = ba.sub(BYTE_ARRAY_BASE_OFFSET);
+        *(base as *mut u64) = total as u64;
+        *(ba as *mut u64) = size as u64;
+        std::ptr::copy_nonoverlapping(src as *const u8, ba.add(8), size);
+    }
+    ba as i64
+}
+
 /// Copy `len` bytes from `src` (Addr#) to `dest_ba` (ByteArray ptr) at `dest_off`.
 pub extern "C" fn runtime_copy_addr_to_byte_array(src: i64, dest_ba: i64, dest_off: i64, len: i64) {
     if check_ptr_invalid(src as *const u8, "runtime_copy_addr_to_byte_array")

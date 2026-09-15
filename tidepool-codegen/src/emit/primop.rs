@@ -3356,7 +3356,7 @@ fn emit_lit_boxed_array(
 }
 
 /// Call a runtime function by name. Returns the result value (or a dummy if no returns).
-fn emit_runtime_call(
+pub(crate) fn emit_runtime_call(
     pipeline: &mut CodegenPipeline,
     builder: &mut FunctionBuilder,
     name: &str,
