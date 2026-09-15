@@ -27,7 +27,9 @@ fails deterministically at `actor_host.rs:5478`: the cell renders
 command-job needles). This is a display defect, not an STG defect, fixed in
 `534d7c8ea` with three stale fixtures it exposed (all five affected tests pass
 solo; `just fixtures-check` passes). The next wave is in
-[next-wave-2026-09-15.md](next-wave-2026-09-15.md). A
+[next-wave-2026-09-15b.md](next-wave-2026-09-15b.md) (revision b supersedes
+[revision a](next-wave-2026-09-15.md)'s A2–A7 shape after a Fable survey of the
+runtime owners). A
 further full `just verify` is deferred to the Wave A exit.
 
 **Full prepared corpus, measured after the review fixes** (`just fixtures-check`

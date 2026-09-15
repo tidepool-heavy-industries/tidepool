@@ -1,7 +1,9 @@
 # STG cutover handoff (2026-09-15)
 
 For the next LLM session taking over `engine/stg-production-cutover`. Read
-the [next wave](next-wave-2026-09-15.md) first (current executable plan), then the
+the [next wave, revision b](next-wave-2026-09-15b.md) first (current executable
+plan; it supersedes the A2–A7 shape of [revision a](next-wave-2026-09-15.md)),
+then the
 [implementation update](implementation-2026-09-15.md) and its
 [review](review-2026-09-15.md), then this historical investigation log and `plans/stg-completion.md` (the governing
 cutover plan). Contributor guidance lives in `AGENTS.md`.
