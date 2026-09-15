@@ -30,6 +30,10 @@ module Tidepool.Actor.Record
   , definition
   , self, sender, ActorInputOrigin (..)
   , LocalEffects, Forwarding, forwardResult, forwardingExit
+  -- Named by exported signatures ('definition', 'self', 'sender',
+  -- 'LocalEffects'), so a cell binding's pinned type can name it. Abstract:
+  -- the constructor stays private.
+  , Message
   ) where
 
 import Control.Monad.Freer (Eff, Member)
@@ -178,78 +182,82 @@ type family ValidState states :: Constraint where
 
 type ActorState api = OneState (States (Rep (api Shape)))
 type Schema api = Rep (api Shape)
-type LocalEffects api effects = ActorLocal (Message (Schema api)) ': effects
+type LocalEffects api effects = ActorLocal (Message api) ': effects
 
 -- Dispatch selects a handler polymorphically in its monad. It does not capture
 -- a caller's effect environment or constrain the actor's effect-row order.
-newtype Message shape result = Message
-  { dispatch :: forall m. View shape (Definition m) -> m result }
+--
+-- Indexed by the actor record type, never by its generic representation:
+-- exported types name `Message api`, so a notebook binder's pinned type is
+-- nameable (`R.Message Api`) instead of rendering `Rep (Api Shape)`.
+newtype Message api result = Message
+  { dispatch :: forall m. View (Schema api) (Definition m) -> m result }
 
 newtype View shape mode = View { unView :: Fields shape mode () }
 
-type Select root part = forall mode. View root mode -> View part mode
+type Select api part = forall mode. View (Schema api) mode -> View part mode
 
-newtype Address shape = Address (Int, Int)
+newtype Address api = Address (Int, Int)
 
-sendTo :: Member Actor effects => Address shape -> Message shape () -> Eff effects ()
+sendTo :: Member Actor effects => Address api -> Message api () -> Eff effects ()
 sendTo (Address address) = Eff.send . Core.ActorCastWith address
 
-callTo :: Member Actor effects => Address shape -> Message shape result -> Eff effects result
+callTo :: Member Actor effects => Address api -> Message api result -> Eff effects result
 callTo (Address address) = Eff.send . Core.ActorCallWith address
 
-class GActor root part where
+class GActor api part where
   endpoints
-    :: Address root
-    -> Select root part
+    :: Address api
+    -> Select api part
     -> View part Client
-  selfEndpoints :: Address root -> Select root part -> View part Self
+  selfEndpoints :: Address api -> Select api part -> View part Self
   sources
-    :: View root (Definition m)
-    -> Select root part
-    -> [Source (Message root)]
+    :: View (Schema api) (Definition m)
+    -> Select api part
+    -> [Source (Message api)]
   states
     :: View part (Definition m)
-    -> [OneState (States root)]
+    -> [OneState (States (Schema api))]
 
-instance GActor root fields => GActor root (M1 i meta fields) where
-  endpoints ref select = View (M1 (unView (endpoints @root @fields ref (\root -> View (unM1 (unView (select root)))))))
-  selfEndpoints ref select = View (M1 (unView (selfEndpoints @root @fields ref (\root -> View (unM1 (unView (select root)))))))
-  sources spec select = sources @root @fields spec (\root -> View (unM1 (unView (select root))))
-  states :: forall m. View (M1 i meta fields) (Definition m) -> [OneState (States root)]
-  states (View (M1 fields)) = states @root @fields @m (View fields)
+instance GActor api fields => GActor api (M1 i meta fields) where
+  endpoints ref select = View (M1 (unView (endpoints @api @fields ref (\api -> View (unM1 (unView (select api)))))))
+  selfEndpoints ref select = View (M1 (unView (selfEndpoints @api @fields ref (\api -> View (unM1 (unView (select api)))))))
+  sources spec select = sources @api @fields spec (\api -> View (unM1 (unView (select api))))
+  states :: forall m. View (M1 i meta fields) (Definition m) -> [OneState (States (Schema api))]
+  states (View (M1 fields)) = states @api @fields @m (View fields)
 
-instance (GActor root left, GActor root right) => GActor root (left :*: right) where
+instance (GActor api left, GActor api right) => GActor api (left :*: right) where
   endpoints ref select = View $
-    unView (endpoints @root @left ref (\root -> case unView (select root) of left :*: _ -> View left))
-      :*: unView (endpoints @root @right ref (\root -> case unView (select root) of _ :*: right -> View right))
+    unView (endpoints @api @left ref (\api -> case unView (select api) of left :*: _ -> View left))
+      :*: unView (endpoints @api @right ref (\api -> case unView (select api) of _ :*: right -> View right))
   selfEndpoints ref select = View $
-    unView (selfEndpoints @root @left ref (\root -> case unView (select root) of left :*: _ -> View left))
-      :*: unView (selfEndpoints @root @right ref (\root -> case unView (select root) of _ :*: right -> View right))
+    unView (selfEndpoints @api @left ref (\api -> case unView (select api) of left :*: _ -> View left))
+      :*: unView (selfEndpoints @api @right ref (\api -> case unView (select api) of _ :*: right -> View right))
   sources spec select =
-    sources @root @left spec (\root -> case unView (select root) of left :*: _ -> View left)
-      ++ sources @root @right spec (\root -> case unView (select root) of _ :*: right -> View right)
-  states :: forall m. View (left :*: right) (Definition m) -> [OneState (States root)]
-  states (View (left :*: right)) = states @root @left @m (View left) ++ states @root @right @m (View right)
+    sources @api @left spec (\api -> case unView (select api) of left :*: _ -> View left)
+      ++ sources @api @right spec (\api -> case unView (select api) of _ :*: right -> View right)
+  states :: forall m. View (left :*: right) (Definition m) -> [OneState (States (Schema api))]
+  states (View (left :*: right)) = states @api @left @m (View left) ++ states @api @right @m (View right)
 
-instance (s ~ OneState (States root)) => GActor root (K1 i (State s)) where
+instance (s ~ OneState (States (Schema api))) => GActor api (K1 i (State s)) where
   endpoints _ _ = View (K1 Private)
   selfEndpoints _ _ = View (K1 Private)
   sources _ _ = []
   states (View (K1 value)) = [value]
 
-instance GActor root (K1 i (Call input NoReply)) where
+instance GActor api (K1 i (Call input NoReply)) where
   endpoints ref select = View (K1 (Send (\input -> sendTo ref (Message (\spec -> unK1 (unView (select spec)) input)))))
   selfEndpoints ref select = View (K1 (Send (\input -> sendTo ref (Message (\spec -> unK1 (unView (select spec)) input)))))
   sources _ _ = []
   states _ = []
 
-instance GActor root (K1 i (Call input (Reply output))) where
+instance GActor api (K1 i (Call input (Reply output))) where
   endpoints ref select = View (K1 (Request (\input -> callTo ref (Message (\spec -> unK1 (unView (select spec)) input)))))
   selfEndpoints _ _ = View (K1 Private)
   sources _ _ = []
   states _ = []
 
-instance GActor root (K1 i (Event event)) where
+instance GActor api (K1 i (Event event)) where
   endpoints _ _ = View (K1 Private)
   selfEndpoints _ _ = View (K1 Private)
   sources spec select =
@@ -259,13 +267,13 @@ instance GActor root (K1 i (Event event)) where
 
 data ActorSpec api effects = ActorSpec
   { specLabel :: Text
-  , specProfile :: EffectProfile (Message (Schema api)) effects
+  , specProfile :: EffectProfile (Message api) effects
   , specRecord :: api (Definition (Handler (ActorState api) effects))
   }
 
 definition
   :: Text
-  -> EffectProfile (Message (Schema api)) effects
+  -> EffectProfile (Message api) effects
   -> api (Definition (Handler (ActorState api) effects))
   -> ActorSpec api effects
 definition = ActorSpec
@@ -278,12 +286,12 @@ type Derive api effects =
   , Rep (api Client) ~ Fields (Schema api) Client
   , Rep (api (Definition (Handler (ActorState api) effects)))
       ~ Fields (Schema api) (Definition (Handler (ActorState api) effects))
-  , GActor (Schema api) (Schema api)
-  , Member (ActorLocal (Message (Schema api))) effects
+  , GActor api (Schema api)
+  , Member (ActorLocal (Message api)) effects
   )
 
 newtype ActorHandle api = ActorHandle
-  { actorRef :: Actor.ActorRef (Message (Schema api)) (ActorState api) }
+  { actorRef :: Actor.ActorRef (Message api) (ActorState api) }
 
 -- Inspection reveals exact identity, never the private mailbox or exit cell.
 instance Show (ActorHandle api) where
@@ -293,15 +301,15 @@ instance Show (ActorHandle api) where
 lower
   :: forall api effects. Derive api effects
   => ActorSpec api effects
-  -> (Actor.ActorDefinition (ActorState api) (Message (Schema api)) (ActorState api), ActorState api)
+  -> (Actor.ActorDefinition (ActorState api) (Message api) (ActorState api), ActorState api)
 lower ActorSpec { specLabel = label, specProfile = profile, specRecord = record } =
   let spec = View (from record)
-      step :: forall result. ActorState api -> Message (Schema api) result
+      step :: forall result. ActorState api -> Message api result
            -> Eff effects (result, ActorState api)
       step state message = S.runState state (dispatch message spec)
-      actor = Actor.withSources (sources @(Schema api) @(Schema api) spec id)
+      actor = Actor.withSources (sources @api @(Schema api) spec id)
         (Actor.stateful label profile step)
-  in case states @(Schema api) @(Schema api) spec of
+  in case states @api @(Schema api) spec of
     [initial] -> (actor, initial)
     _ -> error "record derivation violated the single State field invariant"
 
@@ -312,25 +320,25 @@ start spec = let (actor, initial) = lower spec in ActorHandle <$> Actor.startAct
 
 client
   :: forall api. (Generic (api Client), Rep (api Client) ~ Fields (Schema api) Client,
-                 GActor (Schema api) (Schema api))
+                 GActor api (Schema api))
   => ActorHandle api -> api Client
 client ActorHandle { actorRef = Internal.ActorRef actor incarnation _ } =
-  to (unView (endpoints @(Schema api) @(Schema api) (Address (actor, incarnation)) id))
+  to (unView (endpoints @api @(Schema api) (Address (actor, incarnation)) id))
 
 self
   :: forall api effects.
      ( Generic (api Self), Rep (api Self) ~ Fields (Schema api) Self
-     , GActor (Schema api) (Schema api)
-     , Member (ActorLocal (Message (Schema api))) effects )
+     , GActor api (Schema api)
+     , Member (ActorLocal (Message api)) effects )
   => Eff effects (api Self)
 self = do
-  (address, _) <- Eff.send @(ActorLocal (Message (Schema api))) Core.ActorLocalContextWith
-  pure (to (unView (selfEndpoints @(Schema api) @(Schema api) (Address address) id)))
+  (address, _) <- Eff.send @(ActorLocal (Message api)) Core.ActorLocalContextWith
+  pure (to (unView (selfEndpoints @api @(Schema api) (Address address) id)))
 
 sender
-  :: forall api effects. Member (ActorLocal (Message (Schema api))) effects
+  :: forall api effects. Member (ActorLocal (Message api)) effects
   => Eff effects ActorInputOrigin
-sender = snd <$> Eff.send @(ActorLocal (Message (Schema api))) Core.ActorLocalContextWith
+sender = snd <$> Eff.send @(ActorLocal (Message api)) Core.ActorLocalContextWith
 
 finish :: Member Actor effects => ActorHandle api -> Eff effects (ActorExit (ActorState api))
 finish ActorHandle { actorRef = ref } = Actor.drainActor ref >> Actor.awaitExit ref
