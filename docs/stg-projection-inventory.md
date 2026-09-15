@@ -151,22 +151,28 @@ produced resolves through machine-wide tables,
 thunk descriptors (`tidepool-codegen/src/prepared_program/machine.rs`).
 Generated code reaches this as the terminal fallback of its own
 per-program fast chain: `apply.rs::emit_dispatchers` falls through to the
-host fn `prepared_resolve_call(vmctx, header, fingerprint)`, and
+host fn `prepared_resolve_call(vmctx, header, demand)`, and
 `entry.rs::emit_prepared_enter` to `prepared_resolve_enter(vmctx,
-header)` (`prepared_program.rs`). A fingerprint
-(`resolve::signature_fingerprint`, a fixed-seed FNV-1a hash over argument
-representations and the result contract) guards the ABI at the call site.
-Exact application of a foreign function -- whether the callee is the
+header)` (`prepared_program.rs`). Demand metadata is boxed and owned by the
+calling compiled program. Lookup compares full logical signatures, including
+`Void` positions and the result contract; no hash establishes ABI equality.
+Application of a foreign function -- whether the callee is the
 import reference itself (`ValueRef::Global`, Haskell's ordinary
 `producerFn x`) or a local value that happens to hold one (a managed
 argument, a case-bound name) -- and forcing a foreign thunk all work this
 way. A dispatcher whose demanded shape matches none of the compiling
 program's own callables is legal and consists of the fallback alone.
-Foreign PAP, partial, and excess application through this path are not
-yet served: they fail as `RuntimeError::UnresolvedCallee`, disposition
-`Reusable` -- the decision precedes any call, so the heap is untouched. A
-header no installed program can enter is `BadThunkState`, machine
-`Unavailable`.
+Each owner predeclares exact remaining signatures and partial prefixes for
+its function/PAP layouts, including scalar and multiple-result PAP completion.
+The owner applies and flattens PAP fields under its own rooting discipline.
+On a full-demand miss, the caller probes terminal prefixes, then lifted-result
+prefixes for excess application; a successful lifted result is rooted before
+suffix application. Lookup misses do not record a failure. Exhausted resolution
+reports `UnresolvedCallee`, disposition `Reusable`; a header no installed
+program can enter is `BadThunkState`, machine `Unavailable`. Terminal saturation
+never applies excess arguments. Focused coverage lives in
+`prepared_program/foreign_apply_tests.rs`, alongside the imported-thunk and
+signature-mismatch regressions in `prepared_program/machine.rs`.
 
 A top-level constructor whose field is an import is a heap top
 (`image.rs::heap_top_partition`), initialised from the published import

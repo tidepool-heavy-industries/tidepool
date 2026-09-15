@@ -70,18 +70,18 @@ archive).
   pragma (S5), a `PreparedRuntime` hostable in the session registry with
   realm-scoped leases (rung 5's substrate), a composite test proving rungs
   2-5 together through that registry, and a live session-turn mechanism
-  through the real prepared-STG projection (rung 6's substrate). Remaining:
-  foreign PAP/partial/excess application (a typed reusable failure today,
-  dispatch not yet built) and a found, more fundamental gap -- admission
-  has no case at all for a direct call to an imported function, which
-  fails the whole program's install, not just that call; rung 5's proof
-  through `tidepool-actor`'s own registry (the session substrate cannot
-  depend on the actor crate); and the workbench routing decision itself
-  (three options recorded, none taken -- see "Routing options" in the
-  plan). The plan's closing section, "Fable review of Wave 6C-3", records
-  two latent bugs found in review (phantom import leases; closed-world
-  admission of dynamic callees) and the stage-G structural agenda
-  (G0-G5), ordered to delete bug categories rather than instances.
+  through the real prepared-STG projection (rung 6's substrate). Stage G adds
+  direct import admission, program-declared import leases and actor-placement
+  retirement. The current implementation adds foreign PAP/partial/excess
+  dispatch using full signatures and non-mutating probes, plus retained-set
+  compiler/interface invalidation. Production notebook/actor integration and
+  program reclamation remain distinct from these substrate proofs; see the
+  completion plan and the closing implementation evidence in the Wave 6 plan.
+- [Finish the STG engine](stg-completion.md): review at `344ecd59a` and proposed
+  completion sequence: sound foreign application, the production notebook and
+  actor boundary, complete retirement/collection, parity/default routing, and
+  removal of the old engine. Identifies gaps in the G1 proposal and distinguishes
+  Wave 6 substrate evidence from production acceptance.
 
 ## Supporting actor designs and separate harness work
 
