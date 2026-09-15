@@ -23,7 +23,7 @@ use super::CompileError;
 /// One shared descriptor per constructor identity, with the declaration it
 /// was minted from so a conflicting later declaration is refused rather
 /// than silently aliased.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct DescriptorInterner {
     constructors: BTreeMap<SymbolIdentity, (ConstructorDecl, Arc<ObjectDescriptor>)>,
 }

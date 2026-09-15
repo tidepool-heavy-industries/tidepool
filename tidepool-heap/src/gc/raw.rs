@@ -35,7 +35,26 @@ pub struct DescriptorSpace {
     external_payloads: HashMap<usize, ExternalStorageKind>,
 }
 
+/// Registration checkpoint for a prepared-program install. Collection scratch
+/// and relocated object addresses deliberately do not belong to this snapshot.
+pub struct DescriptorOwners {
+    static_regions: Vec<Arc<crate::static_region::StaticRegion>>,
+    descriptors: HashMap<usize, Arc<ObjectDescriptor>>,
+}
+
 impl DescriptorSpace {
+    pub fn snapshot_owners(&self) -> DescriptorOwners {
+        DescriptorOwners {
+            static_regions: self.static_regions.clone(),
+            descriptors: self.descriptors.clone(),
+        }
+    }
+
+    pub fn restore_owners(&mut self, owners: DescriptorOwners) {
+        self.static_regions = owners.static_regions;
+        self.descriptors = owners.descriptors;
+    }
+
     /// Resolve a live header through this space's pinned descriptor owner.
     /// This validates metadata identity, not the provenance of an object pointer.
     pub fn live_descriptor(&self, header: usize) -> Option<&ObjectDescriptor> {

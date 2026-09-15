@@ -13,13 +13,24 @@ use tidepool_heap::external_storage::ExternalStorageKind;
 /// map field. The address index is a second view of the same pinned storage.
 pub(crate) struct PinnedBytes {
     by_value: BTreeMap<Vec<u8>, Arc<[u8]>>,
-    by_address: Vec<Arc<[u8]>>,
+    by_address: Vec<PinnedLiteral>,
+}
+
+struct PinnedLiteral {
+    storage: Arc<[u8]>,
+    logical_len: usize,
 }
 
 impl PinnedBytes {
     pub(super) fn new(by_value: BTreeMap<Vec<u8>, Arc<[u8]>>) -> Self {
-        let mut by_address: Vec<_> = by_value.values().cloned().collect();
-        by_address.sort_unstable_by_key(|storage| storage.as_ptr() as usize);
+        let mut by_address: Vec<_> = by_value
+            .iter()
+            .map(|(logical, storage)| PinnedLiteral {
+                storage: Arc::clone(storage),
+                logical_len: logical.len(),
+            })
+            .collect();
+        by_address.sort_unstable_by_key(|literal| literal.storage.as_ptr() as usize);
         Self {
             by_value,
             by_address,
@@ -30,15 +41,26 @@ impl PinnedBytes {
         self.by_value.get(logical)
     }
 
+    /// Observe only logical literal bytes, excluding the implicit terminal NUL.
+    pub(super) fn logical_suffix(&self, address: usize) -> Option<&[u8]> {
+        let candidate = self
+            .by_address
+            .partition_point(|literal| literal.storage.as_ptr() as usize <= address)
+            .checked_sub(1)?;
+        let literal = &self.by_address[candidate];
+        let offset = address.checked_sub(literal.storage.as_ptr() as usize)?;
+        literal.storage.get(offset..literal.logical_len)
+    }
+
     /// C string length is admitted only within owned immutable storage. Scan
     /// its slice to the first NUL, never dereference the numeric input address
     /// or cross an allocation boundary looking for a terminator.
     pub(super) fn c_string_len(&self, address: usize) -> Option<usize> {
         let candidate = self
             .by_address
-            .partition_point(|storage| storage.as_ptr() as usize <= address)
+            .partition_point(|literal| literal.storage.as_ptr() as usize <= address)
             .checked_sub(1)?;
-        let storage = &self.by_address[candidate];
+        let storage = &self.by_address[candidate].storage;
         let offset = address.checked_sub(storage.as_ptr() as usize)?;
         storage.get(offset..)?.iter().position(|byte| *byte == 0)
     }
@@ -60,9 +82,9 @@ impl PinnedBytes {
     ) -> Option<&[u8]> {
         let candidate = self
             .by_address
-            .partition_point(|storage| storage.as_ptr() as usize <= address)
+            .partition_point(|literal| literal.storage.as_ptr() as usize <= address)
             .checked_sub(1)?;
-        let storage = &self.by_address[candidate];
+        let storage = &self.by_address[candidate].storage;
         let base = storage.as_ptr() as usize;
         if address.checked_sub(base)? > storage.len() {
             return None;
@@ -135,9 +157,16 @@ pub(super) unsafe extern "C" fn prepared_copy_addr_to_byte_array(
                 len,
             });
         }
-        let source = unsafe { &*pool }
-            .read_range(address, count)
-            .ok_or(RuntimeError::BadPointer)?;
+        let external;
+        let source = match unsafe { &*pool }.read_range(address, count) {
+            Some(source) => source,
+            None => {
+                external = machine
+                    .read_external_address(address, count)
+                    .map_err(|error| super::arrays::storage_error(error, 0))?;
+                &external
+            }
+        };
         machine
             .store_external_bytes(published, offset, source)
             .map_err(|error| super::arrays::storage_error(error, offset as i64))?;
@@ -205,6 +234,7 @@ pub(super) unsafe extern "C" fn prepared_c_string_len(
     } else {
         unsafe { &*pool }
             .c_string_len(address)
+            .or_else(|| machine.external_c_string_len(address).ok())
             .and_then(|length| i64::try_from(length).ok())
     };
     match length {
@@ -264,17 +294,27 @@ pub(super) unsafe extern "C" fn prepared_index_char(
         return status as i32;
     }
     let byte = if pool.is_null() || output.is_null() {
-        None
+        Err(crate::host_fns::RuntimeError::BadPointer)
+    } else if let Some(byte) = unsafe { &*pool }.read_byte(address, index) {
+        Ok(byte)
     } else {
-        unsafe { &*pool }.read_byte(address, index)
+        machine
+            .read_external_address_offset(address, index, 1)
+            .map_err(|error| super::arrays::storage_error(error, index))
+            .and_then(|bytes| {
+                bytes
+                    .first()
+                    .copied()
+                    .ok_or(crate::host_fns::RuntimeError::BadPointer)
+            })
     };
     match byte {
-        Some(byte) => {
+        Ok(byte) => {
             unsafe { output.write(u64::from(byte)) };
             crate::prepared_control::CallStatus::Success as i32
         }
-        None => {
-            machine.set_first_cause(crate::host_fns::RuntimeError::BadPointer);
+        Err(error) => {
+            machine.set_first_cause(error);
             machine.prepared_call_status() as i32
         }
     }
@@ -372,6 +412,52 @@ mod tests {
             dest_ref,
             payload,
         );
+    }
+
+    #[test]
+    fn logical_suffix_is_bounded_by_literal_bytes() {
+        let storage: Arc<[u8]> = Arc::from(&b"ab\0tail\0"[..]);
+        let base = storage.as_ptr() as usize;
+        let pool = PinnedBytes::new(BTreeMap::from([(b"ab\0tail".to_vec(), storage)]));
+        assert_eq!(pool.logical_suffix(base), Some(&b"ab\0tail"[..]));
+        assert_eq!(pool.logical_suffix(base + 2), Some(&b"\0tail"[..]));
+        assert_eq!(pool.logical_suffix(base + 7), Some(&b""[..]));
+        assert_eq!(pool.logical_suffix(base + 8), None);
+        assert_eq!(pool.logical_suffix(0), None);
+        assert_eq!(pool.logical_suffix(usize::MAX), None);
+    }
+
+    #[test]
+    fn string_hosts_accept_authenticated_external_byte_addresses() {
+        with_copy_fixture(|vmctx, machine, descriptor, pool, _, dest_ref, payload| {
+            let source = machine.allocate_external_bytes(4, 8).unwrap();
+            machine.store_external_bytes(source, 0, b"ab\0z").unwrap();
+            let address = machine.external_byte_address(source).unwrap();
+            let mut length = -1;
+            let mut character = 0;
+            unsafe {
+                assert_eq!(prepared_c_string_len(vmctx, pool, address, &mut length), 0);
+                assert_eq!(
+                    prepared_index_char(vmctx, pool, address + 1, -1, &mut character),
+                    0
+                );
+                assert_eq!(
+                    prepared_copy_addr_to_byte_array(
+                        vmctx,
+                        pool,
+                        Arc::as_ptr(descriptor),
+                        address,
+                        dest_ref,
+                        0,
+                        4
+                    ),
+                    0
+                );
+            }
+            assert_eq!(length, 2);
+            assert_eq!(character, u64::from(b'a'));
+            assert_eq!(machine.copy_external_bytes(payload).unwrap(), b"ab\0z");
+        });
     }
 
     #[test]

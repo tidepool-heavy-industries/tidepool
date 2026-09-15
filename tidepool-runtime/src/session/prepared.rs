@@ -657,7 +657,16 @@ impl PreparedRuntime {
     /// the lease protects binding-table identity/generation, not the
     /// value's liveness — so releasing it at realm close never drops a value
     /// out from under a still-running program.
+    /// ROOT belongs to the session itself; closing it is a no-op for both
+    /// handles and leases. Session teardown releases those resources.
     pub fn close_realm_report(&mut self, realm: RealmId) -> RealmRetirement {
+        if realm == RealmId::ROOT {
+            return RealmRetirement {
+                frames: 0,
+                handles_released: 0,
+                leases_released: 0,
+            };
+        }
         let (frames, handles_released) = self
             .machine
             .as_mut()
@@ -1697,6 +1706,40 @@ mod tests {
         runtime
             .release_binding(id)
             .expect("the binding releases once its only lease is gone");
+    }
+
+    #[test]
+    fn closing_root_preserves_session_bindings_and_import_leases() {
+        let (mut runtime, first) = session();
+        let id = runtime.bind_top(first, ValueId(0), "producer").unwrap();
+        runtime
+            .install_prepared_in(
+                consumer_program(false, Some(1)),
+                &[(producer_identity(), id)],
+                RealmId::ROOT,
+            )
+            .unwrap();
+        let handles = runtime.retained_handle_count();
+        for _ in 0..2 {
+            let report = runtime.close_realm_report(RealmId::ROOT);
+            assert_eq!(
+                (
+                    report.frames,
+                    report.handles_released,
+                    report.leases_released
+                ),
+                (0, 0, 0)
+            );
+            assert_eq!(runtime.retained_handle_count(), handles);
+            assert_eq!(runtime.bindings().lease_count(id), 1);
+        }
+        runtime
+            .install_prepared_in(
+                consumer_program(false, Some(1)),
+                &[(producer_identity(), id)],
+                RealmId::ROOT,
+            )
+            .expect("root binding remains a valid import");
     }
 
     #[test]

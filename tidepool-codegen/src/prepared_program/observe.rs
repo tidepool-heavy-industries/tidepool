@@ -15,8 +15,16 @@ use tidepool_repr::Literal;
 
 use super::{ConstructorObservation, DescriptorMeaning, DescriptorMetadata};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddressOrigin {
+    Null,
+    Unauthenticated,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ObservationFailure {
+    #[error("cannot observe address: {origin:?}")]
+    Address { origin: AddressOrigin },
     #[error("observation budget {limit} exhausted")]
     BudgetExceeded { limit: usize },
     #[error("observation snapshot allocation failed")]
@@ -27,6 +35,22 @@ pub enum ObservationFailure {
     Representation(RuntimeRep),
     #[error(transparent)]
     Integrity(#[from] DescriptorTraceError),
+}
+
+fn check_indirection(
+    visited: &mut std::collections::HashSet<usize>,
+    word: usize,
+) -> Result<(), ObservationFailure> {
+    visited
+        .try_reserve(1)
+        .map_err(|_| ObservationFailure::AllocationFailed)?;
+    if !visited.insert(untag(word)) {
+        return Err(DescriptorTraceError::UpdatedCycle {
+            address: untag(word),
+        }
+        .into());
+    }
+    Ok(())
 }
 
 fn external_observation_error(error: ExternalStorageValidationError) -> ObservationFailure {
@@ -84,6 +108,7 @@ pub(super) struct ObservationHeap<'a> {
     /// Every installed program's immutable static image. A pointer is static
     /// iff SOME region in this set admits it -- see [`Self::object`].
     statics: Vec<&'a StaticRegion>,
+    pools: Vec<&'a super::static_bytes::PinnedBytes>,
     old_space: Option<&'a dyn tidepool_heap::descriptor_region::DescriptorOldSpace>,
     descriptors: BTreeMap<usize, Arc<ObjectDescriptor>>,
     starts: Vec<u64>,
@@ -164,6 +189,7 @@ impl<'a> ObservationHeap<'a> {
     pub(super) fn new_with_registry_and_starts(
         nursery: &'a [u64],
         statics: &'a [Arc<StaticRegion>],
+        pools: &'a [Arc<super::static_bytes::PinnedBytes>],
         registry: &'a BTreeMap<usize, DescriptorMetadata>,
         starts: &[u64],
         old_space: Option<&'a dyn tidepool_heap::descriptor_region::DescriptorOldSpace>,
@@ -181,6 +207,7 @@ impl<'a> ObservationHeap<'a> {
         Ok(Self {
             nursery,
             statics: statics.iter().map(Arc::as_ref).collect(),
+            pools: pools.iter().map(Arc::as_ref).collect(),
             old_space,
             descriptors,
             starts: starts.to_vec(),
@@ -246,6 +273,7 @@ impl<'a> ObservationHeap<'a> {
             constructors,
             registry,
             external_owner: None,
+            pools: Vec::new(),
         })
     }
 
@@ -346,9 +374,11 @@ impl<'a> ObservationHeap<'a> {
         if !matches!(seed.rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
             return Err(ObservationFailure::Representation(seed.rep));
         }
+        let mut visited = std::collections::HashSet::new();
         loop {
             let (descriptor, object, state) = self.object(seed.word)?;
             if state == DescriptorState::Updated {
+                check_indirection(&mut visited, seed.word)?;
                 seed.word = read_object(
                     object,
                     descriptor,
@@ -382,9 +412,11 @@ impl<'a> ObservationHeap<'a> {
         encoded: usize,
     ) -> Result<bool, ObservationFailure> {
         let mut word = encoded;
+        let mut visited = std::collections::HashSet::new();
         loop {
             let (descriptor, object, state) = self.object(word)?;
             if state == DescriptorState::Updated {
+                check_indirection(&mut visited, word)?;
                 word = read_object(
                     object,
                     descriptor,
@@ -455,8 +487,27 @@ impl<'a> ObservationHeap<'a> {
             budget.remaining -= 1;
 
             match seed.rep {
-                RuntimeRep::Void => unreachable!("void results are omitted before observation"),
-                RuntimeRep::Address => return Err(ObservationFailure::Representation(seed.rep)),
+                RuntimeRep::Void => {
+                    return Err(ObservationFailure::Representation(RuntimeRep::Void))
+                }
+                RuntimeRep::Address => {
+                    if seed.word == 0 {
+                        return Err(ObservationFailure::Address {
+                            origin: AddressOrigin::Null,
+                        });
+                    }
+                    let bytes = self
+                        .pools
+                        .iter()
+                        .find_map(|pool| pool.logical_suffix(seed.word))
+                        .ok_or(ObservationFailure::Address {
+                            origin: AddressOrigin::Unauthenticated,
+                        })?;
+                    budget.charge_bytes(bytes.len())?;
+                    return Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitString(
+                        bytes.to_vec(),
+                    ))));
+                }
                 RuntimeRep::Int(bits) => {
                     return Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitInt(
                         signed_value(seed.word, bits)?,
@@ -792,6 +843,50 @@ mod tests {
     }
 
     #[test]
+    fn address_observation_authenticates_all_pools_and_charges_copied_bytes() {
+        let storage: Arc<[u8]> = Arc::from(&b"ab\0tail\0"[..]);
+        let address = storage.as_ptr() as usize;
+        let pool = super::super::static_bytes::PinnedBytes::new(BTreeMap::from([(
+            b"ab\0tail".to_vec(),
+            storage,
+        )]));
+        let empty = super::super::static_bytes::PinnedBytes::new(BTreeMap::new());
+        let statics = statics();
+        let constructors = BTreeMap::new();
+        let mut heap = ObservationHeap::new(&[], &statics, [], &constructors).unwrap();
+        heap.pools = vec![&empty, &pool];
+        let reps = [RuntimeRep::Address];
+        let layout = StorageLayout::for_reps(&target(), &reps).unwrap();
+        for offset in [0, 2, 7] {
+            let expected = &b"ab\0tail"[offset..];
+            let values = heap
+                .observe_results(
+                    &[(address + offset) as u64],
+                    &reps,
+                    &layout,
+                    1 + expected.len(),
+                )
+                .unwrap();
+            assert!(
+                matches!(&values[0], Value::Lit(Literal::LitString(bytes)) if bytes == expected)
+            );
+            assert!(matches!(
+                heap.observe_results(&[(address + offset) as u64], &reps, &layout, expected.len()),
+                Err(ObservationFailure::BudgetExceeded { .. })
+            ));
+        }
+        let unowned = vec![b'x'];
+        for unknown in [address + 8, unowned.as_ptr() as usize, usize::MAX] {
+            assert!(matches!(
+                heap.observe_results(&[unknown as u64], &reps, &layout, 100),
+                Err(ObservationFailure::Address {
+                    origin: AddressOrigin::Unauthenticated
+                })
+            ));
+        }
+    }
+
+    #[test]
     fn observes_zero_multiple_void_and_sized_scalars_in_source_order() {
         let statics = statics();
         let reps = vec![
@@ -930,6 +1025,36 @@ mod tests {
         assert!(
             matches!(values.as_slice(), [Value::Lit(Literal::LitByteArray(bytes))] if bytes == b"abc")
         );
+    }
+
+    #[test]
+    fn cyclic_indirections_reject_nonforcing_inspection() {
+        let statics = statics();
+        let layout = StorageLayout::for_reps(&target(), &[]).unwrap();
+        let thunk = Arc::new(ObjectDescriptor::new(ObjectKind::Thunk, layout, None).unwrap());
+        let mut nursery = vec![
+            (thunk.initial_header_word() | DescriptorState::Updated as usize) as u64,
+            0,
+        ];
+        nursery[1] = nursery.as_ptr() as u64;
+        let constructors = BTreeMap::new();
+        let heap = ObservationHeap::new(&nursery, &statics, [thunk], &constructors).unwrap();
+        let word = nursery.as_ptr() as usize;
+        assert!(matches!(
+            heap.resolves_to_whnf_value(word),
+            Err(ObservationFailure::Integrity(
+                DescriptorTraceError::UpdatedCycle { .. }
+            ))
+        ));
+        assert!(matches!(
+            heap.inspect_constructor(ObservationSeed {
+                word,
+                rep: RuntimeRep::LiftedRef
+            }),
+            Err(ObservationFailure::Integrity(
+                DescriptorTraceError::UpdatedCycle { .. }
+            ))
+        ));
     }
 
     #[test]
@@ -1090,7 +1215,9 @@ mod tests {
         let address_layout = StorageLayout::for_reps(&target(), &address_reps).unwrap();
         assert!(matches!(
             function_heap.observe_results(&[0], &address_reps, &address_layout, 1),
-            Err(ObservationFailure::Representation(RuntimeRep::Address))
+            Err(ObservationFailure::Address {
+                origin: AddressOrigin::Null
+            })
         ));
     }
 
@@ -1124,7 +1251,9 @@ mod tests {
         let root = nursery.as_ptr() as usize | 1;
         assert!(matches!(
             heap.observe_results(&[root as u64], &reps, &layout, 3),
-            Err(ObservationFailure::Representation(RuntimeRep::Address))
+            Err(ObservationFailure::Address {
+                origin: AddressOrigin::Null
+            })
         ));
     }
 }

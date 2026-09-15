@@ -141,6 +141,7 @@ pub struct PreparedMachine<'code> {
     /// program's own region, so a cross-program static field resolves
     /// through whichever region actually admits it (T4).
     statics: Vec<Arc<StaticRegion>>,
+    pools: Vec<Arc<super::static_bytes::PinnedBytes>>,
     /// Union of every installed program's pinned descriptor layouts, passed
     /// to `retain_prepared`/`promote_prepared` so a promoted value's
     /// transitive graph is covered no matter which program produced the
@@ -247,6 +248,47 @@ impl Drop for TemporaryRoots<'_> {
     }
 }
 
+/// Candidate registrations are unpublished until install returns successfully.
+/// Undo only registration state: a completed collection may have moved live
+/// objects, whose updated roots and nursery cursor must survive rollback.
+struct InstallTransaction<'a, 'code> {
+    machine: &'a mut PreparedMachine<'code>,
+    slots: std::ops::Range<usize>,
+    owners: Option<tidepool_heap::gc::raw::DescriptorOwners>,
+    stack_maps: usize,
+    committed: bool,
+}
+
+impl Drop for InstallTransaction<'_, '_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            for slot in self.slots.clone() {
+                let root = unsafe {
+                    self.machine
+                        .top_table
+                        .as_mut_ptr()
+                        .add(slot)
+                        .cast::<*mut u8>()
+                };
+                self.machine.machine.deregister_persistent_root(root);
+                // The range is bounded by the fixed top-table capacity.
+                let _ = self.machine.top_table.write(slot, 0);
+            }
+            while self.machine.machine.stack_map_registries().len() > self.stack_maps {
+                self.machine.machine.pop_stack_map_registry();
+            }
+            if let Some(owners) = self.owners.take() {
+                self.machine
+                    .machine
+                    .restore_prepared_descriptor_owners(owners);
+            } else {
+                self.machine.machine.clear_gc_state();
+            }
+        }
+        self.machine.machine.end_prepared_call();
+    }
+}
+
 impl PreparedMachine<'static> {
     /// Create a machine and install `program` as its first program, retaining
     /// its mutable heap, static image, top-table range, descriptor registry
@@ -296,6 +338,7 @@ impl<'code> PreparedMachine<'code> {
             vmctx: VMContext::new(std::ptr::null_mut(), std::ptr::null(), gc_trigger),
             old_space: Box::new(OldSpace::new()),
             statics: Vec::new(),
+            pools: Vec::new(),
             descriptors: Vec::new(),
             descriptor_registry: BTreeMap::new(),
             interner: super::DescriptorInterner::default(),
@@ -311,7 +354,8 @@ impl<'code> PreparedMachine<'code> {
         linked: &tidepool_repr::execution_schema::LinkedProgram,
     ) -> Result<CompiledProgram, super::CompileError> {
         let base = self.next_top_slot_base();
-        CompiledProgram::compile_with(linked, base, &mut self.interner)
+        let mut staged = self.interner.clone();
+        CompiledProgram::compile_with(linked, base, &mut staged)
     }
 
     /// The base a program must be compiled against
@@ -326,10 +370,9 @@ impl<'code> PreparedMachine<'code> {
     /// compiled against exactly [`Self::next_top_slot_base`] as observed
     /// before this call; the machine-wide table capacity is fixed at
     /// construction, so exhaustion is [`ExecutionError::TopTableExhausted`],
-    /// never a reallocation. Nothing is written -- no top-table cell, no
-    /// claimed-slot advance, no persistent root -- unless the whole install
-    /// succeeds, and every already-installed program is untouched by a
-    /// failed install.
+    /// never a reallocation. A transaction removes candidate table cells,
+    /// roots and metadata on failure. Existing programs retain their live
+    /// state, including root updates from any completed collection.
     /// `imports` resolves every one of `program`'s declared globals by
     /// identity, one live [`PreparedHandle`] retained by THIS machine per
     /// import (an identity absent here is [`ExecutionError::UnknownPreparedHandle`]).
@@ -349,6 +392,34 @@ impl<'code> PreparedMachine<'code> {
     }
 
     fn install(
+        &mut self,
+        program: ProgramCustody<'code>,
+        imports: &ImportBindings,
+    ) -> Result<ProgramId, ExecutionError> {
+        self.machine
+            .begin_prepared_call()
+            .map_err(ExecutionError::Runtime)?;
+        let compiled = program.get();
+        let slots = self.claimed_slots
+            ..self
+                .claimed_slots
+                .saturating_add(compiled.top_slots.len() + compiled.import_slots.len())
+                .min(self.top_capacity);
+        let owners = self.machine.prepared_descriptor_owners();
+        let stack_maps = self.machine.stack_map_registries().len();
+        let mut transaction = InstallTransaction {
+            machine: self,
+            slots,
+            owners,
+            stack_maps,
+            committed: false,
+        };
+        let result = transaction.machine.install_staged(program, imports);
+        transaction.committed = result.is_ok();
+        result
+    }
+
+    fn install_staged(
         &mut self,
         program: ProgramCustody<'code>,
         imports: &ImportBindings,
@@ -386,7 +457,8 @@ impl<'code> PreparedMachine<'code> {
         // A constructor identity this machine already shares must be
         // declared identically, with the same descriptor, by the incoming
         // program; otherwise nothing is absorbed and nothing else happens.
-        self.interner
+        let mut staged_interner = self.interner.clone();
+        staged_interner
             .absorb(&compiled.interned_constructors)
             .map_err(|identity| ExecutionError::DescriptorShape {
                 identity: Box::new(identity),
@@ -495,14 +567,11 @@ impl<'code> PreparedMachine<'code> {
                 compiled.descriptors.clone(),
                 Some(Arc::clone(&statics)),
             ) {
-                self.machine.clear_stack_map_registry();
                 return Err(runtime_error(&self.machine, error));
             }
             let (start, size) = match self.machine.gc_active_range() {
                 Some(range) => range,
                 None => {
-                    self.machine.clear_gc_state();
-                    self.machine.clear_stack_map_registry();
                     return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
                 }
             };
@@ -516,12 +585,7 @@ impl<'code> PreparedMachine<'code> {
             // always installed with no imports -- see `PreparedMachine::new`/
             // `from_borrowed`), so this loop is a defensive no-op here, kept
             // symmetric with the second-program branch below.
-            if let Err(error) = self.publish_imports(&resolved_imports) {
-                self.machine.free_session_heap();
-                self.machine.clear_stack_map_registry();
-                rollback_published_imports(&self.top_table, &self.machine, &resolved_imports);
-                return Err(error);
-            }
+            self.publish_imports(&resolved_imports)?;
             let heap_used = match initialize_heap_tops(
                 start,
                 size,
@@ -535,9 +599,6 @@ impl<'code> PreparedMachine<'code> {
             ) {
                 Ok(heap_used) => heap_used,
                 Err(cause) => {
-                    self.machine.free_session_heap();
-                    self.machine.clear_stack_map_registry();
-                    rollback_published_imports(&self.top_table, &self.machine, &resolved_imports);
                     return Err(runtime_error(&self.machine, cause));
                 }
             };
@@ -560,7 +621,6 @@ impl<'code> PreparedMachine<'code> {
                 .machine
                 .extend_prepared_descriptors(compiled.descriptors.clone(), Arc::clone(&statics))
             {
-                self.machine.pop_stack_map_registry();
                 return Err(runtime_error(&self.machine, error));
             }
             // Publish every verified import HERE, before `collect_on`: each
@@ -585,26 +645,16 @@ impl<'code> PreparedMachine<'code> {
             // against: it is a heap top's *own* pointer to the import, which
             // does not exist yet until `initialize_heap_tops` writes it, so
             // there is nothing of this program's to go stale.
-            if let Err(error) = self.publish_imports(&resolved_imports) {
-                self.machine.pop_stack_map_registry();
-                rollback_published_imports(&self.top_table, &self.machine, &resolved_imports);
-                return Err(error);
-            }
-            if let Err(error) = collect_on(
+            self.publish_imports(&resolved_imports)?;
+            collect_on(
                 &self.machine,
                 &mut self.vmctx,
                 &self.old_space,
                 heap_reserve,
-            ) {
-                self.machine.pop_stack_map_registry();
-                rollback_published_imports(&self.top_table, &self.machine, &resolved_imports);
-                return Err(error);
-            }
+            )?;
             let (start, size) = match self.machine.gc_active_range() {
                 Some(range) => range,
                 None => {
-                    self.machine.pop_stack_map_registry();
-                    rollback_published_imports(&self.top_table, &self.machine, &resolved_imports);
                     return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
                 }
             };
@@ -614,8 +664,6 @@ impl<'code> PreparedMachine<'code> {
             {
                 Some(cursor) => cursor,
                 None => {
-                    self.machine.pop_stack_map_registry();
-                    rollback_published_imports(&self.top_table, &self.machine, &resolved_imports);
                     return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
                 }
             };
@@ -633,8 +681,6 @@ impl<'code> PreparedMachine<'code> {
             ) {
                 Ok(heap_used) => heap_used,
                 Err(cause) => {
-                    self.machine.pop_stack_map_registry();
-                    rollback_published_imports(&self.top_table, &self.machine, &resolved_imports);
                     return Err(runtime_error(&self.machine, cause));
                 }
             };
@@ -655,6 +701,7 @@ impl<'code> PreparedMachine<'code> {
         // above), so there is nothing left to publish here.
 
         self.statics.push(statics);
+        self.pools.push(Arc::clone(&compiled.bytes));
         self.descriptors
             .extend(compiled.descriptors.iter().cloned());
         self.descriptor_registry.extend(
@@ -681,24 +728,15 @@ impl<'code> PreparedMachine<'code> {
                 .map(|&header| (header, compiled.pipeline.get_function_ptr(compiled.enter))),
         );
 
+        self.interner = staged_interner;
         self.programs.push(InstalledProgram { program });
         self.claimed_slots = base + slot_count;
         Ok(ProgramId((self.programs.len() - 1) as u32))
     }
 
-    /// Publish every declared import already verified by [`Self::install`]'s
-    /// reservation pass: write each source handle's CURRENT pointer into
-    /// this program's own import slot, then register that slot as its own
-    /// independent persistent root (the same pattern as a heap top's own
-    /// root just below it in `install`, not a reference to the source
-    /// handle's own root slot). Called BEFORE any step that can move the
-    /// heap (`collect_on`, `initialize_heap_tops`) so that a relocating
-    /// collection sees these slots as registered roots and rewrites them in
-    /// place -- see `install`'s comments at each call site for why that
-    /// ordering is now required. A failure partway through leaves some
-    /// entries published and some not; every caller rolls back the WHOLE
-    /// `resolved_imports` list via [`rollback_published_imports`] regardless
-    /// of how far this got, so a partial publish here is never observable.
+    /// Publish each verified import as a persistent root before collection or
+    /// heap-top initialization. The install transaction deregisters and zeros
+    /// the entire candidate slot range if any subsequent step fails.
     fn publish_imports(
         &self,
         resolved_imports: &[(usize, ValueHandle)],
@@ -789,6 +827,9 @@ impl<'code> PreparedMachine<'code> {
     /// idempotent by construction, so a retirement path that can race a
     /// wholesale teardown stays safe.
     pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
+        if realm == RealmId::ROOT {
+            return (0, 0);
+        }
         let closed = self.handles.close_realm(realm);
         debug_assert!(
             closed.frames.is_empty(),
@@ -967,6 +1008,7 @@ impl<'code> PreparedMachine<'code> {
         super::observe::ObservationHeap::new_with_registry_and_starts(
             nursery,
             &self.statics,
+            &self.pools,
             &self.descriptor_registry,
             &starts,
             Some(&*self.old_space),
@@ -1267,6 +1309,7 @@ impl<'code> PreparedMachine<'code> {
             &mut self.vmctx,
             &self.old_space,
             &self.statics,
+            &self.pools,
             &self.descriptor_registry,
         );
         self.machine.end_prepared_call();
@@ -1288,26 +1331,6 @@ fn collect_on(
         return Err(runtime_error_for_status(machine, status));
     }
     Ok(())
-}
-
-/// Undo [`PreparedMachine::publish_imports`] for a failure occurring between
-/// publish and `install`'s success return: deregister each slot as a
-/// persistent root and zero it, leaving the table exactly as an install
-/// that never reached publish would (T3). Safe to call unconditionally on
-/// the WHOLE `resolved_imports` list regardless of how much of it was
-/// actually published -- `deregister_persistent_root` is an idempotent
-/// no-op for a slot address it never saw registered, and zeroing an
-/// already-zero slot is harmless.
-fn rollback_published_imports(
-    top_table: &RootWords,
-    machine: &MachineState,
-    resolved_imports: &[(usize, ValueHandle)],
-) {
-    for &(slot, _) in resolved_imports {
-        let root = unsafe { top_table.as_mut_ptr().add(slot).cast::<*mut u8>() };
-        machine.deregister_persistent_root(root);
-        let _ = top_table.write(slot, 0);
-    }
 }
 
 impl<'code> InstalledProgram<'code> {
@@ -1533,6 +1556,7 @@ impl<'code> InstalledProgram<'code> {
         vmctx: &mut VMContext,
         old_space: &OldSpace,
         statics: &[Arc<StaticRegion>],
+        pools: &[Arc<super::static_bytes::PinnedBytes>],
         descriptor_registry: &BTreeMap<usize, DescriptorMetadata>,
     ) -> Result<RunResult, ExecutionError> {
         let (adapter, expected_arguments, has_managed_arguments, result_contract, result_layout) = {
@@ -1642,6 +1666,7 @@ impl<'code> InstalledProgram<'code> {
             self.program.get(),
             vmctx,
             statics,
+            pools,
             descriptor_registry,
             old_space,
             &seeds,
@@ -2904,8 +2929,10 @@ mod tests {
         let a_roots_before = machine.persistent_roots_count(program_a);
 
         let base_b = machine.next_top_slot_base();
+        let candidate = base_program(base_b, 991);
+        let candidate_descriptor = Arc::downgrade(&candidate.interned_constructors[0].1);
         let error = machine
-            .install_program(base_program(base_b, 991), ImportBindings::new())
+            .install_program(candidate, ImportBindings::new())
             .expect_err("B's heap-top reserve cannot fit under the forced test ceiling, even after a collection");
         crate::host_fns::clear_max_heap_bytes_override();
 
@@ -2915,8 +2942,24 @@ mod tests {
                 if failure.disposition == MachineDisposition::Reusable
         ));
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+        assert!(
+            candidate_descriptor.upgrade().is_none(),
+            "failed install must release candidate descriptor ownership"
+        );
         assert_eq!(machine.next_top_slot_base(), base_before);
         assert_eq!(machine.persistent_roots_count(program_a), a_roots_before);
+        for slot in base_before.0 as usize..machine.top_capacity {
+            assert_eq!(unsafe { *machine.top_table.as_mut_ptr().add(slot) }, 0);
+        }
+        let handle = machine
+            .retain_top(program_a, ValueId(0))
+            .expect("failed install leaves no pending collection failure");
+        assert_eq!(machine.close_realm(RealmId::ROOT), (0, 0));
+        assert!(machine.handle_root(handle).is_some());
+        machine
+            .install_program(base_program(base_before, 992), ImportBindings::new())
+            .expect("a new install succeeds without running an entry first");
+        assert!(machine.release(handle));
 
         let result = machine
             .run_entry(

@@ -883,6 +883,31 @@ impl MachineState {
         Ok(())
     }
 
+    pub(crate) fn prepared_descriptor_owners(
+        &self,
+    ) -> Option<tidepool_heap::gc::raw::DescriptorOwners> {
+        self.gc_state
+            .borrow()
+            .as_ref()?
+            .prepared
+            .as_ref()
+            .map(|prepared| prepared.space.snapshot_owners())
+    }
+
+    pub(crate) fn restore_prepared_descriptor_owners(
+        &self,
+        owners: tidepool_heap::gc::raw::DescriptorOwners,
+    ) {
+        if let Some(prepared) = self
+            .gc_state
+            .borrow_mut()
+            .as_mut()
+            .and_then(|state| state.prepared.as_mut())
+        {
+            prepared.space.restore_owners(owners);
+        }
+    }
+
     /// Reclaim the live heap buffer + high-water cursor from this machine's
     /// GC state, called from `RegistryGuard::drop` BEFORE `clear_run_scratch`
     /// takes the `GcState`. Returns `(None, 0)` when there's no `GcState`
@@ -1637,6 +1662,26 @@ impl MachineState {
             })
     }
 
+    /// Find a terminal NUL inside an authenticated byte array's logical extent.
+    pub(crate) fn external_c_string_len(
+        &self,
+        address: usize,
+    ) -> Result<usize, ExternalStorageValidationError> {
+        let storage = self.external_storage.borrow();
+        let (published, offset) = Self::external_address_span(&storage, address, 0)?;
+        let record =
+            Self::checked_external_record(&storage, published, ExternalStorageKind::Bytes)?;
+        let remaining = record.logical_len - offset;
+        // Authentication and the ledger borrow retain the entire bounded span.
+        let bytes = unsafe { std::slice::from_raw_parts(published.add(8).add(offset), remaining) };
+        bytes.iter().position(|byte| *byte == 0).ok_or(
+            ExternalStorageValidationError::IndexOutOfBounds {
+                index: record.logical_len,
+                len: record.logical_len,
+            },
+        )
+    }
+
     /// Snapshot a complete ledger-authenticated Addr# span. The ledger borrow
     /// covers validation and the copy; no raw payload pointer escapes it.
     pub(crate) fn read_external_address(
@@ -1803,7 +1848,7 @@ impl MachineState {
         let (mut position, mut found) = (0_usize, 0_usize);
         while found < count && position < span.len() {
             position += match span[position] {
-                byte if byte < 0x80 => 1,
+                byte if byte < 0xC0 => 1,
                 byte if byte < 0xE0 => 2,
                 byte if byte < 0xF0 => 3,
                 _ => 4,
@@ -3579,6 +3624,25 @@ mod tests {
             Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
         ));
         assert_eq!(ms.external_revision.get(), before);
+    }
+
+    #[test]
+    fn external_strings_respect_logical_extents_and_utf8_continuations() {
+        let machine = MachineState::new();
+        let payload = machine.allocate_external_bytes(4, 8).unwrap();
+        machine
+            .store_external_bytes(payload, 0, &[0x80, b'a', 0, b'z'])
+            .unwrap();
+        let address = machine.external_byte_address(payload).unwrap();
+        assert_eq!(machine.external_c_string_len(address).unwrap(), 2);
+        assert_eq!(machine.external_c_string_len(address + 2).unwrap(), 0);
+        assert!(machine.external_c_string_len(address + 3).is_err());
+        assert!(machine.external_c_string_len(0).is_err());
+        assert_eq!(machine.measure_external_utf8(payload, 0, 4, 1).unwrap(), 1);
+        machine
+            .shrink_external_payload(payload, ExternalStorageKind::Bytes, 2)
+            .unwrap();
+        assert!(machine.external_c_string_len(address).is_err());
     }
 
     #[test]

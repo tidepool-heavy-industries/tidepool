@@ -40,7 +40,7 @@ mod no_success_tests;
 mod observe;
 pub(crate) mod resolve;
 mod roots;
-pub use observe::ObservationFailure;
+pub use observe::{AddressOrigin, ObservationFailure};
 mod interner;
 pub use interner::DescriptorInterner;
 mod run;

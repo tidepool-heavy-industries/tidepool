@@ -581,6 +581,83 @@ fn scalar_only_bytes_keep_the_exact_embedded_address_alive() {
 }
 
 #[test]
+fn literal_addresses_observe_through_one_shot_and_other_installed_programs() {
+    use super::{ImportBindings, PreparedCallOptions, PreparedMachine, PreparedMachineOptions};
+    use crate::suspension::RealmId;
+    let payload = b"ab\0tail".to_vec();
+    let mut wire = testing::wire_program();
+    wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
+    wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(1)))]);
+    wire.bindings.push(Group::NonRecursive(TopBinding {
+        identity: testing::identity("AddressOwner", "bytes"),
+        binding: HeapBinding {
+            id: ValueId(1),
+            rhs: HeapRhs::Bytes(payload.clone()),
+        },
+    }));
+    let owner = compile(wire);
+    let address = owner.bytes.get(&payload).unwrap().as_ptr() as usize;
+    let result = owner
+        .run_entry(
+            ValueId(0),
+            &[],
+            &RunOptions::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+    assert!(
+        matches!(&result.values[0], tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitString(bytes)) if bytes == &payload)
+    );
+
+    let (mut machine, _) = PreparedMachine::new(
+        owner,
+        PreparedMachineOptions {
+            nursery_bytes: RunOptions::default().nursery_bytes,
+            top_slots: 8,
+        },
+    )
+    .unwrap();
+    let mut wire = testing::wire_program();
+    wire.signatures[0] = Signature {
+        arguments: vec![RuntimeRep::Address],
+        results: ResultContract::Returns(vec![RuntimeRep::Address]),
+    };
+    wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(1)))]);
+    wire.bindings = vec![Group::NonRecursive(TopBinding {
+        identity: testing::identity("AddressReader", "entry"),
+        binding: HeapBinding {
+            id: ValueId(0),
+            rhs: HeapRhs::Function {
+                signature: SignatureId(0),
+                parameters: vec![ValueId(1)],
+                captures: vec![],
+                body: 0,
+            },
+        },
+    })];
+    let linked = link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+    let reader = CompiledProgram::compile(&linked, machine.next_top_slot_base()).unwrap();
+    let reader = machine
+        .install_program(reader, ImportBindings::new())
+        .unwrap();
+    let result = machine
+        .run_entry(
+            reader,
+            ValueId(0),
+            &[(address + 2) as u64],
+            PreparedCallOptions {
+                observation_budget: 6,
+                collect_before_observation: true,
+            },
+            RealmId::ROOT,
+        )
+        .unwrap();
+    assert!(
+        matches!(&result.values[0], tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitString(bytes)) if bytes == &payload[2..])
+    );
+}
+
+#[test]
 fn bytes_top_and_scalar_literal_share_terminated_storage() {
     let payload = b"a\0b".to_vec();
     let mut wire = testing::wire_program();

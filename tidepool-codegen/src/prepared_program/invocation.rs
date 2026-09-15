@@ -298,6 +298,7 @@ impl<'code> PreparedInvocation<'code> {
             self.program,
             &mut self.vmctx,
             std::slice::from_ref(&self.statics),
+            std::slice::from_ref(&self.program.bytes),
             &self.program.descriptor_registry,
             &self.old_space,
             &result_seeds,
