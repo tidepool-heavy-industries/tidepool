@@ -495,6 +495,31 @@ impl PreparedRuntime {
         Ok(program)
     }
 
+    /// Install one live session turn's projected artifact and bind the name
+    /// it introduces at the runtime's current generation. `imports` pairs
+    /// each retained-generation identity the turn's module declared with the
+    /// session binding that satisfies it. This is [`Self::install_prepared`]
+    /// followed by [`Self::bind_top`] against the freshly installed
+    /// program's own entry — the link+install+bind sequence
+    /// [`super::prepared_turn::SessionTurns::run`] drives after it has
+    /// projected `prepared` through `ExtractCmd`'s `--target` mode.
+    pub fn turn(
+        &mut self,
+        prepared: PreparedProgram,
+        imports: &[(SymbolIdentity, SessionVarId)],
+        introduces: &str,
+    ) -> Result<SessionVarId, PreparedRuntimeError> {
+        let program = self.install_prepared(prepared, imports)?;
+        let entry = self
+            .programs
+            .get(&program)
+            .map(|linked| linked.prepared().entry())
+            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                program,
+            )))?;
+        self.bind_top(program, entry, introduces)
+    }
+
     /// Release a session binding's root. Refused, with the lease count,
     /// while any installed program imports it; leases are held for the
     /// importing program's lifetime, which this wave ends only with the

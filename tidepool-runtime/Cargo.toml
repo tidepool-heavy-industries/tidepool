@@ -110,3 +110,7 @@ path = "tests/prepared_execution.rs"
 [[test]]
 name = "prepared_resident_composite"
 path = "tests/prepared_resident_composite.rs"
+
+[[test]]
+name = "prepared_turn"
+path = "tests/prepared_turn.rs"

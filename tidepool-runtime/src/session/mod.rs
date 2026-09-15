@@ -23,6 +23,7 @@ pub mod inspection;
 pub mod kernel;
 pub mod persistent;
 pub mod prepared;
+pub mod prepared_turn;
 mod recovery;
 pub mod registry;
 pub mod render;
@@ -52,6 +53,8 @@ pub use prepared::{
     PreparedRetainedResult, PreparedRunResult, PreparedRuntime, PreparedRuntimeError,
     PreparedValue, PreparedValueResult, RealmId,
 };
+
+pub use prepared_turn::{PreparedTurnError, SessionTurns, TurnForm};
 
 pub use recovery::{DeclarationRecoveryReport, LostDeclaration, ReplayedDeclaration};
 
