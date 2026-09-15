@@ -11,7 +11,8 @@ use std::process::{Command as ProcessCommand, ExitStatus};
 
 use tidepool_repr::serial::read_metadata;
 use tidepool_testing::prepared_corpus::{
-    Expectations, Outcome, ProgramRecord, ProjectionManifest, ProjectionOutcome, Stage,
+    Classification, Expectation, Expectations, OracleScope, Outcome, ProgramRecord,
+    ProjectionManifest, ProjectionOutcome, Stage,
 };
 
 const REPORT_VERSION: u32 = 2;
@@ -61,7 +62,11 @@ struct StageTotal {
     stage: Stage,
     passed: usize,
     failed: usize,
+    not_closed: usize,
+    no_finite_observation: usize,
+    function_valued: usize,
     missing_expectation: usize,
+    no_oracle: usize,
     running: usize,
     not_reached: usize,
 }
@@ -302,6 +307,12 @@ fn run_corpus_with(
 ) -> Result<(), Box<dyn Error>> {
     let manifest = read_manifest(&manifest_path)?;
     let summary = validate_manifest(&manifest)?;
+    // A declared oracle domain must describe this manifest. An unreadable
+    // expectation file is left to each child, which records it as that row's
+    // validation failure.
+    if let Ok(declared) = read_json::<Expectations>(&expectations) {
+        validate_oracle_domain(&manifest, &declared)?;
+    }
 
     let mut programs = Vec::with_capacity(manifest.programs.len());
     for (index, row) in manifest.programs.iter().enumerate() {
@@ -399,6 +410,7 @@ fn run_one(
                     Err(error) => return fail_active_stage(&output, &mut record, error),
                 };
             let expected = expected_for(row, &expectations);
+            let scope = OracleScope::of(row.expectation_key.as_deref(), &expectations);
             let persist = |driver_record: &ProgramRecord| {
                 merge_driver_record(&mut record, driver_record);
                 persist_or_exit(&output, &record);
@@ -408,6 +420,7 @@ fn run_one(
                 &bytes,
                 &requirements,
                 expected,
+                scope,
                 &constructors,
                 persist,
             );
@@ -595,6 +608,42 @@ fn validate_expectation_key(
     }
 }
 
+/// A generated oracle names manifest rows. Every source top and expectation
+/// key must be a manifest expectation key, and a compiler-introduced key may
+/// carry only a cyclic-observation classification, so a renamed simplifier
+/// float or a stale oracle fails the run instead of becoming `no_oracle`.
+fn validate_oracle_domain(
+    manifest: &ProjectionManifest,
+    expectations: &Expectations,
+) -> Result<(), Box<dyn Error>> {
+    let Some(source_tops) = &expectations.source_tops else {
+        return Ok(());
+    };
+    let keys: BTreeSet<&str> = manifest
+        .programs
+        .iter()
+        .filter_map(|row| row.expectation_key.as_deref())
+        .collect();
+    if let Some(top) = source_tops.iter().find(|top| !keys.contains(top.as_str())) {
+        return Err(invalid_manifest(format!(
+            "oracle source top {top:?} is not a manifest expectation key"
+        )));
+    }
+    for (key, expectation) in &expectations.expectations {
+        if !keys.contains(key.as_str()) {
+            return Err(invalid_manifest(format!(
+                "oracle expectation {key:?} is not a manifest expectation key"
+            )));
+        }
+        if !source_tops.contains(key) && !matches!(expectation, Expectation::CyclicObservation) {
+            return Err(invalid_manifest(format!(
+                "compiler-introduced key {key:?} cannot carry a value oracle"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn expected_for<'a>(
     row: &tidepool_testing::prepared_corpus::ProjectionRecord,
     expectations: &'a Expectations,
@@ -687,7 +736,7 @@ fn fail_abnormal(record: &mut ProgramRecord, reason: String) {
     );
     if native_was_reached {
         let execution = record.stages.get_mut(Stage::Execution);
-        if matches!(execution.outcome, Outcome::Passed) {
+        if !matches!(execution.outcome, Outcome::Failed { .. }) {
             execution.outcome = Outcome::Failed { reason };
         }
         record.record(Stage::Comparison, Outcome::NotReached);
@@ -711,7 +760,11 @@ fn stage_totals(programs: &[ProgramRecord]) -> Vec<StageTotal> {
                 stage,
                 passed: 0,
                 failed: 0,
+                not_closed: 0,
+                no_finite_observation: 0,
+                function_valued: 0,
                 missing_expectation: 0,
+                no_oracle: 0,
                 running: 0,
                 not_reached: 0,
             };
@@ -720,7 +773,13 @@ fn stage_totals(programs: &[ProgramRecord]) -> Vec<StageTotal> {
                 match outcome {
                     Outcome::Passed => total.passed += 1,
                     Outcome::Failed { .. } => total.failed += 1,
+                    Outcome::Classified { class, .. } => match class {
+                        Classification::NotClosed => total.not_closed += 1,
+                        Classification::NoFiniteObservation => total.no_finite_observation += 1,
+                        Classification::FunctionValued => total.function_valued += 1,
+                    },
                     Outcome::MissingExpectation => total.missing_expectation += 1,
+                    Outcome::NoOracle => total.no_oracle += 1,
                     Outcome::Running => total.running += 1,
                     Outcome::NotReached => total.not_reached += 1,
                 }
@@ -853,6 +912,7 @@ mod tests {
         .unwrap();
         let expectations = Expectations {
             source_revision: "test".into(),
+            source_tops: None,
             expectations: [("historical".into(), Expectation::Int(7))]
                 .into_iter()
                 .collect(),
@@ -861,6 +921,47 @@ mod tests {
             expected_for(&row, &expectations),
             Some(Expectation::Int(7))
         ));
+    }
+
+    #[test]
+    fn oracle_domain_must_name_manifest_keys_and_keep_values_on_source_tops() {
+        let manifest: ProjectionManifest = serde_json::from_str(
+            r#"{"version":2,"legacy_targets":[],"programs":[
+                {"name":"u:M:value:t_swap","expectation_key":"t_swap","status":"projected","artifact":"0","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"t_swap"}},
+                {"name":"u:M:value:t_swap1","expectation_key":"t_swap1","status":"projected","artifact":"1","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"t_swap1"}}
+            ]}"#,
+        )
+        .unwrap();
+        let oracle = |tops: &[&str], entries: Vec<(&str, Expectation)>| Expectations {
+            source_revision: "test".into(),
+            source_tops: Some(tops.iter().map(|top| top.to_string()).collect()),
+            expectations: entries
+                .into_iter()
+                .map(|(key, expectation)| (key.to_string(), expectation))
+                .collect(),
+        };
+        assert!(validate_oracle_domain(
+            &manifest,
+            &oracle(
+                &["t_swap"],
+                vec![
+                    ("t_swap", Expectation::Int(1)),
+                    ("t_swap1", Expectation::CyclicObservation)
+                ]
+            )
+        )
+        .is_ok());
+        assert!(validate_oracle_domain(&manifest, &oracle(&["renamed"], vec![])).is_err());
+        assert!(validate_oracle_domain(
+            &manifest,
+            &oracle(&["t_swap"], vec![("t_swap1", Expectation::Int(1))])
+        )
+        .is_err());
+        assert!(validate_oracle_domain(
+            &manifest,
+            &oracle(&["t_swap"], vec![("gone", Expectation::CyclicObservation)])
+        )
+        .is_err());
     }
 
     #[test]
@@ -1158,6 +1259,30 @@ mod tests {
         fail_abnormal(&mut record, "child exited abnormally: signal 6".into());
         assert!(matches!(record.stages[0].outcome, Outcome::Passed));
         assert!(matches!(record.stages[1].outcome, Outcome::Failed { .. }));
+    }
+
+    #[test]
+    fn abnormal_child_after_classification_is_an_execution_failure() {
+        for class in [
+            Classification::NotClosed,
+            Classification::NoFiniteObservation,
+            Classification::FunctionValued,
+        ] {
+            let mut record = ProgramRecord::new("classified".into());
+            record.record(
+                Stage::Execution,
+                Outcome::Classified {
+                    class,
+                    reason: "typed classification before cleanup".into(),
+                },
+            );
+            fail_abnormal(&mut record, "child exited abnormally: signal 6".into());
+            assert!(matches!(
+                &record.stages[4].outcome,
+                Outcome::Failed { reason } if reason.contains("signal 6")
+            ));
+            assert!(matches!(record.stages[5].outcome, Outcome::NotReached));
+        }
     }
 
     #[test]

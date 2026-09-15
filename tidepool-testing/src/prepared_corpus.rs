@@ -1,7 +1,7 @@
 //! Stage evidence for the prepared-STG semantic corpus, never Core execution.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{atomic::AtomicBool, Arc};
 use tidepool_bridge::shapes::unbox_char;
 use tidepool_bridge::{FromCore, Value};
@@ -19,6 +19,11 @@ pub enum Expectation {
     /// The reference program has no finite observation. Keep compiler-stage
     /// coverage, but never count omission of native execution as a match.
     NoFiniteObservation,
+    /// A top whose weak head normal form is a finite constructor but whose
+    /// reachable graph is cyclic. Native execution runs; only exhaustion of the
+    /// observation budget is accepted, and it is recorded as a classification,
+    /// never as a comparison pass.
+    CyclicObservation,
     Int(i64),
     Bool(bool),
     Char(char),
@@ -73,7 +78,34 @@ pub fn matches_expected_failure(
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Expectations {
     pub source_revision: String,
+    /// The generated oracle's domain: every manifest expectation key that GHC
+    /// resolves to a binding declared in the source module. `None` for
+    /// hand-authored contract cohorts, whose rows are all oracle-bearing.
+    #[serde(default)]
+    pub source_tops: Option<BTreeSet<String>>,
     pub expectations: BTreeMap<String, Expectation>,
+}
+
+/// Whether a row can carry a native GHC oracle at all. Compiler-introduced
+/// tops (simplifier floats, workers, dictionaries, `local` bindings) have no
+/// source-level name to evaluate; their evidence is transitive through the
+/// source tops that reference them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OracleScope {
+    /// The expectation file declares no domain; every row is oracle-bearing.
+    Unscoped,
+    SourceTop,
+    CompilerIntroduced,
+}
+
+impl OracleScope {
+    pub fn of(expectation_key: Option<&str>, expectations: &Expectations) -> Self {
+        match (&expectations.source_tops, expectation_key) {
+            (None, _) => Self::Unscoped,
+            (Some(tops), Some(key)) if tops.contains(key) => Self::SourceTop,
+            (Some(_), _) => Self::CompilerIntroduced,
+        }
+    }
 }
 
 /// Produced directly from GHC's prepared modules, not translated Core filenames.
@@ -151,9 +183,33 @@ impl Stage {
 pub enum Outcome {
     Running,
     Passed,
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
+    /// Typed evidence that this stage has no first-order result to produce.
+    /// Counted separately from both passes and failures.
+    Classified {
+        class: Classification,
+        reason: String,
+    },
     MissingExpectation,
+    /// Comparison only: the row is compiler-introduced and has no oracle.
+    NoOracle,
     NotReached,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Classification {
+    /// The engine refused entry because arguments are required. The corpus
+    /// supplies no arguments, so this top is not a closed program.
+    NotClosed,
+    /// The oracle declares no finite observation (execution omitted), or a
+    /// declared cyclic top exhausted the observation budget.
+    NoFiniteObservation,
+    /// Native execution returned, but the result graph reaches a function or
+    /// partial application, which has no first-order observation.
+    FunctionValued,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -253,12 +309,14 @@ pub struct ProgramRecord {
 /// native execution is intentionally kept behind this per-artifact function so
 /// a runner can invoke it in a subprocess. `persist` observes every stage only
 /// after its outcome is known, including the compilation success immediately
-/// before `run_entry` enters native code.
+/// before `run_entry` enters native code. `scope` decides whether a row that
+/// executed without an oracle is a missing expectation or has no oracle.
 pub fn run_prepared_artifact<F>(
     name: impl Into<String>,
     bytes: &[u8],
     requirements: &ProgramRequirements,
     expected: Option<&Expectation>,
+    scope: OracleScope,
     constructors: &DataConTable,
     mut persist: F,
 ) -> ProgramRecord
@@ -366,8 +424,9 @@ where
         record_stage(
             &mut record,
             Stage::Execution,
-            Outcome::Failed {
-                reason: "harness limitation: reference has no finite observation; native execution omitted".into(),
+            Outcome::Classified {
+                class: Classification::NoFiniteObservation,
+                reason: "oracle has no finite observation; native execution omitted".into(),
             },
             &mut persist,
         );
@@ -392,14 +451,13 @@ where
     ) {
         Ok(run) => run,
         Err(error) => {
-            record_stage(
-                &mut record,
-                Stage::Execution,
-                Outcome::Failed {
+            let outcome = match classify_execution_error(&error, expected) {
+                Some((class, reason)) => Outcome::Classified { class, reason },
+                None => Outcome::Failed {
                     reason: error.to_string(),
                 },
-                &mut persist,
-            );
+            };
+            record_stage(&mut record, Stage::Execution, outcome, &mut persist);
             // An error oracle is compared only after native execution reached
             // its terminal result. Validation, admission, compilation, and
             // watchdog failures remain stage failures, never language evidence.
@@ -424,7 +482,10 @@ where
         &mut persist,
     );
     let outcome = match expected {
-        None => Outcome::MissingExpectation,
+        None => match scope {
+            OracleScope::CompilerIntroduced => Outcome::NoOracle,
+            OracleScope::Unscoped | OracleScope::SourceTop => Outcome::MissingExpectation,
+        },
         Some(expected) => match compare_values(&run.values, expected, constructors) {
             Ok(()) => Outcome::Passed,
             Err(reason) => Outcome::Failed { reason },
@@ -455,6 +516,9 @@ fn comparison_for_expected_failure(
     }
 }
 
+/// Only an error oracle is compared against a failure. A row without one has
+/// no comparison to make, so the stage stays not reached rather than reporting
+/// a missing expectation for a program that produced no value.
 fn comparison_for_execution_error(
     error: &tidepool_codegen::prepared_program::ExecutionError,
     expected: Option<&Expectation>,
@@ -463,8 +527,47 @@ fn comparison_for_execution_error(
         Some(Expectation::Error(expected)) => {
             Some(comparison_for_expected_failure(error, expected))
         }
-        None => Some(Outcome::MissingExpectation),
-        Some(_) => None,
+        _ => None,
+    }
+}
+
+/// Classifications of a native call that returned without a first-order
+/// observation. Each requires one exact typed cause. A value oracle always
+/// wins: a row GHC evaluated to data is a failure if it cannot be observed.
+fn classify_execution_error(
+    error: &tidepool_codegen::prepared_program::ExecutionError,
+    expected: Option<&Expectation>,
+) -> Option<(Classification, String)> {
+    use tidepool_codegen::prepared_program::{ExecutionError, ObservationFailure};
+    use tidepool_heap::execution_descriptor::ObjectKind;
+    match (error, expected) {
+        (
+            ExecutionError::Unsupported(
+                tidepool_codegen::prepared_program::Unsupported::HostArguments(_),
+            ),
+            None,
+        )
+        | (
+            ExecutionError::Arguments {
+                actual: 0,
+                expected: 1..,
+            },
+            None,
+        ) => Some((Classification::NotClosed, error.to_string())),
+        (
+            ExecutionError::Observation(ObservationFailure::Unobservable(
+                ObjectKind::Function | ObjectKind::Pap,
+            )),
+            None,
+        ) => Some((Classification::FunctionValued, error.to_string())),
+        (
+            ExecutionError::Observation(ObservationFailure::BudgetExceeded { .. }),
+            Some(Expectation::CyclicObservation),
+        ) => Some((
+            Classification::NoFiniteObservation,
+            format!("declared cyclic observation: {error}"),
+        )),
+        _ => None,
     }
 }
 
@@ -482,16 +585,18 @@ impl ProgramRecord {
     }
 }
 
-/// Values are already materialized without forcing. Compare logical constructor
-/// shapes using the metadata owner, not tag numbers or rendered Debug strings.
-/// Preserve the historical float tolerance. Missing expectations are separate
-/// from success; no timeout or admission rejection satisfies an error oracle.
+/// Compare materialized logical constructor shapes using the metadata owner.
+/// Missing expectations are separate from success; no timeout or admission
+/// rejection satisfies an error oracle.
 pub fn compare_values(
     values: &[Value],
     expected: &Expectation,
     constructors: &DataConTable,
 ) -> Result<(), String> {
-    if matches!(expected, Expectation::NoFiniteObservation) {
+    if matches!(
+        expected,
+        Expectation::NoFiniteObservation | Expectation::CyclicObservation
+    ) {
         return Err("no finite observation is available for value comparison".into());
     }
     if let Expectation::Error(failure) = expected {
@@ -550,11 +655,17 @@ pub fn compare_values(
                 } => {
                     let got = f64::from_value(value, constructors)
                         .map_err(|error| mismatch("Float64", error))?;
-                    // A NaN distance is outside every tolerance.
-                    let within = matches!(
-                        (got - *want).abs().partial_cmp(absolute_tolerance),
-                        Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-                    );
+                    // Native oracle values use zero tolerance: preserve signed
+                    // zero as well as the exact finite binary64 value.
+                    let within = if *absolute_tolerance == 0.0 {
+                        got.is_finite() && got.to_bits() == want.to_bits()
+                    } else {
+                        // A NaN distance is outside every tolerance.
+                        matches!(
+                            (got - *want).abs().partial_cmp(absolute_tolerance),
+                            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                        )
+                    };
                     if !within {
                         return Err(format!(
                             "expected Float64 within {absolute_tolerance} of {want}, received {got}"
@@ -622,7 +733,7 @@ pub fn compare_values(
                         failure
                     ));
                 }
-                Expectation::NoFiniteObservation => {
+                Expectation::NoFiniteObservation | Expectation::CyclicObservation => {
                     return Err("no finite observation is available for value comparison".into());
                 }
             },
@@ -830,10 +941,7 @@ mod tests {
         );
         assert!(matches!(report.stages[5].outcome, Outcome::Failed { .. }));
 
-        assert!(matches!(
-            comparison_for_execution_error(&error, None),
-            Some(Outcome::MissingExpectation)
-        ));
+        assert!(comparison_for_execution_error(&error, None).is_none());
         assert!(comparison_for_execution_error(&error, Some(&Expectation::Int(1))).is_none());
     }
 
@@ -973,6 +1081,32 @@ mod tests {
     }
 
     #[test]
+    fn native_float_oracle_decodes_roundtrip_and_preserves_signed_zero() {
+        let expected: Expectation = serde_json::from_str(
+            r#"{"kind":"float64_approx","value":{"expected":1.1045419098831014e66,"absolute_tolerance":0.0}}"#,
+        )
+        .unwrap();
+        let Expectation::Float64Approx {
+            expected: number, ..
+        } = &expected
+        else {
+            panic!("expected a float oracle");
+        };
+        assert_eq!(number.to_bits(), 0x4da4_f9fc_3c6d_a5d7);
+        let table = DataConTable::default();
+        let value = |bits| Value::Lit(tidepool_repr::Literal::LitDouble(bits));
+        assert!(compare_values(&[value(number.to_bits())], &expected, &table).is_ok());
+        assert!(compare_values(&[value(number.to_bits() + 1)], &expected, &table).is_err());
+
+        let negative_zero: Expectation = serde_json::from_str(
+            r#"{"kind":"float64_approx","value":{"expected":-0.0,"absolute_tolerance":0.0}}"#,
+        )
+        .unwrap();
+        assert!(compare_values(&[value((-0.0f64).to_bits())], &negative_zero, &table).is_ok());
+        assert!(compare_values(&[value(0.0f64.to_bits())], &negative_zero, &table).is_err());
+    }
+
+    #[test]
     fn failure_expectations_never_match_values_or_missing_results() {
         let table = constructor_table();
         let expectation = Expectation::Error(ExpectedFailure::Blackhole);
@@ -1016,6 +1150,7 @@ mod tests {
             &[0xff],
             &requirements,
             None,
+            OracleScope::Unscoped,
             &DataConTable::default(),
             |record| {
                 snapshots.push(
@@ -1171,6 +1306,7 @@ mod tests {
             bytes,
             &requirements,
             Some(expected),
+            OracleScope::SourceTop,
             &DataConTable::default(),
             |record| {
                 saw_execution_running |= record.stages.iter().any(|stage| {
@@ -1183,7 +1319,10 @@ mod tests {
             .all(|stage| matches!(stage.outcome, Outcome::Passed)));
         assert!(matches!(
             record.stages[4].outcome,
-            Outcome::Failed { ref reason } if reason.contains("harness limitation")
+            Outcome::Classified {
+                class: Classification::NoFiniteObservation,
+                ref reason,
+            } if reason.contains("native execution omitted")
         ));
         assert!(matches!(record.stages[5].outcome, Outcome::NotReached));
         assert!(!saw_execution_running);
@@ -1210,5 +1349,106 @@ mod tests {
         let mut short: Vec<StageRecord> = record.stages.clone().into();
         short.pop();
         assert!(StageRecords::try_from(short).is_err());
+    }
+
+    #[test]
+    fn classifications_require_the_exact_typed_cause_and_yield_to_oracles() {
+        use tidepool_codegen::prepared_program::{ExecutionError, ObservationFailure};
+        use tidepool_heap::execution_descriptor::ObjectKind;
+
+        let arguments = ExecutionError::Arguments {
+            actual: 0,
+            expected: 1,
+        };
+        assert!(matches!(
+            classify_execution_error(&arguments, None),
+            Some((Classification::NotClosed, _))
+        ));
+        assert!(classify_execution_error(&arguments, Some(&Expectation::Int(1))).is_none());
+        assert!(classify_execution_error(
+            &ExecutionError::Arguments {
+                actual: 1,
+                expected: 2
+            },
+            None
+        )
+        .is_none());
+
+        let function =
+            ExecutionError::Observation(ObservationFailure::Unobservable(ObjectKind::Function));
+        assert!(matches!(
+            classify_execution_error(&function, None),
+            Some((Classification::FunctionValued, _))
+        ));
+        assert!(classify_execution_error(&function, Some(&Expectation::Int(1))).is_none());
+        assert!(
+            classify_execution_error(&function, Some(&Expectation::CyclicObservation)).is_none()
+        );
+        let thunk =
+            ExecutionError::Observation(ObservationFailure::Unobservable(ObjectKind::Thunk));
+        assert!(classify_execution_error(&thunk, None).is_none());
+
+        let budget = ExecutionError::Observation(ObservationFailure::BudgetExceeded { limit: 1 });
+        assert!(matches!(
+            classify_execution_error(&budget, Some(&Expectation::CyclicObservation)),
+            Some((Classification::NoFiniteObservation, _))
+        ));
+        assert!(classify_execution_error(&budget, None).is_none());
+        assert!(compare_values(
+            &[Value::Lit(tidepool_repr::Literal::LitInt(1))],
+            &Expectation::CyclicObservation,
+            &DataConTable::default()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn oracle_scope_distinguishes_source_tops_only_when_a_domain_is_declared() {
+        let mut expectations = Expectations {
+            source_revision: "test".into(),
+            source_tops: None,
+            expectations: BTreeMap::new(),
+        };
+        assert_eq!(
+            OracleScope::of(Some("t_swap1"), &expectations),
+            OracleScope::Unscoped
+        );
+        assert_eq!(OracleScope::of(None, &expectations), OracleScope::Unscoped);
+        expectations.source_tops = Some(["t_swap".to_string()].into_iter().collect());
+        assert_eq!(
+            OracleScope::of(Some("t_swap"), &expectations),
+            OracleScope::SourceTop
+        );
+        assert_eq!(
+            OracleScope::of(Some("t_swap1"), &expectations),
+            OracleScope::CompilerIntroduced
+        );
+        assert_eq!(
+            OracleScope::of(None, &expectations),
+            OracleScope::CompilerIntroduced
+        );
+    }
+
+    #[test]
+    fn new_outcomes_and_expectations_have_stable_json_shapes() {
+        let outcome = Outcome::Classified {
+            class: Classification::NotClosed,
+            reason: "r".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&outcome).unwrap(),
+            serde_json::json!({"status": "classified", "class": "not_closed", "reason": "r"})
+        );
+        assert_eq!(
+            serde_json::to_value(Outcome::NoOracle).unwrap(),
+            serde_json::json!({"status": "no_oracle"})
+        );
+        let cyclic: Expectation =
+            serde_json::from_value(serde_json::json!({"kind": "cyclic_observation"})).unwrap();
+        assert!(matches!(cyclic, Expectation::CyclicObservation));
+        let legacy: Expectations =
+            serde_json::from_value(serde_json::json!({"source_revision": "x", "expectations": {}}))
+                .unwrap();
+        assert!(legacy.source_tops.is_none());
     }
 }

@@ -52,7 +52,7 @@ if [[ "$actual" != "$expected" ]]; then
 fi
 
 # The retired eval interpreter was a consumer of these bytes, not their
-# authority. Pure-language semantic acceptance belongs to the pending native
+# authority. Pure-language semantic acceptance belongs to the native
 # GHC oracle; this check establishes only extractor/source freshness.
 source scripts/lib-extract.sh
 resolve_tidepool_extract

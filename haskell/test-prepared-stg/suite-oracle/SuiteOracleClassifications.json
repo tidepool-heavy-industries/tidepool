@@ -1,0 +1,10 @@
+{
+  "thunk_cycle_xs'": {
+    "reason": "compiler-introduced cyclic list floated from Suite.thunk_cycle (cycle [1, 2, 3]); its weak head normal form is finite, its reachable graph is a cycle",
+    "expectation": { "kind": "cyclic_observation" }
+  },
+  "thunk_letrec_knot_xs": {
+    "reason": "compiler-introduced knot `xs = 1 : xs` floated from Suite.thunk_letrec_knot; its weak head normal form is finite, its reachable graph is a cycle",
+    "expectation": { "kind": "cyclic_observation" }
+  }
+}
