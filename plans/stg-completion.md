@@ -133,6 +133,55 @@ and the relevant Wave 6 integration gate runs on one recorded revision. Classify
 timeouts separately; earlier passes and a baseline reproduction do not make
 the current broad gate green.
 
+Step 1 evidence at `413f8cea4` (G1 committed; recorded 2026-09-15):
+
+- Focused checks on the committed tree: codegen library 486 passed, 1 skipped
+  (the prior 484, minus three deleted fingerprint unit tests, plus five
+  foreign-application tests); runtime library plus `prepared_execution` and
+  `prepared_resident_composite` 188 passed; `placement_retirement` 1 passed;
+  the ignored `prepared_turn` 1 passed with the extractor resolved; Haskell
+  `execution-schema-projection` and `prepared-stg-pipeline-test` passed;
+  canonical `just fixtures-check` passed.
+- The peer's broad `just changed HEAD` run was stopped at 230/2966 with 28
+  failures, all in `tidepool` actor-host tests; that crate does not reference
+  the prepared engine. Triage reproduced a representative sample at the
+  pre-session commit `067adcf18` (with its own extractor) and again on the G1
+  tree, both run quietly:
+  - `actor_host::tests::actor_workspace_recipes_distinguish_orchestrators_from_coding_workers`
+    and `overlay_resource::tests::lost_descendant_custody_does_not_authorize_parent_reclamation`
+    fail identically at baseline: pre-existing assertion failures.
+  - `research_policy_tests::research_admission_obeys_configured_width_and_consumes_depth`
+    fails with the same assertion (`research_policy_tests.rs:110`) at baseline
+    and on the G1 tree: pre-existing.
+  - `custody_tests::custody_install_failure_prevents_provider_publication`
+    passes at baseline and on the G1 tree (about 117 s each); its failure in
+    the broad run was a timeout under load.
+  - Seven `command_jobs_tests` match the classification in `067adcf18`.
+  The other custody, hosted-tools, notification, forest and steering failures
+  from the loaded run were not individually reproduced; the sample indicates
+  load-induced timeouts, but they remain unclassified until a quiet run.
+- A pre-existing clippy error (`clone` on the `Copy` type `RuntimeRep`,
+  `tidepool-toolchain/src/prepared_artifact.rs:100`) stops that crate's test
+  build under the broad gate.
+
+- Dispatcher cost, one debug-build observation per artifact (the ignored
+  `foreign_dispatch_cost_on_freer_artifact` with `TIDEPOOL_COST_ARTIFACT`; the
+  pre-G1 column is a throwaway probe of `CompiledProgram::compile` at `344ecd59a`):
+
+  | Artifact | Pre-G1 compile | G1 compile | G1 dispatchers | G1 dispatcher bytes | G1 dispatcher emission | Exports pre-G1 / offers G1 |
+  |---|---|---|---|---|---|---|
+  | freer-resume fixture | 434 ms | 486 ms | 96 | 509 KB | 172 ms | 158 / 2,968 |
+  | text contract `3.prepared.cbor` (306 KB) | 533 ms | 623 ms | 124 | 699 KB | 227 ms | 167 / 3,983 |
+  | suite `502.prepared.cbor` (297 KB) | 762 ms | 922 ms | 236 | 1.35 MB | 441 ms | 245 / 6,522 |
+
+  G1 adds 12-21% compile time; dispatcher emission is 35-48% of the total,
+  so header chains do not dominate compilation. Emitted dispatcher code is
+  large relative to the artifact and has no pre-G1 byte baseline. Owner
+  adapters specialized per known header stay on this step's list before
+  default routing, not as a prerequisite for connecting the first notebook turn.
+
+This is not a green broad gate; the exit criterion above still requires one.
+
 ### 2. Connect one complete notebook turn through the production owners
 
 Owners: `session::{workbench,turn,prepared,registry,supervisor}`, extractor

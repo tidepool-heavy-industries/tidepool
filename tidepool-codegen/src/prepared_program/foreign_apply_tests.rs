@@ -592,10 +592,24 @@ fn foreign_excess_can_continue_in_a_third_program() {
     assert_eq!(machine.handle_count(), 0);
 }
 
+/// Manual cost observation. Measures the pinned freer-resume fixture, or the
+/// artifact named by `TIDEPOOL_COST_ARTIFACT` (e.g. a large
+/// `target/prepared-corpus/*/N.prepared.cbor` produced by
+/// `scripts/prepared-corpus.sh`) so dispatcher cost can be recorded on
+/// realistic programs, not only a small fixture.
 #[test]
-#[ignore = "manual compilation cost observation; run with --ignored --nocapture"]
+#[ignore = "manual compilation cost observation; run with --run-ignored only --no-capture"]
 fn foreign_dispatch_cost_on_freer_artifact() {
-    let bytes = include_bytes!("../../../haskell/test-prepared-stg/fixtures/freer-resume.cbor");
+    let pinned: &[u8] =
+        include_bytes!("../../../haskell/test-prepared-stg/fixtures/freer-resume.cbor");
+    let (label, owned) = match std::env::var_os("TIDEPOOL_COST_ARTIFACT") {
+        Some(path) => (
+            path.to_string_lossy().into_owned(),
+            Some(std::fs::read(&path).expect("read TIDEPOOL_COST_ARTIFACT")),
+        ),
+        None => ("freer-resume".to_owned(), None),
+    };
+    let bytes = owned.as_deref().unwrap_or(pinned);
     let envelope = testing::envelope();
     let requirements = ProgramRequirements {
         schema_version: envelope.schema_version,
@@ -614,7 +628,7 @@ fn foreign_dispatch_cost_on_freer_artifact() {
         let started = std::time::Instant::now();
         let program = CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap();
         eprintln!(
-            "freer-resume: {} callable offers, total compile {:?}",
+            "{label}: {} callable offers, total compile {:?}",
             program.callables.len(),
             started.elapsed()
         );
