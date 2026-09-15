@@ -319,16 +319,22 @@ runPipeline = runPipelineSelected LegacyCore
 
 runPipelineSelected :: PipelineSelection result -> FilePath -> [FilePath] -> IO result
 runPipelineSelected selection path includes =
-  runPipelineSessionSelected selection GeneralCompile Nothing path includes Nothing
+  runPipelineSessionSelected selection Set.empty GeneralCompile Nothing path includes Nothing
 
 -- | Like 'runPipelineSelected', but withholding unfoldings for the given
 -- retained-generation symbols from GHC's own simplifier -- see
 -- 'Tidepool.RetainedUnfoldings' for the mechanism and why it must run this
 -- early. Used today only by 'test-prepared-stg/ExecutionProjectionTest.hs';
--- wiring a live request's @--retained-generation@ set through the resident
--- pipeline ('withResidentPipelineSelected') is a separate change, since that
--- entry point's compiler closure type is a public contract 'app/Main.hs'
--- already depends on.
+-- 'app/Main.hs' now threads a live request's @--retained-generation@ set
+-- through 'runPipelineSessionSelected' directly for its one-shot
+-- (non-resident) 'PreparedStg' compiles. Wiring the same set through the
+-- resident pipeline ('withResidentPipelineSelected') remains a separate,
+-- harder change: that entry point boots ONE 'HscEnv' and reuses it (with its
+-- installed plugins) across every subsequent request, so naively installing
+-- 'installRetainedUnfoldingsPlugin' per request would accumulate withholding
+-- passes on the shared session forever rather than reflecting only the
+-- current request's set. See its call site in 'app/Main.hs' for the current
+-- (still-'Set.empty') status there.
 runPipelineSelectedRetaining
   :: PipelineSelection result -> Set.Set SymbolIdentity -> FilePath -> [FilePath] -> IO result
 runPipelineSelectedRetaining selection retained path includes =
@@ -485,16 +491,22 @@ runPipelineSession :: Maybe SessionScope -> FilePath -> [FilePath] -> Maybe File
 runPipelineSession = runPipelineSessionFor GeneralCompile
 
 runPipelineSessionFor :: CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath -> IO PipelineResult
-runPipelineSessionFor purpose = runPipelineSessionSelected LegacyCore purpose
+runPipelineSessionFor purpose = runPipelineSessionSelected LegacyCore Set.empty purpose
 
+-- | Like 'runPipelineSelected'/'runPipelineSession', but also taking a
+-- retained-generation set (see 'Tidepool.RetainedUnfoldings') to withhold
+-- from GHC's own simplifier before it runs. This is the production one-shot
+-- entry point 'app/Main.hs' calls for every request; a caller with no
+-- retained-generation set to thread passes 'Set.empty', which
+-- 'installRetainedUnfoldingsPlugin' makes a true no-op.
 runPipelineSessionSelected
-  :: PipelineSelection result -> CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath]
-  -> Maybe FilePath -> IO result
-runPipelineSessionSelected selection purpose mscope path includes buildProductsDir =
+  :: PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope
+  -> FilePath -> [FilePath] -> Maybe FilePath -> IO result
+runPipelineSessionSelected selection retained purpose mscope path includes buildProductsDir =
   selectCompileResult selection <$> case mscope of
     Just scope | isSessionScopeActive scope ->
-      runCompile (selectionKind selection) Set.empty (sessionVariant purpose scope path) path includes buildProductsDir
-    _ -> runCompile (selectionKind selection) Set.empty (normalVariant purpose path) path includes buildProductsDir
+      runCompile (selectionKind selection) retained (sessionVariant purpose scope path) path includes buildProductsDir
+    _ -> runCompile (selectionKind selection) retained (normalVariant purpose path) path includes buildProductsDir
 
 -- ---------------------------------------------------------------------------
 -- Resident compilation state
@@ -1001,14 +1013,37 @@ withResidentPipeline
   -> IO a
 withResidentPipeline baseIncludes useCompiler = do
   withResidentPipelineSelected baseIncludes $ \compile ->
-    useCompiler (compile LegacyCore)
+    useCompiler (compile LegacyCore Set.empty)
 
 -- | Resident compiler with an explicit representation selection per request.
 -- Prepared outputs share the same validity checks and request-scope cleanup as
 -- the optimized guts from which they were produced.
+--
+-- The compiler closure's shape matches 'runPipelineSessionSelected''s own
+-- (a leading 'PipelineSelection' and a retained-generation 'Set.Set') so
+-- 'app/Main.hs' can hold either behind one @Compiler@ alias. UNLIKE the
+-- one-shot path, the retained-generation set passed here is NOT YET
+-- forwarded to a withholding pass: this entry point boots exactly one
+-- 'HscEnv' in 'runGhc' below and reuses it -- along with whatever
+-- 'installRetainedUnfoldingsPlugin' installed on it -- across every
+-- subsequent request ('residentCompileOne' only ever patches
+-- 'importPaths'/build-products per request, never 'hsc_plugins').
+-- Installing the withholding plugin here the same way 'runCompile' does
+-- would accumulate one withholding pass per request onto the same
+-- long-lived session (each carrying that request's own retained set) rather
+-- than replacing the previous request's pass, since
+-- 'installRetainedUnfoldingsPlugin' only ever prepends. Reflecting a
+-- request's retained set correctly would need the resident loop to reset
+-- 'hsc_plugins' to a saved baseline before installing each request's own
+-- pass -- a change to how this loop manages plugin state, not just to this
+-- parameter list, and out of scope here. The parameter is accepted (so
+-- 'app/Main.hs' has one @Compiler@ shape for both entry points) and
+-- currently ignored; see the caller in 'app/Main.hs' for the resulting gap
+-- (only exercised by @--worker-loop-v1@, not by the bare one-shot path the
+-- S6 fixture regeneration uses).
 withResidentPipelineSelected
   :: [FilePath]
-  -> ((forall result. PipelineSelection result -> CompilePurpose -> Maybe SessionScope
+  -> ((forall result. PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope
        -> FilePath -> [FilePath] -> Maybe FilePath -> IO result) -> IO a)
   -> IO a
 withResidentPipelineSelected baseIncludes useCompiler = do
@@ -1023,7 +1058,7 @@ withResidentPipelineSelected baseIncludes useCompiler = do
     memoRef <- liftIO (newIORef Map.empty)
     let baseImportPaths = importPaths dflags'
     reifyGhc $ \session ->
-      useCompiler $ \selection purpose mscope path extraIncludes buildProductsDir -> do
+      useCompiler $ \selection _retained purpose mscope path extraIncludes buildProductsDir -> do
         let targetModName' = mkModuleName (capitalize (takeBaseName path))
         compiled <- reflectGhc
           (residentCompileOne (selectionKind selection) cache memoRef dflags' baseImportPaths timing purpose mscope path extraIncludes buildProductsDir)

@@ -7,6 +7,7 @@ import System.FilePath (takeBaseName, takeDirectory, takeFileName, (</>))
 import System.Directory (createDirectoryIfMissing, setCurrentDirectory)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import qualified Data.Sequence as Seq
 import Control.Exception
   ( evaluate, try, throwIO, SomeAsyncException, SomeException, Exception
@@ -73,8 +74,20 @@ import Tidepool.CborEncode (encodeTree, encodeMetadata, encodeTurnOut, encodeCel
 import Tidepool.Timing (readTimingEnabled, timePhase)
 import Tidepool.TurnSource (extractModuleName, spliceTemplate)
 
+-- | The retained-generation 'Set.Set' threads a request's
+-- @--retained-generation@ symbols (see 'Tidepool.RetainedUnfoldings') into
+-- the compile call so an imported retained-generation symbol's unfolding is
+-- withheld from GHC's own simplifier rather than being inlined into a
+-- consumer compiled in the same session. Every call site outside
+-- 'processFile''s 'PreparedStg' compile passes 'Set.empty' (a true no-op):
+-- only a prepared-STG compile ever recovers/persists a retained-generation
+-- 'GlobalDecl' reference, so 'LegacyCore' modes (inspection/turn/cell) have
+-- nothing to withhold. NOTE: the resident-daemon path
+-- ('withResidentPipelineSelected', used only behind @--worker-loop-v1@)
+-- currently ignores this parameter -- see its haddock in GhcPipeline.hs.
 type Compiler =
   forall result. PipelineSelection result
+  -> Set.Set SymbolIdentity
   -> CompilePurpose
   -> Maybe SessionScope
   -> FilePath
@@ -172,7 +185,7 @@ runInspectionMode compiler args _path = do
       let purpose = case query of
             InspectTypeSearch _ -> LookupTypeCompile
             _ -> GeneralCompile
-      compiled <- try (compiler LegacyCore purpose scope path (requestIncludes args) (requestBuildProductsDir args))
+      compiled <- try (compiler LegacyCore Set.empty purpose scope path (requestIncludes args) (requestBuildProductsDir args))
       case compiled of
         Left exception -> case fromException exception of
           Just (sourceError :: SourceError) ->
@@ -266,7 +279,7 @@ processFile compiler timing args path = do
     -- Multi-target extraction can inject stable session values without
     -- becoming a session bind/reference operation.
     let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
-    prepared <- compiler PreparedStg GeneralCompile scope path (requestIncludes args) (requestBuildProductsDir args)
+    prepared <- compiler PreparedStg (Map.keysSet (requestRetainedGenerations args)) GeneralCompile scope path (requestIncludes args) (requestBuildProductsDir args)
     let result = pprPipelineResult prepared
     let binds = prBinds result
         tycons = prTyCons result
@@ -562,7 +575,7 @@ runTurnMode compiler args path = do
             compileVariants _ [] = error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
             compileVariants index (tmplFile:rest) = do
               (spliced, _modName, modulePath) <- spliceInto tmplFile
-              attempted <- try (compiler LegacyCore GeneralCompile (Just scope) modulePath (requestIncludes args) (requestBuildProductsDir args))
+              attempted <- try (compiler LegacyCore Set.empty GeneralCompile (Just scope) modulePath (requestIncludes args) (requestBuildProductsDir args))
               case attempted of
                 Right result -> return (index, spliced, result)
                 Left err@(_ :: SomeException) -> case (fromException err :: Maybe SourceError, rest) of
@@ -644,7 +657,7 @@ runCellMode compiler args cellPath = do
       writeFile modulePath rendered
       -- Preserve GHC's source plan even when checking reports diagnostics.
       BS.writeFile out (encodeCellOut plan [] rendered)
-      compiler LegacyCore GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)) initialPlan
+      compiler LegacyCore Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)) initialPlan
     checkedSource <- either fail pure (renderCellCheckSource template analyzed)
     (finalPlan, finalSource, compiled) <- if null (cellPlanDisplayTargets analyzed)
       then pure (analyzed, checkedSource, provisional)
@@ -653,12 +666,12 @@ runCellMode compiler args cellPath = do
         let contextual = installCellDisplayDeclarations contextDeclarations analyzed
         contextualSource <- either fail pure (renderCellCheckSource template contextual)
         writeFile modulePath contextualSource
-        contextChecked <- compiler LegacyCore GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
+        contextChecked <- compiler LegacyCore Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
         declarations <- cellDisplayDeclarations DisplayInstanceFields contextChecked analyzed
         let finalized = installCellDisplayDeclarations declarations analyzed
         finalizedSource <- either fail pure (renderCellCheckSource template finalized)
         writeFile modulePath finalizedSource
-        finalizedResult <- compiler LegacyCore GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
+        finalizedResult <- compiler LegacyCore Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
         pure (finalized, finalizedSource, finalizedResult)
     -- Statement preparation checks these rendered pins in their actual value
     -- modules before any declaration commits or effect runs.
