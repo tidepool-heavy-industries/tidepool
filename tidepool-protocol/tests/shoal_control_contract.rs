@@ -110,7 +110,7 @@ fn fork_options_are_optional_at_the_existing_launch_boundary() {
         .iter()
         .find(|verb| verb.ctor == "ForksStartWith")
         .unwrap();
-    assert_eq!(launch.args.len(), 13);
+    assert_eq!(launch.args.len(), 15);
     assert_eq!(launch.args[9].name, "effort");
     assert_eq!(
         launch.args[9].ty,

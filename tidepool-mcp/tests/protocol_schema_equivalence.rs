@@ -262,6 +262,118 @@ fn agent_session_decl_matches_the_schema_exactly() {
     );
 }
 
+#[test]
+fn recipe_check_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::recipe_check_decl(),
+        &tidepool_protocol::effects::recipe_check::recipe_check(),
+    );
+}
+
+#[test]
+fn actor_context_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::actor_context_decl(),
+        &tidepool_protocol::effects::actor_context::actor_context(),
+    );
+}
+
+#[test]
+fn introspection_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::introspection_decl(),
+        &tidepool_protocol::effects::introspection::introspection(),
+    );
+}
+
+#[test]
+fn sleep_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::sleep_decl(),
+        &tidepool_protocol::effects::sleep::sleep(),
+    );
+}
+
+#[test]
+fn agent_control_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::agent_control_decl(),
+        &tidepool_protocol::effects::agent_control::agent_control(),
+    );
+}
+
+#[test]
+fn commands_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::commands_decl(),
+        &tidepool_protocol::effects::commands::commands(),
+    );
+}
+
+#[test]
+fn notifications_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::notifications_decl(),
+        &tidepool_protocol::effects::notifications::notifications(),
+    );
+}
+
+#[test]
+fn agent_inspection_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::agent_inspection_decl(),
+        &tidepool_protocol::effects::agent_inspection::agent_inspection(),
+    );
+}
+
+#[test]
+fn agent_launch_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::agent_launch_decl(),
+        &tidepool_protocol::effects::agent_launch::agent_launch(),
+    );
+}
+
+#[test]
+fn forks_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::forks_decl(),
+        &tidepool_protocol::effects::forks::forks(),
+    );
+}
+
+#[test]
+fn bound_worktree_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::bound_worktree_decl(),
+        &tidepool_protocol::effects::worktree_facades::bound_worktree(),
+    );
+}
+
+#[test]
+fn worktree_registry_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::worktree_registry_decl(),
+        &tidepool_protocol::effects::worktree_facades::worktree_registry(),
+    );
+}
+
+#[test]
+fn worktree_allocation_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::worktree_allocation_decl(),
+        &tidepool_protocol::effects::worktree_facades::worktree_allocation(),
+    );
+}
+
+#[test]
+fn worktree_integration_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::worktree_integration_decl(),
+        &tidepool_protocol::effects::worktree_facades::worktree_integration(),
+    );
+}
+
 /// Every effect the schema claims to own must actually be wired into
 /// `tidepool-mcp` — a schema entry with no live decl would prove nothing while
 /// looking like coverage.
@@ -280,15 +392,29 @@ fn every_schema_effect_is_reachable() {
             "RepoEvent",
             "AskUser",
             "ReadState",
+            "RecipeCheck",
             "RunLLMTurn",
             "Fork",
             "Finalize",
             "Green",
             "Actor",
+            "ActorContext",
+            "Introspection",
             "ActorKernel",
             "ActorLocal",
+            "Sleep",
+            "AgentControl",
+            "Commands",
+            "Notifications",
+            "AgentInspection",
+            "AgentLaunch",
+            "Forks",
             "AgentTools",
             "AgentSession",
+            "BoundWorktree",
+            "WorktreeRegistry",
+            "WorktreeAllocation",
+            "WorktreeIntegration",
         ],
         "the migrated set changed — add the new effect's equivalence assertion above"
     );
