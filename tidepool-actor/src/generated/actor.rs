@@ -11,7 +11,14 @@ use tidepool_bridge_derive::FromCore;
 /// it goes on to read, so an all-recognition, no-field-read effect is
 /// expected here, not a bug.
 #[derive(FromCore)]
-#[allow(dead_code, clippy::enum_variant_names)]
+#[allow(
+    dead_code,
+    clippy::enum_variant_names,
+    clippy::type_complexity,
+    reason = "decode-only shape mirrors the Haskell GADT constructor's nested \
+              argument tuple exactly; a local type alias would name a shape \
+              that exists only here and is never reused"
+)]
 pub enum ActorReq {
     ActorBeginForkGroupWith(bool, String, Vec<String>),
     ActorStartWith(

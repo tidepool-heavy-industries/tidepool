@@ -89,7 +89,11 @@ fn body(e: &Effect) -> String {
     // `Subagent*`) is the CORRECT spelling, not a naming smell — clippy's
     // enum_variant_names lint disagrees, so it is silenced deliberately here
     // rather than by renaming variants away from their wire truth.
-    out.push_str("#[allow(dead_code, clippy::enum_variant_names)]\n");
+    // Variant payloads mirror each GADT constructor's nested argument tuple
+    // exactly, so type_complexity is silenced for the same wire-truth reason.
+    out.push_str(
+        "#[allow(\n    dead_code,\n    clippy::enum_variant_names,\n    clippy::type_complexity,\n    reason = \"decode-only shape mirrors the Haskell GADT constructor's nested \\\n              argument tuple exactly; a local type alias would name a shape \\\n              that exists only here and is never reused\"\n)]\n",
+    );
     out.push_str(&format!("pub enum {} {{\n", e.req_enum));
     for v in &e.verbs {
         let tys: Vec<String> = v
