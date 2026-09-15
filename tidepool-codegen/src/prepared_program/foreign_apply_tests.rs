@@ -305,8 +305,7 @@ fn foreign_terminal_saturation_does_not_apply_excess_or_publish_results() {
         );
         let error = machine
             .run_entry_retained(b, ValueId(0), &inputs, options(), RealmId::ROOT)
-            .err()
-            .expect("terminal call fails");
+            .expect_err("terminal call fails");
         assert!(matches!(
             error,
             ExecutionError::Runtime(crate::machine_state::MachineFailure {
@@ -644,8 +643,7 @@ fn foreign_application_of_an_owned_constructor_is_a_reusable_miss() {
             options(),
             RealmId::ROOT,
         )
-        .err()
-        .expect("a constructor is not callable");
+        .expect_err("a constructor is not callable");
     assert!(matches!(
         error,
         ExecutionError::Runtime(crate::machine_state::MachineFailure {

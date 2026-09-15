@@ -814,23 +814,21 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     .unwrap();
     assert!(!publication.is_pending());
     drop(publication);
-    let calls = backend.calls.lock();
-    let retries = &calls[calls.len() - 3..];
-    assert!(retries
-        .iter()
-        .all(|(sequence, _)| *sequence == retries[0].0));
-    drop(calls);
+    {
+        let calls = backend.calls.lock();
+        let retries = &calls[calls.len() - 3..];
+        assert!(retries
+            .iter()
+            .all(|(sequence, _)| *sequence == retries[0].0));
+    }
     let _child_native = NativeProcess::start(child, &backend);
     let child_actor = ActorRef::first(tidepool_actor::ActorId(2));
+    let child_binding = tidepool_agent::read_interactive_binding(&binding)
+        .await
+        .unwrap();
     admission.native.as_ref().unwrap().owners.lock().insert(
         child_actor,
-        owner(
-            child.clone(),
-            tidepool_agent::read_interactive_binding(&binding)
-                .await
-                .unwrap(),
-            &_child_native,
-        ),
+        owner(child.clone(), child_binding, &_child_native),
     );
     shell(child, "printf staged-child > file; git add file; printf dirty-child > file; printf warm > .shoal/build/cargo/artifact");
     let grandchild = admission

@@ -421,7 +421,7 @@ impl OverlayResourceLease {
         let work = next.join("work");
         std::fs::create_dir(&upper)?;
         std::fs::create_dir(&work)?;
-        tidepool_atomic_write::create_dir_all_durable(&next)?;
+        tidepool_atomic_write::create_dir_all_durable(next)?;
         let mut frozen = self.layers.clone();
         frozen.push(OverlayLayer {
             path: self.upper.clone(),
@@ -746,10 +746,9 @@ pub(super) fn source_manifest(
         group.sort();
         let anchor = group[0].clone();
         for path in group {
-            entries
-                .get_mut(path)
-                .expect("manifest link path inserted")
-                .hardlink_anchor = Some(anchor.clone());
+            #[allow(clippy::expect_used, reason = "manifest link path inserted")]
+            let entry = entries.get_mut(path).expect("manifest link path inserted");
+            entry.hardlink_anchor = Some(anchor.clone());
         }
     }
     Ok(SourceManifest(entries))

@@ -302,7 +302,9 @@ mod tests {
                 bytes.as_mut_ptr(),
                 bytes.len(),
                 &descriptor,
-                &[DescriptorValue::Managed(1usize as *mut u8)],
+                &[DescriptorValue::Managed(std::ptr::without_provenance_mut(
+                    1,
+                ))],
             )
         }
         .unwrap_err();

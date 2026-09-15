@@ -384,8 +384,15 @@ impl HostedRetirement {
                         .map_err(|error| error.to_string())
                 })));
             }
-            self.shutdown.as_mut().unwrap().finish().await;
-            self.resident = match self.shutdown.as_ref().unwrap() {
+            #[allow(clippy::expect_used, reason = "just set above")]
+            self.shutdown
+                .as_mut()
+                .expect("just set above")
+                .finish()
+                .await;
+            #[allow(clippy::expect_used, reason = "just set above")]
+            let shutdown = self.shutdown.as_ref().expect("just set above");
+            self.resident = match shutdown {
                 Operation::Finished(Ok(result)) => account(exact, Some(result.cleanup.clone())),
                 Operation::Finished(Err(error)) => ResidentObservation::Failed(error.clone()),
                 Operation::Pending(_) => unreachable!(),

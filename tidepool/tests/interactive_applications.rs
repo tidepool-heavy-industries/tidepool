@@ -495,25 +495,27 @@ trust_level = "trusted"
         InputAdmission::Admitted | InputAdmission::Dispatching | InputAdmission::Presented
     ));
     let end = Instant::now() + Duration::from_secs(20);
-    while provider_state.0.lock().unwrap().len() <= bootstrap_requests && Instant::now() < end {
+    let request_count = || provider_state.0.lock().unwrap().len();
+    while request_count() <= bootstrap_requests && Instant::now() < end {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let requests = provider_state.0.lock().unwrap();
-    let delivered = requests
-        .iter()
-        .filter(|body| body.to_string().contains("one owned host input"))
-        .count();
-    assert_eq!(
-        delivered, 1,
-        "owned input must reach the provider exactly once: {requests:?}"
-    );
-    assert!(
-        !requests
+    {
+        let requests = provider_state.0.lock().unwrap();
+        let delivered = requests
             .iter()
-            .any(|body| body.to_string().contains("must not deliver")),
-        "wrong owner reached provider"
-    );
-    drop(requests);
+            .filter(|body| body.to_string().contains("one owned host input"))
+            .count();
+        assert_eq!(
+            delivered, 1,
+            "owned input must reach the provider exactly once: {requests:?}"
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|body| body.to_string().contains("must not deliver")),
+            "wrong owner reached provider"
+        );
+    }
     let observed = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let outcome = backend.query_input(&thread, &operation).await.unwrap();

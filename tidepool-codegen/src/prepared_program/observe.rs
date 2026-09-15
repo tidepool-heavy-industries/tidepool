@@ -1109,7 +1109,7 @@ mod tests {
             parent.initialize_header(nursery.as_mut_ptr().cast());
             function.initialize_header(nursery.as_mut_ptr().add(3).cast());
         }
-        nursery[2] = (nursery.as_ptr() as usize + 3 * 8 | usize::from(function.tag())) as u64;
+        nursery[2] = ((nursery.as_ptr() as usize + 3 * 8) | usize::from(function.tag())) as u64;
         let constructors = BTreeMap::from([(
             parent.initial_header_word(),
             ConstructorObservation {

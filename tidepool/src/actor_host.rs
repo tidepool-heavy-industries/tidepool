@@ -1912,6 +1912,7 @@ fn spawn_owned_retirement(
 ) {
     let (scope, receipt_slot, native_retirement) = {
         let rows = owners.lock();
+        #[allow(clippy::expect_used, reason = "exact deployment retention row")]
         let row = rows
             .get(&deployment.actor)
             .expect("exact deployment retention row");
@@ -2495,6 +2496,7 @@ async fn run_interactive_applications(
                         let actor = local_actor.identity();
                         let (already_retired, pending_activations) = {
                             let mut owners = application_owners.lock();
+                            #[allow(clippy::expect_used, reason = "registered launch owner")]
                             let owner = owners.get_mut(&actor).expect("registered launch owner");
                             owner.launch = HostLaunchState::Published;
                             (owner.terminal.is_some(), std::mem::take(&mut owner.pending_activations))
@@ -2996,11 +2998,11 @@ fn prepare_actor_worktree(
         actor.incarnation.0,
     );
     if installation.worktree_custody.is_none()
-        || !context
+        || context
             .bindings
             .lock()
             .current(handle.id())
-            .is_some_and(|binding| binding.agent() == &principal)
+            .is_none_or(|binding| binding.agent() != &principal)
     {
         return Err(application_error(
             actor,
@@ -3234,9 +3236,9 @@ async fn launch_prepared_interactive_application(
                     },
                     instructions: installation.instructions.clone(),
                 },
-                &blake3::hash(base_prompt.body().as_bytes())
+                blake3::hash(base_prompt.body().as_bytes())
                     .to_hex()
-                    .to_string(),
+                    .as_ref(),
             )
         })
         .transpose()
@@ -3799,17 +3801,14 @@ async fn deliver_session_activation(
             application.failure_reported = true;
             let local_actor = application.local_actor.clone();
             tracing::warn!(?actor, %error, "actor activation delivery degraded");
-            if let Err(error) = apply_application_failure(
+            apply_application_failure(
                 local_actor,
                 ExternalApplicationFailure {
                     class: ExternalApplicationFailureClass::ToolHostStartup,
                     detail: error,
                 },
             )
-            .await
-            {
-                return Err(error);
-            }
+            .await?;
             return Ok(());
         }
         application
@@ -4001,6 +4000,7 @@ fn observe_notification_receipt(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn deliver_pending(
     actor: ActorRef,
     inbox: &Arc<ActorInbox>,
@@ -4307,6 +4307,7 @@ fn finish_update_reconciliation(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_delivery_pump(
     actor: ActorRef,
     inbox: Arc<ActorInbox>,

@@ -1620,7 +1620,7 @@ mod tests {
         } else {
             RuntimeRep::Int(64)
         };
-        wire.signatures[0].results = ResultContract::Returns(vec![final_rep.clone()]);
+        wire.signatures[0].results = ResultContract::Returns(vec![final_rep]);
         wire.signatures.extend([
             Signature {
                 arguments: vec![RuntimeRep::Int(64), RuntimeRep::LiftedRef, RuntimeRep::Void],
@@ -1644,7 +1644,7 @@ mod tests {
                 } else {
                     vec![RuntimeRep::UnliftedRef]
                 },
-                results: ResultContract::Returns(vec![final_rep.clone()]),
+                results: ResultContract::Returns(vec![final_rep]),
             },
         ]);
         wire.constructors = vec![empty_constructor(0)];
@@ -2165,7 +2165,11 @@ mod tests {
             .store_external_elements(
                 source,
                 0,
-                &[1usize as *mut u8, 2usize as *mut u8, 3usize as *mut u8],
+                &[
+                    std::ptr::without_provenance_mut(1),
+                    2usize as *mut u8,
+                    3usize as *mut u8,
+                ],
             )
             .unwrap();
         machine

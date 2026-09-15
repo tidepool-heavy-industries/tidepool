@@ -67,56 +67,6 @@ pub(super) fn heap_top_partition(tops: &BTreeMap<ValueId, &HeapBinding>) -> BTre
     heap
 }
 
-#[cfg(test)]
-mod partition_tests {
-    use super::*;
-    use tidepool_repr::execution_schema::{ConstructorId, SignatureId, UpdatePolicy};
-
-    #[test]
-    fn w5_a1_caf_partition_moves_reverse_closure_only() {
-        let caf = HeapBinding {
-            id: ValueId(0),
-            rhs: HeapRhs::Thunk {
-                signature: SignatureId(0),
-                update: UpdatePolicy::Memoize,
-                captures: vec![],
-                body: 0,
-            },
-        };
-        let container = HeapBinding {
-            id: ValueId(1),
-            rhs: HeapRhs::Constructor {
-                constructor: ConstructorId(0),
-                fields: vec![Atom::Ref(ValueRef::Local(caf.id))],
-            },
-        };
-        let closure = HeapBinding {
-            id: ValueId(2),
-            rhs: HeapRhs::Function {
-                signature: SignatureId(0),
-                parameters: vec![],
-                captures: vec![ValueRef::Local(container.id)],
-                body: 0,
-            },
-        };
-        let independent = HeapBinding {
-            id: ValueId(3),
-            rhs: HeapRhs::Constructor {
-                constructor: ConstructorId(0),
-                fields: vec![],
-            },
-        };
-        let tops = [&caf, &container, &closure, &independent]
-            .into_iter()
-            .map(|binding| (binding.id, binding))
-            .collect();
-        assert_eq!(
-            heap_top_partition(&tops),
-            BTreeSet::from([caf.id, container.id, closure.id])
-        );
-    }
-}
-
 /// Reserve every top object before initializing any managed edge. Function
 /// captures and constructor fields use the same descriptor logical layout as
 /// generated allocation. Raw byte addresses point into ProgramPlan's pinned
@@ -536,4 +486,54 @@ fn invalid_static_value(plan: &ProgramPlan<'_>) -> CompileError {
         binding: plan.program.entry(),
         node: 0,
     })
+}
+
+#[cfg(test)]
+mod partition_tests {
+    use super::*;
+    use tidepool_repr::execution_schema::{ConstructorId, SignatureId, UpdatePolicy};
+
+    #[test]
+    fn w5_a1_caf_partition_moves_reverse_closure_only() {
+        let caf = HeapBinding {
+            id: ValueId(0),
+            rhs: HeapRhs::Thunk {
+                signature: SignatureId(0),
+                update: UpdatePolicy::Memoize,
+                captures: vec![],
+                body: 0,
+            },
+        };
+        let container = HeapBinding {
+            id: ValueId(1),
+            rhs: HeapRhs::Constructor {
+                constructor: ConstructorId(0),
+                fields: vec![Atom::Ref(ValueRef::Local(caf.id))],
+            },
+        };
+        let closure = HeapBinding {
+            id: ValueId(2),
+            rhs: HeapRhs::Function {
+                signature: SignatureId(0),
+                parameters: vec![],
+                captures: vec![ValueRef::Local(container.id)],
+                body: 0,
+            },
+        };
+        let independent = HeapBinding {
+            id: ValueId(3),
+            rhs: HeapRhs::Constructor {
+                constructor: ConstructorId(0),
+                fields: vec![],
+            },
+        };
+        let tops = [&caf, &container, &closure, &independent]
+            .into_iter()
+            .map(|binding| (binding.id, binding))
+            .collect();
+        assert_eq!(
+            heap_top_partition(&tops),
+            BTreeSet::from([caf.id, container.id, closure.id])
+        );
+    }
 }

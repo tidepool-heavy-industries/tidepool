@@ -1063,7 +1063,7 @@ fn recursive_group_reserves_once_before_sibling_initialization() {
         .expect("prepared compilation captures pre-compile IR");
     let function_id = program.entries[&tidepool_repr::execution_schema::ValueId(0)].function;
     let function = ir.get(&function_id).expect("top entry IR is captured");
-    let (reserve, slow) = first_reserve_call(function, &*program.pipeline.module);
+    let (reserve, slow) = first_reserve_call(function, &program.pipeline.module);
     assert_eq!(reserve_extent(function, reserve), {
         let constructor = program.descriptors.first().unwrap().allocation_extent();
         let recursive_function = program.descriptors.last().unwrap().allocation_extent();
@@ -1148,7 +1148,7 @@ fn enter_uses_one_generated_state_machine_call_without_an_inline_header_chain() 
         .blocks()
         .flat_map(|block| function.layout.block_insts(block))
         .filter(|inst| {
-            direct_call_is_named(function, &*program.pipeline.module, *inst, "prepared_enter")
+            direct_call_is_named(function, &program.pipeline.module, *inst, "prepared_enter")
         })
         .count();
     assert_eq!(

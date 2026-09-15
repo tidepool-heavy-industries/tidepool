@@ -413,8 +413,7 @@ async fn production_tuis_fork_live_workspaces_recursively() {
                             .as_array()
                             .unwrap()
                             .iter()
-                            .filter(|item| is_tool_output(item))
-                            .last()
+                            .rfind(|item| is_tool_output(item))
                             .unwrap()
                     );
                 }

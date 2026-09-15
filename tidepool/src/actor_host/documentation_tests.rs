@@ -1578,8 +1578,10 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
                 }
                 _ => {}
             }
-            if forwarded && review_ready && failure_notified && reviewer.is_some() {
-                break reviewer.unwrap();
+            if forwarded && review_ready && failure_notified {
+                if let Some(reviewer) = reviewer {
+                    break reviewer;
+                }
             }
         }
     })

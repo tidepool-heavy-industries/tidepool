@@ -131,6 +131,136 @@ fn mount_references_storage(line: &str, storage: &str) -> bool {
     })
 }
 
+fn bytes(path: &Path) -> io::Result<u64> {
+    let mut pending = vec![path.to_owned()];
+    let mut seen = BTreeSet::new();
+    let mut bytes = 0;
+    while let Some(path) = pending.pop() {
+        let metadata = fs::symlink_metadata(&path)?;
+        if !seen.insert((metadata.dev(), metadata.ino())) {
+            continue;
+        }
+        bytes += metadata.blocks() * 512;
+        if metadata.is_dir() {
+            // Kernel work/work is mode 000 and contains no build artifacts.
+            if metadata.mode() & 0o700 == 0 {
+                continue;
+            }
+            for entry in fs::read_dir(path)? {
+                pending.push(entry?.path());
+            }
+        }
+    }
+    Ok(bytes)
+}
+
+fn source_finalized(repository: &Path, resource: &Path) -> bool {
+    use tidepool_worktree::{WorktreeId, WorktreeRecordStatus, WorktreeRegistry};
+
+    let Some(id) = resource.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let registry_root = repository.join("registry");
+    if !registry_root.is_dir() {
+        return false;
+    }
+    let Ok(registry) = WorktreeRegistry::open(registry_root) else {
+        return false;
+    };
+    let Ok(Some(receipt)) = registry.get(&WorktreeId::from_raw(id)) else {
+        return false;
+    };
+    let (Ok(cwd), Ok(managed_root), Ok(git_file)) = (
+        receipt.cwd.canonicalize(),
+        repository.join("worktrees").canonicalize(),
+        fs::symlink_metadata(receipt.cwd.join(".git")),
+    ) else {
+        return false;
+    };
+    receipt.status == WorktreeRecordStatus::Finalized
+        && cwd.starts_with(managed_root)
+        && git_file.is_file()
+}
+
+pub fn cleanup(
+    run_root: &Path,
+    apply: bool,
+    include_source: bool,
+) -> io::Result<Vec<StorageReport>> {
+    let run_root = run_root.canonicalize()?;
+    let run_id = run_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| io::Error::other("invalid run root"))?;
+    uuid::Uuid::parse_str(run_id).map_err(io::Error::other)?;
+    let runs = run_root
+        .parent()
+        .ok_or_else(|| io::Error::other("missing runs directory"))?;
+    if runs.file_name().is_none_or(|name| name != "runs") {
+        return Err(io::Error::other("expected a recorded Shoal runs directory"));
+    }
+    // The same lifetime lock excludes host restart throughout inspection/removal.
+    let _lock = super::host_incarnation::HostRunLock::existing(&run_root)?;
+    let repositories = runs
+        .parent()
+        .ok_or_else(|| io::Error::other("missing Shoal state directory"))?
+        .join("actor-worktrees");
+    let mut report = Vec::new();
+    for repository in fs::read_dir(repositories)? {
+        let repository = repository?.path();
+        let resources = repository.join("worktrees/.resources").join(run_id);
+        if !resources.is_dir() {
+            continue;
+        }
+        if resources.canonicalize()? != resources {
+            return Err(io::Error::other("symlinked resource root retained"));
+        }
+        for resource in fs::read_dir(resources)? {
+            let resource = resource?.path();
+            for (kind, name) in [
+                (StorageKind::Build, "build"),
+                (StorageKind::Source, "source"),
+            ] {
+                if matches!(kind, StorageKind::Source) && !include_source {
+                    continue;
+                }
+                let path = resource.join(name);
+                if !path.is_dir() {
+                    continue;
+                }
+                if path.canonicalize()? != path {
+                    return Err(io::Error::other(format!(
+                        "symlinked {name} storage retained"
+                    )));
+                }
+                let allocated_bytes = bytes(&path)?;
+                let outcome = if matches!(kind, StorageKind::Source)
+                    && !source_finalized(&repository, &resource)
+                {
+                    Outcome::Retained("working files have no finalized checkout proof".into())
+                } else {
+                    match mounted_reference(&path) {
+                        Ok(None) if apply => {
+                            super::overlay_resource::remove_unmounted_storage(&path)?;
+                            Outcome::Removed
+                        }
+                        Ok(None) => Outcome::Reclaimable,
+                        Ok(Some(reason)) => Outcome::Retained(reason),
+                        Err(error) => Outcome::Retained(error.to_string()),
+                    }
+                };
+                report.push(StorageReport {
+                    kind,
+                    path,
+                    allocated_bytes,
+                    outcome,
+                });
+            }
+        }
+    }
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,134 +390,4 @@ mod tests {
             .contains("symlinked build"));
         assert!(moved.join("upper/artifact").exists());
     }
-}
-
-fn bytes(path: &Path) -> io::Result<u64> {
-    let mut pending = vec![path.to_owned()];
-    let mut seen = BTreeSet::new();
-    let mut bytes = 0;
-    while let Some(path) = pending.pop() {
-        let metadata = fs::symlink_metadata(&path)?;
-        if !seen.insert((metadata.dev(), metadata.ino())) {
-            continue;
-        }
-        bytes += metadata.blocks() * 512;
-        if metadata.is_dir() {
-            // Kernel work/work is mode 000 and contains no build artifacts.
-            if metadata.mode() & 0o700 == 0 {
-                continue;
-            }
-            for entry in fs::read_dir(path)? {
-                pending.push(entry?.path());
-            }
-        }
-    }
-    Ok(bytes)
-}
-
-fn source_finalized(repository: &Path, resource: &Path) -> bool {
-    use tidepool_worktree::{WorktreeId, WorktreeRecordStatus, WorktreeRegistry};
-
-    let Some(id) = resource.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    let registry_root = repository.join("registry");
-    if !registry_root.is_dir() {
-        return false;
-    }
-    let Ok(registry) = WorktreeRegistry::open(registry_root) else {
-        return false;
-    };
-    let Ok(Some(receipt)) = registry.get(&WorktreeId::from_raw(id)) else {
-        return false;
-    };
-    let (Ok(cwd), Ok(managed_root), Ok(git_file)) = (
-        receipt.cwd.canonicalize(),
-        repository.join("worktrees").canonicalize(),
-        fs::symlink_metadata(receipt.cwd.join(".git")),
-    ) else {
-        return false;
-    };
-    receipt.status == WorktreeRecordStatus::Finalized
-        && cwd.starts_with(managed_root)
-        && git_file.is_file()
-}
-
-pub fn cleanup(
-    run_root: &Path,
-    apply: bool,
-    include_source: bool,
-) -> io::Result<Vec<StorageReport>> {
-    let run_root = run_root.canonicalize()?;
-    let run_id = run_root
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| io::Error::other("invalid run root"))?;
-    uuid::Uuid::parse_str(run_id).map_err(io::Error::other)?;
-    let runs = run_root
-        .parent()
-        .ok_or_else(|| io::Error::other("missing runs directory"))?;
-    if runs.file_name().is_none_or(|name| name != "runs") {
-        return Err(io::Error::other("expected a recorded Shoal runs directory"));
-    }
-    // The same lifetime lock excludes host restart throughout inspection/removal.
-    let _lock = super::host_incarnation::HostRunLock::existing(&run_root)?;
-    let repositories = runs
-        .parent()
-        .ok_or_else(|| io::Error::other("missing Shoal state directory"))?
-        .join("actor-worktrees");
-    let mut report = Vec::new();
-    for repository in fs::read_dir(repositories)? {
-        let repository = repository?.path();
-        let resources = repository.join("worktrees/.resources").join(run_id);
-        if !resources.is_dir() {
-            continue;
-        }
-        if resources.canonicalize()? != resources {
-            return Err(io::Error::other("symlinked resource root retained"));
-        }
-        for resource in fs::read_dir(resources)? {
-            let resource = resource?.path();
-            for (kind, name) in [
-                (StorageKind::Build, "build"),
-                (StorageKind::Source, "source"),
-            ] {
-                if matches!(kind, StorageKind::Source) && !include_source {
-                    continue;
-                }
-                let path = resource.join(name);
-                if !path.is_dir() {
-                    continue;
-                }
-                if path.canonicalize()? != path {
-                    return Err(io::Error::other(format!(
-                        "symlinked {name} storage retained"
-                    )));
-                }
-                let allocated_bytes = bytes(&path)?;
-                let outcome = if matches!(kind, StorageKind::Source)
-                    && !source_finalized(&repository, &resource)
-                {
-                    Outcome::Retained("working files have no finalized checkout proof".into())
-                } else {
-                    match mounted_reference(&path) {
-                        Ok(None) if apply => {
-                            super::overlay_resource::remove_unmounted_storage(&path)?;
-                            Outcome::Removed
-                        }
-                        Ok(None) => Outcome::Reclaimable,
-                        Ok(Some(reason)) => Outcome::Retained(reason),
-                        Err(error) => Outcome::Retained(error.to_string()),
-                    }
-                };
-                report.push(StorageReport {
-                    kind,
-                    path,
-                    allocated_bytes,
-                    outcome,
-                });
-            }
-        }
-    }
-    Ok(report)
 }

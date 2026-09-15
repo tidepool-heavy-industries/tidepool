@@ -53,6 +53,7 @@ impl WorkspacePublication {
                 identity: None,
             });
         }
+        #[allow(clippy::expect_used, reason = "publication reserved above")]
         let pending = self.pending.as_mut().expect("publication reserved above");
         match backend
             .workspace_publication(

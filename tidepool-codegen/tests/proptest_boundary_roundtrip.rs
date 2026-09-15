@@ -121,9 +121,6 @@ fn canonicalize(v: &Value) -> Value {
                         work.push(Frame::Enter(f));
                     }
                 }
-                // Non-bridgeable shapes (closures, thunks, ...) never occur in
-                // these tests; pass them through structurally if they ever do.
-                other => out.push(other.clone()),
             },
             Frame::ExitCon(id, n) => {
                 let mut fields = Vec::with_capacity(n);

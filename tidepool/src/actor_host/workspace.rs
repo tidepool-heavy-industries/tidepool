@@ -274,6 +274,7 @@ impl WorkspaceLayout {
             .join(key)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn prepare(
         &self,
         host_path: PathBuf,

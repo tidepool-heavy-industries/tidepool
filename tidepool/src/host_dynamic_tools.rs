@@ -441,6 +441,10 @@ impl WorkbenchInterruptionResponse {
     }
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "WorkbenchResponse serialization is infallible"
+)]
 fn workbench_reply(reply: tidepool_actor::KernelWorkbenchReply) -> CallResponse {
     match reply {
         Ok(response) => CallResponse::domain(
@@ -1383,11 +1387,12 @@ pub(crate) mod tests {
             }
         }
 
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 3);
-        assert_eq!(calls[0], calls[2]);
-        assert_ne!(calls[0].call_id, calls[1].call_id);
-        drop(calls);
+        {
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.len(), 3);
+            assert_eq!(calls[0], calls[2]);
+            assert_ne!(calls[0].call_id, calls[1].call_id);
+        }
 
         state.control.drain();
         let error = cancel_workbench(State(state), Json(cancellation_request("call-a")))

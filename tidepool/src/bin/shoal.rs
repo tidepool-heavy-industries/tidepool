@@ -24,8 +24,8 @@ enum Command {
         command: Vec<String>,
     },
     /// Own shared command admission and cgroup custody across Shoal runs.
-    #[command(hide = true)]
-    CommandResources {
+    #[command(hide = true, name = "command-resources")]
+    Resources {
         #[arg(long)]
         socket: PathBuf,
         #[arg(long)]
@@ -197,7 +197,7 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Command::MountHelper => unreachable!("handled before runtime construction"),
         Command::InSlice { .. } => unreachable!("handled before runtime construction"),
-        Command::CommandResources { socket, policy } => {
+        Command::Resources { socket, policy } => {
             tidepool::shoal::resources::serve(socket, policy).await
         }
         Command::Cleanup {

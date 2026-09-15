@@ -1,5 +1,3 @@
-#[path = "../support/engine_observation.rs"]
-mod engine_observation;
 #[path = "../support/session_scaffold.rs"]
 mod session_scaffold;
 #[path = "../support/session_scaffold_expect.rs"]

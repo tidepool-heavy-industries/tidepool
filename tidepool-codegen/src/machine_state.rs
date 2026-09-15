@@ -2989,7 +2989,7 @@ mod tests {
     #[test]
     fn complete_root_snapshot_joins_every_registry_and_live_tail_slot() {
         let ms = MachineState::new();
-        let mut stack_value = 1usize as *mut u8;
+        let mut stack_value: *mut u8 = std::ptr::without_provenance_mut(1);
         let mut rust_value = 2usize as *mut u8;
         let mut persistent_value = 3usize as *mut u8;
         let mut stowed_value = 4usize as *mut u8;
@@ -3029,7 +3029,7 @@ mod tests {
     #[test]
     fn major_snapshot_keeps_remembered_edges_distinct_from_strong_roots() {
         let ms = MachineState::new();
-        let mut persistent = 1usize as *mut u8;
+        let mut persistent: *mut u8 = std::ptr::without_provenance_mut(1);
         let mut remembered = 2usize as *mut u8;
         ms.register_persistent_root(&mut persistent);
         ms.register_remembered_slot(&mut remembered);

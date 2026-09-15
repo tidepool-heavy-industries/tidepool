@@ -771,12 +771,11 @@ async fn notebook_cell_cancellation_stops_at_item_boundaries() {
     let no_prefix = sleeper_policy
         .dispatch_boxed(invocation("cancelledNoPrefix", "cancelled-no-prefix"))
         .await;
-    match no_prefix {
-        Ok(response) => assert_eq!(
+    if let Ok(response) = no_prefix {
+        assert_eq!(
             response["status"], "rejected",
             "the interrupted first cell must not install bindings: {response}"
-        ),
-        Err(_) => {}
+        );
     }
 
     let (after_prefix, prefix_context) = cancel_sleeping_cell(
@@ -832,9 +831,8 @@ async fn notebook_cell_cancellation_stops_at_item_boundaries() {
     let tail = sleeper_policy
         .dispatch_boxed(invocation("cancelledTail", "cancelled-tail"))
         .await;
-    match tail {
-        Ok(response) => assert_eq!(response["status"], "rejected", "{response}"),
-        Err(_) => {}
+    if let Ok(response) = tail {
+        assert_eq!(response["status"], "rejected", "{response}");
     }
 
     let available = sleeper_policy

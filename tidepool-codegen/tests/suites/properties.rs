@@ -1,6 +1,3 @@
-#[path = "../support/gc_scaffold.rs"]
-mod gc_scaffold;
-
 // Each module remains a separate source file; nextest isolates each test process.
 #[path = "../proptest_boundary_roundtrip.rs"]
 mod proptest_boundary_roundtrip;

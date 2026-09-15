@@ -1,7 +1,7 @@
 #[path = "../src/prepared_control.rs"]
 mod prepared_control;
 
-use prepared_control::{CallStatus, ControlError};
+use prepared_control::{CallStatus, ControlError, PreparedSafepoint};
 
 #[test]
 fn raw_statuses_have_stable_wire_values() {
@@ -17,4 +17,21 @@ fn unknown_raw_status_is_typed() {
         CallStatus::from_raw(99),
         Err(ControlError::UnknownStatus(99))
     );
+}
+
+#[test]
+fn raw_safepoints_have_stable_wire_values() {
+    for safepoint in [
+        PreparedSafepoint::Allocation,
+        PreparedSafepoint::FunctionEntry,
+        PreparedSafepoint::Backedge,
+        PreparedSafepoint::ThunkEntry,
+        PreparedSafepoint::ThunkCommit,
+    ] {
+        assert_eq!(
+            PreparedSafepoint::from_raw(safepoint as u32),
+            Some(safepoint)
+        );
+    }
+    assert_eq!(PreparedSafepoint::from_raw(5), None);
 }
