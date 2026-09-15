@@ -966,7 +966,10 @@ mod tests {
         drop(worker);
         view.detach_retired_tree(&project.join("target")).unwrap();
         let parent = SharedOverlayResource::new(parent);
-        assert!(parent.retire().await.is_err());
+        // Retirement of the owner's view succeeds; the uncertain descendant
+        // vetoes reclamation, so the backing storage must survive.
+        parent.retire().await.unwrap();
+        assert!(parent.latest_snapshot().is_none());
         assert!(parent_path.exists());
     }
 
