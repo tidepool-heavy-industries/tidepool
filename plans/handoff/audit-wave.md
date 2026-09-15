@@ -241,3 +241,27 @@ libdir plus daemon epoch; undecodable cached artifacts recompile,
    recompiles but the daemon memo returns stale Core. Skip the memo for CPP or
    modules with dependent files. Affects user include dirs (stdlib has no CPP).
 
+## ExecutionProjection partiality and determinism
+No wrong code or nondeterminism from ordinary programs; no `!!`, `head`,
+`fromJust`, `error` or reachable incomplete patterns. Ordering is
+deterministic (`nonDetEltsUniqSet` only feeds a `Set`, maps keyed by
+`SymbolIdentity`, `dVarSetElems` captures, emission-ordered local spellings).
+1. Conditional wrong code — `projectReference` checks `wiredInErrorKind`
+   before the program's own tops and adds an implicit top under
+   `idSymbol "value"` without a collision check (`:782-783`, `:873-892`);
+   projecting a module that defines `patError`/`absentErr` yields duplicate
+   symbols. `preparedTargetReferences` (`:249-258`) also does not exclude
+   wired-in or deferred ids. Add the `topValues` check used at `:914`; filter
+   `wiredInErrorKind` ids from references.
+2. Smell — bottoming primop list (`:674`) lacks `RaiseOverflowOp` and
+   `RaiseIOOp`; polymorphic results of those are rejected instead of
+   `NoSuccess`.
+3. Smell — `bindValue` does not remove the binder from `joins` and `bindJoin`
+   not from `values` (`:954-970`); a reused unique could turn a value into a
+   `Jump`.
+4. Smell — exported `projectPrepared` (`:161`) skips `pmSiteRejections`
+   (only tests use it); share the check or unexport.
+5. Performance — signature, constructor and operation interning use linear
+   search plus `<>` (`:1036-1087`, `:1205`): quadratic on large programs; use a
+   `Map` index and `Seq`.
+
