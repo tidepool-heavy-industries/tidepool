@@ -197,10 +197,33 @@ impl ActorSessionContext {
     }
 }
 
+/// What retiring one placement released: the parked-frame half from closing
+/// its resource realm plus the value-plane half from retiring its lexical
+/// scope. Mirrors the union of `ResidentSession::close_realm`'s
+/// `(frames, handles)` pair and `ResidentSession::retire_scope`'s
+/// `ScopeRetirement`; an engine with no lexical-scope frames of its own (the
+/// prepared-STG engine) reports `0` for `scope_roots` rather than inventing a
+/// value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlacementRetirement {
+    /// Parked continuation frames dropped by closing the resource realm.
+    pub frames: usize,
+    /// Value handles/roots released by closing the resource realm.
+    pub handles: usize,
+    /// Import leases released by closing the resource realm.
+    pub leases: usize,
+    /// Persistent GC roots released by retiring the lexical scope.
+    pub scope_roots: usize,
+}
+
 /// Narrow target seam used to mount the real resident session without moving
 /// machine ownership into actor-local code.
 pub trait ActorRunTarget {
     type Error;
+
+    /// The registry hole type this machine parks a suspended continuation
+    /// under (the `SessionRegistry`'s checkout-index value type).
+    type Hole: Clone + PartialEq + std::fmt::Debug;
 
     fn install_actor_execution(
         &mut self,
@@ -208,6 +231,16 @@ pub trait ActorRunTarget {
         effect_policy: EffectRunPolicy,
         live_payload: LivePayloadPolicy,
     ) -> Result<(), Self::Error>;
+
+    /// Retire one actor placement: release everything its resource realm and
+    /// lexical scope solely owned. Idempotent on an already-retired
+    /// placement, mirroring `close_realm`/`retire_scope`'s own all-zero
+    /// no-op receipts.
+    fn retire_placement(
+        &mut self,
+        resource_scope: RealmId,
+        lexical_scope: ScopeId,
+    ) -> PlacementRetirement;
 }
 
 impl<H, O> ActorRunTarget for ResidentSession<H, O>
@@ -216,6 +249,7 @@ where
     O: OutputSink + Sync,
 {
     type Error = ResidentError;
+    type Hole = String;
 
     fn install_actor_execution(
         &mut self,
@@ -225,6 +259,21 @@ where
     ) -> Result<(), Self::Error> {
         self.set_actor_execution(context, effect_policy, live_payload)
     }
+
+    fn retire_placement(
+        &mut self,
+        resource_scope: RealmId,
+        lexical_scope: ScopeId,
+    ) -> PlacementRetirement {
+        let (frames, handles) = self.close_realm(resource_scope);
+        let scope = self.retire_scope(lexical_scope);
+        PlacementRetirement {
+            frames,
+            handles,
+            leases: 0,
+            scope_roots: scope.roots_released,
+        }
+    }
 }
 
 /// The prepared-STG engine has no effect handlers of its own yet: mounting it
@@ -233,6 +282,7 @@ where
 /// contract.
 impl ActorRunTarget for PreparedRuntime {
     type Error = std::convert::Infallible;
+    type Hole = tidepool_runtime::session::prepared::PreparedHole;
 
     fn install_actor_execution(
         &mut self,
@@ -242,5 +292,22 @@ impl ActorRunTarget for PreparedRuntime {
     ) -> Result<(), Self::Error> {
         self.set_actor_execution(context, effect_policy, live_payload);
         Ok(())
+    }
+
+    /// This engine has no lexical-scope frames of its own (see
+    /// `RealmRetirement::frames`'s doc: it never parks a continuation), so
+    /// `lexical_scope` is a no-op here and `scope_roots` is always `0`.
+    fn retire_placement(
+        &mut self,
+        resource_scope: RealmId,
+        _lexical_scope: ScopeId,
+    ) -> PlacementRetirement {
+        let report = self.close_realm_report(resource_scope);
+        PlacementRetirement {
+            frames: report.frames,
+            handles: report.handles_released,
+            leases: report.leases_released,
+            scope_roots: 0,
+        }
     }
 }

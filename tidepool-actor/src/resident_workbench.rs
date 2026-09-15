@@ -5027,10 +5027,10 @@ where
         &self,
         placement: crate::ActorPlacement,
     ) -> Result<(), ResidentActorWorkbenchError> {
+        use crate::ActorRunTarget;
         self.access
             .with_host_machine(placement.session, None, move |session, _| {
-                session.close_realm(placement.resource_scope);
-                session.retire_scope(placement.lexical_scope);
+                let _ = session.retire_placement(placement.resource_scope, placement.lexical_scope);
                 Ok(())
             })
             .await
