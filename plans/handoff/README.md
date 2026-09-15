@@ -58,7 +58,8 @@ this, then `plans/stg-completion.md` (the governing plan), then `CLAUDE.md`.
    plan). Blocks `shoal_exports_persistent_agents_and_hides_turn_lifecycle_operations`.
 3. **`Address` host values** — the only engine gap among the 184 corpus
    execution failures (74 rows). First slice designed (observation of pinned
-   literal bytes; typed refusal otherwise).
+   literal bytes; typed refusal otherwise). Implementation plan:
+   `designs/address-first-slice.md`.
 4. **Actor exit contract** (needs the user's decision, `designs/actor-exit-contract.md`):
    a handler failure during drain pauses forever; unconfirmed cleanup rewrites
    the exit kind; four exit writers. `stateful_replacement_preserves_owned_children`
