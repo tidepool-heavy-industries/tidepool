@@ -64,15 +64,15 @@ this, then `plans/stg-completion.md` (the governing plan), then `CLAUDE.md`.
    the exit kind; four exit writers. `stateful_replacement_preserves_owned_children`
    still fails (no heap corruption in its run) and is attributed here.
 5. **Remaining stale tests** — patches in `patches/stale-fixtures/`, applied
-   and run once, NOT committed: 02 (steering, load timeout only), 03 (doc text;
-   the new cell still fails: `Variable not in scope: available`), 04e (operator;
-   still references `committedPrefix`), 04f (display failure; still renders
-   `Right (result)` — the structural display wins, patch premise wrong), 10
-   (custody shutdown settlement arm; load timeout only), 11 (research
-   escalation `assignment`; load timeout only). Re-run 02, 10, 11 ALONE; fix 03,
-   04e, 04f. `notification_admission_and_poll_preserve_typed_request_bindings`
-   now fails "expected never-assigned recipient policy" (investigate). 04a is a
-   product prompt change awaiting sign-off.
+   and run once, NOT committed: 02 (steering, load timeout only), 10 (custody
+   shutdown settlement arm; load timeout only), 11 (research escalation
+   `assignment`; load timeout only) — re-run each ALONE. 03, 04e and 04f failed
+   for real reasons; use the corrected `patches/stale-fixtures/v2/` versions
+   (diagnoses under "Investigations folded in after handoff"; the earlier
+   "structural display wins" diagnosis for 04f was wrong).
+   `notification_admission_and_poll_preserve_typed_request_bindings` is a stale
+   test (the designed settlement notice arrives first; fix described below).
+   04a is a product prompt change awaiting sign-off.
 6. **Cell pins** — `acknowledgeCancellation` names
    `Tidepool.Agent.Reply.Internal.Reply`; patches and a pin-surface probe in
    `patches/pin-exports/` (not compiled). `sleep` names an unexported
