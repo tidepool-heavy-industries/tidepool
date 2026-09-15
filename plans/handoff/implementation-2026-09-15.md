@@ -19,6 +19,17 @@ freshness and the full prepared corpus were not reached. Artifacts:
 `target/tidepool-test-runs/20260915T195052Z-2446621-check`. The three timeouts
 are unclassified until each reruns alone.
 
+**Full prepared corpus, measured after the review fixes** (`just fixtures-check`
+with the typed-site change applied, committed as `e50831879`; report
+`target/prepared-corpus/suite.yv9lfv/results.json`): all cohorts pass their
+gates. Suite: 812 rows projected, validated, admitted and compiled; execution
+702 passed, 0 failed, 110 classified (104 not closed, 3 no finite observation,
+3 function valued, the expected rise from 2 to 3 after `5d3b2d5d9`);
+comparison 234 passed, 0 failed, 4 missing source oracles (the allowlisted
+four), 464 compiler-introduced rows without oracles (exactly the new ceiling
+from `0870da4ff`). The oracle check reports "fingerprint and payload seal are
+current". This is the first complete corpus pass for the milestone.
+
 ## Start here after switching subscriptions
 
 Snapshot: **2026-09-15 19:52 UTC (12:52 PDT)**. Branch
