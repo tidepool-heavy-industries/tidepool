@@ -3,6 +3,8 @@
 //! A session is idle, checked out and running, suspended with one or more
 //! parked holes, or terminally wedged. Checkout moves the machine out under a
 //! short lock; compilation and execution happen after the lock is released.
+//! Machine custody stays boxed across slot transitions and detached settlement,
+//! so moving a checkout never copies a large resident machine onto an async stack.
 //! Settlement restores the machine together with the hole set reported by the
 //! session itself.
 //!
@@ -72,7 +74,7 @@ pub enum CheckoutError<H> {
 /// sees it.
 #[derive(Debug)]
 pub enum Slot<M, H> {
-    Idle(M),
+    Idle(Box<M>),
     /// The machine is out on a turn — a fresh run, a resume, or a child run
     /// over parked frames. `holes` are the parked holes the session had when
     /// it left, carried so reads and errors stay truthful while the machine
@@ -84,7 +86,7 @@ pub enum Slot<M, H> {
     /// The machine is present with one or more parked holes, each resumable
     /// by identity in any order. Newest last.
     Suspended {
-        machine: M,
+        machine: Box<M>,
         holes: Vec<H>,
     },
     /// The machine is irrecoverably gone (a turn thread that outran its
@@ -207,7 +209,7 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
                 id,
                 Entry {
                     epoch,
-                    slot: Slot::Idle(machine),
+                    slot: Slot::Idle(Box::new(machine)),
                 },
             )
             .map(|e| e.slot);
@@ -426,7 +428,7 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     /// the lock. An empty set restores `Idle`. A stale epoch (the entry was
     /// removed or replaced while this checkout was outstanding) drops the
     /// machine instead of writing it back.
-    fn restore_suspended(&self, id: SessionId, epoch: u64, machine: M, holes: Vec<H>) {
+    fn restore_suspended(&self, id: SessionId, epoch: u64, machine: Box<M>, holes: Vec<H>) {
         let mut slots = self.slots.lock();
         match slots.get_mut(&id) {
             Some(entry) if entry.epoch == epoch => {
@@ -472,7 +474,7 @@ fn slot_holes<M, H: Clone>(slot: &Slot<M, H>) -> Vec<H> {
 }
 
 /// Move the machine out of a present-machine slot, leaving `Running{holes}`.
-fn take_machine<M, H>(slot: &mut Slot<M, H>, holes: Vec<H>) -> M {
+fn take_machine<M, H>(slot: &mut Slot<M, H>, holes: Vec<H>) -> Box<M> {
     match std::mem::replace(slot, Slot::Running { holes }) {
         Slot::Idle(machine) => machine,
         Slot::Suspended { machine, .. } => machine,
@@ -486,16 +488,15 @@ fn take_machine<M, H>(slot: &mut Slot<M, H>, holes: Vec<H>) -> M {
 /// Owns the machine for the turn; settle it exactly once via
 /// [`Self::restore_suspended`] or [`Self::mark_wedged`].
 ///
-/// Dropping a `Checkout` without settling leaves the slot `Running` (the
-/// session is wedged) — the panic-safety `Drop` below is the only exit that
-/// does not require an explicit settlement call.
-#[must_use = "a checked-out machine must be restored (or marked wedged), or the session is left \
-              Running forever"]
+/// Dropping a checkout restores the machine and its original parked holes
+/// while it still owns the machine. After [`Self::take`], the caller must put
+/// the machine back or explicitly settle the slot.
+#[must_use = "a checkout owns machine custody until restored or explicitly settled"]
 pub struct Checkout<'r, M, H: Clone + PartialEq + std::fmt::Debug> {
     registry: &'r SessionRegistry<M, H>,
     id: SessionId,
     epoch: u64,
-    machine: Option<M>,
+    machine: Option<Box<M>>,
     /// The parked holes carried OUT with the machine — what the panic-safety
     /// `Drop` restores (an unwound turn must not lose the session's parked
     /// frames; they are still rooted in the machine's continuation
@@ -503,12 +504,8 @@ pub struct Checkout<'r, M, H: Clone + PartialEq + std::fmt::Debug> {
     holes: Vec<H>,
 }
 
-// Whole point of this type: a checked-out machine is settled by exactly one
-// call, which consumes `self` by value. A future `#[derive(Clone)]` would let
-// a caller settle the SAME checkout twice, silently reviving the
-// double-settle bug this type exists to make a compile error. Pinned at
-// `M = H = ()` — the struct has no `Clone`/`Copy` impl for any `M`/`H`, so a
-// fixed stand-in is enough to catch a derive that would apply uniformly.
+// Settlement consumes the checkout. Cloning custody would allow the same
+// epoch to be settled twice; the representative types catch blanket derives.
 static_assertions::assert_not_impl_any!(Checkout<'static, (), ()>: Clone, Copy);
 
 impl<M, H: Clone + PartialEq + std::fmt::Debug> Checkout<'_, M, H> {
@@ -536,31 +533,22 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> Checkout<'_, M, H> {
             .expect("machine present until settled")
     }
 
-    /// Take ownership of the machine off the checkout (e.g. to move it onto
-    /// an eval thread). The caller MUST return it via [`Self::restore_suspended`]
-    /// or settle via [`Self::mark_wedged`].
-    pub fn take(&mut self) -> M {
+    /// Take boxed ownership of the machine off the checkout (e.g. to move it onto
+    /// an eval thread). Return it with [`Self::put`] before restoring the slot,
+    /// or settle the missing machine via [`Self::mark_wedged`].
+    pub fn take(&mut self) -> Box<M> {
         #[allow(clippy::expect_used, reason = "machine present until settled")]
         self.machine.take().expect("machine present until settled")
     }
 
     /// Put the machine back after a `take`, ahead of [`Self::restore_suspended`].
-    pub fn put(&mut self, machine: M) {
+    pub fn put(&mut self, machine: Box<M>) {
         self.machine = Some(machine);
     }
 
-    /// Split into the machine (to drive the turn on, e.g. move onto a
-    /// blocking task) and an OWNED [`CheckoutReceipt`] carrying just enough
-    /// (`session`, `epoch`) to settle LATER against a fresh registry borrow —
-    /// for a caller whose settlement must run from a DIFFERENT async task
-    /// than the one that checked out (a detached `tokio::spawn`, decoupled
-    /// from the original request future, cannot hold a `Checkout<'r, ..>`
-    /// whose `'r` is tied to that original call). Mirrors
-    /// `tidepool-repl`'s pre-promotion `Checkout::into_parts`/
-    /// `CheckoutCustody` split, now shared. Harness never needs this — its
-    /// `run_checked_out` holds the borrowed `Checkout` across an `.await`
-    /// within the SAME async fn instead.
-    pub fn into_parts(mut self) -> (M, CheckoutReceipt) {
+    /// Split boxed machine custody from an owned settlement receipt so a
+    /// detached task can settle the turn through a fresh registry borrow.
+    pub fn into_parts(mut self) -> (Box<M>, CheckoutReceipt) {
         #[allow(clippy::expect_used, reason = "machine present until settled")]
         let machine = self.machine.take().expect("machine present until settled");
         let receipt = CheckoutReceipt {
@@ -673,7 +661,7 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     /// with its post-turn parked hole set — the SAME settlement as
     /// [`Checkout::restore_suspended`], reachable without the borrowed
     /// `Checkout` still in hand.
-    pub fn settle_suspended(&self, receipt: CheckoutReceipt, machine: M, holes: Vec<H>) {
+    pub fn settle_suspended(&self, receipt: CheckoutReceipt, machine: Box<M>, holes: Vec<H>) {
         let id = receipt.session_id();
         self.restore_suspended(id, receipt.into_epoch(), machine, holes);
     }
@@ -789,7 +777,7 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SingleSlot<M, H> {
 
     /// [`SessionRegistry::settle_suspended`] — settle a [`CheckoutReceipt`]
     /// obtained from a checkout this facade produced.
-    pub fn settle_suspended(&self, receipt: CheckoutReceipt, machine: M, holes: Vec<H>) {
+    pub fn settle_suspended(&self, receipt: CheckoutReceipt, machine: Box<M>, holes: Vec<H>) {
         self.registry.settle_suspended(receipt, machine, holes);
     }
 
@@ -855,6 +843,52 @@ mod tests {
                 ..
             })
         )
+    }
+
+    #[test]
+    fn large_machine_custody_stays_off_the_checkout_stack() {
+        type LargeMachine = [u8; 64 * 1024];
+        assert_eq!(
+            std::mem::size_of::<Slot<LargeMachine, Hole>>(),
+            std::mem::size_of::<Slot<u8, Hole>>()
+        );
+        assert_eq!(
+            std::mem::size_of::<Checkout<'_, LargeMachine, Hole>>(),
+            std::mem::size_of::<Checkout<'_, u8, Hole>>()
+        );
+        let registry: SessionRegistry<LargeMachine, Hole> = SessionRegistry::new();
+        let id = SessionId(99);
+        registry.insert_idle(id, [7; 64 * 1024]);
+        let original = registry
+            .peek(id, |machine| machine.as_ptr() as usize)
+            .unwrap();
+        std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(move || {
+                let mut checkout = registry.checkout_run(id).unwrap();
+                assert_eq!(checkout.machine().as_ptr() as usize, original);
+                let mut machine = checkout.take();
+                machine[0] = 9;
+                checkout.put(machine);
+                checkout.restore_suspended(vec![Hole("large")]);
+
+                let checkout = registry.checkout_resume(id, &Hole("large")).unwrap();
+                let (machine, receipt) = checkout.into_parts();
+                assert_eq!(machine.as_ptr() as usize, original);
+                assert_eq!(machine[0], 9);
+                registry.settle_suspended(receipt, machine, vec![Hole("large")]);
+                // RAII settlement also preserves the same allocation and parked holes.
+                drop(registry.checkout_child(id).unwrap());
+                assert_eq!(registry.kind(id), Some(SlotKind::Suspended));
+                assert_eq!(
+                    registry.peek(id, |machine| machine.as_ptr() as usize),
+                    Some(original)
+                );
+                assert!(registry.remove(id).is_some());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

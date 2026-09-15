@@ -3366,7 +3366,7 @@ impl Harness {
         f: F,
     ) -> Result<T, HarnessError>
     where
-        F: FnOnce(Session) -> (Session, T) + Send + 'static,
+        F: FnOnce(Box<Session>) -> (Box<Session>, T) + Send + 'static,
         T: Send + 'static,
     {
         // Apply the node's realm to the session before the turn — ONE site
