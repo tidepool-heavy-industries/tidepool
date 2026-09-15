@@ -8,9 +8,12 @@
 -- DevSwarm belong in separately loaded application modules.
 module Tidepool.Actors.Shoal
   ( ActorEffects
+  , Eff, Member
+  , Void, Natural
+  , EffectProfile, ActorExit, ActorLifecycle
   , (:-), State, Call, NoReply, Event
   , Shape, Definition, Client, Self, Private
-  , ActorState, Handler, ActorSpec, ActorHandle
+  , ActorState, Handler, ActorSpec, ActorHandle, Message
   , Send, Request, EventHandler, EventSource
   , get, gets, put, modify'
   , definition, client, start, finish, progress, settlement, lifecycle, self, sender
@@ -115,6 +118,7 @@ module Tidepool.Actors.Shoal
   , CleanupActorState (..)
   , CleanupReceipt (..)
   , CleanupStepReceipt (..)
+  , AgentStopControlOutcome (..)
   , planCleanup
   , executeCleanup
   , responseActor
@@ -174,6 +178,7 @@ module Tidepool.Actors.Shoal
   , StopOutcome (..)
   , stopAgent
   , RequestId
+  , Reply
   , Replies
   , RequestUpdate
   , RequestUpdateState (..)
@@ -237,6 +242,7 @@ module Tidepool.Actors.Shoal
   , GitRef
   , InProgressKind (..)
   , GitOid (..)
+  , GitFailureReceipt
   , worktreeId
   , worktreeBranch
   , worktreeHead
@@ -253,13 +259,17 @@ module Tidepool.Actors.Shoal
   , SubmissionObservation (..)
   ) where
 
+import Control.Monad.Freer (Eff, Member)
+import Data.Void (Void)
+import Numeric.Natural (Natural)
+import Tidepool.Actor (EffectProfile, ActorExit, ActorLifecycle)
 import Tidepool.Inspection (FullInspection, inspectFull)
 
 import Tidepool.Agent.Reply
 import Tidepool.Actor.Record
   ( (:-), State, Call, NoReply, Event
   , Shape, Definition, Client, Self, Private
-  , ActorState, Handler, ActorSpec, ActorHandle
+  , ActorState, Handler, ActorSpec, ActorHandle, Message
   , Send, Request, EventHandler, EventSource
   , get, gets, put, modify'
   , definition, client, start, finish, progress, settlement, lifecycle, self, sender
@@ -326,6 +336,8 @@ import Tidepool.Effects.Core
   , ProviderUsageSummary (..)
   , CacheBoundaryReason (..)
   , GitOid (..)
+  , GitFailureReceipt
+  , AgentStopControlOutcome (..)
   )
 import Tidepool.Worktree hiding
   ( boundWorktree

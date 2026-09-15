@@ -249,6 +249,7 @@ impl Drop for EnvironmentVariable {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TIDEPOOL_INTERACTIVE_CODEX_BIN (pinned Codex) and tmux"]
 async fn pinned_full_tui_binds_and_accepts_exactly_one_owned_input() {
     let selected = live_fixture_prerequisites(
         std::env::var_os("TIDEPOOL_INTERACTIVE_CODEX_BIN"),

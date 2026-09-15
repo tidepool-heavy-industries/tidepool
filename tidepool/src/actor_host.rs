@@ -4872,14 +4872,16 @@ fn developer_instructions_selected(
 fn append_effective_role(mut instructions: String, role: &tidepool_actor::EffectiveRole) -> String {
     let descendants = role.descendants();
     instructions.push_str(&format!(
-        "\n\nRuntime policy ({}): role={:?}; effects={}; native_tools={:?}; workspace={:?}; descendant_depth={}; active_children={:?}. These are the effective runtime facts; effect membership alone is not authority.\n",
+        "\n\nRuntime policy ({}): role={:?}; effects={}; native_tools={:?}; workspace={:?}; descendant_depth={}; active_children={}. These are the effective runtime facts; effect membership alone is not authority.\n",
         role.prompt_profile(),
         role.role(),
         role.haskell_effects_type(),
         role.native_tools(),
         role.workspace(),
         descendants.maximum_depth,
-        descendants.maximum_active_children,
+        descendants
+            .maximum_active_children
+            .map_or_else(|| "unbounded".to_owned(), |children| children.to_string()),
     ));
     instructions
 }
@@ -6053,11 +6055,17 @@ mod tests {
         );
         assert!(scaffold.starts_with(PromptId::ScaffoldingAgent.body()));
         assert!(scaffold.contains("descendant_depth=2; active_children=3"));
+        assert!(!scaffold.contains("Some("), "{scaffold}");
         let integration = developer_instructions(
             &tidepool_actor::EffectiveRole::integration(),
             &InteractiveLaunchMode::Fresh,
         );
         assert!(integration.starts_with(PromptId::IntegrationAgent.body()));
+        let root = developer_instructions(
+            &tidepool_actor::EffectiveRole::root(),
+            &InteractiveLaunchMode::Fresh,
+        );
+        assert!(root.contains("active_children=unbounded"), "{root}");
     }
 
     #[test]
@@ -7219,6 +7227,28 @@ mod tests {
             answer.to_string().contains("original assignment"),
             "{answer:?}"
         );
+        let settlement =
+            tokio::time::timeout(Duration::from_secs(120), campaign.deployments.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        match settlement {
+            LocalResidentDeployment::SettlementChanged { notification } => {
+                assert_eq!(
+                    notification.owner,
+                    campaign.root_installation.actor.identity()
+                );
+                assert_eq!(notification.label, "notification-original");
+                assert_eq!(
+                    notification.transition,
+                    tidepool_actor::SettlementTransition::Ready
+                );
+            }
+            event => panic!(
+                "expected owner settlement notification, got {:?}",
+                std::mem::discriminant(&event)
+            ),
+        }
         let root_reply = dispatch_lookup(root.as_ref(), &["respond"]).await;
         assert!(
             root_reply.to_string().to_lowercase().contains("no match"),
@@ -7236,7 +7266,10 @@ mod tests {
             .unwrap()
         {
             LocalResidentDeployment::PolicyInstalled(child) => child,
-            _ => panic!("expected never-assigned recipient policy"),
+            event => panic!(
+                "expected never-assigned recipient policy, got {:?}",
+                std::mem::discriminant(&event)
+            ),
         };
         let policy = root.clone();
         let idle_send = tokio::spawn(async move {

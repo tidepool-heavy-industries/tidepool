@@ -9,6 +9,18 @@ import Data.Text (Text)
 import Prelude
 import Tidepool.Actors.Shoal
 import Tidepool.Actors.Observe (actorContext)
+import qualified Tidepool.Actors.Shoal as Shoal
+
+-- Pinned cell signatures must resolve through the authored facade.
+type ReplyPin = Shoal.Reply Int
+type StopControlPin = Shoal.AgentStopControlOutcome
+type ProfilePin protocol effects = Shoal.EffectProfile protocol effects
+type MessagePin api = Shoal.Message api
+type ExitPin value = Shoal.ActorExit value
+type LifecyclePin = Shoal.ActorLifecycle
+type CancellationPin = Shoal.Void
+type DurationInputPin = Shoal.Natural
+type GitFailurePin = Shoal.GitFailureReceipt
 
 startCoding :: WorktreeHandle -> Eff ActorEffects AgentRef
 startCoding = startAgent . codingAgent

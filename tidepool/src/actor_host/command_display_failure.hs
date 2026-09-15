@@ -1,4 +1,5 @@
+import Tidepool.Inspection (Display (..))
 data BrokenDisplay = BrokenDisplay { savedResult :: Cmd.RunResult }
-instance Show BrokenDisplay where show _ = error "deliberate display failure"
-let broken = BrokenDisplay finished
+instance Display BrokenDisplay where displayTree _ = error "deliberate display failure"
+broken <- pure (BrokenDisplay finished)
 broken

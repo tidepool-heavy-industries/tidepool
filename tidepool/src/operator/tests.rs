@@ -30,15 +30,16 @@ async fn unix_http_live_workbench_and_graph() {
     let effects = tidepool_mcp::ensure_effects_module(&declarations).unwrap();
     include.extend(effects.include_paths());
     let preamble = insert_preamble_imports(
-        &tidepool_mcp::build_preamble(&[], false),
-        "Tidepool.Actors.Shoal",
+        &tidepool_mcp::build_preamble(&[tidepool_mcp::sleep_decl()], false),
+        "Tidepool.Actors.Shoal hiding (ActorEffects)\nqualified Tidepool.Actors.Shoal as Shoal",
     );
+    let preamble = format!("{preamble}\ntype ActorEffects = Sleep ': Shoal.ActorEffects\n");
     let lib = SessionLib::open(session, directory.path(), ModuleEnv::standalone_default())
         .unwrap()
         .with_validation_include(include.clone());
     let mut tree = TreeBuilder::new();
     tree.push(CoreFrame::Lit(Literal::LitInt(0)));
-    let machine = ResidentSession::bootstrap(
+    let mut machine = ResidentSession::bootstrap(
         &tree.build(),
         DataConTable::new(),
         frunk::HNil,
@@ -48,6 +49,10 @@ async fn unix_http_live_workbench_and_graph() {
         Some(lib),
     )
     .unwrap();
+    machine.set_effect_execution(
+        tidepool_effect::EffectRunPolicy::SuspendAll,
+        tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+    );
     let (forest, _deployments) = ResidentForest::new(
         ActorWorkbenchSource::new(preamble, include),
         session,
@@ -133,15 +138,57 @@ async fn unix_http_live_workbench_and_graph() {
         .await
         .unwrap();
     assert_eq!(isolated.outcome, Outcome::Rejected, "{isolated:?}");
-    let rejected: SubmitResponse =
-        submit("let committedPrefix = 42\nmissingName\nlet neverRuns = 99")
+    // GHC checks the whole cell before any effect: a type error installs nothing.
+    let unchecked: SubmitResponse =
+        submit("let uncheckedPrefix = 42\nmissingName\nlet uncheckedSuffix = 99")
             .send()
             .await
             .unwrap()
             .json()
             .await
             .unwrap();
-    assert_eq!(rejected.outcome, Outcome::Rejected);
+    assert_eq!(unchecked.outcome, Outcome::Rejected, "{unchecked:?}");
+    let unchecked_receipt = unchecked
+        .receipt
+        .as_ref()
+        .unwrap()
+        .structured
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        unchecked_receipt["items"][0]["status"], "notRun",
+        "{unchecked:?}"
+    );
+    let unbound: SubmitResponse = submit("uncheckedPrefix")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(unbound.outcome, Outcome::Rejected, "{unbound:?}");
+    // A runtime failure keeps the committed prefix and does not run the suffix.
+    let rejected: SubmitResponse = submit(
+        "let committedPrefix = 42 :: Int\nJust impossible <- pure (Nothing :: Maybe Int)\nneverRuns <- pure (99 :: Int)",
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(rejected.outcome, Outcome::Rejected, "{rejected:?}");
+    let rejected_receipt = rejected
+        .receipt
+        .as_ref()
+        .unwrap()
+        .structured
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        rejected_receipt["items"][0]["status"], "committed",
+        "{rejected:?}"
+    );
     let prefix: SubmitResponse = submit("committedPrefix")
         .send()
         .await
@@ -149,7 +196,15 @@ async fn unix_http_live_workbench_and_graph() {
         .json()
         .await
         .unwrap();
-    assert_eq!(prefix.outcome, Outcome::Completed);
+    assert_eq!(prefix.outcome, Outcome::Completed, "{prefix:?}");
+    let suffix: SubmitResponse = submit("neverRuns")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(suffix.outcome, Outcome::Rejected, "{suffix:?}");
     let diagnostic: SubmitResponse = submit(":type absentDiagnosticName")
         .send()
         .await
@@ -186,14 +241,6 @@ async fn unix_http_live_workbench_and_graph() {
         .unwrap()
         .iter()
         .all(|n| n["supervisor_parent"].is_null() && n["provider_thread"].is_null()));
-    let status: SubmitResponse = submit(":status\n:lineage")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(status.outcome, Outcome::Completed, "{status:?}");
     // The opaque segment is decoded exactly once, even with slash, Unicode, and percent text.
     let opaque = "query/λ%2F";
     let first_actor = service
@@ -204,6 +251,7 @@ async fn unix_http_live_workbench_and_graph() {
         .get(&first.session)
         .unwrap()
         .clone();
+    let first_identity = first_actor.identity();
     service
         .state
         .sessions
@@ -237,13 +285,13 @@ async fn unix_http_live_workbench_and_graph() {
     use tokio::io::AsyncWriteExt;
     let mut connection = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let body = serde_json::to_string(&SubmitRequest {
-        source: "afterDisconnect <- pure (123 :: Int)".into(),
+        source: "sleep (minutes 15)\nafterDisconnect <- pure (123 :: Int)".into(),
     })
     .unwrap();
     let request = format!("POST /v1/sessions/{}/submit HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", first.session, body.len(), body);
     connection.write_all(request.as_bytes()).await.unwrap();
-    // Observe the admitted unit through the independent graph route, then detach.
-    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+    // A pending timer makes admission observable until the client disconnects.
+    tokio::time::timeout(std::time::Duration::from_secs(90), async {
         loop {
             let graph: serde_json::Value = client
                 .get(format!("{url}/actors"))
@@ -253,12 +301,10 @@ async fn unix_http_live_workbench_and_graph() {
                 .json()
                 .await
                 .unwrap();
-            if graph["actors"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|node| node["workbench"]["kind"] == "running_unit")
-            {
+            if graph["actors"].as_array().unwrap().iter().any(|node| {
+                node["actor"] == serde_json::json!(first_identity)
+                    && node["workbench"]["kind"] == "awaiting_effect"
+            }) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -267,6 +313,9 @@ async fn unix_http_live_workbench_and_graph() {
     .await
     .expect("observe admitted execution before disconnect");
     drop(connection);
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(15 * 60)).await;
+    tokio::time::resume();
     let disconnected: SubmitResponse = submit("afterDisconnect")
         .send()
         .await

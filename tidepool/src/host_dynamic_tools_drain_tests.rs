@@ -661,7 +661,10 @@ mod actual_seal {
         let items = result["contentItems"].as_array().expect("typed content items");
         assert_eq!(items.len(), 1, "{result}");
         assert_eq!(items[0]["type"], "inputText", "{result}");
-        assert_eq!(items[0]["text"].as_str().unwrap().lines().collect::<Vec<_>>(), ["42"], "{result}");
+        let receipt: serde_json::Value =
+            serde_json::from_str(items[0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(receipt["status"], "committed", "{receipt}");
+        assert_eq!(receipt["items"][0]["output"], "42", "{receipt}");
         endpoint.delay_dispatch.store(true, Ordering::SeqCst);
         request["callId"] = serde_json::json!("late");
         request["contextCallId"] = serde_json::json!("late");

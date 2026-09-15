@@ -1,19 +1,7 @@
-# cargo-nextest config. See tidepool CLAUDE.md "Build & Test" for the invocation
-# (TIDEPOOL_EXTRACT env, etc). nextest runs every test in its OWN process,
-# which structurally de-races the JIT's process-global state (signal
-# handlers, GC, fork-safety harnesses) — replacing the old blanket
-# `-- --test-threads=1` discipline.
-#
-# HAZARD AUDIT: the historical case-by-case audit of which tests touch
-# process-global JIT/GC state, and why none of those hazards are cross-process
-# (so nextest's one-process-per-test model resolves them), lives in this
-# file's git history (nextest-adoption branch) rather than inline here.
-#
-# `cargo check --workspace --all-targets` and a default `cargo nextest run`
-# still BUILD every GHC-heavy target. `default-filter` below is a RUN-time
-# filter and the
-# `ghc-heavy` test-group bounds test PROCESSES — neither touches rustc, so
-# neither command is unconditionally GHC-free.
+# scripts/battery.sh runs each test in a separate nextest process, isolating
+# process-global JIT signals, GC state, and fork-safety machinery.
+# The ghc-heavy group caps test processes that compile Haskell. It does not
+# limit Cargo builds; default-filter controls execution, not compilation.
 
 [profile.default]
 # Global test timeout: warn once a test has run past `period`, hard-kill it
@@ -21,19 +9,10 @@
 # differential/proptest suites under moderate machine contention.
 slow-timeout = { period = "60s", terminate-after = 30 }
 
-# Default tier: bare `cargo nextest run` skips the GHC-extract-heavy crates
-# (every test in tidepool-runtime/handlers forks a real GHC
-# `extract` compile). tidepool-testing, tidepool-harness, and tidepool-actor are MIXED crates
-# — their lib unit tests are pure Rust (quick tier) but their tests/*.rs
-# integration binaries reach GHC — so they're excluded by `kind(test)` rather
-# than wholesale. tidepool-harness's `provider_behavior` and tidepool's
-# non-`crash_recovery` binaries are the sole per-binary exceptions (pure-Rust,
-# no extract/Harness use). Pass `--ignore-default-filter` (what
-# `scripts/battery.sh` does) to run everything, or `--ignore-default-filter
-# -p <crate>` for one heavy crate — `-p` alone is ANDed against this filter,
-# not a bypass of it. The actor-host reply/watch campaign is a lib test but
-# repeatedly compiles Haskell; keep it in the daemon-backed heavy lane rather
-# than making every `just quick` invocation pay several cold compiler boots.
+# Default tier omits extractor-heavy packages, integration targets, and
+# selected actor-host campaigns. It still includes mixed tidepool targets;
+# ghc-heavy bounds their compiler concurrency independently. Package selection
+# intersects this filter; scripts/battery.sh uses --ignore-default-filter.
 default-filter = 'not (package(tidepool-runtime) | package(tidepool-handlers) | (package(tidepool-testing) & kind(test)) | (package(tidepool-harness) & kind(test) & !binary(provider_behavior)) | (package(tidepool-actor) & kind(test)) | (package(tidepool) & (binary(crash_recovery) | (test(typed_reply_settles_response_and_wakes_registered_watch) | test(progress_retains_closures_and_watch_snapshots_across_calls) | test(actor_host::documentation_tests)))))'
 
 # GHC-heavy tests run below full core count so concurrent extractor requests do
@@ -47,5 +26,5 @@ max-threads = 4
 # its tests do no `extract` work (no tidepool-extract spawn, no
 # EvalHarness/Harness turn).
 [[profile.default.overrides]]
-filter = 'not (package(tidepool-repr) | package(tidepool-heap) | package(tidepool-bignum) | package(tidepool-optimize) | package(tidepool-effect) | package(tidepool-bridge) | package(tidepool-bridge-derive) | package(tidepool-bridge-effects) | package(tidepool-codegen) | package(tidepool-web) | (package(tidepool) & !binary(crash_recovery) & !(test(typed_reply_settles_response_and_wakes_registered_watch) | test(progress_retains_closures_and_watch_snapshots_across_calls) | test(actor_host::documentation_tests))) | (package(tidepool-testing) & !kind(test)) | (package(tidepool-harness) & (!kind(test) | binary(provider_behavior)) | (package(tidepool-actor) & !kind(test))))'
+filter = 'not (package(tidepool-repr) | package(tidepool-heap) | package(tidepool-bignum) | package(tidepool-optimize) | package(tidepool-effect) | package(tidepool-bridge) | package(tidepool-bridge-derive) | package(tidepool-bridge-effects) | package(tidepool-codegen) | package(tidepool-web) | (package(tidepool) & !binary(crash_recovery) & !binary(shoal_action_surface) & !(test(actor_host::) | test(host_dynamic_tools::drain_tests::actual_seal) | test(operator::tests::unix_http_live_workbench_and_graph))) | (package(tidepool-testing) & !kind(test)) | (package(tidepool-harness) & (!kind(test) | binary(provider_behavior)) | (package(tidepool-actor) & !kind(test) & !test(resident_interactive::lifecycle_tests))))'
 test-group = 'ghc-heavy'

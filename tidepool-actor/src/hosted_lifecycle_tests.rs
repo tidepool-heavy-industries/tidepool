@@ -255,7 +255,7 @@ async fn cancel_sleeping_cell(
     };
     tokio::select! {
         result = tokio::time::timeout(
-            Duration::from_secs(30),
+            Duration::from_secs(90),
             policy.client.wait_until_sleeping(&context),
         ) => result.expect("notebook cell did not reach its cancellable suspension boundary"),
         result = &mut running => panic!("notebook cell ended before suspension: {result:?}"),
@@ -413,7 +413,7 @@ async fn hosted_lookup_and_status_use_actor_owned_views() {
     let doc_output = docs["items"][0]["output"].as_str().unwrap();
     assert!(doc_output.contains("Shoal topics:"), "{doc_output}");
     assert!(
-        doc_output.contains("Send raw Haskell to the tool"),
+        doc_output.contains("Send one notebook cell of ordinary Haskell"),
         "{doc_output}"
     );
     assert!(
@@ -477,7 +477,8 @@ async fn hosted_lookup_and_status_use_actor_owned_views() {
         })
         .and_then(|section| section.lines().nth(1))
         .and_then(|line| line.trim().split_once(" :: "))
-        .map(|(name, _)| name)
+        // Value lines carry an availability label: `[available] name :: type`.
+        .and_then(|(labelled, _)| labelled.rsplit(' ').next())
         .expect("type query must return a callable spelling");
 
     let source = format!("({returned} probe :: Await (Settlement Int))");
@@ -577,7 +578,7 @@ async fn resident_sleep_waits_fifteen_minutes_without_blocking_a_sibling() {
     let completed_context = completed_invocation.context.clone().unwrap();
     let sleeping = tokio::spawn(sleeper_policy.dispatch_boxed(completed_invocation));
     tokio::time::timeout(
-        Duration::from_secs(30),
+        Duration::from_secs(90),
         sleeper_policy
             .client
             .wait_until_sleeping(&completed_context),

@@ -1025,7 +1025,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         };
         let current = if view == StatusView::Concise {
             format!(
-                "actor {:?} ({}@{})\n  activation={:?} application={} program={standing} current_request={current_request:?}\n  responses: ready={:?} unavailable={} pending={:?}\n  watches: ready={:?} unavailable={} pending={:?}\n  role={:?} workspace={:?} descendant_depth={} active_children={:?} bound_worktree={:?} workbench={:?}{}",
+                "actor {:?} ({}@{})\n  activation={:?} application={} program={standing} current_request={current_request:?}\n  responses: ready={:?} unavailable={} pending={:?}\n  watches: ready={:?} unavailable={} pending={:?}\n  role={:?} workspace={:?} descendant_depth={} active_children={} bound_worktree={:?} workbench={:?}{}",
                 self.descriptor.label(),
                 actor.id.0,
                 actor.incarnation.0,
@@ -1047,7 +1047,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 self.descriptor
                     .effective_role()
                     .descendants()
-                    .maximum_active_children,
+                    .maximum_active_children
+                    .map_or_else(|| "unbounded".to_owned(), |children| children.to_string()),
                 self.launch_worktrees.first(),
                 runtime.workbench_posture,
                 roster_summary,

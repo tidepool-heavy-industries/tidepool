@@ -550,6 +550,7 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
     // is a contract (a shutting-down owner's mailbox may not consume the notice).
     let mut retired = std::collections::HashMap::new();
     let mut child_exits = std::collections::HashMap::new();
+    let mut settlement_notices = std::collections::HashSet::new();
     while let Ok(event) = campaign.deployments.try_recv() {
         match event {
             LocalResidentDeployment::Retired { actor, terminal } => {
@@ -578,6 +579,31 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
                 assert!(
                     child_exits.insert(child, notice.terminal).is_none(),
                     "duplicate child exit"
+                );
+            }
+            // Stopping the children before the root cancels the root's
+            // still-observing requests; a notify-owner request then publishes
+            // a settlement notice to its owner. Delivery during
+            // shutdown is best-effort, so the count is not asserted.
+            LocalResidentDeployment::SettlementChanged { notification } => {
+                assert_eq!(notification.owner, root, "settlement notice owner");
+                assert!(
+                    matches!(notification.label.as_str(), "first" | "second"),
+                    "unexpected settlement notice label {}",
+                    notification.label
+                );
+                assert_eq!(
+                    notification.transition,
+                    tidepool_actor::SettlementTransition::Unavailable(
+                        tidepool_actor::ResponseFailure::TargetCancelled(
+                            "owner actor stopped".into()
+                        )
+                    ),
+                    "settlement notice transition"
+                );
+                assert!(
+                    settlement_notices.insert(notification.request),
+                    "duplicate settlement notice"
                 );
             }
             event => panic!(
