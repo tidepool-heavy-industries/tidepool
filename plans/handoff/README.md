@@ -86,6 +86,9 @@ this, then `plans/stg-completion.md` (the governing plan), then `CLAUDE.md`.
    of 595 missing expectations are GHC-generated tops no oracle can name.
    Patches in `patches/corpus-driver/` (not built).
 
+Broader read-only audit findings (bugs, coverage gaps, idioms) are collected in
+`audit-wave.md`.
+
 ## Designs (proposed, not reviewed by the user)
 
 `designs/`: `resume-contract-v2.md` (typed resume after adversarial review:
