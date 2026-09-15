@@ -4344,7 +4344,8 @@ mod tests {
 
         let payload = {
             let _guard = machine.install_registries();
-            crate::host_fns::runtime_new_boxed_array(1, unsafe { old_value.current() } as i64) as *mut u8
+            crate::host_fns::runtime_new_boxed_array(1, unsafe { old_value.current() } as i64)
+                as *mut u8
         };
         assert_ne!(payload, crate::host_fns::error_poison_ptr());
 
@@ -4379,8 +4380,12 @@ mod tests {
                 .machine_state
                 .gc_active_range()
                 .expect("GC state installed by the guard");
-            assert_eq!(active, start, "the wrapper was written into the active nursery");
-            let range = (start as *const u8, unsafe { start.add(cursor + LIT_SIZE) } as *const u8);
+            assert_eq!(
+                active, start,
+                "the wrapper was written into the active nursery"
+            );
+            let range = (start as *const u8, unsafe { start.add(cursor + LIT_SIZE) }
+                as *const u8);
             unsafe {
                 machine
                     .session
@@ -4405,9 +4410,8 @@ mod tests {
             *(young.add(heap_layout::LIT_VALUE_OFFSET) as *mut i64) = 4242;
         }
         machine.session.as_mut().expect("session").cursor = cursor + LIT_SIZE;
-        let payload = unsafe {
-            *(array_root.current().add(heap_layout::LIT_VALUE_OFFSET) as *const *mut u8)
-        };
+        let payload =
+            unsafe { *(array_root.current().add(heap_layout::LIT_VALUE_OFFSET) as *const *mut u8) };
         unsafe { *(payload.add(8) as *mut *mut u8) = young };
 
         crate::host_fns::set_gc_poison(true);
@@ -4421,7 +4425,10 @@ mod tests {
                 LitTag::Int as u8,
                 "the payload slot must follow its young value through the minor collection"
             );
-            assert_eq!(*(moved.add(heap_layout::LIT_VALUE_OFFSET) as *const i64), 4242);
+            assert_eq!(
+                *(moved.add(heap_layout::LIT_VALUE_OFFSET) as *const i64),
+                4242
+            );
         }
     }
 

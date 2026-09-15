@@ -395,6 +395,18 @@ mod tests {
     fn prepared_formatter_intrinsics_return_owned_bytes_after_gc() {
         for (symbol, precedence, value, expected) in [
             ("prepared_render_double_bytes", None, -0.0, "-0.0"),
+            (
+                "prepared_render_double_bytes",
+                None,
+                1e23,
+                "9.999999999999999e22",
+            ),
+            (
+                "prepared_render_double_prec_bytes",
+                Some(7),
+                -1e23,
+                "(-9.999999999999999e22)",
+            ),
             ("prepared_render_double_prec_bytes", Some(6), -0.0, "-0.0"),
             ("prepared_render_double_prec_bytes", Some(7), -0.0, "(-0.0)"),
             ("prepared_render_double_bytes", None, -f64::NAN, "NaN"),
