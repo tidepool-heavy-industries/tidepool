@@ -18,11 +18,12 @@
 //! accepted and permits rebinding. Once the accepted marker is observed, EOF
 //! or any other response failure is indeterminate and must never be replayed.
 
+use std::cell::Cell;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
@@ -189,7 +190,15 @@ pub(crate) fn execute(
     req.extend_from_slice(REQUEST);
     req.extend_from_slice(epoch);
     req.extend_from_slice(&encode_request(cwd, argv));
-    stream.write_all(&req).map_err(DaemonError::Io)?;
+    if let Err(error) = stream.write_all(&req) {
+        // The daemon may reject and close before reading every byte. Only a
+        // rejection it already sent proves nonacceptance; any other loss after
+        // bytes may have reached it stays indeterminate.
+        return Err(match explicit_rejection(&mut stream) {
+            Some(message) => DaemonError::NotAccepted(message),
+            None => DaemonError::Io(error),
+        });
+    }
     // A missing marker (including orderly EOF) does not prove the peer did
     // not accept. Only an explicit rejection permits rebinding after submission.
     let state = read_exact_or_crash(&mut stream, 1)?[0];
@@ -204,6 +213,16 @@ pub(crate) fn execute(
             "unknown acceptance marker {other}"
         ))),
     }
+}
+
+fn explicit_rejection(stream: &mut UnixStream) -> Option<String> {
+    let marker = read_exact_or_crash(stream, 1).ok()?;
+    if marker[0] != REJECTED {
+        return None;
+    }
+    read_frame(stream)
+        .ok()
+        .map(|frame| String::from_utf8_lossy(&frame).into_owned())
 }
 
 pub(crate) fn preflight(socket_path: &Path) -> Result<DaemonBinding, DaemonError> {
@@ -393,10 +412,17 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
             // The second stamp check is the acceptance fence. If it passes,
             // the acknowledgement is flushed before work begins; every later
             // transport failure is therefore indeterminate and never replayed.
-            if stamp_changed(config, &boot_stamp)? {
-                let _ = write_rejected(&mut connection, "watched deployment changed");
-                socket.retire()?;
-                break;
+            match stamp_changed(config, &boot_stamp) {
+                Ok(false) => {}
+                Ok(true) => {
+                    let _ = write_rejected(&mut connection, "watched deployment changed");
+                    socket.retire()?;
+                    break;
+                }
+                Err(error) => {
+                    let _ = write_rejected(&mut connection, "daemon stopping");
+                    return Err(error);
+                }
             }
             if connection.write_all(&[ACCEPTED]).is_err() || connection.flush().is_err() {
                 continue;
@@ -461,9 +487,15 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
         Ok(0)
     })();
 
+    // Every exit, orderly or not, drains connected clients with an explicit
+    // rejection before the endpoint closes. Retirement is idempotent.
+    let retired = socket.retire();
     drop(socket);
     worker.shutdown();
-    result
+    match (result, retired) {
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        (Ok(code), Ok(())) => Ok(code),
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -501,32 +533,90 @@ fn boot_epoch() -> Result<[u8; 32], FrontendError> {
     Ok(epoch)
 }
 
-/// Owns only the socket inode created by this bind. Existing paths are never
-/// removed on startup, and retirement cannot unlink a replacement endpoint.
+/// Owns only the socket inode created by this bind, under an advisory lock
+/// beside the path that one daemon holds from bind until retirement. A second
+/// daemon, starting or running, fails on the lock and never touches the path.
+/// Holding the lock, a path that refuses connections is a dead daemon's, and
+/// only the inode observed refusing is removed. Retirement cannot unlink a
+/// replacement endpoint. The lock file itself is never removed: unlinking a
+/// lock file lets two holders lock different inodes.
 struct OwnedSocket {
     listener: UnixListener,
     path: std::path::PathBuf,
     identity: (u64, u64),
+    endpoint_lock: Cell<Option<fs::File>>,
+    retired: Cell<bool>,
+}
+
+fn endpoint_lock_path(path: &Path) -> std::path::PathBuf {
+    let mut lock = path.as_os_str().to_owned();
+    lock.push(".lock");
+    lock.into()
 }
 
 impl OwnedSocket {
     fn bind(path: &Path) -> Result<Self, FrontendError> {
-        let listener = UnixListener::bind(path).map_err(|error| {
-            if error.kind() == io::ErrorKind::AddrInUse {
-                FrontendError::Daemon(format!(
-                    "compiler socket {} already exists; stop its owner or remove the stale path before starting",
-                    path.display()
-                ))
-            } else {
-                FrontendError::Io(error)
+        let endpoint_lock = Self::acquire_endpoint_lock(path)?;
+        let listener = match UnixListener::bind(path) {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                Self::remove_dead_endpoint(path)?;
+                UnixListener::bind(path).map_err(FrontendError::Io)?
             }
-        })?;
+            Err(error) => return Err(FrontendError::Io(error)),
+        };
         let metadata = fs::symlink_metadata(path).map_err(FrontendError::Io)?;
         Ok(Self {
             listener,
             path: path.to_owned(),
             identity: (metadata.dev(), metadata.ino()),
+            endpoint_lock: Cell::new(Some(endpoint_lock)),
+            retired: Cell::new(false),
         })
+    }
+
+    fn acquire_endpoint_lock(path: &Path) -> Result<fs::File, FrontendError> {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(endpoint_lock_path(path))
+            .map_err(FrontendError::Io)?;
+        match file.try_lock() {
+            Ok(()) => Ok(file),
+            Err(fs::TryLockError::WouldBlock) => Err(FrontendError::Daemon(format!(
+                "compiler socket {} is owned by another daemon",
+                path.display()
+            ))),
+            Err(fs::TryLockError::Error(error)) => Err(FrontendError::Io(error)),
+        }
+    }
+
+    fn remove_dead_endpoint(path: &Path) -> Result<(), FrontendError> {
+        let observed = fs::symlink_metadata(path).map_err(FrontendError::Io)?;
+        if !observed.file_type().is_socket() {
+            return Err(FrontendError::Daemon(format!(
+                "compiler socket path {} exists and is not a socket",
+                path.display()
+            )));
+        }
+        match UnixStream::connect(path) {
+            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {}
+            _ => {
+                return Err(FrontendError::Daemon(format!(
+                    "compiler socket {} is live without the endpoint lock; stop its owner before starting",
+                    path.display()
+                )))
+            }
+        }
+        let current = fs::symlink_metadata(path).map_err(FrontendError::Io)?;
+        if (current.dev(), current.ino()) != (observed.dev(), observed.ino()) {
+            return Err(FrontendError::Daemon(format!(
+                "compiler socket {} was replaced while checking it",
+                path.display()
+            )));
+        }
+        fs::remove_file(path).map_err(FrontendError::Io)
     }
 
     fn unlink(&self) -> io::Result<()> {
@@ -541,7 +631,13 @@ impl OwnedSocket {
     }
 
     fn retire(&self) -> Result<(), FrontendError> {
+        if self.retired.replace(true) {
+            return Ok(());
+        }
         self.unlink().map_err(FrontendError::Io)?;
+        // The path is free: a replacement daemon may take the endpoint while
+        // this one drains its own, now unlinked, listener.
+        drop(self.endpoint_lock.take());
         self.listener
             .set_nonblocking(true)
             .map_err(FrontendError::Io)?;
@@ -560,15 +656,24 @@ impl OwnedSocket {
             connection
                 .set_write_timeout(Some(remaining.min(Duration::from_millis(100))))
                 .map_err(FrontendError::Io)?;
-            let mut reader = DeadlineReader {
-                stream: &mut connection,
-                deadline: deadline.min(Instant::now() + Duration::from_millis(100)),
+            let preflight = {
+                let mut reader = DeadlineReader {
+                    stream: &mut connection,
+                    deadline: deadline.min(Instant::now() + Duration::from_millis(100)),
+                };
+                let mut kind = [0; 8];
+                let kind_read = reader.read_exact(&mut kind).is_ok();
+                if kind_read && &kind == REQUEST {
+                    let mut epoch = [0; 32];
+                    if reader.read_exact(&mut epoch).is_ok() {
+                        let _ = read_request(&mut reader);
+                    }
+                }
+                kind_read && &kind == PREFLIGHT
             };
-            let mut header = [0; 40];
-            if reader.read_exact(&mut header).is_ok()
-                && &header[..8] == REQUEST
-                && read_request(&mut reader).is_ok()
-            {
+            // A request, complete or partial, never infers its settlement
+            // from a closed connection. A preflight has nothing to settle.
+            if !preflight {
                 let _ = write_rejected(&mut connection, "daemon rotating");
             }
         }
@@ -810,12 +915,92 @@ mod tests {
         let owner = OwnedSocket::bind(&path).unwrap();
         assert!(OwnedSocket::bind(&path).is_err());
         assert!(UnixStream::connect(&path).is_ok());
-        owner.unlink().unwrap();
+        owner.retire().unwrap();
         let replacement = OwnedSocket::bind(&path).unwrap();
         drop(owner);
         assert!(UnixStream::connect(&path).is_ok());
         drop(replacement);
         assert!(!path.exists());
+        let _ = fs::remove_file(endpoint_lock_path(&path));
+    }
+
+    #[test]
+    fn a_dead_daemons_socket_is_replaced_under_the_endpoint_lock() {
+        let path = test_socket("dead-endpoint");
+        drop(UnixListener::bind(&path).unwrap());
+        assert!(path.exists());
+        let owner = OwnedSocket::bind(&path).unwrap();
+        assert!(UnixStream::connect(&path).is_ok());
+        drop(owner);
+        assert!(!path.exists());
+        let _ = fs::remove_file(endpoint_lock_path(&path));
+    }
+
+    #[test]
+    fn a_locked_endpoint_is_never_unlinked() {
+        let path = test_socket("locked-endpoint");
+        drop(UnixListener::bind(&path).unwrap());
+        let starting_peer = OwnedSocket::acquire_endpoint_lock(&path).unwrap();
+        assert!(OwnedSocket::bind(&path).is_err());
+        assert!(
+            path.exists(),
+            "a starting peer's endpoint path must survive"
+        );
+        drop(starting_peer);
+        fs::remove_file(&path).unwrap();
+        let _ = fs::remove_file(endpoint_lock_path(&path));
+    }
+
+    #[test]
+    fn a_live_endpoint_without_the_lock_is_not_unlinked() {
+        let path = test_socket("live-unlocked");
+        let live = UnixListener::bind(&path).unwrap();
+        assert!(OwnedSocket::bind(&path).is_err());
+        assert!(UnixStream::connect(&path).is_ok());
+        drop(live);
+        fs::remove_file(&path).unwrap();
+        let _ = fs::remove_file(endpoint_lock_path(&path));
+    }
+
+    #[test]
+    fn explicit_rejection_survives_a_failed_submission_write() {
+        let path = test_socket("reject-before-read");
+        let socket = OwnedSocket::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = socket.listener.accept().unwrap();
+            let mut kind = [0; 8];
+            connection.read_exact(&mut kind).unwrap();
+            write_rejected(&mut connection, "daemon rotating").unwrap();
+            drop(connection);
+            drop(socket);
+        });
+        let large = OsString::from_vec(vec![b'x'; 8 << 20]);
+        let error = execute(&path, &[1; 32], Path::new("/tmp"), &[large]).unwrap_err();
+        server.join().unwrap();
+        assert!(
+            matches!(&error, DaemonError::NotAccepted(message) if message == "daemon rotating"),
+            "{error}"
+        );
+        let _ = fs::remove_file(endpoint_lock_path(&path));
+    }
+
+    #[test]
+    fn transport_loss_during_submission_is_indeterminate() {
+        let path = test_socket("lost-during-write");
+        let socket = OwnedSocket::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = socket.listener.accept().unwrap();
+            let mut kind = [0; 8];
+            connection.read_exact(&mut kind).unwrap();
+            drop(connection);
+            drop(socket);
+        });
+        let large = OsString::from_vec(vec![b'x'; 8 << 20]);
+        let error = execute(&path, &[1; 32], Path::new("/tmp"), &[large]).unwrap_err();
+        server.join().unwrap();
+        assert!(!error.is_not_accepted(), "{error}");
+        assert!(!error.was_accepted(), "{error}");
+        let _ = fs::remove_file(endpoint_lock_path(&path));
     }
 
     #[test]
@@ -843,6 +1028,8 @@ mod tests {
         let started = Instant::now();
         socket.retire().unwrap();
         assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(read_exact_or_crash(&mut client, 1).unwrap(), [REJECTED]);
+        let _ = fs::remove_file(endpoint_lock_path(&path));
     }
 
     #[test]

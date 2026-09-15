@@ -327,6 +327,66 @@ mod tests {
     static ENV: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn daemon_rejects_unaccepted_requests_when_it_exits_on_an_error() {
+        use std::time::{Duration, Instant};
+
+        let dir = std::env::temp_dir().join(format!("tp-exit-reject-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("daemon.sock");
+        let stamp = dir.join("stamp");
+        std::fs::write(&stamp, b"boot").unwrap();
+        let selection = std::env::current_exe().unwrap();
+        let prepared = PreparedWorker {
+            file: File::open(&selection).unwrap(),
+            bytes: std::fs::read(&selection).unwrap(),
+            selection,
+            ghc_libdir: "unused".into(),
+        };
+        let config = DaemonConfig {
+            socket: socket.clone(),
+            rotate_after: None,
+            rss_ceiling_mb: None,
+            watch_stamp: Some(stamp.clone()),
+            persistent: false,
+            run_id: None,
+            log_path: None,
+        };
+        let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let binding = loop {
+            if let Ok(binding) = crate::daemon::preflight(&socket) {
+                break binding;
+            }
+            assert!(Instant::now() < deadline, "daemon did not become ready");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // An unreadable stamp makes the acceptance fence itself fail.
+        std::fs::remove_file(&stamp).unwrap();
+        std::fs::create_dir(&stamp).unwrap();
+        let clients: Vec<_> = (0..3)
+            .map(|_| {
+                let socket = socket.clone();
+                let dir = dir.clone();
+                let epoch = binding.epoch;
+                std::thread::spawn(move || {
+                    crate::daemon::execute(&socket, &epoch, &dir, &["Expr.hs".into()])
+                })
+            })
+            .collect();
+        for client in clients {
+            let error = client.join().unwrap().unwrap_err();
+            assert!(
+                error.is_not_accepted(),
+                "a request the daemon never accepted must prove it: {error}"
+            );
+        }
+        assert!(server.join().unwrap().is_err());
+        assert!(!socket.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn persistent_daemon_recovers_worker_crashes_without_replaying_requests() {
         use std::time::{Duration, Instant};
 
