@@ -265,3 +265,27 @@ deterministic (`nonDetEltsUniqSet` only feeds a `Set`, maps keyed by
    search plus `<>` (`:1036-1087`, `:1205`): quadratic on large programs; use a
    `Map` index and `Seq`.
 
+## Prepared array, byte and address host functions
+No memory-safety bugs: every host call validates wrapper, offsets and lengths
+against the ledger before touching storage (`checked_add` at
+`machine_state.rs:1539/1477/1428`), failed calls write nothing; CAS, shrink,
+resize, native-endian multi-byte reads, float edge cases, wide-word errors
+and error classes match GHC.
+1. Medium — `copyAddrToByteArray#` (`static_bytes.rs:138`), `cstringLength#`
+   (`:192`) and `indexCharOffAddr#` (`:254`) accept only program literal
+   addresses; a legal pinned-array address from `mutableByteArrayContents#`
+   fails with `BadPointer`, latching the machine. `addresses.rs:104` already
+   falls back to the ledger. Fall back via `read_external_address(_offset)`,
+   reusable error for true misses. Test: pinned "ab\0" through all three.
+2. Low — `copyMutableByteArray#`/`copyMutableByteArrayNonOverlapping#` are not
+   recognized (`byte_arrays.rs:109`; text's `copyM` uses the first); when
+   added, do not route through `copy_external_byte_range` (rejects same-array
+   overlap) — add a memmove copy; test overlapping ranges both directions.
+3. Low (invalid UTF-8 only) — `measure_external_utf8`
+   (`machine_state.rs:1806`, added in 3f5a5ee28) treats a stray continuation
+   byte as a 2-byte char; text's C advances 1. Step
+   `1 + (b>=0xC0) + (b>=0xE0) + (b>=0xF0)`; test `[0x80,0x41]`.
+4. Low — Core-only `decode_float_int` NaN/Inf mapping (also noted above).
+5. Performance — `external_address_span` (`machine_state.rs:1565`) scans every
+   ledger record per `Addr#` operation.
+
