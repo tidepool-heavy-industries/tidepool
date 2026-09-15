@@ -226,3 +226,28 @@ cell: item 0 `NotRun` means the fixture needs a genuinely runtime-only failure;
 item 0 `Committed` with the binding gone afterwards is a real `tidepool-actor`
 gap (add a `let` variant beside `notebook_prefix_failure.hs`).
 
+### Remaining lifecycle/drain timeouts — load, with a likely config root cause
+None of the seven shows a product defect (inferred from code and timings, not
+solo reruns). Six Haskell-backed tests (`authored_seal_survives_lost_waiter_and_rejects_late_work`,
+`notebook_cell_cancellation_stops_at_item_boundaries`,
+`resident_sleep_waits_fifteen_minutes_without_blocking_a_sibling`,
+`http_actual_resident_seal_identity_late_dispatch_and_completion`,
+`lifecycle_sources_follow_replacement_and_capture_retained_exit`,
+`root_recovery_replays_lost_workbench_reply_without_repeating_effects`) ran
+out of time on waits that include a Haskell compile, before reaching their
+product-specific steps. Caveat: workbench dispatch checks out the single forest
+machine through `checkout_queued` (`registry.rs:328`), which has no timeout; a
+leaked checkout would look like a slow compile.
+- **Config root cause:** `.config/nextest.toml`'s `ghc-heavy` cap exempts
+  `package(tidepool)` (so all `actor_host::tests`, `command_jobs_tests`,
+  `actual_seal`) and `package(tidepool-actor) & !kind(test)` (so
+  `lifecycle_tests`), although they compile Haskell; they ran at full core
+  count. Put `actor_host::`, `host_dynamic_tools::drain_tests::actual_seal`
+  and `resident_interactive::lifecycle_tests` under `ghc-heavy`.
+- Raise the 30s `wait_until_sleeping` windows (`hosted_lifecycle_tests.rs`
+  ~257 and ~579) to at least 90s; rerun the six alone at HEAD
+  (`lifecycle_sources` also exercises 052efa6ed at its stage 3).
+- `pinned_full_tui_binds_and_accepts_exactly_one_owned_input` fails in 0.017s
+  on a missing `TIDEPOOL_INTERACTIVE_CODEX_BIN`: mark it
+  `#[ignore = "requires TIDEPOOL_INTERACTIVE_CODEX_BIN (pinned Codex) and tmux"]`,
+  matching `tidepool/tests/shoal_namespace_entry.rs:122`.
