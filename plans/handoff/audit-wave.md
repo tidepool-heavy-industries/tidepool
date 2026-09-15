@@ -319,3 +319,40 @@ length (`daemon.rs:274`); `bind` preflight can wait the full 5-minute timeout
 then compile direct, spawning duplicate GHC workers (`endpoint.rs:150`);
 non-UTF-8 paths are silently altered by `to_string_lossy` (`request.rs:680`).
 
+## Prepared collector root coverage
+Nothing serious; the prepared path cannot have the 052efa6ed bug: there is no
+prepared major/compaction pass (`collect_prepared`, `gc.rs:999`, is a minor
+copy; promotion only appends arenas), and the remembered set is cleared only at
+teardown (`machine_state.rs:943`) or when memory is released or shrunk. Boxed
+array writes/copies/CAS remember slots before writing (`arrays.rs:337/463/504`);
+statics are immutable (`static_region.rs:83`); thunk memoization is barriered
+(`entry.rs:385`) with the barrier armed before first promotion; the young sweep
+runs after the final copy (`gc.rs:1066`); tops, imports, handles and the raised
+exception are rooted; promotion retains reached payloads (`promotion.rs:164`).
+1. Low (leak) — Retained/Revoked payloads and old arenas are never reclaimed
+   while a machine lives; resizing a promoted byte array
+   (`byte_arrays.rs:287`) leaves the old copy. A future prepared major sweep
+   must re-retain every slot as 052efa6ed does.
+2. Low (GHC-permitted) — a `byteArrayContents#` address used without
+   `keepAlive#` can outlive a young sweep; usually `Untracked`, but address
+   reuse by a new payload silently aliases. Optional: no address reuse within
+   a sweep generation.
+3. Guard — add the prepared twin of the 052efa6ed regression test (promote a
+   boxed-array wrapper holding an old value, store young through
+   `prepared_write_boxed`, `prepared_gc_trigger` under poison).
+
+## Audit wave summary: fix first
+1. Validator: a `Jump` in a case scrutinee validates and miscompiles (possible
+   GC-visible raw word) — trust boundary.
+2. `PreparedRuntime` ROOT realm close destroys all session bindings (latent).
+3. Install after a failed `collect_on` leaves a pending cause (machine looks
+   reusable but refuses installs); one install transaction guard.
+4. Pinned-array `Addr#` in three string primitives latches `BadPointer`.
+5. Extractor daemon: queued clients during rotation cannot rebind; persistent
+   daemon dies on one worker crash.
+6. Double rendering at rounding boundaries (`show 1e23`).
+7. Observation shape divergence from the Core bridge (`Char#`, byte arrays,
+   boxed arrays).
+Then the test plan in "Test coverage map", the DoS quadratic paths, and the
+duplication consolidations (identity import rendering, rep mapping,
+`physical_reps()`, one `renderType`).
