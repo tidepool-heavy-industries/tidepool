@@ -1282,6 +1282,10 @@ verifyRetainedImportProjectionExposed = do
       unless (not (Set.member "producerFn" (recoveredOccurrences program)))
         (ioError (userError
           "retained-import-exposed withheld projection recovered producerFn's body"))
+      unless (Set.null (recoveredOccurrences program))
+        (ioError (userError
+          ("retained-import-exposed withheld projection recovered producer tops: "
+            <> show (Set.toList (recoveredOccurrences program)))))
       let globalsByIdentity = [(globalIdentity g, g) | g <- programGlobals program]
       producerValueGlobal <- case lookup producerValueId globalsByIdentity of
         Just value -> pure value

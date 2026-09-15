@@ -302,10 +302,15 @@ selectPreparedTarget context modules =
       , let symbol = mappedTopIdentity binder
       , symbol == entry
       ]
+    -- A top whose body is never recovered -- a registered replacement or a
+    -- retained-generation import -- is a closure boundary: its own
+    -- references must not make its floated sub-bindings reachable. The same
+    -- 'skippedFromRecovery' predicate governs 'recoveryReferences', so
+    -- reachability and recovery cannot disagree about which bodies exist.
     dependencies = Map.fromListWith (<>)
       [ (mappedTopIdentity binder, Set.fromList
           [ symbol
-          | unique <- if registeredReplacement context binder then [] else
+          | unique <- if skippedFromRecovery context binder then [] else
               nonDetEltsUniqSet (topBindingReferences modul topLevel single)
           , Just symbol <- [lookupUFM topUniqueIdentityMap unique]
           ])

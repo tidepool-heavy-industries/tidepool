@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use tidepool_extract_cmd::{resolve_bin, ExtractCmd, ResolvedExtractBin};
+use tidepool_extract_cmd::{resolve_bin, ExtractCmd, ResolvedExtractBin, SymbolIdentity};
 
 /// The stdlib root every fixture's `--include` points at — this crate's own
 /// workspace-relative path, not the general-purpose 5-tier locator
@@ -30,6 +30,16 @@ fn stdlib_lib_dir() -> PathBuf {
         .parent()
         .expect("tidepool-extract-cmd has a workspace parent")
         .join("haskell/lib")
+}
+
+/// `test-prepared-stg` fixture source root, sibling of [`stdlib_lib_dir`] —
+/// home of `ImportProducerExposed.hs`/`ImportConsumerExposed.hs`, used by
+/// `check_j_retained_generation_transitions_through_warm_daemon`.
+fn prepared_stg_fixture_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("tidepool-extract-cmd has a workspace parent")
+        .join("haskell/test-prepared-stg")
 }
 
 /// Resolve the extract binary the same way [`ExtractCmd::new`] would.
@@ -273,6 +283,7 @@ fn daemon_integration() {
     check_f_module_memo_follows_include_roots(&bin, &dir, &lib, &socket);
     check_g_shim_dependent_module_warm_second_request(&bin, &dir, &lib, &socket);
     check_h_request_build_products_dir(&bin, &dir, &lib, &socket);
+    check_j_retained_generation_transitions_through_warm_daemon(&bin, &dir, &socket);
     check_a_byte_identical_transport(&bin, &dir, &lib, &socket);
 
     drop(daemon);
@@ -806,6 +817,183 @@ fn check_g_shim_dependent_module_warm_second_request(
         fs::read(dir.join("out-g-b-direct/turn.cbor")).unwrap(),
         "the resident-turn result must also be byte-identical across transports"
     );
+}
+
+/// (j) The resident daemon reuses ONE GHC session across requests
+/// (`Tidepool.GhcPipeline`'s resident API), and `Tidepool.RetainedUnfoldings`
+/// withholds unfoldings for a request's declared retained-generation set so
+/// GHC's simplifier cannot inline/recover them into the target. This proves
+/// the withholding plugin reads that set PER REQUEST — recompiling as it
+/// changes — rather than latching onto whichever set first warmed the
+/// session: it drives the SAME warm daemon through the retained set
+/// growing, shrinking, and returning to empty, and after every step
+/// compares the daemon's artifact against a fresh one-shot (non-daemon)
+/// compile of the identical request.
+///
+/// Fixtures: `ImportProducerExposed.hs` declares `producerValue`/
+/// `producerFn` with NO `NOINLINE` pragma (unlike the plain `ImportProducer`
+/// pair used elsewhere in this crate) — nothing but the withholding plugin
+/// stops GHC from inlining them. `ImportConsumerExposed.hs`'s
+/// `consumerResult` imports and calls both. See
+/// `ExecutionProjectionTest.verifyRetainedImportProjectionExposed` (Haskell
+/// side) for the same contract proven directly against the pipeline API;
+/// this check proves it survives the daemon's resident-worker/wire
+/// boundary instead.
+///
+/// `tidepool-extract-cmd` is a dependency-leaf crate (see its own
+/// `CLAUDE.md`) and does not depend on `tidepool-repr`, so this check
+/// cannot decode the emitted `execution_schema::WireProgram` CBOR to read
+/// `GlobalDecl`/`required_generation` directly. Two things stand in:
+///   * daemon-vs-one-shot agreement is checked by exact CBOR BYTE equality
+///     of `consumerResult.prepared.cbor`, for every retained-set step;
+///   * the qualitative "recovered locally" vs. "global reference" split is
+///     checked by literal ASCII substring search over those same bytes,
+///     using the exact recovered-top marker names
+///     `ExecutionProjectionTest`'s own doc comment on `consumerResult`
+///     names: `producerValue1` (one of the floated list sub-bindings GHC's
+///     simplifier produces when it inlines `producerValue`'s literal list)
+///     and `$wproducerFn` (the specialised worker GHC produces when it
+///     inlines/specialises `producerFn`). CBOR text strings store their
+///     UTF-8 payload as contiguous raw bytes with no escaping, so a literal
+///     ASCII needle is a sound (if syntactic, not semantically decoded)
+///     presence/absence check.
+fn check_j_retained_generation_transitions_through_warm_daemon(
+    bin: &Path,
+    dir: &Path,
+    socket: &Path,
+) {
+    let lib = stdlib_lib_dir();
+    let fixture_dir = prepared_stg_fixture_dir();
+    assert!(
+        fixture_dir.join("ImportProducerExposed.hs").is_file(),
+        "expected fixture at {}",
+        fixture_dir.join("ImportProducerExposed.hs").display()
+    );
+    assert!(
+        fixture_dir.join("ImportConsumerExposed.hs").is_file(),
+        "expected fixture at {}",
+        fixture_dir.join("ImportConsumerExposed.hs").display()
+    );
+
+    let producer_value_id = SymbolIdentity {
+        unit: "main".to_owned(),
+        module: "ImportProducerExposed".to_owned(),
+        namespace: "value".to_owned(),
+        occurrence: "producerValue".to_owned(),
+        record_parent: None,
+    };
+    let producer_fn_id = SymbolIdentity {
+        unit: "main".to_owned(),
+        module: "ImportProducerExposed".to_owned(),
+        namespace: "value".to_owned(),
+        occurrence: "producerFn".to_owned(),
+        record_parent: None,
+    };
+
+    // Empty, {value, fn}, {fn} only, {value, fn} again, empty again — grows,
+    // narrows, regrows, and fully retreats, so a session that only ever
+    // reacts to warming up (not to the set actually changing back down)
+    // cannot pass this by accident.
+    let steps: [(&str, &[SymbolIdentity]); 5] = [
+        ("empty-1", &[]),
+        ("both-1", &[producer_value_id.clone(), producer_fn_id.clone()]),
+        ("fn-only", &[producer_fn_id.clone()]),
+        ("both-2", &[producer_value_id.clone(), producer_fn_id.clone()]),
+        ("empty-2", &[]),
+    ];
+
+    let build_cmd = |out_dir: PathBuf, retained: &[SymbolIdentity]| -> ExtractCmd {
+        let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(bin));
+        cmd.input(fixture_dir.join("ImportConsumerExposed.hs"))
+            .output_dir(out_dir)
+            .target("consumerResult")
+            .include(&lib)
+            .include(&fixture_dir);
+        for identity in retained {
+            cmd.retained_generation(identity.clone(), 11);
+        }
+        cmd
+    };
+
+    for (label, retained) in steps {
+        let daemon_out_dir = dir.join(format!("out-j-{label}-daemon"));
+        let direct_out_dir = dir.join(format!("out-j-{label}-direct"));
+
+        let daemon_cmd = build_cmd(daemon_out_dir.clone(), retained);
+        let daemon_result = run_via_env_socket(&daemon_cmd, socket);
+        assert!(
+            daemon_result.status.success(),
+            "daemon compile (retained set: {label}) should succeed: {}",
+            String::from_utf8_lossy(&daemon_result.stderr)
+        );
+
+        let direct_cmd = build_cmd(direct_out_dir.clone(), retained);
+        let direct_result = run_direct(&direct_cmd);
+        assert!(
+            direct_result.status.success(),
+            "one-shot compile (retained set: {label}) should succeed: {}",
+            String::from_utf8_lossy(direct_result.stderr.as_slice())
+        );
+
+        let daemon_cbor = fs::read(daemon_out_dir.join("consumerResult.prepared.cbor"))
+            .unwrap_or_else(|e| panic!("read daemon artifact ({label}): {e}"));
+        let direct_cbor = fs::read(direct_out_dir.join("consumerResult.prepared.cbor"))
+            .unwrap_or_else(|e| panic!("read one-shot artifact ({label}): {e}"));
+        assert_eq!(
+            daemon_cbor, direct_cbor,
+            "consumerResult.prepared.cbor must be byte-identical between the warm daemon and a \
+             fresh one-shot compile for retained set '{label}' — the daemon's resident GHC \
+             session must re-read the retained-generation set on every request, not reuse \
+             whatever set warmed it"
+        );
+
+        let contains = |needle: &str| -> bool {
+            daemon_cbor
+                .windows(needle.len())
+                .any(|w| w == needle.as_bytes())
+        };
+        // Without a decoder, show where a marker occurs so a failure names the
+        // surrounding symbols instead of only asserting presence.
+        let context = |needle: &str| -> String {
+            daemon_cbor
+                .windows(needle.len())
+                .enumerate()
+                .filter(|(_, w)| *w == needle.as_bytes())
+                .map(|(at, _)| {
+                    let start = at.saturating_sub(96);
+                    let end = (at + needle.len() + 96).min(daemon_cbor.len());
+                    daemon_cbor[start..end]
+                        .iter()
+                        .map(|b| if b.is_ascii_graphic() { *b as char } else { '.' })
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        let retains_both = retained.len() == 2;
+        if retains_both {
+            assert!(
+                !contains("producerValue1"),
+                "retained set '{label}' retains both producer symbols, so producerValue's \
+                 floated list sub-bindings must not be recovered into the consumer artifact; \
+                 found at: {}",
+                context("producerValue1")
+            );
+            assert!(
+                !contains("$wproducerFn"),
+                "retained set '{label}' retains both producer symbols, so no specialised \
+                 producerFn worker should be recovered into the consumer artifact; found at: {}",
+                context("$wproducerFn")
+            );
+        } else if retained.is_empty() {
+            assert!(
+                contains("producerValue1") || contains("$wproducerFn"),
+                "retained set '{label}' is empty, so plain GHC behavior should recover at least \
+                 one of producerValue's floated sub-bindings or producerFn's specialised worker \
+                 into the consumer artifact"
+            );
+        }
+    }
 }
 
 /// (e) rotation unpublishes the socket after its accepted request and lets the
