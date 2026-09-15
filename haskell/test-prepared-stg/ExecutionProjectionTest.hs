@@ -36,7 +36,8 @@ import Tidepool.ExecutionProjection
 import Tidepool.ExecutionSchema
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PreparedPipelineResult(..), PipelineResult(..)
-  , runPipelineSelected, runPipelineSelectedRetaining )
+  , CompilePurpose(..), runPipelineSelected, runPipelineSelectedRetaining
+  , withResidentPipelineSelected )
 import Tidepool.PreparedFormatting
   (FormattingAuthority(..), classifyFormatting, resolveFormattingAuthority)
 
@@ -1296,6 +1297,27 @@ verifyRetainedImportProjectionExposed = do
       unless (globalRequiredGeneration producerFnGlobal == Just 11)
         (ioError (userError
           "retained-import-exposed withheld projection did not carry producerFn's generation"))
+  -- Reusing dependency Core and home interfaces must agree with a fresh
+  -- compile across both growth and shrinkage of the retained set.
+  let sets = [Set.empty, Set.fromList [producerValueId, producerFnId],
+              Set.fromList [producerValueId, producerFnId], Set.singleton producerFnId,
+              Set.fromList [producerValueId, producerFnId], Set.empty]
+      evidence retained modules = case projectPreparedTarget
+          (contextFor (Map.fromList [(identity, 11) | identity <- Set.toList retained]))
+          (pprModules modules) of
+        Left failure -> ioError (userError ("resident retained projection: " ++ show failure))
+        Right program -> pure
+          (Set.fromList (map globalIdentity (programGlobals program)), recoveredOccurrences program)
+  withResidentPipelineSelected [fixtureDir] $ \compile ->
+    forM_ sets $ \retained -> do
+      fresh <- runPipelineSelectedRetaining PreparedStg retained
+        (fixtureDir </> "ImportConsumerExposed.hs") [fixtureDir]
+      warm <- compile PreparedStg retained GeneralCompile Nothing
+        (fixtureDir </> "ImportConsumerExposed.hs") [] Nothing
+      expected <- evidence retained fresh
+      actual <- evidence retained warm
+      unless (actual == expected)
+        (ioError (userError "resident retained-set transition differs from fresh projection"))
   verifyHierarchicalTargetModule
 
 -- | Task (b) regression: a hierarchical module (@module Session.Val.G1

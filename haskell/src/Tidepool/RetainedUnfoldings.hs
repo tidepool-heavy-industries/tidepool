@@ -67,7 +67,8 @@ import GHC.Data.FastString (unpackFS)
 import GHC.Driver.Env.Types (HscEnv(..))
 import GHC.Driver.Plugins
   ( Plugin(..), PluginWithArgs(..), Plugins(..), StaticPlugin(..)
-  , defaultPlugin )
+  , PluginRecompile(..), defaultPlugin )
+import GHC.Utils.Fingerprint (fingerprintString)
 import GHC.Types.Basic (neverInlinePragma)
 import GHC.Types.Id (Id, idName, setIdUnfolding, setInlinePragma)
 import GHC.Types.Name (isExternalName, nameModule_maybe, nameOccName)
@@ -106,6 +107,13 @@ withholdingPlugin :: IORef (Set SymbolIdentity) -> Plugin
 withholdingPlugin retainedRef = defaultPlugin
   { installCoreToDos = \_args todos ->
       pure (CoreDoPluginPass "WithholdRetainedUnfoldings" pass : todos)
+  , pluginRecompile = \_args -> do
+      retained <- readIORef retainedRef
+      -- Show's escaped, delimited representation preserves every identity
+      -- field; Set ordering makes the encoding independent of insertion order.
+      -- Bump the version when the withholding transformation changes.
+      pure (MaybeRecompile (fingerprintString
+        ("tidepool-retained-unfoldings-v1:" ++ show (Set.toAscList retained))))
   }
   where
     pass = bindsOnlyPass $ \binds -> do

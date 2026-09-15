@@ -96,7 +96,7 @@ import Data.List (isPrefixOf, nub, sortOn, intercalate)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef, writeIORef)
 import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName, takeFileName)
-import System.IO (hPutStrLn, stderr)
+import System.IO (hPutStrLn, stderr, readFile')
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, when)
 import Data.Data (Data, cast, gmapQ)
@@ -323,7 +323,7 @@ cellDisplayDeclarations pass result plan = do
 -- equals its basename, so this changes nothing for them.
 targetModuleNameFor :: FilePath -> IO ModuleName
 targetModuleNameFor path = do
-  contents <- try (readFile path) :: IO (Either IOException String)
+  contents <- try (readFile' path) :: IO (Either IOException String)
   let declared = either (const Nothing) extractModuleName contents
   pure (mkModuleName (fromMaybe (capitalize (takeBaseName path)) declared))
 
