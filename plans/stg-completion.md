@@ -1,5 +1,10 @@
 # Finish the STG engine
 
+Implementation status: the [2026-09-15 safety/compiler milestone](handoff/implementation-2026-09-15.md)
+records completed prerequisite fixes, accepted policy decisions and current
+verification. Production notebook routing, typed resume, binding authority,
+retirement/collection, default routing and Core removal remain unfinished.
+
 Review baseline: `344ecd59a` (2026-09-14). This is a proposed execution plan,
 not an implementation or a fresh gate result. It supersedes the routing
 discussion in `stg-wave6.md` as a recommendation; it does not claim that a

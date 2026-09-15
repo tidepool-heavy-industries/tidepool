@@ -1,7 +1,9 @@
 # STG cutover handoff (2026-09-15)
 
 For the next LLM session taking over `engine/stg-production-cutover`. Read
-this, then `plans/stg-completion.md` (the governing plan), then `CLAUDE.md`.
+the [implementation update](implementation-2026-09-15.md) first, then this
+historical investigation log and `plans/stg-completion.md` (the governing
+cutover plan). Contributor guidance lives in `AGENTS.md`.
 
 ## State
 
@@ -304,4 +306,3 @@ the `Int` right after the constraints (index 3 for `runLLMTurn*`/`fork*`,
 `forkMapSited`/`forkCataSited` live in `haskell/lib/Tidepool/Answerer/Fork.hs`.
 Cached effects folders without siblings are stale content-hashed leftovers.
 The classifier plan's literal-index rule is consistent with every sibling.
-
