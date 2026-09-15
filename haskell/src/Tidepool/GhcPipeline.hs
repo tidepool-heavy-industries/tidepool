@@ -288,7 +288,8 @@ cellDisplayDeclarations pass result plan = do
                     else pure False) fields
           selections <- maybe (fail "cell display field solver failed") pure checked
           let renderField index name supported =
-                let value = if supported then qualifier ++ ".displayTree " ++ name
+                let method = if null labels then ".displayTreePrec 11 " else ".displayTree "
+                    value = if supported then qualifier ++ method ++ name
                       else qualifier ++ ".TextLeaf " ++ textLiteral "<opaque>"
                  in case drop index labels of
                    label : _ -> qualifier ++ ".Concat [" ++ qualifier ++ ".TextLeaf "
@@ -302,12 +303,19 @@ cellDisplayDeclarations pass result plan = do
                 ':' : _ -> "(" ++ constructorName ++ ")"
                 _ -> constructorName
               patternFields = zipWith (\name supported -> if supported then name else "_") names selections
-          pure ("  displayTree (" ++ unwords (patternName : patternFields) ++ ") = "
-            ++ qualifier ++ ".treeParts " ++ textLiteral opening ++ " " ++ textLiteral closing
-            ++ " [" ++ intercalate ", " rendered ++ "]\n")
+          pure ( "  displayTree (" ++ unwords (patternName : patternFields) ++ ") = "
+                   ++ qualifier ++ ".treeParts " ++ textLiteral opening ++ " " ++ textLiteral closing
+                   ++ " [" ++ intercalate ", " rendered ++ "]\n"
+               , "    " ++ patternName ++ " {} -> "
+                   ++ (if null names then "" else qualifier ++ ".precedenceParens __tidepoolPrecedence ")
+                   ++ "(" ++ qualifier ++ ".displayTree __tidepoolValue)\n" )
+        -- An applied constructor is parenthesized as an argument, as derived
+        -- Show does. The method names nothing from the cell's own scope.
+        let precedence = "  displayTreePrec __tidepoolPrecedence __tidepoolValue = case __tidepoolValue of\n"
+              ++ concatMap snd methods
         pure (header ++ if null methods
           then "  displayTree _ = " ++ qualifier ++ ".TextLeaf " ++ textLiteral "<empty>" ++ "\n"
-          else concat methods)
+          else concatMap fst methods ++ precedence)
   where
     environment = prTargetTcGblEnv result
     qualifier = cellPlanDisplayAlias plan

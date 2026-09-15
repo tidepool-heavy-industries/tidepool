@@ -16,6 +16,7 @@ module Tidepool.Inspection
     FullDisplay (inspectFull),
     DisplayTree (..),
     treeParts,
+    precedenceParens,
     DisplayPage,
     text,
     more,
@@ -29,6 +30,7 @@ module Tidepool.Inspection
 where
 
 import Control.Monad.Freer (Eff, Member, send)
+import Data.Char (isSpace)
 import GHC.Records (HasField (getField))
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -75,6 +77,12 @@ class Display a where
 
   {-# MINIMAL displayWith | displayTree #-}
 
+  -- | The tree at a 'showsPrec' precedence, so a constructor application is
+  -- parenthesized exactly where derived 'Show' would parenthesize it. Instances
+  -- without applications (atoms, brackets, custom layouts) need not define it.
+  displayTreePrec :: Int -> a -> DisplayTree
+  displayTreePrec _ = displayTree
+
   displayWithout :: [Text] -> Int -> a -> (Text, Bool)
   displayWithout _ = displayWith
 
@@ -83,31 +91,44 @@ renderText budget value =
   let (prefix, suffix) = Text.splitAt (max 0 budget) value
   in (prefix, not (Text.null suffix))
 
+-- | One constructor applied to arguments, each rendered as an application argument.
+application :: Int -> Text -> [DisplayTree] -> DisplayTree
+application precedence constructor arguments =
+  precedenceParens precedence (Concat (TextLeaf constructor : concatMap (\argument -> [TextLeaf " ", argument]) arguments))
+
 instance {-# OVERLAPPABLE #-} (Show a) => Display a where
-  displayTree = StringLeaf . show
+  displayTree = displayTreePrec 0
+  displayTreePrec precedence value = StringLeaf (showsPrec precedence value "")
   displayWith budget value =
     let limit = max 0 (min (maxBound - 1) budget)
         prefix = take (limit + 1) (show value)
      in (Text.pack (take limit prefix), length prefix > limit)
 
+-- | Text renders literally; as an argument, text that is not one word is
+-- parenthesized so it cannot read as further arguments.
 instance Display Text where
   displayTree = TextLeaf
+  displayTreePrec precedence value
+    | Text.null value || Text.any isSpace value = precedenceParens precedence (TextLeaf value)
+    | otherwise = TextLeaf value
   displayWith = renderText
 
 instance Display (a -> b) where
   displayTree _ = TextLeaf "<function>"
 
 instance (Display a) => Display (Maybe a) where
-  displayTree Nothing = TextLeaf "Nothing"
-  displayTree (Just value) = treeParts "Just (" ")" [displayTree value]
+  displayTree = displayTreePrec 0
+  displayTreePrec _ Nothing = TextLeaf "Nothing"
+  displayTreePrec precedence (Just value) = application precedence "Just" [displayTreePrec 11 value]
   displayWithout _ budget Nothing = renderText budget "Nothing"
   displayWithout keys budget (Just value) = renderParts budget "Just " "" [\n -> displayWithout keys n value]
   displayWith budget Nothing = renderText budget "Nothing"
   displayWith budget (Just value) = renderParts budget "Just " "" [\n -> displayWith n value]
 
 instance (Display a, Display b) => Display (Either a b) where
-  displayTree (Left value) = treeParts "Left (" ")" [displayTree value]
-  displayTree (Right value) = treeParts "Right (" ")" [displayTree value]
+  displayTree = displayTreePrec 0
+  displayTreePrec precedence (Left value) = application precedence "Left" [displayTreePrec 11 value]
+  displayTreePrec precedence (Right value) = application precedence "Right" [displayTreePrec 11 value]
   displayWithout keys budget (Left value) = renderParts budget "Left " "" [\n -> displayWithout keys n value]
   displayWithout keys budget (Right value) = renderParts budget "Right " "" [\n -> displayWithout keys n value]
   displayWith budget (Left value) = renderParts budget "Left " "" [\n -> displayWith n value]
@@ -270,29 +291,34 @@ pageWithContinuation budget tree continuation =
   in DisplayPage (\() -> (rendered, next, pending, unavailable))
 
 instance Display a => Display (ResponseResult a) where
-  displayTree value = treeParts "ResponseResult {" "}"
+  displayTree = displayTreePrec 0
+  displayTreePrec precedence value = precedenceParens precedence $ treeParts "ResponseResult {" "}"
     [ Concat [TextLeaf "responseValue = ", displayTree (responseValue value)]
     , Concat [TextLeaf "responseExecution = ", displayTree (responseExecution value)]
     , Concat [TextLeaf "responseWorktree = ", displayTree (responseWorktree value)]
     ]
 
 instance Display a => Display (ResponseState a) where
-  displayTree ResponsePending = TextLeaf "ResponsePending"
-  displayTree (ResponseCancellationPending reason) = treeParts "ResponseCancellationPending (" ")" [displayTree reason]
-  displayTree (ResponseReady value) = treeParts "ResponseReady (" ")" [displayTree value]
-  displayTree (ResponseUnavailable reason) = treeParts "ResponseUnavailable (" ")" [displayTree reason]
+  displayTree = displayTreePrec 0
+  displayTreePrec _ ResponsePending = TextLeaf "ResponsePending"
+  displayTreePrec precedence (ResponseCancellationPending reason) = application precedence "ResponseCancellationPending" [displayTreePrec 11 reason]
+  displayTreePrec precedence (ResponseReady value) = application precedence "ResponseReady" [displayTreePrec 11 value]
+  displayTreePrec precedence (ResponseUnavailable reason) = application precedence "ResponseUnavailable" [displayTreePrec 11 reason]
 
 instance Display a => Display (WatchState a) where
-  displayTree WatchPending = TextLeaf "WatchPending"
-  displayTree (WatchReady value) = treeParts "WatchReady (" ")" [displayTree value]
-  displayTree (WatchUnavailable reason) = treeParts "WatchUnavailable (" ")" [displayTree reason]
+  displayTree = displayTreePrec 0
+  displayTreePrec _ WatchPending = TextLeaf "WatchPending"
+  displayTreePrec precedence (WatchReady value) = application precedence "WatchReady" [displayTreePrec 11 value]
+  displayTreePrec precedence (WatchUnavailable reason) = application precedence "WatchUnavailable" [displayTreePrec 11 reason]
 
 instance Display a => Display (Settlement a) where
-  displayTree (ReplyAvailable value) = treeParts "ReplyAvailable (" ")" [displayTree value]
-  displayTree (ReplyUnavailable reason) = treeParts "ReplyUnavailable (" ")" [displayTree reason]
+  displayTree = displayTreePrec 0
+  displayTreePrec precedence (ReplyAvailable value) = application precedence "ReplyAvailable" [displayTreePrec 11 value]
+  displayTreePrec precedence (ReplyUnavailable reason) = application precedence "ReplyUnavailable" [displayTreePrec 11 reason]
 
 instance Display a => Display (ProgressState a) where
-  displayTree ProgressPending = TextLeaf "ProgressPending"
-  displayTree (ProgressUpdate cursor value) = treeParts "ProgressUpdate (" ")" [displayTree cursor, displayTree value]
-  displayTree ProgressClosed = TextLeaf "ProgressClosed"
-  displayTree (ProgressRejected reason) = treeParts "ProgressRejected (" ")" [displayTree reason]
+  displayTree = displayTreePrec 0
+  displayTreePrec _ ProgressPending = TextLeaf "ProgressPending"
+  displayTreePrec precedence (ProgressUpdate cursor value) = application precedence "ProgressUpdate" [displayTreePrec 11 cursor, displayTreePrec 11 value]
+  displayTreePrec _ ProgressClosed = TextLeaf "ProgressClosed"
+  displayTreePrec precedence (ProgressRejected reason) = application precedence "ProgressRejected" [displayTreePrec 11 reason]

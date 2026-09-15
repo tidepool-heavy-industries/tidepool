@@ -14,6 +14,15 @@ main = do
   infiniteLeavesAreProductive
   exhaustedBudgetDoesNotForceTheNextField
   legacyLeavesReportUnavailableDetail
+  applicationsParenthesizeOnlyAboveApplicationPrecedence
+
+applicationsParenthesizeOnlyAboveApplicationPrecedence :: IO ()
+applicationsParenthesizeOnlyAboveApplicationPrecedence = do
+  let application = Concat [TextLeaf "Just ", TextLeaf "5"]
+  assertEqual "an application at precedence 10 is bare" "Just 5"
+    (renderAll 64 (precedenceParens 10 application))
+  assertEqual "an application argument is parenthesized" "(Just 5)"
+    (renderAll 64 (precedenceParens 11 application))
 
 punctuationAndChildrenRespectBudget :: IO ()
 punctuationAndChildrenRespectBudget = do

@@ -5497,7 +5497,7 @@ mod tests {
         assert!(presentation.message().contains("Tabs must be clickable"));
         let rejected = dispatch_haskell_script(
             child.policy.as_ref(),
-            "attemptReply sessionReply (sessionInput + 32)",
+            "import Tidepool.Agent.Reply (attemptReply)\nattemptReply sessionReply (sessionInput + 32)",
         )
         .await;
         assert!(

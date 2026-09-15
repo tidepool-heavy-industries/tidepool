@@ -648,7 +648,7 @@ async fn failed_command_display_retains_result_without_reexecution() {
     assert!(!text.contains("Expand: inspectFull"), "{text}");
     let recovered = committed(&campaign, "Cmd.stdout (savedResult broken)").await;
     assert!(
-        recovered.to_string().contains("Right (result)"),
+        recovered.to_string().contains("Right result"),
         "{recovered}"
     );
     assert_eq!(backend.specs.lock().len(), 1);
@@ -990,7 +990,7 @@ async fn command_presentation_is_automatic_scoped_and_retains_quiet_results() {
     assert_eq!(text(0).matches("stdout ·").count(), 1, "{result}");
     assert!(!text(1).contains("stdout ·"), "{result}");
     assert_eq!(text(2).matches("stdout ·").count(), 1, "{result}");
-    assert!(text(3).contains("Right (result)"), "{result}");
+    assert!(text(3).contains("Right result"), "{result}");
     assert!(
         !text(4).contains("stdout ·"),
         "repeated await repeated output: {result}"

@@ -1,3 +1,4 @@
+import Tidepool.Agent.Reply (pollReply)
 let WatchReady incorporationResult = incorporation
 let Right (Incorporated amendment incorporatedHead incorporationChecks) = settledValue incorporationResult
 let acceptedDecision = AcceptedDecision semantics incorporatedHead "Preparation retains the boundary; visible UI acceptance remains separate." incorporationChecks
@@ -9,5 +10,4 @@ let changedQuestions = raiseQuestion newer openQuestions
 inspectFull (map questionKey remainingQuestions == ["product-gate"], resolveQuestion acceptedDecision changedQuestions == changedQuestions, raiseQuestion semantics firstQuestions == firstQuestions, taskSource assignment == incorporatedHead)
 let consumerLabel = "implement" :: Label
 (consumer, consumerQuestions) <- unfold (taskGroup assignment) (childWithProgress @WorkProgress @(Outcome Candidate) (withContext (selected taskContext) (solTask consumerLabel assignment)))
-import Tidepool.Agent.Reply (pollReply)
 pollReply sessionReply

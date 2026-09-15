@@ -6,6 +6,7 @@ module Tidepool.Inspection.Tree
   ( DisplayTree (..)
   , renderTree
   , treeParts
+  , precedenceParens
   ) where
 
 import Data.Text (Text)
@@ -43,6 +44,13 @@ renderTree allowance tree = go (max 0 allowance) [] False [tree]
             (prefix, excess) = T.splitAt left value
         in go (left - T.length prefix) (prefix : pieces)
              (unavailable || omitted || not (T.null excess)) rest
+
+-- | GHC's 'showParen' for a constructor application rendered at a
+-- 'showsPrec' precedence: parenthesized only above application precedence.
+precedenceParens :: Int -> DisplayTree -> DisplayTree
+precedenceParens precedence tree
+  | precedence > 10 = Concat [TextLeaf "(", tree, TextLeaf ")"]
+  | otherwise = tree
 
 treeParts :: Text -> Text -> [DisplayTree] -> DisplayTree
 treeParts opening closing children = Concat

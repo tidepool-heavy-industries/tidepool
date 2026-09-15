@@ -76,6 +76,11 @@ structuralDisplayCompilation effectsRoot = bracket temporary removeDirectoryRecu
     assertContains "custom instance field remains displayable" ".displayTree __tidepoolDisplayField2" finalized
     assertContains "function field uses its opaque Display instance"
       "displayTree (Functions __tidepoolDisplayField0)" finalized
+    assertContains "positional field renders as an application argument"
+      ".displayTreePrec 11 __tidepoolDisplayField0" finalized
+    assertContains "applied constructor is parenthesized as an argument"
+      ".precedenceParens __tidepoolPrecedence" finalized
+    assertContains "infix constructor precedence pattern" "(:+:) {} -> " finalized
     assertContains "higher-kinded unsupported field is not evaluated" "displayTree (Higher _)" finalized
     assertContains "symbolic datatype instance head" ".Display ((:+:) a b)" finalized
     assertContains "rank-n field remains opaque" "displayTree (Poly _)" finalized

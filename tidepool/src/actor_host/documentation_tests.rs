@@ -759,7 +759,7 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
         "state <- pollWatch retainedFailureReady\ninspectFull (fmap (either (const True) (const False) . settledValue) state)",
     )
     .await;
-    assert_eq!(unavailable["items"][1]["output"], "WatchReady (True)");
+    assert_eq!(unavailable["items"][1]["output"], "WatchReady True");
     let outer_unavailable = committed(
         root.as_ref(),
         "state <- pollWatch outerFailureReady\ninspectFull (guideIsUnavailable state)",
@@ -2211,10 +2211,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     .await;
     assert_eq!(replied["status"], "replied", "{replied}");
     let result = committed(reviewer.policy.as_ref(), "state <- pollWatch repaired\ninspectFull (fmap (either (const False) (const True) . settledValue) state)").await;
-    assert_eq!(
-        result["items"][1]["output"], "WatchReady (True)",
-        "{result}"
-    );
+    assert_eq!(result["items"][1]["output"], "WatchReady True", "{result}");
     committed(
         reviewer.policy.as_ref(),
         include_str!("../../../examples/shoal-workspace/.shoal/checks/project_design_question.hs"),
