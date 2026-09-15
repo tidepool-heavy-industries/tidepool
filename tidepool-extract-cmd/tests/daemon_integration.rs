@@ -900,7 +900,7 @@ fn check_j_retained_generation_transitions_through_warm_daemon(
             "both-1",
             &[producer_value_id.clone(), producer_fn_id.clone()],
         ),
-        ("fn-only", &[producer_fn_id.clone()]),
+        ("fn-only", std::slice::from_ref(&producer_fn_id)),
         (
             "both-2",
             &[producer_value_id.clone(), producer_fn_id.clone()],
