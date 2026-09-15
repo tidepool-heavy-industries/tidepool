@@ -180,7 +180,7 @@ impl ExtractRequest {
     /// headers, truncated fields, unknown tags, and trailing bytes are errors.
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
         let mut decoder = Decoder::new(bytes)?;
-        let field_count = decoder.u32()? as usize;
+        let field_count = decoder.count(1)?;
         let mut fields = Vec::with_capacity(field_count);
         for _ in 0..field_count {
             let tag = decoder.byte()?;
@@ -189,7 +189,7 @@ impl ExtractRequest {
                 2 => Field::OutputDir(decoder.os_string()?),
                 3 => Field::Target(decoder.os_string()?),
                 4 => {
-                    let count = decoder.u32()? as usize;
+                    let count = decoder.count(4)?;
                     let mut values = Vec::with_capacity(count);
                     for _ in 0..count {
                         values.push(decoder.string()?);
@@ -542,6 +542,15 @@ impl<'a> Decoder<'a> {
         Ok(u32::from_le_bytes(self.fixed()?))
     }
 
+    // Bound collection allocations by the minimum encoded size of each item.
+    fn count(&mut self, minimum_bytes: usize) -> Result<usize, ProtocolError> {
+        let count = self.u32()? as usize;
+        if count > (self.bytes.len() - self.cursor) / minimum_bytes {
+            return Err(ProtocolError::Truncated);
+        }
+        Ok(count)
+    }
+
     fn u64(&mut self) -> Result<u64, ProtocolError> {
         Ok(u64::from_le_bytes(self.fixed()?))
     }
@@ -865,6 +874,25 @@ impl std::error::Error for CliError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn impossible_collection_counts_reject_before_allocating() {
+        let mut fields = MAGIC.to_vec();
+        fields.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            ExtractRequest::decode(&fields).unwrap_err(),
+            ProtocolError::Truncated
+        );
+
+        let mut targets = MAGIC.to_vec();
+        targets.extend_from_slice(&1u32.to_le_bytes());
+        targets.push(4);
+        targets.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            ExtractRequest::decode(&targets).unwrap_err(),
+            ProtocolError::Truncated
+        );
+    }
 
     #[test]
     fn request_has_versioned_header_and_typed_integer() {

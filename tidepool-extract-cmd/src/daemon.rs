@@ -22,7 +22,8 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::net::UnixStream;
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, ExitStatus, Output, Stdio};
@@ -114,8 +115,8 @@ pub(crate) struct DaemonBinding {
 }
 
 /// Failure while attempting one daemon request. The point of failure carries
-/// settlement information. Connect, setup, write, and explicit rejection are
-/// known-unsubmitted; failures after the acceptance marker are never retried.
+/// settlement information. Only connect/setup failure or explicit rejection
+/// proves nonacceptance. A failed write or missing marker is indeterminate.
 #[derive(Debug)]
 pub(crate) enum DaemonError {
     /// The socket does not exist, or nothing is listening — the ordinary,
@@ -188,21 +189,10 @@ pub(crate) fn execute(
     req.extend_from_slice(REQUEST);
     req.extend_from_slice(epoch);
     req.extend_from_slice(&encode_request(cwd, argv));
-    stream
-        .write_all(&req)
-        .map_err(|error| DaemonError::NotAccepted(error.to_string()))?;
-    // The canonical server flushes the marker before beginning work. An
-    // orderly EOF without a preceding marker therefore proves no acceptance;
-    // timeouts/resets stay conservative because they can race delivery.
-    let state = match read_exact_or_crash(&mut stream, 1) {
-        Ok(state) => state[0],
-        Err(DaemonError::Crashed) => {
-            return Err(DaemonError::NotAccepted(
-                "daemon closed before acceptance".to_owned(),
-            ))
-        }
-        Err(error) => return Err(error),
-    };
+    stream.write_all(&req).map_err(DaemonError::Io)?;
+    // A missing marker (including orderly EOF) does not prove the peer did
+    // not accept. Only an explicit rejection permits rebinding after submission.
+    let state = read_exact_or_crash(&mut stream, 1)?[0];
     match state {
         ACCEPTED => decode_output(&mut stream)
             .map_err(|error| DaemonError::AfterAcceptance(Box::new(error))),
@@ -314,12 +304,10 @@ pub(crate) fn decode_output<R: Read>(r: &mut R) -> Result<Output, DaemonError> {
 
 pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u8, FrontendError> {
     let producer = prepared.producer_identity()?;
-    let mut worker = Worker::spawn(&prepared)?;
     let epoch = boot_epoch()?;
     if let Some(parent) = config.socket.parent() {
         fs::create_dir_all(parent).map_err(FrontendError::Io)?;
     }
-    remove_socket(&config.socket)?;
     let boot_stamp = config
         .watch_stamp
         .as_deref()
@@ -329,8 +317,9 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
     let rotate_after = config.rotate_after.unwrap_or(256);
     let rss_ceiling_mb = config.rss_ceiling_mb.unwrap_or(2048);
     let executable = std::env::current_exe().map_err(FrontendError::Io)?;
-    let listener =
-        std::os::unix::net::UnixListener::bind(&config.socket).map_err(FrontendError::Io)?;
+    let socket = OwnedSocket::bind(&config.socket)?;
+    let listener = &socket.listener;
+    let mut worker = Worker::spawn(&prepared)?;
     let run_id = config.run_id.as_deref().unwrap_or("standalone");
     tracing::info!(
         run_id,
@@ -361,14 +350,11 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
             if connection.read_exact(&mut kind).is_err() {
                 continue;
             }
-            if stamp_changed(config, &boot_stamp)? {
-                if &kind == REQUEST {
-                    let _ = write_rejected(&mut connection, "watched deployment changed");
-                }
-                remove_socket(&config.socket)?;
-                break;
-            }
             if &kind == PREFLIGHT {
+                if stamp_changed(config, &boot_stamp)? {
+                    socket.retire()?;
+                    break;
+                }
                 let mut response = Vec::with_capacity(72);
                 response.extend_from_slice(PREFLIGHT_RESPONSE);
                 response.extend_from_slice(&producer);
@@ -409,7 +395,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
             // transport failure is therefore indeterminate and never replayed.
             if stamp_changed(config, &boot_stamp)? {
                 let _ = write_rejected(&mut connection, "watched deployment changed");
-                remove_socket(&config.socket)?;
+                socket.retire()?;
                 break;
             }
             if connection.write_all(&[ACCEPTED]).is_err() || connection.flush().is_err() {
@@ -440,7 +426,16 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                         %error,
                         "compiler request failed"
                     );
-                    return Err(error);
+                    // The accepted request stays indeterminate; do not replay it.
+                    // Drop its connection before replacing the failed worker.
+                    drop(connection);
+                    worker.abort();
+                    if !config.persistent {
+                        return Err(error);
+                    }
+                    worker = Worker::spawn(&prepared)?;
+                    served = 0;
+                    continue;
                 }
             };
             served += 1;
@@ -458,7 +453,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                     worker = Worker::spawn(&prepared)?;
                     served = 0;
                 } else {
-                    remove_socket(&config.socket)?;
+                    socket.retire()?;
                     break;
                 }
             }
@@ -466,8 +461,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
         Ok(0)
     })();
 
-    drop(listener);
-    let _ = fs::remove_file(&config.socket);
+    drop(socket);
     worker.shutdown();
     result
 }
@@ -507,11 +501,103 @@ fn boot_epoch() -> Result<[u8; 32], FrontendError> {
     Ok(epoch)
 }
 
-fn remove_socket(path: &Path) -> Result<(), FrontendError> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(FrontendError::Io(error)),
+/// Owns only the socket inode created by this bind. Existing paths are never
+/// removed on startup, and retirement cannot unlink a replacement endpoint.
+struct OwnedSocket {
+    listener: UnixListener,
+    path: std::path::PathBuf,
+    identity: (u64, u64),
+}
+
+impl OwnedSocket {
+    fn bind(path: &Path) -> Result<Self, FrontendError> {
+        let listener = UnixListener::bind(path).map_err(|error| {
+            if error.kind() == io::ErrorKind::AddrInUse {
+                FrontendError::Daemon(format!(
+                    "compiler socket {} already exists; stop its owner or remove the stale path before starting",
+                    path.display()
+                ))
+            } else {
+                FrontendError::Io(error)
+            }
+        })?;
+        let metadata = fs::symlink_metadata(path).map_err(FrontendError::Io)?;
+        Ok(Self {
+            listener,
+            path: path.to_owned(),
+            identity: (metadata.dev(), metadata.ino()),
+        })
+    }
+
+    fn unlink(&self) -> io::Result<()> {
+        match fs::symlink_metadata(&self.path) {
+            Ok(metadata) if (metadata.dev(), metadata.ino()) == self.identity => {
+                fs::remove_file(&self.path)
+            }
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn retire(&self) -> Result<(), FrontendError> {
+        self.unlink().map_err(FrontendError::Io)?;
+        self.listener
+            .set_nonblocking(true)
+            .map_err(FrontendError::Io)?;
+        // Bound shutdown even when a queued client sends a partial request.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let (mut connection, _) = match self.listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(FrontendError::Io(error)),
+            };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            connection
+                .set_write_timeout(Some(remaining.min(Duration::from_millis(100))))
+                .map_err(FrontendError::Io)?;
+            let mut reader = DeadlineReader {
+                stream: &mut connection,
+                deadline: deadline.min(Instant::now() + Duration::from_millis(100)),
+            };
+            let mut header = [0; 40];
+            if reader.read_exact(&mut header).is_ok()
+                && &header[..8] == REQUEST
+                && read_request(&mut reader).is_ok()
+            {
+                let _ = write_rejected(&mut connection, "daemon rotating");
+            }
+        }
+        Ok(())
+    }
+}
+
+struct DeadlineReader<'a> {
+    stream: &'a mut UnixStream,
+    deadline: Instant,
+}
+
+impl Read for DeadlineReader<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "rotation drain deadline",
+            ));
+        }
+        self.stream.set_read_timeout(Some(remaining))?;
+        self.stream.read(bytes)
+    }
+}
+
+impl Drop for OwnedSocket {
+    fn drop(&mut self) {
+        let _ = self.unlink();
     }
 }
 
@@ -534,7 +620,8 @@ pub(crate) fn normalize_worker_argv(argv: Vec<OsString>) -> Result<Vec<OsString>
 pub(crate) fn read_request(
     stream: &mut impl Read,
 ) -> Result<(std::path::PathBuf, Vec<OsString>), FrontendError> {
-    let cwd = OsString::from_vec(read_request_frame(stream)?).into();
+    let mut remaining = MAX_REQUEST_FRAME_BYTES;
+    let cwd = OsString::from_vec(read_request_frame(stream, &mut remaining)?).into();
     let count = read_u32(stream).map_err(daemon_frontend_error)?;
     if count > MAX_REQUEST_ARGS {
         return Err(FrontendError::Daemon(format!(
@@ -543,18 +630,25 @@ pub(crate) fn read_request(
     }
     let mut argv = Vec::with_capacity(count as usize);
     for _ in 0..count {
-        argv.push(OsString::from_vec(read_request_frame(stream)?));
+        argv.push(OsString::from_vec(read_request_frame(
+            stream,
+            &mut remaining,
+        )?));
     }
     Ok((cwd, argv))
 }
 
-fn read_request_frame(stream: &mut impl Read) -> Result<Vec<u8>, FrontendError> {
+fn read_request_frame(
+    stream: &mut impl Read,
+    remaining: &mut u32,
+) -> Result<Vec<u8>, FrontendError> {
     let length = read_u32(stream).map_err(daemon_frontend_error)?;
-    if length > MAX_REQUEST_FRAME_BYTES {
+    if length > *remaining {
         return Err(FrontendError::Daemon(format!(
-            "daemon request frame is {length} bytes; maximum is {MAX_REQUEST_FRAME_BYTES}"
+            "daemon request frame is {length} bytes; remaining request budget is {remaining}"
         )));
     }
+    *remaining -= length;
     read_exact_or_crash(stream, length as usize).map_err(daemon_frontend_error)
 }
 
@@ -650,6 +744,12 @@ impl Worker {
         decode_response(&mut self.stdout).map_err(daemon_frontend_error)
     }
 
+    fn abort(&mut self) {
+        drop(self.stdin.take());
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
     pub(crate) fn shutdown(&mut self) {
         drop(self.stdin.take());
         if self.child.wait().is_err() {
@@ -702,6 +802,79 @@ mod tests {
         fn text(&self) -> String {
             String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
         }
+    }
+
+    #[test]
+    fn socket_ownership_preserves_existing_and_replacement_endpoints() {
+        let path = test_socket("ownership");
+        let owner = OwnedSocket::bind(&path).unwrap();
+        assert!(OwnedSocket::bind(&path).is_err());
+        assert!(UnixStream::connect(&path).is_ok());
+        owner.unlink().unwrap();
+        let replacement = OwnedSocket::bind(&path).unwrap();
+        drop(owner);
+        assert!(UnixStream::connect(&path).is_ok());
+        drop(replacement);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn rotation_explicitly_rejects_queued_requests() {
+        let path = test_socket("queued-rotation");
+        let socket = OwnedSocket::bind(&path).unwrap();
+        let mut client = UnixStream::connect(&path).unwrap();
+        client.write_all(REQUEST).unwrap();
+        client.write_all(&[3; 32]).unwrap();
+        client
+            .write_all(&encode_request(Path::new("/tmp"), &["Expr.hs".into()]))
+            .unwrap();
+        socket.retire().unwrap();
+        assert!(!path.exists());
+        assert_eq!(read_exact_or_crash(&mut client, 1).unwrap(), [REJECTED]);
+        assert_eq!(read_frame(&mut client).unwrap(), b"daemon rotating");
+    }
+
+    #[test]
+    fn rotation_does_not_wait_forever_for_partial_clients() {
+        let path = test_socket("partial-rotation");
+        let socket = OwnedSocket::bind(&path).unwrap();
+        let mut client = UnixStream::connect(&path).unwrap();
+        client.write_all(REQUEST).unwrap();
+        let started = Instant::now();
+        socket.retire().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn lost_marker_before_acceptance_is_indeterminate() {
+        let path = test_socket("missing-marker");
+        let socket = OwnedSocket::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = socket.listener.accept().unwrap();
+            let mut header = [0; 40];
+            connection.read_exact(&mut header).unwrap();
+            read_request(&mut connection).unwrap();
+        });
+        let error = execute(&path, &[1; 32], Path::new("/tmp"), &["request".into()]).unwrap_err();
+        server.join().unwrap();
+        assert!(!error.is_not_accepted());
+        assert!(!error.was_accepted());
+        assert!(matches!(error, DaemonError::Crashed));
+    }
+
+    #[test]
+    fn request_frames_share_one_allocation_budget() {
+        let mut remaining = 3;
+        let mut wire = Vec::new();
+        push_frame(&mut wire, b"abc");
+        push_frame(&mut wire, b"d");
+        let mut cursor = Cursor::new(wire);
+        assert_eq!(
+            read_request_frame(&mut cursor, &mut remaining).unwrap(),
+            b"abc"
+        );
+        assert!(read_request_frame(&mut cursor, &mut remaining).is_err());
+        assert_eq!(remaining, 0);
     }
 
     #[test]

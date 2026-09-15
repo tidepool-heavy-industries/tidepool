@@ -327,6 +327,57 @@ mod tests {
     static ENV: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn persistent_daemon_recovers_worker_crashes_without_replaying_requests() {
+        use std::time::{Duration, Instant};
+
+        let dir = std::env::temp_dir().join(format!("tp-crash-worker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("daemon.sock");
+        let stamp = dir.join("stamp");
+        std::fs::write(&stamp, b"boot").unwrap();
+        // The test executable exits on the worker-only argument. It cannot
+        // emit a valid response; every accepted request exercises child failure.
+        let selection = std::env::current_exe().unwrap();
+        let prepared = PreparedWorker {
+            file: File::open(&selection).unwrap(),
+            bytes: std::fs::read(&selection).unwrap(),
+            selection,
+            ghc_libdir: "unused".into(),
+        };
+        let config = DaemonConfig {
+            socket: socket.clone(),
+            rotate_after: None,
+            rss_ceiling_mb: None,
+            watch_stamp: Some(stamp.clone()),
+            persistent: true,
+            run_id: None,
+            log_path: None,
+        };
+        let server = std::thread::spawn(move || crate::daemon::serve(&config, prepared));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let binding = loop {
+            if let Ok(binding) = crate::daemon::preflight(&socket) {
+                break binding;
+            }
+            assert!(Instant::now() < deadline, "daemon did not become ready");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        for _ in 0..2 {
+            let error = crate::daemon::execute(&socket, &binding.epoch, &dir, &["Expr.hs".into()])
+                .unwrap_err();
+            assert!(error.was_accepted());
+            assert!(!error.is_not_accepted());
+            let next = crate::daemon::preflight(&socket).unwrap();
+            assert_eq!(next.epoch, binding.epoch);
+        }
+        std::fs::write(&stamp, b"changed").unwrap();
+        assert!(crate::daemon::preflight(&socket).is_err());
+        assert_eq!(server.join().unwrap().unwrap(), 0);
+        assert!(!socket.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn relocation_resolves_worker_from_original_frontend() {
         let _env = ENV.lock().unwrap();
         let previous = std::env::var_os(WORKER_ENV);
