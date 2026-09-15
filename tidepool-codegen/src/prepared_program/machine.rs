@@ -349,6 +349,13 @@ impl<'code> PreparedMachine<'code> {
     /// top-slot base and this machine's descriptor interner, so every
     /// constructor identity an installed program already declared resolves
     /// to the same descriptor address the existing cells carry.
+    ///
+    /// The base is the compile's reservation. Programs compiled before any of
+    /// them installs hold the same reservation: the first install consumes
+    /// it, and every other is [`ExecutionError::TopSlotBaseMismatch`] before
+    /// any interner, table or root side effect, so a descriptor minted by a
+    /// stale compile never reaches generated dispatch. Recompile against the
+    /// machine as it is now.
     pub fn compile_for_install(
         &mut self,
         linked: &tidepool_repr::execution_schema::LinkedProgram,
@@ -4323,6 +4330,76 @@ mod tests {
                 if *identity == testing::identity("S3Import", "Field") => {}
             Err(other) => panic!("expected DescriptorShape, got {other:?}"),
             Ok(_) => panic!("a differently-declared Field must not compile against A's interner"),
+        }
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// Two compiles outstanding at once mint separate descriptors for a
+    /// constructor identity new to the machine. Only one may install; the
+    /// other is a typed stale reservation, never a silently unshared
+    /// descriptor baked into generated dispatch.
+    #[test]
+    fn an_outstanding_compile_is_refused_after_another_consumes_its_reservation() {
+        let (mut machine, _program_a) = PreparedMachine::new(
+            s3_field_producer_program(TopSlotBase::ZERO),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+                top_slots: 16,
+            },
+        )
+        .expect("A installs");
+        let linked = || {
+            let mut wire = testing::wire_program();
+            wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+            wire.constructors.push(ConstructorDecl {
+                identity: testing::identity("StaleReservation", "Unit"),
+                family: testing::identity("StaleReservation", "Unit"),
+                host_id: tidepool_repr::DataConId(961),
+                result_rep: RuntimeRep::LiftedRef,
+                tag: 1,
+                family_size: 1,
+                field_reps: vec![],
+                strict_fields: vec![],
+                layout: CheckedLayout {
+                    fields: vec![],
+                    alignment: 1,
+                    payload_size: 0,
+                    root_mask: vec![],
+                },
+            });
+            wire.expressions.nodes[0] = ExprFrame::Construct {
+                constructor: ConstructorId(0),
+                fields: vec![],
+            };
+            let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+                unreachable!()
+            };
+            top.binding.rhs = HeapRhs::Thunk {
+                signature: SignatureId(0),
+                update: UpdatePolicy::Memoize,
+                captures: vec![],
+                body: 0,
+            };
+            let prepared = testing::prepare(wire).expect("reservation fixture");
+            link_program(prepared, &MachineImports::default()).expect("reservation fixture links")
+        };
+        let reserved = machine.next_top_slot_base();
+        let first = machine
+            .compile_for_install(&linked())
+            .expect("first outstanding compile");
+        let second = machine
+            .compile_for_install(&linked())
+            .expect("second outstanding compile");
+        machine
+            .install_program(first, ImportBindings::new())
+            .expect("the first compile consumes the reservation");
+        match machine.install_program(second, ImportBindings::new()) {
+            Err(ExecutionError::TopSlotBaseMismatch { expected, found }) => {
+                assert_eq!(found, reserved);
+                assert_eq!(expected, machine.next_top_slot_base());
+            }
+            Err(other) => panic!("expected a stale reservation, got {other:?}"),
+            Ok(_) => panic!("a stale compile must not install"),
         }
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }

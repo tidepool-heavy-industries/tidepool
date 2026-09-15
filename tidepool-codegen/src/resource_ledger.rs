@@ -207,7 +207,16 @@ impl ResourceLedger {
         self.handles.holds_root(slot)
     }
 
+    /// ROOT is the machine's own scope, not a closable realm: its handles,
+    /// frames and cancellation flag live until the machine is torn down.
+    /// Closing it releases nothing, whichever engine or session asks.
     pub(crate) fn close_realm(&mut self, realm: RealmId) -> ClosedRealm {
+        if realm == RealmId::ROOT {
+            return ClosedRealm {
+                frames: Vec::new(),
+                handles: Vec::new(),
+            };
+        }
         let frame_ids: Vec<_> = self
             .continuations
             .iter()
@@ -250,6 +259,17 @@ mod tests {
         let closed = ledger.close_realm(a);
         assert!(closed.frames.is_empty());
         assert!(closed.handles.is_empty());
+        assert_eq!(ledger.counts().cancellation_scopes, 1);
+    }
+
+    #[test]
+    fn the_root_realm_is_not_closable() {
+        let mut ledger = ResourceLedger::default();
+        let root = ledger.cancel_flag(RealmId::ROOT);
+        let closed = ledger.close_realm(RealmId::ROOT);
+        assert!(closed.frames.is_empty());
+        assert!(closed.handles.is_empty());
+        assert!(Arc::ptr_eq(&root, &ledger.cancel_flag(RealmId::ROOT)));
         assert_eq!(ledger.counts().cancellation_scopes, 1);
     }
 

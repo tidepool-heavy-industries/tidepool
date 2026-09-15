@@ -3779,6 +3779,29 @@ mod tests {
     }
 
     #[test]
+    fn closing_the_root_realm_keeps_root_handles_and_roots() {
+        use tidepool_repr::types::Literal;
+        use tidepool_repr::{CoreFrame, TreeBuilder};
+        let mut builder = TreeBuilder::new();
+        builder.push(CoreFrame::Lit(Literal::LitInt(1)));
+        let mut machine =
+            JitEffectMachine::compile_session(&builder.build(), &DataConTable::new(), 4096)
+                .unwrap();
+        let mut cell = Box::new(std::ptr::null_mut());
+        let slot = unsafe { crate::old_space::RootSlot::new(&mut *cell) };
+        machine.machine_state.register_persistent_root(slot.addr());
+        let handle = machine.mint_handle_from_root(slot, RealmId::ROOT).unwrap();
+
+        assert_eq!(machine.close_realm(RealmId::ROOT), (0, 0));
+        assert_eq!(machine.value_handle_count(), 1);
+        assert_eq!(machine.persistent_roots_count(), 1);
+
+        assert!(machine.discard_handle(handle));
+        assert_eq!(machine.persistent_roots_count(), 0);
+        drop(machine);
+    }
+
+    #[test]
     fn late_prepared_collection_failure_fences_readers_and_retains_both_spaces() {
         use tidepool_heap::execution_descriptor::{DescriptorState, ObjectDescriptor};
         use tidepool_repr::execution_schema::{
