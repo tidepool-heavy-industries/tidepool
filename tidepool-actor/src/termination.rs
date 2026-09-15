@@ -165,6 +165,12 @@ impl RetainedActorExit {
             if let Some(terminal) = self.requested_shutdown() {
                 return terminal;
             }
+            #[allow(
+                clippy::expect_used,
+                reason = "the corresponding watch::Sender lives in self.state \
+                          alongside this receiver, so it cannot be dropped \
+                          while this &self borrow is held across the await"
+            )]
             changed
                 .changed()
                 .await

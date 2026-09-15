@@ -2,7 +2,6 @@
 
 use tidepool_actor::{
     ActorDescriptor, ActorPlacement, ActorWorkbenchSource, LocalResidentDeployment, ResidentForest,
-    ResidentToolEndpoint,
 };
 use tidepool_bridge::Value;
 use tidepool_codegen::scope::ScopeId;

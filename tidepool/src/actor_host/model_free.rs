@@ -75,7 +75,7 @@ impl ModelFreeSession {
             _program: program,
             hosted,
             deployments,
-            root_installation,
+            root_installation: *root_installation,
         })
     }
 

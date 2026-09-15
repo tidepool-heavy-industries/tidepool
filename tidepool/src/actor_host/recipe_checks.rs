@@ -288,7 +288,7 @@ impl Driver {
                         gate.mark_ready()?;
                     }
                     self.installations
-                        .insert(installation.actor.identity(), installation);
+                        .insert(installation.actor.identity(), *installation);
                 } else if matches(&event) {
                     return Ok(event);
                 } else if matches!(

@@ -79,6 +79,14 @@ impl WorkbenchExecutionControl {
     }
 
     pub(crate) fn arm_sleep(&self) {
+        #[allow(
+            clippy::expect_used,
+            reason = "arm_sleep is called once per workbench execution's own \
+                      sleep boundary and this control is not shared across \
+                      concurrent executions; a failed exchange means the \
+                      caller's own single-execution invariant broke, which \
+                      should panic rather than be silently ignored"
+        )]
         self.phase
             .compare_exchange(
                 WORKBENCH_IDLE,
@@ -325,12 +333,16 @@ pub trait ResidentToolEndpoint: Send + Sync {
     }
 }
 
+/// The single in-flight workbench execution this client is currently
+/// dispatching to, if any, alongside the control handle used to steer it.
+type ActiveWorkbenchSlot =
+    Arc<parking_lot::Mutex<Option<(WorkbenchExecutionId, Arc<WorkbenchExecutionControl>)>>>;
+
 #[derive(Clone)]
 pub(crate) struct ResidentToolClient {
     actor: crate::LocalActorRef,
     dispatch_gate: Arc<tokio::sync::Mutex<()>>,
-    active_workbench:
-        Arc<parking_lot::Mutex<Option<(WorkbenchExecutionId, Arc<WorkbenchExecutionControl>)>>>,
+    active_workbench: ActiveWorkbenchSlot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

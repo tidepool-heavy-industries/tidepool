@@ -1353,7 +1353,7 @@ impl RequestRegistry {
                 state
                     .requests
                     .get_mut(&dependency.request)
-                    .unwrap()
+                    .ok_or(ReplyError::Stale)?
                     .notify_owner = false;
             }
         }

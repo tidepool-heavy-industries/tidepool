@@ -2248,7 +2248,7 @@ async fn run_interactive_applications(
                                     }
                                 };
                                 launch_interactive_application(
-                                    installation,
+                                    *installation,
                                     context,
                                     cancelled,
                                     InteractiveInheritance { thread: fork_parent_thread, build_snapshot },

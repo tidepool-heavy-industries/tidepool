@@ -160,10 +160,11 @@ where
                 "replacement successor is absent from its directory".into(),
             )
         })?;
-        let transfer = self
-            .replacement_transfer
-            .take()
-            .expect("prepared replacement owns its transfer");
+        let transfer = self.replacement_transfer.take().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "replacement transfer requested before a prepared replacement was admitted".into(),
+            )
+        })?;
         let retained = RetainedHandler {
             placement: self.descriptor.placement(),
             _standing: std::mem::replace(&mut self.standing, ResidentStanding::Terminal),

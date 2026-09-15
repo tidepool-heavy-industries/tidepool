@@ -1112,6 +1112,12 @@ enum IntrospectionNameScope {
 }
 
 #[derive(DeriveFromCore)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "variant names are the wire truth: FromCore matches them \
+              verbatim against Haskell constructor names, so the shared \
+              `Name` suffix must stay exactly as spelled, not be trimmed"
+)]
 enum IntrospectionNameNamespace {
     AnyName,
     ValueName,
@@ -2168,7 +2174,7 @@ where
                         type_modules: &type_modules,
                     },
                     block,
-                    ready,
+                    *ready,
                     display_budget,
                 )
             })
@@ -2869,7 +2875,7 @@ where
         source,
         type_modules,
         &metadata,
-        &[metadata.clone()],
+        std::slice::from_ref(&metadata),
     )?;
     let alias_block = ParsedBlock {
         ordinal: 1,
@@ -5695,7 +5701,7 @@ pub(crate) struct PreparedCellItem {
 }
 
 enum PreparedCellStep {
-    Executable(ReadyBlock),
+    Executable(Box<ReadyBlock>),
     Declaration {
         generation: tidepool_repr::Generation,
         binders: Vec<String>,
@@ -5782,13 +5788,13 @@ where
                     )
                 })?;
                 result.push(PreparedCellItem {
-                    ready: PreparedCellStep::Executable(ReadyBlock {
+                    ready: PreparedCellStep::Executable(Box::new(ReadyBlock {
                         result: TurnResult::Decl(staged.receipt().clone()),
                         generation: compile_view.next_value_generation(),
                         declaration_source: item.source.clone(),
                         declaration_imports: declaration_imports.clone(),
                         observation: None,
-                    }),
+                    })),
                 });
                 continue;
             }
@@ -5839,16 +5845,18 @@ where
                 }
             }
             result.push(PreparedCellItem {
-                ready: PreparedCellStep::Executable(ready),
+                ready: PreparedCellStep::Executable(Box::new(ready)),
             });
         }
         let referenced = result
             .iter()
             .flat_map(|item| match &item.ready {
-                PreparedCellStep::Executable(ReadyBlock {
-                    result: TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. },
-                    ..
-                }) => tidepool_repr::free_vars::free_vars(&compiled.expr),
+                PreparedCellStep::Executable(step) => match &step.result {
+                    TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => {
+                        tidepool_repr::free_vars::free_vars(&compiled.expr)
+                    }
+                    _ => Vec::new(),
+                },
                 _ => Vec::new(),
             })
             .collect::<Vec<_>>();

@@ -89,7 +89,7 @@ pub enum LocalResidentDeployment {
     CommandBackend(Arc<crate::command_jobs::CommandBackendRequest>),
     NotificationSend(Arc<crate::NotificationSend>),
     NotificationPoll(Arc<crate::NotificationPoll>),
-    PolicyInstalled(LocalResidentInstallation),
+    PolicyInstalled(Box<LocalResidentInstallation>),
     /// A resident program opened another typed session in an already-running
     /// interactive application. The message is an ordinary User activation;
     /// the live value itself is mounted as `sessionInput` in Haskell.
@@ -271,6 +271,12 @@ enum RetainedActorInput {
 }
 
 #[derive(Clone, tidepool_bridge_derive::ToCore)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "variant names are the wire truth: ToCore encodes them verbatim \
+              as the matching Haskell constructor names, so the shared \
+              `Actor` prefix must stay exactly as spelled, not be trimmed"
+)]
 enum ActorInputOrigin {
     ActorStartup,
     ActorMessageFrom((i64, i64)),
@@ -553,6 +559,12 @@ impl WorkbenchExecutions {
         let Some(record) = self.0.get(&WorkbenchReplayKey::new(execution, invocation)) else {
             return Ok(None);
         };
+        #[allow(
+            clippy::expect_used,
+            reason = "every record enters this journal through `begin`, whose \
+                      only caller stores it precisely when `request.execution_id()` \
+                      was already Some; no path inserts a record without one"
+        )]
         let comparable = request.clone().with_execution_id(
             record
                 .request
@@ -613,6 +625,12 @@ impl WorkbenchExecutions {
             None => crate::WorkbenchCancellationOutcome::UnknownEvaluation { execution },
             Some(record) => match &record.state {
                 WorkbenchExecutionState::Unconfirmed => {
+                    #[allow(
+                        clippy::expect_used,
+                        reason = "every record enters this journal through `begin`, whose \
+                                  only caller stores it precisely when `request.execution_id()` \
+                                  was already Some; no path inserts a record without one"
+                    )]
                     crate::WorkbenchCancellationOutcome::Unconfirmed {
                         execution: record
                             .request
@@ -762,7 +780,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let _ = self
             .environment
             .deployments
-            .send(LocalResidentDeployment::PolicyInstalled(installation));
+            .send(LocalResidentDeployment::PolicyInstalled(Box::new(
+                installation,
+            )));
     }
 
     fn notification_supervisor(&self, mut next: Option<ActorRef>) -> Option<ActorRef> {
@@ -1888,6 +1908,12 @@ where
                     } else if !actor_can_observe(context.actor, scope, &records) {
                         ObservationShareResult::Unauthorized
                     } else {
+                        #[allow(
+                            clippy::expect_used,
+                            reason = "the RecipientUnavailable branch above already \
+                                      returned unless records.get(&recipient) is Some, \
+                                      and `records` is the same lock held throughout"
+                        )]
                         records
                             .get_mut(&recipient)
                             .expect("checked exact recipient")
@@ -3598,6 +3624,12 @@ where
                                     if let crate::request::sources::SourceTarget::Command(key) =
                                         source.target
                                     {
+                                        #[allow(
+                                            clippy::expect_used,
+                                            reason = "self.source_connections was set to \
+                                                      Some(..) immediately above, with no \
+                                                      intervening code that clears it"
+                                        )]
                                         self.source_connections
                                             .as_mut()
                                             .expect("attached sources")
@@ -3615,6 +3647,12 @@ where
                                     }
                                 }
                                 for (slot, actor) in lifecycle {
+                                    #[allow(
+                                        clippy::expect_used,
+                                        reason = "self.source_connections was set to \
+                                                  Some(..) immediately above, with no \
+                                                  intervening code that clears it"
+                                    )]
                                     self.source_connections
                                         .as_mut()
                                         .expect("attached source set")

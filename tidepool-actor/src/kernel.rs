@@ -148,7 +148,7 @@ pub type KernelWorkbenchReply = Result<WorkbenchResponse, KernelInvocationFailur
 /// path.
 pub enum KernelMessage {
     Replace {
-        definition: crate::ActorReplacementDefinition,
+        definition: Box<crate::ActorReplacementDefinition>,
         reply: RpcReplyPort<Result<LocalActorRef, KernelInvocationFailure>>,
     },
     Drain {
@@ -320,7 +320,7 @@ impl MailboxAdmission {
     pub(crate) fn close_with_fence(
         &self,
         address: &RactorRef<KernelMessage>,
-    ) -> Result<(), ractor::MessagingErr<KernelMessage>> {
+    ) -> Result<(), Box<ractor::MessagingErr<KernelMessage>>> {
         self.fence(address, KernelMessage::DrainFence)
     }
 
@@ -328,9 +328,9 @@ impl MailboxAdmission {
         &self,
         address: &RactorRef<KernelMessage>,
         fence: KernelMessage,
-    ) -> Result<(), ractor::MessagingErr<KernelMessage>> {
+    ) -> Result<(), Box<ractor::MessagingErr<KernelMessage>>> {
         let mut admission = self.0.lock();
-        address.send_message(fence)?;
+        address.send_message(fence).map_err(Box::new)?;
         *admission = AdmissionState::Closed;
         Ok(())
     }
@@ -391,7 +391,7 @@ impl LocalActorRef {
         let (reply, receive) = tokio::sync::oneshot::channel();
         self.address
             .send_message(KernelMessage::Replace {
-                definition,
+                definition: Box::new(definition),
                 reply: reply.into(),
             })
             .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;

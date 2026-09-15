@@ -1821,7 +1821,7 @@ async fn next_project_activation(
                     }) =>
                 {
                     let (installation, custody) = worker.unwrap();
-                    return (installation, custody, activation);
+                    return (*installation, custody, activation);
                 }
                 LocalResidentDeployment::WatchChanged { notification } => {
                     if let tidepool_actor::WatchTransition::RouteFailed { detail } =

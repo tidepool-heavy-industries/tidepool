@@ -52,7 +52,7 @@ async fn research_child(
                         .clone()
                         .expect("bootstrap installed custody");
                     child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
-                    return (child, binding);
+                    return (*child, binding);
                 }
                 LocalResidentDeployment::Retired { actor, terminal } => {
                     panic!("{actor:?} retired: {terminal:?}")

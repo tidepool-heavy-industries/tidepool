@@ -222,6 +222,13 @@ impl KernelContext {
     }
 
     pub(crate) async fn wait_requested_shutdown(&self) -> ActorTerminal {
+        #[allow(
+            clippy::expect_used,
+            reason = "called on this actor's own KernelContext while it is \
+                      still running its turn loop; forget_terminal only ever \
+                      removes an entry already observed terminal, so a live \
+                      actor's own identity always resolves in its directory"
+        )]
         self.directory
             .resolve(self.identity)
             .expect("running actor remains in its local directory")
@@ -828,7 +835,7 @@ where
             }
             KernelMessage::Replace { definition, reply } => {
                 if state.replacement.is_some() {
-                    let failure = match state.behavior.discard_replacement(definition).await {
+                    let failure = match state.behavior.discard_replacement(*definition).await {
                         Ok(()) => crate::KernelInvocationFailure::Rejected {
                             actor: state.context.identity,
                             detail: "actor replacement is already in progress".into(),
@@ -842,7 +849,7 @@ where
                     };
                     let _ = reply.send(Err(failure));
                 } else {
-                    match state.behavior.replace(&state.context, definition).await {
+                    match state.behavior.replace(&state.context, *definition).await {
                         Ok(successor) => {
                             state.replacement = Some(PendingReplacement {
                                 successor,

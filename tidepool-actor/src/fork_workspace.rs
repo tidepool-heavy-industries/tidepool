@@ -52,16 +52,19 @@ pub trait ForkWorkspaceCustody: std::any::Any + Send + Sync {
     fn process_may_exist(&self);
 }
 
+/// Installer invoked once, on the exact successor incarnation, to bind
+/// retained host resources and produce the custody handle for that actor.
+type ForkWorkspaceInstall =
+    dyn FnOnce(ActorRef) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError>
+        + Send
+        + Sync;
+
 /// Owned preparation travels into child bootstrap. Its installer may retain
 /// host resources that cannot be reconstructed from the model-facing receipt.
 /// Installation consumes the preparation and binds it to one exact incarnation.
 pub struct PreparedForkWorkspace {
     handle: WtWorktreeHandle,
-    install: Box<
-        dyn FnOnce(ActorRef) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError>
-            + Send
-            + Sync,
-    >,
+    install: Box<ForkWorkspaceInstall>,
 }
 
 impl PreparedForkWorkspace {

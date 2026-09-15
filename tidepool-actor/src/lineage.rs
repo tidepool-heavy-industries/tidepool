@@ -662,12 +662,12 @@ impl ForkGroupRegistry {
             .lock()
             .groups
             .iter()
-            .filter_map(|(id, group)| {
-                (group.owner == owner
+            .filter(|(_, group)| {
+                group.owner == owner
                     && group.completion_boundary.as_ref() == Some(boundary)
-                    && *group.phase.borrow() == ForkGroupPhase::Ready)
-                    .then(|| (*id, group.children.clone()))
+                    && *group.phase.borrow() == ForkGroupPhase::Ready
             })
+            .map(|(id, group)| (*id, group.children.clone()))
             .collect();
         groups.sort_by_key(|(id, _)| id.0);
         groups

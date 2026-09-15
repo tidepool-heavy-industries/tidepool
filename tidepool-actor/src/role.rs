@@ -263,6 +263,12 @@ impl EffectiveRole {
     /// A descendant cannot refresh an exhausted research allowance by forking again.
     #[must_use]
     pub fn attenuate_child(&self, child: Self) -> Self {
+        #[allow(
+            clippy::expect_used,
+            reason = "child_budget's only fallible step lives inside the \
+                      `requested.map(..)` closure, which never runs when \
+                      `requested` is None, so this exact call can't fail"
+        )]
         self.child_budget(child, None)
             .expect("an omitted budget is valid")
     }
