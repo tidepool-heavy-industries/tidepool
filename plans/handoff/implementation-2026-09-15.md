@@ -4,6 +4,9 @@ This update supersedes the handoff's open-decision list and fix status. The
 approved milestone closes safety/compiler blockers and bounded adjacent
 defects; it does not complete the production STG cutover.
 
+Review of this milestone's commits, with the blocking fixes that precede
+acceptance: [review-2026-09-15.md](review-2026-09-15.md).
+
 ## Start here after switching subscriptions
 
 Snapshot: **2026-09-15 19:52 UTC (12:52 PDT)**. Branch

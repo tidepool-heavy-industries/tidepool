@@ -1,8 +1,8 @@
 # STG cutover handoff (2026-09-15)
 
 For the next LLM session taking over `engine/stg-production-cutover`. Read
-the [implementation update](implementation-2026-09-15.md) first, then this
-historical investigation log and `plans/stg-completion.md` (the governing
+the [implementation update](implementation-2026-09-15.md) first, then its
+[review](review-2026-09-15.md), then this historical investigation log and `plans/stg-completion.md` (the governing
 cutover plan). Contributor guidance lives in `AGENTS.md`.
 
 ## State
