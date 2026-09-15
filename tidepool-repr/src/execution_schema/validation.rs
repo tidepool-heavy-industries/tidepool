@@ -159,10 +159,12 @@ enum Undo {
     Value(usize, Option<ScopedValue>),
     Join(usize, Option<ScopedJoin>),
     Epoch(u64),
+    JoinEpoch(u64),
 }
 
 #[derive(Clone)]
 enum Action {
+    FreshJoins,
     Value(ValueId, ValueType),
     Join(JoinId, SignatureId),
     Closure {
@@ -187,6 +189,7 @@ struct Walker<'w, 'p> {
     undo: Vec<Undo>,
     epoch: u64,
     next_epoch: u64,
+    join_epoch: u64,
     typed: bool,
 }
 
@@ -204,6 +207,7 @@ impl<'w, 'p> Walker<'w, 'p> {
             undo: Vec::new(),
             epoch: 1,
             next_epoch: 1,
+            join_epoch: 1,
             typed,
         })
     }
@@ -254,7 +258,7 @@ impl<'w, 'p> Walker<'w, 'p> {
             .joins
             .get(index)
             .and_then(|entry| *entry)
-            .filter(|entry| entry.epoch == self.epoch)
+            .filter(|entry| entry.epoch == self.join_epoch)
             .map(|entry| entry.signature))
     }
 
@@ -292,7 +296,7 @@ impl<'w, 'p> Walker<'w, 'p> {
         self.ensure_join(index);
         let old = self.joins[index].replace(ScopedJoin {
             signature,
-            epoch: self.epoch,
+            epoch: self.join_epoch,
         });
         self.undo.push(Undo::Join(index, old));
         Ok(())
@@ -307,13 +311,25 @@ impl<'w, 'p> Walker<'w, 'p> {
                 Undo::Value(index, old) => self.values[index] = old,
                 Undo::Join(index, old) => self.joins[index] = old,
                 Undo::Epoch(epoch) => self.epoch = epoch,
+                Undo::JoinEpoch(epoch) => self.join_epoch = epoch,
             }
         }
+    }
+
+    fn fresh_joins(&mut self) -> Result<(), ParseError> {
+        self.undo.push(Undo::JoinEpoch(self.join_epoch));
+        self.next_epoch = self
+            .next_epoch
+            .checked_add(1)
+            .ok_or(ParseError::LimitExceeded("scope epochs"))?;
+        self.join_epoch = self.next_epoch;
+        Ok(())
     }
 
     fn apply(&mut self, actions: &[Action]) -> Result<(), ParseError> {
         for action in actions {
             match action {
+                Action::FreshJoins => self.fresh_joins()?,
                 Action::Value(id, ty) => self.bind_value(*id, *ty)?,
                 Action::Join(id, signature) => self.bind_join(*id, *signature)?,
                 Action::Closure {
@@ -349,6 +365,7 @@ impl<'w, 'p> Walker<'w, 'p> {
                         .checked_add(1)
                         .ok_or(ParseError::LimitExceeded("scope epochs"))?;
                     self.epoch = self.next_epoch;
+                    self.fresh_joins()?;
                     for (id, ty) in local.into_iter().chain(parameters.iter().copied()) {
                         self.bind_value(id, ty)?;
                     }
@@ -717,7 +734,7 @@ impl<'w, 'p> Walker<'w, 'p> {
                 children.push(Seed {
                     index: *scrutinee,
                     group_actions: None,
-                    actions: Vec::new(),
+                    actions: vec![Action::FreshJoins],
                     expected: Some(Rc::new(scrutinee_results.clone())),
                 });
                 self.case_children(
@@ -826,9 +843,34 @@ impl<'w, 'p> Walker<'w, 'p> {
                     }
                 }
                 ExprFrame::Let { .. } | ExprFrame::LetJoins { .. } => {
-                    frame.children.pop().ok_or_else(|| {
+                    let result = frame.children.pop().ok_or_else(|| {
                         ParseError::InvalidReference("let body result is missing".into())
-                    })?
+                    })?;
+                    if let ExprFrame::LetJoins { bindings, .. } = &tree.nodes[frame.index] {
+                        let expected = frame.expected.as_deref().unwrap_or(&result);
+                        let bindings = match bindings {
+                            Group::NonRecursive(binding) => std::slice::from_ref(binding),
+                            Group::Recursive(bindings) => bindings.as_slice(),
+                        };
+                        for binding in bindings {
+                            // A terminal context has no successful return ABI.
+                            // It may retain an unused returning join; an actual
+                            // jump to that join still fails the body's result
+                            // check if it can return successfully.
+                            if *expected != ResultContract::NoSuccess
+                                && !self
+                                    .validator
+                                    .signature(binding.signature)?
+                                    .results
+                                    .satisfies(expected)
+                            {
+                                return Err(ParseError::InvalidSignature(
+                                    "join results do not match the binding continuation".into(),
+                                ));
+                            }
+                        }
+                    }
+                    result
                 }
             }
         } else {
@@ -1902,6 +1944,92 @@ mod tests {
     #[test]
     fn accepts_representative_valid_program() {
         validate_program(&valid_program(), &requirements(), DecodeLimits::default()).unwrap();
+    }
+
+    fn case_join_program(join_inside_scrutinee: bool, result: RuntimeRep) -> WireProgram {
+        let mut program = valid_program();
+        program.signatures.push(Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![result]),
+        });
+        let join = JoinBinding {
+            id: JoinId(0),
+            signature: SignatureId(1),
+            parameters: vec![],
+            body: 0,
+        };
+        let jump = ExprFrame::Jump {
+            join: JoinId(0),
+            arguments: vec![],
+        };
+        program.expressions.nodes = vec![ExprFrame::Return(vec![Atom::Rubbish(result)]), jump];
+        let case = |scrutinee, body| ExprFrame::Case {
+            scrutinee,
+            binder: ValueId(1),
+            scrutinee_results: ResultContract::Returns(vec![result]),
+            kind: CaseKind::Primitive(result),
+            alternatives: vec![Alternative {
+                pattern: AlternativePattern::Default,
+                binders: vec![],
+                body,
+            }],
+        };
+        if join_inside_scrutinee {
+            program.expressions.nodes.push(ExprFrame::LetJoins {
+                bindings: Group::NonRecursive(join),
+                body: 1,
+            });
+            program
+                .expressions
+                .nodes
+                .push(ExprFrame::Return(vec![integer(42)]));
+            program.expressions.nodes.push(case(2, 3));
+        } else {
+            program
+                .expressions
+                .nodes
+                .push(ExprFrame::Return(vec![integer(42)]));
+            program.expressions.nodes.push(case(1, 2));
+            program.expressions.nodes.push(ExprFrame::LetJoins {
+                bindings: Group::NonRecursive(join),
+                body: 3,
+            });
+        }
+        let Group::NonRecursive(top) = &mut program.bindings[0] else {
+            unreachable!()
+        };
+        let HeapRhs::Thunk { body, .. } = &mut top.binding.rhs else {
+            unreachable!()
+        };
+        *body = 4;
+        program
+    }
+
+    #[test]
+    fn case_scrutinee_cannot_jump_to_enclosing_continuation() {
+        // Equal physical result types still skip the case alternative if the
+        // jump escapes to the enclosing continuation.
+        let program = case_join_program(false, RuntimeRep::Int(64));
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidScope(_))
+        ));
+    }
+
+    #[test]
+    fn case_scrutinee_can_declare_its_own_join() {
+        let program = case_join_program(true, RuntimeRep::Word(64));
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+    }
+
+    #[test]
+    fn unused_join_must_match_its_binding_continuation() {
+        let mut program = case_join_program(false, RuntimeRep::Word(64));
+        program.expressions.nodes[1] = ExprFrame::Return(vec![Atom::Rubbish(RuntimeRep::Word(64))]);
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidSignature(_))
+        ));
     }
 
     #[test]

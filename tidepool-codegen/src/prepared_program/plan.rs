@@ -140,6 +140,7 @@ pub(super) fn callee<'a>(
 
 pub(super) struct ProgramPlan<'a> {
     pub program: &'a PreparedProgram,
+    pub value_reps: BTreeMap<ValueId, RuntimeRep>,
     pub functions: BTreeMap<ValueId, FunctionPlan<'a>>,
     pub thunks: BTreeMap<ValueId, ThunkPlan<'a>>,
     pub top_bindings: BTreeMap<ValueId, &'a HeapBinding>,
@@ -437,6 +438,7 @@ impl<'a> ProgramPlan<'a> {
             program,
             functions,
             thunks,
+            value_reps: values,
             top_bindings,
             constructors,
             boxed_array: Arc::new(ObjectDescriptor::external(

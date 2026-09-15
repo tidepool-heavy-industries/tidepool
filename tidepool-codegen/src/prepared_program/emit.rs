@@ -298,7 +298,7 @@ fn emit_function_at(
                             block,
                             block_reps: Vec::new(),
                             values,
-                            joins,
+                            joins: BTreeMap::new(),
                             destination: Destination {
                                 block: scrutinee_block,
                                 results: scrutinee_results.clone(),
@@ -1521,6 +1521,18 @@ fn atom_value(
     owner: ValueId,
     node: usize,
 ) -> Result<Value, CompileError> {
+    let actual = match atom {
+        Atom::Ref(ValueRef::Local(id)) => plan.value_reps.get(id).copied(),
+        Atom::Ref(ValueRef::Global(id)) => {
+            plan.import_slots.get(id.0 as usize).map(|slot| slot.rep)
+        }
+        Atom::Scalar(literal) => Some(literal.rep()),
+        Atom::Rubbish(rep) => Some(*rep),
+        Atom::Void => Some(RuntimeRep::Void),
+    };
+    if actual != Some(expected) {
+        return Err(unsupported(owner, node));
+    }
     match atom {
         Atom::Ref(ValueRef::Local(id)) => {
             if let Some(value) = values.get(id).copied() {

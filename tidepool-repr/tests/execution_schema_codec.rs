@@ -395,10 +395,9 @@ fn codec_enforces_byte_and_table_limits() {
     ));
 }
 
-#[test]
-fn public_parse_rejects_wrong_declared_result_representation() {
+fn scalar_program(result_rep: Cbor) -> Cbor {
     let a = |values| Cbor::Array(values);
-    let signature = a(vec![a(vec![]), a(vec![int(0), a(vec![a(vec![int(1)])])])]);
+    let signature = a(vec![a(vec![]), a(vec![int(0), a(vec![result_rep])])]);
     let scalar = a(vec![
         int(1),
         a(vec![
@@ -423,8 +422,46 @@ fn public_parse_rejects_wrong_declared_result_representation() {
     };
     fields[10] = a(vec![body]);
     fields[11] = a(vec![a(vec![int(0), top])]);
+    program
+}
+
+#[test]
+fn public_parse_rejects_wrong_declared_result_representation() {
+    let program = scalar_program(Cbor::Array(vec![int(1)]));
     assert!(matches!(
         parse_program(&bytes(&program), &requirements(), DecodeLimits::default()),
         Err(ParseError::InvalidSignature(_))
     ));
+}
+
+#[test]
+fn valid_artifact_truncations_and_single_bit_mutations_never_panic() {
+    // IntRep is tag 4 in the wire format.
+    let program = scalar_program(Cbor::Array(vec![int(4), int(64)]));
+    let encoded = bytes(&program);
+    let limits = DecodeLimits {
+        max_bytes: 4096,
+        max_nodes: 128,
+        max_table_entries: 128,
+        max_string_bytes: 1024,
+        max_work: 4096,
+    };
+    parse_program(&encoded, &requirements(), limits).expect("mutation seed is valid");
+    let decoded: Cbor = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+    assert_eq!(bytes(&decoded), encoded);
+    for end in 0..encoded.len() {
+        assert!(
+            parse_program(&encoded[..end], &requirements(), limits).is_err(),
+            "prefix {end}"
+        );
+    }
+    for offset in 0..encoded.len() {
+        for bit in 0..8 {
+            let mut mutant = encoded.clone();
+            mutant[offset] ^= 1 << bit;
+            // Some mutations remain valid programs. Both a checked program and
+            // a typed refusal are acceptable; panic is not.
+            let _ = parse_program(&mutant, &requirements(), limits);
+        }
+    }
 }
