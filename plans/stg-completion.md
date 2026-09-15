@@ -174,6 +174,12 @@ Step 1 evidence at `413f8cea4` (G1 committed; recorded 2026-09-15):
   Failures the broad run reported after test 116 of 2,966 were not captured
   by name; the run's artifact directory was removed by
   `scripts/lib-extract.sh`'s exit cleanup when the run was stopped.
+- Prepared corpus on the G1 tree (run by `just fixtures-check` through
+  `scripts/prepared-corpus.sh`): every contract cohort passed all six stages;
+  suite projection, validation, admission and compilation 812/812; execution
+  628 passed, 184 failed; comparison 216 passed, 0 failed, 595 missing
+  expectations. Execution and comparison equal the script's floors exactly,
+  so nothing regressed and there is no headroom.
 - A pre-existing clippy error (`clone` on the `Copy` type `RuntimeRep`,
   `tidepool-toolchain/src/prepared_artifact.rs:100`) stops that crate's test
   build under the broad gate.
@@ -193,6 +199,26 @@ Step 1 evidence at `413f8cea4` (G1 committed; recorded 2026-09-15):
   large relative to the artifact and has no pre-G1 byte baseline. Owner
   adapters specialized per known header stay on this step's list before
   default routing, not as a prerequisite for connecting the first notebook turn.
+
+- Lane V follow-up checks on the G1 tree: full codegen suite 849 passed, 3
+  skipped; `tidepool-testing` 32 passed; two new G1 gap tests pass (an owned
+  non-callable callee is a reusable `UnresolvedCallee`; cancellation at every
+  function-entry, allocation and thunk-entry poll of a cross-program
+  over-application is reusable and retries). A header no installed program
+  owns cannot reach a dispatcher through the host API, so that branch is
+  documented rather than tested.
+- `just suite tidepool-runtime` stops at its first shard: 17 of 34
+  `properties` tests (`proptest_cache_layer`) fail with
+  `MissingOutput(<key>.prepared.cbor)`. They fail identically at `067adcf18`:
+  the cache has required a prepared artifact since `b217095e5` while the
+  property harness's fake extractor still writes only Core output.
+  Pre-existing; the remaining 16 runtime shards have not run.
+- S5 was incomplete, found by a new daemon retained-set transition check:
+  with `producerValue`/`producerFn` retained, the consumer's projection still
+  recovered the floated `producerValue1..5` tops, in-process and through the
+  binary. `selectPreparedTarget` walked retained bodies for reachability
+  while recovery skipped them; both now use `skippedFromRecovery`, and the
+  Haskell test requires that no producer top is recovered.
 
 This is not a green broad gate; the exit criterion above still requires one.
 
