@@ -363,8 +363,11 @@ fn foreign_terminal_saturation_does_not_apply_excess_or_publish_results() {
     }
 }
 
-#[test]
-fn foreign_excess_probe_misses_do_not_poison_a_later_hit() {
+/// An owner whose entry `(LiftedRef) -> LiftedRef` allocates under a tiny
+/// nursery and returns a closure `(Int64) -> (Int64, LiftedRef)` capturing
+/// its managed argument. Only a caller over-applies it; the owner has no
+/// source call at that demand.
+fn closure_returning_owner() -> WireProgram {
     let mut wire = owner(ResultContract::Returns(vec![
         RuntimeRep::Int(64),
         RuntimeRep::LiftedRef,
@@ -396,6 +399,20 @@ fn foreign_excess_probe_misses_do_not_poison_a_later_hit() {
         body: wire.expressions.nodes.len() - 1,
     });
     wire.bindings[0] = top(0, 0, vec![ValueId(100)], wire.expressions.nodes.len() - 1);
+    wire
+}
+
+/// The caller demand that over-applies [`closure_returning_owner`]'s entry.
+fn excess_demand() -> Signature {
+    Signature {
+        arguments: vec![RuntimeRep::LiftedRef, RuntimeRep::Int(64)],
+        results: ResultContract::Returns(vec![RuntimeRep::Int(64), RuntimeRep::LiftedRef]),
+    }
+}
+
+#[test]
+fn foreign_excess_probe_misses_do_not_poison_a_later_hit() {
+    let wire = closure_returning_owner();
     let (mut machine, a) = PreparedMachine::new(
         compile(wire, TopSlotBase::ZERO),
         PreparedMachineOptions {
@@ -406,13 +423,7 @@ fn foreign_excess_probe_misses_do_not_poison_a_later_hit() {
     .unwrap();
     let function = machine.retain_top(a, ValueId(0)).unwrap();
     let token = machine.retain_top(a, ValueId(1)).unwrap();
-    let b = install_caller(
-        &mut machine,
-        Signature {
-            arguments: vec![RuntimeRep::LiftedRef, RuntimeRep::Int(64)],
-            results: ResultContract::Returns(vec![RuntimeRep::Int(64), RuntimeRep::LiftedRef]),
-        },
-    );
+    let b = install_caller(&mut machine, excess_demand());
     let result = machine
         .run_entry_retained(
             b,
@@ -597,6 +608,177 @@ fn foreign_excess_can_continue_in_a_third_program() {
 /// `target/prepared-corpus/*/N.prepared.cbor` produced by
 /// `scripts/prepared-corpus.sh`) so dispatcher cost can be recorded on
 /// realistic programs, not only a small fixture.
+/// Applying an object some installed program owns but that is not callable
+/// (a constructor) exhausts every probe and reports the typed reusable miss;
+/// it never latches the machine, which still serves a valid foreign call.
+/// (A header no installed program owns cannot reach a dispatcher through the
+/// host API: argument representations are checked on entry, and `Enter`
+/// rejects an unowned header with `BadThunkState` before any probe runs.)
+#[test]
+fn foreign_application_of_an_owned_constructor_is_a_reusable_miss() {
+    let (mut machine, a) = PreparedMachine::new(
+        compile(
+            owner(ResultContract::Returns(vec![RuntimeRep::Int(64)])),
+            TopSlotBase::ZERO,
+        ),
+        PreparedMachineOptions {
+            nursery_bytes: 4096,
+            top_slots: 32,
+        },
+    )
+    .unwrap();
+    let function = machine.retain_top(a, ValueId(0)).unwrap();
+    let token = machine.retain_top(a, ValueId(1)).unwrap();
+    let wrong = install_caller(
+        &mut machine,
+        Signature {
+            arguments: vec![RuntimeRep::Int(64)],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+        },
+    );
+    let error = machine
+        .run_entry_retained(
+            wrong,
+            ValueId(0),
+            &[PreparedInput::Managed(token), PreparedInput::Scalar(7)],
+            options(),
+            RealmId::ROOT,
+        )
+        .err()
+        .expect("a constructor is not callable");
+    assert!(matches!(
+        error,
+        ExecutionError::Runtime(crate::machine_state::MachineFailure {
+            cause: crate::host_fns::RuntimeError::UnresolvedCallee,
+            disposition: crate::machine_state::MachineDisposition::Reusable,
+        })
+    ));
+    assert_eq!(machine.failure(), None);
+
+    let right = install_caller(
+        &mut machine,
+        Signature {
+            arguments: vec![RuntimeRep::LiftedRef, RuntimeRep::Void, RuntimeRep::Int(64)],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+        },
+    );
+    let result = machine
+        .run_entry_retained(
+            right,
+            ValueId(0),
+            &[
+                PreparedInput::Managed(function),
+                PreparedInput::Managed(token),
+                PreparedInput::Scalar(42),
+            ],
+            options(),
+            RealmId::ROOT,
+        )
+        .expect("the machine still serves a valid foreign application");
+    assert!(matches!(
+        result.values.as_slice(),
+        [PreparedResult::Scalar(42)]
+    ));
+    for handle in [function, token] {
+        assert!(machine.release(handle));
+    }
+    assert_eq!(machine.handle_count(), 0);
+}
+
+/// Cancellation at every poll of each kind during a cross-program
+/// over-application (caller entry and dispatcher, probe misses, the owner's
+/// allocating body, the returned closure, the caller's suffix dispatcher)
+/// settles as a reusable `Cancelled`, publishes no result, leaves exactly the
+/// caller's handles, and a retry on the same machine completes. Each
+/// occurrence uses a fresh machine because an unfired injection stays armed.
+#[test]
+fn cancellation_at_every_poll_of_a_foreign_excess_call_is_reusable_and_retries() {
+    use crate::prepared_control::PreparedSafepoint;
+    for point in [
+        PreparedSafepoint::FunctionEntry,
+        PreparedSafepoint::Allocation,
+        PreparedSafepoint::ThunkEntry,
+    ] {
+        let mut fired = 0;
+        let mut completed = false;
+        for occurrence in 1..=512 {
+            let (mut machine, a) = PreparedMachine::new(
+                compile(closure_returning_owner(), TopSlotBase::ZERO),
+                PreparedMachineOptions {
+                    nursery_bytes: 128,
+                    top_slots: 32,
+                },
+            )
+            .unwrap();
+            let function = machine.retain_top(a, ValueId(0)).unwrap();
+            let token = machine.retain_top(a, ValueId(1)).unwrap();
+            let caller = install_caller(&mut machine, excess_demand());
+            let inputs = [
+                PreparedInput::Managed(function),
+                PreparedInput::Managed(token),
+                PreparedInput::Scalar(42),
+            ];
+            machine.fail_prepared_at(point, occurrence, crate::host_fns::RuntimeError::Cancelled);
+            let outcome =
+                machine.run_entry_retained(caller, ValueId(0), &inputs, options(), RealmId::ROOT);
+            let retry = match outcome {
+                Ok(result) => {
+                    // Past the last poll of this kind: the injection never fired.
+                    completed = true;
+                    result
+                }
+                Err(error) => {
+                    assert!(
+                        matches!(
+                            error,
+                            ExecutionError::Runtime(crate::machine_state::MachineFailure {
+                                cause: crate::host_fns::RuntimeError::Cancelled,
+                                disposition: crate::machine_state::MachineDisposition::Reusable,
+                            })
+                        ),
+                        "{point:?} #{occurrence}: {error:?}"
+                    );
+                    assert_eq!(machine.failure(), None, "{point:?} #{occurrence}");
+                    assert_eq!(
+                        machine.handle_count(),
+                        2,
+                        "{point:?} #{occurrence}: a cancelled call publishes no result"
+                    );
+                    fired += 1;
+                    machine
+                        .run_entry_retained(caller, ValueId(0), &inputs, options(), RealmId::ROOT)
+                        .unwrap_or_else(|error| {
+                            panic!("{point:?} #{occurrence}: retry failed: {error:?}")
+                        })
+                }
+            };
+            assert!(
+                matches!(
+                    retry.values.as_slice(),
+                    [PreparedResult::Scalar(42), PreparedResult::Managed(_)]
+                ),
+                "{point:?} #{occurrence}"
+            );
+            for value in retry.values {
+                if let PreparedResult::Managed(handle) = value {
+                    assert!(machine.release(handle));
+                }
+            }
+            for handle in [function, token] {
+                assert!(machine.release(handle));
+            }
+            assert_eq!(machine.handle_count(), 0);
+            if completed {
+                break;
+            }
+        }
+        assert!(completed, "{point:?}: more than 512 polls of one kind");
+        if point != PreparedSafepoint::ThunkEntry {
+            assert!(fired > 0, "{point:?} must be polled on the foreign path");
+        }
+    }
+}
+
 #[test]
 #[ignore = "manual compilation cost observation; run with --run-ignored only --no-capture"]
 fn foreign_dispatch_cost_on_freer_artifact() {

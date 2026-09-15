@@ -1159,6 +1159,19 @@ impl<'code> PreparedMachine<'code> {
         self.handles.handle(handle.raw).map(|entry| entry.realm)
     }
 
+    /// Test-only: fail the `occurrence`th poll of `point` in the next call(s)
+    /// with `cause`, through the same status path as real cancellation. The
+    /// injection is consumed when it fires; an unfired one stays armed.
+    #[cfg(test)]
+    pub(super) fn fail_prepared_at(
+        &self,
+        point: crate::prepared_control::PreparedSafepoint,
+        occurrence: usize,
+        cause: crate::host_fns::RuntimeError,
+    ) {
+        self.machine.fail_prepared_at(point, occurrence, cause);
+    }
+
     /// Whether a retained handle's value is already in weak head normal form
     /// (a constructor, function or PAP, following any settled thunk
     /// indirection), read without forcing -- the fact an importing program's
