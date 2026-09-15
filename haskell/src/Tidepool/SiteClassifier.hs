@@ -48,6 +48,10 @@ data SiteFailure
 classifySiteOccurrence :: Map String Id -> VerbSpec -> Id -> [CoreExpr]
   -> Either SiteFailure SitePlan
 classifySiteOccurrence siblings spec surface args = do
+  -- Siblings first: a walk without generated siblings (constructor metadata
+  -- over bindings that are never executed) poisons the occurrence and must
+  -- never turn a site-shape failure into a rejection.
+  sibling <- maybe (Left MissingSibling) Right (Map.lookup (vsName spec) siblings)
   let (binders, result) = splitInvisPiTys (idType surface)
       nTypes = length (takeWhile isNamed binders)
       nEvidence = length binders - nTypes
@@ -63,7 +67,6 @@ classifySiteOccurrence siblings spec surface args = do
     TypeArgument i -> i)
     >>= closed SiteResult
   inputs <- traverse (\i -> typeAt types i >>= closed SiteInput) (vsInputTypeArgs spec)
-  sibling <- maybe (Left MissingSibling) Right (Map.lookup (vsName spec) siblings)
   if eqType (idType sibling) (mkPiTys binders (mkVisFunTyMany intTy result))
     then Right (SitePlan sibling types missingTypes evidence missingEvidence rest answer inputs)
     else Left IncompatibleSibling

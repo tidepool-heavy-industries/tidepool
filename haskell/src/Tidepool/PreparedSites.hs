@@ -66,6 +66,13 @@ data SiteRejection = SiteRejection
 -- Core still carries types. The caller supplies siblings collected from
 -- tidied home-module guts in dependency order. A polymorphic site is left
 -- unrewritten and recorded as a 'SiteRejection' for its top binder.
+--
+-- Every occurrence of a prepared verb is classified exactly once: an
+-- application head with its arguments (after 'stripNospecSpine'), and a bare
+-- reference (an eta-reduced alias, a higher-rank argument, a verb under a
+-- cast or tick) with none, which leaves its result type open. No verb reference leaves
+-- elaboration without either a rewrite or a recorded rejection; projection
+-- then raises only the rejections its executable closure reaches.
 elaboratePreparedSites :: Map String Id -> [CoreBind]
   -> IO ([CoreBind], [YieldSite], [SiteRejection])
 elaboratePreparedSites siblings bindings = do

@@ -1,16 +1,20 @@
 module Main (main) where
 
-import Control.Exception (SomeException, bracket, try)
+import Control.Exception (SomeException, bracket, evaluate, try)
 import Control.Monad (unless)
 import Data.List (isInfixOf, sort)
 import Data.String (fromString)
 import GHC (moduleNameString)
 import GHC.Builtin.Types (boolTy)
-import GHC.Core (Expr(..), bindersOf)
+import GHC.Core (Expr(..), bindersOf, flattenBinds)
+import GHC.Core.FVs (exprSomeFreeVarsList)
+import GHC.Types.Id (idName)
+import GHC.Types.Name (nameOccName)
+import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Id.Make (nospecId)
 import GHC.Core.TyCo.Compare (eqType)
 import Tidepool.SiteClassifier
-  ( SiteFailure(..), classifySiteOccurrence, stripNospecSpine )
+  ( SiteFailure(..), classifySiteOccurrence, isNospecVar, stripNospecSpine )
 import GHC.Unit.Types (moduleName)
 import System.Directory
   ( createDirectoryIfMissing, getTemporaryDirectory, removePathForcibly )
@@ -27,7 +31,7 @@ import Tidepool.ExecutionIR
   ( LiteralInventory(..), PreparedFact(..), PreparedInventory(..), PreparedSupport(..), inventoryPreparedModule
   , renderPreparedInventory )
 import Tidepool.PreparedSites (buildYieldSite, lookupPreparedVerb, resolvePreparedSiblings)
-import Tidepool.Translate (lowerModule, LoweredModule(..))
+import Tidepool.Translate (collectUsedDataCons, lowerModule, LoweredModule(..))
 import RetainedPluginTest (verifyCompilerReuse)
 
 assert :: Bool -> String -> IO ()
@@ -190,7 +194,8 @@ main = do
         , "typedSite = runLLMTurn @Bool \"prepared\""
         ])
       writeFile polySiteTarget (unlines
-        [ "{-# LANGUAGE ScopedTypeVariables #-}"
+        [ "{-# LANGUAGE RankNTypes #-}"
+        , "{-# LANGUAGE ScopedTypeVariables #-}"
         , "{-# LANGUAGE TypeApplications #-}"
         , "module PolySiteExpr where"
         , "import Tidepool.Effects.Core"
@@ -204,6 +209,12 @@ main = do
         , "{-# NOINLINE polyNested #-}"
         , "unrelated :: Int"
         , "unrelated = 42"
+        -- A verb passed as a value has no site of its own.
+        , "applyVerb :: (forall a. String -> Maybe a) -> Maybe Bool"
+        , "applyVerb verb = verb \"first-class\""
+        , "{-# NOINLINE applyVerb #-}"
+        , "firstClass :: Maybe Bool"
+        , "firstClass = applyVerb runLLMTurn"
         , "usesHelper :: Maybe Bool"
         , "usesHelper = polyHelper @Bool \"helper\""
         , "usesNested :: Maybe Bool"
@@ -248,6 +259,15 @@ main = do
       assertProjects "retained polymorphic site helper is linked, not executed"
         (projectEntry polyDirect "PolySiteExpr" "usesHelper"
           (Map.singleton (Schema.SymbolIdentity "main" "PolySiteExpr" "value" "polyHelper" Nothing) 1))
+      assertSiteRejection "verb used as a first-class value" "result type is unresolved"
+        (projectEntry polyDirect "PolySiteExpr" "firstClass" mempty)
+      -- Constructor metadata translates every binding without generated
+      -- siblings; an unexecuted polymorphic site must poison there.
+      polyLegacy <- runPipeline polySiteTarget [dir]
+      metaWalk <- try (evaluate (length (collectUsedDataCons (prBinds polyLegacy))))
+        :: IO (Either SomeException Int)
+      assert (either (const False) (const True) metaWalk)
+        ("constructor metadata walk rejected an unexecuted typed site: " ++ either show show metaWalk)
       let forkAllSpec = case filter ((== "forkAll") . vsName) sitedVerbs of
             [spec] -> spec
             _ -> error "missing forkAll VerbSpec"
@@ -275,21 +295,37 @@ main = do
       readFile "test-prepared-stg/site-fixtures/ConstrainedSites.hs" >>= writeFile constrainedTarget
       constrained <- runPipelineSelected PreparedStg constrainedTarget [dir]
       let (_, constrainedSites) = preparedEvidence "ConstrainedSites" constrained
-      assert (length constrainedSites == 3 && all ((/= 0) . ysSite) constrainedSites)
-        ("partial, open-row, and higher-order constrained sites must each elaborate once: " ++ show constrainedSites)
+      assert (length constrainedSites == 5 && all ((/= 0) . ysSite) constrainedSites)
+        ("partial, open-row, higher-order and nospec-wrapped constrained sites must each elaborate once: "
+          ++ show constrainedSites)
       mapM_ (\entry -> assertProjects ("constrained " ++ entry)
         (projectEntry constrained "ConstrainedSites" entry mempty))
-        ["partial", "wrapped", "higherOrder", "unrelated"]
+        ["partial", "wrapped", "higherOrder", "openTail", "openEta", "unrelated"]
       assertSiteRejection "unresolved constrained partial site" "result type is unresolved"
         (projectEntry constrained "ConstrainedSites" "unresolved" mempty)
       legacyConstrained <- runPipeline constrainedTarget [dir]
+      let nospecBinders =
+            [ occNameString (nameOccName (idName binder))
+            | (binder, rhs) <- flattenBinds (prBinds legacyConstrained)
+            , any isNospecVar (exprSomeFreeVarsList (const True) rhs) ]
+      assert (all (`elem` nospecBinders) ["openTail", "openEta"])
+        ("GHC no longer wraps the open-tail calls in nospec; this fixture lost its subject: "
+          ++ show nospecBinders)
       case [(binder, spec) | binder <- concatMap bindersOf (prBinds legacyConstrained)
                           , Just spec <- [lookupPreparedVerb binder]
                           , vsName spec == "runLLMTurn"] of
         (surface, spec) : _ -> do
-          assert (case classifySiteOccurrence mempty spec surface [Var surface] of
+          assert (case classifySiteOccurrence mempty spec surface [Type boolTy] of
+            Left MissingSibling -> True
+            _ -> False) "a walk without siblings must poison before checking the site"
+          assert (case classifySiteOccurrence (Map.singleton "runLLMTurn" surface)
+                         spec surface [Var surface] of
             Left (MissingTypeArgument 0) -> True
             _ -> False) "malformed site type prefix was accepted"
+          assert (case classifySiteOccurrence (Map.singleton "runLLMTurn" surface)
+                         spec surface [] of
+            Left (OpenSiteType _ _) -> True
+            _ -> False) "a bare verb reference was classified as a site"
           assert (case classifySiteOccurrence (Map.singleton "runLLMTurn" surface)
                          spec surface [Type boolTy] of
             Left IncompatibleSibling -> True
@@ -302,7 +338,7 @@ main = do
           ("legacy reachability dropped the generated sibling: " ++ entry)
         assert (length sites == 1 && all ((== "Bool") . stType . ysAnswer) sites)
           ("legacy constrained site missing: " ++ entry))
-        ["partial", "wrapped", "higherOrder"]
+        ["partial", "wrapped", "higherOrder", "openTail", "openEta"]
 
       writeFile dep (unlines
         [ "{-# LANGUAGE CPP #-}"

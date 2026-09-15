@@ -16,6 +16,16 @@ wrapped = runLLMTurn @Bool @effects
 higherOrder :: forall effects. Member Replies effects => [String] -> [Eff effects Bool]
 higherOrder = map (runLLMTurn @Bool @effects)
 
+-- The dictionary for the open-tail row is built from the given one through
+-- freer-simple's instances; GHC wraps these calls in `nospec`.
+{-# NOINLINE openTail #-}
+openTail :: forall effects. Member Replies effects => Eff (Other ': effects) Bool
+openTail = runLLMTurn @Bool "open"
+
+{-# NOINLINE openEta #-}
+openEta :: forall effects. Member Replies effects => String -> Eff (Other ': effects) Bool
+openEta = runLLMTurn @Bool
+
 {-# NOINLINE unresolved #-}
 unresolved :: forall a effects. Member Replies effects => String -> Eff effects a
 unresolved = runLLMTurn @a
