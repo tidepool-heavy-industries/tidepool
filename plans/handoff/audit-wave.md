@@ -85,3 +85,121 @@ Test: self-tail-recursive `go n = go (n+1)` with
 `StackOverflow`; a looping memoized thunk cancelled at the Nth `Backedge` is
 Live again afterwards.
 
+## Machine install failure paths
+1. **Medium (bug)** — a failed `collect_on` during a second-program install
+   (`machine.rs:593-602`) records a reusable GC cause (`gc.rs:1264`) that
+   `install` never clears (only `run_entry*` call `end_prepared_call`); the
+   machine reports `Reusable` but the next `install_program` fails at
+   `poll_prepared`, and `retain_top` fails in `promote_prepared`
+   (`old_space/prepared.rs:98`). The existing
+   `t3_install_failure_after_registries_extend…` hides it by calling
+   `run_entry` next. Fix: clear the pending cause on every post-`collect_on`
+   install error (a scope guard). Test: t3 setup, clear the heap ceiling, then
+   `retain_top` and a second install with no `run_entry` between.
+2. Low — static and heap top-table writes (`machine.rs:464-478`,
+   `initialize_heap_tops`) are not zeroed on error, contrary to the doc at
+   :329; cells past the next program's range keep pointers into dropped
+   statics. Zero `base..base+slot_count` on error.
+3. Low — the descriptor and static-region union (`machine.rs:559-565`,
+   `machine_state.rs:875-882`) is never undone after a later failure; each
+   retry leaks a static image and GC admits pointers into an unowned region.
+4. Low — `absorb` (`machine.rs:389`) and `compile_for_install` (`:314`) intern
+   descriptors before install succeeds, so a failed program still claims
+   constructor identities (later different declaration refused). Compile
+   against a staged interner and merge on success.
+Structural fix: one install transaction guard recording slot range, stack-map
+push, descriptor extension, published imports and staged interner, undone on
+drop, disarmed by `commit()`. Ordering between verification, publication and
+`collect_on` is sound; `release`, `close_realm` and `Drop` are fine.
+
+## Artifact trust boundary (decode, validate, link) and emission
+Two audits independently found the same validator hole.
+1. **Critical (memory unsafety / miscompile)** — a `Jump` in a case scrutinee
+   is accepted: the scrutinee is walked with the parent's join scope
+   (`validation.rs:717-722`, `:346-351`) and a join body is checked only
+   against its own signature (`:980-985`), never against the result expected
+   where it is bound. Codegen compiles the scrutinee with enclosing joins in
+   scope (`emit.rs:296-306`, jump at `:359-379`), join bodies return to the
+   function exit (`:341-348`), and `atom_value` does not check reps
+   (`:1525-1527`). A function returning `[LiftedRef]` with
+   `letjoin j :: () -> [Word64] = Return [w]` and body
+   `Case (Jump j) [Word64] Default -> …` validates; at runtime the word reaches
+   a `LiftedRef` exit and is recorded as a GC pointer, or the case alternatives
+   are silently skipped. GHC never emits this; a corrupt or hand-built artifact
+   can. Fix: fresh join scope for scrutinees (as closure bodies), require join
+   results to satisfy the binding site's expected result, and assert plan rep
+   equals expected rep in codegen.
+2. Medium (DoS) — recursive groups are quadratic in the validator (every
+   sibling re-applies the group's bindings, `validation.rs:647-650`,
+   `906-907`, `982`; groups decode without counting entries, `codec.rs:743-747`,
+   up to 2^18 bindings). Apply once or charge the work.
+3. Medium (DoS) — codegen clones the in-scope value map at each case,
+   alternative and join (`emit.rs:292`, `1037`, `1059`, `333`): O(depth²).
+   Use a persistent map or undo log.
+4. Risk — no native tail calls (`return_call` absent; all calls are
+   `call` + `return_` under the Tail convention, `apply.rs:375/488/849/872/613/645`):
+   long `Call`-frame recursion ends in `StackOverflow` instead of running in
+   constant stack. Emit `return_call`/`return_call_indirect` for calls in return
+   position (keep the `FunctionEntry` cancellation test).
+5. Smells — `logical_arguments` drops arguments when physical values run short
+   (`apply.rs:768-782`; should be a compile error); zero-argument PAP
+   application copies the PAP (`apply.rs:510-523`); the case trap's returned
+   status is replaced with a hardcoded `IntegrityFailure` (`emit.rs:1182`).
+Sound: layout/root-mask/alignment canonical checks, tag bounds and family
+agreement, operation name+signature match, id bounds, expression tree
+ownership, GC stack-map declarations across calls, status checks after host
+calls. Fuzz strategy: structured mutations of `testing::wire_program` (move a
+subtree into scrutinee position, retarget jumps, change results, duplicate
+recursive siblings, deepen nesting); validation passing implies compile `Ok` or
+typed error under the Cranelift verifier plus the rep assert; linear-time
+property; encoder round-trip of every mutant.
+
+## PreparedRuntime session invariants
+1. **High (latent)** — `close_realm_report(RealmId::ROOT)` /
+   `retire_placement(ROOT, _)` (`prepared.rs:660-667`,
+   `resource_ledger.rs:90`) has no ROOT guard: it deregisters every `bind_top`
+   handle (all ROOT, `machine.rs:1138`) and releases all leases; the binding
+   table keeps dead entries, later installs fail `UnknownPreparedHandle`, and
+   `release_binding` removes the entry before failing (`:602-613`). The doc at
+   `machine.rs:783` is wrong. Current callers use fresh realms. Fix: refuse or
+   no-op ROOT (runtime or ledger).
+2. Medium — bindings made during a placement are ROOT scope and realm
+   (`prepared.rs:433`), so retirement frees none; `resolve_import`
+   (`556-572`) searches all live bindings regardless of scope, letting one
+   actor import another's same-identity binding. Thread `SessionRunContext`
+   into `bind_top` and filter imports by scope.
+3. Medium — `resolve_import` tie at one generation picks by HashMap order
+   (`569-571`); an explicit `(identity, id)` pair is never checked against the
+   binding's recorded identity (`500-503`). Tie-break by `SessionVarId` or
+   refuse; check identity with a typed error.
+4. Lower — `bind_top` retains before looking up facts (`400-415`, leaks a root
+   on failure); backwards `set_val_gen` reports `GenerationNotStarted` (`373`);
+   allocation failure (`755`) and non-latching `BadPointer` classify as
+   `Language`; the Send comment (`303`) is stale (`ProgramFacts`); dedupe
+   `leased` if a program can declare a global twice.
+Tests: ROOT close keeps bindings and leases; same-generation tie; mismatched
+explicit import pair; `bind_top` failure leaves handle count; post-compile
+install failure leases nothing; `release_binding` after realm close;
+backwards `set_val_gen`.
+
+## Duplicated mechanisms and dead code
+1. Turn imports are built from raw strings (`prepared_turn.rs:169-188`,
+   `turn.rs:380`): operators are not parenthesized, `namespace` and `unit` are
+   ignored, `Retained.generation` is a bare `u64` (`:73`). Let
+   `execution_schema` own rendering an identity as an import item.
+2. Three PrimRep-to-representation mappings in Haskell
+   (`ExecutionProjection.projectRep` 1362, `PreparedFacts.representation` 138,
+   `ExecutionIR.repForm`/`renderTypeReps` 352/386); inventory and projection can
+   disagree. One owner (`ExecutionProjection`).
+3. `returned_reps().unwrap_or(&[])` conflates "never returns" with "returns
+   nothing" (`emit.rs:241,286`, `plan.rs:231`, `validation.rs:1227`); add a
+   documented `physical_reps()` and match `NoSuccess` explicitly. (Also a
+   prerequisite for `CallerResult`.)
+4. Three `renderType` copies (`Resolve.hs:179`, `PreparedSites.hs:205`,
+   `GhcPipeline.hs:1629`); `siteIdentity` hashes rendered type text, so site
+   ids depend on which copy runs. One copy.
+5. Redundant test gates (`invocation.rs` is test-only module-wide yet has inner
+   `#[cfg(test)]`; bare `#[test]` in `arrays.rs:34`; test-only constructors in
+   `observe.rs:148,193,408`); move to `*_tests.rs`.
+6. Dead `include` field under `#[allow(dead_code)]` (`session/resident.rs:621`).
+
