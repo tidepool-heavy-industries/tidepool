@@ -210,3 +210,19 @@ Supersede 03, 04e and 04f:
   at runtime. Keep the explicit erroring `Display` instance, change the needle
   to `Right (result)`, bind with `<-`. The same stale needle is at l.993 in
   `command_presentation_is_automatic_scoped_and_retains_quiet_results`.
+
+### `let` prefix before a runtime failure — most likely a fixture artefact
+A notebook `let x = e` is `TurnKind::Bind` (`turn.rs:65`, `:297`), compiled and
+run as its own item (`resident_workbench.rs` `begin_ready_block` 2458-2465,
+`settle_fragment` 2552-2588), and a later runtime rejection does not roll back
+earlier receipts or bindings (`resident_actor.rs:4786-4825`). The `<-` and
+`let` paths are identical there. The 04e cell's missing `committedPrefix` is
+therefore most likely because the `if error ...` item was rejected at
+preparation (whole cell `NotRun`, `resident_actor.rs:4521-4550`) or surfaced
+as a hard workbench failure rather than `ResidentError::Run`. The contract
+(`plans/notebook-cells/README.md:8-9`) says runtime failure retains the
+committed prefix, `let` included. Resolve with one run of the original 04e
+cell: item 0 `NotRun` means the fixture needs a genuinely runtime-only failure;
+item 0 `Committed` with the binding gone afterwards is a real `tidepool-actor`
+gap (add a `let` variant beside `notebook_prefix_failure.hs`).
+
