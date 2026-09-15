@@ -7,6 +7,18 @@ defects; it does not complete the production STG cutover.
 Review of this milestone's commits, with the blocking fixes that precede
 acceptance: [review-2026-09-15.md](review-2026-09-15.md).
 
+**Gate outcome at `d8a91a7e8` (stopped, not passed).** The `just verify` below
+was stopped at 2,256/3,019 tests after 61 minutes, by decision, in favour of
+focused per-fix runs. Lint passed. 2,249 passed; 3 failed, all tokio `Elapsed`
+timeouts inside `tidepool` actor-host tests that ran 150–500 s each under the
+four-slot `ghc-heavy` group (`active_update_keeps_original_request_and_fences_terminal_delivery`,
+`preview_and_explicit_research_budget_match_without_spawning_during_preview`,
+`lifecycle_sources_follow_replacement_and_capture_retained_exit`); 4 were
+terminated by the stop and 763 never ran. Suite registration, fixture
+freshness and the full prepared corpus were not reached. Artifacts:
+`target/tidepool-test-runs/20260915T195052Z-2446621-check`. The three timeouts
+are unclassified until each reruns alone.
+
 ## Start here after switching subscriptions
 
 Snapshot: **2026-09-15 19:52 UTC (12:52 PDT)**. Branch
