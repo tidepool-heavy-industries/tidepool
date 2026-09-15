@@ -10,3 +10,4 @@ description = "Integer/Natural -> Double encoding helpers for the Tidepool JIT a
 readme = "../README.md"
 
 [dependencies]
+num-bigint = "0.4.8"

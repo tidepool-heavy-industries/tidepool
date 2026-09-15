@@ -1,5 +1,5 @@
 //! Integer/Natural ↔ `Double`/`Float` encoding, decoding, and `show` helpers
-//! used by the JIT and tree-walker.
+//! used by native primitive adapters and host presentation.
 //!
 //! With the native ghc-bignum backend, `Integer`/`Natural` arithmetic is pure
 //! Core over `Word#`/`ByteArray#` primops — no `__gmpn_*`/`integer_gmp_*` FFI —
@@ -103,44 +103,124 @@ pub fn decode_float_int(f: f32) -> (i64, i64) {
     (sign * man, exp as i64)
 }
 
-/// Format a Double matching Haskell's `show` output. Decimal notation for
-/// `0.1 <= |x| < 1e7`, scientific notation otherwise. Always includes a
-/// decimal point — Rust's `{:e}` omits it for an integral mantissa
-/// (`"1e10"`), where Haskell's `show` always writes one (`"1.0e10"`); the
-/// scientific-notation branch inserts it when missing. This is the JIT-pinned
-/// behavior (`proptest_host_arrays` BUG-1 / `bug1_show_double_scientific_decimal`) —
-/// the tree-walker used to carry its own copy that predated that fix and
-/// showed `"1e10"`, a real (if latent — no known corpus/suite fixture ever hit
-/// it) oracle/JIT divergence this shared function closes.
+/// Format binary64 using GHC's strict rounding intervals. Decimal notation
+/// is used for decimal exponents 0 through 7; both forms include a fraction.
 pub fn haskell_show_double(d: f64) -> String {
     if d.is_nan() {
-        return "NaN".to_string();
+        return "NaN".to_owned();
     }
     if d.is_infinite() {
-        return if d > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+        return if d > 0.0 { "Infinity" } else { "-Infinity" }.to_owned();
     }
     if d == 0.0 {
-        return if d.is_sign_negative() { "-0.0" } else { "0.0" }.to_string();
+        return if d.is_sign_negative() { "-0.0" } else { "0.0" }.to_owned();
     }
-    let abs = d.abs();
-    if (0.1..1.0e7).contains(&abs) {
-        let s = d.to_string();
-        if s.contains('.') {
-            s
+    let (digits, exponent) = decimal_digits(d.abs());
+    let mut result = if d.is_sign_negative() { "-" } else { "" }.to_owned();
+    if !(0..=7).contains(&exponent) {
+        result.push(char::from(digits[0]));
+        result.push('.');
+        if digits.len() == 1 {
+            result.push('0');
         } else {
-            format!("{}.0", s)
+            result.extend(digits[1..].iter().copied().map(char::from));
         }
+        result.push('e');
+        result.push_str(&(exponent - 1).to_string());
     } else {
-        // Scientific notation. Haskell's `show` mantissa always carries a
-        // decimal point ("1.0e10", "5.0e-324"); Rust's {:e} omits it for
-        // integral mantissas ("1e10"). Insert ".0" before the exponent when
-        // missing.
-        let s = format!("{:e}", d);
-        match s.find('e') {
-            Some(epos) if !s[..epos].contains('.') => {
-                format!("{}.0{}", &s[..epos], &s[epos..])
-            }
-            _ => s,
+        let split = exponent as usize;
+        if split == 0 {
+            result.push('0');
+        }
+        for index in 0..split {
+            result.push(char::from(digits.get(index).copied().unwrap_or(b'0')));
+        }
+        result.push('.');
+        if split >= digits.len() {
+            result.push('0');
+        } else {
+            result.extend(digits[split..].iter().copied().map(char::from));
+        }
+    }
+    result
+}
+
+/// Exact binary64 intervals avoid the midpoint tie choices made by Rust's
+/// shortest formatter. GHC requires both interval endpoints to be excluded;
+/// when both decimal candidates fit it rounds a decimal tie upward.
+/// Contract: GHC 9.12.2, GHC.Internal.Float.floatToDigits / formatRealFloat.
+/// <https://github.com/ghc/ghc/blob/ghc-9.12.2-release/libraries/ghc-internal/src/GHC/Internal/Float.hs>
+fn decimal_digits(value: f64) -> (Vec<u8>, i32) {
+    use num_bigint::BigUint;
+
+    let bits = value.to_bits();
+    let raw_exponent = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & ((1_u64 << 52) - 1);
+    let mantissa = if raw_exponent == 0 {
+        fraction
+    } else {
+        fraction | (1_u64 << 52)
+    };
+    let binary_exponent = raw_exponent.max(1) - 1023 - 52;
+    // At normal powers of two the previous number is half as far away.
+    let asymmetric = raw_exponent > 1 && fraction == 0;
+    let mut numerator = BigUint::from(mantissa) << 2_usize;
+    let mut denominator = BigUint::from(4_u8);
+    let mut upper = BigUint::from(2_u8);
+    let mut lower = BigUint::from(if asymmetric { 1_u8 } else { 2_u8 });
+    if binary_exponent >= 0 {
+        numerator <<= binary_exponent as usize;
+        upper <<= binary_exponent as usize;
+        lower <<= binary_exponent as usize;
+    } else {
+        denominator <<= (-binary_exponent) as usize;
+    }
+    // Use a floating estimate only to choose a starting scale. Exact integer
+    // comparisons correct it, including an upper endpoint exactly at 10^k.
+    let upper_bound = &numerator + &upper;
+    let contains_upper = |exponent: i32| {
+        let power = BigUint::from(10_u8).pow(exponent.unsigned_abs());
+        if exponent >= 0 {
+            upper_bound <= &denominator * power
+        } else {
+            &upper_bound * power <= denominator
+        }
+    };
+    let mut exponent = value.log10().floor() as i32 + 1;
+    while !contains_upper(exponent) {
+        exponent += 1;
+    }
+    while contains_upper(exponent - 1) {
+        exponent -= 1;
+    }
+    let power = BigUint::from(10_u8).pow(exponent.unsigned_abs());
+    if exponent >= 0 {
+        denominator *= power;
+    } else {
+        numerator *= &power;
+        upper *= &power;
+        lower *= power;
+    }
+    let mut digits = Vec::with_capacity(17);
+    loop {
+        numerator *= 10_u8;
+        upper *= 10_u8;
+        lower *= 10_u8;
+        // The scale bounds the quotient to one digit; repeated subtraction
+        // avoids a general bignum division for this small quotient.
+        let mut digit = 0;
+        while numerator >= denominator {
+            numerator -= &denominator;
+            digit += 1;
+        }
+        let down = numerator < lower;
+        let up = &numerator + &upper > denominator;
+        if up && (!down || (&numerator << 1_usize) >= denominator) {
+            digit += 1;
+        }
+        digits.push(b'0' + digit);
+        if down || up {
+            return (digits, exponent);
         }
     }
 }
@@ -148,6 +228,12 @@ pub fn haskell_show_double(d: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn haskell_show_double_excludes_decimal_rounding_midpoints() {
+        assert_eq!(haskell_show_double(1e23), "9.999999999999999e22");
+        assert_eq!(haskell_show_double(-1e23), "-9.999999999999999e22");
+    }
 
     #[test]
     fn encode_double_basic_and_range() {
@@ -273,10 +359,6 @@ mod tests {
         assert_eq!(haskell_show_double(f64::NEG_INFINITY), "-Infinity");
     }
 
-    /// BUG-1 (`proptest_host_arrays::bug1_show_double_scientific_decimal`):
-    /// Haskell's `show` mantissa in scientific notation always carries a
-    /// decimal point, even when Rust's `{:e}` would omit it for an integral
-    /// mantissa.
     #[test]
     fn haskell_show_double_scientific_always_has_decimal_point() {
         assert_eq!(haskell_show_double(1e10), "1.0e10");

@@ -3748,6 +3748,9 @@ dependencies = [
 [[package]]
 name = "tidepool-bignum"
 version = "0.1.0"
+dependencies = [
+ "num-bigint",
+]
 
 [[package]]
 name = "tidepool-bridge"
