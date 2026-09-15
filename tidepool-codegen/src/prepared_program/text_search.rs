@@ -1,6 +1,7 @@
-//! text's byte-search C call over descriptor-backed byte arrays. The host
-//! authenticates the managed span through the external-storage ledger before
-//! reading a single byte; it never dereferences an unauthenticated address.
+//! text's byte C kernels (`_hs_text_memchr`, `_hs_text_measure_off`) over
+//! descriptor-backed byte arrays. Each host authenticates the managed span
+//! through the external-storage ledger before reading a single byte; it never
+//! dereferences an unauthenticated address.
 
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
 use cranelift_frontend::FunctionBuilder;
@@ -14,14 +15,19 @@ use tidepool_repr::execution_schema::{
 use crate::{host_fns::RuntimeError, prepared_control::CallStatus};
 
 pub(super) const MEMCHR_HOST: &str = "prepared_text_memchr";
+pub(super) const MEASURE_OFF_HOST: &str = "prepared_text_measure_off";
 
-pub(super) fn host_functions() -> [(&'static str, *const u8); 1] {
-    [(MEMCHR_HOST, prepared_text_memchr as *const u8)]
+pub(super) fn host_functions() -> [(&'static str, *const u8); 2] {
+    [
+        (MEMCHR_HOST, prepared_text_memchr as *const u8),
+        (MEASURE_OFF_HOST, prepared_text_measure_off as *const u8),
+    ]
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum TextSearchOperation {
     Memchr,
+    MeasureOff,
 }
 
 pub(super) fn recognize(
@@ -36,12 +42,14 @@ pub(super) fn recognize(
     else {
         return None;
     };
-    if symbol != "_hs_text_memchr" {
-        return None;
-    }
-    (signature.arguments == [UnliftedRef, Word(64), Word(64), Word(8), Void]
+    let (operation, last) = match symbol.as_str() {
+        "_hs_text_memchr" => (TextSearchOperation::Memchr, Word(8)),
+        "_hs_text_measure_off" => (TextSearchOperation::MeasureOff, Word(64)),
+        _ => return None,
+    };
+    (signature.arguments == [UnliftedRef, Word(64), Word(64), last, Void]
         && signature.results == ResultContract::Returns(vec![Int(64)]))
-    .then_some(TextSearchOperation::Memchr)
+    .then_some(operation)
 }
 
 /// The wire span arguments are unsigned; a value the ledger span cannot hold
@@ -97,18 +105,73 @@ pub(super) unsafe extern "C" fn prepared_text_memchr(
     }
 }
 
-pub(super) fn emit_memchr(
+/// Measure `count` UTF-8 characters in an authenticated byte-array span.
+/// Read-only and noncollecting; the result is published only after the
+/// complete span validates.
+pub(super) unsafe extern "C" fn prepared_text_measure_off(
+    vmctx: *mut crate::context::VMContext,
+    reference: *mut u8,
+    descriptor: *const ObjectDescriptor,
+    offset: u64,
+    length: u64,
+    count: u64,
+    output: *mut i64,
+) -> i32 {
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    if machine.prepared_call_status() != CallStatus::Success {
+        return machine.prepared_call_status() as i32;
+    }
+    let result = (|| {
+        if output.is_null() {
+            return Err(RuntimeError::BadPointer);
+        }
+        let (published, len) = unsafe {
+            super::arrays::active_payload(
+                machine,
+                vmctx,
+                reference,
+                descriptor,
+                ExternalStorageKind::Bytes,
+            )
+        }?;
+        let offset = checked_word_span_arg(offset, len)?;
+        let length = checked_word_span_arg(length, len)?;
+        // A character count beyond the address space saturates: the span
+        // can never hold more characters than it has bytes.
+        let count = usize::try_from(count).unwrap_or(usize::MAX);
+        let measured = machine
+            .measure_external_utf8(published, offset, length, count)
+            .map_err(super::byte_arrays::byte_range_error)?;
+        unsafe { output.write(measured) };
+        Ok(())
+    })();
+    match result {
+        Ok(()) => CallStatus::Success as i32,
+        Err(error) => super::arrays::array_error(machine, error),
+    }
+}
+
+/// One emitter for both kernels: `(byte array, offset, length, last)` in,
+/// one `Int64` out through a checked host call.
+pub(super) fn emit_text_kernel(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut crate::pipeline::CodegenPipeline,
     vmctx: Value,
     descriptor: &ObjectDescriptor,
     arguments: &[Value],
+    operation: TextSearchOperation,
 ) -> Result<Vec<Value>, super::CompileError> {
-    let host = super::arrays::declare_host(builder, pipeline, MEMCHR_HOST, 7)?;
+    let (symbol, last) = match operation {
+        TextSearchOperation::Memchr => {
+            (MEMCHR_HOST, builder.ins().uextend(types::I64, arguments[3]))
+        }
+        TextSearchOperation::MeasureOff => (MEASURE_OFF_HOST, arguments[3]),
+    };
+    let host = super::arrays::declare_host(builder, pipeline, symbol, 7)?;
     let owner = builder
         .ins()
         .iconst(types::I64, descriptor.initial_header_word() as i64);
-    let needle = builder.ins().uextend(types::I64, arguments[3]);
+    let needle = last;
     let output = super::arrays::output_slot(builder);
     let call = builder.ins().call(
         host,
@@ -195,9 +258,38 @@ mod tests {
         );
     }
 
+    /// The last argument of a text kernel: memchr's needle byte or
+    /// measure_off's character count.
+    #[derive(Clone, Copy)]
+    enum KernelLast {
+        Needle(u8),
+        Count(u64),
+    }
+
     fn memchr_wire(offset: u64, length: u64, needle: u8) -> WireProgram {
+        text_kernel_wire(
+            "_hs_text_memchr",
+            *b"abcb",
+            offset,
+            length,
+            KernelLast::Needle(needle),
+        )
+    }
+
+    /// Builds a 4-byte array, writes `bytes`, and calls one text kernel on it.
+    fn text_kernel_wire(
+        symbol: &str,
+        bytes: [u8; 4],
+        offset: u64,
+        length: u64,
+        last: KernelLast,
+    ) -> WireProgram {
         let mut wire = testing::wire_program();
         use RuntimeRep::{Int, UnliftedRef, Void, Word};
+        let last_rep = match last {
+            KernelLast::Needle(_) => Word(8),
+            KernelLast::Count(_) => Word(64),
+        };
         wire.signatures[0].results = ResultContract::Returns(vec![Int(64)]);
         wire.signatures.extend([
             Signature {
@@ -209,7 +301,7 @@ mod tests {
                 results: ResultContract::Returns(vec![]),
             },
             Signature {
-                arguments: vec![UnliftedRef, Word(64), Word(64), Word(8), Void],
+                arguments: vec![UnliftedRef, Word(64), Word(64), last_rep, Void],
                 results: ResultContract::Returns(vec![Int(64)]),
             },
         ]);
@@ -224,7 +316,7 @@ mod tests {
             },
             OperationDecl {
                 identity: OperationIdentity::Intrinsic {
-                    symbol: "_hs_text_memchr".into(),
+                    symbol: symbol.into(),
                     convention: ForeignConvention::CCall,
                 },
                 signature: SignatureId(3),
@@ -266,17 +358,20 @@ mod tests {
         };
         wire.expressions.nodes = vec![
             operation(0, vec![int(4), Atom::Void]),
-            operation(1, vec![local(100), int(0), byte(b'a'), Atom::Void]),
-            operation(1, vec![local(100), int(1), byte(b'b'), Atom::Void]),
-            operation(1, vec![local(100), int(2), byte(b'c'), Atom::Void]),
-            operation(1, vec![local(100), int(3), byte(b'b'), Atom::Void]),
+            operation(1, vec![local(100), int(0), byte(bytes[0]), Atom::Void]),
+            operation(1, vec![local(100), int(1), byte(bytes[1]), Atom::Void]),
+            operation(1, vec![local(100), int(2), byte(bytes[2]), Atom::Void]),
+            operation(1, vec![local(100), int(3), byte(bytes[3]), Atom::Void]),
             operation(
                 2,
                 vec![
                     local(100),
                     word64(offset),
                     word64(length),
-                    byte(needle),
+                    match last {
+                        KernelLast::Needle(needle) => byte(needle),
+                        KernelLast::Count(count) => word64(count),
+                    },
                     Atom::Void,
                 ],
             ),
@@ -355,6 +450,94 @@ mod tests {
                     Arc::new(AtomicBool::new(false)),
                 )
                 .unwrap_err();
+            assert!(matches!(
+                error,
+                ExecutionError::Runtime(failure)
+                    if matches!(failure.cause, RuntimeError::ArrayIndexOutOfBounds { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn measure_off_requires_the_exact_intrinsic_signature() {
+        use RuntimeRep::*;
+        let identity = OperationIdentity::Intrinsic {
+            symbol: "_hs_text_measure_off".into(),
+            convention: ForeignConvention::CCall,
+        };
+        let exact = sig(
+            vec![UnliftedRef, Word(64), Word(64), Word(64), Void],
+            vec![Int(64)],
+        );
+        assert_eq!(
+            recognize(&identity, &exact),
+            Some(TextSearchOperation::MeasureOff)
+        );
+        for wrong in [
+            sig(
+                vec![UnliftedRef, Word(64), Word(64), Word(8), Void],
+                vec![Int(64)],
+            ),
+            sig(
+                vec![UnliftedRef, Word(64), Word(64), Word(64), Void],
+                vec![Word(64)],
+            ),
+        ] {
+            assert_eq!(recognize(&identity, &wrong), None);
+        }
+    }
+
+    /// "aλb" is `61 CE BB 62`: `λ` is one character of two bytes.
+    const A_LAMBDA_B: [u8; 4] = [0x61, 0xCE, 0xBB, 0x62];
+
+    fn run_measure_off(
+        offset: u64,
+        length: u64,
+        count: u64,
+    ) -> Result<crate::prepared_program::RunResult, ExecutionError> {
+        compile(text_kernel_wire(
+            "_hs_text_measure_off",
+            A_LAMBDA_B,
+            offset,
+            length,
+            KernelLast::Count(count),
+        ))
+        .run_entry(
+            ValueId(0),
+            &[],
+            &RunOptions::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    #[test]
+    fn measure_off_counts_utf8_characters_like_text() {
+        // (offset, length, characters wanted, expected): bytes consumed when
+        // enough characters fit, otherwise the negated characters found.
+        for (offset, length, count, expected) in [
+            (0, 4, 2, 3),
+            (0, 4, 3, 4),
+            (0, 4, 5, -3),
+            (1, 3, 1, 2),
+            (0, 0, 1, 0),
+            (0, 4, 0, 0),
+        ] {
+            let result = run_measure_off(offset, length, count).unwrap();
+            assert!(
+                matches!(
+                    result.values.as_slice(),
+                    [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(measured))]
+                        if *measured == expected
+                ),
+                "measure_off({offset}, {length}, {count})"
+            );
+        }
+    }
+
+    #[test]
+    fn measure_off_rejects_spans_past_the_extent_without_a_result() {
+        for (offset, length) in [(2, 3), (5, 1), (0, u64::MAX)] {
+            let error = run_measure_off(offset, length, 1).unwrap_err();
             assert!(matches!(
                 error,
                 ExecutionError::Runtime(failure)

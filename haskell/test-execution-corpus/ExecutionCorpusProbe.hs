@@ -35,7 +35,7 @@ import ExecutionCorpusInventory
   , unavailableTargetInventory, renderPreparedFactsForTest )
 import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionProjection
-  ( ProjectionContext(..), TextMemchrAuthority, resolveTextPackageUnit
+  ( ProjectionContext(..), TextUnitAuthority, resolveTextPackageUnit
   , preparedTopIdentities, projectPreparedTarget )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..) )
@@ -187,7 +187,7 @@ matchesExternal moduleNameArg occurrence identity =
 projectOneTarget
   :: PreparedPipelineResult
   -> Maybe FormattingAuthority
-  -> Maybe TextMemchrAuthority
+  -> Maybe TextUnitAuthority
   -> String
   -> FilePath
   -> Int
@@ -207,7 +207,7 @@ projectOneTarget prepared formattingAuthority textAuthority moduleNameArg output
 projectOneIdentity
   :: PreparedPipelineResult
   -> Maybe FormattingAuthority
-  -> Maybe TextMemchrAuthority
+  -> Maybe TextUnitAuthority
   -> FilePath
   -> Int
   -> SymbolIdentity
@@ -338,7 +338,7 @@ mapLegacyTargetsPure
 mapLegacyTargetsPure moduleNameArg identities = map $ \legacyName ->
   fmap (LegacyTarget legacyName) (exactExternalMapping moduleNameArg identities legacyName)
 
-projectionContext :: Maybe FormattingAuthority -> Maybe TextMemchrAuthority
+projectionContext :: Maybe FormattingAuthority -> Maybe TextUnitAuthority
   -> SymbolIdentity -> ProjectionContext
 projectionContext formattingAuthority textAuthority identity =
   ProjectionContext

@@ -8,7 +8,7 @@ module Tidepool.ExecutionProjection
   , projectLiteralAtomForTest
   , assignTopIdentitySpellings
   , resolveTextPackageUnit
-  , TextMemchrAuthority(..)
+  , TextUnitAuthority(..)
   ) where
 
 import Control.Monad (foldM, forM, unless)
@@ -81,7 +81,7 @@ data ProjectionContext = ProjectionContext
   , projectionEntry :: SymbolIdentity
   , projectionFormattingAuthority :: Maybe FormattingAuthority
   -- | Missing authority rejects text's kernel, not unrelated projection.
-  , projectionTextUnit :: Maybe TextMemchrAuthority
+  , projectionTextUnit :: Maybe TextUnitAuthority
   } deriving stock (Eq, Show)
 
 data ProjectionError
@@ -113,21 +113,32 @@ data PState = PState
   , retainedGenerations :: Map SymbolIdentity Word64
   , homeModules :: Set (Text, Text)
   , formattingAuthority :: Maybe FormattingAuthority
-  , textUnit :: Maybe TextMemchrAuthority
+  , textUnit :: Maybe TextUnitAuthority
   }
 
 type P a = StateT PState (Either ProjectionError) a
 
--- | Authority is a compiler-resolved unit, never a package-name prefix.
-newtype TextMemchrAuthority = TextMemchrAuthority Unit deriving stock (Eq)
+-- | text's C kernels admitted as prepared intrinsics, with their exact ABI.
+-- The Rust recognizer (`tidepool-codegen/src/prepared_program/text_search.rs`)
+-- accepts exactly these signatures.
+textKernels :: [(String, Signature)]
+textKernels =
+  [ ("_hs_text_memchr", Signature
+      [UnliftedRefRep, WordRep 64, WordRep 64, WordRep 8, VoidRep] (Returns [IntRep 64]))
+  , ("_hs_text_measure_off", Signature
+      [UnliftedRefRep, WordRep 64, WordRep 64, WordRep 64, VoidRep] (Returns [IntRep 64]))
+  ]
 
-instance Show TextMemchrAuthority where
-  show (TextMemchrAuthority unit) = unitString unit
+-- | Authority is a compiler-resolved unit, never a package-name prefix.
+newtype TextUnitAuthority = TextUnitAuthority Unit deriving stock (Eq)
+
+instance Show TextUnitAuthority where
+  show (TextUnitAuthority unit) = unitString unit
 
 -- | Resolve the text package selected by GHC's unit database, then ask its
 -- module finder for the kernel's provider in that exact package. The explicit
 -- package qualifier excludes home-module shadows. Failure grants no authority.
-resolveTextPackageUnit :: HscEnv -> IO (Maybe TextMemchrAuthority)
+resolveTextPackageUnit :: HscEnv -> IO (Maybe TextUnitAuthority)
 resolveTextPackageUnit hscEnv =
   case lookupPackageName (ue_units (hsc_unit_env hscEnv)) (PackageName (fsLit "text")) of
     Nothing -> pure Nothing
@@ -135,7 +146,7 @@ resolveTextPackageUnit hscEnv =
       found <- findImportedModule hscEnv (mkModuleName "Data.Text.Internal.Search")
         (OtherPkg selected)
       pure $ case found of
-        Found _ owner -> Just (TextMemchrAuthority (moduleUnit owner))
+        Found _ owner -> Just (TextUnitAuthority (moduleUnit owner))
         _ -> Nothing
 
 -- | Narrow test seam for GHC literals which cannot be written in source Haskell.
@@ -1131,16 +1142,15 @@ internOperation op signature = do
           ]
       , operationSignature == Signature arguments (Returns [IntRep 64]) ->
           pure (Schema.IntrinsicIdentity (Text.pack (unpackFS label)) Schema.CCall)
-    -- text's byte-search kernel is a C implementation with no Haskell body.
-    -- The compiler-resolved provider and exact ABI jointly authorize it.
+    -- text's byte kernels are C implementations with no Haskell body. The
+    -- compiler-resolved provider unit and each kernel's exact ABI jointly
+    -- authorize it; the table is the whole admitted set.
     StgFCallOp (Foreign.CCall (Foreign.CCallSpec
       (Foreign.StaticTarget _ label (Just unit) _) Foreign.CCallConv Foreign.PlayRisky)) _
-      | unpackFS label == "_hs_text_memchr"
-      , pinnedTextUnit == Just (TextMemchrAuthority unit)
-      , operationSignature == Signature
-          [UnliftedRefRep, WordRep 64, WordRep 64, WordRep 8, VoidRep]
-          (Returns [IntRep 64]) ->
-          pure (Schema.IntrinsicIdentity "_hs_text_memchr" Schema.CCall)
+      | pinnedTextUnit == Just (TextUnitAuthority unit)
+      , Just expected <- lookup (unpackFS label) textKernels
+      , operationSignature == expected ->
+          pure (Schema.IntrinsicIdentity (Text.pack (unpackFS label)) Schema.CCall)
     -- Fingerprinting is on the ordinary exception/Typeable path. These C
     -- leaves retain their pinned ABI and execute against authenticated byte
     -- storage; they are not deferred stack capabilities.

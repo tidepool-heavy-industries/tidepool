@@ -1783,6 +1783,40 @@ impl MachineState {
             .map_or(-1, |index| index as i64))
     }
 
+    /// text's `_hs_text_measure_off` over an authenticated byte span: walk
+    /// UTF-8 lead bytes until `count` characters are found. Returns the bytes
+    /// consumed when `count` characters fit, otherwise the negated number of
+    /// characters found. Every lead byte read lies inside the checked span; a
+    /// sequence whose continuation bytes would pass the span end still counts
+    /// as one character, exactly as text's C kernel does, without reading them.
+    pub(crate) fn measure_external_utf8(
+        &self,
+        published: *mut u8,
+        offset: usize,
+        length: usize,
+        count: usize,
+    ) -> Result<i64, ExternalStorageValidationError> {
+        let storage = self.external_storage.borrow();
+        let span = Self::checked_external_byte_range(&storage, published, offset, length)?;
+        // SAFETY: the ledger borrow and checked span authenticate every byte.
+        let span = unsafe { std::slice::from_raw_parts(span, length) };
+        let (mut position, mut found) = (0_usize, 0_usize);
+        while found < count && position < span.len() {
+            position += match span[position] {
+                byte if byte < 0x80 => 1,
+                byte if byte < 0xE0 => 2,
+                byte if byte < 0xF0 => 3,
+                _ => 4,
+            };
+            found += 1;
+        }
+        Ok(if found >= count {
+            i64::try_from(position).unwrap_or(i64::MAX)
+        } else {
+            -i64::try_from(found).unwrap_or(i64::MAX)
+        })
+    }
+
     /// Snapshot an active byte payload while its ledger owner is borrowed.
     /// This call is noncollecting and returns owned storage; no payload borrow
     /// survives into later observation or forcing steps.

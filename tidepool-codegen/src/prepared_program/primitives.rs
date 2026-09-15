@@ -996,10 +996,15 @@ pub(super) fn emit_operation(
             super::byte_arrays::emit_compare_bytes(builder, pipeline, vmctx, bytes_array, arguments)
                 .map(Some)
         }
-        PrimitiveOperation::TextSearch(super::text_search::TextSearchOperation::Memchr) => {
-            super::text_search::emit_memchr(builder, pipeline, vmctx, bytes_array, arguments)
-                .map(Some)
-        }
+        PrimitiveOperation::TextSearch(operation) => super::text_search::emit_text_kernel(
+            builder,
+            pipeline,
+            vmctx,
+            bytes_array,
+            arguments,
+            operation,
+        )
+        .map(Some),
         PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Read(element)) => {
             super::byte_arrays::emit_read_bytes(
                 builder,
