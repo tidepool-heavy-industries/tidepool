@@ -1,0 +1,31 @@
+--- a/tidepool/src/actor_host/roster_setup.hs
++++ b/tidepool/src/actor_host/roster_setup.hs
+@@ -2,5 +2,5 @@
+ second <- startAgent (readonlyAgent "roster-second")
+ let firstLabel = "roster-first-request" :: Label
+ let secondLabel = "roster-second-request" :: Label
+-firstAnswer <- request @Int first firstLabel (10 :: Int)
+-secondAnswer <- request @Int second secondLabel (20 :: Int)
++firstAnswer <- request @Int first (assignment firstLabel (10 :: Int))
++secondAnswer <- request @Int second (assignment secondLabel (20 :: Int))
+--- a/tidepool/src/actor_host/operator_request.hs
++++ b/tidepool/src/actor_host/operator_request.hs
+@@ -1,3 +1,3 @@
+ worker <- startAgent (readonlyAgent "operator-worker")
+ let requestKey = "operator-request" :: Label
+-answer <- request @Int worker requestKey (41 :: Int)
++answer <- request @Int worker (assignment requestKey (41 :: Int))
+--- a/tidepool/src/actor_host/active_update_setup.hs
++++ b/tidepool/src/actor_host/active_update_setup.hs
+@@ -1,3 +1,3 @@
+ worker <- startAgent (readonlyAgent "tabs-worker")
+ let tabsLabel = "tabs" :: Label
+-answer <- request @Int worker tabsLabel (10 :: Int)
++answer <- request @Int worker (assignment tabsLabel (10 :: Int))
+--- a/tidepool/src/actor_host/notification_setup.hs
++++ b/tidepool/src/actor_host/notification_setup.hs
+@@ -1,3 +1,3 @@
+ worker <- startAgent (readonlyAgent "notification-recipient")
+ let requestName = "notification-original" :: Label
+-answer <- request @Text worker requestName ("original assignment" :: Text)
++answer <- request @Text worker (assignment requestName ("original assignment" :: Text))

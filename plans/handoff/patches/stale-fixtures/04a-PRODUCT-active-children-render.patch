@@ -1,0 +1,29 @@
+--- a/tidepool/src/actor_host.rs
++++ b/tidepool/src/actor_host.rs
+@@ -4872,14 +4872,16 @@
+ fn append_effective_role(mut instructions: String, role: &tidepool_actor::EffectiveRole) -> String {
+     let descendants = role.descendants();
+     instructions.push_str(&format!(
+-        "\n\nRuntime policy ({}): role={:?}; effects={}; native_tools={:?}; workspace={:?}; descendant_depth={}; active_children={:?}. These are the effective runtime facts; effect membership alone is not authority.\n",
++        "\n\nRuntime policy ({}): role={:?}; effects={}; native_tools={:?}; workspace={:?}; descendant_depth={}; active_children={}. These are the effective runtime facts; effect membership alone is not authority.\n",
+         role.prompt_profile(),
+         role.role(),
+         role.haskell_effects_type(),
+         role.native_tools(),
+         role.workspace(),
+         descendants.maximum_depth,
+-        descendants.maximum_active_children,
++        descendants
++            .maximum_active_children
++            .map_or_else(|| "unbounded".to_owned(), |children| children.to_string()),
+     ));
+     instructions
+ }
+@@ -6053,6 +6055,7 @@
+         );
+         assert!(scaffold.starts_with(PromptId::ScaffoldingAgent.body()));
+         assert!(scaffold.contains("descendant_depth=2; active_children=3"));
++        assert!(!scaffold.contains("Some("), "{scaffold}");
+         let integration = developer_instructions(
+             &tidepool_actor::EffectiveRole::integration(),
+             &InteractiveLaunchMode::Fresh,

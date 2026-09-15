@@ -277,6 +277,40 @@ Step 1 evidence at `413f8cea4` (G1 committed; recorded 2026-09-15):
     `Schema api = Rep (api Shape)`, which renders as an unexported synonym or
     as the generic representation; exporting `Message` fixes only the
     constructor. Index by the record type (`Message api`).
+  - Core engine heap corruption after `drainActor`/`awaitExit` survives
+    `76718e6c7`: the two actor-source/drain tests still fail with case traps
+    (one on a zeroed closure) and a `BadPointer` latch. Under investigation.
+
+Proposed fixes for the defects above (designs from read-only investigation,
+for review before implementation):
+- Typed-site classifier: one pure classifier shared by both elaborators
+  decides rewrite or reject for every recognized verb occurrence. Rewrite when
+  all type arguments and dictionaries are present, placing the site literal at
+  the index derived from the verb's type (foralls plus constraints), whatever
+  the value count; reject (deferred to reachability) when a type argument or
+  dictionary is missing or a type is open. Strip `nospec` first on both
+  paths. `vsMisShapeIsError` goes away. Defence in depth: the `runLLMTurn*`
+  and `finalize` stubs pass a bottom site instead of 0, and the runtime
+  rejects a site with no recorded type.
+- Caller-chosen result representation: `ResultContract::CallerResult`
+  (schema version bump), allowed only for functions, joins, call demands and
+  global entry signatures; validation rejects it in thunks, operations, case
+  scrutinees, enters and the program entry, so only tail positions produce
+  it. Projection emits it from one helper shared by functions, joins and
+  imported entries. Codegen keeps one descriptor per function and emits one
+  monomorphic native entry per result representation actually demanded
+  (closed over the program's own demands plus a lifted instance); a
+  cross-program demand at an uninstantiated representation is a typed
+  reusable miss. First slice fixes `startActor`/`startActorFork`.
+- `Address` host values: an observed address that resolves inside an
+  installed program's pinned literal bytes observes as `LitString` of the
+  literal's suffix from that offset (no NUL scan); a byte-array address, null,
+  or anything unauthenticated is a typed `ObservationFailure::Address` refusal
+  with its origin, never dereferenced. First slice is observation only
+  (pinned-bytes literal length index, pool union in `ObservationHeap`, the
+  `expand` arm) and clears the 74 corpus Address rows; a second slice adds
+  machine-minted address tokens to `PreparedResult`/`PreparedInput` and stops
+  accepting a raw scalar for an `Address` parameter.
 
 This is not a green broad gate; the exit criterion above still requires one.
 
@@ -373,7 +407,35 @@ Decisions:
 
 Acceptance: scalar, record, `Maybe`, `Either`, list and managed answers; every
 production verb answer type; a wrong-family answer and a bottom answer are both
-rejected with the continuation still resumable. The first slice is the
+rejected with the continuation still resumable.
+
+Review against source (adversarial, read-only) found the one `qApp` entry
+sound and validate-then-marshal the right primitive, but the evidence model
+unsafe as written. Amendments required before implementation:
+- A site's recorded type is often not the continuation's input:
+  `runLLMTurnFork`/`Fanout` resume with `Either InvocationExit T` / lists,
+  `request`/`child` deliver `result` through an exit cell, `receive`/`serve`
+  resume with live values. Record a delivery mode per site (host answer with
+  its exact wire type, live handle, exit-cell fill).
+- Nominal heads are a sorted set: too weak (`Either Int Text` equals
+  `Either Text Int`) and too strict (field-type families, erased newtypes,
+  synonyms). Carry closed structural type evidence with a per-family
+  constructor field table; validation is a type-directed walk.
+- Constructors are interned only when used, so a `Left` never matched is
+  undeclared and a late descriptor makes `Case` trap (machine latch). The
+  extractor must emit the constructor closure of every host-answer type; the
+  interner gains a `host_id` index and refuses divergent descriptors.
+- Byte payloads (`Text`, `Integer`) need machine-wide bytes descriptors and a
+  builder-owned ledger allocation with rollback; `Map`/`Set` go through a
+  compiled adapter or are refused.
+- Construction sizes the graph first (memoizing shared nodes), reserves once,
+  and unwinds the ledger on failure; handles are checked for realm, rejected
+  when `Evaluating`, and must be WHNF in strict fields.
+- One-shot consumption needs a continuation ledger (peek, validate, build,
+  take, enter), not a `Copy` handle; "still resumable" means rejected before
+  entry.
+- Settlement needs a compiled request-observation entry that forces the
+  `Union` payload and site literal. The first slice is the
 `FreerResume` fixture resumed through the single entry, then a structured
 answer, then a handle answer.
 
@@ -448,6 +510,29 @@ producer's binding and actor retire; repeated install, run, retire and collect
 cycles beyond 4096 cumulative slots keep live residency bounded; counters for
 handles, import and top roots, slots, old and external bytes, and installed
 code owners are reported separately.
+
+Review against source (adversarial, read-only) confirmed that generated code
+reads only its own slots, import graphs cannot cycle (value graphs can), and a
+between-installs quiescence notion exists. Holes requiring amendment:
+- Liveness edges missed by "header names owning program": constructor
+  descriptors are interned machine-wide with no owner; the collector never
+  visits static-region or old-space objects (no prepared mark phase exists);
+  raw `Address` fields point into a program's byte storage with no header edge
+  (use-after-free); parked sites reference their compiling program; programs
+  need explicit pins between install and first bind, and the first program
+  permanently.
+- `ProgramId` is a vector index; retirement needs a never-reused issuer.
+- Shared index rows (`prepared_enters`, `descriptor_registry`, the collector's
+  descriptor map) hold one value per header from the last writer, so "remove
+  exactly its rows" breaks: rows need owner sets plus a live-header census.
+- Slot reuse by same width fragments and races compile against install;
+  prefer one fixed-address root block per program, freed with it.
+- Reclamation order must start by deregistering slot roots and purging
+  remembered slots; quiescence must be enforced (depth zero, no borrows,
+  never allocation-triggered, machine reusable) and must release per-program
+  leases through a runtime callback.
+- Nothing is reclaimable until shadowed notebook bindings retire, since root
+  bindings and handles pin every program.
 
 Exit: repeated install/run/retire/full-collect cycles beyond the present slot
 budget have bounded live residency. Escaped closures and cross-program PAPs

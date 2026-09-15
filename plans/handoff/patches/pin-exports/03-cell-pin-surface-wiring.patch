@@ -1,0 +1,73 @@
+diff --git a/haskell/tidepool-extract.cabal b/haskell/tidepool-extract.cabal
+--- a/haskell/tidepool-extract.cabal
++++ b/haskell/tidepool-extract.cabal
+@@ -480,3 +480,24 @@
+     tidepool-extract-internal
+   default-language: GHC2024
+   ghc-options:      -Wall
++
++-- Cell-pin renderability of a notebook surface: every type a monomorphic
++-- statement binder can take from an audited module's exports must render,
++-- with the cell's own name context, using only names that cell resolves.
++-- Driven by tidepool's actor_host cell_pin_surface_tests, which supplies the
++-- production cell header and include path:
++--   cell-pin-surface-test HEADER.hs AUDIT-MODULE... -- INCLUDE-DIR...
++-- Prints one TSV finding per unresolved name; exits non-zero only on misuse
++-- or compile failure, so the driver owns the verdict.
++test-suite cell-pin-surface-test
++  type:             exitcode-stdio-1.0
++  main-is:          Main.hs
++  hs-source-dirs:   test-cell-pin-surface
++  build-depends:
++    base         >= 4.20 && < 5,
++    ghc          >= 9.12 && < 9.13,
++    directory,
++    filepath,
++    tidepool-extract-internal
++  default-language: GHC2024
++  ghc-options:      -Wall
+diff --git a/tidepool/src/actor_host.rs b/tidepool/src/actor_host.rs
+--- a/tidepool/src/actor_host.rs
++++ b/tidepool/src/actor_host.rs
+@@ -5,6 +5,8 @@
+ //! tmux is process ownership and observability, never message transport.
+ 
+ #[cfg(test)]
++mod cell_pin_surface_tests;
++#[cfg(test)]
+ mod command_jobs_tests;
+ mod commands;
+ #[cfg(test)]
+@@ -107,6 +109,14 @@
+ 
+ const DRIVER_MODULE: &str = "Tidepool.Actors.Internal.ShoalDriver";
+ const WORKBENCH_SURFACE_MODULE: &str = "Tidepool.Actors.Shoal";
++/// Imports a Shoal root workbench cell sees beyond the effect preamble.
++const SHOAL_CELL_IMPORTS: &[&str] = &[
++    WORKBENCH_SURFACE_MODULE,
++    "qualified Tidepool.Actor.Record as R",
++    "qualified Tidepool.Command as Cmd",
++    "Tidepool.Command (bash, withMemory, Memory(..))",
++    "qualified Tidepool.Actor as Actor",
++];
+ const DRIVER_ENTRY: &str = "rootDriver";
+ const DRIVER_EFFECTS: &str = "RootEffects";
+ const SHOAL_REPLACED_EFFECT_NAMES: &[&str] = &[
+@@ -1790,12 +1800,11 @@
+         tidepool_actor::EffectiveRole::root().with_research_policy(config.research_policy),
+     );
+     Ok((
+-        ActorWorkbenchSource::new(preamble, include)
+-            .with_imports(WORKBENCH_SURFACE_MODULE)
+-            .with_imports("qualified Tidepool.Actor.Record as R")
+-            .with_imports("qualified Tidepool.Command as Cmd")
+-            .with_imports("Tidepool.Command (bash, withMemory, Memory(..))")
+-            .with_imports("qualified Tidepool.Actor as Actor")
++        SHOAL_CELL_IMPORTS
++            .iter()
++            .fold(ActorWorkbenchSource::new(preamble, include), |source, imports| {
++                source.with_imports(imports)
++            })
+             .with_default_quasiquoters()
+             .with_tools(
+                 config

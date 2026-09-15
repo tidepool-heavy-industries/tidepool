@@ -1,0 +1,11 @@
+--- a/tidepool-actor/src/hosted_lifecycle_tests.rs
++++ b/tidepool-actor/src/hosted_lifecycle_tests.rs
+@@ -413,7 +413,7 @@
+     let doc_output = docs["items"][0]["output"].as_str().unwrap();
+     assert!(doc_output.contains("Shoal topics:"), "{doc_output}");
+     assert!(
+-        doc_output.contains("Send raw Haskell to the tool"),
++        doc_output.contains("Send one notebook cell of ordinary Haskell"),
+         "{doc_output}"
+     );
+     assert!(

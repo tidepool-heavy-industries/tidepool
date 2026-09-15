@@ -1,0 +1,602 @@
+diff --git a/scripts/prepared-corpus-oracle.sh b/scripts/prepared-corpus-oracle.sh
+new file mode 100755
+index 0000000..96e4f44
+--- /dev/null
++++ b/scripts/prepared-corpus-oracle.sh
+@@ -0,0 +1,189 @@
++#!/usr/bin/env bash
++# Native GHC oracle for the Suite.hs prepared corpus.
++#
++# Values come from GHC evaluating Suite.hs natively, rendered by typed
++# renderers (haskell/test-prepared-stg/suite-oracle). No expectation value is
++# transcribed by hand. The only reviewed inputs are classifications
++# (SuiteOracleClassifications.json) and permitted nontermination
++# (SuiteOracleNonterminating.txt), and each carries a reason.
++#
++#   check  MANIFEST   compare the fixture's input fingerprint (no GHC build)
++#   verify MANIFEST   regenerate from native GHC and diff against the fixture
++#   update MANIFEST   regenerate and write the fixture
++#
++# MANIFEST is the Suite projection manifest; its expectation keys are the
++# oracle's domain.
++set -euo pipefail
++
++repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++cd "$repo_root"
++
++usage() {
++  echo "usage: $0 check|verify|update MANIFEST" >&2
++  exit 2
++}
++[[ $# -eq 2 ]] || usage
++mode="$1"
++manifest="$2"
++case "$mode" in check | verify | update) ;; *) usage ;; esac
++
++fixture="tidepool-testing/fixtures/prepared-corpus-expectations.json"
++oracle_source="haskell/test-prepared-stg/suite-oracle"
++classifications="$oracle_source/SuiteOracleClassifications.json"
++nonterminating="$oracle_source/SuiteOracleNonterminating.txt"
++eval_timeout="${SUITE_ORACLE_TIMEOUT:-10s}"
++required_ghc="9.12.2"
++# The prepared pipeline's optimisation contract
++# (Tidepool.GhcPipeline.canonicalizeDFlags). Nontermination shape depends on it.
++ghc_flags=(-O2 -fno-full-laziness -fno-cpr-anal
++  -fexpose-all-unfoldings -fexpose-overloaded-unfoldings)
++
++work="$(mktemp -d)"
++trap 'rm -rf "$work"' EXIT
++
++jq -r '.programs[] | .expectation_key // empty' "$manifest" \
++  | LC_ALL=C sort -u >"$work/names"
++
++# Mirrors scripts/fixtures.sh: every input that can change a rendered value.
++inputs_fingerprint() {
++  {
++    find haskell/lib "$oracle_source" -type f -print
++    printf '%s\n' \
++      flake.nix \
++      flake.lock \
++      haskell/cabal.project \
++      haskell/test/Suite.hs \
++      scripts/prepared-corpus-oracle.sh
++  } | LC_ALL=C sort | xargs sha256sum
++  printf 'flags %s\n' "${ghc_flags[*]}"
++  printf 'names %s\n' "$(sha256sum <"$work/names" | cut -d' ' -f1)"
++} 2>/dev/null
++
++fingerprint() { inputs_fingerprint | sha256sum | cut -d' ' -f1; }
++
++build_oracle() {
++  local actual_ghc
++  actual_ghc="$(ghc --numeric-version)"
++  if [[ "$actual_ghc" != "$required_ghc" ]]; then
++    echo "error: the Suite oracle requires GHC $required_ghc, found $actual_ghc" >&2
++    exit 1
++  fi
++  if ! SUITE_ORACLE_NAMES="$work/names" ghc --make "${ghc_flags[@]}" \
++    -i"$repo_root/haskell/lib" -i"$repo_root/haskell/test" -i"$repo_root/$oracle_source" \
++    -outputdir "$work/build" -o "$work/suite-oracle" \
++    "$repo_root/$oracle_source/SuiteOracle.hs" >"$work/ghc.log" 2>&1; then
++    cat "$work/ghc.log" >&2
++    echo "error: the Suite oracle did not build" >&2
++    exit 1
++  fi
++}
++
++generate() {
++  local output="$1"
++  build_oracle
++  "$work/suite-oracle" domain >"$work/domain.jsonl"
++
++  if ! jq -e -n --slurpfile domain "$work/domain.jsonl" --slurpfile classes "$classifications" '
++    ($domain | map({key: .occurrence, value: .}) | from_entries) as $d
++    | $classes[0] | to_entries
++    | all(.[]; $d[.key] != null and $d[.key].class != "value"
++        and (.value.reason | type == "string" and length > 0)
++        and (.value.expectation.kind == "cyclic_observation"))
++  ' >/dev/null; then
++    echo "error: each classification must name a manifest key without a native value" \
++      "oracle, give a reason, and declare cyclic_observation: $classifications" >&2
++    exit 1
++  fi
++
++  : >"$work/values.jsonl"
++  local occurrence json status reason
++  while IFS= read -r occurrence; do
++    set +e
++    json="$(timeout "$eval_timeout" "$work/suite-oracle" eval "$occurrence" 2>"$work/eval.err")"
++    status=$?
++    set -e
++    case "$status" in
++      0)
++        jq -cn --arg key "$occurrence" --argjson value "$json" \
++          '{key: $key, value: $value}' >>"$work/values.jsonl"
++        ;;
++      3 | 4)
++        jq -cn --arg key "$occurrence" --rawfile reason "$work/eval.err" \
++          '{key: $key, refusal: {class: "unrepresentable", reason: ($reason | rtrimstr("\n"))}}' \
++          >>"$work/values.jsonl"
++        ;;
++      124)
++        reason="$(awk -F '\t' -v o="$occurrence" '$1 == o { print $2 }' "$nonterminating")"
++        if [[ -z "$reason" ]]; then
++          echo "error: $occurrence did not terminate within $eval_timeout and is not" \
++            "listed in $nonterminating" >&2
++          exit 1
++        fi
++        jq -cn --arg key "$occurrence" '{key: $key, value: {kind: "no_finite_observation"}}' \
++          >>"$work/values.jsonl"
++        ;;
++      *)
++        echo "error: native evaluation of $occurrence exited $status: $(cat "$work/eval.err")" >&2
++        exit 1
++        ;;
++    esac
++  done < <(jq -r 'select(.scope == "source_top" and .class == "value") | .occurrence' \
++    "$work/domain.jsonl")
++
++  while IFS=$'\t' read -r occurrence _; do
++    [[ -z "$occurrence" || "$occurrence" == \#* ]] && continue
++    if ! jq -e --arg key "$occurrence" \
++      'select(.key == $key and .value.kind == "no_finite_observation")' \
++      "$work/values.jsonl" >/dev/null; then
++      echo "error: $nonterminating lists $occurrence, but it terminated or is not a" \
++        "closed source top" >&2
++      exit 1
++    fi
++  done <"$nonterminating"
++
++  jq -n -S \
++    --arg fingerprint "$(fingerprint)" \
++    --arg ghc "$required_ghc" --arg flags "${ghc_flags[*]}" \
++    --slurpfile domain "$work/domain.jsonl" \
++    --slurpfile values "$work/values.jsonl" \
++    --slurpfile classes "$classifications" '
++    {
++      source_revision: ("generated by scripts/prepared-corpus-oracle.sh from haskell/test/Suite.hs: native GHC "
++        + $ghc + " " + $flags),
++      oracle_fingerprint: $fingerprint,
++      source_tops: ([$domain[] | select(.scope == "source_top") | .occurrence] | sort),
++      refusals: (
++        [$domain[] | select(.scope == "source_top" and .class != "value")
++          | {key: .occurrence, value: {class, reason}}]
++        + [$values[] | select(.refusal) | {key, value: .refusal}]
++        | from_entries),
++      expectations: (
++        ([$values[] | select(.value) | {key, value}] | from_entries)
++        + ($classes[0] | map_values(.expectation)))
++    }' >"$output"
++}
++
++case "$mode" in
++  check)
++    expected="$(fingerprint)"
++    actual="$(jq -r '.oracle_fingerprint // empty' "$fixture")"
++    if [[ "$actual" != "$expected" ]]; then
++      echo "error: the Suite oracle is stale; run: scripts/prepared-corpus-oracle.sh update $manifest" >&2
++      exit 1
++    fi
++    echo "Suite oracle fingerprint is current"
++    ;;
++  verify)
++    generate "$work/expectations.json"
++    if ! diff -u <(jq -S . "$fixture") "$work/expectations.json"; then
++      echo "error: the regenerated Suite oracle differs from $fixture" >&2
++      exit 1
++    fi
++    echo "Suite oracle regenerates identically"
++    ;;
++  update)
++    generate "$work/expectations.json"
++    cp -- "$work/expectations.json" "$fixture"
++    echo "updated $fixture"
++    ;;
++esac
+diff --git a/haskell/test-prepared-stg/suite-oracle/SuiteOracle.hs b/haskell/test-prepared-stg/suite-oracle/SuiteOracle.hs
+new file mode 100644
+index 0000000..4f4464d
+--- /dev/null
++++ b/haskell/test-prepared-stg/suite-oracle/SuiteOracle.hs
+@@ -0,0 +1,81 @@
++{-# LANGUAGE LambdaCase #-}
++{-# LANGUAGE ScopedTypeVariables #-}
++{-# LANGUAGE TemplateHaskell #-}
++
++-- | Native GHC oracle for the Suite.hs prepared corpus. Built and driven only
++-- by @scripts/prepared-corpus-oracle.sh@, with the prepared pipeline's
++-- optimisation flags.
++--
++-- @suite-oracle domain@ prints one JSON line per manifest expectation key:
++-- its scope (@source_top@ or @compiler_introduced@) and, for source tops, its
++-- class (@value@, @not_closed@, @unrepresentable@).
++--
++-- @suite-oracle eval OCCURRENCE@ evaluates one closed source top and prints
++-- its expectation. Exit status 3 means an unrepresentable leaf (for example a
++-- NaN) and 4 means a bottom below weak head normal form, which a non-forcing
++-- observation cannot match. The driver enforces nontermination with an OS
++-- timeout, because a non-allocating loop never yields to an in-process one.
++module Main (main) where
++
++import Control.Exception
++import Data.List (foldl')
++import System.Environment (getArgs)
++import System.Exit
++import System.IO
++
++import qualified Suite
++import SuiteOracleRender
++import SuiteOracleTH (oracleTable)
++
++table :: [(String, OracleEntry)]
++table = $(oracleTable)
++
++main :: IO ()
++main = getArgs >>= \case
++  ["domain"] -> mapM_ (putStrLn . domainLine) table
++  ["eval", occurrence] -> case lookup occurrence table of
++    Just (SourceValue whnf rendered) -> evalOne whnf rendered
++    _ -> refuse 2 (occurrence ++ " is not a closed source value top")
++  _ -> refuse 2 "usage: suite-oracle domain | suite-oracle eval OCCURRENCE"
++
++domainLine :: (String, OracleEntry) -> String
++domainLine (occurrence, entry) =
++  "{\"occurrence\":" ++ jsonString occurrence ++ "," ++ case entry of
++    CompilerIntroduced -> "\"scope\":\"compiler_introduced\"}"
++    SourceNotClosed reason -> source "not_closed" (Just reason)
++    SourceUnrepresentable reason -> source "unrepresentable" (Just reason)
++    SourceValue _ _ -> source "value" Nothing
++  where
++    source class_ reason =
++      "\"scope\":\"source_top\",\"class\":" ++ jsonString class_
++        ++ maybe "" (\r -> ",\"reason\":" ++ jsonString r) reason
++        ++ "}"
++
++-- | A failure while reaching weak head normal form is the whole top's
++-- failure, matching the engine's reusable runtime failure. A failure after
++-- that lives inside the value; a non-forcing observation cannot reproduce it,
++-- so the top is refused rather than given an error oracle.
++evalOne :: IO () -> String -> IO ()
++evalOne whnf rendered = do
++  top <- try whnf
++  case top of
++    Left exception
++      | Just (_ :: SomeAsyncException) <- fromException exception -> throwIO exception
++      | Just NonTermination <- fromException exception ->
++          putStrLn (errorExpectation "blackhole")
++      | otherwise -> putStrLn (errorExpectation "raised_exception")
++    Right () -> do
++      deep <- try (evaluate (forceString rendered))
++      case deep of
++        Right json -> putStrLn json
++        Left exception
++          | Just (_ :: SomeAsyncException) <- fromException exception -> throwIO exception
++          | Just (Unrepresentable reason) <- fromException exception -> refuse 3 reason
++          | otherwise ->
++              refuse 4 ("bottom below weak head normal form: " ++ displayException exception)
++
++forceString :: String -> String
++forceString s = foldl' (\() c -> c `seq` ()) () s `seq` s
++
++refuse :: Int -> String -> IO a
++refuse code reason = hPutStrLn stderr reason >> exitWith (ExitFailure code)
+diff --git a/haskell/test-prepared-stg/suite-oracle/SuiteOracleTH.hs b/haskell/test-prepared-stg/suite-oracle/SuiteOracleTH.hs
+new file mode 100644
+index 0000000..8ba454c
+--- /dev/null
++++ b/haskell/test-prepared-stg/suite-oracle/SuiteOracleTH.hs
+@@ -0,0 +1,154 @@
++{-# LANGUAGE LambdaCase #-}
++{-# LANGUAGE TemplateHaskell #-}
++
++-- | Compile-time half of the Suite.hs oracle generator.
++--
++-- The binding list is not hand-maintained. @SUITE_ORACLE_NAMES@ names a file
++-- holding every @expectation_key@ of the projection manifest. Each key is
++-- resolved as @Suite.<occurrence>@ in the splice site's scope: GHC's renamer,
++-- not a source regex, decides whether the key is a source-declared top.
++-- Keys it cannot resolve (simplifier floats such as @t_swap1@, @$w@ workers,
++-- @$f@ dictionaries, @$tc@ typeable bindings) are compiler-introduced.
++--
++-- A resolved top is classified from its reified type into a closed 'Shape'
++-- with a monomorphic renderer, or refused as not closed (function or
++-- polymorphic type) or unrepresentable (no expectation kind).
++module SuiteOracleTH (oracleTable) where
++
++import Control.Exception (evaluate)
++import Control.Monad (forM)
++import Data.Char (isAlpha, isAlphaNum)
++import qualified Data.Text as T
++import Language.Haskell.TH
++import Language.Haskell.TH.Syntax (addDependentFile)
++import System.Environment (lookupEnv)
++
++import SuiteOracleRender
++
++data Shape
++  = SInt
++  | SBool
++  | SChar
++  | SDouble
++  | SText
++  | SList Shape
++  | STuple [Shape]
++  | SMaybe Shape
++  | SEither Shape Shape
++
++data Refusal
++  = RefuseNotClosed String
++  | RefuseUnrepresentable String
++
++-- | @[(occurrence, OracleEntry)]@ for every manifest expectation key.
++oracleTable :: Q Exp
++oracleTable = do
++  path <- runIO (lookupEnv "SUITE_ORACLE_NAMES") >>= \case
++    Just path -> pure path
++    Nothing -> fail "SUITE_ORACLE_NAMES must name the manifest expectation-key list"
++  addDependentFile path
++  contents <- runIO (readFile path)
++  let occurrences = filter (not . null) (lines contents)
++  entries <- forM occurrences $ \occurrence ->
++    [| (occurrence, $(entryFor occurrence)) |]
++  listE (map pure entries)
++
++entryFor :: String -> Q Exp
++entryFor occurrence
++  | not (plainIdentifier occurrence) = [| CompilerIntroduced |]
++  | otherwise = lookupValueName ("Suite." ++ occurrence) >>= \case
++      Nothing -> [| CompilerIntroduced |]
++      Just name -> reify name >>= \case
++        VarI _ ty _ -> classifyTop name ty
++        DataConI _ ty _ -> classifyTop name ty
++        ClassOpI _ ty _ -> refusal (RefuseNotClosed ("class method :: " ++ pprint ty))
++        info -> refusal (RefuseUnrepresentable ("unsupported binding " ++ pprint info))
++
++-- | Occurrences carrying @$@, @:@ or other non-identifier characters are
++-- never source value names.
++plainIdentifier :: String -> Bool
++plainIdentifier (c : cs) =
++  (isAlpha c || c == '_') && all (\x -> isAlphaNum x || x == '_' || x == '\'') cs
++plainIdentifier [] = False
++
++classifyTop :: Name -> Type -> Q Exp
++classifyTop name ty = shapeOf True ty >>= \case
++  Left refused -> refusal refused
++  Right shape ->
++    [| SourceValue (() <$ evaluate $(varE name)) ($(renderer shape) $(varE name)) |]
++
++refusal :: Refusal -> Q Exp
++refusal (RefuseNotClosed reason) = [| SourceNotClosed reason |]
++refusal (RefuseUnrepresentable reason) = [| SourceUnrepresentable reason |]
++
++-- | The first argument is True only for the top's own type: an arrow there
++-- means the top is a function, while an arrow in a field means a closed
++-- value that contains a function, which has no first-order expectation.
++shapeOf :: Bool -> Type -> Q (Either Refusal Shape)
++shapeOf top = \case
++  ForallT [] [] body -> shapeOf top body
++  ForallT {} -> pure (Left (RefuseNotClosed "polymorphic or constrained type"))
++  ForallVisT {} -> pure (Left (RefuseNotClosed "visible forall"))
++  VarT variable -> pure (Left (RefuseNotClosed ("type variable " ++ pprint variable)))
++  ty
++    | isFunction ty ->
++        pure . Left $
++          if top
++            then RefuseNotClosed ("function type " ++ pprint ty)
++            else RefuseUnrepresentable ("function-valued component " ++ pprint ty)
++  AppT ListT element -> fmap SList <$> shapeOf False element
++  ty
++    | (TupleT arity, components) <- spine ty
++    , arity /= 1
++    , length components == arity ->
++        fmap STuple . sequence <$> mapM (shapeOf False) components
++  AppT (ConT constructor) element
++    | constructor == ''Maybe -> fmap SMaybe <$> shapeOf False element
++  AppT (AppT (ConT constructor) left) right
++    | constructor == ''Either -> do
++        left' <- shapeOf False left
++        right' <- shapeOf False right
++        pure (SEither <$> left' <*> right')
++  ConT constructor
++    | constructor == ''Int -> ok SInt
++    | constructor == ''Bool -> ok SBool
++    | constructor == ''Char -> ok SChar
++    | constructor == ''Double -> ok SDouble
++    | constructor == ''T.Text -> ok SText
++    | constructor == tupleTypeName 0 -> ok (STuple [])
++    | otherwise -> reify constructor >>= \case
++        -- Synonyms such as String and Suite's own `type Text = T.Text`.
++        TyConI (TySynD _ [] rhs) -> shapeOf top rhs
++        _ -> pure (Left (RefuseUnrepresentable ("type " ++ show constructor ++ " has no expectation kind")))
++  ty -> pure (Left (RefuseUnrepresentable ("type " ++ pprint ty ++ " has no expectation kind")))
++  where
++    ok = pure . Right
++
++isFunction :: Type -> Bool
++isFunction = \case
++  AppT (AppT ArrowT _) _ -> True
++  AppT (AppT (AppT MulArrowT _) _) _ -> True
++  _ -> False
++
++spine :: Type -> (Type, [Type])
++spine = go []
++  where
++    go arguments (AppT function argument) = go (argument : arguments) function
++    go arguments headType = (headType, arguments)
++
++-- | A monomorphic renderer for one closed shape.
++renderer :: Shape -> Q Exp
++renderer = \case
++  SInt -> [| renderInt |]
++  SBool -> [| renderBool |]
++  SChar -> [| renderChar |]
++  SDouble -> [| renderDouble |]
++  SText -> [| renderText |]
++  SList element -> [| renderList $(renderer element) |]
++  SMaybe element -> [| renderMaybe $(renderer element) |]
++  SEither left right -> [| renderEither $(renderer left) $(renderer right) |]
++  STuple components -> do
++    names <- mapM (const (newName "component")) components
++    lamE
++      [tupP (map varP names)]
++      [| renderTuple $(listE [ [| $(renderer shape) $(varE name) |] | (shape, name) <- zip components names ]) |]
+diff --git a/haskell/test-prepared-stg/suite-oracle/SuiteOracleRender.hs b/haskell/test-prepared-stg/suite-oracle/SuiteOracleRender.hs
+new file mode 100644
+index 0000000..4704762
+--- /dev/null
++++ b/haskell/test-prepared-stg/suite-oracle/SuiteOracleRender.hs
+@@ -0,0 +1,127 @@
++-- | Runtime half of the Suite.hs prepared-corpus oracle generator.
++--
++-- Each renderer corresponds to exactly one arm of @compare_values@ in
++-- @tidepool-testing/src/prepared_corpus.rs@ and emits that arm's
++-- @Expectation@ JSON (@{"kind": ..., "value": ...}@). Rendering follows the
++-- constructor shape the prepared observer materialises, never 'Show' text:
++--
++-- * @Int@ is @int@ (compared through @I#@ or a literal word).
++-- * @Char@ is @char@ (compared through @C#@ or a canonical word).
++-- * @[Char]@ is a @list@ of @char@, because the observation is a @:@/@[]@
++--   chain; only @Data.Text.Text@ renders as @text@.
++-- * @Double@ is @float64_approx@ with zero tolerance; GHC's 'show' is the
++--   shortest round-tripping decimal and serde parses it correctly rounded.
++--   Non-finite values have no JSON number and are refused.
++-- * Tuples, 'Maybe' and 'Either' are compared by constructor name.
++--
++-- Anything else has no expectation kind and is refused by the compile-time
++-- classifier ("SuiteOracleTH") before a renderer is chosen.
++module SuiteOracleRender
++  ( OracleEntry (..)
++  , Unrepresentable (..)
++  , renderInt
++  , renderBool
++  , renderChar
++  , renderDouble
++  , renderText
++  , renderList
++  , renderTuple
++  , renderMaybe
++  , renderEither
++  , errorExpectation
++  , jsonString
++  ) where
++
++import Control.Exception (Exception, throw)
++import Data.Char (ord)
++import Data.List (intercalate)
++import qualified Data.Text as T
++import Numeric (showHex)
++
++-- | One manifest expectation key, resolved against Suite's own scope.
++data OracleEntry
++  = -- | Not a name Suite declares: a simplifier float, worker, dictionary,
++    -- wrapper or other compiler-introduced top. No source oracle exists.
++    CompilerIntroduced
++  | -- | A source top whose type is a function or is polymorphic.
++    SourceNotClosed String
++  | -- | A closed source top whose type has no expectation kind.
++    SourceUnrepresentable String
++  | -- | A closed source top: an action forcing it to weak head normal form,
++    -- and its lazily rendered expectation.
++    SourceValue (IO ()) String
++
++-- | Raised while rendering a value that has no JSON expectation.
++newtype Unrepresentable = Unrepresentable String
++  deriving Show
++
++instance Exception Unrepresentable
++
++expectation :: String -> String -> String
++expectation kind value =
++  "{\"kind\":" ++ jsonString kind ++ ",\"value\":" ++ value ++ "}"
++
++renderInt :: Int -> String
++renderInt n = expectation "int" (show n)
++
++renderBool :: Bool -> String
++renderBool b = expectation "bool" (if b then "true" else "false")
++
++renderChar :: Char -> String
++renderChar c = expectation "char" (jsonString [scalar c])
++
++renderDouble :: Double -> String
++renderDouble x
++  | isNaN x || isInfinite x =
++      throw (Unrepresentable ("non-finite Double " ++ show x))
++  | otherwise =
++      expectation "float64_approx"
++        ("{\"expected\":" ++ show x ++ ",\"absolute_tolerance\":0.0}")
++
++renderText :: T.Text -> String
++renderText t = expectation "text" (jsonString (map scalar (T.unpack t)))
++
++renderList :: (a -> String) -> [a] -> String
++renderList render xs =
++  expectation "list" ("[" ++ intercalate "," (map render xs) ++ "]")
++
++renderTuple :: [String] -> String
++renderTuple fields = expectation "tuple" ("[" ++ intercalate "," fields ++ "]")
++
++renderMaybe :: (a -> String) -> Maybe a -> String
++renderMaybe _ Nothing = expectation "maybe" "null"
++renderMaybe render (Just x) = expectation "maybe" (render x)
++
++renderEither :: (a -> String) -> (b -> String) -> Either a b -> String
++renderEither left _ (Left x) = expectation "either_left" (left x)
++renderEither _ right (Right y) = expectation "either_right" (right y)
++
++-- | @ExpectedFailure@ is snake_case: @"raised_exception"@ or @"blackhole"@.
++errorExpectation :: String -> String
++errorExpectation failure = expectation "error" (jsonString failure)
++
++-- | A Haskell 'Char' may be a surrogate code point, which neither JSON text
++-- nor a Rust @char@ can carry.
++scalar :: Char -> Char
++scalar c
++  | ord c >= 0xD800 && ord c <= 0xDFFF =
++      throw (Unrepresentable ("surrogate code point U+" ++ showHex (ord c) ""))
++  | otherwise = c
++
++-- | ASCII-only JSON string: every non-ASCII scalar is a @\\u@ escape (a
++-- surrogate pair above the BMP), so output never depends on locale encoding.
++jsonString :: String -> String
++jsonString s = "\"" ++ concatMap escape s ++ "\""
++  where
++    escape '"' = "\\\""
++    escape '\\' = "\\\\"
++    escape '\n' = "\\n"
++    escape '\r' = "\\r"
++    escape '\t' = "\\t"
++    escape c
++      | ord c < 0x20 || (ord c >= 0x7F && ord c <= 0xFFFF) = unit (ord c)
++      | ord c > 0xFFFF =
++          let v = ord c - 0x10000
++           in unit (0xD800 + v `div` 0x400) ++ unit (0xDC00 + v `mod` 0x400)
++      | otherwise = [c]
++    unit n = let h = showHex n "" in "\\u" ++ replicate (4 - length h) '0' ++ h
+diff --git a/haskell/test-prepared-stg/suite-oracle/SuiteOracleClassifications.json b/haskell/test-prepared-stg/suite-oracle/SuiteOracleClassifications.json
+new file mode 100644
+index 0000000..e6a4b82
+--- /dev/null
++++ b/haskell/test-prepared-stg/suite-oracle/SuiteOracleClassifications.json
+@@ -0,0 +1,10 @@
++{
++  "thunk_cycle_xs'": {
++    "reason": "compiler-introduced cyclic list floated from Suite.thunk_cycle (cycle [1, 2, 3]); its weak head normal form is finite, its reachable graph is a cycle",
++    "expectation": { "kind": "cyclic_observation" }
++  },
++  "thunk_letrec_knot_xs": {
++    "reason": "compiler-introduced knot `xs = 1 : xs` floated from Suite.thunk_letrec_knot; its weak head normal form is finite, its reachable graph is a cycle",
++    "expectation": { "kind": "cyclic_observation" }
++  }
++}
+diff --git a/haskell/test-prepared-stg/suite-oracle/SuiteOracleNonterminating.txt b/haskell/test-prepared-stg/suite-oracle/SuiteOracleNonterminating.txt
+new file mode 100644
+index 0000000..f663144
+--- /dev/null
++++ b/haskell/test-prepared-stg/suite-oracle/SuiteOracleNonterminating.txt
+@@ -0,0 +1,5 @@
++# occurrence<TAB>reason
++# A source top that may exceed the generator's evaluation timeout. Each row is
++# rendered as no_finite_observation. Any other timeout fails generation, and a
++# listed row that terminates also fails generation.
++thunk_blackhole	pinned GHC 9.12.2 lowers `let x = x in x` to a self-recursive let-no-escape join; the native binary loops instead of raising a blackhole

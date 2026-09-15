@@ -1,0 +1,16 @@
+--- a/tidepool/src/host_dynamic_tools_drain_tests.rs
++++ b/tidepool/src/host_dynamic_tools_drain_tests.rs
+@@ -135,7 +135,12 @@
+                 .status(),
+             StatusCode::SERVICE_UNAVAILABLE
+         );
+-        assert_eq!(c.post(format!("{URL}/completed")).json(&serde_json::json!({"protocolVersion":PROTOCOL_VERSION,"threadId":THREAD,"contextCallId":"context"})).send().await.unwrap().status(),StatusCode::OK);
++        // Quiesce still admits completion of a boundary that is not in flight.
++        assert_eq!(c.post(format!("{URL}/completed")).json(&serde_json::json!({"protocolVersion":PROTOCOL_VERSION,"threadId":THREAD,"contextCallId":"retired-context"})).send().await.unwrap().status(),StatusCode::OK);
++        // The in-flight call's boundary is still active: retryable, not delivered.
++        let settling = c.post(format!("{URL}/completed")).json(&serde_json::json!({"protocolVersion":PROTOCOL_VERSION,"threadId":THREAD,"contextCallId":"context"})).send().await.unwrap();
++        assert_eq!(settling.status(), StatusCode::SERVICE_UNAVAILABLE);
++        assert!(settling.text().await.unwrap().contains("still settling"));
+     }
+     assert_eq!(endpoint.calls.load(Ordering::SeqCst), 1);
+     assert_eq!(endpoint.completions.load(Ordering::SeqCst), 2);
