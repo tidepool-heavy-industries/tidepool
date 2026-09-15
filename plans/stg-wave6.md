@@ -379,6 +379,98 @@ document's Decisions, Completion plan, and this ledger.
 | S2b GC residuals | tests pass; mutation test surfaced an open, unresolved finding in `walk_frames`'s degraded-chain semantics — recorded, not fixed | `aa9001889` |
 | plans/README.md Wave 6 entry | accepted | `03029fc9d` |
 
-A fresh `just changed 3f43c7d4f` gate run on the tree through `aa9001889`
-was launched in the background; its verbatim result will be appended here
-once it completes.
+### Gate run results (2026-09-14, `just changed 3f43c7d4f` through `aa9001889`)
+
+Red in five steps. Reading (not rerunning) each, cross-referenced against
+every commit's diff since the base:
+
+| Step | Result | Cause |
+|---|---|---|
+| fmt, suite-check | pass | |
+| workspace clippy | FAIL | 23 pre-existing `tidepool-actor` diagnostics (hygiene item above), unrelated to this wave |
+| `cargo nextest run` (workspace) | FAIL, cancelled at 21/2950 | 7 `tidepool actor_host::command_jobs_tests` failures on the user's own in-progress cutover lineage; fail-fast left 2929 tests unrun, so this step proves nothing about the rest of the workspace |
+| `cargo nextest run -p tidepool-codegen` | FAIL, cancelled at 502/833 (500 pass) | two legacy-engine tests, confirmed pre-existing at the wave base — see below |
+| `scripts/fixtures.sh check` | FAIL | fixtures stale since S6 (`2659fce83`) touched `haskell/` after the fingerprint commit `3a7e6e999`; needs one more `fixtures-update` |
+| runtime battery | FAIL before running | `TIDEPOOL_EXTRACT_WORKER` in the gate's environment is older than sources; environment, not tree |
+
+**The two `tidepool-codegen::codegen` failures are confirmed pre-existing,
+not a Wave 6B regression.** Both
+`bind_error_then_allocate::error_bind_turn_then_allocating_bind_turn_stays_sane`
+and `apply_acceptance::apply_gc_during_application_relocates_forced_callee`
+were run twice: on HEAD (`TIDEPOOL_HEAP_VERIFY=1 TIDEPOOL_GC_POISON=1`, an
+isolated target dir) and again in a worktree pinned at the wave base
+`3f43c7d4f`, no env overrides. Both runs produced byte-identical panics.
+No commit since `3f43c7d4f` touches `tidepool-codegen/src` or
+`tidepool-heap/src` outside `prepared_program/` except `84025f519` (S2) and
+`03f31d80f` (S4), and neither's diff reaches the code paths either failing
+test exercises (S2's stack-map chain is a no-op for a single registered
+pipeline, which is every legacy-engine caller; `DescriptorSpace`'s static
+region set is prepared-only).
+
+- `bind_error_then_allocate` is a contract collision: since `71f23ffda`
+  (2026-09-12, already in the wave base), `RuntimeError::CaseTrap` maps to
+  `MachineDisposition::Unavailable` (`host_fns/errors.rs`). This test's own
+  turn 2 deliberately triggers a case-trap and then asserts the machine
+  stays usable for turn 3 — a premise the disposition contract already
+  contradicts, unrelated to any GC chain or heap-sharing change.
+- `apply_acceptance`'s nursery-relocation failure (`nursery_size=400`,
+  `left: 0, right: 3`) is real and still unclassified. Candidate sites are
+  in the pre-base "wip" lineage (`b73298b99`, `e1a4b9145`), not this wave.
+
+Follow-up cards (G2 rewrite the case-trap test to a `Reusable`-class error;
+G3 Fable-direct GC debugging on the apply-relocation failure; an S2b poison
+fix so the mutation test actually detects a truncated chain; G4 fixtures/
+worker env; G5 workspace nextest fail-fast) are recorded in the session plan
+file and will land as their own commits.
+
+## Wave 6C-2 (2026-09-14, in-repo orchestrated wave, no worktrees)
+
+Operating model: a Sonnet orchestrator (this session) spawned agents that
+worked directly in this checkout (no `isolation: worktree`), each owning a
+disjoint file set; the orchestrator alone ran builds/tests/commits. Full
+card specs are in the session-local plan file (not part of this
+repository); this ledger records what actually landed.
+
+| Task | Outcome | Commit |
+|---|---|---|
+| G2/G4/G5a/G5b (Fable, step 0) | case-trap test rewrite, fixtures fingerprint, per-crate and workspace `--no-fail-fast` | `b43a34057`, `5c3601331`, `73bd8ec2e` |
+| C1 realm-scoped cancellation (Fable) | `PreparedMachine` embeds `ResourceLedger`; `run_entry*`/`inspect_outer` take `RealmId` | `e398de760` |
+| G3 heap growth structural fix (Fable) | root cause: legacy growth ignored the triggering allocation's size, not just utilization; `VMContext::gc_trigger` now `fn(vmctx, usize)`, one shared `heap_growth_target` policy for both collectors | `9e4f795d0` |
+| A6 hygiene | `.gitignore` for stray target dirs, dead test types removed, `floating.rs` rustfmt fix | `a1642ddff` |
+| A5 `session::inspection` browse failure | real bug: assertions checked pre-splice query indices, not a GHC format drift | `29abd7951` |
+| A3 / C1b two-realm cancellation test | closes the multi-realm scenario C1's own commit deferred; surfaced that `MachineState::last_failure` is a machine-wide (not realm-scoped) latch cleared only by the next entry call | `90cecaf49` |
+| A2 / S2b-fix | added poisoning to the mutation-check tests; confirmed the real gap: `collect_prepared` (prepared engine's collector) never calls `gc_poison_enabled()` at all — poisoning exists only in the legacy Cheney-copy path. Not fixed (GC-invariant, next Fable pass) | `a2e12265a` |
+| A1 / X2a resolution substrate | `MachineState::prepared_callables`/`prepared_enters` tables, `prepared_resolve_call`/`prepared_resolve_enter` host fns, `signature_fingerprint` (hand-rolled fixed-seed FNV-1a, not `DefaultHasher`) | `c2992e66d` |
+| gc_write_barrier consolidation | one recorder per old-to-young edge class: array payload slots (tenure-time + reach expansion) vs. old-space object fields (`write_barrier`) — two recorders covering the same ground had made the mutation-check tests green-either-way since `71f23ffda` | `2ffdfa5b9` |
+| B1/B2/B3 / X2, S3b | cross-program call/enter dispatcher fallback wired to the X2a substrate; import-holding tops become heap tops, published before `initialize_heap_tops`/before `collect_on`, with rollback on every later failure arm | `5102c0b08` |
+| A8 tidepool-actor clippy + `command_jobs_tests` triage | 23 diagnostics cleared (typed errors, `Box`ed large variants, documented `#[allow]`s only where the lint is genuinely wrong); `--all-targets -D warnings` still red only via pre-existing `tidepool-testing` debt (verified independently, out of scope); 7/23 `command_jobs_tests` classified (5 environmental, 2 real-bug candidates recorded, not fixed) | `067adcf18` |
+| A4 legacy-engine test triage | all 9 pre-existing `tidepool-codegen::codegen` failures were test-authoring bugs (non-strict `let` used for sequencing instead of `Case`; one `f64`-vs-`f32` bit-width test bug) — zero engine-source changes | `075e44cb2` |
+| fmt cleanup | `cargo fmt --all -- --check` clean workspace-wide | `16c38961c` |
+
+**Not attempted this wave** (deferred, per the operating model's "the
+tests are the review" and the user's request to hand back to Fable for
+planning): C-1 (new X2/S3b acceptance tests, un-ignoring S2's T2), C-2 (S6
+`consumerResult` end-to-end against the real apply path), C-3 (standing
+docs update to `docs/stg-projection-inventory.md`/this file's "Rung 2
+boundaries" section reflecting X2/S3b closing those bullets).
+
+**Two real, unresolved findings recorded for the next Fable pass:**
+1. The prepared engine's own collector (`collect_prepared`,
+   `host_fns/gc.rs`) never wires in `gc_poison_enabled()` -- the S2b
+   mutation-check tests cannot detect a truncated stack-map chain this way
+   (see A2 row above). Legacy engine has this; prepared engine does not.
+2. `MachineState::last_failure` is a machine-wide latch, not realm-scoped,
+   cleared only by the next `begin_prepared_call` -- `inspect_outer`
+   between two realm-scoped calls can spuriously read back a stale
+   `Cancelled` failure from an unrelated realm's prior call (see A3/C1b row
+   above). Worth a closer look before rung-5 work leans on inspection
+   between realm-scoped calls in production.
+
+Full verification after this wave (all green except the two documented,
+pre-existing environmental classes -- `command_jobs_tests`'s 5
+environmental + 2 real-bug-candidate failures, and the 3 pre-existing
+`resident_interactive::lifecycle_tests` failures, all confirmed
+unaffected by this wave's commits): `cargo check --workspace --tests`
+clean; `cargo fmt --all -- --check` clean; `tidepool-codegen` full suite
+green; `tidepool-runtime` lib + `prepared_execution` green;
+`tidepool-testing` green.
