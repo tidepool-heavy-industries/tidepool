@@ -1,6 +1,7 @@
-//! One-off generator for the S5 executable-import fixture pair
-//! (`haskell/test-prepared-stg/fixtures/import-producer.cbor` and
-//! `import-consumer.cbor`), pinned for S6. Not part of the standing test
+//! One-off generator for the S5 executable-import fixtures
+//! (`haskell/test-prepared-stg/fixtures/import-producer.cbor`,
+//! `import-consumer.cbor`, and `import-consumer-result.cbor`), pinned for
+//! S6. Not part of the standing test
 //! battery: fixtures are pinned artifacts, generated once by a human/agent
 //! action and thereafter only READ (via `include_bytes!`) — see the other
 //! `fixtures/*.cbor` in this tree. `#[ignore]`d so a bare `cargo test`/
@@ -12,8 +13,7 @@
 //!
 //! ```text
 //! source scripts/lib-extract.sh && resolve_tidepool_extract
-//! CARGO_TARGET_DIR=<worktree>/target-S5 cargo test \
-//!   --config 'build.rustc-wrapper=""' -p tidepool-extract-cmd \
+//! cargo test --config 'build.rustc-wrapper=""' -p tidepool-extract-cmd \
 //!   --test import_fixtures -- --ignored --nocapture
 //! ```
 
@@ -88,14 +88,30 @@ fn generate_import_producer_and_consumer_fixtures() {
         producer_cbor.display()
     );
 
-    // import-consumer.cbor: consumerEntries pulls consumerResult (which
-    // applies producerFn) and consumerValue (which only re-exports
-    // producerValue) into one reachable closure; both producer symbols are
-    // declared as executable imports at generation 11. The
-    // projection must exclude their bodies from recovery and declare them as
-    // globals carrying that generation, even though ImportProducer.hs is
-    // compiled alongside ImportConsumer.hs as a home module (both are under
-    // the same --include root).
+    // import-consumer.cbor / import-consumer-result.cbor: `consumerEntries`
+    // and `consumerResultAt` do not reference each other (see
+    // ImportConsumer.hs), so `.targets([a, b])` projects each from its own
+    // reachability closure into its own `<target>.prepared.cbor` in one
+    // compile (`writePreparedArtifacts` in haskell/app/Main.hs writes one
+    // file per requested target). Kept as two separate artifacts, not
+    // combined into one closure: `consumerResultAt`'s body calls the
+    // imported `producerFn` directly by name, which
+    // `admission.rs::check`'s `ExprFrame::Call` arm has no case for at all
+    // (only a `ValueRef::Local` callee is matched; a `Global` callee falls
+    // through to the wildcard rejection) -- so a program whose reachable
+    // closure contains that call fails to install AT ALL ("admission is
+    // whole-program"). Keeping it in its own artifact means that gap does
+    // not also break `consumerValueAt`/`consumerEntries`, which install and
+    // run correctly today; see ImportConsumer.hs's doc on
+    // `consumerResultAt` and
+    // `tidepool-runtime/tests/prepared_execution.rs`'s
+    // `s6_direct_global_call_is_not_yet_admitted` for the pinned repro.
+    // Both producer symbols are declared as executable imports at
+    // generation 11 in both artifacts. The projection must exclude their
+    // bodies from recovery and declare them as globals carrying that
+    // generation, even though ImportProducer.hs is compiled alongside
+    // ImportConsumer.hs as a home module (both are under the same
+    // --include root).
     let producer_value_id = SymbolIdentity {
         unit: "main".to_owned(),
         module: "ImportProducer".to_owned(),
@@ -114,7 +130,7 @@ fn generate_import_producer_and_consumer_fixtures() {
     consumer_cmd
         .input(fixture_src.join("ImportConsumer.hs"))
         .output_dir(&consumer_out)
-        .target("consumerEntries")
+        .targets(["consumerEntries", "consumerResultAt"])
         .include(&lib)
         .include(&fixture_src)
         .retained_generation(producer_value_id, 11)
@@ -134,6 +150,12 @@ fn generate_import_producer_and_consumer_fixtures() {
         "expected {} to exist",
         consumer_cbor.display()
     );
+    let consumer_result_cbor = consumer_out.join("consumerResultAt.prepared.cbor");
+    assert!(
+        consumer_result_cbor.is_file(),
+        "expected {} to exist",
+        consumer_result_cbor.display()
+    );
 
     let fixtures_dir = fixture_src.join("fixtures");
     std::fs::create_dir_all(&fixtures_dir).expect("create fixtures dir");
@@ -141,10 +163,16 @@ fn generate_import_producer_and_consumer_fixtures() {
         .expect("copy import-producer.cbor into fixtures/");
     std::fs::copy(&consumer_cbor, fixtures_dir.join("import-consumer.cbor"))
         .expect("copy import-consumer.cbor into fixtures/");
+    std::fs::copy(
+        &consumer_result_cbor,
+        fixtures_dir.join("import-consumer-result.cbor"),
+    )
+    .expect("copy import-consumer-result.cbor into fixtures/");
 
     println!(
-        "wrote {} and {}",
+        "wrote {}, {}, and {}",
         fixtures_dir.join("import-producer.cbor").display(),
-        fixtures_dir.join("import-consumer.cbor").display()
+        fixtures_dir.join("import-consumer.cbor").display(),
+        fixtures_dir.join("import-consumer-result.cbor").display()
     );
 }

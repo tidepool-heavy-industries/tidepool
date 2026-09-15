@@ -4,9 +4,9 @@ use tidepool_bridge::Value;
 use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::MachineDisposition;
 use tidepool_codegen::prepared_program::{
-    CompiledProgram, ExecutionError, ObservationFailure, PreparedCallOptions, PreparedHandle,
-    PreparedInput as CodegenPreparedInput, PreparedMachine, PreparedMachineOptions,
-    PreparedOuter as PreparedOuterCodegen, PreparedResult, ProgramId, TopSlotBase,
+    CompileError, CompiledProgram, ExecutionError, ObservationFailure, PreparedCallOptions,
+    PreparedHandle, PreparedInput as CodegenPreparedInput, PreparedMachine, PreparedMachineOptions,
+    PreparedOuter as PreparedOuterCodegen, PreparedResult, ProgramId, TopSlotBase, Unsupported,
 };
 use tidepool_repr::execution_schema::{
     link_program, parse_program, Architecture, DecodeLimits, Endianness, ImportedValue, LinkError,
@@ -2023,7 +2023,8 @@ const IMPORT_CONSUMER_ARTIFACT: &[u8] =
     include_bytes!("../../haskell/test-prepared-stg/fixtures/import-consumer.cbor");
 /// `consumerValueAt 0#`'s GHC-computed value, transcribed from
 /// `ImportConsumerOracle.hs` run under the pinned GHC 9.12.2. Never
-/// hand-derived.
+/// hand-derived. (The same file also carries `consumerResult`'s value,
+/// unused here: see `s6_direct_global_call_is_not_yet_admitted`.)
 const IMPORT_CONSUMER_EXPECTATIONS: &str =
     include_str!("../../haskell/test-prepared-stg/ImportConsumerExpectations.json");
 
@@ -2148,9 +2149,10 @@ fn observed_int_list(value: &Value) -> Vec<i64> {
 /// run its data-only entry with collections between every step and compare
 /// against the GHC oracle, then show a consumer linked against a stale
 /// generation is refused before anything is installed and that leased
-/// bindings cannot be released. `consumerResult` (which applies
-/// `producerFn`) is deliberately not run: cross-program invocation has no
-/// mechanism this wave.
+/// bindings cannot be released. `consumerResult` (which applies the
+/// imported `producerFn` by calling it directly) is exercised separately,
+/// as a documented FAILURE, by `s6_direct_global_call_is_not_yet_admitted`
+/// below: see that test's doc for why.
 #[test]
 fn retained_import_end_to_end_links_consumer_against_bound_producer_tops() {
     let producer = parse_program(
@@ -2359,4 +2361,119 @@ fn retained_import_end_to_end_links_consumer_against_bound_producer_tops() {
         .expect("an unleased binding releases");
     assert_eq!(runtime.retained_handle_count(), 2);
     assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
+}
+
+const IMPORT_CONSUMER_RESULT_ARTIFACT: &[u8] =
+    include_bytes!("../../haskell/test-prepared-stg/fixtures/import-consumer-result.cbor");
+
+/// FINDING, not a regression from X2: a program whose reachable closure
+/// contains a DIRECT call to an imported function -- `consumerResult =
+/// producerFn (length producerValue)`, `producerFn` named as the callee
+/// syntactically, not held in a local/argument first -- fails to install
+/// at all, unconditionally, regardless of X2's runtime dispatch.
+///
+/// Root cause: `tidepool_codegen::prepared_program::admission`'s
+/// `ExprFrame::Call` arm matches `callee` against `Atom::Ref(ValueRef::Local(id))`
+/// only; every other callee shape, including `Atom::Ref(ValueRef::Global(_))`
+/// (an import called by name), falls through to the wildcard arm that marks
+/// the node unsupported. Admission is whole-program (`CompileError::Unsupported`
+/// rejects the entire artifact if any one reachable node fails), so this is
+/// not specific to `consumerResult` -- ANY reachable direct call to an
+/// import hits it. X2's own tests (`t2_closure_crosses_programs_...`,
+/// `x2_foreign_callee_with_mismatching_signature_...`,
+/// `x2_b_forces_a_thunk_import_through_the_owning_programs_enter` in
+/// `tidepool-codegen/src/prepared_program/machine.rs`) all call through a
+/// LOCAL value (a managed argument bound to `ValueRef::Local`) rather than
+/// a bare `ValueRef::Global` callee, so none of them exercise this path --
+/// this is the first fixture built from REAL GHC-compiled Core to reach it.
+///
+/// `import-consumer-result.cbor` is `consumerResultAt`'s own projection,
+/// kept out of the pinned `import-consumer.cbor` artifact for exactly this
+/// reason (see `ImportConsumer.hs`'s doc on `consumerResultAt`): if it were
+/// bundled in, this same rejection would take down `consumerValueAt`/
+/// `consumerEntries` too, since admission is whole-program.
+///
+/// Not fixed here: extending `admission.rs`'s `ExprFrame::Call` arm to
+/// recognise a `Global` callee (and decide its admissibility against the
+/// declared `GlobalDecl`'s `entry_signature`, mirroring what the runtime
+/// resolver already does) is codegen-invariant analysis work for a future
+/// Fable-direct pass, not a Sonnet-orchestrated card.
+#[test]
+fn s6_direct_global_call_is_not_yet_admitted() {
+    let producer = parse_program(
+        IMPORT_PRODUCER_ARTIFACT,
+        &requirements(),
+        DecodeLimits::default(),
+    )
+    .expect("import-producer artifact parses");
+    let consumer_result = parse_program(
+        IMPORT_CONSUMER_RESULT_ARTIFACT,
+        &requirements(),
+        DecodeLimits::default(),
+    )
+    .expect("import-consumer-result artifact parses");
+    let value_identity = producer_identity("producerValue");
+    let fn_identity = producer_identity("producerFn");
+    for identity in [&value_identity, &fn_identity] {
+        let declaration = consumer_result
+            .globals()
+            .iter()
+            .find(|global| &global.identity == identity)
+            .unwrap_or_else(|| panic!("consumer-result declares {identity:?} as a global"));
+        assert_eq!(
+            declaration.required_generation,
+            Some(11),
+            "projected against the same retained generation as the pinned consumer"
+        );
+    }
+    let producer_value_top = top_named(&producer, "ImportProducer", "producerValue");
+    let producer_fn_top = top_named(&producer, "ImportProducer", "producerFn");
+
+    let mut runtime = PreparedRuntime::from_prepared(producer, MachineImports::default())
+        .expect("producer links closed");
+    let first = runtime.first_program().expect("producer installs");
+    runtime
+        .set_val_gen(Generation(11))
+        .expect("the session starts the turn the fixture was projected against");
+    let bound_value = runtime
+        .bind_top(first, producer_value_top.binding.id, "producerValue")
+        .expect("producerValue binds at generation 11");
+    let bound_fn = runtime
+        .bind_top(first, producer_fn_top.binding.id, "producerFn")
+        .expect("producerFn binds at generation 11");
+
+    let error = runtime
+        .install_prepared(
+            consumer_result,
+            &[
+                (value_identity.clone(), bound_value),
+                (fn_identity.clone(), bound_fn),
+            ],
+        )
+        .expect_err(
+            "a direct call to an imported function is not yet admitted -- see this test's doc",
+        );
+    assert!(
+        matches!(
+            &error,
+            PreparedRuntimeError::Compile(CompileError::Unsupported(
+                Unsupported::Expression { .. }
+            ))
+        ),
+        "expected Compile(Unsupported(Expression {{ .. }})), got {error:?}"
+    );
+    assert_eq!(error.kind(), PreparedFailureKind::Rejected);
+
+    // The failed install leaves the machine and both bindings usable: no
+    // partial state, no lease taken, nothing rolled back that needs it.
+    assert_eq!(runtime.bindings().lease_count(bound_value), 0);
+    assert_eq!(runtime.bindings().lease_count(bound_fn), 0);
+    assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
+    runtime
+        .release_binding(bound_value)
+        .expect("an unleased binding releases");
+    runtime
+        .release_binding(bound_fn)
+        .expect("an unleased binding releases");
+    assert_eq!(runtime.retained_handle_count(), 0);
 }

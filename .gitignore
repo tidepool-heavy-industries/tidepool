@@ -43,6 +43,7 @@ haskell/test/text_cbor/
 !haskell/test-prepared-stg/fixtures/freer-resume.cbor
 !haskell/test-prepared-stg/fixtures/import-producer.cbor
 !haskell/test-prepared-stg/fixtures/import-consumer.cbor
+!haskell/test-prepared-stg/fixtures/import-consumer-result.cbor
 *.log
 dump_*.rs
 test_*.hs
