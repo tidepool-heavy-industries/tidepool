@@ -629,3 +629,215 @@ fixtures-update` run once this wave (Haskell source changed); only the
 source fingerprint moved, the generated corpus bytes were unchanged.
 Every number here was reproduced by the orchestrator directly, not taken
 from an implementing agent's own report.
+
+## Fable review of Wave 6C-3, and the structural agenda for stage G (2026-09-14)
+
+Review basis: every commit `79f398a0c..5190f628d` read as a diff (not the
+agents' reports), the current `admission.rs`, `apply.rs`, `entry.rs`,
+`resolve.rs`, `prepared_program.rs`, `machine.rs` install path,
+`machine_state.rs` resolution tables, `session/prepared.rs`,
+`session/prepared_turn.rs`, `RetainedUnfoldings.hs`, and the projection's
+`internGlobal`/`importedEntry`. Verdict: the wave is sound as landed --
+every test asserts what it claims, the `Send` justification holds field by
+field, the Core plugin is the right seam -- but it added two duplicated
+ledgers and left two latent bugs that share one root with the admission gap.
+The agenda below is ordered so each item deletes a category of bug rather
+than one instance.
+
+### Findings in the landed wave
+
+1. **Phantom leases (latent bug, by reading; no test pins it yet).**
+   `PreparedRuntime::install_prepared_in` leases every `(identity, id)`
+   pair the CALLER passes, but the artifact only declares a `GlobalDecl`
+   for a retained symbol it actually REFERENCES (`ExecutionProjection.hs`
+   `projectReference` -> `internGlobal` interns on use). `SessionTurns::run`
+   passes every live binding as an import, so in a real session every turn
+   leases every earlier binding whether or not it names it, and
+   `release_binding` is then refused for bindings nothing imports. B2's
+   three-turn test does not see this only because each turn references
+   every earlier binding. Fix: derive the lease set from
+   `linked.prepared().globals()` (what the program declares), never from
+   the caller's list; the caller's list becomes a resolution table only.
+2. **Closed-world admission of a dynamic local callee (latent, masked).**
+   `admission.rs`'s `pap_fallback_cache` admits a call through an
+   unknown-signature local only if SOME LOCAL callable could satisfy the
+   demand. Under X2 that local may be a foreign callable the runtime
+   resolves fine. T2 (`closure_caller_program`) is admitted by coincidence:
+   B's own entry `(LiftedRef) -> LiftedRef` classifies as the degenerate
+   `Partial { total_pending: 0 }` against the demand `() -> LiftedRef`. A
+   caller with no locally shaped function would be rejected for a call the
+   machine can serve. This is the same defect as the direct-`Global`-callee
+   gap: admission encodes a closed-world assumption the runtime no longer
+   has.
+3. **`handle_realms` duplicates the machine's ledger.** `ResourceLedger::HandleEntry`
+   already carries `realm`; the handoff explicitly allowed a read-only
+   query on `PreparedMachine` (the `handle_root`/`handle_is_evaluated`
+   pattern). A three-line `handle_realm(handle) -> Option<RealmId>` deletes
+   the mirror, `realm_of`, `forget_realm`, and the drift category (any
+   future release path that forgets the mirror; `ResourceLedger::rehome_handle`
+   already exists and the mirror would not see it).
+4. **`SymbolIdentity` reconstructed by hand in four places, two types.**
+   `prepared_turn.rs` builds the identity twice per turn (once as
+   `tidepool_repr::…::SymbolIdentity`, once as `tidepool_extract_cmd::SymbolIdentity`,
+   a hand-kept copy) from `entry.module.gen()` plus a hardcoded `"main"`
+   unit, and `turn_module_name` re-derives the module name a prior turn was
+   compiled as. The producing artifact's `TopBinding.identity` IS the
+   identity an importer links by, and `bind_top` has that top in hand. If
+   `BoundValue::Prepared` records it, the import list is derived, not
+   reconstructed, and `turn(prepared, introduces)` needs no `imports`
+   argument at all (it imports every live binding by identity; item 1's
+   fix makes that free).
+5. **A second turn-module assembly site.** `prepared_turn::project`
+   `format!`s a module (`module … where` / `import …` / body) while the
+   mechanism index names `session::turn` + `workbench::resident_workbench_templates`
+   the ONE template owner. The Core and prepared paths will diverge on
+   preamble, pragmas and imports the first time either changes. The
+   prepared decl turn should be a `TemplateSelector`-shaped template
+   (`{{IMPORTS}}`/`{{TURN}}`) rendered by the same owner.
+6. **`PreparedRuntime.programs` retains every `LinkedProgram` forever** for
+   two lookups (`export_signature`, the entry `ValueId` in `turn`). Per-turn
+   memory grows by a whole program tree. Record the export signature on
+   the binding at `bind_top` time and capture the entry at install; the map
+   goes away.
+7. **Stale attributes and comments.** `#[allow(dead_code, reason = "… a
+   later wave adds")]` on `CompiledProgram::{callables, enter,
+   enter_owned_headers}`, `resolve::CallableExport`,
+   `MachineState::{register_prepared_entries, clear_prepared_entries}` --
+   all consumed since X2/6C-2 (`machine.rs` install, `Drop`).
+   `remove_prepared_entries` is genuinely unused (install registers last,
+   nothing can fail after). `resolve.rs`'s module doc ("a later wave adds
+   the dispatcher-side call sites") and `prepared_program.rs`'s comment at
+   the `prepared_resolve_call` declaration ("`entry::emit_prepared_enter`'s
+   call site still awaits its own wave") describe a tree that no longer
+   exists. Stale allows hide real dead code.
+8. **Haskell.** `withholdRetainedUnfoldings` is correct and minimal (top
+   binder substitution, external-name identity, `Set.null` no-op). The
+   resident-daemon gap is real and matters for routing options 2/3 (the
+   daemon is the production compile path): the fix shape is an
+   `IORef (Set SymbolIdentity)` captured by the plugin closure, installed
+   ONCE at daemon boot and written per request, not per-request plugin
+   installation. `capitalize (takeBaseName path)` appears five times in
+   `GhcPipeline.hs`; `Tidepool.TurnSource.extractModuleName` already parses
+   the header. Threading the parsed name removes the flat-module workaround
+   B2 had to document.
+9. **Tests.** A1's three tests and the two fixture fixes are right; the
+   mutation results in the commit body match the code. A4's four tests
+   cover what they name. B1 is the first genuine registry-hosted prepared
+   session and its six-turn shape is the one a frontend would use. B2's
+   turn 3 correctly pins the known failure and flips to asserting `6` once
+   admission is fixed. `prepared_turn.rs`'s `#[ignore]` is justified
+   (needs a resolved extractor), not a hidden finding.
+
+### Structural agenda for stage G (categories, not instances)
+
+**G0 -- one call-site classification, shared by admission and emission.**
+Today `admission.rs` re-derives, on incomplete information, a judgement
+`apply::emit_dispatchers` makes at runtime, and `emit.rs::emit_exact_call`
+makes a third, laxer one (it accepts any `Local`/`Global` reference). Three
+judges produce exactly the bugs seen: admission rejects what emission can
+compile (the `Global` gap, finding 2), and admission admits what emission
+cannot (stage F's unexplained `Unsupported` for a body-position call
+returning `Int(64)`). Replace with one enum computed once per `Call` node
+in `plan.rs` and consumed by both:
+
+```rust
+enum Callee<'a> {
+    /// A local function/thunk this program declares.
+    Known { signature: &'a Signature },
+    /// An import whose export signature `link_program` already proved
+    /// (`GlobalDecl::entry_signature`); `None` = the projection had no LF
+    /// info (LFUnknown), decide at run time.
+    Import { entry: Option<&'a Signature> },
+    /// A parameter, case binder or let-bound value: descriptor known only
+    /// at run time.
+    Dynamic,
+}
+```
+
+Admissibility becomes: `Known` -> `classify(sig, 0, demand).is_some()`
+(unchanged); `Import { Some(sig) }` -> the same `classify`; `Import { None }`
+and `Dynamic` -> "the demand signature lowers" (`EntryAbi::lower_internal`
+succeeds), nothing about local callables. That closes both findings 2 and
+the `Global` gap in one arm, and deletes `pap_fallback_cache`. With X2's
+resolver in place, a runtime `UnresolvedCallee` (typed, `Reusable`,
+per-call) is strictly better than a whole-program install rejection for a
+shape the runtime may well serve. The single classification is also where
+the `Int(64)` finding gets pinned: emission's `emit_exact_call` should
+consume the same enum and report which arm rejected.
+
+**G1 -- resolution keyed by `(header, demand)`, owner dispatchers as
+targets.** The invariant that makes cross-program application uniform: a
+dispatcher for demand `D` and a function whose signature is `D` have the
+IDENTICAL Cranelift signature (`EntryAbi::lower_internal(profile, D,
+Captured)` builds both, `apply.rs:218` and `prepared_program.rs:694`).
+Therefore the resolution table can hand back EITHER as the jump target for
+a `call_indirect` of `D`'s shape. Make the table
+`HashMap<(header, fingerprint(D)), *const u8>` and have each program
+register, at install: `(h_F, fp(F.sig)) -> F` for every exported function
+(today's exact entries), and `(h, fp(D_i)) -> dispatcher_i` for every owned
+header `h` (function or PAP layout) and every dispatcher `D_i` the program
+emitted where `classify` hits. Then:
+
+- a foreign PAP, or a partial/exact application of a foreign function, is
+  served by the OWNER's dispatcher, which already knows its PAP layouts --
+  no new emission primitive, no runtime layout reads;
+- the owner pre-declares dispatchers for every demand its own exports can
+  satisfy exactly or partially (`F.args[p..p+k] -> LiftedRef`, bounded by
+  arity², small), so "owner never demanded D" cannot miss;
+- excess application of a foreign callee is caller-side: on a miss for
+  the full `D`, try `(header, fp(D.args[..c] -> LiftedRef))` for `c` from
+  `len-1` down to `1`, call it with the statically known per-`c`
+  signature, then apply the suffix through the caller's own dispatcher for
+  `D.args[c..] -> D.results` -- which requires `declare_dispatchers`'s
+  fixpoint to close the demand set over ALL suffixes, not only those
+  `classify` can prove against local functions (a one-line generalisation
+  of the existing loop);
+- the fingerprint stops being a compare-after-lookup guard and becomes
+  part of the key, so a wrong-ABI jump is unrepresentable rather than
+  checked.
+
+Introduce `struct DemandAbi(Signature)` (or make `Signature: Ord + Hash`
+and key `BTreeMap<Signature, FuncId>`) so `Dispatchers`' two views
+(`by_id`, `entries`) and `signature_key`'s clones collapse; `Dispatchers::find`'s
+linear scan and the `MissingRepresentation`-for-a-known-demand branch go
+with them. `UnresolvedCallee` remains the typed miss for a real callable
+no owner can serve; `owns_prepared_entry` remains the Reusable/Unavailable
+split.
+
+**G2 -- identity and leases come from the program, not the caller.**
+Findings 1, 4 and 6 together: `BoundValue::Prepared` gains
+`identity: SymbolIdentity` and `export: Option<Signature>` (both known at
+`bind_top` from the producing artifact's `TopBinding`); `install_prepared_in`
+leases exactly `linked.prepared().globals()`'s identities, resolved
+through the binding table by identity; `PreparedRuntime::turn` takes no
+import list; `PreparedRuntime.programs` is deleted. `tidepool_extract_cmd::SymbolIdentity`
+gets a `From` in one direction (or the crate reuses the repr type if the
+dependency already exists) so the two copies cannot drift. This is what
+lets a real session with many bindings release one.
+
+**G3 -- retirement joins the mount contract.** Rung 5's open proof exists
+because `ActorMachineRegistry<H, O>` is hardwired to `ResidentSession<H, O>`
+and `retire_root_placement` calls inherent `close_realm`/`retire_scope`.
+Extend `ActorRunTarget` with the retirement half
+(`retire_placement(&mut self, resource_scope: RealmId, lexical_scope:
+ScopeId) -> PlacementRetirement`) and an associated hole type, make the
+workbench's registry generic over `M: ActorRunTarget`, and the rung-5 test
+becomes one generic test instantiated twice. Routing option 2 then is a
+type-parameter flip, and the two engines cannot diverge on what retiring an
+incarnation releases.
+
+**G4 -- Haskell.** Finding 8's two items: per-request retained set through
+an `IORef` in the daemon (S5 must hold on the production compile path
+before any routing option beyond 1), and the parsed module name through
+`GhcPipeline`. After the latter, `prepared_turn.rs`'s flat-name workaround
+and its long explanatory doc are deleted, and G2's identity comes from a
+dotted module name that matches `session::turn`'s convention.
+
+**G5 -- hygiene riding along.** Finding 7's stale allows and comments;
+finding 3's `handle_realm` query; finding 5's template ownership (fold
+into G2/G4, whichever lands first touches `prepared_turn.rs`).
+
+Order: G0 first (smallest change, unblocks every direct call to an import,
+flips B2's turn 3 to asserting the oracle's `6`), then G2 (a real session
+is wrong without it), then G1, G3, G4. G0, G1 and the `plan.rs`/`apply.rs`
+halves of G2 are Fable-direct; G3, G4 and G5 are ordinary cards.

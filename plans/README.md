@@ -78,7 +78,10 @@ archive).
   through `tidepool-actor`'s own registry (the session substrate cannot
   depend on the actor crate); and the workbench routing decision itself
   (three options recorded, none taken -- see "Routing options" in the
-  plan).
+  plan). The plan's closing section, "Fable review of Wave 6C-3", records
+  two latent bugs found in review (phantom import leases; closed-world
+  admission of dynamic callees) and the stage-G structural agenda
+  (G0-G5), ordered to delete bug categories rather than instances.
 
 ## Supporting actor designs and separate harness work
 
