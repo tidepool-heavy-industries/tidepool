@@ -16,8 +16,17 @@ four-slot `ghc-heavy` group (`active_update_keeps_original_request_and_fences_te
 `lifecycle_sources_follow_replacement_and_capture_retained_exit`); 4 were
 terminated by the stop and 763 never ran. Suite registration, fixture
 freshness and the full prepared corpus were not reached. Artifacts:
-`target/tidepool-test-runs/20260915T195052Z-2446621-check`. The three timeouts
-are unclassified until each reruns alone.
+`target/tidepool-test-runs/20260915T195052Z-2446621-check`. Solo reruns at
+`aca28b7bb` classify the three timeouts: `preview_and_explicit_research_budget_match_without_spawning_during_preview`
+(pass, 64.6 s) and `lifecycle_sources_follow_replacement_and_capture_retained_exit`
+(pass, 58.7 s) were load starvation. `active_update_keeps_original_request_and_fences_terminal_delivery`
+fails deterministically at `actor_host.rs:5478`: the cell renders
+`Right (UpdateQueued)` because `Tidepool.Inspection`'s `displayTree` for
+`Either`/`Maybe` and the reply-state instances parenthesizes every payload
+(introduced in `57def9e0a`; `56f030122` accepted the same drift in two
+command-job needles). This is a display defect, not an STG defect; the fix and
+the next wave are in [next-wave-2026-09-15.md](next-wave-2026-09-15.md). A
+further full `just verify` is deferred to the Wave A exit.
 
 **Full prepared corpus, measured after the review fixes** (`just fixtures-check`
 with the typed-site change applied, committed as `e50831879`; report
