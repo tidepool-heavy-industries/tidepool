@@ -270,3 +270,35 @@ stub or the enter row removed (non-declaring programs then hit
 constructor headers, so a call miss on a constructor is a reusable
 `UnresolvedCallee` — contrary to its doc comment.
 
+### Prepared fixture regeneration checklist (for any schema version bump)
+Bump `tidepool-repr/src/execution_schema.rs:9` and
+`haskell/src/Tidepool/ExecutionSchema.hs:24`, rebuild the extractor, then
+(steps 1-4 from `haskell/` inside `bash scripts/dev-shell.sh`):
+1. `test-execution-schema-encode/fixtures/schema6-intrinsic.cbor`:
+   `cabal test execution-schema-encode --test-options='--write-schema6-fixture test-execution-schema-encode/fixtures/schema6-intrinsic.cbor'`.
+2. `test-prepared-stg/fixtures/m3-vertical.cbor`:
+   `cabal run execution-schema-projection -- test-prepared-stg/fixtures/m3-vertical.cbor`.
+3. `freer-resume.cbor`: `cabal build tidepool-extract-bin execution-corpus-projection`;
+   `$(cabal list-bin execution-corpus-projection) test-prepared-stg/FreerResume.hs FreerResume test-prepared-stg/FreerResumeTargets <out> lib`;
+   copy `<out>/2.prepared.cbor`.
+4. `freer-retention.cbor`: no recorded generator; likely the same probe with
+   `FreerRetention.hs FreerRetention test-prepared-stg/FreerRetentionTargets`,
+   copying `<out>/0.prepared.cbor` — verify the manifest row is `freerRequest`.
+5. Import fixtures (all three), from the repo root:
+   `source scripts/lib-extract.sh && resolve_tidepool_extract` then
+   `cargo test --config 'build.rustc-wrapper=""' -p tidepool-extract-cmd --test import_fixtures -- --ignored --nocapture`.
+Then `just fixtures-check`, the `tidepool-repr` `execution_schema_contract`
+test, and `cargo nextest run -p tidepool-runtime --test prepared_execution --ignore-default-filter`.
+Core CBOR fixtures are unaffected. Five of the seven prepared fixtures have
+never been regenerated through a bump before.
+
+### `*Sited` siblings — all consistent
+All siblings match their surface verbs' foralls and constraints in order, with
+the `Int` right after the constraints (index 3 for `runLLMTurn*`/`fork*`,
+4 for `finalize`, 2 for `forkMap`/`forkCata`). Core siblings are generated from
+`tidepool-protocol/src/effects/{run_llm_turn,fork}.rs` via
+`tidepool-mcp/src/generated/*` and written by `ensure_effects_module`;
+`forkMapSited`/`forkCataSited` live in `haskell/lib/Tidepool/Answerer/Fork.hs`.
+Cached effects folders without siblings are stale content-hashed leftovers.
+The classifier plan's literal-index rule is consistent with every sibling.
+
