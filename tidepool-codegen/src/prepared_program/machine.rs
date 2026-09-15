@@ -3430,6 +3430,173 @@ mod tests {
         assert_eq!(machine.handle_count(), 0);
     }
 
+    fn thunk_to_closure_identity() -> SymbolIdentity {
+        testing::identity("ThunkToClosure", "makeClosure")
+    }
+
+    /// A for the forced-environment test: a memoized CAF whose body builds a
+    /// `Ready` constructor `y` and returns a closure `f = \() -> y` that
+    /// CAPTURES `y`. Imported unforced, so a caller's dispatcher must enter
+    /// it before applying the function it evaluates to -- and must apply
+    /// that function with its OWN environment, not the thunk's.
+    fn thunk_to_closure_program(base: TopSlotBase) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("ThunkToClosure", "Ready"),
+            family: testing::identity("ThunkToClosure", "Ready"),
+            host_id: tidepool_repr::DataConId(1_301),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        });
+        wire.expressions.nodes = vec![
+            // node 0: f's body returns its captured `y`.
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(301)))]),
+            // node 1: the let body returns `f`.
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(302)))]),
+            // node 2: let f = \() -> y (captures y) in node 1.
+            ExprFrame::Let {
+                bindings: Group::NonRecursive(HeapBinding {
+                    id: ValueId(302),
+                    rhs: HeapRhs::Function {
+                        signature: SignatureId(0),
+                        parameters: vec![],
+                        captures: vec![ValueRef::Local(ValueId(301))],
+                        body: 0,
+                    },
+                }),
+                body: 1,
+            },
+            // node 3: let y = Ready in node 2.
+            ExprFrame::Let {
+                bindings: Group::NonRecursive(HeapBinding {
+                    id: ValueId(301),
+                    rhs: HeapRhs::Constructor {
+                        constructor: ConstructorId(0),
+                        fields: vec![],
+                    },
+                }),
+                body: 2,
+            },
+        ];
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.identity = thunk_to_closure_identity();
+        top.binding.rhs = HeapRhs::Thunk {
+            signature: SignatureId(0),
+            update: UpdatePolicy::Memoize,
+            captures: vec![],
+            body: 3,
+        };
+        let prepared = testing::prepare(wire).expect("thunk-to-closure fixture");
+        let linked = link_program(prepared, &MachineImports::default())
+            .expect("thunk-to-closure fixture links");
+        CompiledProgram::compile(&linked, base).expect("thunk-to-closure fixture compiles")
+    }
+
+    /// B for the forced-environment test: its entry calls the imported,
+    /// still-unforced global DIRECTLY (`ValueRef::Global` callee) at
+    /// `() -> LiftedRef`. B declares no function of that shape, so the call
+    /// is served entirely by the dispatcher's enter-then-resolve fallback.
+    fn direct_import_caller_program(
+        base: TopSlotBase,
+        identity: SymbolIdentity,
+    ) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0] = Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        };
+        wire.globals = vec![GlobalDecl {
+            identity: identity.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        }];
+        wire.expressions.nodes[0] = ExprFrame::Call {
+            callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+            signature: SignatureId(0),
+            arguments: vec![],
+        };
+        let prepared = testing::prepare(wire).expect("direct import caller fixture");
+        let mut imports = MachineImports::default();
+        imports.values.insert(
+            identity.clone(),
+            ImportedValue {
+                identity,
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                evaluated: false,
+                generation: 0,
+            },
+        );
+        let linked = link_program(prepared, &imports).expect("direct import caller fixture links");
+        CompiledProgram::compile(&linked, base).expect("direct import caller fixture compiles")
+    }
+
+    /// The foreign-resolution fallback applies the ENTERED callee. B calls
+    /// A's unforced CAF directly; the dispatcher enters it (running A's body
+    /// through `prepared_resolve_enter`), gets the closure `f`, resolves
+    /// `f`'s code machine-wide, and must pass `f` -- not the original thunk --
+    /// as the environment `f` reads its captured `y` from. Passing the
+    /// thunk made `f` load its capture out of the thunk's own payload.
+    #[test]
+    fn foreign_resolution_applies_the_entered_closure_not_the_thunk() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            thunk_to_closure_program(TopSlotBase::ZERO),
+            PreparedMachineOptions {
+                nursery_bytes: 4096,
+                top_slots: 16,
+            },
+        )
+        .expect("A installs");
+        let thunk = machine
+            .retain_top(program_a, ValueId(0))
+            .expect("A's unforced CAF is retained without running it");
+        let base_b = machine.next_top_slot_base();
+        let mut imports = ImportBindings::new();
+        imports.insert(thunk_to_closure_identity(), thunk);
+        let program_b = machine
+            .install_program(
+                direct_import_caller_program(base_b, thunk_to_closure_identity()),
+                imports,
+            )
+            .expect("B installs, importing A's unforced CAF");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: true,
+        };
+        let called = machine
+            .run_entry_retained(program_b, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("B's direct call enters A's CAF and applies the closure it evaluates to");
+        let [PreparedResult::Managed(result)] = called.values.as_slice() else {
+            panic!("the call returns one managed value");
+        };
+        let PreparedOuter::Constructor { identity, .. } = machine
+            .inspect_outer(*result, RealmId::ROOT)
+            .expect("the closure's captured constructor inspects");
+        assert_eq!(
+            identity,
+            tidepool_repr::DataConId(1_301),
+            "the closure returned its own captured Ready, read from its own environment"
+        );
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+        assert!(machine.release(*result));
+        assert!(machine.release(thunk));
+        assert_eq!(machine.handle_count(), 0);
+    }
+
     fn x2b_thunk_producer_identity() -> SymbolIdentity {
         testing::identity("X2ThunkForce", "producer")
     }

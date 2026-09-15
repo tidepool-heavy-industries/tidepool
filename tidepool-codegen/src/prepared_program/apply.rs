@@ -564,7 +564,14 @@ pub(super) fn emit_dispatchers(
         builder.seal_block(resolved_block);
         let dispatcher_signature = builder.func.signature.clone();
         let sig_ref = builder.import_signature(dispatcher_signature);
-        let call = builder.ins().call_indirect(sig_ref, code, &params);
+        // The environment is the ENTERED callee, exactly as on the local
+        // paths above: `original_callee` may be a thunk (or an updated
+        // indirection) whose payload is not the function's captures.
+        let mut resolved_arguments = vec![vmctx, callee];
+        resolved_arguments.extend_from_slice(&params[2..]);
+        let call = builder
+            .ins()
+            .call_indirect(sig_ref, code, &resolved_arguments);
         let returned = builder.inst_results(call).to_vec();
         builder.ins().return_(&returned);
 
