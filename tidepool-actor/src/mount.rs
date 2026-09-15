@@ -6,8 +6,8 @@ use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::{Generation, PrincipalId, SessionId};
 use tidepool_runtime::session::{
-    MaterializedFacade, OutputSink, ResidentError, ResidentSession, SessionCompileView,
-    SessionRunContext, SourceImports,
+    MaterializedFacade, OutputSink, PreparedRuntime, ResidentError, ResidentSession,
+    SessionCompileView, SessionRunContext, SourceImports,
 };
 
 use crate::ActorRef;
@@ -224,5 +224,23 @@ where
         live_payload: LivePayloadPolicy,
     ) -> Result<(), Self::Error> {
         self.set_actor_execution(context, effect_policy, live_payload)
+    }
+}
+
+/// The prepared-STG engine has no effect handlers of its own yet: mounting it
+/// can only record the ambient context, never fail, so its `Error` is
+/// uninhabited rather than borrowed from `ResidentSession`'s handler-backed
+/// contract.
+impl ActorRunTarget for PreparedRuntime {
+    type Error = std::convert::Infallible;
+
+    fn install_actor_execution(
+        &mut self,
+        context: SessionRunContext,
+        effect_policy: EffectRunPolicy,
+        live_payload: LivePayloadPolicy,
+    ) -> Result<(), Self::Error> {
+        self.set_actor_execution(context, effect_policy, live_payload);
+        Ok(())
     }
 }

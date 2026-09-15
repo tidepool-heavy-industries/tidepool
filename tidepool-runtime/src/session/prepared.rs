@@ -34,6 +34,10 @@ use tidepool_repr::{
     BindingName, Generation, MonotonicIdIssuer, SessionModule, SessionVarId, VarId,
 };
 
+use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+
+use super::resident::SessionRunContext;
+
 /// Machine-wide top-table capacity a session machine reserves up front:
 /// every later `install` claims its tops and import slots from this fixed
 /// range, and registered root addresses must never move, so it is sized for
@@ -71,6 +75,11 @@ pub enum PreparedRuntimeError {
         "session binding {id:?} is leased by {leases} installed program(s) and cannot be released"
     )]
     BindingLeased { id: SessionVarId, leases: usize },
+    #[error(
+        "a managed argument's handle is not live under realm {realm:?}: it was minted under a \
+         different runtime resource scope (or already released)"
+    )]
+    CrossRealmArgument { realm: RealmId },
 }
 
 impl PreparedRuntimeError {
@@ -81,7 +90,8 @@ impl PreparedRuntimeError {
             | Self::Link(_)
             | Self::UnknownBinding(_)
             | Self::GenerationNotStarted
-            | Self::BindingLeased { .. } => PreparedFailureKind::Rejected,
+            | Self::BindingLeased { .. }
+            | Self::CrossRealmArgument { .. } => PreparedFailureKind::Rejected,
             Self::Cancelled => PreparedFailureKind::Cancelled,
             Self::Unavailable(_) => PreparedFailureKind::Integrity,
             Self::Compile(_) => PreparedFailureKind::Rejected,
@@ -135,6 +145,19 @@ pub struct PreparedRunResult {
 /// Its codegen root never escapes this wrapper.
 pub struct PreparedValue(PreparedHandle);
 
+/// The identity of one [`PreparedValue`] under a runtime resource scope,
+/// for a caller that must name a retained value without holding it (e.g. a
+/// [`crate::session::registry::SessionRegistry`] hole). Unlike
+/// [`PreparedValue`] this is `Clone + Copy + PartialEq + Debug` and carries
+/// no ownership: it does not keep the handle's root alive, and holding one
+/// past a [`PreparedRuntime::release`] or [`PreparedRuntime::close_realm`]
+/// simply makes [`PreparedRuntime::parked_realm`] answer `None`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedHole {
+    pub realm: RealmId,
+    pub k: PreparedHandle,
+}
+
 pub enum PreparedArgument<'a> {
     Scalar(u64),
     Managed(&'a PreparedValue),
@@ -149,6 +172,17 @@ pub enum PreparedValueResult {
 pub struct PreparedRetainedResult {
     pub values: Vec<PreparedValueResult>,
     pub collections: u64,
+}
+
+/// What closing a realm actually released, from [`PreparedRuntime::close_realm_report`].
+/// `frames` is always `0`: this engine never parks a continuation (see
+/// [`PreparedMachine::close_realm`]'s doc), so the field exists only to mirror
+/// the JIT machine's own scope-retirement receipt shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RealmRetirement {
+    pub frames: usize,
+    pub handles_released: usize,
+    pub leases_released: usize,
 }
 
 /// One constructor layer of a retained value, read without forcing children.
@@ -186,7 +220,75 @@ pub struct PreparedRuntime {
     /// empty session; binding at it is refused.
     val_gen: Generation,
     binding_ids: MonotonicIdIssuer,
+    /// Local mirror of the machine ledger's handle-to-realm association.
+    /// Every operation in this module that mints, moves, or releases a
+    /// `PreparedHandle` updates this table in the same call, so it always
+    /// agrees with `PreparedMachine`'s own `ResourceLedger`. It exists
+    /// because `PreparedHandle`'s inner id is private to `tidepool-codegen`
+    /// and `PreparedMachine` exposes no by-realm existence query (see
+    /// `Self::parked_realm`'s doc); a linear scan is fine at this session's
+    /// scale (one machine's live handles, not a corpus).
+    handle_realms: Vec<(PreparedHandle, RealmId)>,
+    /// Session-var ids leased by each realm's `install_prepared_in` calls,
+    /// released together (`self.bindings.release_leases`) when that realm
+    /// closes. The import slot a lease guards is the installing program's
+    /// own persistent root — the lease exists to protect binding-table
+    /// identity/generation from a later mismatched re-`bind_top`/install,
+    /// not to keep the underlying value alive — so releasing every lease a
+    /// realm holds at `close_realm` is safe even though the machine may
+    /// still (independently) retain the value elsewhere.
+    realm_leases: BTreeMap<RealmId, Vec<SessionVarId>>,
+    /// Ambient actor mount context, set once by `Self::set_actor_execution`
+    /// and otherwise unused: this engine has no effect handlers of its own
+    /// yet, so `EffectRunPolicy`/`LivePayloadPolicy` are stored for a later
+    /// wave rather than acted on.
+    actor_execution: Option<(SessionRunContext, EffectRunPolicy, LivePayloadPolicy)>,
 }
+
+// SAFETY: `PreparedRuntime` is Send under the same stowed-XOR-running
+// discipline as `PersistentSession`/`JitEffectMachine`
+// (`tidepool-codegen/src/jit_machine.rs`'s `unsafe impl Send for
+// JitEffectMachine`, and this crate's `persistent.rs` threading note above
+// `PersistentSession`'s machine lifecycle section): exactly one thread ever
+// touches a `PreparedRuntime` at a time, because `SessionRegistry` only ever
+// hands it to one checkout, which either runs on the caller's own thread or
+// is moved wholesale onto a blocking thread and back (`Checkout::into_parts`)
+// -- it is never split, aliased, or driven from two threads at once.
+// Field by field:
+//  - `pending: Option<LinkedProgram>` -- plain owned data (parsed/linked
+//    program tree), no thread affinity.
+//  - `machine: Option<(PreparedMachine<'static>, ProgramId)>` -- the only
+//    field that is not already auto-`Send`. `PreparedMachine`'s non-`Send`
+//    fields are `Rc<MachineState>` and (inside its installed programs)
+//    `Rc<CompiledProgram>`. `MachineState` itself already carries `unsafe
+//    impl Send` (`tidepool-codegen/src/machine_state.rs`) for the identical
+//    reason: it is touched by exactly one thread at a time. An `Rc`'s own
+//    non-`Send`-ness is about un-synchronized refcount mutation from two
+//    threads concurrently, not about its pointee being thread-affine data;
+//    under the single-owner discipline above, no second thread ever holds a
+//    clone of either `Rc` while this one moves, so no concurrent refcount
+//    access can occur. The raw code pointers, vmctx, and heap buffers
+//    reachable through `PreparedMachine` are process-global address space
+//    (`tidepool-codegen/CLAUDE.md`'s "JIT allocation" section), valid from
+//    any thread, exactly like `JitEffectMachine`'s own code/heap.
+//  - `programs: BTreeMap<ProgramId, LinkedProgram>` -- plain owned data.
+//  - `bindings: BindingTable` -- already carries its own `unsafe impl Send`
+//    (`tidepool-codegen/src/binding_table.rs`) for its `RootSlot(*mut *mut
+//    u8)` cells, which are owned by the machine's `OldSpace` and therefore
+//    live under the very same single-owner discipline as `machine` above:
+//    `BindingTable` never deregisters a GC root itself (that is
+//    `JitEffectMachine`/`PreparedMachine`'s job), so it makes no unsynchronized
+//    access to the pointee either.
+//  - `val_gen: Generation`, `binding_ids: MonotonicIdIssuer` -- plain data.
+//  - `handle_realms: Vec<(PreparedHandle, RealmId)>` -- `PreparedHandle` is
+//    `Copy` plain data (a `ValueHandle(u64)` id plus a `RuntimeRep` tag), no
+//    pointer of its own.
+//  - `realm_leases: BTreeMap<RealmId, Vec<SessionVarId>>` -- plain data.
+//  - `actor_execution: Option<(SessionRunContext, EffectRunPolicy,
+//    LivePayloadPolicy)>` -- plain data (ids and policy enums).
+unsafe impl Send for PreparedRuntime {}
+
+static_assertions::assert_impl_all!(PreparedRuntime: Send);
 
 impl PreparedRuntime {
     pub fn from_artifact(
@@ -213,6 +315,9 @@ impl PreparedRuntime {
             bindings: BindingTable::new(),
             val_gen: Generation::default(),
             binding_ids: MonotonicIdIssuer::starting_at("prepared-binding", 1),
+            handle_realms: Vec::new(),
+            realm_leases: BTreeMap::new(),
+            actor_execution: None,
         })
     }
 
@@ -275,6 +380,9 @@ impl PreparedRuntime {
             .ok_or(PreparedRuntimeError::Run(
                 ExecutionError::UnknownPreparedHandle,
             ))?;
+        // `retain_top` handles are session-level: `PreparedMachine::close_realm`
+        // never affects them, so they are tracked under `RealmId::ROOT` here too.
+        self.handle_realms.push((handle, RealmId::ROOT));
         let id = SessionVarId::from_var(VarId(self.binding_ids.next_raw()));
         let entry = BindingEntry {
             name: BindingName(name.to_string()),
@@ -307,8 +415,21 @@ impl PreparedRuntime {
         limits: DecodeLimits,
         imports: &[(SymbolIdentity, SessionVarId)],
     ) -> Result<ProgramId, PreparedRuntimeError> {
+        self.install_in(artifact, requirements, limits, imports, RealmId::ROOT)
+    }
+
+    /// [`Self::install`] whose imports' leases are released together when
+    /// `realm` closes, instead of being held for the machine's whole life.
+    pub fn install_in(
+        &mut self,
+        artifact: &[u8],
+        requirements: &ProgramRequirements,
+        limits: DecodeLimits,
+        imports: &[(SymbolIdentity, SessionVarId)],
+        realm: RealmId,
+    ) -> Result<ProgramId, PreparedRuntimeError> {
         let prepared = parse_program(artifact, requirements, limits)?;
-        self.install_prepared(prepared, imports)
+        self.install_prepared_in(prepared, imports, realm)
     }
 
     /// [`Self::install`] for an already-decoded program.
@@ -316,6 +437,16 @@ impl PreparedRuntime {
         &mut self,
         prepared: PreparedProgram,
         imports: &[(SymbolIdentity, SessionVarId)],
+    ) -> Result<ProgramId, PreparedRuntimeError> {
+        self.install_prepared_in(prepared, imports, RealmId::ROOT)
+    }
+
+    /// [`Self::install_in`] for an already-decoded program.
+    pub fn install_prepared_in(
+        &mut self,
+        prepared: PreparedProgram,
+        imports: &[(SymbolIdentity, SessionVarId)],
+        realm: RealmId,
     ) -> Result<ProgramId, PreparedRuntimeError> {
         self.ensure_machine()?;
         let mut values = MachineImports::default();
@@ -356,6 +487,10 @@ impl PreparedRuntime {
             .map_err(Self::classify_execution)?;
         self.bindings
             .acquire_leases(imports.iter().map(|(_, id)| *id));
+        self.realm_leases
+            .entry(realm)
+            .or_default()
+            .extend(imports.iter().map(|(_, id)| *id));
         self.programs.insert(program, linked);
         Ok(program)
     }
@@ -381,6 +516,7 @@ impl PreparedRuntime {
                 ExecutionError::UnknownPreparedHandle,
             ));
         }
+        self.forget_realm(handle);
         Ok(())
     }
 
@@ -433,11 +569,35 @@ impl PreparedRuntime {
 
     /// SCOPE EXIT: close `realm`, releasing every value handle it owns.
     /// `(0, 0)` if no machine has been installed yet (nothing to close).
-    /// See [`PreparedMachine::close_realm`] for the exact contract.
+    /// See [`PreparedMachine::close_realm`] for the exact contract. Kept for
+    /// existing callers; [`Self::close_realm_report`] additionally reports
+    /// leases released.
     pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
-        self.machine
+        let report = self.close_realm_report(realm);
+        (report.frames, report.handles_released)
+    }
+
+    /// [`Self::close_realm`], also releasing every lease
+    /// [`Self::install_prepared_in`] acquired under `realm`
+    /// (`self.bindings.release_leases`) and reporting the full receipt. The
+    /// leased import slot is the installing program's own persistent root —
+    /// the lease protects binding-table identity/generation, not the
+    /// value's liveness — so releasing it at realm close never drops a value
+    /// out from under a still-running program.
+    pub fn close_realm_report(&mut self, realm: RealmId) -> RealmRetirement {
+        let (frames, handles_released) = self
+            .machine
             .as_mut()
-            .map_or((0, 0), |(machine, _)| machine.close_realm(realm))
+            .map_or((0, 0), |(machine, _)| machine.close_realm(realm));
+        self.handle_realms.retain(|(_, owner)| *owner != realm);
+        let leases = self.realm_leases.remove(&realm).unwrap_or_default();
+        let leases_released = leases.len();
+        self.bindings.release_leases(leases);
+        RealmRetirement {
+            frames,
+            handles_released,
+            leases_released,
+        }
     }
 
     /// Number of `PreparedValue`s this runtime's machine currently retains.
@@ -503,6 +663,13 @@ impl PreparedRuntime {
     ) -> Result<PreparedRetainedResult, PreparedRuntimeError> {
         self.ensure_available()?;
         self.ensure_machine()?;
+        for argument in arguments {
+            if let PreparedArgument::Managed(value) = argument {
+                if self.realm_of(value.0) != Some(realm) {
+                    return Err(PreparedRuntimeError::CrossRealmArgument { realm });
+                }
+            }
+        }
         if self
             .machine_mut()?
             .realm_cancel_handle(realm)
@@ -539,7 +706,7 @@ impl PreparedRuntime {
                 realm,
             )
             .map_err(Self::classify_execution)?;
-        Ok(Self::retain_result(result))
+        Ok(self.retain_result(realm, result))
     }
 
     /// Inspect one retained constructor layer without evaluating its fields.
@@ -556,15 +723,72 @@ impl PreparedRuntime {
         let outer = machine
             .inspect_outer(value.0, realm)
             .map_err(Self::classify_execution)?;
-        Ok(Self::outer_result(outer))
+        Ok(self.outer_result(realm, outer))
     }
 
     /// Consume one retained value's runtime wrapper and release its root.
     /// Releasing an already-closed or foreign value is a no-op.
     pub fn release(&mut self, value: PreparedValue) -> bool {
-        self.machine
+        let released = self
+            .machine
             .as_mut()
-            .is_some_and(|(machine, _)| machine.release(value.0))
+            .is_some_and(|(machine, _)| machine.release(value.0));
+        if released {
+            self.forget_realm(value.0);
+        }
+        released
+    }
+
+    /// This runtime's [`PreparedHole`] for `value` under `realm`. Does not
+    /// consume or alter `value`'s liveness; call [`Self::release`] once the
+    /// value itself is no longer needed.
+    #[must_use]
+    pub fn hole_for(&self, value: &PreparedValue, realm: RealmId) -> PreparedHole {
+        PreparedHole { realm, k: value.0 }
+    }
+
+    /// `Some(hole.realm)` iff `hole`'s handle is still live in this
+    /// runtime's machine under that realm; `None` once released (by
+    /// [`Self::release`], [`Self::release_binding`], or [`Self::close_realm`])
+    /// or if it was never minted under this realm to begin with.
+    ///
+    /// `PreparedMachine` exposes no by-realm existence query of its own
+    /// (`inspect_outer`'s realm filter is the closest, but it also forces
+    /// constructor decoding and mints fresh handles for managed fields as a
+    /// side effect, so it cannot serve as a read-only liveness check).
+    /// This answers instead from `Self::handle_realms`, the local mirror
+    /// this module keeps in step with every mint/move/release it performs.
+    #[must_use]
+    pub fn parked_realm(&self, hole: &PreparedHole) -> Option<RealmId> {
+        (self.realm_of(hole.k) == Some(hole.realm)).then_some(hole.realm)
+    }
+
+    /// Set the ambient actor mount context for this runtime. See the
+    /// `actor_execution` field doc: this engine does not yet act on
+    /// `effect_policy`/`live_payload`, but stores them for parity with
+    /// [`ActorRunTarget::install_actor_execution`]'s other implementers.
+    pub fn set_actor_execution(
+        &mut self,
+        context: SessionRunContext,
+        effect_policy: EffectRunPolicy,
+        live_payload: LivePayloadPolicy,
+    ) {
+        self.actor_execution = Some((context, effect_policy, live_payload));
+    }
+
+    /// The realm a handle is currently recorded live under, per
+    /// `Self::handle_realms`.
+    fn realm_of(&self, handle: PreparedHandle) -> Option<RealmId> {
+        self.handle_realms
+            .iter()
+            .find(|(owned, _)| *owned == handle)
+            .map(|(_, realm)| *realm)
+    }
+
+    /// Drop `handle`'s entry from the local realm mirror. Called wherever
+    /// this module releases a handle's root through the machine.
+    fn forget_realm(&mut self, handle: PreparedHandle) {
+        self.handle_realms.retain(|(owned, _)| *owned != handle);
     }
 
     fn run_entry_with_completion_hook(
@@ -691,27 +915,45 @@ impl PreparedRuntime {
             )))
     }
 
-    fn retain_result(result: PreparedResultBatch) -> PreparedRetainedResult {
+    fn retain_result(
+        &mut self,
+        realm: RealmId,
+        result: PreparedResultBatch,
+    ) -> PreparedRetainedResult {
         PreparedRetainedResult {
-            values: result.values.into_iter().map(Self::value_result).collect(),
+            values: result
+                .values
+                .into_iter()
+                .map(|value| self.value_result(realm, value))
+                .collect(),
             collections: result.collections,
         }
     }
 
-    fn outer_result(outer: CodegenPreparedOuter) -> PreparedOuter {
+    fn outer_result(&mut self, realm: RealmId, outer: CodegenPreparedOuter) -> PreparedOuter {
         match outer {
             CodegenPreparedOuter::Constructor { identity, fields } => PreparedOuter::Constructor {
                 identity,
-                fields: fields.into_iter().map(Self::value_result).collect(),
+                fields: fields
+                    .into_iter()
+                    .map(|field| self.value_result(realm, field))
+                    .collect(),
             },
         }
     }
 
-    fn value_result(result: PreparedResult) -> PreparedValueResult {
+    /// Convert one codegen result, recording a newly minted managed handle's
+    /// realm in `Self::handle_realms` (both `run_entry_retained` and
+    /// `inspect_outer` mint fresh handles for their managed outputs, tagged
+    /// with the `realm` each was called with).
+    fn value_result(&mut self, realm: RealmId, result: PreparedResult) -> PreparedValueResult {
         match result {
             PreparedResult::Void => PreparedValueResult::Void,
             PreparedResult::Scalar(word) => PreparedValueResult::Scalar(word),
-            PreparedResult::Managed(handle) => PreparedValueResult::Managed(PreparedValue(handle)),
+            PreparedResult::Managed(handle) => {
+                self.handle_realms.push((handle, realm));
+                PreparedValueResult::Managed(PreparedValue(handle))
+            }
         }
     }
 
@@ -1269,5 +1511,161 @@ mod tests {
             Err(PreparedRuntimeError::UnknownBinding(id)) if id == free
         ));
         assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
+    }
+
+    // ---- A4: Send, realm-owned leases, cross-realm refusal, holes --------
+
+    /// An entry taking one managed `LiftedRef` argument and returning it
+    /// unchanged -- used to exercise a managed argument crossing (or
+    /// failing to cross) a realm boundary, which the zero-argument fixtures
+    /// above (`producer_program`, `consumer_program`) cannot do.
+    fn identity_program() -> PreparedProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0] = Signature {
+            arguments: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        };
+        wire.expressions.nodes[0] =
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(50)))]);
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Function {
+            signature: SignatureId(0),
+            parameters: vec![ValueId(50)],
+            captures: vec![],
+            body: 0,
+        };
+        testing::prepare(wire).expect("identity fixture")
+    }
+
+    #[test]
+    fn prepared_runtime_moves_across_a_thread_boundary_with_a_live_machine() {
+        let mut runtime = m3_runtime();
+        runtime
+            .run_entry(None, &[], true, RealmId::ROOT)
+            .expect("first entry runs on the constructing thread");
+
+        let mut runtime = std::thread::spawn(move || {
+            runtime
+                .run_entry(None, &[], true, RealmId::ROOT)
+                .expect("second entry runs on a different thread");
+            runtime
+        })
+        .join()
+        .expect("PreparedRuntime crosses the thread boundary intact");
+
+        runtime
+            .run_entry(None, &[], true, RealmId::ROOT)
+            .expect("runtime carries a still-usable machine back on the original thread");
+    }
+
+    #[test]
+    fn leases_acquired_under_a_realm_are_released_when_it_closes() {
+        let (mut runtime, first) = session();
+        let id = runtime
+            .bind_top(first, ValueId(0), "producer")
+            .expect("producer top binds");
+        let realm = runtime.open_realm();
+        runtime
+            .install_prepared_in(
+                consumer_program(false, Some(1)),
+                &[(producer_identity(), id)],
+                realm,
+            )
+            .expect("consumer installs under a realm-scoped lease");
+        assert_eq!(runtime.bindings().lease_count(id), 1);
+
+        let report = runtime.close_realm_report(realm);
+        assert_eq!(
+            report.leases_released, 1,
+            "the realm's one lease is released"
+        );
+        assert_eq!(runtime.bindings().lease_count(id), 0);
+
+        runtime
+            .release_binding(id)
+            .expect("the binding releases once its only lease is gone");
+    }
+
+    #[test]
+    fn managed_argument_from_another_realm_is_rejected_before_any_machine_call() {
+        let (mut runtime, _first) = session();
+        let realm_a = runtime.open_realm();
+        let produced = runtime
+            .run_entry_retained(None, &[], true, realm_a)
+            .expect("producer entry runs and retains its result under realm_a");
+        let PreparedValueResult::Managed(value) = produced
+            .values
+            .into_iter()
+            .next()
+            .expect("the producer entry returns one value")
+        else {
+            panic!("producer's entry returns a managed value");
+        };
+
+        // The producer's own entry takes no arguments; a second program
+        // whose entry actually accepts one managed `LiftedRef` is needed to
+        // exercise passing `value` as an argument at all.
+        let identity = runtime
+            .install_prepared_in(identity_program(), &[], realm_a)
+            .expect("identity program installs alongside the producer");
+
+        let realm_b = runtime.open_realm();
+        let error = match runtime.run_entry_retained_in(
+            identity,
+            ValueId(0),
+            &[PreparedArgument::Managed(&value)],
+            false,
+            realm_b,
+        ) {
+            Err(error) => error,
+            Ok(_) => {
+                panic!("a handle minted under realm_a must not run as an argument under realm_b")
+            }
+        };
+        assert!(matches!(
+            error,
+            PreparedRuntimeError::CrossRealmArgument { realm } if realm == realm_b
+        ));
+        assert_eq!(error.kind(), PreparedFailureKind::Rejected);
+
+        // The same handle is still accepted back under its own realm.
+        runtime
+            .run_entry_retained_in(
+                identity,
+                ValueId(0),
+                &[PreparedArgument::Managed(&value)],
+                false,
+                realm_a,
+            )
+            .expect("the refused call left the machine and the handle usable");
+    }
+
+    #[test]
+    fn parked_realm_reports_liveness_and_clears_on_release() {
+        let (mut runtime, _first) = session();
+        let realm = runtime.open_realm();
+        let produced = runtime
+            .run_entry_retained(None, &[], true, realm)
+            .expect("producer entry runs and retains its result");
+        let PreparedValueResult::Managed(value) = produced
+            .values
+            .into_iter()
+            .next()
+            .expect("the producer entry returns one value")
+        else {
+            panic!("producer's entry returns a managed value");
+        };
+
+        let hole = runtime.hole_for(&value, realm);
+        assert_eq!(runtime.parked_realm(&hole), Some(realm));
+
+        assert!(runtime.release(value));
+        assert_eq!(
+            runtime.parked_realm(&hole),
+            None,
+            "a released handle's hole is no longer live under any realm"
+        );
     }
 }
