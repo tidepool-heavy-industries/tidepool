@@ -494,3 +494,65 @@ fn w5_a1_join_backedge_cancellation_settles_thunk() {
         );
     }
 }
+
+#[test]
+fn nonreturning_join_crosses_empty_case_scrutinee_and_cancels() {
+    use tidepool_repr::execution_schema::*;
+    let mut wire = testing::wire_program();
+    wire.signatures[0].results = ResultContract::NoSuccess;
+    // GHC's `let x = x in x` puts the recursive bottom jump under an
+    // empty case whose nominal scrutinee representation remains lifted.
+    wire.expressions.nodes = vec![
+        ExprFrame::Jump {
+            join: JoinId(0),
+            arguments: vec![],
+        },
+        ExprFrame::Case {
+            scrutinee: 0,
+            binder: ValueId(1),
+            scrutinee_results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+            kind: CaseKind::Polymorphic,
+            alternatives: vec![],
+        },
+        ExprFrame::Jump {
+            join: JoinId(0),
+            arguments: vec![],
+        },
+        ExprFrame::LetJoins {
+            bindings: Group::Recursive(vec![JoinBinding {
+                id: JoinId(0),
+                signature: SignatureId(0),
+                parameters: vec![],
+                body: 1,
+            }]),
+            body: 2,
+        },
+    ];
+    let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+        unreachable!()
+    };
+    top.binding.rhs = HeapRhs::Thunk {
+        signature: SignatureId(0),
+        update: UpdatePolicy::Memoize,
+        captures: vec![],
+        body: 3,
+    };
+    let linked = link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+    let program = CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap();
+    let mut invocation = Invocation::new(&program);
+    for _ in 0..2 {
+        invocation.machine.fail_prepared_at(
+            PreparedSafepoint::Backedge,
+            3,
+            RuntimeError::Cancelled,
+        );
+        let (status, output) = invocation.force();
+        assert_eq!(status, CallStatus::Cancelled);
+        assert_eq!(output, 0xdead_beef);
+        assert_eq!(invocation.state(), DescriptorState::Live);
+        assert_eq!(
+            invocation.machine.take_runtime_error(),
+            Some(RuntimeError::Cancelled)
+        );
+    }
+}

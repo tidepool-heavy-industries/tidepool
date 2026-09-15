@@ -153,6 +153,7 @@ struct ScopedValue {
 struct ScopedJoin {
     signature: SignatureId,
     epoch: u64,
+    closure_epoch: u64,
 }
 
 enum Undo {
@@ -254,12 +255,15 @@ impl<'w, 'p> Walker<'w, 'p> {
 
     fn join(&self, id: JoinId) -> Result<Option<SignatureId>, ParseError> {
         let index = self.join_index(id)?;
-        Ok(self
-            .joins
-            .get(index)
-            .and_then(|entry| *entry)
-            .filter(|entry| entry.epoch == self.join_epoch)
-            .map(|entry| entry.signature))
+        let Some(entry) = self.joins.get(index).and_then(|entry| *entry) else {
+            return Ok(None);
+        };
+        // A bottoming join cannot return through the wrong case continuation,
+        // but even bottoming jumps must remain inside their heap closure.
+        let visible = entry.closure_epoch == self.epoch
+            && (entry.epoch == self.join_epoch
+                || self.validator.signature(entry.signature)?.results == ResultContract::NoSuccess);
+        Ok(visible.then_some(entry.signature))
     }
 
     fn bind_value(&mut self, id: ValueId, ty: ValueType) -> Result<(), ParseError> {
@@ -297,6 +301,7 @@ impl<'w, 'p> Walker<'w, 'p> {
         let old = self.joins[index].replace(ScopedJoin {
             signature,
             epoch: self.join_epoch,
+            closure_epoch: self.epoch,
         });
         self.undo.push(Undo::Join(index, old));
         Ok(())
@@ -2046,6 +2051,44 @@ mod tests {
         // Equal physical result types still skip the case alternative if the
         // jump escapes to the enclosing continuation.
         let program = case_join_program(false, RuntimeRep::Int(64));
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidScope(_))
+        ));
+    }
+
+    #[test]
+    fn nonreturning_join_can_cross_a_case_but_not_a_heap_closure() {
+        let mut program = case_join_program(false, RuntimeRep::Int(64));
+        program.signatures[1].results = ResultContract::NoSuccess;
+        // A recursive bottom join has no returning continuation to bypass.
+        program.expressions.nodes[0] = ExprFrame::Jump {
+            join: JoinId(0),
+            arguments: vec![],
+        };
+        let ExprFrame::LetJoins { bindings, .. } = &mut program.expressions.nodes[4] else {
+            unreachable!()
+        };
+        let Group::NonRecursive(join) = bindings.clone() else {
+            unreachable!()
+        };
+        *bindings = Group::Recursive(vec![join]);
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+
+        // Moving that same jump into a new thunk must remain invalid even
+        // though the join is nonreturning: heap closures cannot capture joins.
+        program.expressions.nodes[3] = ExprFrame::Let {
+            bindings: Group::NonRecursive(HeapBinding {
+                id: ValueId(2),
+                rhs: HeapRhs::Thunk {
+                    signature: SignatureId(1),
+                    update: UpdatePolicy::Memoize,
+                    captures: vec![],
+                    body: 1,
+                },
+            }),
+            body: 2,
+        };
         assert!(matches!(
             validate_program(&program, &requirements(), DecodeLimits::default()),
             Err(ParseError::InvalidScope(_))

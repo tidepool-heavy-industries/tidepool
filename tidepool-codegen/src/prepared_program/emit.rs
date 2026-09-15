@@ -302,7 +302,12 @@ fn emit_function_at(
                             block,
                             block_reps: Vec::new(),
                             values,
-                            joins: BTreeMap::new(),
+                            joins: joins
+                                .into_iter()
+                                .filter(|(_, target)| {
+                                    target.signature.results == ResultContract::NoSuccess
+                                })
+                                .collect(),
                             destination: Destination {
                                 block: scrutinee_block,
                                 results: scrutinee_results.clone(),

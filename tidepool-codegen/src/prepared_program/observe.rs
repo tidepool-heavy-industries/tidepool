@@ -875,7 +875,7 @@ mod tests {
                 Err(ObservationFailure::BudgetExceeded { .. })
             ));
         }
-        let unowned = vec![b'x'];
+        let unowned = Box::new([b'x']);
         for unknown in [address + 8, unowned.as_ptr() as usize, usize::MAX] {
             assert!(matches!(
                 heap.observe_results(&[unknown as u64], &reps, &layout, 100),
