@@ -42,7 +42,7 @@ impl PinnedBytes {
     }
 
     /// Observe only logical literal bytes, excluding the implicit terminal NUL.
-    pub(super) fn logical_suffix(&self, address: usize) -> Option<&[u8]> {
+    pub(crate) fn logical_suffix(&self, address: usize) -> Option<&[u8]> {
         let candidate = self
             .by_address
             .partition_point(|literal| literal.storage.as_ptr() as usize <= address)
@@ -55,7 +55,7 @@ impl PinnedBytes {
     /// C string length is admitted only within owned immutable storage. Scan
     /// its slice to the first NUL, never dereference the numeric input address
     /// or cross an allocation boundary looking for a terminator.
-    pub(super) fn c_string_len(&self, address: usize) -> Option<usize> {
+    pub(crate) fn c_string_len(&self, address: usize) -> Option<usize> {
         let candidate = self
             .by_address
             .partition_point(|literal| literal.storage.as_ptr() as usize <= address)
@@ -67,14 +67,14 @@ impl PinnedBytes {
 
     /// A complete span from one pinned allocation. This also admits an empty
     /// span at its end; unknown addresses never become raw slices.
-    pub(super) fn read_range(&self, address: usize, length: usize) -> Option<&[u8]> {
+    pub(crate) fn read_range(&self, address: usize, length: usize) -> Option<&[u8]> {
         self.read_range_offset(address, 0, length)
     }
 
     /// Resolve a signed byte offset only within the pinned allocation owning
     /// the original address. The offset cannot acquire authority over a
     /// neighboring allocation, even when its numeric target lands inside one.
-    pub(super) fn read_range_offset(
+    pub(crate) fn read_range_offset(
         &self,
         address: usize,
         offset: i64,
@@ -98,7 +98,7 @@ impl PinnedBytes {
     /// accessed byte belongs to that same allocation. Read through its owned
     /// slice, not through the untrusted numeric address. Backing storage includes
     /// GHC's implicit terminal NUL; logical wire bytes do not.
-    pub(super) fn read_byte(&self, address: usize, index: i64) -> Option<u8> {
+    pub(crate) fn read_byte(&self, address: usize, index: i64) -> Option<u8> {
         self.read_range_offset(address, index, 1)
             .and_then(|bytes| bytes.first().copied())
     }
@@ -109,11 +109,10 @@ impl PinnedBytes {
 /// ledger-mediated write, so a failed call cannot partially mutate storage.
 ///
 /// # Safety
-/// vmctx belongs to the active generated call, pool and descriptor are retained
-/// by its compiled program, and dest_ref is an untrusted generated reference.
+/// vmctx belongs to the active generated call, descriptor is retained by its
+/// compiled program, and dest_ref is an untrusted generated reference.
 pub(super) unsafe extern "C" fn prepared_copy_addr_to_byte_array(
     vmctx: *mut crate::context::VMContext,
-    pool: *const PinnedBytes,
     descriptor: *const ObjectDescriptor,
     address: usize,
     dest_ref: *mut u8,
@@ -127,9 +126,6 @@ pub(super) unsafe extern "C" fn prepared_copy_addr_to_byte_array(
         return machine.prepared_call_status() as i32;
     }
     let result = (|| {
-        if pool.is_null() {
-            return Err(RuntimeError::BadPointer);
-        }
         let (published, len) = unsafe {
             super::arrays::active_payload(
                 machine,
@@ -157,19 +153,20 @@ pub(super) unsafe extern "C" fn prepared_copy_addr_to_byte_array(
                 len,
             });
         }
-        let external;
-        let source = match unsafe { &*pool }.read_range(address, count) {
-            Some(source) => source,
+        let literal = machine.resolve_literal_bytes(|pool| {
+            pool.read_range(address, count)
+                .map(|source| machine.store_external_bytes(published, offset, source))
+        });
+        match literal {
+            Some(stored) => stored,
             None => {
-                external = machine
+                let external = machine
                     .read_external_address(address, count)
                     .map_err(|error| super::arrays::storage_error(error, 0))?;
-                &external
+                machine.store_external_bytes(published, offset, &external)
             }
-        };
-        machine
-            .store_external_bytes(published, offset, source)
-            .map_err(|error| super::arrays::storage_error(error, offset as i64))?;
+        }
+        .map_err(|error| super::arrays::storage_error(error, offset as i64))?;
         Ok(())
     })();
     match result {
@@ -182,15 +179,11 @@ pub(super) fn emit_copy_addr_to_byte_array(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut CodegenPipeline,
     vmctx: Value,
-    pool: &Arc<PinnedBytes>,
     descriptor: &ObjectDescriptor,
     arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
     let host =
-        super::arrays::declare_host(builder, pipeline, "prepared_copy_addr_to_byte_array", 7)?;
-    let pool_owner = builder
-        .ins()
-        .iconst(types::I64, Arc::as_ptr(pool) as usize as i64);
+        super::arrays::declare_host(builder, pipeline, "prepared_copy_addr_to_byte_array", 6)?;
     let descriptor_owner = builder.ins().iconst(
         types::I64,
         descriptor as *const ObjectDescriptor as usize as i64,
@@ -199,7 +192,6 @@ pub(super) fn emit_copy_addr_to_byte_array(
         host,
         &[
             vmctx,
-            pool_owner,
             descriptor_owner,
             arguments[0],
             arguments[1],
@@ -216,11 +208,10 @@ pub(super) fn emit_copy_addr_to_byte_array(
 /// immutable byte pool. Numeric addresses are never dereferenced directly.
 ///
 /// # Safety
-/// vmctx and output belong to the active generated call; pool is the frozen
-/// Arc allocation retained by its compiled owner throughout native execution.
+/// vmctx and output belong to the active generated call. Literal bytes are
+/// authenticated through the pools registered with its machine.
 pub(super) unsafe extern "C" fn prepared_c_string_len(
     vmctx: *mut crate::context::VMContext,
-    pool: *const PinnedBytes,
     address: usize,
     output: *mut i64,
 ) -> i32 {
@@ -229,11 +220,11 @@ pub(super) unsafe extern "C" fn prepared_c_string_len(
     if status != crate::prepared_control::CallStatus::Success {
         return status as i32;
     }
-    let length = if pool.is_null() || output.is_null() {
+    let length = if output.is_null() {
         None
     } else {
-        unsafe { &*pool }
-            .c_string_len(address)
+        machine
+            .resolve_literal_bytes(|pool| pool.c_string_len(address))
             .or_else(|| machine.external_c_string_len(address).ok())
             .and_then(|length| i64::try_from(length).ok())
     };
@@ -255,15 +246,11 @@ pub(super) fn emit_c_string_len(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut CodegenPipeline,
     vmctx: Value,
-    pool: &Arc<PinnedBytes>,
     address: Value,
 ) -> Result<Vec<Value>, super::CompileError> {
-    let host = super::arrays::declare_host(builder, pipeline, "prepared_c_string_len", 4)?;
+    let host = super::arrays::declare_host(builder, pipeline, "prepared_c_string_len", 3)?;
     let output = super::arrays::output_slot(builder);
-    let owner = builder
-        .ins()
-        .iconst(types::I64, Arc::as_ptr(pool) as usize as i64);
-    let call = builder.ins().call(host, &[vmctx, owner, address, output]);
+    let call = builder.ins().call(host, &[vmctx, address, output]);
     let status = builder.inst_results(call)[0];
     super::arrays::finish_checked_call(builder, status);
     Ok(vec![builder.ins().load(
@@ -278,12 +265,11 @@ pub(super) fn emit_c_string_len(
 /// Word(32): GHC Char# has WordRep on the pinned 64-bit profile.
 ///
 /// # Safety
-/// vmctx and output belong to the active generated call; pool is the frozen
-/// Arc allocation retained by its compiled owner throughout native execution.
+/// vmctx and output belong to the active generated call. Literal bytes are
+/// authenticated through the pools registered with its machine.
 /// address/index are untrusted and are never dereferenced as a raw pointer.
 pub(super) unsafe extern "C" fn prepared_index_char(
     vmctx: *mut crate::context::VMContext,
-    pool: *const PinnedBytes,
     address: usize,
     index: i64,
     output: *mut u64,
@@ -293,9 +279,10 @@ pub(super) unsafe extern "C" fn prepared_index_char(
     if status != crate::prepared_control::CallStatus::Success {
         return status as i32;
     }
-    let byte = if pool.is_null() || output.is_null() {
+    let byte = if output.is_null() {
         Err(crate::host_fns::RuntimeError::BadPointer)
-    } else if let Some(byte) = unsafe { &*pool }.read_byte(address, index) {
+    } else if let Some(byte) = machine.resolve_literal_bytes(|pool| pool.read_byte(address, index))
+    {
         Ok(byte)
     } else {
         machine
@@ -327,18 +314,12 @@ pub(super) fn emit_index_char(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut CodegenPipeline,
     vmctx: Value,
-    pool: &Arc<PinnedBytes>,
     address: Value,
     index: Value,
 ) -> Result<Vec<Value>, super::CompileError> {
-    let host = super::arrays::declare_host(builder, pipeline, "prepared_index_char", 5)?;
+    let host = super::arrays::declare_host(builder, pipeline, "prepared_index_char", 4)?;
     let output = super::arrays::output_slot(builder);
-    let owner = builder
-        .ins()
-        .iconst(types::I64, Arc::as_ptr(pool) as usize as i64);
-    let call = builder
-        .ins()
-        .call(host, &[vmctx, owner, address, index, output]);
+    let call = builder.ins().call(host, &[vmctx, address, index, output]);
     let status = builder.inst_results(call)[0];
     super::arrays::finish_checked_call(builder, status);
     Ok(vec![builder.ins().load(
@@ -361,7 +342,6 @@ mod tests {
             &mut crate::context::VMContext,
             &crate::machine_state::MachineState,
             &Arc<ObjectDescriptor>,
-            &PinnedBytes,
             usize,
             *mut u8,
             *mut u8,
@@ -401,17 +381,12 @@ mod tests {
         vmctx.machine_state = &machine as *const _ as *mut _;
         let storage: Arc<[u8]> = Arc::from(&b"ab\0"[..]);
         let base = storage.as_ptr() as usize;
-        let pool = PinnedBytes::new(BTreeMap::from([(b"ab".to_vec(), storage)]));
+        machine.register_prepared_byte_pool(Arc::new(PinnedBytes::new(BTreeMap::from([(
+            b"ab".to_vec(),
+            storage,
+        )]))));
         let dest_ref = (start as usize | usize::from(descriptor.tag())) as *mut u8;
-        test(
-            &mut vmctx,
-            &machine,
-            &descriptor,
-            &pool,
-            base,
-            dest_ref,
-            payload,
-        );
+        test(&mut vmctx, &machine, &descriptor, base, dest_ref, payload);
     }
 
     #[test]
@@ -429,22 +404,21 @@ mod tests {
 
     #[test]
     fn string_hosts_accept_authenticated_external_byte_addresses() {
-        with_copy_fixture(|vmctx, machine, descriptor, pool, _, dest_ref, payload| {
+        with_copy_fixture(|vmctx, machine, descriptor, _, dest_ref, payload| {
             let source = machine.allocate_external_bytes(4, 8).unwrap();
             machine.store_external_bytes(source, 0, b"ab\0z").unwrap();
             let address = machine.external_byte_address(source).unwrap();
             let mut length = -1;
             let mut character = 0;
             unsafe {
-                assert_eq!(prepared_c_string_len(vmctx, pool, address, &mut length), 0);
+                assert_eq!(prepared_c_string_len(vmctx, address, &mut length), 0);
                 assert_eq!(
-                    prepared_index_char(vmctx, pool, address + 1, -1, &mut character),
+                    prepared_index_char(vmctx, address + 1, -1, &mut character),
                     0
                 );
                 assert_eq!(
                     prepared_copy_addr_to_byte_array(
                         vmctx,
-                        pool,
                         Arc::as_ptr(descriptor),
                         address,
                         dest_ref,
@@ -541,30 +515,27 @@ mod tests {
 
     #[test]
     fn copy_addr_host_uses_ledger_write_and_invalidates_stale_sweep_plan() {
-        with_copy_fixture(
-            |vmctx, machine, descriptor, pool, base, dest_ref, payload| {
-                let plan = machine
-                    .plan_external_sweep(&HashSet::from([payload]))
-                    .unwrap();
-                let status = unsafe {
-                    prepared_copy_addr_to_byte_array(
-                        vmctx,
-                        pool,
-                        Arc::as_ptr(descriptor),
-                        base,
-                        dest_ref,
-                        1,
-                        3,
-                    )
-                };
-                assert_eq!(status, crate::prepared_control::CallStatus::Success as i32);
-                assert_eq!(machine.copy_external_bytes(payload).unwrap(), b"zab\0");
-                assert!(matches!(
-                    machine.commit_external_sweep(plan),
-                    Err(ExternalStorageValidationError::LedgerChanged)
-                ));
-            },
-        );
+        with_copy_fixture(|vmctx, machine, descriptor, base, dest_ref, payload| {
+            let plan = machine
+                .plan_external_sweep(&HashSet::from([payload]))
+                .unwrap();
+            let status = unsafe {
+                prepared_copy_addr_to_byte_array(
+                    vmctx,
+                    Arc::as_ptr(descriptor),
+                    base,
+                    dest_ref,
+                    1,
+                    3,
+                )
+            };
+            assert_eq!(status, crate::prepared_control::CallStatus::Success as i32);
+            assert_eq!(machine.copy_external_bytes(payload).unwrap(), b"zab\0");
+            assert!(matches!(
+                machine.commit_external_sweep(plan),
+                Err(ExternalStorageValidationError::LedgerChanged)
+            ));
+        });
     }
 
     #[test]
@@ -607,30 +578,27 @@ mod tests {
                 crate::host_fns::RuntimeError::BadPointer,
             ),
         ] {
-            with_copy_fixture(
-                |vmctx, machine, descriptor, pool, base, dest_ref, payload| {
-                    let address = source_shift.map_or(0, |shift| base + shift);
-                    let destination = if invalid_dest {
-                        std::ptr::null_mut()
-                    } else {
-                        dest_ref
-                    };
-                    let status = unsafe {
-                        prepared_copy_addr_to_byte_array(
-                            vmctx,
-                            pool,
-                            Arc::as_ptr(descriptor),
-                            address,
-                            destination,
-                            offset,
-                            count,
-                        )
-                    };
-                    assert_ne!(status, crate::prepared_control::CallStatus::Success as i32);
-                    assert_eq!(machine.copy_external_bytes(payload).unwrap(), b"zzzz");
-                    assert_eq!(machine.take_runtime_error(), Some(expected));
-                },
-            );
+            with_copy_fixture(|vmctx, machine, descriptor, base, dest_ref, payload| {
+                let address = source_shift.map_or(0, |shift| base + shift);
+                let destination = if invalid_dest {
+                    std::ptr::null_mut()
+                } else {
+                    dest_ref
+                };
+                let status = unsafe {
+                    prepared_copy_addr_to_byte_array(
+                        vmctx,
+                        Arc::as_ptr(descriptor),
+                        address,
+                        destination,
+                        offset,
+                        count,
+                    )
+                };
+                assert_ne!(status, crate::prepared_control::CallStatus::Success as i32);
+                assert_eq!(machine.copy_external_bytes(payload).unwrap(), b"zzzz");
+                assert_eq!(machine.take_runtime_error(), Some(expected));
+            });
         }
     }
 }

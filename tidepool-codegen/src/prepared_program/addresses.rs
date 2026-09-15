@@ -2,8 +2,6 @@
 //! into pinned immutable program bytes or active external byte-array owners;
 //! they are never dereferenced directly.
 
-use std::sync::Arc;
-
 use super::primitives::returns_exact;
 use crate::{host_fns::RuntimeError, prepared_control::CallStatus};
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
@@ -91,15 +89,17 @@ fn address_error(
 
 fn read_address_element<const WIDTH: usize>(
     machine: &crate::machine_state::MachineState,
-    pool: &super::static_bytes::PinnedBytes,
     address: usize,
     index: i64,
 ) -> Result<[u8; WIDTH], RuntimeError> {
     let offset = index
         .checked_mul(WIDTH as i64)
         .ok_or(RuntimeError::BadPointer)?;
-    if let Some(bytes) = pool.read_range_offset(address, offset, WIDTH) {
-        return bytes.try_into().map_err(|_| RuntimeError::BadPointer);
+    if let Some(bytes) = machine.resolve_literal_bytes(|pool| {
+        pool.read_range_offset(address, offset, WIDTH)
+            .map(<[u8; WIDTH]>::try_from)
+    }) {
+        return bytes.map_err(|_| RuntimeError::BadPointer);
     }
     machine
         .read_external_address_offset(address, offset, WIDTH)
@@ -113,7 +113,6 @@ fn read_address_element<const WIDTH: usize>(
 /// only fallback and owns all mutable-address dereferences.
 pub(super) unsafe extern "C" fn prepared_read_word8_address(
     vmctx: *mut crate::context::VMContext,
-    pool: *const super::static_bytes::PinnedBytes,
     address: usize,
     offset: i64,
     output: *mut i64,
@@ -123,10 +122,12 @@ pub(super) unsafe extern "C" fn prepared_read_word8_address(
         return machine.prepared_call_status() as i32;
     }
     let result = (|| {
-        if pool.is_null() || output.is_null() {
+        if output.is_null() {
             return Err(RuntimeError::BadPointer);
         }
-        let value = if let Some(value) = unsafe { &*pool }.read_byte(address, offset) {
+        let value = if let Some(value) =
+            machine.resolve_literal_bytes(|pool| pool.read_byte(address, offset))
+        {
             value
         } else {
             machine
@@ -144,7 +145,6 @@ pub(super) unsafe extern "C" fn prepared_read_word8_address(
 
 pub(super) unsafe extern "C" fn prepared_read_int8_address(
     vmctx: *mut crate::context::VMContext,
-    pool: *const super::static_bytes::PinnedBytes,
     address: usize,
     index: i64,
     output: *mut i64,
@@ -154,10 +154,10 @@ pub(super) unsafe extern "C" fn prepared_read_int8_address(
         return machine.prepared_call_status() as i32;
     }
     let result = (|| {
-        if pool.is_null() || output.is_null() {
+        if output.is_null() {
             return Err(RuntimeError::BadPointer);
         }
-        let bytes = read_address_element::<1>(machine, unsafe { &*pool }, address, index)?;
+        let bytes = read_address_element::<1>(machine, address, index)?;
         unsafe { output.write(i64::from(i8::from_ne_bytes(bytes))) };
         Ok(())
     })();
@@ -169,7 +169,6 @@ pub(super) unsafe extern "C" fn prepared_read_int8_address(
 
 pub(super) unsafe extern "C" fn prepared_read_word32_address(
     vmctx: *mut crate::context::VMContext,
-    pool: *const super::static_bytes::PinnedBytes,
     address: usize,
     index: i64,
     output: *mut u64,
@@ -179,10 +178,10 @@ pub(super) unsafe extern "C" fn prepared_read_word32_address(
         return machine.prepared_call_status() as i32;
     }
     let result = (|| {
-        if pool.is_null() || output.is_null() {
+        if output.is_null() {
             return Err(RuntimeError::BadPointer);
         }
-        let bytes = read_address_element::<4>(machine, unsafe { &*pool }, address, index)?;
+        let bytes = read_address_element::<4>(machine, address, index)?;
         unsafe { output.write(u64::from(u32::from_ne_bytes(bytes))) };
         Ok(())
     })();
@@ -194,7 +193,6 @@ pub(super) unsafe extern "C" fn prepared_read_word32_address(
 
 pub(super) unsafe extern "C" fn prepared_read_address_address(
     vmctx: *mut crate::context::VMContext,
-    pool: *const super::static_bytes::PinnedBytes,
     address: usize,
     index: i64,
     output: *mut u64,
@@ -204,10 +202,10 @@ pub(super) unsafe extern "C" fn prepared_read_address_address(
         return machine.prepared_call_status() as i32;
     }
     let result = (|| {
-        if pool.is_null() || output.is_null() {
+        if output.is_null() {
             return Err(RuntimeError::BadPointer);
         }
-        let bytes = read_address_element::<8>(machine, unsafe { &*pool }, address, index)?;
+        let bytes = read_address_element::<8>(machine, address, index)?;
         unsafe { output.write(u64::from_ne_bytes(bytes)) };
         Ok(())
     })();
@@ -221,7 +219,6 @@ pub(super) unsafe extern "C" fn prepared_read_address_address(
 /// four-byte span against the allocation owning the original address.
 pub(super) unsafe extern "C" fn prepared_read_wide_char_address(
     vmctx: *mut crate::context::VMContext,
-    pool: *const super::static_bytes::PinnedBytes,
     address: usize,
     index: i64,
     output: *mut u64,
@@ -231,12 +228,15 @@ pub(super) unsafe extern "C" fn prepared_read_wide_char_address(
         return machine.prepared_call_status() as i32;
     }
     let result = (|| {
-        if pool.is_null() || output.is_null() {
+        if output.is_null() {
             return Err(RuntimeError::BadPointer);
         }
         let offset = index.checked_mul(4).ok_or(RuntimeError::BadPointer)?;
-        let value = if let Some(bytes) = unsafe { &*pool }.read_range_offset(address, offset, 4) {
-            u32::from_ne_bytes(bytes.try_into().map_err(|_| RuntimeError::BadPointer)?)
+        let value = if let Some(bytes) = machine.resolve_literal_bytes(|pool| {
+            pool.read_range_offset(address, offset, 4)
+                .map(<[u8; 4]>::try_from)
+        }) {
+            u32::from_ne_bytes(bytes.map_err(|_| RuntimeError::BadPointer)?)
         } else {
             let bytes = machine
                 .read_external_address_offset(address, offset, 4)
@@ -306,14 +306,12 @@ pub(super) fn emit_read_word8(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut crate::pipeline::CodegenPipeline,
     vmctx: Value,
-    pool: &Arc<super::static_bytes::PinnedBytes>,
     arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
     emit_scaled_read(
         builder,
         pipeline,
         vmctx,
-        pool,
         arguments,
         "prepared_read_word8_address",
         types::I8,
@@ -327,19 +325,15 @@ fn emit_scaled_read(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut crate::pipeline::CodegenPipeline,
     vmctx: Value,
-    pool: &Arc<super::static_bytes::PinnedBytes>,
     arguments: &[Value],
     host_name: &str,
     result_type: cranelift_codegen::ir::Type,
 ) -> Result<Vec<Value>, super::CompileError> {
-    let host = super::arrays::declare_host(builder, pipeline, host_name, 5)?;
-    let owner = builder
-        .ins()
-        .iconst(types::I64, Arc::as_ptr(pool) as usize as i64);
+    let host = super::arrays::declare_host(builder, pipeline, host_name, 4)?;
     let output = super::arrays::output_slot(builder);
     let call = builder
         .ins()
-        .call(host, &[vmctx, owner, arguments[0], arguments[1], output]);
+        .call(host, &[vmctx, arguments[0], arguments[1], output]);
     let status = builder.inst_results(call)[0];
     super::arrays::finish_checked_call(builder, status);
     let word = builder
@@ -356,14 +350,12 @@ pub(super) fn emit_read_int8(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut crate::pipeline::CodegenPipeline,
     vmctx: Value,
-    pool: &Arc<super::static_bytes::PinnedBytes>,
     arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
     emit_scaled_read(
         builder,
         pipeline,
         vmctx,
-        pool,
         arguments,
         "prepared_read_int8_address",
         types::I8,
@@ -374,14 +366,12 @@ pub(super) fn emit_read_word32(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut crate::pipeline::CodegenPipeline,
     vmctx: Value,
-    pool: &Arc<super::static_bytes::PinnedBytes>,
     arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
     emit_scaled_read(
         builder,
         pipeline,
         vmctx,
-        pool,
         arguments,
         "prepared_read_word32_address",
         types::I32,
@@ -392,14 +382,12 @@ pub(super) fn emit_read_address(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut crate::pipeline::CodegenPipeline,
     vmctx: Value,
-    pool: &Arc<super::static_bytes::PinnedBytes>,
     arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
     emit_scaled_read(
         builder,
         pipeline,
         vmctx,
-        pool,
         arguments,
         "prepared_read_address_address",
         types::I64,
@@ -410,14 +398,12 @@ pub(super) fn emit_read_wide_char(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut crate::pipeline::CodegenPipeline,
     vmctx: Value,
-    pool: &Arc<super::static_bytes::PinnedBytes>,
     arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
     emit_scaled_read(
         builder,
         pipeline,
         vmctx,
-        pool,
         arguments,
         "prepared_read_wide_char_address",
         types::I64,
@@ -493,6 +479,7 @@ pub(super) fn host_functions() -> [(&'static str, *const u8); 7] {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
     use tidepool_heap::external_storage::ExternalStorageKind;
     use tidepool_repr::execution_schema::ResultContract;
 
@@ -639,13 +626,13 @@ mod tests {
             pinned.clone(),
         )]));
         let machine = crate::machine_state::MachineState::new();
+        machine.register_prepared_byte_pool(Arc::new(pool));
         let mut vmctx = vmctx(&machine);
         let mut output = -1;
         assert_eq!(
             unsafe {
                 prepared_read_word8_address(
                     &mut vmctx,
-                    &pool,
                     pinned.as_ptr() as usize + 3,
                     -2,
                     &mut output,
@@ -661,14 +648,14 @@ mod tests {
         machine.store_external_bytes(published, 0, b"data").unwrap();
         let address = machine.external_byte_address(published).unwrap();
         assert_eq!(
-            unsafe { prepared_read_word8_address(&mut vmctx, &pool, address + 1, 2, &mut output) },
+            unsafe { prepared_read_word8_address(&mut vmctx, address + 1, 2, &mut output) },
             CallStatus::Success as i32
         );
         assert_eq!(output, i64::from(b'a'));
 
         output = 0x55;
         assert_eq!(
-            unsafe { prepared_read_word8_address(&mut vmctx, &pool, address + 3, 1, &mut output) },
+            unsafe { prepared_read_word8_address(&mut vmctx, address + 3, 1, &mut output) },
             CallStatus::LanguageFailure as i32
         );
         assert_eq!(output, 0x55);
@@ -690,18 +677,13 @@ mod tests {
             pinned.clone(),
         )]));
         let machine = crate::machine_state::MachineState::new();
+        machine.register_prepared_byte_pool(Arc::new(pool));
         let mut vmctx = vmctx(&machine);
 
         let mut signed = 0;
         assert_eq!(
             unsafe {
-                prepared_read_int8_address(
-                    &mut vmctx,
-                    &pool,
-                    pinned.as_ptr() as usize,
-                    0,
-                    &mut signed,
-                )
+                prepared_read_int8_address(&mut vmctx, pinned.as_ptr() as usize, 0, &mut signed)
             },
             CallStatus::Success as i32
         );
@@ -712,7 +694,6 @@ mod tests {
             unsafe {
                 prepared_read_word32_address(
                     &mut vmctx,
-                    &pool,
                     pinned.as_ptr() as usize + 8,
                     -1,
                     &mut word,
@@ -727,7 +708,6 @@ mod tests {
             unsafe {
                 prepared_read_address_address(
                     &mut vmctx,
-                    &pool,
                     pinned.as_ptr() as usize + 8,
                     0,
                     &mut address,
@@ -740,7 +720,6 @@ mod tests {
 
     #[test]
     fn scaled_reads_reject_end_and_cross_owner_without_output() {
-        let pool = super::super::static_bytes::PinnedBytes::new(BTreeMap::new());
         for cross_owner in [false, true] {
             let machine = crate::machine_state::MachineState::new();
             let first = machine
@@ -762,13 +741,7 @@ mod tests {
             let mut vmctx = vmctx(&machine);
             assert_ne!(
                 unsafe {
-                    prepared_read_address_address(
-                        &mut vmctx,
-                        &pool,
-                        first_address,
-                        index,
-                        &mut output,
-                    )
+                    prepared_read_address_address(&mut vmctx, first_address, index, &mut output)
                 },
                 CallStatus::Success as i32
             );
@@ -878,12 +851,11 @@ mod tests {
             pinned,
         )]));
         let machine = crate::machine_state::MachineState::new();
+        machine.register_prepared_byte_pool(Arc::new(pool));
         let mut vmctx = vmctx(&machine);
         let mut output = u64::MAX;
         assert_eq!(
-            unsafe {
-                prepared_read_wide_char_address(&mut vmctx, &pool, pinned_address, 0, &mut output)
-            },
+            unsafe { prepared_read_wide_char_address(&mut vmctx, pinned_address, 0, &mut output) },
             CallStatus::Success as i32
         );
         assert_eq!(output, u64::from(expected));
@@ -901,9 +873,7 @@ mod tests {
         let address = machine.external_byte_address(published).unwrap();
         output = u64::MAX;
         assert_eq!(
-            unsafe {
-                prepared_read_wide_char_address(&mut vmctx, &pool, address + 8, -2, &mut output)
-            },
+            unsafe { prepared_read_wide_char_address(&mut vmctx, address + 8, -2, &mut output) },
             CallStatus::Success as i32
         );
         assert_eq!(output, u64::from(expected));
@@ -911,7 +881,6 @@ mod tests {
 
     #[test]
     fn wide_char_rejects_overflow_short_and_cross_owner_spans_before_output() {
-        let pool = super::super::static_bytes::PinnedBytes::new(BTreeMap::new());
         for rejection in 0..3 {
             let machine = crate::machine_state::MachineState::new();
             let first = machine
@@ -938,13 +907,7 @@ mod tests {
             };
             let mut output = 0xfeed_face_u64;
             let status = unsafe {
-                prepared_read_wide_char_address(
-                    &mut vmctx,
-                    &pool,
-                    first_address,
-                    index,
-                    &mut output,
-                )
+                prepared_read_wide_char_address(&mut vmctx, first_address, index, &mut output)
             };
             assert_ne!(status, CallStatus::Success as i32);
             assert_eq!(output, 0xfeed_face);
@@ -1073,7 +1036,6 @@ mod tests {
 
     #[test]
     fn prefix_and_revoked_addresses_each_poison_their_own_machine() {
-        let pool = super::super::static_bytes::PinnedBytes::new(BTreeMap::new());
         for revoked in [false, true] {
             let machine = crate::machine_state::MachineState::new();
             let published = machine
@@ -1089,9 +1051,7 @@ mod tests {
             let mut output = 0x55;
             let tested_address = if revoked { address } else { published as usize };
             assert_eq!(
-                unsafe {
-                    prepared_read_word8_address(&mut vmctx, &pool, tested_address, 0, &mut output)
-                },
+                unsafe { prepared_read_word8_address(&mut vmctx, tested_address, 0, &mut output) },
                 CallStatus::IntegrityFailure as i32
             );
             assert_eq!(output, 0x55);
@@ -1101,13 +1061,12 @@ mod tests {
 
     #[test]
     fn first_cause_prevents_reads_and_writes() {
-        let pool = super::super::static_bytes::PinnedBytes::new(BTreeMap::new());
         let machine = crate::machine_state::MachineState::new();
         machine.set_first_cause(RuntimeError::BlackHole);
         let mut vmctx = vmctx(&machine);
         let mut output = 0x55;
         assert_eq!(
-            unsafe { prepared_read_word8_address(&mut vmctx, &pool, 1, 0, &mut output) },
+            unsafe { prepared_read_word8_address(&mut vmctx, 1, 0, &mut output) },
             CallStatus::LanguageFailure as i32
         );
         assert_eq!(output, 0x55);
@@ -1117,7 +1076,7 @@ mod tests {
         );
         let mut wide_output = 0x55;
         assert_eq!(
-            unsafe { prepared_read_wide_char_address(&mut vmctx, &pool, 1, 0, &mut wide_output) },
+            unsafe { prepared_read_wide_char_address(&mut vmctx, 1, 0, &mut wide_output) },
             CallStatus::LanguageFailure as i32
         );
         assert_eq!(wide_output, 0x55);

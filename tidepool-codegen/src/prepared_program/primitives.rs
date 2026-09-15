@@ -8,7 +8,6 @@
 use crate::pipeline::CodegenPipeline;
 use cranelift_codegen::{ir, ir::InstBuilder};
 use cranelift_frontend::FunctionBuilder;
-use std::sync::Arc;
 use tidepool_repr::execution_schema::{
     ForeignConvention, OperationDecl, OperationIdentity, ResultContract, RuntimeRep, Signature,
 };
@@ -836,7 +835,6 @@ pub(super) fn emit_operation(
     arguments: &[ir::Value],
     vmctx: ir::Value,
     pipeline: &mut CodegenPipeline,
-    bytes: &Arc<super::static_bytes::PinnedBytes>,
     prepared_enter: cranelift_module::FuncId,
     gc: cranelift_module::FuncId,
     boxed_array: &tidepool_heap::execution_descriptor::ObjectDescriptor,
@@ -845,25 +843,22 @@ pub(super) fn emit_operation(
 ) -> Result<Option<Vec<ir::Value>>, super::CompileError> {
     match operation {
         PrimitiveOperation::Fingerprint(operation) => {
-            super::fingerprint::emit(builder, pipeline, vmctx, bytes, operation, arguments)
-                .map(Some)
+            super::fingerprint::emit(builder, pipeline, vmctx, operation, arguments).map(Some)
         }
         PrimitiveOperation::Address(super::addresses::AddressOperation::ReadWord8) => {
-            super::addresses::emit_read_word8(builder, pipeline, vmctx, bytes, arguments).map(Some)
+            super::addresses::emit_read_word8(builder, pipeline, vmctx, arguments).map(Some)
         }
         PrimitiveOperation::Address(super::addresses::AddressOperation::ReadInt8) => {
-            super::addresses::emit_read_int8(builder, pipeline, vmctx, bytes, arguments).map(Some)
+            super::addresses::emit_read_int8(builder, pipeline, vmctx, arguments).map(Some)
         }
         PrimitiveOperation::Address(super::addresses::AddressOperation::ReadWord32) => {
-            super::addresses::emit_read_word32(builder, pipeline, vmctx, bytes, arguments).map(Some)
+            super::addresses::emit_read_word32(builder, pipeline, vmctx, arguments).map(Some)
         }
         PrimitiveOperation::Address(super::addresses::AddressOperation::ReadAddress) => {
-            super::addresses::emit_read_address(builder, pipeline, vmctx, bytes, arguments)
-                .map(Some)
+            super::addresses::emit_read_address(builder, pipeline, vmctx, arguments).map(Some)
         }
         PrimitiveOperation::Address(super::addresses::AddressOperation::ReadWideChar) => {
-            super::addresses::emit_read_wide_char(builder, pipeline, vmctx, bytes, arguments)
-                .map(Some)
+            super::addresses::emit_read_wide_char(builder, pipeline, vmctx, arguments).map(Some)
         }
         PrimitiveOperation::Address(super::addresses::AddressOperation::WriteWord8) => {
             super::addresses::emit_write_word8(builder, pipeline, vmctx, arguments).map(Some)
@@ -893,7 +888,6 @@ pub(super) fn emit_operation(
                 builder,
                 pipeline,
                 vmctx,
-                bytes,
                 kind,
                 arguments.first().copied(),
             )?;
@@ -1073,7 +1067,6 @@ pub(super) fn emit_operation(
             builder,
             pipeline,
             vmctx,
-            bytes,
             arguments[0],
             arguments[1],
         )
@@ -1083,15 +1076,13 @@ pub(super) fn emit_operation(
                 builder,
                 pipeline,
                 vmctx,
-                bytes,
                 bytes_array,
                 arguments,
             )
             .map(Some)
         }
         PrimitiveOperation::CStringLen => {
-            super::static_bytes::emit_c_string_len(builder, pipeline, vmctx, bytes, arguments[0])
-                .map(Some)
+            super::static_bytes::emit_c_string_len(builder, pipeline, vmctx, arguments[0]).map(Some)
         }
         PrimitiveOperation::Integer(operation)
             if matches!(

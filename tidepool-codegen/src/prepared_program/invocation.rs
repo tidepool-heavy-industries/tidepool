@@ -138,6 +138,7 @@ impl<'code> PreparedInvocation<'code> {
         let results = super::run::try_root_words(result_words.max(1))?;
 
         let machine = Rc::new(MachineState::new());
+        machine.register_prepared_byte_pool(Arc::clone(&program.bytes));
         machine.set_cancel_flag(Arc::clone(&cancel));
         machine.set_stack_map_registry(&program.pipeline.stack_maps);
         if let Err(error) = machine.install_prepared_buffer_with_static_region(
@@ -298,7 +299,6 @@ impl<'code> PreparedInvocation<'code> {
             self.program,
             &mut self.vmctx,
             std::slice::from_ref(&self.statics),
-            std::slice::from_ref(&self.program.bytes),
             &self.program.descriptor_registry,
             &self.old_space,
             &result_seeds,

@@ -3,8 +3,6 @@
 //! Hosts snapshot every input into owned Rust storage before calling the C
 //! kernel. They never pass a VM address to C and never collect or re-enter.
 
-use std::sync::Arc;
-
 use cranelift_codegen::ir::{types, InstBuilder, Value};
 use cranelift_frontend::FunctionBuilder;
 use tidepool_repr::execution_schema::{
@@ -12,7 +10,6 @@ use tidepool_repr::execution_schema::{
 };
 
 use super::md5_kernel::{Context, CONTEXT_BYTES};
-use super::static_bytes::PinnedBytes;
 
 const DIGEST_BYTES: usize = 16;
 
@@ -89,13 +86,13 @@ fn snapshot_context(
 
 fn snapshot_input(
     machine: &crate::machine_state::MachineState,
-    pool: *const PinnedBytes,
     address: usize,
     length: usize,
 ) -> Result<Vec<u8>, crate::host_fns::RuntimeError> {
-    let pinned = unsafe { pool.as_ref() }.and_then(|pool| pool.read_range(address, length));
+    let pinned =
+        machine.resolve_literal_bytes(|pool| pool.read_range(address, length).map(copy_bytes));
     match pinned {
-        Some(bytes) => copy_bytes(bytes),
+        Some(bytes) => bytes,
         None => machine
             .read_external_address(address, length)
             .map_err(storage_error),
@@ -139,7 +136,6 @@ pub(super) unsafe extern "C" fn prepared_md5_init(
 /// Update from either immutable compiled bytes or an owned external byte span.
 pub(super) unsafe extern "C" fn prepared_md5_update(
     vmctx: *mut crate::context::VMContext,
-    pool: *const PinnedBytes,
     context_address: usize,
     input_address: usize,
     length: i64,
@@ -158,7 +154,7 @@ pub(super) unsafe extern "C" fn prepared_md5_update(
                 len: i32::MAX as usize,
             })?;
         let context = snapshot_context(machine, context_address)?;
-        let input = snapshot_input(machine, pool, input_address, length)?;
+        let input = snapshot_input(machine, input_address, length)?;
         let updated = context.update(&input).to_bytes();
         machine
             .store_external_address(context_address, &updated)
@@ -211,26 +207,22 @@ pub(super) fn emit(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut crate::pipeline::CodegenPipeline,
     vmctx: Value,
-    pool: &Arc<PinnedBytes>,
     operation: FingerprintOperation,
     arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
     let (host_name, parameters) = match operation {
         FingerprintOperation::Init => (INIT_HOST, 2),
-        FingerprintOperation::Update => (UPDATE_HOST, 5),
+        FingerprintOperation::Update => (UPDATE_HOST, 4),
         FingerprintOperation::Final => (FINAL_HOST, 3),
     };
     let host = super::arrays::declare_host(builder, pipeline, host_name, parameters)?;
     let call = match operation {
         FingerprintOperation::Init => builder.ins().call(host, &[vmctx, arguments[0]]),
         FingerprintOperation::Update => {
-            let owner = builder
-                .ins()
-                .iconst(types::I64, Arc::as_ptr(pool) as usize as i64);
             let length = builder.ins().sextend(types::I64, arguments[2]);
             builder
                 .ins()
-                .call(host, &[vmctx, owner, arguments[0], arguments[1], length])
+                .call(host, &[vmctx, arguments[0], arguments[1], length])
         }
         FingerprintOperation::Final => builder
             .ins()
@@ -245,6 +237,9 @@ pub(super) fn emit(
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    use super::super::static_bytes::PinnedBytes;
 
     use super::*;
     use crate::machine_state::ExternalStorageKind;
@@ -281,7 +276,10 @@ mod tests {
             .expect("external input initialization");
         let pinned: Arc<[u8]> = Arc::from(&b"abc"[..]);
         let pinned_address = pinned.as_ptr() as usize;
-        let pool = PinnedBytes::new(BTreeMap::from([(b"abc".to_vec(), pinned)]));
+        machine.register_prepared_byte_pool(Arc::new(PinnedBytes::new(BTreeMap::from([(
+            b"abc".to_vec(),
+            pinned,
+        )]))));
         let (digest, _) = bytes(&machine, DIGEST_BYTES);
 
         assert_eq!(
@@ -289,11 +287,11 @@ mod tests {
             crate::prepared_control::CallStatus::Success as i32
         );
         assert_eq!(
-            unsafe { prepared_md5_update(&mut vmctx, &pool, context, pinned_address, 3) },
+            unsafe { prepared_md5_update(&mut vmctx, context, pinned_address, 3) },
             crate::prepared_control::CallStatus::Success as i32
         );
         assert_eq!(
-            unsafe { prepared_md5_update(&mut vmctx, &pool, context, external, 3) },
+            unsafe { prepared_md5_update(&mut vmctx, context, external, 3) },
             crate::prepared_control::CallStatus::Success as i32
         );
         assert_eq!(
@@ -331,9 +329,7 @@ mod tests {
                 .read_external_address(context, CONTEXT_BYTES)
                 .expect("context before rejected update");
             assert_ne!(
-                unsafe {
-                    prepared_md5_update(&mut vmctx, std::ptr::null(), context, input, length)
-                },
+                unsafe { prepared_md5_update(&mut vmctx, context, input, length) },
                 crate::prepared_control::CallStatus::Success as i32
             );
             assert_eq!(

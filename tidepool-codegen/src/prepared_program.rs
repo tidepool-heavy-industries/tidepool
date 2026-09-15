@@ -74,7 +74,7 @@ mod retention_tests;
 mod safepoint;
 #[cfg(test)]
 mod settlement_tests;
-mod static_bytes;
+pub(crate) mod static_bytes;
 mod text_search;
 mod wide_words;
 pub use admission::{admit_prepared, admit_program, supports_operation};

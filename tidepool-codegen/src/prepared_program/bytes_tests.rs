@@ -655,6 +655,40 @@ fn literal_addresses_observe_through_one_shot_and_other_installed_programs() {
     assert!(
         matches!(&result.values[0], tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitString(bytes)) if bytes == &payload[2..])
     );
+
+    // String primitives resolve a literal address through the same machine
+    // authority as observation, whichever installed program owns the bytes.
+    let linked = link_program(
+        testing::prepare(c_string_len_wire(
+            c_string_len_identity(),
+            c_string_len_signature(),
+        ))
+        .unwrap(),
+        &MachineImports::default(),
+    )
+    .unwrap();
+    let strlen = CompiledProgram::compile(&linked, machine.next_top_slot_base()).unwrap();
+    let strlen = machine
+        .install_program(strlen, ImportBindings::new())
+        .unwrap();
+    let length = machine
+        .run_entry(
+            strlen,
+            ValueId(0),
+            &[address as u64],
+            PreparedCallOptions {
+                observation_budget: 1,
+                collect_before_observation: false,
+            },
+            RealmId::ROOT,
+        )
+        .unwrap();
+    assert!(matches!(
+        length.values.as_slice(),
+        [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(
+            2
+        ))]
+    ));
 }
 
 #[test]

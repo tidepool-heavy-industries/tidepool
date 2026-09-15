@@ -310,6 +310,10 @@ pub struct MachineState {
     /// `Enter` can force an imported thunk through the program that knows how
     /// to run it. Same lifetime contract as `prepared_callables`.
     prepared_enters: RefCell<HashMap<usize, *const u8>>,
+    /// Every immutable literal pool compiled by a prepared program running on
+    /// this machine: the one authority for literal `Addr#` bytes, consulted
+    /// by observation and by every address primitive before the ledger.
+    prepared_byte_pools: RefCell<Vec<Arc<crate::prepared_program::static_bytes::PinnedBytes>>>,
 }
 
 // SAFETY: MachineState is only ever accessed from the single thread driving
@@ -373,6 +377,7 @@ impl MachineState {
             external_freed_objects: Cell::new(0),
             prepared_callables: RefCell::new(HashMap::new()),
             prepared_enters: RefCell::new(HashMap::new()),
+            prepared_byte_pools: RefCell::new(Vec::new()),
         }
     }
 
@@ -1660,6 +1665,32 @@ impl MachineState {
                 kind: ExternalStorageKind::Bytes,
                 logical_len: record.logical_len,
             })
+    }
+
+    /// Register one compiled program's literal pool as an `Addr#` authority
+    /// for the life of this machine. Registering the same pool again is a
+    /// no-op.
+    pub(crate) fn register_prepared_byte_pool(
+        &self,
+        pool: Arc<crate::prepared_program::static_bytes::PinnedBytes>,
+    ) {
+        let mut pools = self.prepared_byte_pools.borrow_mut();
+        if !pools.iter().any(|known| Arc::ptr_eq(known, &pool)) {
+            pools.push(pool);
+        }
+    }
+
+    /// Resolve a literal `Addr#` through every registered pool. Pools own
+    /// disjoint pinned allocations, so at most one answers.
+    pub(crate) fn resolve_literal_bytes<R>(
+        &self,
+        resolve: impl FnMut(&crate::prepared_program::static_bytes::PinnedBytes) -> Option<R>,
+    ) -> Option<R> {
+        self.prepared_byte_pools
+            .borrow()
+            .iter()
+            .map(Arc::as_ref)
+            .find_map(resolve)
     }
 
     /// Find a terminal NUL inside an authenticated byte array's logical extent.

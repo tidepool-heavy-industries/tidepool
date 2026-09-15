@@ -5,7 +5,6 @@ use crate::host_fns::RuntimeError;
 use cranelift_codegen::ir::{self, types, AbiParam, InstBuilder, Value};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
-use std::sync::Arc;
 use tidepool_repr::execution_schema::WiredInErrorKind;
 
 /// Decode only a complete NUL-terminated span owned by the compiled program.
@@ -68,16 +67,14 @@ fn decode_kind(tag: u64) -> Option<WiredInErrorKind> {
     })
 }
 
-/// Record a GHC wired-in bottom without forcing or collecting. The byte-pool
-/// pointer is a compiled-owner capability; the generated address is accepted
-/// only when the pool authenticates its complete NUL-terminated message.
+/// Record a GHC wired-in bottom without forcing or collecting. The generated
+/// address is accepted only when a literal pool registered with the machine
+/// authenticates its complete NUL-terminated message.
 ///
 /// # Safety
-/// `vmctx` belongs to the active generated call and a non-null `pool` is the
-/// frozen owner retained by that call's compiled program.
+/// `vmctx` belongs to the active generated call.
 pub(super) unsafe extern "C" fn prepared_wired_in_error(
     vmctx: *mut crate::context::VMContext,
-    pool: *const super::static_bytes::PinnedBytes,
     kind_tag: u64,
     address: usize,
 ) -> i32 {
@@ -88,9 +85,17 @@ pub(super) unsafe extern "C" fn prepared_wired_in_error(
     if status != CallStatus::Success {
         return status as i32;
     }
-    let failure = match (decode_kind(kind_tag), unsafe { pool.as_ref() }) {
-        (Some(kind), Some(bytes)) => wired_in_failure(bytes, kind, address),
-        _ => Err(RuntimeError::BadPointer),
+    let failure = match decode_kind(kind_tag) {
+        Some(kind) => machine
+            .resolve_literal_bytes(|pool| {
+                pool.c_string_len(address)
+                    .map(|_| wired_in_failure(pool, kind, address))
+            })
+            .unwrap_or_else(|| {
+                let unowned = super::static_bytes::PinnedBytes::new(Default::default());
+                wired_in_failure(&unowned, kind, address)
+            }),
+        None => Err(RuntimeError::BadPointer),
     };
     machine.set_first_cause(match failure {
         Ok(error) | Err(error) => error,
@@ -102,13 +107,11 @@ pub(super) fn emit_wired_in_error(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut crate::pipeline::CodegenPipeline,
     vmctx: Value,
-    bytes: &Arc<super::static_bytes::PinnedBytes>,
     kind: WiredInErrorKind,
     address: Option<Value>,
 ) -> Result<(), super::CompileError> {
     let mut signature = ir::Signature::new(pipeline.isa.default_call_conv());
     signature.params.extend([
-        AbiParam::new(types::I64),
         AbiParam::new(types::I64),
         AbiParam::new(types::I64),
         AbiParam::new(types::I64),
@@ -119,12 +122,9 @@ pub(super) fn emit_wired_in_error(
         .declare_function("prepared_wired_in_error", Linkage::Import, &signature)
         .map_err(|error| crate::pipeline::PipelineError::Declaration(error.to_string()))?;
     let host = pipeline.module.declare_func_in_func(host, builder.func);
-    let pool = builder
-        .ins()
-        .iconst(types::I64, Arc::as_ptr(bytes) as usize as i64);
     let kind_tag = builder.ins().iconst(types::I64, kind as u8 as i64);
     let address = address.unwrap_or_else(|| builder.ins().iconst(types::I64, 0));
-    let call = builder.ins().call(host, &[vmctx, pool, kind_tag, address]);
+    let call = builder.ins().call(host, &[vmctx, kind_tag, address]);
     let status = builder.inst_results(call)[0];
     super::no_success::emit_status(builder, status);
     Ok(())
@@ -198,8 +198,7 @@ mod tests {
             crate::host_fns::gc_trigger,
         );
         vmctx.machine_state = &machine as *const _ as *mut _;
-        let status =
-            unsafe { prepared_wired_in_error(&mut vmctx, std::ptr::null(), u64::MAX, usize::MAX) };
+        let status = unsafe { prepared_wired_in_error(&mut vmctx, u64::MAX, usize::MAX) };
         assert_eq!(
             status,
             crate::prepared_control::CallStatus::Cancelled as i32
@@ -208,12 +207,8 @@ mod tests {
     }
 
     #[test]
-    fn host_rejects_invalid_kind_and_null_pool_as_bad_pointer() {
-        let pool = super::super::static_bytes::PinnedBytes::new(BTreeMap::new());
-        for (pool, kind) in [
-            (&pool as *const _, u64::MAX),
-            (std::ptr::null(), WiredInErrorKind::AbsentSumField as u64),
-        ] {
+    fn host_rejects_an_invalid_kind_and_an_unowned_message_as_bad_pointer() {
+        for kind in [u64::MAX, WiredInErrorKind::PatternMatch as u64] {
             let machine = crate::machine_state::MachineState::new();
             let mut vmctx = crate::context::VMContext::new(
                 std::ptr::null_mut(),
@@ -221,12 +216,44 @@ mod tests {
                 crate::host_fns::gc_trigger,
             );
             vmctx.machine_state = &machine as *const _ as *mut _;
-            let status = unsafe { prepared_wired_in_error(&mut vmctx, pool, kind, usize::MAX) };
+            let status = unsafe { prepared_wired_in_error(&mut vmctx, kind, usize::MAX) };
             assert_eq!(
                 status,
                 crate::prepared_control::CallStatus::IntegrityFailure as i32
             );
             assert_eq!(machine.take_runtime_error(), Some(RuntimeError::BadPointer));
         }
+    }
+
+    #[test]
+    fn host_reads_its_message_from_any_registered_literal_pool() {
+        let payload: Arc<[u8]> = Arc::from(&b"Suite.hs:3|f\0"[..]);
+        let address = payload.as_ptr() as usize;
+        let machine = crate::machine_state::MachineState::new();
+        machine.register_prepared_byte_pool(Arc::new(
+            super::super::static_bytes::PinnedBytes::new(BTreeMap::new()),
+        ));
+        machine.register_prepared_byte_pool(Arc::new(
+            super::super::static_bytes::PinnedBytes::new(BTreeMap::from([(
+                b"Suite.hs:3|f".to_vec(),
+                payload,
+            )])),
+        ));
+        let mut vmctx = crate::context::VMContext::new(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            crate::host_fns::gc_trigger,
+        );
+        vmctx.machine_state = &machine as *const _ as *mut _;
+        let status = unsafe {
+            prepared_wired_in_error(&mut vmctx, WiredInErrorKind::PatternMatch as u64, address)
+        };
+        assert_ne!(status, crate::prepared_control::CallStatus::Success as i32);
+        assert_eq!(
+            machine.take_runtime_error(),
+            Some(RuntimeError::PatternMatchFailure(
+                "Suite.hs:3: Non-exhaustive patterns in f\n".into()
+            ))
+        );
     }
 }

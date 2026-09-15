@@ -475,7 +475,6 @@ fn emit_function_at(
                             &physical_arguments,
                             vmctx,
                             pipeline,
-                            &plan.bytes,
                             prepared_enter,
                             prepared_gc,
                             &plan.boxed_array,

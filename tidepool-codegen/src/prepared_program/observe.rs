@@ -108,7 +108,6 @@ pub(super) struct ObservationHeap<'a> {
     /// Every installed program's immutable static image. A pointer is static
     /// iff SOME region in this set admits it -- see [`Self::object`].
     statics: Vec<&'a StaticRegion>,
-    pools: Vec<&'a super::static_bytes::PinnedBytes>,
     old_space: Option<&'a dyn tidepool_heap::descriptor_region::DescriptorOldSpace>,
     descriptors: BTreeMap<usize, Arc<ObjectDescriptor>>,
     starts: Vec<u64>,
@@ -189,7 +188,6 @@ impl<'a> ObservationHeap<'a> {
     pub(super) fn new_with_registry_and_starts(
         nursery: &'a [u64],
         statics: &'a [Arc<StaticRegion>],
-        pools: &'a [Arc<super::static_bytes::PinnedBytes>],
         registry: &'a BTreeMap<usize, DescriptorMetadata>,
         starts: &[u64],
         old_space: Option<&'a dyn tidepool_heap::descriptor_region::DescriptorOldSpace>,
@@ -207,7 +205,6 @@ impl<'a> ObservationHeap<'a> {
         Ok(Self {
             nursery,
             statics: statics.iter().map(Arc::as_ref).collect(),
-            pools: pools.iter().map(Arc::as_ref).collect(),
             old_space,
             descriptors,
             starts: starts.to_vec(),
@@ -273,7 +270,6 @@ impl<'a> ObservationHeap<'a> {
             constructors,
             registry,
             external_owner: None,
-            pools: Vec::new(),
         })
     }
 
@@ -496,16 +492,23 @@ impl<'a> ObservationHeap<'a> {
                             origin: AddressOrigin::Null,
                         });
                     }
-                    let bytes = self
-                        .pools
-                        .iter()
-                        .find_map(|pool| pool.logical_suffix(seed.word))
-                        .ok_or(ObservationFailure::Address {
-                            origin: AddressOrigin::Unauthenticated,
-                        })?;
-                    budget.charge_bytes(bytes.len())?;
+                    let unauthenticated = || ObservationFailure::Address {
+                        origin: AddressOrigin::Unauthenticated,
+                    };
+                    let owner = self.external_owner.ok_or_else(unauthenticated)?;
+                    let length = owner
+                        .resolve_literal_bytes(|pool| {
+                            pool.logical_suffix(seed.word).map(<[u8]>::len)
+                        })
+                        .ok_or_else(unauthenticated)?;
+                    budget.charge_bytes(length)?;
+                    let bytes = owner
+                        .resolve_literal_bytes(|pool| {
+                            pool.logical_suffix(seed.word).map(<[u8]>::to_vec)
+                        })
+                        .ok_or_else(unauthenticated)?;
                     return Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitString(
-                        bytes.to_vec(),
+                        bytes,
                     ))));
                 }
                 RuntimeRep::Int(bits) => {
@@ -850,11 +853,15 @@ mod tests {
             b"ab\0tail".to_vec(),
             storage,
         )]));
-        let empty = super::super::static_bytes::PinnedBytes::new(BTreeMap::new());
+        let owner = crate::machine_state::MachineState::new();
+        owner.register_prepared_byte_pool(Arc::new(super::super::static_bytes::PinnedBytes::new(
+            BTreeMap::new(),
+        )));
+        owner.register_prepared_byte_pool(Arc::new(pool));
         let statics = statics();
         let constructors = BTreeMap::new();
         let mut heap = ObservationHeap::new(&[], &statics, [], &constructors).unwrap();
-        heap.pools = vec![&empty, &pool];
+        heap.external_owner = Some(&owner);
         let reps = [RuntimeRep::Address];
         let layout = StorageLayout::for_reps(&target(), &reps).unwrap();
         for offset in [0, 2, 7] {

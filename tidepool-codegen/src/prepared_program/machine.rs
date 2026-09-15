@@ -141,7 +141,6 @@ pub struct PreparedMachine<'code> {
     /// program's own region, so a cross-program static field resolves
     /// through whichever region actually admits it (T4).
     statics: Vec<Arc<StaticRegion>>,
-    pools: Vec<Arc<super::static_bytes::PinnedBytes>>,
     /// Union of every installed program's pinned descriptor layouts, passed
     /// to `retain_prepared`/`promote_prepared` so a promoted value's
     /// transitive graph is covered no matter which program produced the
@@ -338,7 +337,6 @@ impl<'code> PreparedMachine<'code> {
             vmctx: VMContext::new(std::ptr::null_mut(), std::ptr::null(), gc_trigger),
             old_space: Box::new(OldSpace::new()),
             statics: Vec::new(),
-            pools: Vec::new(),
             descriptors: Vec::new(),
             descriptor_registry: BTreeMap::new(),
             interner: super::DescriptorInterner::default(),
@@ -708,7 +706,8 @@ impl<'code> PreparedMachine<'code> {
         // above), so there is nothing left to publish here.
 
         self.statics.push(statics);
-        self.pools.push(Arc::clone(&compiled.bytes));
+        self.machine
+            .register_prepared_byte_pool(Arc::clone(&compiled.bytes));
         self.descriptors
             .extend(compiled.descriptors.iter().cloned());
         self.descriptor_registry.extend(
@@ -1015,7 +1014,6 @@ impl<'code> PreparedMachine<'code> {
         super::observe::ObservationHeap::new_with_registry_and_starts(
             nursery,
             &self.statics,
-            &self.pools,
             &self.descriptor_registry,
             &starts,
             Some(&*self.old_space),
@@ -1316,7 +1314,6 @@ impl<'code> PreparedMachine<'code> {
             &mut self.vmctx,
             &self.old_space,
             &self.statics,
-            &self.pools,
             &self.descriptor_registry,
         );
         self.machine.end_prepared_call();
@@ -1563,7 +1560,6 @@ impl<'code> InstalledProgram<'code> {
         vmctx: &mut VMContext,
         old_space: &OldSpace,
         statics: &[Arc<StaticRegion>],
-        pools: &[Arc<super::static_bytes::PinnedBytes>],
         descriptor_registry: &BTreeMap<usize, DescriptorMetadata>,
     ) -> Result<RunResult, ExecutionError> {
         let (adapter, expected_arguments, has_managed_arguments, result_contract, result_layout) = {
@@ -1673,7 +1669,6 @@ impl<'code> InstalledProgram<'code> {
             self.program.get(),
             vmctx,
             statics,
-            pools,
             descriptor_registry,
             old_space,
             &seeds,
