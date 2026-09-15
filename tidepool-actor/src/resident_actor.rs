@@ -624,7 +624,8 @@ impl WorkbenchExecutions {
         match self.0.get(&WorkbenchReplayKey::new(&execution, invocation)) {
             None => crate::WorkbenchCancellationOutcome::UnknownEvaluation { execution },
             Some(record) => match &record.state {
-                WorkbenchExecutionState::Unconfirmed => {
+                WorkbenchExecutionState::Unconfirmed =>
+                {
                     #[allow(
                         clippy::expect_used,
                         reason = "every record enters this journal through `begin`, whose \

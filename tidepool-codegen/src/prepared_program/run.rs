@@ -263,10 +263,7 @@ fn write_atoms(
                 }
                 value.to_ne_bytes().to_vec()
             }
-            (
-                RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef,
-                Atom::Ref(ValueRef::Global(id)),
-            ) => {
+            (RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef, Atom::Ref(ValueRef::Global(id))) => {
                 // Read the import's CURRENT published slot value, not a
                 // cached pointer: this heap top is initialized only after
                 // `install` has already published every import slot (see

@@ -4,10 +4,9 @@ use tidepool_bridge::Value;
 use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::MachineDisposition;
 use tidepool_codegen::prepared_program::{
-    CompiledProgram, ExecutionError, ObservationFailure, PreparedCallOptions,
-    PreparedHandle, PreparedInput as CodegenPreparedInput, PreparedMachine,
-    PreparedMachineOptions, PreparedOuter as PreparedOuterCodegen, PreparedResult, ProgramId,
-    TopSlotBase,
+    CompiledProgram, ExecutionError, ObservationFailure, PreparedCallOptions, PreparedHandle,
+    PreparedInput as CodegenPreparedInput, PreparedMachine, PreparedMachineOptions,
+    PreparedOuter as PreparedOuterCodegen, PreparedResult, ProgramId, TopSlotBase,
 };
 use tidepool_repr::execution_schema::{
     link_program, parse_program, Architecture, DecodeLimits, Endianness, ImportedValue, LinkError,
@@ -1354,9 +1353,7 @@ fn drive_direct_to_val(
         let PreparedOuterCodegen::Constructor {
             identity: union_identity,
             fields: mut union_fields,
-        } = machine
-            .inspect_outer(union, realm)
-            .expect("Union inspects");
+        } = machine.inspect_outer(union, realm).expect("Union inspects");
         assert_eq!(union_identity, fixture.union_id);
         assert_eq!(
             union_fields.len(),
@@ -1630,8 +1627,14 @@ fn two_realms_share_one_machine_cancel_reset_close_independently_of_each_other()
     // above: drive it all the way to its own settled `Val` now, keeping
     // that settled cell's handle alive (not released yet) so it can be
     // re-checked after r1's close_realm below.
-    let (value_r2, outer_r2_final) =
-        drive_direct_to_val(&mut machine, program_id, call_options, &fixture, r2, outer_r2);
+    let (value_r2, outer_r2_final) = drive_direct_to_val(
+        &mut machine,
+        program_id,
+        call_options,
+        &fixture,
+        r2,
+        outer_r2,
+    );
     assert_eq!(
         value_r2, value_r1,
         "r1 and r2 run the same deterministic computation from the same fixture"
