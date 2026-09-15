@@ -312,9 +312,18 @@ fn test_case_lit_double() {
 fn test_case_lit_float() {
     // case Lit(2.5f) of { LitAlt(1.0f) -> 10; LitAlt(2.5f) -> 77; Default -> 0 }
     let binder = VarId(99);
-    // LitFloat stores f64 bits (GHC represents Float# as Double internally)
-    let target_bits = 2.5f64.to_bits();
-    let one_bits = 1.0f64.to_bits();
+    // FINDING (pre-existing, stale expectation): `LitFloat` stores raw f32
+    // bits widened into a u64 -- see the engine's own convention at
+    // `Literal::LitFloat(1.5f32.to_bits() as u64)` a few tests below in this
+    // same file, `unbox_float` (tidepool-codegen/src/emit/primop.rs) which
+    // reinterprets the value slot as F32, and case.rs's own lit dispatch
+    // (`f32::from_bits(*bits as u32)`). This test previously stored f64 bits
+    // instead; truncating a f64 bit pattern to its low 32 bits collapses both
+    // 1.0f64 and 2.5f64 to 0x00000000 (both have a zero low word), so the
+    // scrutinee spuriously matched the *first* alt. Use f32 bits, matching
+    // the engine's actual Float# representation.
+    let target_bits = 2.5f32.to_bits() as u64;
+    let one_bits = 1.0f32.to_bits() as u64;
     let tree = RecursiveTree {
         nodes: vec![
             CoreFrame::Lit(Literal::LitFloat(target_bits)), // 0: scrutinee

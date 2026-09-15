@@ -330,8 +330,26 @@ fn test_emit_primop_bytearray_basic() {
 
 #[test]
 fn test_emit_primop_bytearray_read_write() {
+    // FINDING (pre-existing bug, not caused by this session): the previous
+    // version of this test sequenced the write before the read via
+    // `let dummy = write(...) in read(...) + dummy`, relying on `dummy`
+    // being forced before the read is evaluated. GHC Core `let` is
+    // NON-STRICT -- see `emit/expr.rs`'s own doc comment ("GHC Core `let`
+    // is NON-STRICT -- strictness is expressed via `case`, never `let`")
+    // and `tidepool-repr::trivial_field` ("Primitive applications remain
+    // computations" -- never trivial, so a PrimOp RHS is always thunked).
+    // Two independently-thunked arguments to a strict primop like `IntAdd`
+    // have no specified relative forcing order, and empirically this one
+    // forces the direct (non-Var) argument first -- so the read ran before
+    // the write's thunk was ever forced, observing an unwritten array.
+    // This was a test-authoring bug (relying on an ordering `let` never
+    // promised), not a bug in `WriteWord8Array`/`ReadWord8Array` codegen.
+    // Fix: sequence with `Case`, whose scrutinee is unconditionally forced
+    // before its alt body runs (`emit_case::emit_case` forces the scrutinee
+    // as its very first step) -- the same mechanism GHC Core itself uses to
+    // express strict sequencing.
     let ba = VarId(1);
-    let dummy = VarId(2);
+    let seq_binder = VarId(2);
     let tree = RecursiveTree {
         nodes: vec![
             CoreFrame::Lit(Literal::LitInt(10)), // 0
@@ -345,28 +363,27 @@ fn test_emit_primop_bytearray_read_write() {
             CoreFrame::PrimOp {
                 op: PrimOpKind::WriteWord8Array,
                 args: vec![2, 3, 4],
-            }, // 5
+            }, // 5: write effect (case scrutinee, forced first)
             CoreFrame::Var(ba),                  // 6
             CoreFrame::Lit(Literal::LitInt(3)),  // 7
             CoreFrame::PrimOp {
                 op: PrimOpKind::ReadWord8Array,
                 args: vec![6, 7],
-            }, // 8
-            CoreFrame::Var(dummy),               // 9
-            CoreFrame::PrimOp {
-                op: PrimOpKind::IntAdd,
-                args: vec![8, 9],
-            }, // 10: read + dummy (0)
-            CoreFrame::LetNonRec {
-                binder: dummy,
-                rhs: 5,
-                body: 10,
-            }, // 11
+            }, // 8: read (case default-alt body, runs after the write)
+            CoreFrame::Case {
+                scrutinee: 5,
+                binder: seq_binder,
+                alts: vec![Alt {
+                    con: AltCon::Default,
+                    binders: vec![],
+                    body: 8,
+                }],
+            }, // 9
             CoreFrame::LetNonRec {
                 binder: ba,
                 rhs: 1,
-                body: 11,
-            }, // 12
+                body: 9,
+            }, // 10
         ],
     };
     let result = compile_and_run(&tree, 65536);
@@ -377,8 +394,14 @@ fn test_emit_primop_bytearray_read_write() {
 
 #[test]
 fn test_emit_primop_bytearray_word_read_write() {
+    // See the FINDING comment on `test_emit_primop_bytearray_read_write`:
+    // this test previously relied on `let dummy = write in read + dummy`
+    // to sequence the write before the read, which GHC Core `let` (lazy,
+    // no forcing-order contract between independently thunked args) never
+    // actually guaranteed. Sequenced with `Case` instead, whose scrutinee
+    // is always forced before its alt body runs.
     let ba = VarId(1);
-    let dummy = VarId(2);
+    let seq_binder = VarId(2);
     let tree = RecursiveTree {
         nodes: vec![
             CoreFrame::Lit(Literal::LitInt(64)),
@@ -392,28 +415,27 @@ fn test_emit_primop_bytearray_word_read_write() {
             CoreFrame::PrimOp {
                 op: PrimOpKind::WriteWordArray,
                 args: vec![2, 3, 4],
-            },
+            }, // 5: scrutinee
             CoreFrame::Var(ba),
             CoreFrame::Lit(Literal::LitInt(2)),
             CoreFrame::PrimOp {
                 op: PrimOpKind::IndexWordArray,
                 args: vec![6, 7],
-            },
-            CoreFrame::Var(dummy),
-            CoreFrame::PrimOp {
-                op: PrimOpKind::WordAdd,
-                args: vec![8, 9],
-            },
-            CoreFrame::LetNonRec {
-                binder: dummy,
-                rhs: 5,
-                body: 10,
-            },
+            }, // 8: default-alt body
+            CoreFrame::Case {
+                scrutinee: 5,
+                binder: seq_binder,
+                alts: vec![Alt {
+                    con: AltCon::Default,
+                    binders: vec![],
+                    body: 8,
+                }],
+            }, // 9
             CoreFrame::LetNonRec {
                 binder: ba,
                 rhs: 1,
-                body: 11,
-            },
+                body: 9,
+            }, // 10
         ],
     };
     let result = compile_and_run(&tree, 65536);
@@ -550,8 +572,11 @@ fn test_emit_primop_plus_addr() {
 
 #[test]
 fn test_emit_primop_bytearray_set() {
+    // See the FINDING comment on `test_emit_primop_bytearray_read_write`:
+    // sequenced with `Case` instead of the non-strict `let dummy = ...`
+    // idiom, which never guaranteed the mutation ran before the read.
     let ba = VarId(1);
-    let dummy = VarId(2);
+    let seq_binder = VarId(2);
     let tree = RecursiveTree {
         nodes: vec![
             CoreFrame::Lit(Literal::LitInt(10)), // 0
@@ -566,28 +591,27 @@ fn test_emit_primop_bytearray_set() {
             CoreFrame::PrimOp {
                 op: PrimOpKind::SetByteArray,
                 args: vec![2, 3, 4, 5],
-            }, // 6
+            }, // 6: scrutinee
             CoreFrame::Var(ba),                  // 7
             CoreFrame::Lit(Literal::LitInt(2)),  // 8
             CoreFrame::PrimOp {
                 op: PrimOpKind::ReadWord8Array,
                 args: vec![7, 8],
-            }, // 9
-            CoreFrame::Var(dummy),               // 10
-            CoreFrame::PrimOp {
-                op: PrimOpKind::IntAdd,
-                args: vec![9, 10],
-            }, // 11
-            CoreFrame::LetNonRec {
-                binder: dummy,
-                rhs: 6,
-                body: 11,
-            }, // 12
+            }, // 9: default-alt body
+            CoreFrame::Case {
+                scrutinee: 6,
+                binder: seq_binder,
+                alts: vec![Alt {
+                    con: AltCon::Default,
+                    binders: vec![],
+                    body: 9,
+                }],
+            }, // 10
             CoreFrame::LetNonRec {
                 binder: ba,
                 rhs: 1,
-                body: 12,
-            }, // 13
+                body: 10,
+            }, // 11
         ],
     };
     let result = compile_and_run(&tree, 65536);
@@ -598,8 +622,11 @@ fn test_emit_primop_bytearray_set() {
 
 #[test]
 fn test_emit_primop_bytearray_shrink() {
+    // See the FINDING comment on `test_emit_primop_bytearray_read_write`:
+    // sequenced with `Case` instead of the non-strict `let dummy = ...`
+    // idiom, which never guaranteed the shrink ran before the sizeof read.
     let ba = VarId(1);
-    let dummy = VarId(2);
+    let seq_binder = VarId(2);
     let tree = RecursiveTree {
         nodes: vec![
             CoreFrame::Lit(Literal::LitInt(10)), // 0
@@ -612,27 +639,26 @@ fn test_emit_primop_bytearray_shrink() {
             CoreFrame::PrimOp {
                 op: PrimOpKind::ShrinkMutableByteArray,
                 args: vec![2, 3],
-            }, // 4
+            }, // 4: scrutinee
             CoreFrame::Var(ba),                  // 5
             CoreFrame::PrimOp {
                 op: PrimOpKind::SizeofByteArray,
                 args: vec![5],
-            }, // 6
-            CoreFrame::Var(dummy),               // 7
-            CoreFrame::PrimOp {
-                op: PrimOpKind::IntAdd,
-                args: vec![6, 7],
-            }, // 8
-            CoreFrame::LetNonRec {
-                binder: dummy,
-                rhs: 4,
-                body: 8,
-            }, // 9
+            }, // 6: default-alt body
+            CoreFrame::Case {
+                scrutinee: 4,
+                binder: seq_binder,
+                alts: vec![Alt {
+                    con: AltCon::Default,
+                    binders: vec![],
+                    body: 6,
+                }],
+            }, // 7
             CoreFrame::LetNonRec {
                 binder: ba,
                 rhs: 1,
-                body: 9,
-            }, // 10
+                body: 7,
+            }, // 8
         ],
     };
     let result = compile_and_run(&tree, 65536);
@@ -873,10 +899,14 @@ fn test_error_sentinel_detection_in_complex_rhs() {
 
 #[test]
 fn test_emit_primop_bytearray_compare_unequal() {
+    // See the FINDING comment on `test_emit_primop_bytearray_read_write`:
+    // sequenced with nested `Case`s instead of the non-strict
+    // `let d1 = set1; let d2 = set2 in ...` idiom, which never guaranteed
+    // either mutation ran before the compare read both arrays.
     let ba1 = VarId(1);
     let ba2 = VarId(2);
-    let d1 = VarId(3);
-    let d2 = VarId(4);
+    let seq1 = VarId(3);
+    let seq2 = VarId(4);
     let tree = RecursiveTree {
         nodes: vec![
             CoreFrame::Lit(Literal::LitInt(10)),
@@ -895,49 +925,47 @@ fn test_emit_primop_bytearray_compare_unequal() {
             CoreFrame::PrimOp {
                 op: PrimOpKind::SetByteArray,
                 args: vec![3, 4, 5, 6],
-            }, // 7
+            }, // 7: outer scrutinee (set ba1)
             CoreFrame::Var(ba2),
             CoreFrame::Lit(Literal::LitInt(0xBB)),
             CoreFrame::PrimOp {
                 op: PrimOpKind::SetByteArray,
                 args: vec![8, 4, 5, 9],
-            }, // 10
+            }, // 10: inner scrutinee (set ba2)
             CoreFrame::Var(ba1),
             CoreFrame::Var(ba2),
             CoreFrame::PrimOp {
                 op: PrimOpKind::CompareByteArrays,
                 args: vec![11, 4, 12, 4, 5],
-            }, // 13
-            CoreFrame::Var(d1),
-            CoreFrame::Var(d2),
-            CoreFrame::PrimOp {
-                op: PrimOpKind::IntAdd,
-                args: vec![13, 14],
-            },
-            CoreFrame::PrimOp {
-                op: PrimOpKind::IntAdd,
-                args: vec![16, 15],
-            },
-            CoreFrame::LetNonRec {
-                binder: d2,
-                rhs: 10,
-                body: 17,
-            },
-            CoreFrame::LetNonRec {
-                binder: d1,
-                rhs: 7,
-                body: 18,
-            },
+            }, // 13: innermost default-alt body
+            CoreFrame::Case {
+                scrutinee: 10,
+                binder: seq2,
+                alts: vec![Alt {
+                    con: AltCon::Default,
+                    binders: vec![],
+                    body: 13,
+                }],
+            }, // 14
+            CoreFrame::Case {
+                scrutinee: 7,
+                binder: seq1,
+                alts: vec![Alt {
+                    con: AltCon::Default,
+                    binders: vec![],
+                    body: 14,
+                }],
+            }, // 15
             CoreFrame::LetNonRec {
                 binder: ba2,
                 rhs: 2,
-                body: 19,
-            },
+                body: 15,
+            }, // 16
             CoreFrame::LetNonRec {
                 binder: ba1,
                 rhs: 1,
-                body: 20,
-            },
+                body: 16,
+            }, // 17
         ],
     };
     let result = compile_and_run(&tree, 65536);
@@ -948,10 +976,14 @@ fn test_emit_primop_bytearray_compare_unequal() {
 
 #[test]
 fn test_emit_primop_bytearray_copy_mutable() {
+    // See the FINDING comment on `test_emit_primop_bytearray_read_write`:
+    // sequenced with nested `Case`s instead of the non-strict
+    // `let d1 = set; let d2 = copy in ...` idiom, which never guaranteed
+    // either mutation ran before the read.
     let ba1 = VarId(1);
     let ba2 = VarId(2);
-    let d1 = VarId(3);
-    let d2 = VarId(4);
+    let seq1 = VarId(3);
+    let seq2 = VarId(4);
     let tree = RecursiveTree {
         nodes: vec![
             CoreFrame::Lit(Literal::LitInt(10)),
@@ -970,48 +1002,46 @@ fn test_emit_primop_bytearray_copy_mutable() {
             CoreFrame::PrimOp {
                 op: PrimOpKind::SetByteArray,
                 args: vec![3, 4, 5, 6],
-            }, // 7
+            }, // 7: outer scrutinee (set ba1)
             CoreFrame::Var(ba1),
             CoreFrame::Var(ba2),
             CoreFrame::PrimOp {
                 op: PrimOpKind::CopyMutableByteArray,
                 args: vec![8, 4, 9, 4, 5],
-            }, // 10
+            }, // 10: inner scrutinee (copy ba1 -> ba2)
             CoreFrame::Var(ba2),
             CoreFrame::PrimOp {
                 op: PrimOpKind::ReadWord8Array,
                 args: vec![11, 4],
-            }, // 12
-            CoreFrame::Var(d1),
-            CoreFrame::Var(d2),
-            CoreFrame::PrimOp {
-                op: PrimOpKind::IntAdd,
-                args: vec![12, 13],
-            },
-            CoreFrame::PrimOp {
-                op: PrimOpKind::IntAdd,
-                args: vec![15, 14],
-            },
-            CoreFrame::LetNonRec {
-                binder: d2,
-                rhs: 10,
-                body: 16,
-            },
-            CoreFrame::LetNonRec {
-                binder: d1,
-                rhs: 7,
-                body: 17,
-            },
+            }, // 12: innermost default-alt body
+            CoreFrame::Case {
+                scrutinee: 10,
+                binder: seq2,
+                alts: vec![Alt {
+                    con: AltCon::Default,
+                    binders: vec![],
+                    body: 12,
+                }],
+            }, // 13
+            CoreFrame::Case {
+                scrutinee: 7,
+                binder: seq1,
+                alts: vec![Alt {
+                    con: AltCon::Default,
+                    binders: vec![],
+                    body: 13,
+                }],
+            }, // 14
             CoreFrame::LetNonRec {
                 binder: ba2,
                 rhs: 2,
-                body: 18,
-            },
+                body: 14,
+            }, // 15
             CoreFrame::LetNonRec {
                 binder: ba1,
                 rhs: 1,
-                body: 19,
-            },
+                body: 15,
+            }, // 16
         ],
     };
     let result = compile_and_run(&tree, 65536);
@@ -1022,8 +1052,13 @@ fn test_emit_primop_bytearray_copy_mutable() {
 
 #[test]
 fn test_emit_primop_bytearray_index_word8() {
+    // See the FINDING comment on `test_emit_primop_bytearray_read_write`:
+    // sequenced with `Case` instead of the non-strict `let d1 = write in
+    // ...` idiom, which never guaranteed the write ran before the index
+    // read (through `UnsafeFreezeByteArray`, an identity op on this
+    // representation).
     let ba = VarId(1);
-    let d1 = VarId(2);
+    let seq_binder = VarId(2);
     let tree = RecursiveTree {
         nodes: vec![
             CoreFrame::Lit(Literal::LitInt(10)),
@@ -1037,7 +1072,7 @@ fn test_emit_primop_bytearray_index_word8() {
             CoreFrame::PrimOp {
                 op: PrimOpKind::WriteWord8Array,
                 args: vec![2, 3, 4],
-            }, // 5
+            }, // 5: scrutinee
             CoreFrame::Var(ba),
             CoreFrame::PrimOp {
                 op: PrimOpKind::UnsafeFreezeByteArray,
@@ -1047,22 +1082,21 @@ fn test_emit_primop_bytearray_index_word8() {
             CoreFrame::PrimOp {
                 op: PrimOpKind::IndexWord8Array,
                 args: vec![7, 8],
-            }, // 9
-            CoreFrame::Var(d1),
-            CoreFrame::PrimOp {
-                op: PrimOpKind::IntAdd,
-                args: vec![9, 10],
-            }, // 11
-            CoreFrame::LetNonRec {
-                binder: d1,
-                rhs: 5,
-                body: 11,
-            },
+            }, // 9: default-alt body
+            CoreFrame::Case {
+                scrutinee: 5,
+                binder: seq_binder,
+                alts: vec![Alt {
+                    con: AltCon::Default,
+                    binders: vec![],
+                    body: 9,
+                }],
+            }, // 10
             CoreFrame::LetNonRec {
                 binder: ba,
                 rhs: 1,
-                body: 12,
-            },
+                body: 10,
+            }, // 11
         ],
     };
     let result = compile_and_run(&tree, 65536);
@@ -1073,8 +1107,11 @@ fn test_emit_primop_bytearray_index_word8() {
 
 #[test]
 fn test_emit_primop_bytearray_copy_addr() {
+    // See the FINDING comment on `test_emit_primop_bytearray_read_write`:
+    // sequenced with `Case` instead of the non-strict `let d1 = copy in
+    // ...` idiom, which never guaranteed the copy ran before the read.
     let ba = VarId(1);
-    let d1 = VarId(2);
+    let seq_binder = VarId(2);
     let tree = RecursiveTree {
         nodes: vec![
             CoreFrame::Lit(Literal::LitString(b"ABCDE".to_vec())), // 0
@@ -1089,28 +1126,27 @@ fn test_emit_primop_bytearray_copy_addr() {
             CoreFrame::PrimOp {
                 op: PrimOpKind::CopyAddrToByteArray,
                 args: vec![0, 3, 4, 5],
-            }, // 6
+            }, // 6: scrutinee
             CoreFrame::Var(ba),
             CoreFrame::Lit(Literal::LitInt(2)),
             CoreFrame::PrimOp {
                 op: PrimOpKind::ReadWord8Array,
                 args: vec![7, 8],
-            }, // 9
-            CoreFrame::Var(d1),
-            CoreFrame::PrimOp {
-                op: PrimOpKind::IntAdd,
-                args: vec![9, 10],
-            }, // 11
-            CoreFrame::LetNonRec {
-                binder: d1,
-                rhs: 6,
-                body: 11,
-            },
+            }, // 9: default-alt body
+            CoreFrame::Case {
+                scrutinee: 6,
+                binder: seq_binder,
+                alts: vec![Alt {
+                    con: AltCon::Default,
+                    binders: vec![],
+                    body: 9,
+                }],
+            }, // 10
             CoreFrame::LetNonRec {
                 binder: ba,
                 rhs: 2,
-                body: 12,
-            },
+                body: 10,
+            }, // 11
         ],
     };
     let result = compile_and_run(&tree, 65536);
