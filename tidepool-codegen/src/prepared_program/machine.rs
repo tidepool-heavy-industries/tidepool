@@ -410,17 +410,15 @@ impl<'code> PreparedMachine<'code> {
         // collection.
         let mut resolved_imports: Vec<(usize, ValueHandle)> =
             Vec::with_capacity(compiled.import_slots.len());
-        // Built once, eagerly, only if some declared import actually needs
-        // the evaluatedness check -- most installs need no heap read at all.
-        let observation = if compiled
-            .import_slots
-            .iter()
-            .any(|slot| slot.required_evaluated)
-        {
-            Some(self.observation_heap()?)
-        } else {
-            None
-        };
+        // Pass 1, no heap access: every declared import must name a handle
+        // this machine retains, of the declared representation, with a
+        // live pointer. On an EMPTY machine (first program) the ledger has
+        // no handles, so a program with any import is refused here as
+        // `UnknownPreparedHandle` -- before the evaluatedness pass below
+        // could ask for an observation heap that does not exist yet (which
+        // would report `BadPointer` and latch the machine Unavailable for
+        // what is a caller error).
+        let mut evaluated_checks: Vec<(usize, &super::plan::ImportSlot)> = Vec::new();
         for slot in &compiled.import_slots {
             let handle = imports
                 .get(&slot.identity)
@@ -442,14 +440,17 @@ impl<'code> PreparedMachine<'code> {
                 return Err(ExecutionError::UnknownPreparedHandle);
             }
             if slot.required_evaluated {
-                // `observation` was built above whenever any slot needs this
-                // check, so this one always does; the fallback error keeps
-                // this branch fail-closed rather than relying on that.
-                let Some(heap) = observation.as_ref() else {
-                    return Err(ExecutionError::UnknownPreparedHandle);
-                };
-                let evaluated = heap.resolves_to_whnf_value(pointer)?;
-                if !evaluated {
+                evaluated_checks.push((pointer, slot));
+            }
+            resolved_imports.push((slot.slot, handle.raw));
+        }
+        // Pass 2, one observation heap built only if some verified import
+        // actually needs the evaluatedness check -- most installs need no
+        // heap read at all.
+        if !evaluated_checks.is_empty() {
+            let heap = self.observation_heap()?;
+            for (pointer, slot) in evaluated_checks {
+                if !heap.resolves_to_whnf_value(pointer)? {
                     return Err(ExecutionError::ImportShape {
                         identity: Box::new(slot.identity.clone()),
                         expected: ImportShapeFact::Evaluated(true),
@@ -457,9 +458,7 @@ impl<'code> PreparedMachine<'code> {
                     });
                 }
             }
-            resolved_imports.push((slot.slot, handle.raw));
         }
-        drop(observation);
 
         let statics = Arc::new(compiled.statics.instantiate()?);
         for (&id, &slot) in &compiled.top_slots {
@@ -3330,6 +3329,96 @@ mod tests {
         assert!(machine.release(*f));
         assert!(machine.release(*unforced));
         assert!(machine.release(*outer_again));
+        assert_eq!(machine.handle_count(), 0);
+    }
+
+    /// A for the G0 scalar-return test: a zero-argument FUNCTION (not a
+    /// thunk) top returning the raw `Int(64)` 7, retained as a value so B
+    /// can apply it as a dynamic callee.
+    fn scalar_returning_function_program(base: TopSlotBase) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::Int {
+            bits: 64,
+            bytes: 7_i64.to_be_bytes().to_vec(),
+        })]);
+        let prepared = testing::prepare(wire).expect("scalar function fixture");
+        let linked = link_program(prepared, &MachineImports::default())
+            .expect("scalar function fixture links");
+        CompiledProgram::compile(&linked, base).expect("scalar function fixture compiles")
+    }
+
+    /// B for the G0 scalar-return test: entry `(LiftedRef) -> Int(64)`
+    /// applying its argument as `() -> Int(64)`. B declares NO function of
+    /// the demanded shape, so before G0 admission refused the whole program
+    /// (`admission_admits_a_dynamic_callee_without_a_locally_shaped_function`
+    /// pins the admission half; this fixture proves the runtime half).
+    fn scalar_dynamic_caller_program(base: TopSlotBase) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0] = Signature {
+            arguments: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+        };
+        wire.signatures.push(Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+        });
+        wire.expressions.nodes[0] = ExprFrame::Call {
+            callee: Atom::Ref(ValueRef::Local(ValueId(50))),
+            signature: SignatureId(1),
+            arguments: vec![],
+        };
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Function {
+            signature: SignatureId(0),
+            parameters: vec![ValueId(50)],
+            captures: vec![],
+            body: 0,
+        };
+        let prepared = testing::prepare(wire).expect("scalar dynamic caller fixture");
+        let linked = link_program(prepared, &MachineImports::default())
+            .expect("scalar dynamic caller fixture links");
+        CompiledProgram::compile(&linked, base).expect("scalar dynamic caller fixture compiles")
+    }
+
+    /// G0: a dynamic callee whose demanded shape matches NO local function
+    /// is admitted and served through the machine-wide resolver -- the
+    /// scalar-returning shape stage F recorded as an unexplained
+    /// `Unsupported`, now explained (closed-world admission) and closed.
+    #[test]
+    fn g0_dynamic_scalar_returning_call_resolves_a_foreign_function() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            scalar_returning_function_program(TopSlotBase::ZERO),
+            PreparedMachineOptions {
+                nursery_bytes: 4096,
+                top_slots: 16,
+            },
+        )
+        .expect("A installs");
+        let function = machine
+            .retain_top(program_a, ValueId(0))
+            .expect("A's function top is retained as a value");
+        let base_b = machine.next_top_slot_base();
+        let program_b = machine
+            .install_program(scalar_dynamic_caller_program(base_b), ImportBindings::new())
+            .expect("B installs: its dynamic call is admitted without a locally shaped function");
+        let call = PreparedCallOptions {
+            observation_budget: 0,
+            collect_before_observation: false,
+        };
+        let called = machine
+            .run_entry_retained(
+                program_b,
+                ValueId(0),
+                &[PreparedInput::Managed(function)],
+                call,
+                RealmId::ROOT,
+            )
+            .expect("B applies A's function through the resolver and gets its scalar back");
+        assert_eq!(called.values.as_slice(), &[PreparedResult::Scalar(7)]);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+        assert!(machine.release(function));
         assert_eq!(machine.handle_count(), 0);
     }
 

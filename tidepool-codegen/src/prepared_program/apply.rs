@@ -524,7 +524,13 @@ pub(super) fn emit_dispatchers(
             next = following;
         }
         builder.switch_to_block(next);
-        builder.seal_block(next);
+        // A dispatcher with NO local candidate at all (every callee of this
+        // shape is foreign; legal since G0 admits dynamic and import callees
+        // without a locally shaped function) never left `entered`, which is
+        // already sealed.
+        if next != entered {
+            builder.seal_block(next);
+        }
         // No local function/PAP descriptor matched. Fall back to the
         // machine-wide resolution table before giving up: the callee may be
         // a foreign (cross-program) function or PAP whose header this

@@ -1,8 +1,8 @@
 use super::Unsupported;
 use std::collections::BTreeMap;
 use tidepool_repr::execution_schema::{
-    Atom, ExprFrame, GlobalId, Group, HeapBinding, HeapRhs, LinkedProgram, OperationDecl,
-    PreparedProgram, ResultContract, RuntimeRep, Signature, SignatureId, ValueId, ValueRef,
+    ExprFrame, GlobalId, Group, HeapBinding, HeapRhs, LinkedProgram, OperationDecl,
+    PreparedProgram, ResultContract, RuntimeRep, Signature, ValueId,
 };
 
 /// Whether one validated operation declaration has an exact native lowering.
@@ -135,7 +135,18 @@ pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
     }
 
     let owners = expression_owners(program);
-    let mut pap_fallback_cache: BTreeMap<SignatureId, bool> = BTreeMap::new();
+    // Call admission needs the native ABI only to ask whether a demanded
+    // signature lowers at all (`Callee::admits`); the profile is a function
+    // of the target descriptor alone, so it can be built here, before the
+    // plan exists, exactly as `CompiledProgram::compile_with` builds it.
+    let target = &program.envelope().target;
+    let profile = crate::entry_abi::NativeAbiProfile::new(target.clone(), 0)
+        .map_err(|_| Unsupported::Target(target.clone()))?;
+    let known = |id: ValueId| -> Option<&Signature> {
+        functions
+            .get(&id)
+            .and_then(|actual| program.signatures().get(actual.0 as usize))
+    };
     for (node, frame) in program.expressions().nodes.iter().enumerate() {
         let rejected = match frame {
             ExprFrame::Operation { operation, .. } => {
@@ -163,48 +174,21 @@ pub fn admit_prepared(program: &PreparedProgram) -> Result<(), Unsupported> {
                     None => true,
                 }
             }
+            // One classification, shared with emission (`plan::callee`):
+            // a call is refuted here only when its callee's KNOWN signature
+            // cannot be applied at the demanded shape, or when the demand
+            // itself has no native lowering. A dynamic or import callee is
+            // resolved by the machine at run time (X2), never against this
+            // program's own callable table.
             ExprFrame::Call {
                 callee, signature, ..
-            } => {
-                match callee {
-                    Atom::Ref(ValueRef::Local(id)) => {
-                        match program.signatures().get(signature.0 as usize) {
-                            None => true,
-                            Some(demand) => {
-                                if let Some(entry) = functions
-                                    .get(id)
-                                    .and_then(|actual| program.signatures().get(actual.0 as usize))
-                                {
-                                    super::apply::classify(entry, 0, demand).is_none()
-                                } else {
-                                    // Case/let values may be PAPs. Their actual
-                                    // descriptor remains a generated dispatch
-                                    // check, but admission can prove that at least
-                                    // one owned callable/pending arity has this ABI.
-                                    // `functions` is fixed once admission begins,
-                                    // so this predicate is stable per demanded
-                                    // signature and worth caching across nodes.
-                                    !*pap_fallback_cache.entry(*signature).or_insert_with(|| {
-                                        functions.values().any(|actual| {
-                                            program.signatures().get(actual.0 as usize).is_some_and(
-                                                |entry| {
-                                                    (0..entry.arguments.len()).any(|pending| {
-                                                        super::apply::classify(
-                                                            entry, pending, demand,
-                                                        )
-                                                        .is_some()
-                                                    })
-                                                },
-                                            )
-                                        })
-                                    })
-                                }
-                            }
-                        }
-                    }
-                    _ => true,
-                }
-            }
+            } => match (
+                super::plan::callee(program, &known, callee),
+                program.signatures().get(signature.0 as usize),
+            ) {
+                (Some(callee), Some(demand)) => !callee.admits(&profile, demand),
+                _ => true,
+            },
             _ => false,
         };
         if rejected {
@@ -309,6 +293,18 @@ mod tests {
     }
     fn global_with_rep(name: &str, rep_value: RuntimeRep) -> Vec<u8> {
         array([symbol(name), rep(rep_value), none(), boolean(false), none()])
+    }
+    fn global_with_entry(name: &str, signature: u8) -> Vec<u8> {
+        array([
+            symbol(name),
+            rep(RuntimeRep::LiftedRef),
+            array([uint(1), uint(u64::from(signature))]),
+            boolean(false),
+            none(),
+        ])
+    }
+    fn atom_global(id: u8) -> Vec<u8> {
+        array([uint(0), array([uint(1), uint(u64::from(id))])])
     }
     fn scalar_int(value: u8) -> Vec<u8> {
         array([uint(0), uint(64), bytes(&[value, 0, 0, 0, 0, 0, 0, 0])])
@@ -526,9 +522,18 @@ mod tests {
         );
     }
 
+    /// A call through a parameter is resolved by the machine at run time
+    /// (the callee may be ANY installed program's function), so admission
+    /// cannot refute it from this program's own callable table. This exact
+    /// shape -- entry `(LiftedRef) -> Int(64)` applying its argument as
+    /// `() -> Int(64)`, with no locally shaped function -- was rejected
+    /// before G0 (stage F's unexplained `Unsupported(Expression)`), while
+    /// the identical shape returning `LiftedRef` was admitted only because
+    /// the entry itself classified as a degenerate zero-pending partial
+    /// application of the demand.
     #[test]
-    fn admission_rejects_indirect_calls_and_accepts_partial_calls() {
-        let indirect = wire(
+    fn admission_admits_a_dynamic_callee_without_a_locally_shaped_function() {
+        let dynamic = wire(
             vec![
                 sig(&[RuntimeRep::LiftedRef], &[RuntimeRep::Int(64)]),
                 sig(&[], &[RuntimeRep::Int(64)]),
@@ -539,14 +544,46 @@ mod tests {
             vec![call(atom_local(1), 1, vec![])],
             vec![array([uint(0), top(0, function(0, &[1], 0))])],
         );
-        assert_eq!(
-            admit_program(&linked(indirect)),
-            Err(Unsupported::Expression {
-                binding: ValueId(0),
-                node: 0
-            })
-        );
+        assert_eq!(admit_program(&linked(dynamic)), Ok(()));
+    }
 
+    /// A direct call to an import is admitted against the import's
+    /// link-proven `entry_signature`, exactly as a call to a local function
+    /// is against its declared one; an import with no entry information is
+    /// left to the runtime resolver.
+    #[test]
+    fn admission_judges_a_direct_import_call_by_its_entry_signature() {
+        let matching = wire(
+            vec![sig(&[RuntimeRep::LiftedRef], &[RuntimeRep::LiftedRef])],
+            vec![global_with_entry("imported", 0)],
+            vec![],
+            vec![],
+            vec![call(atom_global(0), 0, vec![atom_local(1)])],
+            vec![array([uint(0), top(0, function(0, &[1], 0))])],
+        );
+        assert_eq!(admit_program(&linked(matching)), Ok(()));
+
+        // A shape disagreement between the call and the import's entry
+        // signature (argument prefix, saturated result) never reaches
+        // admission: `execution_schema::validation`'s `check_callable`
+        // refutes it at parse time for every callable-typed atom, import or
+        // local, so `Callee::admits`' `classify` is the same judgement made
+        // once more on the same proven facts.
+
+        // No entry information at all: the runtime resolver decides.
+        let unknown = wire(
+            vec![sig(&[RuntimeRep::LiftedRef], &[RuntimeRep::LiftedRef])],
+            vec![global("imported")],
+            vec![],
+            vec![],
+            vec![call(atom_global(0), 0, vec![atom_local(1)])],
+            vec![array([uint(0), top(0, function(0, &[1], 0))])],
+        );
+        assert_eq!(admit_program(&linked(unknown)), Ok(()));
+    }
+
+    #[test]
+    fn admission_accepts_partial_calls() {
         let partial = wire(
             vec![
                 sig(&[RuntimeRep::Int(64)], &[RuntimeRep::LiftedRef]),

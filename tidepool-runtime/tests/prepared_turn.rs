@@ -20,12 +20,10 @@
 
 use std::path::{Path, PathBuf};
 
-use tidepool_codegen::prepared_program::{CompileError, Unsupported};
+use tidepool_codegen::binding_table::BoundValue;
 use tidepool_extract_cmd::{resolve_bin, ResolvedExtractBin};
 use tidepool_repr::Literal;
-use tidepool_runtime::session::{
-    PreparedRuntimeError, PreparedTurnError, RealmId, SessionTurns, TurnForm,
-};
+use tidepool_runtime::session::{RealmId, SessionTurns, TurnForm};
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -93,60 +91,37 @@ fn later_turn_imports_an_earlier_turns_binding_by_retained_generation() {
     assert_ne!(producer_value, producer_fn);
 
     // Turn 3 (Expr, wrapped `it = producerFn (length producerValue)`): the
-    // same shape as `ImportConsumer.hs`'s `consumerResult`, which that
-    // module's own doc comment and
-    // `prepared_execution.rs::s6_direct_global_call_is_not_yet_admitted`
-    // document as a KNOWN, documented gap -- admission's whole-program check
-    // (`tidepool-codegen/src/prepared_program/admission.rs`'s
-    // `ExprFrame::Call` arm) has no case for a `Global` callee, so a program
-    // whose reachable closure directly calls an imported function is
-    // rejected at install, not just at compile. Turn 3 calls the
-    // retained-generation import `producerFn` directly, so it is expected to
-    // hit exactly that gap.
-    let turn3 = turns.run(
-        &mut runtime,
-        TurnForm::Expr("producerFn (length producerValue)"),
-        "it",
-    );
+    // same shape as `ImportConsumer.hs`'s `consumerResult`. `producerFn` is
+    // turn 2's binding, installed as a SEPARATE program, so this is a
+    // direct cross-program call to an import (`ValueRef::Global` callee)
+    // resolved through the machine-wide table at run time.
+    let it = turns
+        .run(
+            &mut runtime,
+            TurnForm::Expr("producerFn (length producerValue)"),
+            "it",
+        )
+        .expect("turn 3 applies turn 2's binding directly and installs");
+    assert_ne!(it, producer_fn);
 
-    match turn3 {
-        Ok(it) => {
-            // The admission gap this test's doc comment describes has
-            // closed: verify the value for real instead of just accepting
-            // success silently.
-            let result = runtime
-                .run_entry(None, &[], true, RealmId::ROOT)
-                .expect("turn 3's entry runs");
-            assert_eq!(result.values.len(), 1);
-            let observed = observed_int(&result.values[0]);
-            assert_eq!(
-                observed, 6,
-                "producerFn (length producerValue) == 6, per ImportConsumerOracle.hs"
-            );
-            let _ = it;
-        }
-        Err(PreparedTurnError::Runtime(PreparedRuntimeError::Compile(
-            CompileError::Unsupported(Unsupported::Expression { .. }),
-        ))) => {
-            // EXPECTED, DOCUMENTED FINDING: this is the exact shape
-            // `prepared_execution.rs::s6_direct_global_call_is_not_yet_admitted`
-            // pins for `ImportConsumer.hs`'s `consumerResult` (`producerFn
-            // (length producerValue)` -- the identical source shape).
-            // Admission's whole-program check
-            // (`tidepool-codegen/src/prepared_program/admission.rs`'s
-            // `ExprFrame::Call` arm) has no case for a `Global` callee, so a
-            // program whose reachable closure directly calls an imported
-            // function is rejected at compile-for-install, not merely at
-            // link time. Turn 3 hits this because `producerFn` (turn 2's
-            // binding) is itself installed as a SEPARATE program from turn
-            // 3's, so calling it is necessarily a cross-program `Global`
-            // call under this mechanism -- there is no local recompilation
-            // path that would avoid it while still proving retained-
-            // generation import of a CALLABLE binding.
-        }
-        Err(other) => panic!(
-            "turn 3 failed for a DIFFERENT reason than the documented Global-callee admission \
-             gap -- this is a genuine new finding, not the expected one: {other:#?}"
-        ),
-    }
+    let BoundValue::Prepared {
+        origin: Some((program, entry)),
+        ..
+    } = runtime
+        .bindings()
+        .get(it)
+        .expect("`it` is a live binding")
+        .value
+    else {
+        panic!("`it` was bound from turn 3's own program entry");
+    };
+    let result = runtime
+        .run_entry_in(program, entry, &[], true, RealmId::ROOT)
+        .expect("turn 3's entry runs");
+    assert_eq!(result.values.len(), 1);
+    assert_eq!(
+        observed_int(&result.values[0]),
+        6,
+        "producerFn (length producerValue) == 6, per ImportConsumerOracle.hs"
+    );
 }

@@ -57,6 +57,87 @@ pub(crate) struct ImportSlot {
     pub required_evaluated: bool,
 }
 
+/// What a `Call` site can know about its callee at compile time. Computed
+/// ONCE per call site ([`callee`]) and consumed by both admission
+/// ([`super::admission`]) and emission (`emit::emit_exact_call`), so the
+/// two can never disagree about which calls this program accepts. Every
+/// call is lowered through the demanded signature's dispatcher; the
+/// classification only decides what can be refuted statically.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Callee<'a> {
+    /// A function or thunk this program itself declares: its signature is
+    /// authoritative, so an application `classify` cannot serve is refuted
+    /// at admission.
+    Known { signature: &'a Signature },
+    /// An import. `entry` is the declared `GlobalDecl::entry_signature`,
+    /// already proven equal to the exporter's real signature by
+    /// `link_program`; `None` when the projection had no entry information
+    /// for it, which leaves the decision to the runtime resolver.
+    Import { entry: Option<&'a Signature> },
+    /// A parameter, case binder or let-bound value whose descriptor is only
+    /// known at run time. Under cross-program dispatch it may be ANY
+    /// installed program's callable, so nothing about this program's own
+    /// callables can refute the call: only an unlowerable demand can.
+    Dynamic,
+}
+
+impl<'a> Callee<'a> {
+    /// Whether a call of `demand` on this callee is admitted. `Known` and a
+    /// signature-carrying `Import` are refuted exactly when
+    /// [`super::apply::classify`] cannot split the application; `Dynamic`
+    /// and an entry-less `Import` are admitted whenever `demand` itself has
+    /// a native lowering (the dispatcher for it exists), because the machine
+    /// resolves the actual callee at run time and reports a miss as the
+    /// typed, reusable `UnresolvedCallee`. Rejecting such a call for lack of
+    /// a LOCALLY shaped function was the closed-world defect the direct
+    /// import-call gap and T2's coincidental admission both came from.
+    pub(super) fn admits(
+        &self,
+        profile: &crate::entry_abi::NativeAbiProfile,
+        demand: &Signature,
+    ) -> bool {
+        match self {
+            Callee::Known { signature }
+            | Callee::Import {
+                entry: Some(signature),
+            } => super::apply::classify(signature, 0, demand).is_some(),
+            Callee::Import { entry: None } | Callee::Dynamic => {
+                crate::entry_abi::EntryAbi::lower_internal(
+                    profile,
+                    demand,
+                    crate::entry_abi::EnvironmentMode::Captured,
+                )
+                .is_ok()
+            }
+        }
+    }
+}
+
+/// Classify a call site's callee atom. `known` answers the signature of a
+/// function or thunk THIS program declares (admission and the plan build
+/// that map differently, so it is passed in). `None` for a non-reference
+/// atom (a literal, `Void`, `Rubbish`), which can never be applied.
+pub(super) fn callee<'a>(
+    program: &'a PreparedProgram,
+    known: &dyn Fn(ValueId) -> Option<&'a Signature>,
+    atom: &Atom,
+) -> Option<Callee<'a>> {
+    match atom {
+        Atom::Ref(ValueRef::Local(id)) => Some(match known(*id) {
+            Some(signature) => Callee::Known { signature },
+            None => Callee::Dynamic,
+        }),
+        Atom::Ref(ValueRef::Global(id)) => {
+            let declaration = program.globals().get(id.0 as usize)?;
+            let entry = declaration
+                .entry_signature
+                .and_then(|id| program.signatures().get(id.0 as usize));
+            Some(Callee::Import { entry })
+        }
+        Atom::Scalar(_) | Atom::Void | Atom::Rubbish(_) => None,
+    }
+}
+
 pub(super) struct ProgramPlan<'a> {
     pub program: &'a PreparedProgram,
     pub functions: BTreeMap<ValueId, FunctionPlan<'a>>,
@@ -378,6 +459,22 @@ impl<'a> ProgramPlan<'a> {
             heap_top_specs,
             pap_layouts,
         })
+    }
+}
+
+impl<'a> ProgramPlan<'a> {
+    /// [`callee`] against this plan's own function/thunk tables.
+    pub(super) fn callee(&self, atom: &Atom) -> Option<Callee<'a>> {
+        callee(
+            self.program,
+            &|id| {
+                self.functions
+                    .get(&id)
+                    .map(|function| function.signature)
+                    .or_else(|| self.thunks.get(&id).map(|thunk| thunk.signature))
+            },
+            atom,
+        )
     }
 }
 

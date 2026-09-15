@@ -1451,15 +1451,15 @@ fn emit_exact_call(
     owner: ValueId,
     node: usize,
 ) -> Result<Option<Vec<Value>>, CompileError> {
-    // A foreign (imported) callee is lowered exactly like a local one:
-    // `atom_value` already resolves a `ValueRef::Global` through the
-    // import's top-table slot, and the dispatcher itself falls back to the
-    // machine-wide resolution table when the callee's descriptor is not
-    // one of this program's own. Only a non-reference atom (a literal,
-    // `Void`, or `Rubbish`) can never be a callable, so that is the only
-    // shape this call site rejects.
-    match atom_ref(callee, owner, node)? {
-        ValueRef::Local(_) | ValueRef::Global(_) => {}
+    // Every callee shape admission accepted (`plan::callee`, the one
+    // classification both stages consume) lowers the same way: the callee
+    // atom is loaded as a lifted reference (`atom_value` resolves a
+    // `ValueRef::Global` through the import's top-table slot) and applied
+    // through the demanded signature's dispatcher, whose terminal fallback
+    // resolves a foreign callee machine-wide. Only a non-reference atom is
+    // rejected here, and admission already refused it.
+    if plan.callee(callee).is_none() {
+        return Err(unsupported(owner, node));
     }
     let environment = atom_value(
         builder,
@@ -1505,13 +1505,6 @@ fn emit_exact_call(
         &call_arguments,
         &signature.results,
     )
-}
-
-fn atom_ref(atom: &Atom, owner: ValueId, node: usize) -> Result<&ValueRef, CompileError> {
-    match atom {
-        Atom::Ref(reference) => Ok(reference),
-        _ => Err(unsupported(owner, node)),
-    }
 }
 
 #[expect(

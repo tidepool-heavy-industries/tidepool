@@ -111,10 +111,16 @@ path for the Linux x86-64 little-endian 64-bit SysV profile. Its
 whole-program admission pass admits a global per declaration when its
 representation is `LiftedRef` or `UnliftedRef` and rejects any other global
 representation with the declaring `GlobalId`; it rejects unsupported thunk
-signatures, unsupported operations, and application signatures/forms without
-an admitted exact/partial/excess classification. Admission
-walks nested expression ownership iteratively and reports the owning binding
-and arena node for unsupported expressions. `run_entry` also rejects managed
+signatures, unsupported operations, and applications it can refute. A call
+site is classified once (`plan.rs::Callee`: a locally declared function or
+thunk, an import with its link-proven entry signature, or a dynamic
+value), and admission and emission consume the same classification. A
+known callee is refuted when no exact/partial/excess split serves the
+demanded signature; a dynamic callee, or an import without entry
+information, is admitted whenever the demanded signature itself lowers,
+because the machine resolves the actual callee at run time. Admission walks
+nested expression ownership iteratively and reports the owning binding and
+arena node for unsupported expressions. `run_entry` also rejects managed
 host arguments.
 
 An admitted global is an executable import: `plan.rs` assigns it a
@@ -150,23 +156,17 @@ host fn `prepared_resolve_call(vmctx, header, fingerprint)`, and
 header)` (`prepared_program.rs`). A fingerprint
 (`resolve::signature_fingerprint`, a fixed-seed FNV-1a hash over argument
 representations and the result contract) guards the ABI at the call site.
-Exact application of a foreign function held in a LOCAL value (a managed
-argument, a case-bound name) and forcing a foreign thunk both work this
-way. Foreign PAP, partial, and excess application through this path are
-not yet served: they fail as `RuntimeError::UnresolvedCallee`,
-disposition `Reusable` -- the decision precedes any call, so the heap is
-untouched. A header no installed program can enter is `BadThunkState`,
-machine `Unavailable`.
-
-This resolution never runs for a call whose callee is the import
-reference ITSELF (`ValueRef::Global`), rather than a local value that
-happens to hold one: `admission.rs`'s `ExprFrame::Call` arm has no case
-for a `Global` callee, so such a call is rejected at admission, before
-compilation ever reaches emission -- and since admission is
-whole-program, one such call anywhere in a program's reachable closure
-blocks the whole artifact from installing. Haskell's ordinary function
-application of an imported name (`producerFn x`) takes this shape.
-Extending admission to recognise a `Global` callee is not yet done.
+Exact application of a foreign function -- whether the callee is the
+import reference itself (`ValueRef::Global`, Haskell's ordinary
+`producerFn x`) or a local value that happens to hold one (a managed
+argument, a case-bound name) -- and forcing a foreign thunk all work this
+way. A dispatcher whose demanded shape matches none of the compiling
+program's own callables is legal and consists of the fallback alone.
+Foreign PAP, partial, and excess application through this path are not
+yet served: they fail as `RuntimeError::UnresolvedCallee`, disposition
+`Reusable` -- the decision precedes any call, so the heap is untouched. A
+header no installed program can enter is `BadThunkState`, machine
+`Unavailable`.
 
 A top-level constructor whose field is an import is a heap top
 (`image.rs::heap_top_partition`), initialised from the published import

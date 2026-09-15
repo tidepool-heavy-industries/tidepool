@@ -180,34 +180,15 @@ identity on the shared heap. Generated code can load, hold, pass, return,
 force, case on, and hold an imported value in a top-level constructor.
 Calling one is narrower than that. What remains open:
 
-- **admission has no case for a `Global` callee at all.**
-  `tidepool-codegen/src/prepared_program/admission.rs`'s `ExprFrame::Call`
-  arm matches `Atom::Ref(ValueRef::Local(id))` only; every other callee
-  shape -- a `Global` reference (an import called directly by name, e.g.
-  Haskell's `producerFn (length producerValue)`) included -- falls through
-  to the wildcard rejection. Admission is whole-program
-  (`CompileError::Unsupported` on any one reachable node rejects the whole
-  artifact), so ANY reachable direct call to an import blocks the entire
-  program from installing, not just that call. X2's runtime dispatch
-  (`prepared_resolve_call`) never even runs for this shape: the call is
-  rejected before compilation reaches emission. Confirmed against a real
-  GHC-compiled fixture, not only a synthetic repro
-  (`tidepool-runtime/tests/prepared_execution.rs`'s
-  `s6_direct_global_call_is_not_yet_admitted`; `import-consumer-result.cbor`
-  is kept as its own artifact for exactly this reason, so the gap does not
-  also take down the working `consumerValueAt`/`consumerEntries` fixture).
-  Not fixed this wave: extending admission's `Call` arm to recognise a
-  `Global` callee (deciding admissibility against the declared
-  `GlobalDecl`'s `entry_signature`) is codegen-invariant analysis work for
-  a Fable-direct pass.
-- calling an import held in a LOCAL value (a managed argument, a
-  case-bound name) IS admitted and does resolve through X2's machine-wide
-  tables for an exact application
+- exact application of an import -- called directly by name
+  (`s6_direct_global_call_runs_against_the_oracle`, G0) or through a
+  local value holding it
   (`t2_closure_crosses_programs_and_collects_inside_the_producing_program`,
-  `x2_b_forces_a_thunk_import_through_the_owning_programs_enter`); a
-  foreign PAP, or partial/excess application of a foreign callee, is not
-  yet served there either and fails as a typed `RuntimeError::UnresolvedCallee`,
-  disposition `Reusable` (`c2992e66d`, `5102c0b08`, phase 2 pending);
+  `x2_b_forces_a_thunk_import_through_the_owning_programs_enter`) --
+  resolves through X2's machine-wide tables; a foreign PAP, or
+  partial/excess application of a foreign callee, is not yet served and
+  fails as a typed `RuntimeError::UnresolvedCallee`, disposition
+  `Reusable` (`c2992e66d`, `5102c0b08`, G1 pending);
 - S5's contract for unfoldings of retained symbols: closed. A GHC Core
   plugin (`Tidepool.RetainedUnfoldings`, `42b2621b9`) withholds a retained
   symbol's unfolding from the simplifier before `load'` runs, so a
