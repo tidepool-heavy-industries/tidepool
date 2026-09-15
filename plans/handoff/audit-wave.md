@@ -289,3 +289,33 @@ and error classes match GHC.
 5. Performance — `external_address_span` (`machine_state.rs:1565`) scans every
    ledger record per `Addr#` operation.
 
+## Extractor daemon and request protocol robustness
+Codecs match on both sides (retired tags 9, 10, 14 retired on both);
+parent-death set on every extractor spawn except `ghc --print-libdir`
+(`frontend.rs:172`); worker crashes classify as `ReportWorkerFailure`; no
+accepted request is replayed.
+1. Medium-High — clients queued in the listen backlog during a rotation or
+   stamp/worker exit (`daemon.rs:461-470`, `368`, `412`, `443`) get a
+   connection reset that `execute` (`daemon.rs:197-204`) classifies as
+   indeterminate `Io`, so `permits_rebind()` is false although no acceptance
+   marker was sent. Treat ECONNRESET/EPIPE before the marker as `NotAccepted`;
+   unlink the socket first, then reject still-queued connections before
+   closing. Test: `--rotate-after 1` with four concurrent clients, each succeeds
+   or permits rebind.
+2. Medium — any worker failure ends a `--persistent` daemon
+   (`daemon.rs:435-444`; stack/heap overflow escapes `trySynchronous`,
+   `Main.hs:438`; OOM kill). In persistent mode report the request
+   indeterminate, respawn the worker, keep serving.
+3. Medium-Low — `Vec::with_capacity` from an untrusted u32 count
+   (`request.rs:184,192`, reached via `normalize_worker_argv`) can abort the
+   daemon; cap by bytes remaining (test: `u32::MAX` gives `Truncated`).
+4. Medium-Low — startup unconditionally unlinks the socket path
+   (`daemon.rs:322`) even if a live daemon holds it, and either exit unlinks
+   again; preflight first and unlink only the socket this daemon bound
+   (device+inode).
+Minor: `Worker::request`/`shutdown` have no deadline and the kill fallback
+never runs (`daemon.rs:650`, `655`); response frames allocate an arbitrary u32
+length (`daemon.rs:274`); `bind` preflight can wait the full 5-minute timeout
+then compile direct, spawning duplicate GHC workers (`endpoint.rs:150`);
+non-UTF-8 paths are silently altered by `to_string_lossy` (`request.rs:680`).
+
