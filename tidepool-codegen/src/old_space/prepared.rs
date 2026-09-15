@@ -97,7 +97,7 @@ impl super::OldSpace {
     ) -> Result<(), RuntimeError> {
         if machine.prepared_call_status() != crate::prepared_control::CallStatus::Success {
             return Err(machine
-                .last_failure()
+                .current_failure()
                 .map_or(RuntimeError::BadPointer, |failure| failure.cause));
         }
         let (active_start, active_size) =

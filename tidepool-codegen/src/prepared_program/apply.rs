@@ -262,6 +262,7 @@ pub(super) fn emit_dispatchers(
     prepared_enter: FuncId,
     prepared_bad_state: FuncId,
     prepared_resolve_call: FuncId,
+    prepared_recorded_failure: FuncId,
     pipeline: &mut CodegenPipeline,
 ) -> Result<(), super::CompileError> {
     for (signature, output) in dispatchers.iter() {
@@ -561,9 +562,18 @@ pub(super) fn emit_dispatchers(
         let returned = builder.inst_results(call).to_vec();
         builder.ins().return_(&returned);
 
+        // The resolver already recorded why it missed (`UnresolvedCallee`
+        // for a real callable it cannot serve, `BadThunkState` for a word
+        // that is no callable at all); return that status, do not record a
+        // second cause.
         builder.switch_to_block(still_bad_block);
         builder.seal_block(still_bad_block);
-        emit_bad_state(&mut builder, vmctx, prepared_bad_state, pipeline);
+        let recorded_ref = pipeline
+            .module
+            .declare_func_in_func(prepared_recorded_failure, builder.func);
+        let recorded = builder.ins().call(recorded_ref, &[vmctx]);
+        let status = builder.inst_results(recorded)[0];
+        crate::alloc::emit_prepared_failure_return(&mut builder, status);
         builder.seal_all_blocks();
         builder.finalize();
         pipeline.define_function(output, &mut context)?;

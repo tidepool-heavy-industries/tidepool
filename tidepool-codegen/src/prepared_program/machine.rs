@@ -724,6 +724,10 @@ impl<'code> PreparedMachine<'code> {
         self.machine.disposition()
     }
 
+    /// The machine latch: the first integrity failure, if any. A reusable
+    /// failure (cancellation, a language error, an unresolved cross-program
+    /// callee) is reported by the call that hit it and never latches here,
+    /// so this is `None` on a reusable machine whatever its calls did.
     #[must_use]
     pub fn failure(&self) -> Option<MachineFailure> {
         self.machine.last_failure()
@@ -1185,7 +1189,7 @@ impl<'code> PreparedMachine<'code> {
             .programs
             .get(id.0 as usize)
             .ok_or(ExecutionError::UnknownProgram(id))?;
-        program.run_entry_retained(
+        let result = program.run_entry_retained(
             entry,
             arguments,
             options,
@@ -1196,7 +1200,10 @@ impl<'code> PreparedMachine<'code> {
             &mut self.old_space,
             &self.descriptors,
             &mut self.handles,
-        )
+        );
+        // The call's outcome is in `result`; nothing of it outlives the call.
+        self.machine.end_prepared_call();
+        result
     }
 
     /// Execute one scalar-only entry on the retained machine.
@@ -1233,7 +1240,7 @@ impl<'code> PreparedMachine<'code> {
             .programs
             .get(id.0 as usize)
             .ok_or(ExecutionError::UnknownProgram(id))?;
-        program.run_entry(
+        let result = program.run_entry(
             entry,
             arguments,
             options,
@@ -1243,7 +1250,9 @@ impl<'code> PreparedMachine<'code> {
             &self.old_space,
             &self.statics,
             &self.descriptor_registry,
-        )
+        );
+        self.machine.end_prepared_call();
+        result
     }
 }
 
@@ -3198,6 +3207,135 @@ mod tests {
         assert!(machine.release(*f));
         assert!(machine.release(*unforced));
         assert!(machine.release(*result));
+        assert_eq!(machine.handle_count(), 0);
+    }
+
+    /// Program B' for the X2 signature-mismatch test: like
+    /// [`closure_caller_program`] but applies its first argument TO its
+    /// second through a one-argument call site. A's `f` is a zero-argument
+    /// function, so the call-site fingerprint (argument reps and result
+    /// contract) can never match A's exported one.
+    fn closure_miscaller_program(base: TopSlotBase) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0] = Signature {
+            arguments: vec![RuntimeRep::LiftedRef, RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        };
+        wire.signatures.push(Signature {
+            arguments: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        });
+        wire.expressions.nodes[0] = ExprFrame::Call {
+            callee: Atom::Ref(ValueRef::Local(ValueId(50))),
+            signature: SignatureId(1),
+            arguments: vec![Atom::Ref(ValueRef::Local(ValueId(51)))],
+        };
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Function {
+            signature: SignatureId(0),
+            parameters: vec![ValueId(50), ValueId(51)],
+            captures: vec![],
+            body: 0,
+        };
+        let prepared = testing::prepare(wire).expect("closure_miscaller_program fixture");
+        let linked = link_program(prepared, &MachineImports::default())
+            .expect("closure_miscaller_program fixture links");
+        CompiledProgram::compile(&linked, base).expect("closure_miscaller_program fixture compiles")
+    }
+
+    /// X2: a foreign callee the machine knows but cannot serve at this call
+    /// site (here: an arity/signature mismatch; a foreign PAP takes the same
+    /// path until phase 2) is an ordinary, reusable `UnresolvedCallee`. The
+    /// decision is made before any code of A runs and the heap is untouched,
+    /// so the machine latch stays clear and the next entry succeeds. Pins the
+    /// two halves of that contract that were previously wrong: the miss block
+    /// must not record a second (`BadThunkState`) cause, and a reusable cause
+    /// must never latch.
+    #[test]
+    fn x2_foreign_callee_with_mismatching_signature_is_a_typed_reusable_failure() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            closure_producer_program(TopSlotBase::ZERO),
+            PreparedMachineOptions {
+                nursery_bytes: 4096,
+                top_slots: 16,
+            },
+        )
+        .expect("A installs");
+        let base_b = machine.next_top_slot_base();
+        let program_b = machine
+            .install_program(closure_miscaller_program(base_b), ImportBindings::new())
+            .expect("B' installs alongside A");
+        let call = PreparedCallOptions {
+            observation_budget: 0,
+            collect_before_observation: true,
+        };
+        let produced = machine
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("A produces its Envelope(f, unforced)");
+        let [PreparedResult::Managed(outer)] = produced.values.as_slice() else {
+            panic!("A's producer must return one managed Envelope");
+        };
+        let PreparedOuter::Constructor { fields, .. } = machine
+            .inspect_outer(*outer, RealmId::ROOT)
+            .expect("A's outer inspects");
+        let [PreparedResult::Managed(f), PreparedResult::Managed(unforced)] = fields.as_slice()
+        else {
+            panic!("Envelope's fields must both be managed handles");
+        };
+
+        let error = machine
+            .run_entry_retained(
+                program_b,
+                ValueId(0),
+                &[
+                    PreparedInput::Managed(*f),
+                    PreparedInput::Managed(*unforced),
+                ],
+                call,
+                RealmId::ROOT,
+            )
+            .expect_err(
+                "a one-argument application of a zero-argument foreign closure cannot resolve",
+            );
+        let ExecutionError::Runtime(failure) = error else {
+            panic!("the failure is the machine-reported runtime cause, got {error:?}");
+        };
+        assert_eq!(failure.cause, RuntimeError::UnresolvedCallee);
+        assert_eq!(failure.disposition, MachineDisposition::Reusable);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+        assert_eq!(
+            machine.failure(),
+            None,
+            "a reusable cause is the call's outcome, never the machine latch"
+        );
+
+        // The very next observation and entry see a clean machine.
+        let PreparedOuter::Constructor {
+            identity,
+            fields: fields_again,
+        } = machine
+            .inspect_outer(*outer, RealmId::ROOT)
+            .expect("observation after a reusable failure reports the value, not a stale cause");
+        assert_eq!(identity, tidepool_repr::DataConId(981));
+        for field in fields_again {
+            let PreparedResult::Managed(handle) = field else {
+                panic!("Envelope's fields are managed");
+            };
+            assert!(machine.release(handle));
+        }
+        let again = machine
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("A's entry runs again on the still-reusable machine");
+        let [PreparedResult::Managed(outer_again)] = again.values.as_slice() else {
+            panic!("A's producer must return one managed Envelope");
+        };
+
+        assert!(machine.release(*outer));
+        assert!(machine.release(*f));
+        assert!(machine.release(*unforced));
+        assert!(machine.release(*outer_again));
         assert_eq!(machine.handle_count(), 0);
     }
 

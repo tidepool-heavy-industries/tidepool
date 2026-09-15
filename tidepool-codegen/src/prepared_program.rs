@@ -217,7 +217,12 @@ unsafe extern "C" fn prepared_resolve_call(
     match machine.resolve_prepared_call(masked) {
         Some(entry) if entry.fingerprint == fingerprint => entry.code as u64,
         _ => {
-            if machine.prepared_descriptor_known(masked) {
+            // A header some installed program can enter names a real
+            // callable (a function with another arity/signature, or a PAP):
+            // the application is unservable here, the heap is untouched,
+            // the machine stays reusable. Any other header is not a
+            // callable object at all.
+            if machine.owns_prepared_entry(masked) {
                 machine.set_first_cause(crate::host_fns::RuntimeError::UnresolvedCallee);
             } else {
                 machine.set_first_cause(crate::host_fns::RuntimeError::BadThunkState(0));
@@ -229,9 +234,10 @@ unsafe extern "C" fn prepared_resolve_call(
 
 /// Resolve the owning program's `prepared_enter` for a foreign
 /// thunk/function/PAP header, so `entry.rs`'s per-program enter chain
-/// can fall back to it (a later wave wires the call site). Returns 0
-/// on any miss, with the same cause classification as
-/// `prepared_resolve_call`.
+/// can fall back to it. Returns 0 on a miss: the enter map is the union
+/// of every installed program's enterable headers, so a miss means no
+/// program owns the object -- an integrity failure, not an unresolved
+/// callee.
 unsafe extern "C" fn prepared_resolve_enter(
     vmctx: *mut crate::context::VMContext,
     header: u64,
@@ -241,14 +247,21 @@ unsafe extern "C" fn prepared_resolve_enter(
     match machine.resolve_prepared_enter(masked) {
         Some(code) => code as u64,
         None => {
-            if machine.prepared_descriptor_known(masked) {
-                machine.set_first_cause(crate::host_fns::RuntimeError::UnresolvedCallee);
-            } else {
-                machine.set_first_cause(crate::host_fns::RuntimeError::BadThunkState(0));
-            }
+            machine.set_first_cause(crate::host_fns::RuntimeError::BadThunkState(0));
             0
         }
     }
+}
+
+/// Status-only failure return for a site whose cause was already recorded
+/// by the host fn that decided it (`prepared_resolve_call`/`_enter`).
+/// Recording a second cause there would be wrong twice over: the first
+/// cause is what the caller must see, and a `BadThunkState` after an
+/// `UnresolvedCallee` would latch the machine Unavailable for a failure
+/// that touched nothing.
+unsafe extern "C" fn prepared_recorded_failure(vmctx: *mut crate::context::VMContext) -> i32 {
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    machine.prepared_call_status() as i32
 }
 
 /// Pins generated entries, descriptors and immutable images together. Each run
@@ -362,6 +375,10 @@ impl CompiledProgram {
                 (
                     "prepared_resolve_enter",
                     prepared_resolve_enter as *const u8,
+                ),
+                (
+                    "prepared_recorded_failure",
+                    prepared_recorded_failure as *const u8,
                 ),
                 ("prepared_raise", no_success::raise as *const u8),
                 ("prepared_keep_alive", lifetime::keep_alive as *const u8),
@@ -611,6 +628,14 @@ impl CompiledProgram {
                 &prepared_resolve_enter_signature,
             )
             .map_err(|error| PipelineError::Declaration(error.to_string()))?;
+        let prepared_recorded_failure = pipeline
+            .module
+            .declare_function(
+                "prepared_recorded_failure",
+                Linkage::Import,
+                &prepared_status_signature,
+            )
+            .map_err(|error| PipelineError::Declaration(error.to_string()))?;
         let mut write_barrier_signature = ir::Signature::new(pipeline.isa.default_call_conv());
         write_barrier_signature
             .params
@@ -695,6 +720,7 @@ impl CompiledProgram {
             prepared_enter,
             prepared_bad_state,
             prepared_resolve_call,
+            prepared_recorded_failure,
             &mut pipeline,
         )?;
         // Every function address has been declared, including recursive peers.
@@ -761,6 +787,7 @@ impl CompiledProgram {
             prepared_bad_state,
             prepared_blackhole,
             prepared_resolve_enter,
+            prepared_recorded_failure,
             write_barrier,
         )?;
         let force_adapter =

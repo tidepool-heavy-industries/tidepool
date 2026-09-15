@@ -558,32 +558,34 @@ impl MachineState {
         }
     }
 
+    /// Two slots, two lifetimes. `runtime_error` is the CALL OUTCOME: the
+    /// first cause recorded during the current entry (language failure,
+    /// cancellation, an unresolved cross-program callee, an integrity
+    /// failure alike), consumed by the call's completion and reset by
+    /// [`Self::begin_prepared_call`]. `last_failure` is the MACHINE LATCH:
+    /// the first `Unavailable` cause ever recorded, never cleared, the
+    /// reason every later entry and observation is refused. A reusable
+    /// cause never reaches the latch, so an observation between two calls
+    /// (`inspect_outer`) cannot read back a stale `Cancelled` or
+    /// `UnresolvedCallee` from an unrelated realm's earlier call.
     fn record_first_cause(&self, cause: RuntimeError, exception: Option<*mut u8>) {
         let disposition = cause.machine_disposition();
         if disposition == MachineDisposition::Unavailable {
             self.disposition.set(MachineDisposition::Unavailable);
+            if let Ok(mut latch) = self.last_failure.try_borrow_mut() {
+                if latch.is_none() {
+                    *latch = Some(MachineFailure {
+                        cause: cause.clone(),
+                        disposition,
+                    });
+                }
+            }
         }
         if let Ok(mut slot) = self.runtime_error.try_borrow_mut() {
             if slot.is_none() {
                 self.prepared_exception
                     .set(exception.unwrap_or(std::ptr::null_mut()));
-                *slot = Some(cause.clone());
-                if let Ok(mut failure) = self.last_failure.try_borrow_mut() {
-                    *failure = Some(MachineFailure {
-                        cause,
-                        disposition: self.disposition.get(),
-                    });
-                }
-            }
-        }
-        // A later integrity observation cannot replace the first cause, but
-        // it still makes reuse unsafe. Keep the retained cause and upgrade
-        // its disposition to match the machine's monotonic decision.
-        if disposition == MachineDisposition::Unavailable {
-            if let Ok(mut failure) = self.last_failure.try_borrow_mut() {
-                if let Some(failure) = failure.as_mut() {
-                    failure.disposition = MachineDisposition::Unavailable;
-                }
+                *slot = Some(cause);
             }
         }
     }
@@ -592,8 +594,26 @@ impl MachineState {
         self.disposition.get()
     }
 
+    /// The machine latch: the first `Unavailable` cause, if any. `None` on a
+    /// reusable machine even while a call outcome is pending.
     pub(crate) fn last_failure(&self) -> Option<MachineFailure> {
         self.last_failure.try_borrow().ok().and_then(|f| f.clone())
+    }
+
+    /// The failure a completing call reports: the machine latch when set,
+    /// otherwise the pending call outcome (reusable by construction).
+    pub(crate) fn current_failure(&self) -> Option<MachineFailure> {
+        if let Some(latched) = self.last_failure() {
+            return Some(latched);
+        }
+        self.runtime_error
+            .try_borrow()
+            .ok()
+            .and_then(|slot| slot.clone())
+            .map(|cause| MachineFailure {
+                disposition: cause.machine_disposition(),
+                cause,
+            })
     }
 
     /// Start a fresh prepared entry on this machine.
@@ -611,9 +631,19 @@ impl MachineState {
         }
         self.prepared_exception.set(std::ptr::null_mut());
         self.runtime_error.borrow_mut().take();
-        self.last_failure.borrow_mut().take();
+        // `last_failure` is the Unavailable latch and is never cleared; a
+        // reusable machine has none to clear.
         self.reset_call_depth();
         Ok(())
+    }
+
+    /// Settle the entry that just returned. Its outcome has been reported by
+    /// the returning call (`current_failure`); consuming it here means no
+    /// later observation, collection or root write between calls can mistake
+    /// that call's reusable outcome for a live fault (`prepared_call_status`
+    /// gates those paths). The Unavailable latch is untouched.
+    pub(crate) fn end_prepared_call(&self) {
+        let _ = self.take_runtime_error();
     }
 
     /// Take the pending cause, if any. Uses `try_borrow_mut` defensively: this
@@ -1139,24 +1169,15 @@ impl MachineState {
         self.prepared_enters.borrow().get(&header).copied()
     }
 
-    /// Whether `header` (a masked object header word) is a descriptor this
-    /// machine's shared descriptor space knows about at all -- used to
-    /// distinguish "a real cross-program object with no resolvable entry yet"
-    /// (typed, `Reusable` failure) from "not a live object header" (integrity
-    /// failure).
-    ///
-    /// Deliberate simplification for this substrate-only card: there is no
-    /// existing read-only accessor onto the live `DescriptorSpace` (it lives
-    /// behind `take_gc_state`/`put_gc_state`, which is awkward and
-    /// reentrant-unsafe to call from here), and adding one safely is
-    /// `host_fns::gc`'s call, not this card's. Unconditionally reporting the
-    /// header as known means every resolution miss classifies as
-    /// `RuntimeError::UnresolvedCallee` (reusable) rather than
-    /// `BadThunkState` (unavailable) -- the safer direction to be wrong in,
-    /// since it never turns a real integrity failure into a silently
-    /// swallowed one. A later wave can tighten this once it owns `gc.rs`.
-    pub(crate) fn prepared_descriptor_known(&self, _header: usize) -> bool {
-        true
+    /// Whether some installed program owns an enter routine for `header` (a
+    /// masked object header word): the object is a real function, PAP or
+    /// thunk of this machine. A call-resolution miss on such a header is an
+    /// ordinary, reusable `UnresolvedCallee` (wrong arity or signature, or a
+    /// PAP, which phase 2 of cross-program application will serve); a miss
+    /// on any other header means the callee word does not name a callable
+    /// object at all, which is an integrity failure.
+    pub(crate) fn owns_prepared_entry(&self, header: usize) -> bool {
+        self.prepared_enters.borrow().contains_key(&header)
     }
 
     /// Join a successful generated-frame walk with every ambient root registry.
@@ -2617,17 +2638,30 @@ mod tests {
     fn first_cause_wins_while_integrity_disposition_is_monotonic() {
         let ms = MachineState::new();
         ms.set_first_cause(RuntimeError::Cancelled);
+        // A reusable cause is this call's outcome only: nothing latches.
+        assert_eq!(
+            ms.current_failure(),
+            Some(MachineFailure {
+                cause: RuntimeError::Cancelled,
+                disposition: MachineDisposition::Reusable,
+            })
+        );
+        assert_eq!(ms.last_failure(), None);
         ms.set_first_cause(RuntimeError::BadPointer);
 
-        assert_eq!(ms.take_runtime_error(), Some(RuntimeError::Cancelled));
+        // The call outcome keeps its first cause; the latch holds the first
+        // INTEGRITY cause, which is what makes the machine unavailable.
         assert_eq!(ms.disposition(), MachineDisposition::Unavailable);
         assert_eq!(
             ms.last_failure(),
             Some(MachineFailure {
-                cause: RuntimeError::Cancelled,
+                cause: RuntimeError::BadPointer,
                 disposition: MachineDisposition::Unavailable,
             })
         );
+        assert_eq!(ms.current_failure(), ms.last_failure());
+        assert_eq!(ms.take_runtime_error(), Some(RuntimeError::Cancelled));
+        assert!(ms.begin_prepared_call().is_err(), "the latch never clears");
     }
 
     #[test]

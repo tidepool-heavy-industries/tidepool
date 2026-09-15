@@ -49,6 +49,7 @@ pub(super) fn emit_prepared_enter(
     bad_state: FuncId,
     blackhole: FuncId,
     prepared_resolve_enter: FuncId,
+    prepared_recorded_failure: FuncId,
     write_barrier: FuncId,
 ) -> Result<(), super::CompileError> {
     use crate::prepared_control::CallStatus;
@@ -309,9 +310,17 @@ pub(super) fn emit_prepared_enter(
         .call_indirect(sig_ref, code, &[vmctx, reference]);
     let foreign_returned = builder.inst_results(foreign_call).to_vec();
     builder.ins().return_(&foreign_returned);
+    // The resolver recorded the cause of its miss; return that status
+    // rather than joining `invalid`, whose `bad_state` call would record
+    // a second one.
     builder.switch_to_block(truly_invalid_block);
     builder.seal_block(truly_invalid_block);
-    builder.ins().jump(invalid, &[]);
+    let recorded_ref = pipeline
+        .module
+        .declare_func_in_func(prepared_recorded_failure, builder.func);
+    let recorded = builder.ins().call(recorded_ref, &[vmctx]);
+    let recorded_status = builder.inst_results(recorded)[0];
+    crate::alloc::emit_prepared_failure_return(&mut builder, recorded_status);
     builder.switch_to_block(invalid);
     builder.seal_block(invalid);
     let failure = builder.ins().call(bad_ref, &[vmctx]);

@@ -1568,21 +1568,33 @@ fn two_realms_share_one_machine_cancel_reset_close_independently_of_each_other()
         "a cancelled call alone must never poison the machine"
     );
 
-    // `MachineState::last_failure` is a machine-wide "first cause" latch,
-    // cleared only at the START of the next entry call
-    // (`begin_prepared_call`, `tidepool-codegen/src/machine_state.rs`) --
-    // NOT by `inspect_outer`, which never begins a call. So the very next
-    // machine call after the cancelled `resumeInt` above must itself be an
-    // entry call, not an observation, or it would spuriously read back the
-    // stale `Cancelled` failure the cancelled call recorded (a real
-    // engine-level latch, not a bug in this test's realm scoping: the latch
-    // is machine-wide, not realm-scoped, and `close_realm`/`reset` do not
-    // touch it). Reset r1 and retry with the very same `k1`/`n1` here,
-    // immediately, before either realm is inspected again: the retry
-    // succeeds (proving `k1` was never consumed by the cancelled call, the
-    // same proof `cancellation_before_commit_leaves_a_parked_k_valid_for_retry`
-    // relies on) and its own `begin_prepared_call` clears the stale latch
-    // for every call that follows, on either realm.
+    // A cancelled call is that call's own outcome, not a machine failure:
+    // an observation on the OTHER realm right after it must see r2's parked
+    // `Eff` value, never a stale `Cancelled` read back from r1's call.
+    // (`MachineState` keeps the reusable outcome and the Unavailable latch
+    // in separate slots; only the latch outlives a call.)
+    let PreparedOuterCodegen::Constructor {
+        identity: id_r2_check,
+        fields: mut fields_r2_check,
+    } = machine
+        .inspect_outer(outer_r2, r2)
+        .expect("r2's parked Eff inspects cleanly right after r1's cancelled call");
+    assert_eq!(id_r2_check, fixture.e_id);
+    assert_eq!(fields_r2_check.len(), 2);
+    let union_r2_check = take_managed_result(&mut fields_r2_check, 0);
+    let k2_check = take_managed_result(&mut fields_r2_check, 1);
+    assert!(machine.release(union_r2_check));
+    assert!(machine.release(k2_check));
+    assert_eq!(
+        machine.failure(),
+        None,
+        "cancellation never reaches the machine latch"
+    );
+
+    // Reset r1 and retry with the very same `k1`/`n1`: the retry succeeds,
+    // proving `k1` was never consumed by the cancelled call (the same proof
+    // `cancellation_before_commit_leaves_a_parked_k_valid_for_retry` relies
+    // on).
     machine.realm_cancel_handle(r1).reset();
     let resumed_r1 = machine
         .run_entry_retained(

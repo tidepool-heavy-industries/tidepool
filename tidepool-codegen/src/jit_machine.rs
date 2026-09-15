@@ -2241,7 +2241,9 @@ impl JitEffectMachine {
         }
     }
 
-    /// The most recently recorded first cause and its typed reuse decision.
+    /// The machine latch: the first integrity failure that made this machine
+    /// unavailable, if any. Reusable failures are reported by the run that
+    /// hit them and never latch here.
     pub fn last_failure(&self) -> Option<MachineFailure> {
         self.machine_state.last_failure()
     }
@@ -3728,12 +3730,15 @@ mod tests {
             .machine_state
             .set_first_cause(crate::host_fns::RuntimeError::BadPointer);
 
+        // The fence reports the integrity cause that made the machine
+        // unavailable; the earlier, reusable cancellation was that call's
+        // own outcome and never latches.
         fn unavailable<T>(result: Result<T, JitError>) {
             assert!(matches!(
                 result,
                 Err(JitError::MachineUnavailable {
                     failure: Some(MachineFailure {
-                        cause: crate::host_fns::RuntimeError::Cancelled,
+                        cause: crate::host_fns::RuntimeError::BadPointer,
                         disposition: MachineDisposition::Unavailable,
                     }),
                 })

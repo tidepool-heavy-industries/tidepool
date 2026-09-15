@@ -353,13 +353,28 @@ pub(super) fn register_result_roots(
     }
 }
 
+/// Report a host-side failure. An integrity cause latches the machine; a
+/// reusable cause is this operation's own outcome and is reported directly
+/// (a cause the running call already recorded takes precedence, as it does
+/// for generated code). Recording a reusable cause here would leave a stale
+/// pending outcome behind an observation or install, which runs outside any
+/// call and so has no `begin`/`end` bracket to settle it.
 pub(super) fn runtime_error(machine: &MachineState, error: RuntimeError) -> ExecutionError {
-    machine.set_first_cause(error);
-    runtime_error_from_machine(machine)
+    if error.machine_disposition() == MachineDisposition::Unavailable {
+        machine.set_first_cause(error);
+        return runtime_error_from_machine(machine);
+    }
+    match machine.current_failure() {
+        Some(failure) => ExecutionError::Runtime(failure),
+        None => runtime_error_without_machine(error),
+    }
 }
 
+/// The failure a completing call reports: the machine latch when set,
+/// otherwise this call's own pending outcome (see
+/// `MachineState::current_failure`).
 pub(super) fn runtime_error_from_machine(machine: &MachineState) -> ExecutionError {
-    ExecutionError::Runtime(machine.last_failure().unwrap_or(MachineFailure {
+    ExecutionError::Runtime(machine.current_failure().unwrap_or(MachineFailure {
         cause: RuntimeError::BadPointer,
         disposition: MachineDisposition::Unavailable,
     }))
@@ -369,7 +384,7 @@ pub(super) fn runtime_error_for_status(
     machine: &MachineState,
     status: CallStatus,
 ) -> ExecutionError {
-    if machine.last_failure().is_none() {
+    if machine.current_failure().is_none() {
         machine.set_first_cause(match status {
             CallStatus::Cancelled => RuntimeError::Cancelled,
             CallStatus::LanguageFailure => RuntimeError::BadPointer,
@@ -379,11 +394,13 @@ pub(super) fn runtime_error_for_status(
     runtime_error_from_machine(machine)
 }
 
+/// Result observation right after a call: a failure the call itself
+/// recorded takes precedence over the observation's own complaint.
 pub(super) fn runtime_error_from_machine_or_observation(
     machine: &MachineState,
     observation: ObservationFailure,
 ) -> ExecutionError {
-    if machine.last_failure().is_some() {
+    if machine.current_failure().is_some() {
         runtime_error_from_machine(machine)
     } else {
         ExecutionError::Observation(observation)
