@@ -1,6 +1,10 @@
 //! Machine-wide resolution of a foreign program's callable/enter code,
-//! backing the cross-program call and force fallback (a later wave adds
-//! the dispatcher-side call sites; this module is the substrate).
+//! backing the cross-program call and force fallback. Each exported
+//! function is a [`CallableExport`], built in `prepared_program::compile_with`
+//! and registered into `MachineState`'s resolution table at install
+//! (`PreparedMachine::install`). `apply::emit_dispatchers`' terminal
+//! fallback consults that table via the host fn `prepared_resolve_call`;
+//! `entry::emit_prepared_enter` consults it via `prepared_resolve_enter`.
 
 use cranelift_module::FuncId;
 use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, Signature};
@@ -9,10 +13,6 @@ use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, Signature};
 /// installed program: its descriptor's header word identifies the object
 /// at runtime, `function` is the compiled callee, `fingerprint` guards
 /// against a signature mismatch (see `signature_fingerprint`).
-#[allow(
-    dead_code,
-    reason = "consumed by the install-time registration a later wave adds"
-)]
 pub(crate) struct CallableExport {
     pub header: usize,
     pub function: FuncId,

@@ -1153,6 +1153,14 @@ impl<'code> PreparedMachine<'code> {
         self.handles.handle(handle.raw).map(|entry| entry.slot)
     }
 
+    /// The runtime resource scope `handle` is currently live under, or
+    /// `None` for an unknown, foreign or released handle. Answered from the
+    /// machine's own `ResourceLedger`, the single owner of that fact.
+    #[must_use]
+    pub fn handle_realm(&self, handle: PreparedHandle) -> Option<RealmId> {
+        self.handles.handle(handle.raw).map(|entry| entry.realm)
+    }
+
     /// Whether a retained handle's value is already in weak head normal form
     /// (a constructor, function or PAP, following any settled thunk
     /// indirection), read without forcing -- the fact an importing program's

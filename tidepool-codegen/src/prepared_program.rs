@@ -200,8 +200,8 @@ unsafe extern "C" fn prepared_blackhole(vmctx: *mut crate::context::VMContext) -
     machine.prepared_call_status() as i32
 }
 
-/// Resolve a foreign callee for `emit_dispatchers`' fallback (a later
-/// wave wires the call site): `header` is the callee object's masked
+/// Resolve a foreign callee for `apply::emit_dispatchers`' terminal
+/// fallback call site: `header` is the callee object's masked
 /// header word, `fingerprint` is the CALLER's expectation of that
 /// callee's signature shape (see `resolve::signature_fingerprint`).
 /// Returns the code pointer on a fingerprint-matching hit, 0 on any
@@ -292,31 +292,22 @@ pub struct CompiledProgram {
     /// Platform C-ABI adapter `(vmctx, result_out, managed_ref) -> status`.
     /// The target is generated code which calls Tail `prepared_enter`.
     pub(crate) force_adapter: FuncId,
-    /// Every function this program exports as a cross-program call target,
-    /// for the installing machine to register in its resolution table. A
-    /// later wave's dispatcher fallback (X2b/X2c) is the actual consumer.
-    #[allow(
-        dead_code,
-        reason = "consumed by the install-time registration a later wave adds"
-    )]
+    /// Every function this program exports as a cross-program call target.
+    /// `PreparedMachine::install` registers these in the machine's
+    /// resolution table, which `apply::emit_dispatchers`' fallback queries
+    /// through `prepared_resolve_call`.
     pub(crate) callables: Vec<resolve::CallableExport>,
-    /// This program's own `prepared_enter` FuncId, exported so an
-    /// installing machine can register it as the owner for every header in
-    /// `enter_owned_headers`.
-    #[allow(
-        dead_code,
-        reason = "consumed by the install-time registration a later wave adds"
-    )]
+    /// This program's own `prepared_enter` FuncId. `PreparedMachine::install`
+    /// registers it as the owner for every header in `enter_owned_headers`.
     pub(crate) enter: FuncId,
     /// Every thunk/function/PAP descriptor header THIS program's own
     /// `prepared_enter` (the `enter` field above) knows how to force --
     /// i.e. the union of `plan.thunks`' and the evaluated-chain descriptors'
     /// header words, mirroring what `entry::emit_prepared_enter`'s
     /// `thunks`/`evaluated` parameters already cover for this program.
-    #[allow(
-        dead_code,
-        reason = "consumed by the install-time registration a later wave adds"
-    )]
+    /// `PreparedMachine::install` registers these against `enter` so
+    /// `prepared_resolve_enter` can dispatch foreign headers to their
+    /// owning program.
     pub(crate) enter_owned_headers: Vec<usize>,
 }
 
@@ -598,9 +589,9 @@ impl CompiledProgram {
         prepared_resolve_call_signature
             .returns
             .push(AbiParam::new(types::I64));
-        // `entry::emit_prepared_enter`'s call site still awaits its own
-        // wave; `apply::emit_dispatchers`' fallback call site is wired
-        // below.
+        // `entry::emit_prepared_enter` calls `prepared_resolve_enter`
+        // (declared below); `apply::emit_dispatchers`' fallback call site
+        // calls this one.
         let prepared_resolve_call = pipeline
             .module
             .declare_function(

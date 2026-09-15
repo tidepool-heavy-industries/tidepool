@@ -1113,18 +1113,14 @@ impl MachineState {
 
     // --- cross-program call/enter resolution ------------------------------
     // Substrate for the prepared engine's cross-program call and force
-    // fallback (see `prepared_program::resolve`); a later wave adds the
-    // dispatcher-side call sites that actually read these tables at a miss.
+    // fallback (see `prepared_program::resolve`); `apply::emit_dispatchers`'
+    // fallback and `entry::emit_prepared_enter` read these tables at a miss.
 
     /// Register one installed program's exported call targets and owned
-    /// enter headers. Called at install time (a later wave); additive only
+    /// enter headers. Called from `PreparedMachine::install`; additive only
     /// -- a header already registered by an earlier program is left alone
     /// by `extend`'s "later entries overwrite" semantics, which is fine here
     /// because header words are unique per descriptor across the machine.
-    #[allow(
-        dead_code,
-        reason = "called by install/rollback logic a later wave adds"
-    )]
     pub(crate) fn register_prepared_entries(
         &self,
         callables: impl IntoIterator<Item = (usize, resolve::ResolvedEntry)>,
@@ -1134,28 +1130,8 @@ impl MachineState {
         self.prepared_enters.borrow_mut().extend(enters);
     }
 
-    /// Install rollback: undo exactly the headers a failed install already
-    /// registered (its own list, not a blanket clear -- earlier programs'
-    /// entries must survive).
-    #[allow(
-        dead_code,
-        reason = "called by install/rollback logic a later wave adds"
-    )]
-    pub(crate) fn remove_prepared_entries(&self, headers: &[usize]) {
-        let mut callables = self.prepared_callables.borrow_mut();
-        let mut enters = self.prepared_enters.borrow_mut();
-        for header in headers {
-            callables.remove(header);
-            enters.remove(header);
-        }
-    }
-
     /// Machine-teardown path (`Drop for PreparedMachine`): drop every raw
     /// code pointer before the pipelines they point into are freed.
-    #[allow(
-        dead_code,
-        reason = "wired into Drop for PreparedMachine by a later wave (B3)"
-    )]
     pub(crate) fn clear_prepared_entries(&self) {
         self.prepared_callables.borrow_mut().clear();
         self.prepared_enters.borrow_mut().clear();
