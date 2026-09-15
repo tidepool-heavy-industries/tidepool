@@ -2420,6 +2420,13 @@ impl JitEffectMachine {
         };
 
         let marked: HashSet<_> = external.keys().copied().collect();
+        // Payloads a live OLD object reaches. Core array stores into them are
+        // unbarriered by design: their slots are remembered for life once
+        // the payload is retained. Captured before the plan is consumed.
+        let old_reachable: Vec<(usize, crate::machine_state::ExternalStorageKind)> = compaction
+            .reachable_external_storage()
+            .map(|(pointer, kind)| (pointer as usize, kind))
+            .collect();
         let sweep = self
             .machine_state
             .plan_external_sweep(&marked)
@@ -2440,8 +2447,19 @@ impl JitEffectMachine {
             .commit_external_sweep(sweep)
             .map_err(|error| format!("external sweep commit failed: {error:?}"))?;
 
-        // Old-space commit rebuilt its half after clearing the old remembered
-        // set. Rebuild live external old-to-young slots from the traced graph.
+        // Old-space commit cleared the remembered set. Every payload a live
+        // old object reaches is re-retained with ALL of its slots, whatever
+        // they hold now: a slot holding an old value today receives a young
+        // value through an unbarriered store tomorrow (an actor's exit cell
+        // filled by `drainActor`), and a minor collection only sees it through
+        // the remembered set. Rebuilding only currently-young slots dropped
+        // those slots for good.
+        self.machine_state
+            .retain_external_payloads(&old_reachable)
+            .map_err(|error| format!("retaining old-reachable payloads failed: {error:?}"))?;
+        // Payloads reached only from the nursery need no remembered slots for
+        // minor collection, which traces them through their wrappers; keep
+        // any old-to-young edge they currently hold.
         for pointer in marked {
             let view = self
                 .machine_state
@@ -4294,6 +4312,117 @@ mod tests {
             after_collection.freed_bytes,
             after_collection.allocated_bytes
         );
+    }
+
+    /// Regression: a tenured array wrapper's payload slot must stay remembered
+    /// across a major collection even while it holds an OLD value, because a
+    /// later Core `writeSmallArray#` stores a young value without a barrier.
+    /// The major collector used to rebuild only currently-young slots, so a
+    /// following minor collection left the slot pointing at a stale nursery
+    /// object (the actor exit-cell corruption after `drainActor`/`awaitExit`).
+    #[test]
+    #[serial]
+    fn retained_payload_slot_stays_remembered_across_a_major_collection() {
+        use crate::emit::ExternalEnv;
+        use tidepool_heap::layout::{self as heap_layout, LitTag, LIT_SIZE};
+
+        let (expr, table) = make_gc_forcing_setup(1);
+        let mut machine =
+            JitEffectMachine::compile_session(&expr, &table, 4096).expect("compile session");
+        let dead_entry = machine
+            .add_function("dead_old_owner", &expr, &table, &ExternalEnv::new())
+            .expect("compile dead owner");
+        let old_entry = machine
+            .add_function("old_slot_value", &expr, &table, &ExternalEnv::new())
+            .expect("compile old value");
+        let dead_owner = machine
+            .run_pure_and_bind(dead_entry)
+            .expect("tenure dead owner");
+        let old_value = machine
+            .run_pure_and_bind(old_entry)
+            .expect("tenure old slot value");
+
+        let payload = {
+            let _guard = machine.install_registries();
+            crate::host_fns::runtime_new_boxed_array(1, unsafe { old_value.current() } as i64) as *mut u8
+        };
+        assert_ne!(payload, crate::host_fns::error_poison_ptr());
+
+        let nursery_start = |machine: &mut JitEffectMachine| {
+            machine
+                .session
+                .as_mut()
+                .expect("session")
+                .heap
+                .as_mut()
+                .map_or(machine.nursery.start() as *mut u8, |heap| {
+                    heap.as_mut_ptr() as *mut u8
+                })
+        };
+        let start = nursery_start(&mut machine);
+        let cursor = machine.session.as_ref().expect("session").cursor;
+        let wrapper = unsafe { start.add(cursor) };
+        unsafe {
+            heap_layout::write_header(wrapper, heap_layout::TAG_LIT, LIT_SIZE as u32);
+            *wrapper.add(heap_layout::LIT_TAG_OFFSET) = LitTag::SmallArray as u8;
+            *(wrapper.add(heap_layout::LIT_VALUE_OFFSET) as *mut *mut u8) = payload;
+        }
+        machine.session.as_mut().expect("session").cursor = cursor + LIT_SIZE;
+
+        // Tenure the wrapper: its payload becomes Retained and its slot remembered.
+        let array_root = {
+            // Tenure runs inside an installed run context, as materialization does.
+            let _guard = machine.install_registries();
+            let mut vmctx = machine.make_session_vmctx();
+            vmctx.machine_state = &mut machine.machine_state as *mut MachineState;
+            let (active, _) = machine
+                .machine_state
+                .gc_active_range()
+                .expect("GC state installed by the guard");
+            assert_eq!(active, start, "the wrapper was written into the active nursery");
+            let range = (start as *const u8, unsafe { start.add(cursor + LIT_SIZE) } as *const u8);
+            unsafe {
+                machine
+                    .session
+                    .as_mut()
+                    .expect("session")
+                    .old_space
+                    .tenure(&mut vmctx, wrapper, range)
+            }
+        };
+
+        // A major collection while the slot still holds the old value.
+        machine.retire_scope_root(dead_owner);
+
+        // An unbarriered young store into the retained payload, exactly as
+        // generated Core array writes do.
+        let start = nursery_start(&mut machine);
+        let cursor = machine.session.as_ref().expect("session").cursor;
+        let young = unsafe { start.add(cursor) };
+        unsafe {
+            heap_layout::write_header(young, heap_layout::TAG_LIT, LIT_SIZE as u32);
+            *young.add(heap_layout::LIT_TAG_OFFSET) = LitTag::Int as u8;
+            *(young.add(heap_layout::LIT_VALUE_OFFSET) as *mut i64) = 4242;
+        }
+        machine.session.as_mut().expect("session").cursor = cursor + LIT_SIZE;
+        let payload = unsafe {
+            *(array_root.current().add(heap_layout::LIT_VALUE_OFFSET) as *const *mut u8)
+        };
+        unsafe { *(payload.add(8) as *mut *mut u8) = young };
+
+        crate::host_fns::set_gc_poison(true);
+        machine.force_gc_for_test();
+        crate::host_fns::set_gc_poison(false);
+
+        let moved = unsafe { *(payload.add(8) as *const *mut u8) };
+        unsafe {
+            assert_eq!(
+                *moved.add(heap_layout::LIT_TAG_OFFSET),
+                LitTag::Int as u8,
+                "the payload slot must follow its young value through the minor collection"
+            );
+            assert_eq!(*(moved.add(heap_layout::LIT_VALUE_OFFSET) as *const i64), 4242);
+        }
     }
 
     #[test]
