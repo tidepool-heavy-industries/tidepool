@@ -4,6 +4,7 @@ module ExecutionProjectionTest
   ( projectProjectionContract
   , verifyRetainedImportProjection
   , verifyRetainedImportProjectionExposed
+  , verifyHierarchicalTargetModule
   ) where
 
 import Control.Monad (forM_, unless)
@@ -1295,3 +1296,40 @@ verifyRetainedImportProjectionExposed = do
       unless (globalRequiredGeneration producerFnGlobal == Just 11)
         (ioError (userError
           "retained-import-exposed withheld projection did not carry producerFn's generation"))
+  verifyHierarchicalTargetModule
+
+-- | Task (b) regression: a hierarchical module (@module Session.Val.G1
+-- where@ in @test-prepared-stg/Session/Val/G1.hs@, whose bare file basename
+-- is only @G1@) compiles and projects successfully when passed as the
+-- PRIMARY compile target. Before
+-- 'Tidepool.GhcPipeline.targetModuleNameFor', every "target module"
+-- derivation in 'Tidepool.GhcPipeline' used
+-- @capitalize (takeBaseName path)@ -- here, @G1@ -- so the post-loop merge
+-- could never find a compiled module actually named @Session.Val.G1@ and
+-- failed with "target module 'G1' not found among compiled modules".
+verifyHierarchicalTargetModule :: IO ()
+verifyHierarchicalTargetModule = do
+  root <- getCurrentDirectory
+  let fixtureDir = root </> "test-prepared-stg"
+  prepared <- runPipelineSelected PreparedStg
+    (fixtureDir </> "Session" </> "Val" </> "G1.hs") [fixtureDir]
+  let modules = pprModules prepared
+      moduleNames = [ moduleNameString (moduleName (pmModule m)) | m <- modules ]
+  unless ("Session.Val.G1" `elem` moduleNames)
+    (ioError (userError
+      ("hierarchical target module test: expected a compiled module named "
+        ++ "'Session.Val.G1', got: " ++ show moduleNames)))
+  let context = ProjectionContext
+        { projectionProfile = "ghc-9.12-prepared-stg"
+        , projectionToolchain = "ghc-9.12.2"
+        , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []
+        , projectionRetainedGenerations = Map.empty
+        , projectionEntry =
+            SymbolIdentity "main" "Session.Val.G1" "value" "hierarchicalValue" Nothing
+        , projectionFormattingAuthority = Nothing
+        , projectionTextUnit = Nothing
+        }
+  case projectPreparedTarget context modules of
+    Left failure -> ioError (userError
+      ("hierarchical target module projection failed: " <> show failure))
+    Right _ -> pure ()

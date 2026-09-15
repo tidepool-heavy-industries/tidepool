@@ -54,6 +54,8 @@ module Tidepool.RetainedUnfoldings
   , withholdRetainedUnfoldings
   ) where
 
+import Control.Monad.IO.Class (liftIO)
+import Data.IORef (IORef, readIORef)
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
@@ -76,32 +78,39 @@ import GHC.Unit.Types (unitString)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 
 -- | Install the withholding pass on a session's 'HscEnv', ahead of every
--- other registered plugin. A 'Set.null' retained set is a true no-op: the
--- 'HscEnv' is returned unchanged, so an empty retained map (today's default
--- everywhere except this feature's own tests) costs nothing and changes no
--- compiled byte.
-installRetainedUnfoldingsPlugin :: Set SymbolIdentity -> HscEnv -> HscEnv
-installRetainedUnfoldingsPlugin retained hscEnv
-  | Set.null retained = hscEnv
-  | otherwise = hscEnv { hsc_plugins = plugins { staticPlugins = staticPlugin : staticPlugins plugins } }
+-- other registered plugin. UNCONDITIONALLY installs (unlike the pure
+-- 'withholdRetainedUnfoldings' this pass wraps): the pass reads the given
+-- 'IORef' at RUN time, once per module, so the same installed pass serves
+-- every later retained set a caller writes into the cell -- including a
+-- 'Set.null' one, which stays a true no-op on the compiled bytes. This lets
+-- a long-lived 'HscEnv' (the resident daemon's session) install the pass
+-- exactly ONCE and vary the retained set per request by writing the cell,
+-- instead of installing one pass per request and accumulating them. A
+-- one-shot caller that only ever compiles once may still pass a fresh
+-- 'IORef' seeded with its one request's set.
+installRetainedUnfoldingsPlugin :: IORef (Set SymbolIdentity) -> HscEnv -> HscEnv
+installRetainedUnfoldingsPlugin retainedRef hscEnv =
+  hscEnv { hsc_plugins = plugins { staticPlugins = staticPlugin : staticPlugins plugins } }
   where
     plugins = hsc_plugins hscEnv
     staticPlugin = StaticPlugin
       { spPlugin = PluginWithArgs
-          { paPlugin = withholdingPlugin retained
+          { paPlugin = withholdingPlugin retainedRef
           , paArguments = []
           }
       -- No 'driverPlugin' action to run; nothing further to initialise.
       , spInitialised = True
       }
 
-withholdingPlugin :: Set SymbolIdentity -> Plugin
-withholdingPlugin retained = defaultPlugin
+withholdingPlugin :: IORef (Set SymbolIdentity) -> Plugin
+withholdingPlugin retainedRef = defaultPlugin
   { installCoreToDos = \_args todos ->
       pure (CoreDoPluginPass "WithholdRetainedUnfoldings" pass : todos)
   }
   where
-    pass = bindsOnlyPass (pure . withholdRetainedUnfoldings retained)
+    pass = bindsOnlyPass $ \binds -> do
+      retained <- liftIO (readIORef retainedRef)
+      pure (withholdRetainedUnfoldings retained binds)
 
 -- | The pure Core-to-Core rewrite: every top-level binder whose
 -- 'SymbolIdentity' is a member of the retained set, and every occurrence of

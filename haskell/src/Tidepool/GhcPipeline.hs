@@ -90,10 +90,10 @@ import GHC.Types.Var (mkTyVarBinder, setVarName, tyVarKind, varName)
 import Language.Haskell.Syntax.Specificity (Specificity (SpecifiedSpec))
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
 import Control.Applicative ((<|>))
-import Control.Exception (finally, try, throwIO)
+import Control.Exception (finally, try, throwIO, IOException)
 import Data.Maybe (fromMaybe, isNothing)
 import Data.List (isPrefixOf, nub, sortOn, intercalate)
-import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef, writeIORef)
 import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName, takeFileName)
 import System.IO (hPutStrLn, stderr)
@@ -116,6 +116,7 @@ import Tidepool.PreparedStg (PreparedElaboration(..), PreparedModule(..), prepar
 import Tidepool.PreparedSites (elaboratePreparedSites, resolvePreparedSiblings)
 import Tidepool.ExecutionSchema (SymbolIdentity)
 import Tidepool.RetainedUnfoldings (installRetainedUnfoldingsPlugin)
+import Tidepool.TurnSource (extractModuleName)
 
 -- | Selects the compiler representation produced at the internal GHC API
 -- boundary. Existing extraction entry points always select 'LegacyCore'.
@@ -311,6 +312,21 @@ cellDisplayDeclarations pass result plan = do
     qualifier = cellPlanDisplayAlias plan
     textLiteral value = "(" ++ qualifier ++ "Text.pack " ++ show value ++ ")"
 
+-- | Resolve the target module's 'ModuleName' for one input file. Prefers the
+-- declared name from a conventional @module ... where@ header (via
+-- 'Tidepool.TurnSource.extractModuleName'), so a hierarchical module such as
+-- @Tidepool.Session.Val.G1@ (declared in a file whose bare basename is only
+-- @G1@) is recognised by its own dotted name rather than reduced to that
+-- basename. Falls back to the historical @capitalize (takeBaseName path)@
+-- derivation when the file has no recognisable header, or can't be read.
+-- Every existing caller compiles a flat module whose declared name already
+-- equals its basename, so this changes nothing for them.
+targetModuleNameFor :: FilePath -> IO ModuleName
+targetModuleNameFor path = do
+  contents <- try (readFile path) :: IO (Either IOException String)
+  let declared = either (const Nothing) extractModuleName contents
+  pure (mkModuleName (fromMaybe (capitalize (takeBaseName path)) declared))
+
 -- | The normal one-shot extraction. This is exactly
 -- @runPipelineSession Nothing@, so no session
 -- machinery (iface injection, source-less home modules) ever touches this path.
@@ -325,21 +341,16 @@ runPipelineSelected selection path includes =
 -- retained-generation symbols from GHC's own simplifier -- see
 -- 'Tidepool.RetainedUnfoldings' for the mechanism and why it must run this
 -- early. Used today only by 'test-prepared-stg/ExecutionProjectionTest.hs';
--- 'app/Main.hs' now threads a live request's @--retained-generation@ set
--- through 'runPipelineSessionSelected' directly for its one-shot
--- (non-resident) 'PreparedStg' compiles. Wiring the same set through the
--- resident pipeline ('withResidentPipelineSelected') remains a separate,
--- harder change: that entry point boots ONE 'HscEnv' and reuses it (with its
--- installed plugins) across every subsequent request, so naively installing
--- 'installRetainedUnfoldingsPlugin' per request would accumulate withholding
--- passes on the shared session forever rather than reflecting only the
--- current request's set. See its call site in 'app/Main.hs' for the current
--- (still-'Set.empty') status there.
+-- 'app/Main.hs' threads a live request's @--retained-generation@ set through
+-- 'runPipelineSessionSelected' directly for its one-shot (non-resident)
+-- 'PreparedStg' compiles, and through 'withResidentPipelineSelected' for its
+-- resident-daemon compiles.
 runPipelineSelectedRetaining
   :: PipelineSelection result -> Set.Set SymbolIdentity -> FilePath -> [FilePath] -> IO result
-runPipelineSelectedRetaining selection retained path includes =
+runPipelineSelectedRetaining selection retained path includes = do
+  variant <- normalVariant GeneralCompile path
   selectCompileResult selection <$>
-    runCompile (selectionKind selection) retained (normalVariant GeneralCompile path) path includes Nothing
+    runCompile (selectionKind selection) retained variant path includes Nothing
 
 -- ---------------------------------------------------------------------------
 -- The shared compile loop and its two seams
@@ -475,15 +486,18 @@ runCompile preparation retained variant path includes buildProductsDir = do
     -- is what actually simplifies every home module the first time, so the
     -- plugin must already be registered on the session's 'HscEnv' by now.
     -- See 'Tidepool.RetainedUnfoldings' for why a Core plugin is the seam
-    -- that reaches both 'load'' and 'core2core' uniformly. A 'Set.null'
-    -- retained set costs nothing (see 'installRetainedUnfoldingsPlugin').
+    -- that reaches both 'load'' and 'core2core' uniformly. The plugin reads
+    -- this request's retained set from an 'IORef' at run time, so a
+    -- 'Set.null' retained set costs nothing on the compiled bytes (see
+    -- 'withholdRetainedUnfoldings').
+    retainedRef <- liftIO (newIORef retained)
     hscForRetained <- getSession
-    setSession (installRetainedUnfoldingsPlugin retained hscForRetained)
+    setSession (installRetainedUnfoldingsPlugin retainedRef hscForRetained)
     -- One cycle, no cache, no memo — 'sessionT0' is captured BEFORE this
     -- DynFlags bootstrap (above) so the default-on per-compile summary's
     -- wall-clock figure covers it too, exactly as it always has. See
     -- 'runCompileCycle''s haddock for what each argument controls.
-    runCompileCycle preparation Nothing Nothing timing sessionT0 variant path
+    runCompileCycle preparation Nothing Nothing retained timing sessionT0 variant path
 
 -- | Compile with an optional active session scope and an optional persistent
 -- build-products directory. Inert scopes use the normal pipeline.
@@ -502,11 +516,12 @@ runPipelineSessionFor purpose = runPipelineSessionSelected LegacyCore Set.empty 
 runPipelineSessionSelected
   :: PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope
   -> FilePath -> [FilePath] -> Maybe FilePath -> IO result
-runPipelineSessionSelected selection retained purpose mscope path includes buildProductsDir =
-  selectCompileResult selection <$> case mscope of
-    Just scope | isSessionScopeActive scope ->
-      runCompile (selectionKind selection) retained (sessionVariant purpose scope path) path includes buildProductsDir
-    _ -> runCompile (selectionKind selection) retained (normalVariant purpose path) path includes buildProductsDir
+runPipelineSessionSelected selection retained purpose mscope path includes buildProductsDir = do
+  variant <- case mscope of
+    Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
+    _ -> normalVariant purpose path
+  selectCompileResult selection <$>
+    runCompile (selectionKind selection) retained variant path includes buildProductsDir
 
 -- ---------------------------------------------------------------------------
 -- Resident compilation state
@@ -532,6 +547,17 @@ data GutsMemoEntry = GutsMemoEntry
       (ModGuts, Map.Map String String, [CheckedBinderPin], Maybe Type)
     -- ^ Post-externalize result, exactly the shape 'results' carries.
   , gmePrepared :: Maybe PreparedModule
+  , gmeRetained :: Set.Set SymbolIdentity
+    -- ^ The retained-generation set THIS entry was compiled under
+    -- (see 'Tidepool.RetainedUnfoldings'). A module's Core is not just a
+    -- function of its own source hash: 'installRetainedUnfoldingsPlugin'
+    -- withholds unfoldings for whatever set the compiling request wrote into
+    -- its 'IORef' before 'core2core' ran, so the SAME source module compiled
+    -- under a DIFFERENT retained set can legitimately produce different
+    -- simplified guts (an unfolding withheld here, or newly exposed there).
+    -- 'lookupValidMemo' checks this alongside the source hash so a memo hit
+    -- can never hand a later request a dependency module's guts baked under
+    -- an earlier, no-longer-current retained set.
   }
 
 type GutsMemo = Map.Map ModuleName GutsMemoEntry
@@ -555,10 +581,16 @@ type GutsMemo = Map.Map ModuleName GutsMemoEntry
 --     always takes this path.
 --   * 'summaryT0' — the caller's compile start. Direct callers capture it
 --     before session bootstrap; resident callers capture it per request.
+--
+-- 'retained' is the current request's retained-generation set (see
+-- 'Tidepool.RetainedUnfoldings'/'GutsMemoEntry'): read ONCE here, at cycle
+-- start, from the same 'IORef' the caller already wrote it into before the
+-- installed withholding pass ran -- never re-read per module, since it is
+-- constant for the whole cycle.
 runCompileCycle
   :: PreparationKind -> Maybe ModIfaceCache -> Maybe (IORef GutsMemo)
-  -> Bool -> Double -> PipelineVariant -> FilePath -> Ghc CompileResult
-runCompileCycle preparation mCache mMemoRef timing sessionT0 variant path = do
+  -> Set.Set SymbolIdentity -> Bool -> Double -> PipelineVariant -> FilePath -> Ghc CompileResult
+runCompileCycle preparation mCache mMemoRef retained timing sessionT0 variant path = do
     target <- guessTarget path Nothing Nothing
     setTargets [target]
     -- Install target-diagnostic capture before load/typecheck. Warnings become
@@ -654,8 +686,8 @@ runCompileCycle preparation mCache mMemoRef timing sessionT0 variant path = do
     -- into one entry per module via 'Map.insertWith'. The compile summary uses
     -- the top three; detailed per-module output remains timing-gated.
     moduleMsRef <- liftIO (newIORef (Map.empty :: Map.Map String Integer))
-    let targetModName  = capitalize (takeBaseName path)
-        targetModName' = mkModuleName targetModName
+    targetModName' <- liftIO (targetModuleNameFor path)
+    let targetModName = moduleNameString targetModName'
         -- The ONE per-module front half. Re-canonicalize the module's
         -- DynFlags first (see canonicalizeDFlags): the load phase may have
         -- downgraded them for TH/QQ bytecode provisioning. NOTE: 'hscDesugar'
@@ -765,6 +797,7 @@ runCompileCycle preparation mCache mMemoRef timing sessionT0 variant path = do
                 pure $ do
                   entry <- Map.lookup (ms_mod_name modSum) m
                   if ms_hs_hash (mfSummary (gmeFront entry)) == ms_hs_hash modSum
+                    && gmeRetained entry == retained
                     then Just entry
                     else Nothing
     (fronts, results, preparedModules, mReachable) <- case cpTier plan of
@@ -804,7 +837,7 @@ runCompileCycle preparation mCache mMemoRef timing sessionT0 variant path = do
               prepared <- prepareSelected mf simplified
               case mMemoRef of
                 Just ref -> liftIO (modifyIORef' ref
-                  (Map.insert mn (GutsMemoEntry mf simplified r prepared)))
+                  (Map.insert mn (GutsMemoEntry mf simplified r prepared retained)))
                 Nothing  -> pure ()
               pure (mf, r, prepared)
         pure ([f | (f, _, _) <- pairs], [r | (_, r, _) <- pairs],
@@ -899,7 +932,7 @@ runCompileCycle preparation mCache mMemoRef timing sessionT0 variant path = do
                 case mMemoRef of
                   Just ref -> liftIO (modifyIORef' ref
                     (Map.insert (ms_mod_name (mfSummary f))
-                      (GutsMemoEntry f simplified r prepared)))
+                      (GutsMemoEntry f simplified r prepared retained)))
                   Nothing  -> pure ()
                 pure [(r, prepared)]
             -- Not reachable: never core2core'd this cycle (matches every
@@ -1021,26 +1054,15 @@ withResidentPipeline baseIncludes useCompiler = do
 --
 -- The compiler closure's shape matches 'runPipelineSessionSelected''s own
 -- (a leading 'PipelineSelection' and a retained-generation 'Set.Set') so
--- 'app/Main.hs' can hold either behind one @Compiler@ alias. UNLIKE the
--- one-shot path, the retained-generation set passed here is NOT YET
--- forwarded to a withholding pass: this entry point boots exactly one
--- 'HscEnv' in 'runGhc' below and reuses it -- along with whatever
--- 'installRetainedUnfoldingsPlugin' installed on it -- across every
--- subsequent request ('residentCompileOne' only ever patches
--- 'importPaths'/build-products per request, never 'hsc_plugins').
--- Installing the withholding plugin here the same way 'runCompile' does
--- would accumulate one withholding pass per request onto the same
--- long-lived session (each carrying that request's own retained set) rather
--- than replacing the previous request's pass, since
--- 'installRetainedUnfoldingsPlugin' only ever prepends. Reflecting a
--- request's retained set correctly would need the resident loop to reset
--- 'hsc_plugins' to a saved baseline before installing each request's own
--- pass -- a change to how this loop manages plugin state, not just to this
--- parameter list, and out of scope here. The parameter is accepted (so
--- 'app/Main.hs' has one @Compiler@ shape for both entry points) and
--- currently ignored; see the caller in 'app/Main.hs' for the resulting gap
--- (only exercised by @--worker-loop-v1@, not by the bare one-shot path the
--- S6 fixture regeneration uses).
+-- 'app/Main.hs' can hold either behind one @Compiler@ alias. This entry
+-- point boots exactly one 'HscEnv' in 'runGhc' below and reuses it across
+-- every subsequent request; the withholding plugin is installed on it
+-- exactly ONCE, at boot, via 'installRetainedUnfoldingsPlugin''s 'IORef'
+-- seam ('Tidepool.RetainedUnfoldings') rather than once per request, so
+-- passes never accumulate. Each request writes its own retained set into
+-- that cell before 'residentCompileOne' runs and resets it to 'Set.empty'
+-- afterwards (also on an exception), so the one installed pass reflects
+-- only the current request.
 withResidentPipelineSelected
   :: [FilePath]
   -> ((forall result. PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope
@@ -1054,15 +1076,20 @@ withResidentPipelineSelected baseIncludes useCompiler = do
     dflags <- getSessionDynFlags
     let dflags' = extractionDynFlags dflags baseIncludes
     _ <- setSessionDynFlags dflags'
+    retainedRef <- liftIO (newIORef Set.empty)
+    hscForRetained <- getSession
+    setSession (installRetainedUnfoldingsPlugin retainedRef hscForRetained)
     cache   <- liftIO newIfaceCache
     memoRef <- liftIO (newIORef Map.empty)
     let baseImportPaths = importPaths dflags'
     reifyGhc $ \session ->
-      useCompiler $ \selection _retained purpose mscope path extraIncludes buildProductsDir -> do
-        let targetModName' = mkModuleName (capitalize (takeBaseName path))
-        compiled <- reflectGhc
-          (residentCompileOne (selectionKind selection) cache memoRef dflags' baseImportPaths timing purpose mscope path extraIncludes buildProductsDir)
-          session `finally` sanitizeMemo targetModName' memoRef
+      useCompiler $ \selection retained purpose mscope path extraIncludes buildProductsDir -> do
+        targetModName' <- targetModuleNameFor path
+        compiled <- (writeIORef retainedRef retained >>
+          reflectGhc
+            (residentCompileOne (selectionKind selection) cache memoRef retainedRef dflags' baseImportPaths timing purpose mscope path extraIncludes buildProductsDir)
+            session)
+          `finally` (sanitizeMemo targetModName' memoRef >> writeIORef retainedRef Set.empty)
         pure (selectCompileResult selection compiled)
 
 -- | One resident-session compile cycle, against the ALREADY-OPEN session
@@ -1075,21 +1102,28 @@ withResidentPipelineSelected baseIncludes useCompiler = do
 -- The resident and direct paths select the same pipeline variant. This is an
 -- output contract: optimization tier affects validation-only dependency Core
 -- and therefore can affect merged metadata.
+--
+-- Reads 'retainedRef' -- the same cell 'withResidentPipelineSelected' just
+-- wrote this request's retained-generation set into, immediately before
+-- calling here -- ONCE, at cycle start, and threads the plain value into
+-- 'runCompileCycle'/the 'GutsMemo' validity check; it is never re-read
+-- per module.
 residentCompileOne
-  :: PreparationKind -> ModIfaceCache -> IORef GutsMemo -> DynFlags -> [FilePath]
+  :: PreparationKind -> ModIfaceCache -> IORef GutsMemo -> IORef (Set.Set SymbolIdentity) -> DynFlags -> [FilePath]
   -> Bool -> CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath
   -> Ghc CompileResult
-residentCompileOne preparation cache memoRef baseDFlags baseImportPaths timing purpose mscope path extraIncludes buildProductsDir = do
+residentCompileOne preparation cache memoRef retainedRef baseDFlags baseImportPaths timing purpose mscope path extraIncludes buildProductsDir = do
   sessionT0 <- monotonicTime
+  retained <- liftIO (readIORef retainedRef)
   hsc0 <- getSession
   setSession (hscUpdateFlags
     (configureBuildProducts baseDFlags buildProductsDir .
       (\df -> df { importPaths = nub (baseImportPaths ++ extraIncludes) }))
     hsc0)
-  let variant = case mscope of
-        Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
-        _                                        -> normalVariant purpose path
-  runCompileCycle preparation (Just cache) (Just memoRef) timing sessionT0 variant path
+  variant <- liftIO $ case mscope of
+    Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
+    _                                        -> normalVariant purpose path
+  runCompileCycle preparation (Just cache) (Just memoRef) retained timing sessionT0 variant path
 
 -- | Strip every request-scoped entry from the shared 'GutsMemo' after a
 -- resident cycle: the cycle's own target module (@targetModName@) and any
@@ -1183,12 +1217,14 @@ configureBuildProducts baseline mDir dflags = case mDir of
 
 -- | The normal (non-session) variant: no injection, and E6's Core-reachability
 -- tier. Everything else is 'runCompile'.
-normalVariant :: CompilePurpose -> FilePath -> PipelineVariant
-normalVariant purpose path = PipelineVariant
-  { pvLabel = "runPipeline"
-  , pvDownsweepExcludes = []
-  , pvTransformParsed = transformFor purpose (mkModuleName (capitalize (takeBaseName path)))
-  , pvPlan = \_timing modGraphRaw -> pure CompilePlan
+normalVariant :: CompilePurpose -> FilePath -> IO PipelineVariant
+normalVariant purpose path = do
+  targetModName' <- targetModuleNameFor path
+  pure PipelineVariant
+   { pvLabel = "runPipeline"
+   , pvDownsweepExcludes = []
+   , pvTransformParsed = transformFor purpose targetModName'
+   , pvPlan = \_timing modGraphRaw -> pure CompilePlan
       { cpLoadGraph = modGraphRaw
       , cpAfterLoad = \_ -> pure ()
         -- TOPOLOGICAL RECOVERY ORDER (was: 'mgModSummaries <$> getModuleGraph',
@@ -1261,14 +1297,20 @@ normalVariant purpose path = PipelineVariant
 -- calls from HPT ifaces) is load-bearing — see 'cpAfterModule' below. A
 -- reference turn imports @Tidepool.Prelude@ via the eval preamble; the
 -- @load'@ also keeps those source deps "loaded" (GHC-58427).
-sessionVariant :: CompilePurpose -> SessionScope -> FilePath -> PipelineVariant
-sessionVariant purpose scope path = PipelineVariant
-  { pvLabel = "runSessionPipeline"
-  , pvDownsweepExcludes = excludedVal
-  , pvTransformParsed = transformFor purpose (mkModuleName (capitalize (takeBaseName path)))
-  , pvPlan = \timing modGraphRaw -> do
-      let targetModName' = mkModuleName (capitalize (takeBaseName path))
-          directSummaries = [ ms | ModuleNode _ ms <- mgModSummaries' modGraphRaw ]
+sessionVariant :: CompilePurpose -> SessionScope -> FilePath -> IO PipelineVariant
+sessionVariant purpose scope path = do
+  targetModName' <- targetModuleNameFor path
+  -- The injected source-less @Val.G<g>@ modules: excluded from the
+  -- downsweep (no source to summarise) — a deferred module's @import@ of
+  -- them resolves from the HPT entry 'cpBeforeModule' registers immediately
+  -- before the importing source module is compiled.
+  let excludedVal = map renderSessionModule (ssValIfaces scope)
+  pure PipelineVariant
+   { pvLabel = "runSessionPipeline"
+   , pvDownsweepExcludes = excludedVal
+   , pvTransformParsed = transformFor purpose targetModName'
+   , pvPlan = \timing modGraphRaw -> do
+      let directSummaries = [ ms | ModuleNode _ ms <- mgModSummaries' modGraphRaw ]
           importsOf ms = [ unLoc lmn | (_, lmn) <- ms_textual_imps ms ]
           isSessionLib ms = case parseSessionModule (moduleNameString (ms_mod_name ms)) of
             Just (SessionModule LibMod _) -> True
@@ -1428,13 +1470,7 @@ sessionVariant purpose scope path = PipelineVariant
             liftIO (readIORef injectMsRef >>= emitPhase timing "inject")
         , cpFinalEnv = hscUpdateFlags canonicalizeDFlags
         }
-  }
-  where
-    -- The injected source-less @Val.G<g>@ modules: excluded from the
-    -- downsweep (no source to summarise) — a deferred module's @import@ of
-    -- them resolves from the HPT entry 'cpBeforeModule' registers immediately
-    -- before the importing source module is compiled.
-    excludedVal = map renderSessionModule (ssValIfaces scope)
+   }
 -- | Capture only compiler-reserved probe binders. Ordinary module bindings do
 -- not belong in pipeline metadata or the resident compile memo.
 capturedTopLevelTypes :: TcGblEnv -> Map.Map String String

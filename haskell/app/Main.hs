@@ -82,9 +82,9 @@ import Tidepool.TurnSource (extractModuleName, spliceTemplate)
 -- 'processFile''s 'PreparedStg' compile passes 'Set.empty' (a true no-op):
 -- only a prepared-STG compile ever recovers/persists a retained-generation
 -- 'GlobalDecl' reference, so 'LegacyCore' modes (inspection/turn/cell) have
--- nothing to withhold. NOTE: the resident-daemon path
--- ('withResidentPipelineSelected', used only behind @--worker-loop-v1@)
--- currently ignores this parameter -- see its haddock in GhcPipeline.hs.
+-- nothing to withhold. The resident-daemon path ('withResidentPipelineSelected',
+-- used only behind @--worker-loop-v1@) honors this parameter per request too,
+-- via a single installed plugin that reads a per-request 'IORef' cell.
 type Compiler =
   forall result. PipelineSelection result
   -> Set.Set SymbolIdentity
