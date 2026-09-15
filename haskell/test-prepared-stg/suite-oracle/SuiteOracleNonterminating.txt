@@ -1,0 +1,5 @@
+# occurrence<TAB>reason
+# A source top that may exceed the generator's evaluation timeout. Each row is
+# rendered as no_finite_observation. Any other timeout fails generation, and a
+# listed row that terminates also fails generation.
+thunk_blackhole	pinned GHC 9.12.2 lowers `let x = x in x` to a self-recursive let-no-escape join; the native binary loops instead of raising a blackhole
