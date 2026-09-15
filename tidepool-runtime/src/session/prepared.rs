@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use tidepool_bridge::Value;
-use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
+use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue, PreparedOrigin};
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
     CompileError, CompiledProgram, ExecutionError, ImportBindings, PreparedCallOptions,
@@ -193,6 +193,42 @@ pub enum PreparedOuter {
     },
 }
 
+/// The facts about an installed program the session still needs after the
+/// machine has taken its code: the declared entry (what `run_entry(None)`
+/// addresses) and, per top-level binding, the identity and entry signature
+/// an importer links against. Recorded on every binding made from the top
+/// ([`PreparedOrigin`]) so nothing downstream reconstructs them.
+struct ProgramFacts {
+    entry: ValueId,
+    tops: BTreeMap<ValueId, (SymbolIdentity, Option<Signature>)>,
+}
+
+impl ProgramFacts {
+    fn of(prepared: &PreparedProgram) -> Self {
+        let tops = prepared
+            .bindings()
+            .iter()
+            .flat_map(|group| match group {
+                Group::NonRecursive(top) => std::slice::from_ref(top),
+                Group::Recursive(tops) => tops.as_slice(),
+            })
+            .map(|top| {
+                let export = match &top.binding.rhs {
+                    HeapRhs::Function { signature, .. } | HeapRhs::Thunk { signature, .. } => {
+                        prepared.signatures().get(signature.0 as usize).cloned()
+                    }
+                    HeapRhs::Constructor { .. } | HeapRhs::Bytes(_) => None,
+                };
+                (top.binding.id, (top.identity.clone(), export))
+            })
+            .collect();
+        Self {
+            entry: prepared.entry(),
+            tops,
+        }
+    }
+}
+
 /// One prepared session: a lazily installed machine shared by every program
 /// installed into it, the session's retained bindings, and the one
 /// generation counter later programs link against.
@@ -209,8 +245,10 @@ pub struct PreparedRuntime {
     /// Set together: the machine and the id of the first program it was
     /// created with (the program `run_entry` addresses by default).
     machine: Option<(PreparedMachine<'static>, ProgramId)>,
-    /// Every installed program, for entry defaults and export lookup.
-    programs: BTreeMap<ProgramId, LinkedProgram>,
+    /// What the session keeps about each installed program once the machine
+    /// owns its code (see [`ProgramFacts`]); the linked program tree itself
+    /// is not retained.
+    programs: BTreeMap<ProgramId, ProgramFacts>,
     bindings: BindingTable,
     /// The session's single value generation counter. A generation is a
     /// turn: every binding made before the next `advance_generation` shares
@@ -367,6 +405,14 @@ impl PreparedRuntime {
             .ok_or(PreparedRuntimeError::Run(
                 ExecutionError::UnknownPreparedHandle,
             ))?;
+        let (identity, export) = self
+            .programs
+            .get(&program)
+            .and_then(|facts| facts.tops.get(&value))
+            .cloned()
+            .ok_or(PreparedRuntimeError::Run(ExecutionError::MissingEntry(
+                value,
+            )))?;
         let id = SessionVarId::from_var(VarId(self.binding_ids.next_raw()));
         let entry = BindingEntry {
             name: BindingName(name.to_string()),
@@ -375,7 +421,12 @@ impl PreparedRuntime {
             value: BoundValue::Prepared {
                 root,
                 handle,
-                origin: Some((program, value)),
+                origin: Some(PreparedOrigin {
+                    program,
+                    value,
+                    identity,
+                    export,
+                }),
             },
             type_display: None,
             defining_expr: None,
@@ -385,13 +436,18 @@ impl PreparedRuntime {
     }
 
     /// Install a later program that imports session bindings by identity.
-    /// `imports` pairs each identity the artifact declares with the binding
-    /// that satisfies it. The artifact is linked against those bindings'
-    /// live shape (representation, settledness, exporting signature,
-    /// generation) BEFORE anything is compiled or installed, so a stale
-    /// generation (`LinkError::ImportContract`) or an undeclared identity
+    /// Every global the artifact DECLARES is resolved to a live binding:
+    /// through `imports` when the caller names that identity explicitly,
+    /// otherwise by the identity recorded on the binding at [`Self::bind_top`]
+    /// (at the declared `required_generation`, or the newest when none is
+    /// declared). The artifact is linked against those bindings' live shape
+    /// (representation, settledness, exporting signature, generation) BEFORE
+    /// anything is compiled or installed, so a stale generation
+    /// (`LinkError::ImportContract`) or an unresolvable identity
     /// (`LinkError::MissingImport`) has no machine side effect. On success
-    /// every named binding is leased for the program's lifetime.
+    /// exactly the bindings the program declares are leased for its
+    /// lifetime -- a pair in `imports` the artifact never declares leases
+    /// nothing.
     pub fn install(
         &mut self,
         artifact: &[u8],
@@ -435,16 +491,32 @@ impl PreparedRuntime {
         self.ensure_machine()?;
         let mut values = MachineImports::default();
         let mut bindings = ImportBindings::new();
-        for (identity, id) in imports {
+        let mut leased = Vec::new();
+        // Resolution is driven by what the PROGRAM declares, never by the
+        // caller's list alone: that list can only name a binding for an
+        // identity the artifact actually imports.
+        for declaration in prepared.globals() {
+            let identity = &declaration.identity;
+            let Some(id) = imports
+                .iter()
+                .find(|(named, _)| named == identity)
+                .map(|(_, id)| *id)
+                .or_else(|| self.resolve_import(identity, declaration.required_generation))
+            else {
+                // Left absent: `link_program` reports it as the typed
+                // `MissingImport` for exactly this identity.
+                continue;
+            };
             let entry = self
                 .bindings
-                .get(*id)
-                .ok_or(PreparedRuntimeError::UnknownBinding(*id))?;
-            let BoundValue::Prepared { handle, origin, .. } = entry.value else {
-                return Err(PreparedRuntimeError::UnknownBinding(*id));
+                .get(id)
+                .ok_or(PreparedRuntimeError::UnknownBinding(id))?;
+            let BoundValue::Prepared { handle, origin, .. } = &entry.value else {
+                return Err(PreparedRuntimeError::UnknownBinding(id));
             };
+            let handle = *handle;
             let generation = entry.module.gen().0;
-            let entry_signature = origin.and_then(|origin| self.export_signature(origin));
+            let entry_signature = origin.as_ref().and_then(|origin| origin.export.clone());
             let evaluated = self
                 .machine_ref()?
                 .handle_is_evaluated(handle)
@@ -460,7 +532,9 @@ impl PreparedRuntime {
                 },
             );
             bindings.insert(identity.clone(), handle);
+            leased.push(id);
         }
+        let facts = ProgramFacts::of(&prepared);
         let linked = link_program(prepared, &values)?;
         let machine = self.machine_mut()?;
         let compiled = machine
@@ -469,38 +543,50 @@ impl PreparedRuntime {
         let program = machine
             .install_program(compiled, bindings)
             .map_err(Self::classify_execution)?;
-        self.bindings
-            .acquire_leases(imports.iter().map(|(_, id)| *id));
-        self.realm_leases
-            .entry(realm)
-            .or_default()
-            .extend(imports.iter().map(|(_, id)| *id));
-        self.programs.insert(program, linked);
+        self.bindings.acquire_leases(leased.iter().copied());
+        self.realm_leases.entry(realm).or_default().extend(leased);
+        self.programs.insert(program, facts);
         Ok(program)
     }
 
+    /// The live binding an artifact's declared import resolves to by
+    /// identity: the one bound from a top whose declared identity is
+    /// `identity`, at `generation` when the artifact pins one, otherwise the
+    /// newest such binding.
+    fn resolve_import(
+        &self,
+        identity: &SymbolIdentity,
+        generation: Option<u64>,
+    ) -> Option<SessionVarId> {
+        self.bindings
+            .iter_live()
+            .filter(|entry| {
+                matches!(
+                    &entry.value,
+                    BoundValue::Prepared { origin: Some(origin), .. } if &origin.identity == identity
+                )
+            })
+            .filter(|entry| generation.is_none_or(|generation| entry.module.gen().0 == generation))
+            .max_by_key(|entry| entry.module.gen())
+            .map(|entry| entry.id)
+    }
+
     /// Install one live session turn's projected artifact and bind the name
-    /// it introduces at the runtime's current generation. `imports` pairs
-    /// each retained-generation identity the turn's module declared with the
-    /// session binding that satisfies it. This is [`Self::install_prepared`]
-    /// followed by [`Self::bind_top`] against the freshly installed
-    /// program's own entry — the link+install+bind sequence
-    /// [`super::prepared_turn::SessionTurns::run`] drives after it has
-    /// projected `prepared` through `ExtractCmd`'s `--target` mode.
+    /// it introduces at the runtime's current generation. Every
+    /// retained-generation import the turn's module declares resolves by
+    /// identity to the binding recorded at [`Self::bind_top`] (there is no
+    /// caller-supplied import list to get wrong). This is
+    /// [`Self::install_prepared`] followed by [`Self::bind_top`] against the
+    /// freshly installed program's own entry — the link+install+bind
+    /// sequence [`super::prepared_turn::SessionTurns::run`] drives after it
+    /// has projected `prepared` through `ExtractCmd`'s `--target` mode.
     pub fn turn(
         &mut self,
         prepared: PreparedProgram,
-        imports: &[(SymbolIdentity, SessionVarId)],
         introduces: &str,
     ) -> Result<SessionVarId, PreparedRuntimeError> {
-        let program = self.install_prepared(prepared, imports)?;
-        let entry = self
-            .programs
-            .get(&program)
-            .map(|linked| linked.prepared().entry())
-            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
-                program,
-            )))?;
+        let entry = prepared.entry();
+        let program = self.install_prepared(prepared, &[])?;
         self.bind_top(program, entry, introduces)
     }
 
@@ -526,27 +612,6 @@ impl PreparedRuntime {
             ));
         }
         Ok(())
-    }
-
-    /// The signature a bound top exports, from its producing program's own
-    /// declaration: a function's or thunk's entry signature, none for a
-    /// constructor or byte top. What an importer's `entry_signature`
-    /// declaration must equal at link time.
-    fn export_signature(&self, (program, value): (ProgramId, ValueId)) -> Option<Signature> {
-        let prepared = self.programs.get(&program)?.prepared();
-        let binding = prepared
-            .bindings()
-            .iter()
-            .flat_map(|group| match group {
-                Group::NonRecursive(top) => std::slice::from_ref(top),
-                Group::Recursive(tops) => tops.as_slice(),
-            })
-            .find(|top| top.binding.id == value)?;
-        let signature = match &binding.binding.rhs {
-            HeapRhs::Function { signature, .. } | HeapRhs::Thunk { signature, .. } => *signature,
-            HeapRhs::Constructor { .. } | HeapRhs::Bytes(_) => return None,
-        };
-        prepared.signatures().get(signature.0 as usize).cloned()
     }
 
     #[must_use]
@@ -838,6 +903,7 @@ impl PreparedRuntime {
         let linked = self.pending.take().ok_or(PreparedRuntimeError::Run(
             ExecutionError::UnknownProgram(ProgramId::FIRST),
         ))?;
+        let facts = ProgramFacts::of(linked.prepared());
         let compiled = match CompiledProgram::compile(&linked, TopSlotBase::ZERO) {
             Ok(compiled) => compiled,
             Err(error) => {
@@ -861,7 +927,7 @@ impl PreparedRuntime {
         };
         let program = installed.1;
         self.machine = Some(installed);
-        self.programs.insert(program, linked);
+        self.programs.insert(program, facts);
         Ok(program)
     }
 
@@ -894,7 +960,7 @@ impl PreparedRuntime {
         }
         self.programs
             .get(&program)
-            .map(|linked| linked.prepared().entry())
+            .map(|facts| facts.entry)
             .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
                 program,
             )))
@@ -1482,6 +1548,80 @@ mod tests {
             Err(PreparedRuntimeError::UnknownBinding(id)) if id == free
         ));
         assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
+    }
+
+    // ---- G2: identity and leases come from the program -------------------
+
+    /// A bound top records the identity and entry signature its producing
+    /// artifact declared -- exactly what an importer's `GlobalDecl` names --
+    /// so an install resolves the import by identity with no caller list.
+    #[test]
+    fn a_bound_top_records_the_identity_an_importer_declares() {
+        let (mut runtime, first) = session();
+        let id = runtime
+            .bind_top(first, ValueId(0), "producer")
+            .expect("producer top binds");
+        let BoundValue::Prepared {
+            origin: Some(origin),
+            ..
+        } = &runtime.bindings().get(id).expect("live binding").value
+        else {
+            panic!("a bound top records its origin");
+        };
+        assert_eq!(origin.identity, producer_identity());
+        assert_eq!(origin.program, first);
+        assert_eq!(origin.value, ValueId(0));
+        assert_eq!(
+            origin.export,
+            Some(Signature {
+                arguments: vec![],
+                results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+            }),
+            "a thunk top exports its zero-argument entry signature"
+        );
+
+        let consumer = runtime
+            .install_prepared(consumer_program(false, Some(1)), &[])
+            .expect("the declared import resolves by the recorded identity");
+        assert_ne!(consumer, first);
+        assert_eq!(runtime.bindings().lease_count(id), 1);
+    }
+
+    /// Leases follow what the PROGRAM declares. A caller that names a
+    /// binding the artifact never imports (the phantom-lease shape every
+    /// session turn used to produce by passing every live binding) leases
+    /// nothing, and that binding still releases.
+    #[test]
+    fn an_install_leases_only_the_bindings_its_program_declares() {
+        let (mut runtime, first) = session();
+        let imported = runtime
+            .bind_top(first, ValueId(0), "imported")
+            .expect("binds at generation 1");
+        runtime.advance_generation();
+        let unrelated = runtime
+            .bind_top(first, ValueId(0), "unrelated")
+            .expect("binds again at generation 2");
+        let undeclared = SymbolIdentity {
+            occurrence: "neverImported".into(),
+            ..producer_identity()
+        };
+
+        runtime
+            .install_prepared(consumer_program(false, Some(1)), &[(undeclared, unrelated)])
+            .expect("the declared generation-1 import resolves by identity");
+        assert_eq!(runtime.bindings().lease_count(imported), 1);
+        assert_eq!(
+            runtime.bindings().lease_count(unrelated),
+            0,
+            "a pair for an identity the program does not declare leases nothing"
+        );
+        runtime
+            .release_binding(unrelated)
+            .expect("the never-imported binding releases");
+        assert!(matches!(
+            runtime.release_binding(imported),
+            Err(PreparedRuntimeError::BindingLeased { leases: 1, .. })
+        ));
     }
 
     // ---- A4: Send, realm-owned leases, cross-realm refusal, holes --------

@@ -105,9 +105,9 @@ fn later_turn_imports_an_earlier_turns_binding_by_retained_generation() {
     assert_ne!(it, producer_fn);
 
     let BoundValue::Prepared {
-        origin: Some((program, entry)),
+        origin: Some(origin),
         ..
-    } = runtime
+    } = &runtime
         .bindings()
         .get(it)
         .expect("`it` is a live binding")
@@ -115,6 +115,7 @@ fn later_turn_imports_an_earlier_turns_binding_by_retained_generation() {
     else {
         panic!("`it` was bound from turn 3's own program entry");
     };
+    let (program, entry) = (origin.program, origin.value);
     let result = runtime
         .run_entry_in(program, entry, &[], true, RealmId::ROOT)
         .expect("turn 3's entry runs");

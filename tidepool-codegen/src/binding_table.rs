@@ -74,7 +74,7 @@ struct BindingTip {
 /// Both variants hold the stable [`RootSlot`] the GC updates in place; the
 /// distinction records *how the value was prepared at bind time*, which the
 /// `:bindings` view and any future re-forcing logic consult.
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub enum BoundValue {
     /// First-order data (Tier-0): `deep_force`d to normal form then tenured.
     Tier0Forced(RootSlot),
@@ -85,17 +85,29 @@ pub enum BoundValue {
     /// (never deep-forced, so its preparation policy is Tier-1's), rooted by
     /// `root` for the machine's life. `handle` is the machine's own custody of
     /// that same root (what a later program's `ImportBindings` names), and
-    /// `origin` is the installed program and top-level binding it was
-    /// retained from, when it is a top rather than an entry result -- the
-    /// exporting signature an importer's declaration is linked against.
+    /// `origin` says which installed program's top-level binding it was
+    /// retained from, when it is a top rather than an entry result.
     Prepared {
         root: RootSlot,
         handle: crate::prepared_program::PreparedHandle,
-        origin: Option<(
-            crate::prepared_program::ProgramId,
-            tidepool_repr::execution_schema::ValueId,
-        )>,
+        origin: Option<PreparedOrigin>,
     },
+}
+
+/// Where a [`BoundValue::Prepared`] top came from, recorded at bind time
+/// from the producing artifact's own `TopBinding` -- the facts an importer
+/// links against, kept ON the binding so no caller ever reconstructs them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedOrigin {
+    pub program: crate::prepared_program::ProgramId,
+    pub value: tidepool_repr::execution_schema::ValueId,
+    /// The top's declared identity: exactly what a later program's
+    /// `GlobalDecl::identity` names when it imports this binding.
+    pub identity: tidepool_repr::execution_schema::SymbolIdentity,
+    /// The top's entry signature (a function's or thunk's), `None` for a
+    /// constructor or byte top -- what an importer's declared
+    /// `entry_signature` must equal at link time.
+    pub export: Option<tidepool_repr::execution_schema::Signature>,
 }
 
 impl BoundValue {

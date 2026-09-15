@@ -370,6 +370,28 @@ pub struct TurnTemplate {
 /// silently parsing session-decl code in a different dialect than eval does.
 pub const DECL_TEMPLATE_SOURCE: &str = "{-# LANGUAGE GADTs, OverloadedStrings, TypeOperators, DataKinds, KindSignatures, ScopedTypeVariables, BangPatterns, ViewPatterns, TupleSections, MultiWayIf, LambdaCase, RecordWildCards, NamedFieldPuns, DeriveFunctor, DeriveFoldable, DeriveTraversable, TypeApplications, QuasiQuotes, OverloadedLabels #-}\nmodule SessionDecls where\n{{TURN}}\n";
 
+/// The one module a prepared-STG session turn compiles as
+/// ([`super::prepared_turn::SessionTurns`]): `module_name` is the turn's
+/// value module (`SessionModule::val(g).module_name()`), `imports` are
+/// earlier turns' modules as `(module, names)` pairs, and `body` is the
+/// single top-level declaration the turn introduces. Kept beside the Core
+/// turn templates so the two turn paths share one owner for module text.
+#[must_use]
+pub fn prepared_turn_module(
+    module_name: &str,
+    imports: &[(String, Vec<String>)],
+    body: &str,
+) -> String {
+    let mut source = format!("module {module_name} where\n\n");
+    for (module, names) in imports {
+        source.push_str(&format!("import {module} ({})\n", names.join(", ")));
+    }
+    source.push('\n');
+    source.push_str(body);
+    source.push('\n');
+    source
+}
+
 /// One `run_turn` request: the raw turn text, the wrapper templates it may
 /// need, the session context, the bind generation, and an optional
 /// caller-supplied verdict.

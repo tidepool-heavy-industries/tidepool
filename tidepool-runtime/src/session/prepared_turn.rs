@@ -1,91 +1,48 @@
 //! Live session turns projected through the PREPARED-STG path (`--target`),
 //! not the Core `--turn` path [`super::turn::run_turn`] drives.
 //!
-//! `session::turn`'s mechanism renders raw turn text into ONE scaffold module
-//! per turn via a `{{TURN}}`/`{{TURN_STMT}}` splice
-//! ([`super::workbench::resident_workbench_templates`]) and compiles it as
-//! `LegacyCore`. That produces a `CoreExpr`, never a prepared-STG artifact, so
-//! it cannot feed [`super::prepared::PreparedRuntime`]. This module is the
-//! prepared-STG counterpart: each turn becomes its OWN tiny standalone `.hs`
-//! FILE on disk, projected with `tidepool_extract_cmd::ExtractCmd`'s
-//! `--target` mode (confirmed end-to-end by the S5/S6/A2/A6 cards — see
-//! `haskell/test-prepared-stg/ImportProducer.hs` /
-//! `ImportConsumer.hs` for the hand-authored precedent this module automates).
+//! `session::turn`'s Core mechanism compiles a turn to a `CoreExpr`, which
+//! cannot feed [`super::prepared::PreparedRuntime`]. Here each turn is its
+//! own module `Tidepool.Session.Val.G<g>` (the same value-module name the
+//! Core session uses), written under `session_root` at
+//! [`SessionModule::relative_hs_path`] and projected with
+//! `tidepool_extract_cmd::ExtractCmd`'s `--target` mode. Module text comes
+//! from the one template owner, [`super::turn::prepared_turn_module`].
 //!
-//! One deliberate departure from `session::turn`'s `Tidepool.Session.Val.G<g>`
-//! naming: that dotted, hierarchical name is only ever used for an INJECTED
-//! `--inject-val` iface, never as the PRIMARY compile input. As the primary
-//! input to `--target` mode it breaks, because
-//! `haskell/src/Tidepool/GhcPipeline.hs`'s single-file pipeline derives its
-//! own notion of "the target module" as `capitalize (takeBaseName path)` —
-//! the bare file basename, never the parsed, dotted `module ... where` header
-//! — and then filters compiled guts by STRING EQUALITY against that bare
-//! name (`runPipeline: target module '<name>' not found among compiled
-//! modules: [...]`, `GhcPipeline.hs` lines 657/945/975). A hierarchical
-//! module at `Tidepool/Session/Val/G1.hs` compiles fine (GHC itself resolves
-//! it) but is never recognized as ITS OWN target, because its real module
-//! name (`"Tidepool.Session.Val.G1"`) never string-equals its file's bare
-//! basename (`"G1"`) — confirmed by reproducing exactly that rejection while
-//! building this mechanism. Ordinary flat module authoring — module name
-//! equal to file basename, per [`turn_module_name`] — sidesteps it without
-//! touching the extractor; see this module's top-level doc on the mechanism
-//! for the finding recorded at the call site that hit it.
+//! A later turn imports each earlier turn's module by name (all live under
+//! the same `--include` session root) and declares every live binding as a
+//! retained-generation import, so the projection links it against the
+//! runtime's live value instead of recompiling its body. Both the import
+//! line and the retained identity come from the identity recorded on the
+//! binding when it was bound ([`PreparedOrigin`]); nothing is reconstructed
+//! from names, and [`PreparedRuntime::turn`] resolves and leases exactly the
+//! imports the projected program declares.
 //!
-//! A later turn's module plainly `import`s an earlier turn's module by name
-//! (both live directly under the same `--include` session-root directory, so
-//! GHC resolves them as ordinary home modules) and declares every
-//! already-bound session entry as a retained-generation executable import
-//! (`ExtractCmd::retained_generation`), so the projection excludes that
-//! import's body from recovery and links it against the runtime's live
-//! binding instead of recompiling it.
-//!
-//! Scope, deliberately: a turn here is always a single top-level binding (a
-//! bare `x = e` Decl, or an Expr wrapped as `it = e`). There is no real GHC
-//! turn classification (`TurnKind`/`classify_block`) — callers supply the
-//! already-known shape directly ([`TurnForm`]) — and no IO/bind-effect turn
-//! semantics. Session-root lifecycle (creation, cleanup) is the caller's job;
-//! this module only ever writes into a directory it is given.
+//! Scope, deliberately: a turn is a single top-level binding (a bare
+//! `x = e` Decl, or an Expr wrapped as `it = e`). There is no GHC turn
+//! classification and no IO/bind-effect turn semantics. Session-root
+//! lifecycle is the caller's job; this module only writes into the
+//! directory it is given.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use tidepool_codegen::binding_table::{BoundValue, PreparedOrigin};
 use tidepool_extract_cmd::{BinError, ExtractCmd, ResolvedExtractBin, SpawnError};
 use tidepool_repr::execution_schema::{
     parse_program, DecodeLimits, MachineImports, PreparedProgram, SymbolIdentity,
 };
-use tidepool_repr::{Generation, SessionVarId};
+use tidepool_repr::{Generation, SessionModule, SessionVarId};
 
 use super::prepared::{PreparedRuntime, PreparedRuntimeError};
 
-/// The module name (and file basename) one turn's generation compiles under:
-/// a FLAT name, deliberately not `session::turn`'s dotted
-/// `Tidepool.Session.Val.G<g>` — see this module's top-level doc for why a
-/// dotted name breaks as `--target` mode's PRIMARY compile input.
-fn turn_module_name(generation: Generation) -> String {
-    format!("SessionTurnG{}", generation.0)
-}
-
-/// A snapshot of one already-bound session entry, enough to render its
-/// `import` line, its retained-generation declaration, and its
-/// [`PreparedRuntime::install_prepared`] import pair. Read from
-/// [`tidepool_codegen::binding_table::BindingTable::iter_live`] for every
-/// turn after the first.
-struct RetainedEntry {
-    module_name: String,
-    generation: u64,
-    name: String,
-    id: SessionVarId,
-}
-
-/// The raw shape of one turn's source. Real turn classification
-/// (`TurnKind`/`classify_block`) is out of scope for this mechanism; callers
-/// already know which shape they have.
+/// The raw shape of one turn's source. Callers already know which shape
+/// they have; real turn classification is out of scope here.
 pub enum TurnForm<'a> {
     /// A top-level declaration, verbatim (`"producerValue = [1, 2, 3]"`).
     Decl(&'a str),
-    /// A bare expression, wrapped as `<introduces> = <expr>` (matching
-    /// `session::turn`'s `it` convention for a reference turn with no
-    /// explicit binder).
+    /// A bare expression, wrapped as `<introduces> = <expr>` (the Core
+    /// session's `it` convention for a turn with no explicit binder).
     Expr(&'a str),
 }
 
@@ -109,10 +66,15 @@ pub enum PreparedTurnError {
     Runtime(#[from] PreparedRuntimeError),
 }
 
+/// One live prepared binding a later turn may import: its recorded identity
+/// and the generation it was bound at.
+struct Retained {
+    identity: SymbolIdentity,
+    generation: u64,
+}
+
 /// Compiles and installs live session turns on one [`PreparedRuntime`]
-/// through the prepared-STG projection, writing each turn's own module under
-/// `session_root` and resolving every prior turn's binding as a
-/// retained-generation import.
+/// through the prepared-STG projection.
 pub struct SessionTurns {
     bin: ResolvedExtractBin,
     session_root: PathBuf,
@@ -136,10 +98,9 @@ impl SessionTurns {
     }
 
     /// Project and install the SESSION'S FIRST turn: builds a fresh
-    /// [`PreparedRuntime`] from `form`'s own artifact (there is nothing yet
-    /// to retain), sets its generation to `Generation(1)`, and binds
-    /// `introduces` there. Every later turn goes through [`Self::run`]
-    /// instead, against the runtime this returns.
+    /// [`PreparedRuntime`] from `form`'s own artifact (nothing to retain
+    /// yet), starts generation 1, and binds `introduces` there. Every later
+    /// turn goes through [`Self::run`] against the runtime this returns.
     pub fn first(
         &self,
         form: TurnForm<'_>,
@@ -147,9 +108,6 @@ impl SessionTurns {
     ) -> Result<(PreparedRuntime, SessionVarId), PreparedTurnError> {
         let generation = Generation(1);
         let prepared = self.project(generation, &[], form, introduces)?;
-        // Captured before `from_prepared` takes ownership: the projection's
-        // own declared entry IS this turn's binder, the only target it was
-        // asked for.
         let entry = prepared.entry();
         let mut runtime = PreparedRuntime::from_prepared(prepared, MachineImports::default())?;
         let first_program = runtime.first_program()?;
@@ -158,12 +116,10 @@ impl SessionTurns {
         Ok((runtime, id))
     }
 
-    /// Project `form` as the next turn introducing `introduces`, advancing
-    /// `runtime`'s generation, installing the result, and binding
-    /// `introduces` at the new generation. Every session entry already bound
-    /// on `runtime` is declared as a retained-generation import and given a
-    /// real Haskell `import` of its `Tidepool.Session.Val.G<g>` module, so a
-    /// later turn can reference an earlier one by name.
+    /// Project `form` as the next turn introducing `introduces`: advance
+    /// `runtime`'s generation, declare every live binding as a
+    /// retained-generation import, install the result, and bind
+    /// `introduces` at the new generation.
     pub fn run(
         &self,
         runtime: &mut PreparedRuntime,
@@ -171,83 +127,65 @@ impl SessionTurns {
         introduces: &str,
     ) -> Result<SessionVarId, PreparedTurnError> {
         let generation = runtime.advance_generation();
-        // `entry.module.gen()` is exactly this mechanism's own generation
-        // (set by `PreparedRuntime::bind_top` to `self.val_gen` at bind
-        // time, i.e. the generation `Self::project` compiled that turn
-        // under), so `turn_module_name` recovers the REAL GHC module name a
-        // prior turn was compiled as — deliberately not
-        // `entry.module.module_name()`, which is `BindingTable`'s own
-        // `Tidepool.Session.Val.G<g>` bookkeeping name for the Core `--turn`
-        // path and does not match what this mechanism actually compiled (see
-        // this module's top-level doc).
-        let retained: Vec<RetainedEntry> = runtime
+        let retained: Vec<Retained> = runtime
             .bindings()
             .iter_live()
-            .map(|entry| RetainedEntry {
-                module_name: turn_module_name(entry.module.gen()),
-                generation: entry.module.gen().0,
-                name: entry.name.0.clone(),
-                id: entry.id,
+            .filter_map(|entry| match &entry.value {
+                BoundValue::Prepared {
+                    origin: Some(PreparedOrigin { identity, .. }),
+                    ..
+                } => Some(Retained {
+                    identity: identity.clone(),
+                    generation: entry.module.gen().0,
+                }),
+                _ => None,
             })
             .collect();
         let prepared = self.project(generation, &retained, form, introduces)?;
-        let import_pairs: Vec<(SymbolIdentity, SessionVarId)> = retained
-            .iter()
-            .map(|entry| {
-                (
-                    SymbolIdentity {
-                        unit: "main".to_owned(),
-                        module: entry.module_name.clone(),
-                        namespace: "value".to_owned(),
-                        occurrence: entry.name.clone(),
-                        record_parent: None,
-                    },
-                    entry.id,
-                )
-            })
-            .collect();
-        Ok(runtime.turn(prepared, &import_pairs, introduces)?)
+        Ok(runtime.turn(prepared, introduces)?)
     }
 
     /// Write `form`'s module under `session_root` at `generation`, declare
     /// every entry in `retained` as a retained-generation import (both the
-    /// real Haskell `import` and `ExtractCmd::retained_generation`), and
-    /// project it with `tidepool-extract`'s `--target` mode.
+    /// Haskell `import` and `ExtractCmd::retained_generation`), and project
+    /// it with `tidepool-extract`'s `--target` mode.
     fn project(
         &self,
         generation: Generation,
-        retained: &[RetainedEntry],
+        retained: &[Retained],
         form: TurnForm<'_>,
         introduces: &str,
     ) -> Result<PreparedProgram, PreparedTurnError> {
-        let module_name = turn_module_name(generation);
-        let module_path = self.session_root.join(format!("{module_name}.hs"));
-        std::fs::create_dir_all(&self.session_root).map_err(|source| PreparedTurnError::Io {
-            path: self.session_root.clone(),
+        let module = SessionModule::val(generation);
+        let module_path = self.session_root.join(module.relative_hs_path());
+        let module_dir = module_path
+            .parent()
+            .map_or_else(|| self.session_root.clone(), std::path::Path::to_path_buf);
+        std::fs::create_dir_all(&module_dir).map_err(|source| PreparedTurnError::Io {
+            path: module_dir.clone(),
             source,
         })?;
 
-        // One `import M (a, b, ...)` line per prior turn's module, grouping
-        // names in case a future caller ever binds more than one name per
-        // generation (this card's own turns bind exactly one each).
         let mut by_module: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for entry in retained {
             by_module
-                .entry(entry.module_name.clone())
+                .entry(entry.identity.module.clone())
                 .or_default()
-                .push(entry.name.clone());
+                .push(entry.identity.occurrence.clone());
         }
-        let mut imports_src = String::new();
-        for (module_name, mut names) in by_module {
-            names.sort();
-            imports_src.push_str(&format!("import {module_name} ({})\n", names.join(", ")));
-        }
-
+        let imports: Vec<(String, Vec<String>)> = by_module
+            .into_iter()
+            .map(|(module, mut names)| {
+                names.sort();
+                names.dedup();
+                (module, names)
+            })
+            .collect();
         let body = match form {
             TurnForm::Decl(text) => text.to_string(),
             TurnForm::Expr(text) => format!("{introduces} = {text}"),
         };
-        let source = format!("module {module_name} where\n\n{imports_src}\n{body}\n");
+        let source = super::turn::prepared_turn_module(&module.module_name(), &imports, &body);
         std::fs::write(&module_path, source).map_err(|source| PreparedTurnError::Io {
             path: module_path.clone(),
             source,
@@ -271,16 +209,7 @@ impl SessionTurns {
             cmd.include(include);
         }
         for entry in retained {
-            cmd.retained_generation(
-                tidepool_extract_cmd::SymbolIdentity {
-                    unit: "main".to_owned(),
-                    module: entry.module_name.clone(),
-                    namespace: "value".to_owned(),
-                    occurrence: entry.name.clone(),
-                    record_parent: None,
-                },
-                entry.generation,
-            );
+            cmd.retained_generation(extract_identity(&entry.identity), entry.generation);
         }
 
         let endpoint = cmd.bind()?;
@@ -303,5 +232,17 @@ impl SessionTurns {
             &requirements,
             DecodeLimits::default(),
         )?)
+    }
+}
+
+/// The extractor request's copy of a symbol identity. `tidepool-extract-cmd`
+/// does not depend on `tidepool-repr`, so this is the one conversion site.
+fn extract_identity(identity: &SymbolIdentity) -> tidepool_extract_cmd::SymbolIdentity {
+    tidepool_extract_cmd::SymbolIdentity {
+        unit: identity.unit.clone(),
+        module: identity.module.clone(),
+        namespace: identity.namespace.clone(),
+        occurrence: identity.occurrence.clone(),
+        record_parent: identity.record_parent.clone(),
     }
 }

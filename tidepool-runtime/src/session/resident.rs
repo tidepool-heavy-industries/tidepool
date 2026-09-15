@@ -883,7 +883,7 @@ where
             }
             .into());
         }
-        let value = source_entry.value;
+        let value = source_entry.value.clone();
         let id = SessionVarId::from_extract(alias.var_id);
         if self.core.bindings().get(id).is_some() {
             return Err(BindingAliasError::IdentityInUse(id).into());
