@@ -1044,6 +1044,16 @@ fn collect_prepared(
                 // No fallible work between copying and publishing ownership.
                 std::mem::swap(active, &mut prepared.spare);
                 *completed_copy = true;
+                // `spare` is now the retired from-space. Under
+                // `gc_poison_enabled()` it is filled with the same tag the
+                // legacy collector uses, so a pointer the trace missed (an
+                // unregistered frame, a forgotten root) reads back as an
+                // unmistakable failure instead of the stale-but-plausible
+                // object it used to point at. Nothing reads this buffer
+                // again until the next copy overwrites it.
+                if gc_poison_enabled() {
+                    prepared.spare.fill(0xDDDD_DDDD_DDDD_DDDD);
+                }
                 state.active_start = active.as_mut_ptr().cast();
                 state.active_size = std::mem::size_of_val(active.as_slice());
                 prepared.used = result.bytes_copied;

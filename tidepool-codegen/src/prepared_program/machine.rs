@@ -4482,10 +4482,16 @@ mod tests {
     #[test]
     fn s2b_second_program_native_frame_is_walked_through_the_stack_map_chain() {
         let _poison_guard = PoisonGuard::enabled();
+        // 40 Cons cells are 640 bytes of payload+header: under a 256-byte
+        // nursery the chain CANNOT be built without collecting while B's
+        // own frame, holding the previous cell as a bare local, is live.
+        // (Under the 4096-byte default it fit entirely, and the one
+        // collection the test used to observe was result retention after B
+        // had returned -- a window in which a truncated chain is harmless.)
         let (mut machine, program_a) = PreparedMachine::new(
             base_program(TopSlotBase::ZERO, 995),
             PreparedMachineOptions {
-                nursery_bytes: RunOptions::default().nursery_bytes,
+                nursery_bytes: 256,
                 top_slots: 8,
             },
         )
@@ -4524,9 +4530,13 @@ mod tests {
                  return cleanly",
             );
         assert!(
-            b_result.collections >= 1,
-            "40 Cons cells in a default-sized nursery must force at least one collection \
-             DURING B's own native call (collect_before_observation is false here)"
+            b_result.collections >= 2,
+            "640 bytes of Cons cells in a 256-byte nursery must force at least two \
+             collections DURING B's own native call, before the one result retention \
+             adds (collect_before_observation is false here). Mutation-checked: with \
+             `MachineState::stack_map_registries` truncated to A's registry this call \
+             fails with IncompletePromotion(InvalidManagedPointer), the dangling tail \
+             a missed root left pointing into the poisoned retired semispace"
         );
         let [PreparedResult::Managed(list)] = b_result.values.as_slice() else {
             panic!("B must return one managed list head");
