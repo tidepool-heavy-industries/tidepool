@@ -2747,6 +2747,7 @@ where
             items: Vec::new(),
         }),
         target: None,
+        prepared: None,
     })
     .map_err(|failure| {
         ResidentActorWorkbenchError::Inspection(render_turn_compile_error(
@@ -6050,6 +6051,7 @@ where
         gen: compile_view.next_value_generation().0,
         verdict,
         target: None,
+        prepared: None,
     };
     // A failed worker may already have published a thin value interface.
     // Its identity is never reused, whether compilation or execution succeeds.

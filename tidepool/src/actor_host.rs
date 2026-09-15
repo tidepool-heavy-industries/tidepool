@@ -1665,6 +1665,7 @@ fn compile_driver(
         gen: 1,
         verdict: None,
         target: None,
+        prepared: None,
     })
     .map_err(render_root_compile_failure)?
     {

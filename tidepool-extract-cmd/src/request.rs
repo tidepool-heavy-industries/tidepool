@@ -52,7 +52,10 @@ enum Field {
     TargetModuleOnly,
     Include(OsString),
     Turn,
-    TurnTemplate { kind: String, path: PathBuf },
+    TurnTemplate {
+        kind: String,
+        path: PathBuf,
+    },
     TurnOut(OsString),
     TurnVerdict(OsString),
     Classify,
@@ -75,6 +78,9 @@ enum Field {
     InspectStructuredType(StructuredInspection),
     InspectOut(OsString),
     RetainedGeneration(SymbolIdentity, u64),
+    /// A `--turn` request that also writes its target's prepared-STG program
+    /// (`<target>.prepared.cbor`), compiled against the retained generations.
+    PreparedTurn,
 }
 
 /// A versioned, typed request for the Haskell compiler worker.
@@ -231,6 +237,7 @@ impl ExtractRequest {
                     let identity = decoder.symbol_identity()?;
                     Field::RetainedGeneration(identity, decoder.u64()?)
                 }
+                39 => Field::PreparedTurn,
                 other => return Err(ProtocolError::UnknownFieldTag(other)),
             };
             fields.push(field);
@@ -285,6 +292,13 @@ impl ExtractRequest {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Whether this turn request also asks for its prepared-STG program.
+    pub fn prepared_turn_requested(&self) -> bool {
+        self.fields
+            .iter()
+            .any(|field| matches!(field, Field::PreparedTurn))
     }
 
     pub(crate) fn input(&mut self, value: impl AsRef<OsStr>) {
@@ -384,6 +398,10 @@ impl ExtractRequest {
     pub(crate) fn retained_generation(&mut self, identity: SymbolIdentity, generation: u64) {
         self.fields
             .push(Field::RetainedGeneration(identity, generation));
+    }
+
+    pub(crate) fn prepared_turn(&mut self) {
+        self.fields.push(Field::PreparedTurn);
     }
 
     pub(crate) fn inspect_type(&mut self, expression: &str) {
@@ -487,6 +505,7 @@ impl ExtractRequest {
                         identity.record_parent.as_deref().unwrap_or(""),
                     )),
                 ),
+                Field::PreparedTurn => flags.push("--prepared-turn".into()),
             }
         }
         inputs.extend(flags);
@@ -742,6 +761,7 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
             encode_symbol_identity(out, identity);
             out.extend_from_slice(&generation.to_le_bytes());
         }
+        Field::PreparedTurn => out.push(39),
     }
 }
 
@@ -941,6 +961,30 @@ mod tests {
         request.retained_generation(identity.clone(), 3);
         let decoded = ExtractRequest::decode(&request.encode()).unwrap();
         assert_eq!(decoded.retained_generations().get(&identity), Some(&3u64));
+    }
+
+    #[test]
+    fn prepared_turn_round_trips_through_the_typed_protocol() {
+        let mut request = ExtractRequest::default();
+        request.input("turn.txt");
+        request.turn();
+        assert!(!ExtractRequest::decode(&request.encode())
+            .unwrap()
+            .prepared_turn_requested());
+        request.prepared_turn();
+        let decoded = ExtractRequest::decode(&request.encode()).unwrap();
+        assert!(decoded.prepared_turn_requested());
+        // A prepared turn writes different artifacts, so it keys differently.
+        assert!(request
+            .cli_argv()
+            .iter()
+            .any(|arg| arg == "--prepared-turn"));
+    }
+
+    #[test]
+    fn prepared_turn_is_absent_from_the_cli_flag_parser() {
+        let error = ExtractRequest::from_cli(&["--prepared-turn".into()]).unwrap_err();
+        assert_eq!(error.to_string(), "unknown option: --prepared-turn");
     }
 
     #[test]

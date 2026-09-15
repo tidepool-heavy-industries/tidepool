@@ -566,6 +566,7 @@ mod actual_seal {
             gen,
             verdict: None,
             target: None,
+            prepared: None,
         })
         .unwrap()
         {

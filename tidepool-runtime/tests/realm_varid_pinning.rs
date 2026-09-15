@@ -137,6 +137,7 @@ fn compile_bind_turn(
             items: Vec::new(),
         }),
         target: None,
+        prepared: None,
     })
     .unwrap_or_else(|error| panic!("compile bind turn for {literal}: {error}"));
     match result {
@@ -258,6 +259,7 @@ fn second_scope_fragment_env_excludes_first_scopes_session_var_id() {
             items: Vec::new(),
         }),
         target: None,
+        prepared: None,
     })
     .expect("compile read turn");
     let compiled_read = match read_result {

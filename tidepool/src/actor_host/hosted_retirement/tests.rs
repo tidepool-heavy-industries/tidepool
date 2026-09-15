@@ -971,6 +971,7 @@ async fn hosted_authored_failed_child_cleanup_retains_http_uncertainty() {
         gen: 1,
         verdict: None,
         target: None,
+        prepared: None,
     })
     .unwrap()
     {

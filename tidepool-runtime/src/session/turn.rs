@@ -26,6 +26,9 @@ use tempfile::TempDir;
 use tidepool_extract_cmd::{ExtractCmd, SpawnError};
 use tidepool_toolchain::extract_module_name;
 
+use tidepool_repr::execution_schema::{
+    parse_program, DecodeLimits, PreparedProgram, SymbolIdentity,
+};
 use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings};
 use tidepool_repr::{CoreExpr, DataConTable};
 
@@ -434,7 +437,34 @@ pub struct TurnRequest<'a> {
     /// uses and which names its target `result`. Forwarded as `--target`; the
     /// output file base is `result.cbor` either way.
     pub target: Option<&'a str>,
+    /// Ask the same compile to also produce this turn's prepared-STG program.
+    /// `None` is the Core-only turn every caller performs today.
+    pub prepared: Option<PreparedTurn<'a>>,
 }
+
+/// The prepared half of a turn request: the caller's live bindings, declared
+/// as executable imports so the projection links against them instead of
+/// recompiling their bodies. Retaining a binding is only meaningful when a
+/// prepared program is requested, so the two travel together.
+pub struct PreparedTurn<'a> {
+    pub retained: &'a [(SymbolIdentity, u64)],
+}
+
+/// `tidepool-extract-cmd` is a dependency leaf and cannot name
+/// `tidepool_repr`'s identity type; this is the one conversion site.
+fn extract_identity(identity: &SymbolIdentity) -> tidepool_extract_cmd::SymbolIdentity {
+    tidepool_extract_cmd::SymbolIdentity {
+        unit: identity.unit.clone(),
+        module: identity.module.clone(),
+        namespace: identity.namespace.clone(),
+        occurrence: identity.occurrence.clone(),
+        record_parent: identity.record_parent.clone(),
+    }
+}
+
+/// The turn target whose artifacts the worker writes when a template does not
+/// name its own: the extract's scaffold-reserved binding.
+const SCAFFOLD_TARGET: &str = "__result";
 
 /// Failure from the shared resident-turn boundary.
 ///
@@ -598,6 +628,8 @@ pub struct CompiledTurn {
     pub warnings: MetaWarnings,
     /// Typed suspension sites decoded from the `TurnOut` wire payload.
     pub asks: Vec<YieldSite>,
+    /// The turn's prepared-STG program, when the request asked for one.
+    pub prepared: Option<PreparedProgram>,
 }
 
 /// The result of [`run_turn`] — one variant per verdict, each carrying only
@@ -1208,6 +1240,12 @@ fn run_turn_with_pin(req: TurnRequest<'_>, pin: Option<&str>) -> Result<TurnResu
     if let Some(pin) = pin {
         cmd.turn_pin(pin);
     }
+    if let Some(prepared) = &req.prepared {
+        cmd.prepared_turn();
+        for (identity, generation) in prepared.retained {
+            cmd.retained_generation(extract_identity(identity), *generation);
+        }
+    }
 
     let endpoint = cmd.bind().map_err(map_notfound)?;
     crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
@@ -1248,13 +1286,20 @@ fn run_turn_with_pin(req: TurnRequest<'_>, pin: Option<&str>) -> Result<TurnResu
         });
     }
 
-    decode_turn_output_dir(temp.path()).map_err(Into::into)
+    let prepared_target = req
+        .prepared
+        .as_ref()
+        .map(|_| req.target.unwrap_or(SCAFFOLD_TARGET));
+    decode_turn_output_dir(temp.path(), prepared_target).map_err(Into::into)
 }
 
 /// Decode one item's full output directory into a [`TurnResult`]: the
 /// `TurnOut` CBOR sidecar (`turn.cbor`) plus, for a `Bind`/`Expr` verdict,
 /// `result.cbor`/`meta.cbor` off the SAME directory.
-fn decode_turn_output_dir(dir: &Path) -> Result<TurnResult, CompileError> {
+fn decode_turn_output_dir(
+    dir: &Path,
+    prepared_target: Option<&str>,
+) -> Result<TurnResult, CompileError> {
     let turn_out_path = dir.join("turn.cbor");
     if !turn_out_path.exists() {
         return Err(CompileError::MissingOutput(turn_out_path));
@@ -1279,7 +1324,7 @@ fn decode_turn_output_dir(dir: &Path) -> Result<TurnResult, CompileError> {
             asks,
             wrapped_source,
         } => {
-            let compiled = read_compiled_turn(dir, asks)?;
+            let compiled = read_compiled_turn(dir, asks, prepared_target)?;
             Ok(TurnResult::Bind {
                 binders,
                 bound,
@@ -1293,7 +1338,7 @@ fn decode_turn_output_dir(dir: &Path) -> Result<TurnResult, CompileError> {
             asks,
             wrapped_source,
         } => {
-            let compiled = read_compiled_turn(dir, asks)?;
+            let compiled = read_compiled_turn(dir, asks, prepared_target)?;
             Ok(TurnResult::Expr {
                 variant,
                 compiled,
@@ -1308,6 +1353,7 @@ fn decode_turn_output_dir(dir: &Path) -> Result<TurnResult, CompileError> {
 fn read_compiled_turn(
     output_dir: &Path,
     asks: Vec<YieldSite>,
+    prepared_target: Option<&str>,
 ) -> Result<CompiledTurn, CompileError> {
     let expr_path = output_dir.join("result.cbor");
     let meta_path = output_dir.join("meta.cbor");
@@ -1343,12 +1389,32 @@ fn read_compiled_turn(
     tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
     tidepool_codegen::host_fns::register_poisoned_externals(&warnings.poisoned);
 
+    let prepared = prepared_target
+        .map(|target| read_prepared_program(output_dir, target))
+        .transpose()?;
+
     Ok(CompiledTurn {
         expr,
         table,
         warnings,
         asks,
+        prepared,
     })
+}
+
+/// Read the prepared-STG program the worker wrote beside this turn's Core
+/// artifacts. A requested program that is absent is a missing output, never a
+/// silent Core-only turn.
+fn read_prepared_program(output_dir: &Path, target: &str) -> Result<PreparedProgram, CompileError> {
+    let path = output_dir.join(format!("{target}.prepared.cbor"));
+    if !path.exists() {
+        return Err(CompileError::MissingOutput(path));
+    }
+    let bytes = std::fs::read(&path)?;
+    let requirements = tidepool_toolchain::prepared_artifact::production_requirements()
+        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+    parse_program(&bytes, &requirements, DecodeLimits::default())
+        .map_err(|error| CompileError::ExtractFailed(format!("{path:?}: {error}")))
 }
 
 /// The decoded shape of the `TurnOut` CBOR sidecar, before `run_turn` reads
@@ -2100,6 +2166,7 @@ mod tests {
                 gen: 1,
                 verdict: Some(checked.items[0].verdict.clone()),
                 target: None,
+                prepared: None,
             },
             &first_pins,
         )
@@ -2122,6 +2189,7 @@ mod tests {
                 gen: 2,
                 verdict: Some(checked.items[1].verdict.clone()),
                 target: None,
+                prepared: None,
             },
             &second_pins,
         )
@@ -2216,6 +2284,7 @@ mod tests {
                 gen: 1,
                 verdict: Some(checked.items[1].verdict.clone()),
                 target: None,
+                prepared: None,
             },
             &pins,
         )
@@ -2609,12 +2678,60 @@ mod tests {
                 items: Vec::new(),
             }),
             target: None,
+            prepared: None,
         };
         let err = run_turn(req).unwrap_err();
         assert!(
             matches!(err.error, CompileError::ExtractFailed(_)),
             "expected a clean ExtractFailed, got {err:?}"
         );
+    }
+
+    /// A prepared turn is one compile that yields both halves: the Core the
+    /// session runs today, and the turn target's prepared-STG program.
+    #[test]
+    fn prepared_turn_writes_its_program_beside_the_core_artifacts() {
+        tidepool_testing::eval_harness::require_extract();
+        let session_root = TempDir::new().unwrap();
+        let templates = [TurnTemplate {
+            kind: TemplateSelector::Expr,
+            source: "module Expr where\n__result :: Int\n__result = {{TURN}}\n".to_string(),
+        }];
+        let request = |prepared| TurnRequest {
+            turn_text: "41 + 1",
+            templates: &templates,
+            include: &[],
+            session_root: session_root.path(),
+            inject_modules: &[],
+            gen: 0,
+            verdict: Some(TurnClassification {
+                kind: TurnKind::Expr,
+                binders: Vec::new(),
+                items: Vec::new(),
+            }),
+            target: None,
+            prepared,
+        };
+
+        let TurnResult::Expr { compiled, .. } = run_turn(request(None)).unwrap() else {
+            panic!("expr verdict produced another variant");
+        };
+        assert!(
+            compiled.prepared.is_none(),
+            "an ordinary turn compiles no prepared program"
+        );
+
+        let TurnResult::Expr { compiled, .. } =
+            run_turn(request(Some(PreparedTurn { retained: &[] }))).unwrap()
+        else {
+            panic!("expr verdict produced another variant");
+        };
+        assert!(
+            compiled.prepared.is_some(),
+            "a prepared turn carries its own program"
+        );
+        // The Core half is unchanged by asking for the prepared half.
+        assert!(!compiled.table.is_empty());
     }
 
     /// Ordered templates are a typechecking fallback, not a blanket recovery
@@ -2648,6 +2765,7 @@ mod tests {
                 items: Vec::new(),
             }),
             target: None,
+            prepared: None,
         })
         .expect_err("an infrastructure exception must not select the valid fallback template");
         assert!(
@@ -3182,6 +3300,7 @@ mod tests {
                 gen: 0,
                 verdict: Some(old.clone()),
                 target: None,
+                prepared: None,
             };
 
             match case.name {

@@ -59,6 +59,7 @@ async fn authored_seal_survives_lost_waiter_and_rejects_late_work() {
         gen,
         verdict: None,
         target: None,
+        prepared: None,
     })
     .unwrap()
     {
@@ -326,6 +327,7 @@ async fn hosted_lookup_and_status_use_actor_owned_views() {
         gen: 1,
         verdict: None,
         target: None,
+        prepared: None,
     })
     .unwrap()
     {
@@ -535,6 +537,7 @@ async fn resident_sleep_waits_fifteen_minutes_without_blocking_a_sibling() {
         gen: 1,
         verdict: None,
         target: None,
+        prepared: None,
     })
     .unwrap()
     {
@@ -683,6 +686,7 @@ async fn notebook_cell_cancellation_stops_at_item_boundaries() {
         gen: 1,
         verdict: None,
         target: None,
+        prepared: None,
     })
     .unwrap()
     {

@@ -34,6 +34,7 @@ fn named_profile_compile_failures() {
         gen: 1,
         verdict: None,
         target: None,
+        prepared: None,
     })
     .expect_err("a ReadOnly actor definition must not admit FsWrite");
     let failure = tidepool_runtime::classify_compile(&error.error);

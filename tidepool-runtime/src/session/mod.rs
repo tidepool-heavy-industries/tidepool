@@ -872,6 +872,7 @@ impl SessionLib {
                 items: Vec::new(),
             }),
             target: None,
+            prepared: None,
         })
         .map_err(|failure| SessionError::Compile(failure.error))?;
         let receipt = match turn_result {

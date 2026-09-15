@@ -56,6 +56,7 @@ data RequestField
   | InspectStructuredType StructuredInspection
   | InspectOut FilePath
   | RetainedGeneration SymbolIdentity Word64
+  | PreparedTurn
   deriving (Eq, Show)
 
 -- | A decoded compiler-worker invocation. This is the Haskell boundary's
@@ -91,6 +92,9 @@ data WorkerRequest = WorkerRequest
   -- it as a global carrying that generation, even when its defining module
   -- is compiled alongside this request as a home module.
   , requestRetainedGenerations :: Map SymbolIdentity Word64
+  -- | A turn that also writes its target's prepared-STG program from the
+  -- same compile, linked against 'requestRetainedGenerations'.
+  , requestPreparedTurn :: Bool
   }
   deriving (Eq, Show)
 
@@ -122,6 +126,7 @@ emptyWorkerRequest = WorkerRequest
   , requestInspections = []
   , requestInspectOut = Nothing
   , requestRetainedGenerations = Map.empty
+  , requestPreparedTurn = False
   }
 
 data InspectionRequest
@@ -205,6 +210,7 @@ requestFromFields = foldl apply emptyWorkerRequest
       RetainedGeneration identity generation -> request
         { requestRetainedGenerations =
             Map.insert identity generation (requestRetainedGenerations request) }
+      PreparedTurn -> request { requestPreparedTurn = True }
 
 workerRequestFlag :: String
 workerRequestFlag = "--worker-request-v7"
@@ -273,6 +279,7 @@ encodeField field = case field of
   InspectStructuredType query -> BS.singleton 37 <> encodeStructuredInspection query
   RetainedGeneration identity generation ->
     BS.singleton 38 <> encodeSymbolIdentity identity <> putU64 generation
+  PreparedTurn -> BS.singleton 39
 
 encodeSymbolIdentity :: SymbolIdentity -> BS.ByteString
 encodeSymbolIdentity identity =
@@ -372,6 +379,7 @@ pField bytes = do
       (identity, rest') <- pSymbolIdentity rest
       (generation, rest'') <- pWord64 rest'
       Right (RetainedGeneration identity generation, rest'')
+    39 -> Right (PreparedTurn, rest)
     _  -> Left ("worker request: unknown field tag " ++ show tag)
   where
     retired tag = Left ("worker request: retired field tag " ++ show tag)

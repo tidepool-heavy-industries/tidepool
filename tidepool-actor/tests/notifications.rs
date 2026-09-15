@@ -30,6 +30,7 @@ fn notification_facade_compiles_and_receipt_constructor_is_private() {
             gen,
             verdict: None,
             target: None,
+            prepared: None,
         })
     };
     assert!(matches!(
@@ -107,6 +108,7 @@ async fn notification_interpreter_denies_role_and_stale_target_then_continues() 
         gen,
         verdict: None,
         target: None,
+        prepared: None,
     })
     .unwrap()
     {

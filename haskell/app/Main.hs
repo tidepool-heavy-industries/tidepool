@@ -575,16 +575,25 @@ runTurnMode compiler args path = do
         let selector = templateSelectorForVerdict kind (sbBinders sb)
         let scope = scopeFromWorkerRequest args
             matching = [f | (name, f) <- templates, name == templateSelectorWireName selector]
+            -- A prepared turn is one PreparedStg compile: it yields the same
+            -- Core result the legacy path reads, plus the prepared modules.
+            compileTurn modulePath
+              | requestPreparedTurn args = do
+                  prepared <- compiler PreparedStg (Map.keysSet (requestRetainedGenerations args)) GeneralCompile (Just scope) modulePath (requestIncludes args) (requestBuildProductsDir args)
+                  return (pprPipelineResult prepared, pprModules prepared)
+              | otherwise = do
+                  legacy <- compiler LegacyCore Set.empty GeneralCompile (Just scope) modulePath (requestIncludes args) (requestBuildProductsDir args)
+                  return (legacy, [])
             compileVariants _ [] = error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
             compileVariants index (tmplFile:rest) = do
               (spliced, _modName, modulePath) <- spliceInto tmplFile
-              attempted <- try (compiler LegacyCore Set.empty GeneralCompile (Just scope) modulePath (requestIncludes args) (requestBuildProductsDir args))
+              attempted <- try (compileTurn modulePath)
               case attempted of
-                Right result -> return (index, spliced, result)
+                Right (result, preparedModules) -> return (index, spliced, modulePath, result, preparedModules)
                 Left err@(_ :: SomeException) -> case (fromException err :: Maybe SourceError, rest) of
                   (Just _, _ : _) -> compileVariants (index + 1) rest
                   _               -> throwIO err
-        (variant, spliced, result) <- compileVariants (0 :: Int) matching
+        (variant, spliced, compiledPath, result, preparedModules) <- compileVariants (0 :: Int) matching
         let binds       = prBinds result
             hscEnv      = prHscEnv result
             mCapturedTy = fmap T.pack (prCapturedType result)
@@ -595,6 +604,10 @@ runTurnMode compiler args path = do
         -- stays "result" regardless — every Rust caller reads result.cbor.
         let targetName = fromMaybe scaffoldTargetName (requestTarget args)
         asksSites <- writeWholeModuleClosed timing outDir hscEnv binds (prTyCons result) mCapturedTy warnTexts targetName scaffoldOutputBase
+        if requestPreparedTurn args
+          then writePreparedArtifacts outDir compiledPath hscEnv preparedModules [targetName]
+                 (requestRetainedGenerations args)
+          else pure ()
         let wrapped = T.pack spliced
         case selector of
           SBind -> do

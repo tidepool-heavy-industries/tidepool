@@ -12,6 +12,7 @@ checks = pure
   [ check "typed request decodes fields and a binary generation" typedRequestDecodes
   , check "typed inspection request retains query and output" typedInspectionDecodes
   , check "structured inspection retains scope namespace and provenance" structuredInspectionDecodes
+  , check "prepared turn field decodes beside turn mode" preparedTurnDecodes
   , check "unknown request versions are rejected" wrongVersionRejected
   , check "retired request flags are rejected" retiredFlagsRejected
   , check "unknown field tags are rejected" unknownTagRejected
@@ -56,6 +57,14 @@ structuredInspectionDecodes = case workerRequestFromArgv
       StructuredCurrentScope StructuredAnyName "WorkProgress" provenance
     public = StructuredInspection
       (StructuredPublicModule "Project.Work") StructuredTypeName "Task" provenance
+
+preparedTurnDecodes :: Bool
+preparedTurnDecodes = case (decoded [Input "turn.txt", Turn], decoded [Input "turn.txt", Turn, PreparedTurn]) of
+  (Right (Just plain), Right (Just prepared)) ->
+    not (requestPreparedTurn plain) && requestTurn prepared && requestPreparedTurn prepared
+  _ -> False
+  where
+    decoded = workerRequestFromArgv . workerArgv
 
 typedRequestDecodes :: Bool
 typedRequestDecodes = case workerRequestFromArgv ["--worker-request-v7", payload] of

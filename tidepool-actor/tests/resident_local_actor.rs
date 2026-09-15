@@ -100,6 +100,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
         gen: 1,
         verdict: None,
         target: None,
+        prepared: None,
     })
     .expect("compile resident policy")
     {

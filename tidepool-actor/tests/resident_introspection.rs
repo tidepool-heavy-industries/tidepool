@@ -85,6 +85,7 @@ async fn resident_eff_structured_introspection_is_reentrant_and_read_only() {
         gen: 1,
         verdict: None,
         target: None,
+        prepared: None,
     })
     .expect("compile resident introspection policy")
     {

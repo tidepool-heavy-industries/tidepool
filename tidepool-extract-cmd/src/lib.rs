@@ -571,6 +571,14 @@ impl ExtractCmd {
         self
     }
 
+    /// With `--turn`, also write the turn target's prepared-STG program
+    /// (`<target>.prepared.cbor`) from the same compile, linked against every
+    /// [`retained_generation`](Self::retained_generation) import.
+    pub fn prepared_turn(&mut self) -> &mut Self {
+        self.request.prepared_turn();
+        self
+    }
+
     /// Ask the compiler worker for GHC's type of an expression.
     pub fn inspect_type(&mut self, expression: &str) -> &mut Self {
         self.request.inspect_type(expression);

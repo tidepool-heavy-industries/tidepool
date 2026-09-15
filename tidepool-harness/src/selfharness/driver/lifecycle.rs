@@ -567,6 +567,7 @@ impl SelfHarnessDriver {
             gen: 0,
             verdict: None,
             target: None,
+            prepared: None,
         })
         .map_err(|failure| {
             DriverError::Session(format!(

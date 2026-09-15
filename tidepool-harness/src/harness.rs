@@ -1695,6 +1695,7 @@ impl Harness {
                 gen,
                 verdict: None,
                 target: None,
+                prepared: None,
             };
             run_turn(req)
         })
@@ -2113,6 +2114,7 @@ impl Harness {
                     gen,
                     verdict: Some(req_verdict),
                     target: None,
+                    prepared: None,
                 };
                 run_turn(req)
             })
