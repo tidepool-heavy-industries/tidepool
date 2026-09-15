@@ -53,6 +53,7 @@ import GHC.Unit.Module.ModSummary (ModSummary(..))
 import GHC.Types.TypeEnv (typeEnvTyCons)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe, text)
 import Tidepool.EffectSchema (YieldSite)
+import Tidepool.PreparedSites (SiteRejection)
 import Tidepool.FatIface (ExactInterfaceFailure(..), readExactInterface)
 import Tidepool.PreparedFacts (PreparedFacts, extractPreparedFacts)
 
@@ -67,6 +68,7 @@ data PreparedElaboration = PreparedElaboration
   , peBindings :: [CoreBind]
   , peSitedSiblings :: Map String Id
   , peYieldSites :: [YieldSite]
+  , peSiteRejections :: [SiteRejection]
   }
 
 -- | The migration state used until the production elaborator is installed.
@@ -78,6 +80,7 @@ unelaboratedModule guts = PreparedElaboration
   , peBindings = cg_binds guts
   , peSitedSiblings = mempty
   , peYieldSites = []
+  , peSiteRejections = []
   }
 
 -- | An executable record of the selected GHC 9.12 preparation policy.
@@ -108,6 +111,9 @@ data PreparedModule = PreparedModule
   , pmTagSigs :: StgCgInfos
   , pmSitedSiblings :: Map String Id
   , pmYieldSites :: [YieldSite]
+  -- | Typed sites that failed elaboration, raised only if projection
+  -- reaches their top binder. Empty for recovered package bodies.
+  , pmSiteRejections :: [SiteRejection]
   , pmFacts :: PreparedFacts
   }
 
@@ -115,11 +121,12 @@ data PreparedModule = PreparedModule
 -- object-code path, stopping before Cmm.  The caller must supply optimized,
 -- typed module guts before any Tidepool type erasure or cross-module flattening.
 prepareModule :: HscEnv -> ModSummary -> PreparedElaboration -> IO PreparedModule
-prepareModule hscEnv summary elaboration =
+prepareModule hscEnv summary elaboration = do
   let guts = peGuts elaboration
-  in prepareBindings hscEnv (cg_module guts) (ms_location summary)
-       (cg_tycons guts) (peBindings elaboration)
-       (peSitedSiblings elaboration) (peYieldSites elaboration)
+  prepared <- prepareBindings hscEnv (cg_module guts) (ms_location summary)
+    (cg_tycons guts) (peBindings elaboration)
+    (peSitedSiblings elaboration) (peYieldSites elaboration)
+  pure prepared { pmSiteRejections = peSiteRejections elaboration }
 
 -- | Exact optimized bindings retain their defining module and interface
 -- context. No fabricated ModSummary or cross-module Core grouping is needed:
@@ -265,5 +272,6 @@ prepareBindingsWithScope subsetScope hscEnv thisModule location tycons optimized
     , pmTagSigs = tagSigs
     , pmSitedSiblings = siblings
     , pmYieldSites = yieldSites
+    , pmSiteRejections = []
     , pmFacts = extractPreparedFacts thisModule tagSigs (map fst preparedBindings)
     }

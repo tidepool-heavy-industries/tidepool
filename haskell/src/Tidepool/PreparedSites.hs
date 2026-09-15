@@ -1,5 +1,6 @@
 module Tidepool.PreparedSites
   ( buildYieldSite
+  , SiteRejection(..)
   , elaboratePreparedSites
   , lookupPreparedVerb
   , resolvePreparedSiblings
@@ -44,21 +45,38 @@ import Tidepool.TypePolicy
 data ElaborationState = ElaborationState
   { esCounters :: !(Map T.Text Word64)
   , esSites :: ![YieldSite]
+  , esRejections :: ![SiteRejection]
+  }
+
+-- | A typed site that cannot carry concrete evidence (polymorphic, or not
+-- fully applied), attached to the top binder containing it. Whether it is an
+-- error depends on the projected target: projection raises it only when that
+-- binder's body is executed by the program, so an unrelated helper never
+-- rejects a program that does not use it.
+--
+-- Ownership by top binder is sound because elaboration runs on tidied Core:
+-- the top-level binders are final, and CorePrep/STG preparation keeps a site
+-- application inside the closure of the top binder that contained it.
+data SiteRejection = SiteRejection
+  { srBinder :: Id
+  , srMessage :: String
   }
 
 -- | Rewrite typed surface sites onto their exact generated siblings while
 -- Core still carries types. The caller supplies siblings collected from
--- tidied home-module guts in dependency order.
-elaboratePreparedSites :: Map String Id -> [CoreBind] -> ([CoreBind], [YieldSite])
+-- tidied home-module guts in dependency order. A polymorphic site is left
+-- unrewritten and recorded as a 'SiteRejection' for its top binder.
+elaboratePreparedSites :: Map String Id -> [CoreBind]
+  -> ([CoreBind], [YieldSite], [SiteRejection])
 elaboratePreparedSites siblings bindings =
   let (bindings', final) = runState (traverse rewriteBind bindings)
-        (ElaborationState mempty [])
-  in (bindings', reverse (esSites final))
+        (ElaborationState mempty [] [])
+  in (bindings', reverse (esSites final), reverse (esRejections final))
   where
     rewriteBind (NonRec binder rhs) =
-      NonRec binder <$> rewriteExpr (binderQualName binder) rhs
+      NonRec binder <$> rewriteExpr (binder, binderQualName binder) rhs
     rewriteBind (Rec pairs) = Rec <$> traverse (\(binder, rhs) ->
-      (binder,) <$> rewriteExpr (binderQualName binder) rhs) pairs
+      (binder,) <$> rewriteExpr (binder, binderQualName binder) rhs) pairs
 
     rewriteExpr origin expression = case expression of
       Var{} -> pure expression
@@ -102,20 +120,31 @@ elaboratePreparedSites siblings bindings =
                     TypeArgument index -> visibleTypes !! index
                     AppliedResultType -> exprType expression
                   inputs = map (visibleTypes !!) (vsInputTypeArgs spec)
-              answer' <- validateType origin (vsName spec) "result" answer
-              inputs' <- traverse (validateType origin (vsName spec) "input") inputs
-              ordinal <- nextOrdinal origin
-              let site = buildYieldSite spec origin ordinal answer' inputs'
-                  identity = ysSite site
-                  literal = mkCoreConApps intDataCon
-                    [Lit (LitNumber LitNumInt (fromIntegral identity))]
-              modify' (\current -> current {esSites = site : esSites current})
-              pure (mkApps (Var sibling) (prefix ++ literal : values))
+              let (topBinder, originName) = origin
+                  checked = (,) <$> validateType originName (vsName spec) SiteResult answer
+                    <*> traverse (validateType originName (vsName spec) SiteInput) inputs
+              case checked of
+                Left message -> do
+                  modify' (\current -> current
+                    {esRejections = SiteRejection topBinder message : esRejections current})
+                  pure (mkApps headExpr rewrittenArguments)
+                Right (answer', inputs') -> do
+                  ordinal <- nextOrdinal originName
+                  let site = buildYieldSite spec originName ordinal answer' inputs'
+                      identity = ysSite site
+                      literal = mkCoreConApps intDataCon
+                        [Lit (LitNumber LitNumInt (fromIntegral identity))]
+                  modify' (\current -> current {esSites = site : esSites current})
+                  pure (mkApps (Var sibling) (prefix ++ literal : values))
         Var surface
           | Just spec <- lookupPreparedVerb surface
-          , vsMisShapeIsError spec -> throw (SourceRejection
-              (vsName spec ++ " site in " ++ T.unpack origin
-                ++ " is not fully applied or has unresolved type arguments"))
+          , vsMisShapeIsError spec -> do
+              let (topBinder, originName) = origin
+                  message = vsName spec ++ " site in " ++ T.unpack originName
+                    ++ " is not fully applied or has unresolved type arguments"
+              modify' (\current -> current
+                {esRejections = SiteRejection topBinder message : esRejections current})
+              pure (mkApps headExpr rewrittenArguments)
         _ -> pure (mkApps headExpr rewrittenArguments)
 
     -- Type and coercion applications do not satisfy a verb's runtime arity.
@@ -159,13 +188,12 @@ lookupPreparedVerb binder = find matches sitedVerbs
           Just modul -> moduleNameString (moduleName modul) == vsModule spec
           Nothing -> False
 
-validateType :: T.Text -> String -> String -> Type -> State ElaborationState Type
-validateType origin verb position ty = do
+validateType :: T.Text -> String -> SiteTypePosition -> Type -> Either String Type
+validateType origin verb position ty =
   let stable = stabilizeEffectRows ty
-  if isEmptyVarSet (tyCoVarsOfType stable)
-    then pure stable
-    else throw (SourceRejection ("polymorphic " ++ verb ++ " " ++ position
-      ++ " site in " ++ T.unpack origin ++ ": " ++ renderType stable))
+  in if isEmptyVarSet (tyCoVarsOfType stable)
+    then Right stable
+    else Left (polymorphicSiteMessage verb position (T.unpack origin) (renderType stable))
 
 siteType :: Bool -> Type -> SiteType
 siteType listAnswer ty = SiteType rendered

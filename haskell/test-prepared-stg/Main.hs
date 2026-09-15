@@ -3,6 +3,7 @@ module Main (main) where
 import Control.Exception (SomeException, bracket, try)
 import Control.Monad (unless)
 import Data.List (isInfixOf, sort)
+import Data.String (fromString)
 import GHC (moduleNameString)
 import GHC.Builtin.Types (boolTy)
 import GHC.Unit.Types (moduleName)
@@ -13,6 +14,9 @@ import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CompilePurpose(..)
   , runPipeline, runPipelineSelected, withResidentPipelineSelected )
 import Tidepool.PreparedStg (PreparedModule(..))
+import qualified Data.Map.Strict as Map
+import qualified Tidepool.ExecutionProjection as Projection
+import qualified Tidepool.ExecutionSchema as Schema
 import Tidepool.EffectSchema (SiteType(..), YieldSite(..), sitedVerbs, vsName)
 import Tidepool.ExecutionIR
   ( LiteralInventory(..), PreparedFact(..), PreparedInventory(..), PreparedSupport(..), inventoryPreparedModule
@@ -62,6 +66,35 @@ preparedEvidence wanted result = case filter isWanted (pprModules result) of
   where
     isWanted = (== wanted) . moduleNameString . moduleName . pmModule
 
+-- | Project one entry of a prepared fixture module, as the extractor does.
+projectEntry :: PreparedPipelineResult -> String -> String
+  -> Map.Map Schema.SymbolIdentity Word -> Either Projection.ProjectionError Schema.WireProgram
+projectEntry result modul entry retained = Projection.projectPreparedTarget context (pprModules result)
+  where
+    context = Projection.ProjectionContext
+      { Projection.projectionProfile = "ghc-9.12-prepared-stg"
+      , Projection.projectionToolchain = "ghc-9.12.2"
+      , Projection.projectionTarget =
+          Schema.TargetDescriptor Schema.X86_64 Schema.LittleEndian 64 64 "sysv64" []
+      , Projection.projectionRetainedGenerations = Map.map fromIntegral retained
+      , Projection.projectionEntry = Schema.SymbolIdentity "main" (fromString modul) "value" (fromString entry) Nothing
+      , Projection.projectionFormattingAuthority = Nothing
+      , Projection.projectionTextUnit = Nothing
+      }
+
+-- | A deferred typed-site failure is raised exactly when projection reaches it.
+assertSiteRejection :: String -> String -> Either Projection.ProjectionError Schema.WireProgram -> IO ()
+assertSiteRejection label needle outcome = case outcome of
+  Left (Projection.RejectedTypedSite message)
+    | needle `isInfixOf` show message -> pure ()
+  other -> ioError (userError (label ++ ": expected a typed-site rejection containing "
+    ++ show needle ++ ", got " ++ either show (const "a projected program") other))
+
+assertProjects :: String -> Either Projection.ProjectionError Schema.WireProgram -> IO ()
+assertProjects label outcome = case outcome of
+  Right _ -> pure ()
+  Left failure -> ioError (userError (label ++ ": projection failed: " ++ show failure))
+
 expectFailure :: String -> IO result -> IO ()
 expectFailure label action = do
   outcome <- try (action >> pure ()) :: IO (Either SomeException ())
@@ -93,6 +126,7 @@ main = do
           unfold = unfoldDir </> "Unfold.hs"
           siteTarget = dir </> "SiteExpr.hs"
           malformedSiteTarget = dir </> "MalformedSiteExpr.hs"
+          polySiteTarget = dir </> "PolySiteExpr.hs"
           target = dir </> "Expr.hs"
           validTarget = unlines
             [ "module Expr where"
@@ -140,6 +174,26 @@ main = do
         , "typedSite :: Maybe Bool"
         , "typedSite = runLLMTurn @Bool \"prepared\""
         ])
+      writeFile polySiteTarget (unlines
+        [ "{-# LANGUAGE ScopedTypeVariables #-}"
+        , "{-# LANGUAGE TypeApplications #-}"
+        , "module PolySiteExpr where"
+        , "import Tidepool.Effects.Core"
+        , "polyHelper :: forall a. String -> Maybe a"
+        -- Fully applied to a computed argument, so the simplifier cannot
+        -- eta-reduce it to a partial, unelaborated verb occurrence.
+        , "polyHelper label = runLLMTurn @a (label ++ \"!\")"
+        , "{-# NOINLINE polyHelper #-}"
+        , "polyNested :: forall a. Bool -> String -> Maybe a"
+        , "polyNested flag label = if flag then runLLMTurn @a label else Nothing"
+        , "{-# NOINLINE polyNested #-}"
+        , "unrelated :: Int"
+        , "unrelated = 42"
+        , "usesHelper :: Maybe Bool"
+        , "usesHelper = polyHelper @Bool \"helper\""
+        , "usesNested :: Maybe Bool"
+        , "usesNested = polyNested @Bool True \"nested\""
+        ])
       writeFile malformedSiteTarget (unlines
         [ "{-# LANGUAGE TypeApplications #-}"
         , "module MalformedSiteExpr where"
@@ -162,8 +216,21 @@ main = do
                   && show (ysSite site) `isInfixOf` siteInventory
                 _ -> False)
         "typed site was not elaborated before preparation"
-      expectFailureContaining "direct malformed recognized site" "is not fully applied" $
-        runPipelineSelected PreparedStg malformedSiteTarget [dir]
+      -- Typed-site failures are deferred to projection: a module compiles, and
+      -- only a program that reaches the failing site is rejected.
+      malformedDirect <- runPipelineSelected PreparedStg malformedSiteTarget [dir]
+      assertSiteRejection "direct malformed recognized site" "is not fully applied"
+        (projectEntry malformedDirect "MalformedSiteExpr" "malformedSite" mempty)
+      polyDirect <- runPipelineSelected PreparedStg polySiteTarget [dir]
+      assertProjects "unrelated top beside a polymorphic site helper"
+        (projectEntry polyDirect "PolySiteExpr" "unrelated" mempty)
+      assertSiteRejection "reachable polymorphic site helper" "result type is unresolved"
+        (projectEntry polyDirect "PolySiteExpr" "usesHelper" mempty)
+      assertSiteRejection "reachable polymorphic site under a prepared case" "result type is unresolved"
+        (projectEntry polyDirect "PolySiteExpr" "usesNested" mempty)
+      assertProjects "retained polymorphic site helper is linked, not executed"
+        (projectEntry polyDirect "PolySiteExpr" "usesHelper"
+          (Map.singleton (Schema.SymbolIdentity "main" "PolySiteExpr" "value" "polyHelper" Nothing) 1))
       let forkAllSpec = case filter ((== "forkAll") . vsName) sitedVerbs of
             [spec] -> spec
             _ -> error "missing forkAll VerbSpec"
@@ -178,8 +245,9 @@ main = do
           "resident cold typed-site evidence differs from direct"
         assert (preparedEvidence "SiteExpr" siteWarm == (siteInventory, directSites))
           "resident warm typed-site evidence differs from direct"
-        expectFailureContaining "resident malformed recognized site" "is not fully applied" $
-          compileSite PreparedStg mempty GeneralCompile Nothing malformedSiteTarget [] Nothing
+        malformedResident <- compileSite PreparedStg mempty GeneralCompile Nothing malformedSiteTarget [] Nothing
+        assertSiteRejection "resident malformed recognized site" "is not fully applied"
+          (projectEntry malformedResident "MalformedSiteExpr" "malformedSite" mempty)
         siteRecovered <- compileSite PreparedStg mempty GeneralCompile Nothing siteTarget [] Nothing
         assert (preparedEvidence "SiteExpr" siteRecovered == (siteInventory, directSites))
           "resident compiler did not recover after malformed recognized site"

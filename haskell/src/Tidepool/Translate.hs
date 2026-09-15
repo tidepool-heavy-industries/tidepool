@@ -84,6 +84,8 @@ import Tidepool.PrimOps
 import Tidepool.PreparedSites (buildYieldSite, lookupPreparedVerb)
 import Tidepool.EffectSchema
   ( SiteAnswerSource (..)
+  , SiteTypePosition (..)
+  , polymorphicSiteMessage
   , VerbSpec (..)
   , YieldSite (..)
   , sitedVerbs
@@ -2807,20 +2809,13 @@ checkSiteInputType spec tys index =
 
 -- | Suspension sites carry concrete type metadata, so their answer type must
 -- be monomorphic at extraction time.
-data SiteTypePosition = SiteInput | SiteResult
-
 checkMonomorphicSite :: String -> SiteTypePosition -> Type -> TransM ()
 checkMonomorphicSite verb position ty = do
   binder <- gets tsCurrentBinder
   let siteDesc = maybe "<top level>" T.unpack binder
-      typeStr = Tidepool.GhcPipeline.renderType ty
-      (what, advice) = case position of
-        SiteInput -> (verb ++ " input", "The input type is unresolved. Add a concrete type annotation to the input.")
-        SiteResult -> (verb, "The result type is unresolved. Add a concrete result type annotation or visible type application, for example `"
-          ++ verb ++ " @Finding ...` when Finding is your intended result type.")
   when (not (isEmptyVarSet (tyCoVarsOfType ty))) $
-    throw $ SourceRejection $ "polymorphic " ++ what ++ " site in " ++ siteDesc ++ ": " ++ typeStr
-      ++ "\n" ++ advice
+    throw $ SourceRejection $
+      polymorphicSiteMessage verb position siteDesc (Tidepool.GhcPipeline.renderType ty)
 
 -- | Recognize GHC's unpackAppendCString# builtin.
 -- unpackAppendCString# :: Addr# -> [Char] -> [Char]

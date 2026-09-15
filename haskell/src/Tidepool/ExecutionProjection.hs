@@ -70,6 +70,7 @@ import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.Identity (varId)
 import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
+import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.PreparedFormatting
   (FormattingAuthority, FormattingSpec(..), FormattingIntrinsic(..), classifyFormatting)
 
@@ -95,6 +96,9 @@ data ProjectionError
   | DeferredFunctionSignatureMismatch SymbolIdentity Signature (Maybe Signature)
   | UnsupportedPrimitiveCall Text Signature
   | UnsupportedForeignCall Text Signature
+  -- | A typed site in a reachable top cannot carry concrete evidence. This
+  -- is a source error, reported with the compiler's own guidance.
+  | RejectedTypedSite Text
   deriving stock (Eq, Show)
 
 data PState = PState
@@ -223,7 +227,16 @@ projectPreparedTarget :: ProjectionContext -> [PreparedModule] -> Either Project
 projectPreparedTarget _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
 projectPreparedTarget context modules =
   let (identities, selected) = selectPreparedTarget context modules
-  in projectPreparedWithTopSymbols context selected identities
+      reachable = mkUniqSet [ varUnique binder | prepared <- selected
+        , (binding, _) <- pmBindings prepared, binder <- topBinders binding ]
+  in case [ srMessage rejection | prepared <- modules
+            , rejection <- pmSiteRejections prepared
+            , elementOfUniqSet (varUnique (srBinder rejection)) reachable
+            -- A retained-generation import's body is linked, never executed
+            -- here, so its sites cannot reject this program.
+            , not (skippedFromRecovery context (srBinder rejection)) ] of
+       message : _ -> Left (RejectedTypedSite (Text.pack message))
+       [] -> projectPreparedWithTopSymbols context selected identities
 
 -- | Exact external value references of the selected top closure. The identity
 -- map is always computed before filtering. Recovery uses Ids, never occurrence

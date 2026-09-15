@@ -4,6 +4,8 @@ module Tidepool.EffectSchema
   , NominalHead(..)
   , SiteType(..)
   , YieldSite(..)
+  , SiteTypePosition(..)
+  , polymorphicSiteMessage
   , sitedVerbs
   ) where
 
@@ -32,6 +34,21 @@ data YieldSite = YieldSite
   , ysReplyDeclaration :: Maybe Text
   }
   deriving (Eq, Show)
+
+-- | Which type of a suspension site failed the monomorphism requirement.
+data SiteTypePosition = SiteInput | SiteResult
+  deriving (Eq, Show)
+
+-- | The source diagnostic for a polymorphic typed site. Both the Core
+-- translator and the prepared elaborator render it through this one function.
+polymorphicSiteMessage :: String -> SiteTypePosition -> String -> String -> String
+polymorphicSiteMessage verb position siteDesc typeStr =
+  "polymorphic " ++ what ++ " site in " ++ siteDesc ++ ": " ++ typeStr ++ "\n" ++ advice
+  where
+    (what, advice) = case position of
+      SiteInput -> (verb ++ " input", "The input type is unresolved. Add a concrete type annotation to the input.")
+      SiteResult -> (verb, "The result type is unresolved. Add a concrete result type annotation or visible type application, for example `"
+        ++ verb ++ " @Finding ...` when Finding is your intended result type.")
 
 -- | Declarative description of a surface verb rewritten to a site-aware
 -- sibling during Core lowering.

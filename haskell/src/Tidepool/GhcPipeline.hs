@@ -758,13 +758,14 @@ runCompileCycle preparation mCache mMemoRef retained timing sessionT0 variant pa
             siblings <- liftIO $ atomicModifyIORef' preparedSiblingsRef $ \known ->
               let known' = Map.union (resolvePreparedSiblings (cg_binds cgGuts)) known
               in (known', known')
-            let (elaboratedBindings, yieldSites) =
+            let (elaboratedBindings, yieldSites, rejections) =
                   elaboratePreparedSites siblings (cg_binds cgGuts)
                 elaboration = PreparedElaboration
                   { peGuts = cgGuts
                   , peBindings = elaboratedBindings
                   , peSitedSiblings = siblings
                   , peYieldSites = yieldSites
+                  , peSiteRejections = rejections
                   }
             Just <$> liftIO (prepareModule (mfHscEnv mf) (mfSummary mf) elaboration)
         rememberPreparedSiblings prepared = liftIO $

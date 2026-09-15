@@ -47,7 +47,7 @@ import Tidepool.GhcPipeline
   , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..), dumpCore
   , withResidentPipelineSelected, CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances )
 import Tidepool.ExecutionEncode (encodeWireProgram)
-import Tidepool.ExecutionProjection (ProjectionContext(..), projectPreparedTarget, resolveTextPackageUnit)
+import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), projectPreparedTarget, resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..) )
@@ -475,8 +475,11 @@ writePreparedArtifacts outDir input hscEnv modules targets retainedGenerations =
           }
     recovered <- recoverPreparedClosure hscEnv context modules
     reportRecoveryResiduals target (closureFailures recovered)
-    program <- either (ioError . userError . ("prepared projection failed: " <>) . show) pure
-      (projectPreparedTarget context (closureModules recovered))
+    program <- case projectPreparedTarget context (closureModules recovered) of
+      -- A reachable polymorphic typed site is the author's source error.
+      Left (RejectedTypedSite message) -> throwIO (SourceRejection (T.unpack message))
+      Left failure -> ioError (userError ("prepared projection failed: " <> show failure))
+      Right projected -> pure projected
     let output = outDir </> target ++ ".prepared.cbor"
     BS.writeFile output (encodeWireProgram program)
     hPutStrLn stderr $ "  Wrote: " ++ output ++ " (prepared execution)"
