@@ -5,6 +5,7 @@ module Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..)
   , runPipeline, runPipelineSession, runPipelineSessionFor
   , runPipelineSelected, runPipelineSessionSelected
+  , runPipelineSelectedRetaining
   , CompilePurpose(..), PipelineResult(..), dumpCore
     -- * Bound-value type analysis
   , stripMonadHead, isClosureType, renderType
@@ -113,6 +114,8 @@ import Tidepool.Timing
   , emitCompileSummary, emitModuleTiming )
 import Tidepool.PreparedStg (PreparedElaboration(..), PreparedModule(..), prepareModule)
 import Tidepool.PreparedSites (elaboratePreparedSites, resolvePreparedSiblings)
+import Tidepool.ExecutionSchema (SymbolIdentity)
+import Tidepool.RetainedUnfoldings (installRetainedUnfoldingsPlugin)
 
 -- | Selects the compiler representation produced at the internal GHC API
 -- boundary. Existing extraction entry points always select 'LegacyCore'.
@@ -318,6 +321,20 @@ runPipelineSelected :: PipelineSelection result -> FilePath -> [FilePath] -> IO 
 runPipelineSelected selection path includes =
   runPipelineSessionSelected selection GeneralCompile Nothing path includes Nothing
 
+-- | Like 'runPipelineSelected', but withholding unfoldings for the given
+-- retained-generation symbols from GHC's own simplifier -- see
+-- 'Tidepool.RetainedUnfoldings' for the mechanism and why it must run this
+-- early. Used today only by 'test-prepared-stg/ExecutionProjectionTest.hs';
+-- wiring a live request's @--retained-generation@ set through the resident
+-- pipeline ('withResidentPipelineSelected') is a separate change, since that
+-- entry point's compiler closure type is a public contract 'app/Main.hs'
+-- already depends on.
+runPipelineSelectedRetaining
+  :: PipelineSelection result -> Set.Set SymbolIdentity -> FilePath -> [FilePath] -> IO result
+runPipelineSelectedRetaining selection retained path includes =
+  selectCompileResult selection <$>
+    runCompile (selectionKind selection) retained (normalVariant GeneralCompile path) path includes Nothing
+
 -- ---------------------------------------------------------------------------
 -- The shared compile loop and its two seams
 --
@@ -419,8 +436,8 @@ data ModuleFront = ModuleFront
   , mfResultType :: Maybe Type
   }
 
-runCompile :: PreparationKind -> PipelineVariant -> FilePath -> [FilePath] -> Maybe FilePath -> IO CompileResult
-runCompile preparation variant path includes buildProductsDir = do
+runCompile :: PreparationKind -> Set.Set SymbolIdentity -> PipelineVariant -> FilePath -> [FilePath] -> Maybe FilePath -> IO CompileResult
+runCompile preparation retained variant path includes buildProductsDir = do
   timing <- readTimingEnabled
   (libdir, startupMs) <- timeSection getLibdir
   emitPhase timing "startup" startupMs
@@ -447,6 +464,15 @@ runCompile preparation variant path includes buildProductsDir = do
     let extracted = extractionDynFlags dflags includes
         dflags' = configureBuildProducts extracted buildProductsDir extracted
     setSessionDynFlags dflags'
+    -- Withhold unfoldings for retained-generation symbols BEFORE 'load''
+    -- runs: 'load' -- not this pipeline's own per-module redo loop below --
+    -- is what actually simplifies every home module the first time, so the
+    -- plugin must already be registered on the session's 'HscEnv' by now.
+    -- See 'Tidepool.RetainedUnfoldings' for why a Core plugin is the seam
+    -- that reaches both 'load'' and 'core2core' uniformly. A 'Set.null'
+    -- retained set costs nothing (see 'installRetainedUnfoldingsPlugin').
+    hscForRetained <- getSession
+    setSession (installRetainedUnfoldingsPlugin retained hscForRetained)
     -- One cycle, no cache, no memo — 'sessionT0' is captured BEFORE this
     -- DynFlags bootstrap (above) so the default-on per-compile summary's
     -- wall-clock figure covers it too, exactly as it always has. See
@@ -467,8 +493,8 @@ runPipelineSessionSelected
 runPipelineSessionSelected selection purpose mscope path includes buildProductsDir =
   selectCompileResult selection <$> case mscope of
     Just scope | isSessionScopeActive scope ->
-      runCompile (selectionKind selection) (sessionVariant purpose scope path) path includes buildProductsDir
-    _ -> runCompile (selectionKind selection) (normalVariant purpose path) path includes buildProductsDir
+      runCompile (selectionKind selection) Set.empty (sessionVariant purpose scope path) path includes buildProductsDir
+    _ -> runCompile (selectionKind selection) Set.empty (normalVariant purpose path) path includes buildProductsDir
 
 -- ---------------------------------------------------------------------------
 -- Resident compilation state

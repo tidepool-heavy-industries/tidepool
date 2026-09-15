@@ -36,6 +36,7 @@ library tidepool-extract-internal
     Tidepool.PreparedFacts
     Tidepool.PreparedFormatting
     Tidepool.PreparedSites
+    Tidepool.RetainedUnfoldings
     Tidepool.ExecutionIR
     Tidepool.ExecutionSchema
     Tidepool.ExecutionProjection

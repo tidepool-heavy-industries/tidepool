@@ -3,6 +3,7 @@
 module ExecutionProjectionTest
   ( projectProjectionContract
   , verifyRetainedImportProjection
+  , verifyRetainedImportProjectionExposed
   ) where
 
 import Control.Monad (forM_, unless)
@@ -34,7 +35,7 @@ import Tidepool.ExecutionProjection
 import Tidepool.ExecutionSchema
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PreparedPipelineResult(..), PipelineResult(..)
-  , runPipelineSelected )
+  , runPipelineSelected, runPipelineSelectedRetaining )
 import Tidepool.PreparedFormatting
   (FormattingAuthority(..), classifyFormatting, resolveFormattingAuthority)
 
@@ -1176,6 +1177,7 @@ verifyRetainedImportProjection = do
       unless (globalRequiredGeneration producerFnGlobal == Just 11)
         (ioError (userError
           "retained-import projection did not carry producerFn's generation"))
+  verifyRetainedImportProjectionExposed
   where
     recoveredOccurrences program = Set.fromList
       [ symbolOccurrence symbol
@@ -1184,3 +1186,112 @@ verifyRetainedImportProjection = do
       ]
     groupItems (NonRecursive item) = [item]
     groupItems (Recursive items) = items
+
+-- | Same shape as 'verifyRetainedImportProjection', but proving the
+-- COMPILE-TIME half of the mechanism: 'ImportProducerExposed' carries no
+-- 'NOINLINE' pragmas (unlike 'ImportProducer'), so nothing stops GHC's own
+-- simplifier from inlining its bindings into 'ImportConsumerExposed' UNLESS
+-- 'Tidepool.RetainedUnfoldings' withholds their unfoldings during
+-- compilation itself. Two separate compiles of the same consumer source
+-- prove the pass is gated on the retained-identity set passed to
+-- 'runPipelineSelectedRetaining', not merely on the projection-time
+-- 'projectionRetainedGenerations' map (which 'verifyRetainedImportProjection'
+-- above already covers for the NOINLINE-pragma stand-in):
+--
+--   * retained set empty at compile time -> today's plain-GHC behavior:
+--     both bindings are recovered locally (their exact occurrence names
+--     appear as recovered tops), and neither is declared a 'GlobalDecl'.
+--   * retained set populated at compile time -> the pass withholds both
+--     unfoldings before GHC's simplifier ever runs, so 'consumerResult'
+--     keeps plain, unexpanded 'Var' references to both -- exactly the shape
+--     'ExecutionProjection' already expects an executable import to have
+--     (see 'verifyRetainedImportProjection' above, which covers the same
+--     contract for the NOINLINE-pragma stand-in): neither occurrence name
+--     is recovered locally, and projecting with a matching
+--     'projectionRetainedGenerations' map declares both a 'GlobalDecl'
+--     carrying generation 11. (GHC still floats 'producerValue''s own
+--     static list into internal top-level pieces WITHIN
+--     'ImportProducerExposed' itself -- e.g. @producerValue1@ -- regardless
+--     of this pass, exactly as it already does for the real
+--     'ImportProducer' fixture; that is 'producerValue''s own module
+--     compiling its literal list, not a leak into the consumer, and
+--     'ExecutionProjection' already tolerates it the same way for
+--     'ImportProducer', so this test does not re-litigate it.)
+verifyRetainedImportProjectionExposed :: IO ()
+verifyRetainedImportProjectionExposed = do
+  root <- getCurrentDirectory
+  let fixtureDir = root </> "test-prepared-stg"
+      entry = SymbolIdentity "main" "ImportConsumerExposed" "value" "consumerResult" Nothing
+      producerValueId = SymbolIdentity "main" "ImportProducerExposed" "value" "producerValue" Nothing
+      producerFnId = SymbolIdentity "main" "ImportProducerExposed" "value" "producerFn" Nothing
+      contextFor retainedGenerations = ProjectionContext
+        { projectionProfile = "ghc-9.12-prepared-stg"
+        , projectionToolchain = "ghc-9.12.2"
+        , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []
+        , projectionRetainedGenerations = retainedGenerations
+        , projectionEntry = entry
+        , projectionFormattingAuthority = Nothing
+        , projectionTextUnit = Nothing
+        }
+      recoveredOccurrences program = Set.fromList
+        [ symbolOccurrence symbol
+        | group <- programBindings program
+        , TopBinding symbol _ <- groupItems group
+        , symbolModule symbol == "ImportProducerExposed"
+        ]
+      groupItems (NonRecursive item) = [item]
+      groupItems (Recursive items) = items
+  -- Compiled with the pass gated OFF (empty retained set): plain GHC
+  -- behavior -- both bindings are recovered locally, and neither is
+  -- declared as a global.
+  baselineModules <- runPipelineSelectedRetaining PreparedStg Set.empty
+    (fixtureDir </> "ImportConsumerExposed.hs") [fixtureDir]
+  case projectPreparedTarget (contextFor Map.empty) (pprModules baselineModules) of
+    Left failure -> ioError (userError
+      ("retained-import-exposed baseline projection failed: " <> show failure))
+    Right program -> do
+      unless (Set.member "producerValue" (recoveredOccurrences program))
+        (ioError (userError
+          "retained-import-exposed baseline omitted producerValue's recovered body"))
+      unless (Set.member "producerFn" (recoveredOccurrences program))
+        (ioError (userError
+          "retained-import-exposed baseline omitted producerFn's recovered body"))
+      unless (all ((/= producerValueId) . globalIdentity) (programGlobals program))
+        (ioError (userError
+          "retained-import-exposed baseline declared producerValue a global"))
+      unless (all ((/= producerFnId) . globalIdentity) (programGlobals program))
+        (ioError (userError
+          "retained-import-exposed baseline declared producerFn a global"))
+  -- Compiled with the pass gated ON (both symbols retained): neither
+  -- occurrence name is recovered locally in the consumer, and both become
+  -- 'GlobalDecl's carrying the generation.
+  withheldModules <- runPipelineSelectedRetaining PreparedStg
+    (Set.fromList [producerValueId, producerFnId])
+    (fixtureDir </> "ImportConsumerExposed.hs") [fixtureDir]
+  case projectPreparedTarget
+      (contextFor (Map.fromList [(producerValueId, 11), (producerFnId, 11)]))
+      (pprModules withheldModules) of
+    Left failure -> ioError (userError
+      ("retained-import-exposed withheld projection failed: " <> show failure))
+    Right program -> do
+      unless (not (Set.member "producerValue" (recoveredOccurrences program)))
+        (ioError (userError
+          "retained-import-exposed withheld projection recovered producerValue's body"))
+      unless (not (Set.member "producerFn" (recoveredOccurrences program)))
+        (ioError (userError
+          "retained-import-exposed withheld projection recovered producerFn's body"))
+      let globalsByIdentity = [(globalIdentity g, g) | g <- programGlobals program]
+      producerValueGlobal <- case lookup producerValueId globalsByIdentity of
+        Just value -> pure value
+        Nothing -> ioError (userError
+          "retained-import-exposed withheld projection omitted producerValue's global")
+      producerFnGlobal <- case lookup producerFnId globalsByIdentity of
+        Just value -> pure value
+        Nothing -> ioError (userError
+          "retained-import-exposed withheld projection omitted producerFn's global")
+      unless (globalRequiredGeneration producerValueGlobal == Just 11)
+        (ioError (userError
+          "retained-import-exposed withheld projection did not carry producerValue's generation"))
+      unless (globalRequiredGeneration producerFnGlobal == Just 11)
+        (ioError (userError
+          "retained-import-exposed withheld projection did not carry producerFn's generation"))
