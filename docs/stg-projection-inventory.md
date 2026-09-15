@@ -150,12 +150,25 @@ host fn `prepared_resolve_call(vmctx, header, fingerprint)`, and
 header)` (`prepared_program.rs`). A fingerprint
 (`resolve::signature_fingerprint`, a fixed-seed FNV-1a hash over argument
 representations and the result contract) guards the ABI at the call site.
-Exact application of a foreign function and forcing a foreign thunk both
-work. Foreign PAP, partial, and excess application are not yet served:
-they fail as `RuntimeError::UnresolvedCallee`, disposition `Reusable` --
-the decision precedes any call, so the heap is untouched. A header no
-installed program can enter is `BadThunkState`, machine `Unavailable`. A
-top-level constructor whose field is an import is a heap top
+Exact application of a foreign function held in a LOCAL value (a managed
+argument, a case-bound name) and forcing a foreign thunk both work this
+way. Foreign PAP, partial, and excess application through this path are
+not yet served: they fail as `RuntimeError::UnresolvedCallee`,
+disposition `Reusable` -- the decision precedes any call, so the heap is
+untouched. A header no installed program can enter is `BadThunkState`,
+machine `Unavailable`.
+
+This resolution never runs for a call whose callee is the import
+reference ITSELF (`ValueRef::Global`), rather than a local value that
+happens to hold one: `admission.rs`'s `ExprFrame::Call` arm has no case
+for a `Global` callee, so such a call is rejected at admission, before
+compilation ever reaches emission -- and since admission is
+whole-program, one such call anywhere in a program's reachable closure
+blocks the whole artifact from installing. Haskell's ordinary function
+application of an imported name (`producerFn x`) takes this shape.
+Extending admission to recognise a `Global` callee is not yet done.
+
+A top-level constructor whose field is an import is a heap top
 (`image.rs::heap_top_partition`), initialised from the published import
 slot (`run.rs::write_atoms`); `install` publishes import slots before
 initialising heap tops and before the install-time collection, with

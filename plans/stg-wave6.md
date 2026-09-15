@@ -177,22 +177,46 @@ must not be conflated with this.
 An admitted global is a top-table slot published from a retained root at
 install (`PreparedMachine::install_program` with `ImportBindings`), read by
 identity on the shared heap. Generated code can load, hold, pass, return,
-call, force, case on, and hold an imported value in a top-level
-constructor. What remains open:
+force, case on, and hold an imported value in a top-level constructor.
+Calling one is narrower than that. What remains open:
 
-- foreign PAP, partial, and excess application: `apply.rs::emit_dispatchers`
-  and `entry.rs::emit_prepared_enter` resolve an exact application or a
-  force of a foreign callee through the machine-wide
-  `prepared_resolve_call`/`prepared_resolve_enter` host fns (X2,
-  `c2992e66d`, `5102c0b08`), guarded by `resolve::signature_fingerprint`; a
+- **admission has no case for a `Global` callee at all.**
+  `tidepool-codegen/src/prepared_program/admission.rs`'s `ExprFrame::Call`
+  arm matches `Atom::Ref(ValueRef::Local(id))` only; every other callee
+  shape -- a `Global` reference (an import called directly by name, e.g.
+  Haskell's `producerFn (length producerValue)`) included -- falls through
+  to the wildcard rejection. Admission is whole-program
+  (`CompileError::Unsupported` on any one reachable node rejects the whole
+  artifact), so ANY reachable direct call to an import blocks the entire
+  program from installing, not just that call. X2's runtime dispatch
+  (`prepared_resolve_call`) never even runs for this shape: the call is
+  rejected before compilation reaches emission. Confirmed against a real
+  GHC-compiled fixture, not only a synthetic repro
+  (`tidepool-runtime/tests/prepared_execution.rs`'s
+  `s6_direct_global_call_is_not_yet_admitted`; `import-consumer-result.cbor`
+  is kept as its own artifact for exactly this reason, so the gap does not
+  also take down the working `consumerValueAt`/`consumerEntries` fixture).
+  Not fixed this wave: extending admission's `Call` arm to recognise a
+  `Global` callee (deciding admissibility against the declared
+  `GlobalDecl`'s `entry_signature`) is codegen-invariant analysis work for
+  a Fable-direct pass.
+- calling an import held in a LOCAL value (a managed argument, a
+  case-bound name) IS admitted and does resolve through X2's machine-wide
+  tables for an exact application
+  (`t2_closure_crosses_programs_and_collects_inside_the_producing_program`,
+  `x2_b_forces_a_thunk_import_through_the_owning_programs_enter`); a
   foreign PAP, or partial/excess application of a foreign callee, is not
-  yet served and fails as a typed `RuntimeError::UnresolvedCallee`,
-  disposition `Reusable` (phase 2 pending);
-- S5's contract for unfoldings of retained symbols: a retained binding's
-  unfolding must not be visible to a later turn's compilation. The probe
-  still stands in for this with `NOINLINE`; without it GHC inlines small
-  static data into the consumer as a recovered copy instead of an import.
-  In flight, not yet closed.
+  yet served there either and fails as a typed `RuntimeError::UnresolvedCallee`,
+  disposition `Reusable` (`c2992e66d`, `5102c0b08`, phase 2 pending);
+- S5's contract for unfoldings of retained symbols: closed. A GHC Core
+  plugin (`Tidepool.RetainedUnfoldings`, `42b2621b9`) withholds a retained
+  symbol's unfolding from the simplifier before `load'` runs, so a
+  notebook user never has to write `NOINLINE`; wired into the production
+  one-shot compile path (`05276e0c8`) so a live `--retained-generation`
+  request actually withholds, not just the test harness. The resident
+  daemon still compiles with an empty retained set (documented limitation:
+  its long-lived `HscEnv` would otherwise accumulate one withholding pass
+  per request forever, since the plugin only ever prepends).
 
 Host observation (`inspect_outer`, entry-result observation) resolves an
 imported value, including another program's static cells, through the
@@ -485,12 +509,27 @@ builds/tests/commits.
 |---|---|---|
 | F1 call-outcome/machine-latch separation | `MachineState` now tracks `runtime_error` (call outcome, settled at call end) separately from `last_failure` (machine latch, first `Unavailable` cause, never cleared); reusable causes never latch | `af80ee6b5` |
 | F2 prepared collector poisoning | `collect_prepared` poisons its retired semispace under `gc_poison_enabled()`; S2b mutation test now fails deterministically under a 256-byte nursery | `79f398a0c` |
-| A1 | TBD | TBD |
-| A2 | TBD | TBD |
-| A3 | TBD | TBD |
-| A4 | TBD | TBD |
-| A5 | TBD | TBD |
-| B1 | TBD | TBD |
-| B2 | TBD | TBD |
-| B3 | TBD | TBD |
-| G1 | TBD | TBD |
+| A1 X2/S3b acceptance tests | T2 un-ignored (closed by X2); new `x2_b_forces_a_thunk_import_...`, `s3b_import_holding_top_...`, `s3b_default_only_case_...`; two fixture bugs found and fixed in review; admission-analysis finding (`apply::classify`'s Partial arm) root-caused, not fixed | `c60b8cf6f` |
+| A3 S5 unfoldings (Haskell) | GHC Core plugin (`Tidepool.RetainedUnfoldings`) withholds a retained symbol's unfolding before `load'` runs; `ImportProducer.hs` no longer needs `NOINLINE` | `42b2621b9` |
+| A6 wire retained set into production compile (found necessary while verifying A2/A3 together, not a pre-planned card) | `runPipelineSessionSelected`/`app/Main.hs`'s `PreparedStg` call now thread a live request's retained-generation set into `runCompile`; resident-daemon path documented as a deliberate, separate gap | `05276e0c8` |
+| A2 S6 end-to-end consumerResult | Fixtures regenerated with the real withholding pass; found and pinned a real admission gap (a direct `Global`-callee call is never admitted, whole-program) rather than papering over it -- `consumerResultAt` projects to its own artifact so the gap doesn't regress the working `consumerValueAt`/`consumerEntries` fixture; new `s6_direct_global_call_is_not_yet_admitted` | `3b41d44d4` |
+| A4 PreparedRuntime registry-hostable | `unsafe impl Send`, `PreparedHole`, realm-scoped import leases, `CrossRealmArgument` refusal, `ActorRunTarget` impl; two test fixtures fixed in review | `1fb9fcda9` |
+| A5 standing docs | `docs/stg-projection-inventory.md`, `plans/stg-wave6.md`, `plans/README.md` rewritten to the current X2/S3b/F1/F2 contract; later corrected (see A2 row) once the direct-`Global`-call admission gap was found | `54a035aa8` |
+| B1 | not started | TBD |
+| B2 | not started | TBD |
+| B3 | not started | TBD |
+| G1 | not started | TBD |
+
+**New finding this wave, upgraded from A1's hypothesis to a confirmed
+blocker:** `admission.rs`'s `ExprFrame::Call` arm has no case for a
+`ValueRef::Global` callee at all -- broader than A1's originally-reported
+`apply::classify` Partial-arm gap (which only covers calls through an
+unknown-signature local). ANY direct call to an imported function,
+anywhere in a program's reachable closure, blocks that whole program from
+installing. This is real, GHC-Core-confirmed (not just a synthetic
+repro), and belongs in the same Fable-direct codegen-invariant pass as
+the planned X2 phase 2 (foreign PAP/partial/excess) work -- likely
+before it, since it blocks the far more common case of an ordinary
+direct function call to an import. See "Rung 2 boundaries" above and
+`s6_direct_global_call_is_not_yet_admitted`
+(`tidepool-runtime/tests/prepared_execution.rs`) for the pinned repro.
