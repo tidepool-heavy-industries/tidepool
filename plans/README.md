@@ -61,11 +61,17 @@ archive).
 - [Wave 6](stg-wave6.md): prepared-STG effect suspension, retained imports
   and resume. Wave 6A landed the persistent-heap and closure-decode substrate
   (rung 0); Wave 6B landed single-turn suspend/resume and retained-binding
-  imports (rungs 1-2, with the import limits the plan's "Rung 2 boundaries"
-  section records) plus machine-wide constructor descriptor interning.
-  Cross-program call/force dispatch, interleaved parked work across
-  programs, realm cancellation, and actor authority (the rest of rung 2 and
-  rungs 3-5) are the plan's "Completion plan" section.
+  imports (rungs 1-2) plus machine-wide constructor descriptor interning;
+  Wave 6C landed cross-program call/force dispatch and import-holding
+  top-level constructors (closing the rest of rung 2 for exact application),
+  interleaved parked work across programs (rung 3), and realm-scoped
+  cancellation (rung 4, with the reusable-vs-latch failure distinction this
+  found and fixed). Remaining: foreign PAP/partial/excess application
+  (typed reusable failure today, dispatch itself not yet built), S5's
+  contract for unfoldings of retained symbols, rung 5 (an STG session in
+  the registry, actor-turn authority) and rung 6 (the composite resident-
+  session test and the workbench routing decision), per the plan's
+  "Completion plan" section.
 
 ## Supporting actor designs and separate harness work
 

@@ -137,23 +137,48 @@ one descriptor per constructor identity; a conflicting later declaration
 is `CompileError::DescriptorShape`): a program compiled through
 `PreparedMachine::compile_for_install` shares every earlier program's
 constructor descriptors, so its `Case` (including `seq`) and
-evaluated-constructor enter recognise cells another program built. The
-per-program tables generated code still consults only for its own program
-are `apply.rs`'s call dispatchers and `entry.rs`'s thunk enter chain, so a
-generated call *of* an imported closure, or forcing an imported thunk,
-traps (`BadThunkState`, machine `Unavailable`). Because admission is
-whole-program, a closure containing such a body does not install at all.
-A top-level constructor whose field is an import is rejected at compile
-time (`image.rs`): static data cannot hold a pointer known only at
-install. Host observation (`inspect_outer`, `run_entry`'s result
-observation) resolves imported values, including another program's static
-cells, through the machine-wide descriptor/static union. Cross-program
-invocation and dispatch, and import-holding tops, are recorded as the next
-codegen steps, not implied by import admission. Retained-generation
-matching is external-name-only: a retained symbol whose body GHC inlines
-into the consumer (small static data with an exposed unfolding) is
-consumed as a recovered copy, not through the import; the producer side
-must withhold the unfolding.
+evaluated-constructor enter recognise cells another program built.
+Calling a function or forcing a thunk that another installed program
+produced resolves through machine-wide tables,
+`MachineState::prepared_callables`/`prepared_enters`, filled at
+`PreparedMachine::install` from every installed program's function and
+thunk descriptors (`tidepool-codegen/src/prepared_program/machine.rs`).
+Generated code reaches this as the terminal fallback of its own
+per-program fast chain: `apply.rs::emit_dispatchers` falls through to the
+host fn `prepared_resolve_call(vmctx, header, fingerprint)`, and
+`entry.rs::emit_prepared_enter` to `prepared_resolve_enter(vmctx,
+header)` (`prepared_program.rs`). A fingerprint
+(`resolve::signature_fingerprint`, a fixed-seed FNV-1a hash over argument
+representations and the result contract) guards the ABI at the call site.
+Exact application of a foreign function and forcing a foreign thunk both
+work. Foreign PAP, partial, and excess application are not yet served:
+they fail as `RuntimeError::UnresolvedCallee`, disposition `Reusable` --
+the decision precedes any call, so the heap is untouched. A header no
+installed program can enter is `BadThunkState`, machine `Unavailable`. A
+top-level constructor whose field is an import is a heap top
+(`image.rs::heap_top_partition`), initialised from the published import
+slot (`run.rs::write_atoms`); `install` publishes import slots before
+initialising heap tops and before the install-time collection, with
+rollback on every later failure arm. Default-only algebraic `Case` skips
+descriptor matching (`emit.rs::emit_algebraic_dispatch`), so a
+`seq`-shaped case works on an import even in a standalone-compiled
+program.
+
+Host observation (`inspect_outer`, `run_entry`'s result observation)
+resolves imported values, including another program's static cells,
+through the machine-wide descriptor/static union. Failure classification
+is orthogonal to this resolution: `MachineState` separates the call
+outcome (`runtime_error`, the first failure cause of one call, settled
+when that call ends) from the machine latch (`last_failure`, the first
+`Unavailable`-class cause the machine has seen, never cleared). Reusable
+causes -- cancellation, language-level failure, `UnresolvedCallee` among
+them -- never latch, so an `inspect_outer` observation made between calls
+sees only the latch, not a reusable failure from inside a completed call.
+Retained-generation matching is still external-name-only: a retained
+symbol whose body GHC inlines into the consumer (small static data with
+an exposed unfolding) is consumed as a recovered copy, not through the
+import; the producer side must withhold the unfolding, and this
+constraint is not yet lifted (S5 is in flight).
 
 The currently emitted strict subset is:
 

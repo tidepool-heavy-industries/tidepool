@@ -27,7 +27,7 @@ passes once it does. Ordered by minimal new surface first.
 | 1 | Smallest real end-to-end suspend/resume: print -> sleep -> print, single turn, single realm; heap object identity checked across resumes | **Done** (Wave 6B, E1-E3: `freer-resume.cbor`, `freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments`, parking tests in `tidepool-runtime/tests/prepared_execution.rs`) |
 | 2 | Retained bindings across turns: turn N+1's program links against turn N's binding via `required_generation`, reads it off the same persistent heap (identity, not re-import by value) | **Done with recorded limits** (Wave 6B, S1-S6: `retained_import_end_to_end_links_consumer_against_bound_producer_tops`; limits under "Rung 2 boundaries" below) |
 | 3 | Interleaved parked work: two suspended continuations share one heap, resumed out of order, survive an intervening nursery GC | **Done** (C0, cross-program: `c0_two_installed_programs_park_and_resume_out_of_order_with_a_collection_between`, `c0_unrelated_entry_of_a_second_installed_program_runs_while_the_first_stays_parked`; scope note below) |
-| 4 | Cancellation of one parked turn among siblings, via a realm-scoped `CancelHandle`; sibling and `close_realm` counts unaffected | Not started this wave |
+| 4 | Cancellation of one parked turn among siblings, via a realm-scoped `CancelHandle`; sibling and `close_realm` counts unaffected | **Done** (C1 `e398de760`, C1b `90cecaf49`) |
 | 5 | Actor-turn authority: retiring an incarnation releases its parked frame; a different incarnation cannot resume it | Not started this wave |
 | 6 | Composite: rungs 2-5 together in one resident session — the actual gate for calling Wave 6 done | Not started this wave |
 
@@ -176,39 +176,29 @@ must not be conflated with this.
 
 An admitted global is a top-table slot published from a retained root at
 install (`PreparedMachine::install_program` with `ImportBindings`), read by
-identity on the shared heap. Generated code can load, hold, pass and return
-an imported value. It cannot yet:
+identity on the shared heap. Generated code can load, hold, pass, return,
+call, force, case on, and hold an imported value in a top-level
+constructor. What remains open:
 
-- call an imported closure, or force an imported thunk: `apply.rs`'s
-  dispatchers and `entry.rs`'s enter routine match a callee against the
-  compiling program's own function/thunk tables (`BadThunkState`, machine
-  `Unavailable`) -- X2 below;
-- (closed by X1, `a0e41c70d`) `Case` on an imported constructor: a program
-  compiled through `PreparedMachine::compile_for_install` shares one
-  descriptor per constructor identity with every earlier program, so its
-  `Case` and evaluated-constructor enter recognise their cells; a program
-  compiled standalone still sees only its own;
-- hold an import in a top-level constructor: static data cannot carry a
-  pointer known only at install (`image.rs` rejects it at compile time);
-- install a closure containing any of the above bodies, since admission is
-  whole-program.
+- foreign PAP, partial, and excess application: `apply.rs::emit_dispatchers`
+  and `entry.rs::emit_prepared_enter` resolve an exact application or a
+  force of a foreign callee through the machine-wide
+  `prepared_resolve_call`/`prepared_resolve_enter` host fns (X2,
+  `c2992e66d`, `5102c0b08`), guarded by `resolve::signature_fingerprint`; a
+  foreign PAP, or partial/excess application of a foreign callee, is not
+  yet served and fails as a typed `RuntimeError::UnresolvedCallee`,
+  disposition `Reusable` (phase 2 pending);
+- S5's contract for unfoldings of retained symbols: a retained binding's
+  unfolding must not be visible to a later turn's compilation. The probe
+  still stands in for this with `NOINLINE`; without it GHC inlines small
+  static data into the consumer as a recovered copy instead of an import.
+  In flight, not yet closed.
 
 Host observation (`inspect_outer`, entry-result observation) resolves an
 imported value, including another program's static cells, through the
-machine-wide descriptor/static union. Two further caveats: retained
-generation matching is external-name-only, so a producer must withhold the
-unfolding of a retained symbol (GHC otherwise inlines small static data
-into the consumer as a recovered copy; the S6 probe uses `NOINLINE`), and
-`required_evaluated` means weak head normal form (a function or PAP counts,
-matching the projection's `importedEntry`).
-
-Follow-ups, in dependency order: S3b (import-holding tops become heap
-tops published after import slots; default-only `Case` skips dispatch),
-then cross-program call and case dispatch through the machine-wide
-registry (the real "apply an imported closure" primitive D2 deferred), then
-S5's contract for unfoldings of retained symbols. S2b (two GC tests for
-collection during a second program's live native call and static-region
-admission across programs) is a small independent card.
+machine-wide descriptor/static union. `required_evaluated` means weak head
+normal form (a function or PAP counts, matching the projection's
+`importedEntry`).
 
 ## Completion plan (what is left to call Wave 6 done)
 
@@ -235,29 +225,30 @@ call a retained function has not really retained it.
   `CompileError::DescriptorShape`; codegen and runtime suites no worse.
   Status: **done**, `a0e41c70d` (codegen lib 470 passed; runtime session
   and integration suites 11 and 10 passed).
-- **X2 function and thunk dispatch through the machine.** After each
-  per-program fast chain (`apply.rs::emit_dispatchers`,
-  `entry.rs::emit_prepared_enter`), replace the terminal bad-state with a
-  host lookup `prepared_resolve_entry(vmctx, header, signature_hash) ->
-  code` over a machine-wide map `install` fills from every program's
-  `pipeline.get_function_ptr` for its function and thunk descriptors, then
-  `call_indirect` with the ABI `EntryAbi::cranelift_signature` gives (thunk
-  bodies: `(vmctx, reference) -> (status, value)`). Foreign PAPs are a
-  second step (read pending arguments through the PAP's own descriptor
-  layout, then dispatch the underlying function). Acceptance: S2's T2 and
-  T4 un-ignore and pass (a collection inside the producer's code while the
-  consumer's frame is live; static admission through a call); S6 runs
-  `consumerResult` (`producerFn (length producerValue)`) against the
-  oracle's 6, with the pinned closure regenerated to include it; a call
-  with a mismatching signature hash is a typed failure, machine
-  `Reusable`. Medium-large.
-- **S3b import-holding tops.** A top-level constructor referencing a
-  `Global` becomes a heap top (`image.rs::heap_top_partition`),
-  `initialize_heap_tops` resolves the field from the import slot, and
-  `install` publishes import slots before initializing heap tops. Default-
-  only algebraic `Case` skips descriptor matching. Acceptance: a consumer
-  whose target is `(consumerResult, producerValue)` as static data
-  compiles, installs and reads correctly across collections. Small.
+- **X2 function and thunk dispatch through the machine — done**
+  (`c2992e66d`, `5102c0b08`, `af80ee6b5`). Machine-wide tables
+  `MachineState::prepared_callables`/`prepared_enters`, filled at
+  `PreparedMachine::install` from every installed program's function and
+  thunk descriptors; `apply.rs::emit_dispatchers` and
+  `entry.rs::emit_prepared_enter` fall through to host fns
+  `prepared_resolve_call(vmctx, header, fingerprint)` /
+  `prepared_resolve_enter(vmctx, header)`, guarded by a fixed-seed FNV-1a
+  `resolve::signature_fingerprint` over argument representations and the
+  result contract. Exact application of a foreign function and forcing a
+  foreign thunk both work; `t2_closure_crosses_programs_and_collects_
+  inside_the_producing_program` is un-ignored and passes. Foreign PAP,
+  partial, and excess application are a typed reusable failure instead
+  (`x2_foreign_callee_with_mismatching_signature_is_a_typed_reusable_
+  failure`: `RuntimeError::UnresolvedCallee`, disposition `Reusable`) —
+  phase 2, not yet built.
+- **S3b import-holding tops — done** (`5102c0b08`). A top-level
+  constructor referencing a `Global` is a heap top
+  (`image.rs::heap_top_partition`); `install` publishes import slots
+  before initialising heap tops and before the install-time collection,
+  with rollback on every later failure arm; default-only algebraic `Case`
+  skips descriptor matching. A consumer whose target is
+  `(consumerResult, producerValue)` as static data compiles, installs and
+  reads correctly across collections.
 - **S5 unfoldings.** A retained symbol's unfolding must not be visible to a
   later turn's compilation (today `NOINLINE` in the probe stands in for
   it). Acceptance: `ImportProducer.hs` without `NOINLINE` still projects
@@ -269,19 +260,19 @@ call a retained function has not really retained it.
   own live native call, tracing a bare Cranelift local never registered as
   a Rust root) and `s2b_a_static_object_is_retained_through_b_via_the_
   shared_static_region_set` (retention of one of A's genuinely static
-  objects through B). Both pass on the unmodified tree. **Not settled:**
-  mutation-testing the first test by truncating
-  `MachineState::stack_map_registries()` to the first registry -- the exact
-  mutation this card asked it to catch -- did NOT make it fail.
-  `gc/frame_walker.rs::walk_frames` silently skips a frame whose return
-  address matches no registry in the chain (treats it as an untracked
-  host-boundary frame) rather than erroring, and this specific test's
-  allocation pattern doesn't expose the resulting corruption -- plausibly
-  because the untraced object's fromspace memory isn't reused before the
-  test reads it back, not because the chain is actually correct. This is a
-  genuine open question about `walk_frames`'s own semantics under a
-  degraded chain, needs direct judgment rather than another Sonnet
-  test-writing pass, and is not yet closed by any test in the suite.
+  objects through B). Both pass on the unmodified tree. **Resolved by F2
+  (`79f398a0c`):** the mutation-check gap was that the prepared engine's
+  own collector (`host_fns/gc.rs::collect_prepared`) never poisoned its
+  retired semispace, so a truncated-chain mutation left stale but
+  still-readable bytes behind and neither test's allocation pattern
+  exposed corruption. `collect_prepared` now poisons the retired
+  semispace under `gc_poison_enabled()`, matching the legacy Cheney-copy
+  path; the mutation test runs under a 256-byte nursery so the collection
+  lands inside the second program's own live frame, and the truncated-chain
+  mutation now fails deterministically. `walk_frames`'s degraded-chain
+  behavior (skipping an untracked frame rather than erroring) is unchanged
+  and not itself the bug; the fix was making corruption from that
+  skip observable.
 
 ### Stage 2: parked work across programs and realms (rungs 3-4)
 
@@ -454,17 +445,26 @@ planning): C-1 (new X2/S3b acceptance tests, un-ignoring S2's T2), C-2 (S6
 docs update to `docs/stg-projection-inventory.md`/this file's "Rung 2
 boundaries" section reflecting X2/S3b closing those bullets).
 
-**Two real, unresolved findings recorded for the next Fable pass:**
+**Two real findings recorded for the next Fable pass -- both now resolved:**
 1. The prepared engine's own collector (`collect_prepared`,
-   `host_fns/gc.rs`) never wires in `gc_poison_enabled()` -- the S2b
-   mutation-check tests cannot detect a truncated stack-map chain this way
-   (see A2 row above). Legacy engine has this; prepared engine does not.
-2. `MachineState::last_failure` is a machine-wide latch, not realm-scoped,
-   cleared only by the next `begin_prepared_call` -- `inspect_outer`
-   between two realm-scoped calls can spuriously read back a stale
-   `Cancelled` failure from an unrelated realm's prior call (see A3/C1b row
-   above). Worth a closer look before rung-5 work leans on inspection
-   between realm-scoped calls in production.
+   `host_fns/gc.rs`) never wired in `gc_poison_enabled()` -- the S2b
+   mutation-check tests could not detect a truncated stack-map chain this
+   way (see A2 row above). Legacy engine had this; prepared engine did
+   not. **Resolved by F2 (`79f398a0c`):** `collect_prepared` now poisons
+   its retired semispace under `gc_poison_enabled()`; the mutation test
+   runs under a 256-byte nursery so collection happens inside the second
+   program's live frame, and the truncated-chain mutation now fails
+   deterministically.
+2. `MachineState::last_failure` was a machine-wide latch, not
+   realm-scoped, cleared only by the next `begin_prepared_call` --
+   `inspect_outer` between two realm-scoped calls could spuriously read
+   back a stale `Cancelled` failure from an unrelated realm's prior call
+   (see A3/C1b row above). **Resolved by F1 (`af80ee6b5`):**
+   `MachineState` now separates the call outcome (`runtime_error`, first
+   cause of one entry, settled at call end) from the machine latch
+   (`last_failure`, first `Unavailable` cause, never cleared). Reusable
+   causes (cancellation, language failure, `UnresolvedCallee`) never
+   latch; an observation between calls sees only the latch.
 
 Full verification after this wave (all green except the two documented,
 pre-existing environmental classes -- `command_jobs_tests`'s 5
@@ -474,3 +474,23 @@ unaffected by this wave's commits): `cargo check --workspace --tests`
 clean; `cargo fmt --all -- --check` clean; `tidepool-codegen` full suite
 green; `tidepool-runtime` lib + `prepared_execution` green;
 `tidepool-testing` green.
+
+## Wave 6C-3 (in-repo orchestrated wave, no worktrees)
+
+Same operating model as 6C-2: a Sonnet orchestrator spawned agents working
+directly in this checkout on disjoint file sets; the orchestrator alone ran
+builds/tests/commits.
+
+| Task | Outcome | Commit |
+|---|---|---|
+| F1 call-outcome/machine-latch separation | `MachineState` now tracks `runtime_error` (call outcome, settled at call end) separately from `last_failure` (machine latch, first `Unavailable` cause, never cleared); reusable causes never latch | `af80ee6b5` |
+| F2 prepared collector poisoning | `collect_prepared` poisons its retired semispace under `gc_poison_enabled()`; S2b mutation test now fails deterministically under a 256-byte nursery | `79f398a0c` |
+| A1 | TBD | TBD |
+| A2 | TBD | TBD |
+| A3 | TBD | TBD |
+| A4 | TBD | TBD |
+| A5 | TBD | TBD |
+| B1 | TBD | TBD |
+| B2 | TBD | TBD |
+| B3 | TBD | TBD |
+| G1 | TBD | TBD |
