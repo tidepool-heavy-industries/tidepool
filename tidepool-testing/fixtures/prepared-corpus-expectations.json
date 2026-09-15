@@ -1557,7 +1557,8 @@
       ]
     }
   },
-  "oracle_fingerprint": "f08187a380358a7002400a550c29f61a853a35b0bb3c351d988cdbfc30df185d",
+  "oracle_fingerprint": "aee09ac533322c45f92ca1f599ccb0d2911699f38953e7a6d72113eab8272470",
+  "oracle_payload_digest": "be0a2606e9adabdbd45bab9fd5da9e87235465707075b91f23ed6ceda8951fb8",
   "refusals": {
     "Box": {
       "class": "not_closed",

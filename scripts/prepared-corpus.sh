@@ -98,13 +98,15 @@ assert_suite_report() {
   local max_execution_classified="$6"
   local min_comparison_passed="$7"
   local max_missing_expectation="$8"
+  local max_no_oracle="$9"
   jq -e \
     --argjson expected "$expected_programs" \
     --argjson min_execution "$min_execution_passed" \
     --argjson max_failed "$max_execution_failed" \
     --argjson max_classified "$max_execution_classified" \
     --argjson min_comparison "$min_comparison_passed" \
-    --argjson max_missing "$max_missing_expectation" '
+    --argjson max_missing "$max_missing_expectation" \
+    --argjson max_no_oracle "$max_no_oracle" '
     def stage($name): [.stage_totals[] | select(.stage == $name)][0];
     def classified: .not_closed + .no_finite_observation + .function_valued;
     .stg_programs == $expected
@@ -122,6 +124,7 @@ assert_suite_report() {
       | $c.failed == 0
       and $c.passed >= $min_comparison
       and $c.missing_expectation <= $max_missing
+      and $c.no_oracle <= $max_no_oracle
       and ($c.passed + $c.missing_expectation + $c.no_oracle + $c.not_reached) == $expected)
     and all(.programs[];
       if .stages[4].outcome.status == "passed"
@@ -131,7 +134,8 @@ assert_suite_report() {
       "with projection/validation/admission/compilation fully passing;" \
       "execution passed >= $min_execution_passed, failed <= $max_execution_failed," \
       "classified <= $max_execution_classified; comparison failed == 0," \
-      "passed >= $min_comparison_passed, missing_expectation <= $max_missing_expectation;" \
+      "passed >= $min_comparison_passed, missing_expectation <= $max_missing_expectation," \
+      "no_oracle <= $max_no_oracle;" \
       "every executed row compared: $report" >&2
     return 1
   }
@@ -198,10 +202,13 @@ suite_max_execution_classified=110
 suite_min_comparison_passed=234
 # Source tops whose type has no expectation kind (Aeson Value and FmtKInt).
 suite_max_missing_expectation=4
+# Compiler-introduced rows have no source-level oracle. Measured ceiling: a
+# rise means source tops lost oracles or projection introduced new bindings.
+suite_max_no_oracle=464
 assert_suite_report suite "$suite_report" \
   "$suite_expected_programs" "$suite_min_execution_passed" "$suite_max_execution_failed" \
   "$suite_max_execution_classified" "$suite_min_comparison_passed" \
-  "$suite_max_missing_expectation"
+  "$suite_max_missing_expectation" "$suite_max_no_oracle"
 # These source types have no observation expectation yet. A new missing oracle
 # is a regression even if another row gains an oracle in the same change.
 jq -e 'all(.programs[] | select(.stages[5].outcome.status == "missing_expectation");

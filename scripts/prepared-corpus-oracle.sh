@@ -7,7 +7,8 @@
 # (SuiteOracleClassifications.json) and permitted nontermination
 # (SuiteOracleNonterminating.txt), and each carries a reason.
 #
-#   check  MANIFEST   compare the fixture's input fingerprint (no GHC build)
+#   check  MANIFEST   compare the input fingerprint and the sealed payload digest
+#                     (no GHC build)
 #   verify MANIFEST   regenerate from native GHC and diff against the fixture
 #   update MANIFEST   regenerate and write the fixture
 #
@@ -56,10 +57,20 @@ inputs_fingerprint() {
       scripts/prepared-corpus-oracle.sh
   } | LC_ALL=C sort | xargs sha256sum
   printf 'flags %s\n' "${ghc_flags[*]}"
+  printf 'ghc %s\n' "$required_ghc"
+  printf 'timeout %s\n' "$eval_timeout"
+  printf 'jq %s\n' "$(jq --version)"
   printf 'names %s\n' "$(sha256sum <"$work/names" | cut -d' ' -f1)"
 } 2>/dev/null
 
 fingerprint() { inputs_fingerprint | sha256sum | cut -d' ' -f1; }
+
+# Digest of the complete checked-in oracle: values, refusals, source tops and
+# classifications. `check` cannot regenerate values without GHC; the seal makes
+# an edit after generation visible to it. `verify` remains the authority.
+payload_digest() {
+  jq -S -c 'del(.oracle_fingerprint, .oracle_payload_digest)' "$1" | sha256sum | cut -d' ' -f1
+}
 
 build_oracle() {
   local actual_ghc
@@ -160,7 +171,9 @@ generate() {
       expectations: (
         ([$values[] | select(.value) | {key, value}] | from_entries)
         + ($classes[0] | map_values(.expectation)))
-    }' >"$output"
+    }' >"$work/unsealed.json"
+  jq -S --arg digest "$(payload_digest "$work/unsealed.json")" \
+    '. + {oracle_payload_digest: $digest}' "$work/unsealed.json" >"$output"
 }
 
 case "$mode" in
@@ -171,7 +184,13 @@ case "$mode" in
       echo "error: the Suite oracle is stale; run: scripts/prepared-corpus-oracle.sh update $manifest" >&2
       exit 1
     fi
-    echo "Suite oracle fingerprint is current"
+    sealed="$(jq -r '.oracle_payload_digest // empty' "$fixture")"
+    if [[ "$sealed" != "$(payload_digest "$fixture")" ]]; then
+      echo "error: $fixture changed after generation; regenerate it:" \
+        "scripts/prepared-corpus-oracle.sh update $manifest" >&2
+      exit 1
+    fi
+    echo "Suite oracle fingerprint and payload seal are current"
     ;;
   verify)
     generate "$work/expectations.json"
