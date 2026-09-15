@@ -271,56 +271,24 @@ pub(super) fn emit_dispatchers(
         context.func.signature = abi.cranelift_signature(profile, CallConv::Tail)?;
         let mut frontend = FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut context.func, &mut frontend);
-        let start = builder.create_block();
-        builder.append_block_params_for_function_params(start);
-        builder.switch_to_block(start);
-        builder.seal_block(start);
-        let params = builder.block_params(start).to_vec();
-        let vmctx = params[0];
-        let original_callee = params[1];
-        builder.declare_value_needs_stack_map(original_callee);
-        for (&value, rep) in params[2..].iter().zip(abi.physical_arguments()) {
-            if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
-                builder.declare_value_needs_stack_map(value);
-            }
-        }
-        let preflight =
-            super::emit::emit_preflight(&mut builder, vmctx, prepared_stack_overflow, pipeline);
-        super::emit::emit_status_guard(&mut builder, preflight);
-        let poll = pipeline
-            .module
-            .declare_func_in_func(prepared_poll, builder.func);
-        let point = builder.ins().iconst(
-            types::I32,
-            crate::prepared_control::PreparedSafepoint::FunctionEntry as i64,
+        // Everything below sees only the ENTERED callee: the dispatcher's
+        // raw parameters, including the original (possibly unevaluated)
+        // callee, stay private to `emit_dispatch_entry`.
+        let DispatchInput {
+            vmctx,
+            entered,
+            callee,
+            arguments: physical_arguments,
+        } = emit_dispatch_entry(
+            &mut builder,
+            pipeline,
+            &abi,
+            signature,
+            prepared_poll,
+            prepared_stack_overflow,
+            prepared_enter,
         );
-        let poll = builder.ins().call(poll, &[vmctx, point]);
-        let poll_status = builder.inst_results(poll)[0];
-        super::emit::emit_status_guard(&mut builder, poll_status);
-        let entered = builder.create_block();
-        let entered_failure = builder.create_block();
-        let enter = pipeline
-            .module
-            .declare_func_in_func(prepared_enter, builder.func);
-        let forced = builder.ins().call(enter, &[vmctx, original_callee]);
-        let forced_values = builder.inst_results(forced).to_vec();
-        let forced_ok = builder.ins().icmp_imm(
-            ir::condcodes::IntCC::Equal,
-            forced_values[0],
-            crate::prepared_control::CallStatus::Success as i64,
-        );
-        builder
-            .ins()
-            .brif(forced_ok, entered, &[], entered_failure, &[]);
-        builder.switch_to_block(entered_failure);
-        builder.seal_block(entered_failure);
-        crate::alloc::emit_prepared_failure_return(&mut builder, forced_values[0]);
-        builder.switch_to_block(entered);
-        builder.seal_block(entered);
-        let callee = forced_values[1];
-        builder.declare_value_needs_stack_map(callee);
         let mut next = entered;
-        let physical_arguments = logical_arguments(signature, &params[2..]);
         for (&id, function) in &plan.functions {
             let Some(application) = classify(function.signature, 0, signature) else {
                 continue;
@@ -352,8 +320,7 @@ pub(super) fn emit_dispatchers(
                     let target = pipeline
                         .module
                         .declare_func_in_func(callee_function, builder.func);
-                    let mut call_arguments = vec![vmctx, callee];
-                    call_arguments.extend(physical_arguments.iter().flatten().copied());
+                    let call_arguments = call_arguments(vmctx, callee, &physical_arguments);
                     let call = builder.ins().call(target, &call_arguments);
                     let returned = builder.inst_results(call).to_vec();
                     builder.ins().return_(&returned);
@@ -362,9 +329,8 @@ pub(super) fn emit_dispatchers(
                     let target = pipeline
                         .module
                         .declare_func_in_func(callee_function, builder.func);
-                    let mut call_arguments = vec![vmctx, callee];
-                    call_arguments
-                        .extend(physical_arguments.iter().take(consumed).flatten().copied());
+                    let call_arguments =
+                        call_arguments(vmctx, callee, physical_arguments.iter().take(consumed));
                     let _ = super::emit_direct_call(
                         &mut builder,
                         pipeline,
@@ -446,7 +412,8 @@ pub(super) fn emit_dispatchers(
             builder.ins().brif(matches, hit, &[], following, &[]);
             builder.switch_to_block(hit);
             builder.seal_block(hit);
-            let original = load_pap_field(&mut builder, object, layout, 0)?;
+            // A PAP applies its underlying function, stored in field 0.
+            let pap_function = load_pap_field(&mut builder, object, layout, 0)?;
             let mut flattened = Vec::with_capacity(pending + physical_arguments.len());
             for logical in 0..pending {
                 if layout.descriptor.payload().logical_to_stored()[logical + 1].is_none() {
@@ -463,8 +430,7 @@ pub(super) fn emit_dispatchers(
             flattened.extend(physical_arguments.iter().copied());
             match application {
                 Application::Exact => {
-                    let mut call_arguments = vec![vmctx, original];
-                    call_arguments.extend(flattened.iter().flatten().copied());
+                    let call_arguments = call_arguments(vmctx, pap_function, &flattened);
                     let target = pipeline
                         .module
                         .declare_func_in_func(callee_function, builder.func);
@@ -476,9 +442,11 @@ pub(super) fn emit_dispatchers(
                     let target = pipeline
                         .module
                         .declare_func_in_func(callee_function, builder.func);
-                    let mut call_arguments = vec![vmctx, original];
-                    call_arguments
-                        .extend(flattened.iter().take(pending + consumed).flatten().copied());
+                    let call_arguments = call_arguments(
+                        vmctx,
+                        pap_function,
+                        flattened.iter().take(pending + consumed),
+                    );
                     let _ = super::emit_direct_call(
                         &mut builder,
                         pipeline,
@@ -496,7 +464,7 @@ pub(super) fn emit_dispatchers(
                     emit_partial(
                         &mut builder,
                         vmctx,
-                        original,
+                        pap_function,
                         &flattened,
                         layout,
                         prepared_gc,
@@ -509,7 +477,7 @@ pub(super) fn emit_dispatchers(
                 } => emit_excess(
                     &mut builder,
                     vmctx,
-                    original,
+                    pap_function,
                     &flattened,
                     pending,
                     consumed,
@@ -564,11 +532,7 @@ pub(super) fn emit_dispatchers(
         builder.seal_block(resolved_block);
         let dispatcher_signature = builder.func.signature.clone();
         let sig_ref = builder.import_signature(dispatcher_signature);
-        // The environment is the ENTERED callee, exactly as on the local
-        // paths above: `original_callee` may be a thunk (or an updated
-        // indirection) whose payload is not the function's captures.
-        let mut resolved_arguments = vec![vmctx, callee];
-        resolved_arguments.extend_from_slice(&params[2..]);
+        let resolved_arguments = call_arguments(vmctx, callee, &physical_arguments);
         let call = builder
             .ins()
             .call_indirect(sig_ref, code, &resolved_arguments);
@@ -592,6 +556,100 @@ pub(super) fn emit_dispatchers(
         pipeline.define_function(output, &mut context)?;
     }
     Ok(())
+}
+
+/// What a dispatcher body may use after its entry sequence: the VM context,
+/// the block reached once the callee is entered, the ENTERED callee, and the
+/// demanded arguments in logical order (`None` for a `Void` position).
+/// Deliberately absent: the dispatcher's raw parameters, and with them the
+/// original callee, which may be a thunk or an updated indirection whose
+/// payload is not the applied function's environment.
+struct DispatchInput {
+    vmctx: ir::Value,
+    entered: ir::Block,
+    callee: ir::Value,
+    arguments: Vec<Option<ir::Value>>,
+}
+
+/// Emit a dispatcher's entry: parameters, their stack-map declarations,
+/// preflight and function-entry poll, then `prepared_enter` on the callee
+/// (returning the failure status if entering fails). The builder is left
+/// in the sealed `entered` block.
+fn emit_dispatch_entry(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut CodegenPipeline,
+    abi: &EntryAbi,
+    signature: &Signature,
+    prepared_poll: FuncId,
+    prepared_stack_overflow: FuncId,
+    prepared_enter: FuncId,
+) -> DispatchInput {
+    let start = builder.create_block();
+    builder.append_block_params_for_function_params(start);
+    builder.switch_to_block(start);
+    builder.seal_block(start);
+    let params = builder.block_params(start).to_vec();
+    let vmctx = params[0];
+    let original_callee = params[1];
+    builder.declare_value_needs_stack_map(original_callee);
+    for (&value, rep) in params[2..].iter().zip(abi.physical_arguments()) {
+        if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
+            builder.declare_value_needs_stack_map(value);
+        }
+    }
+    let preflight = super::emit::emit_preflight(builder, vmctx, prepared_stack_overflow, pipeline);
+    super::emit::emit_status_guard(builder, preflight);
+    let poll = pipeline
+        .module
+        .declare_func_in_func(prepared_poll, builder.func);
+    let point = builder.ins().iconst(
+        types::I32,
+        crate::prepared_control::PreparedSafepoint::FunctionEntry as i64,
+    );
+    let poll = builder.ins().call(poll, &[vmctx, point]);
+    let poll_status = builder.inst_results(poll)[0];
+    super::emit::emit_status_guard(builder, poll_status);
+    let entered = builder.create_block();
+    let entered_failure = builder.create_block();
+    let enter = pipeline
+        .module
+        .declare_func_in_func(prepared_enter, builder.func);
+    let forced = builder.ins().call(enter, &[vmctx, original_callee]);
+    let forced_values = builder.inst_results(forced).to_vec();
+    let forced_ok = builder.ins().icmp_imm(
+        ir::condcodes::IntCC::Equal,
+        forced_values[0],
+        crate::prepared_control::CallStatus::Success as i64,
+    );
+    builder
+        .ins()
+        .brif(forced_ok, entered, &[], entered_failure, &[]);
+    builder.switch_to_block(entered_failure);
+    builder.seal_block(entered_failure);
+    crate::alloc::emit_prepared_failure_return(builder, forced_values[0]);
+    builder.switch_to_block(entered);
+    builder.seal_block(entered);
+    let callee = forced_values[1];
+    builder.declare_value_needs_stack_map(callee);
+    DispatchInput {
+        vmctx,
+        entered,
+        callee,
+        arguments: logical_arguments(signature, &params[2..]),
+    }
+}
+
+/// The one way an application's native argument list is built: VM context,
+/// the environment (the applied function or closure), then the physical
+/// arguments (logical `Void` positions carry no value and are skipped).
+fn call_arguments<'a>(
+    vmctx: ir::Value,
+    environment: ir::Value,
+    arguments: impl IntoIterator<Item = &'a Option<ir::Value>>,
+) -> Vec<ir::Value> {
+    let mut native = vec![vmctx, environment];
+    native.extend(arguments.into_iter().flatten().copied());
+    native
 }
 
 fn logical_arguments(signature: &Signature, physical: &[ir::Value]) -> Vec<Option<ir::Value>> {
@@ -655,7 +713,7 @@ fn emit_partial(
 fn emit_excess(
     builder: &mut FunctionBuilder<'_>,
     vmctx: ir::Value,
-    _original_callee: ir::Value,
+    function: ir::Value,
     arguments: &[Option<ir::Value>],
     pending: usize,
     consumed: usize,
@@ -671,8 +729,7 @@ fn emit_excess(
     let Some(&target_id) = functions.get(&function_id) else {
         return Err(super::CompileError::MissingRepresentation(function_id));
     };
-    let mut first_args = vec![vmctx, _original_callee];
-    first_args.extend(arguments.iter().take(pending + consumed).flatten().copied());
+    let first_args = call_arguments(vmctx, function, arguments.iter().take(pending + consumed));
     let target = pipeline
         .module
         .declare_func_in_func(target_id, builder.func);
@@ -698,8 +755,7 @@ fn emit_excess(
         let target = pipeline
             .module
             .declare_func_in_func(suffix_dispatcher, builder.func);
-        let mut call_args = vec![vmctx, result];
-        call_args.extend(suffix.iter().flatten().copied());
+        let call_args = call_arguments(vmctx, result, suffix);
         let call = builder.ins().call(target, &call_args);
         let returned = builder.inst_results(call).to_vec();
         builder.ins().return_(&returned);
