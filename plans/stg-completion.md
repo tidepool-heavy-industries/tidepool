@@ -157,9 +157,23 @@ Step 1 evidence at `413f8cea4` (G1 committed; recorded 2026-09-15):
     passes at baseline and on the G1 tree (about 117 s each); its failure in
     the broad run was a timeout under load.
   - Seven `command_jobs_tests` match the classification in `067adcf18`.
-  The other custody, hosted-tools, notification, forest and steering failures
-  from the loaded run were not individually reproduced; the sample indicates
-  load-induced timeouts, but they remain unclassified until a quiet run.
+  - Quiet rerun on the G1 tree (two concurrent tests): three more custody
+    tests pass (`custody_actor_cancellation_after_binding_prevents_provider_publication`,
+    `custody_actor_cancellation_during_delayed_install_releases_exact_binding`,
+    `custody_haskell_bootstrap_failure_after_install_releases_binding`), so
+    their broad-run failures were load timeouts.
+  - Six fail quietly on the G1 tree and identically, same panic sites, at
+    `067adcf18`: pre-existing. `hosted_tools_tests::frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindings`
+    (`hosted_tools_tests.rs:26`), `tests::active_update_keeps_original_request_and_fences_terminal_delivery`
+    (`actor_host.rs:5391`), `tests::forest_operator_survives_model_root_recovery`
+    (`actor_host.rs:5160`), `tests::haskell_actor_sends_normal_steering_without_a_native_session`
+    (`actor_host.rs:7606`), `tests::notification_admission_and_poll_preserve_typed_request_bindings`
+    (`actor_host.rs:7056`), and `custody_tests::custody_precedes_first_bootstrap_worktree_use_for_two_siblings`
+    (`custody_tests.rs:583`). Four of them are notebook cells rejected by GHC
+    type errors against current stdlib signatures.
+  Failures the broad run reported after test 116 of 2,966 were not captured
+  by name; the run's artifact directory was removed by
+  `scripts/lib-extract.sh`'s exit cleanup when the run was stopped.
 - A pre-existing clippy error (`clone` on the `Copy` type `RuntimeRep`,
   `tidepool-toolchain/src/prepared_artifact.rs:100`) stops that crate's test
   build under the broad gate.
