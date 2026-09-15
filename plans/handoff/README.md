@@ -56,6 +56,7 @@ this, then `plans/stg-completion.md` (the governing plan), then `CLAUDE.md`.
    `startActor`/`startActorFork`) as "runtime-polymorphic representation".
    Design: `ResultContract::CallerResult` (proposed fixes in the completion
    plan). Blocks `shoal_exports_persistent_agents_and_hides_turn_lifecycle_operations`.
+   Commit plan: `designs/caller-result-first-slice.md`.
 3. **`Address` host values** — the only engine gap among the 184 corpus
    execution failures (74 rows). First slice designed (observation of pinned
    literal bytes; typed refusal otherwise). Implementation plan:
