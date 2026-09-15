@@ -6,13 +6,18 @@ import Data.List (isInfixOf, sort)
 import Data.String (fromString)
 import GHC (moduleNameString)
 import GHC.Builtin.Types (boolTy)
+import GHC.Core (Expr(..), bindersOf)
+import GHC.Types.Id.Make (nospecId)
+import GHC.Core.TyCo.Compare (eqType)
+import Tidepool.SiteClassifier
+  ( SiteFailure(..), classifySiteOccurrence, stripNospecSpine )
 import GHC.Unit.Types (moduleName)
 import System.Directory
   ( createDirectoryIfMissing, getTemporaryDirectory, removePathForcibly )
 import System.FilePath ((</>))
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CompilePurpose(..)
-  , runPipeline, runPipelineSelected, withResidentPipelineSelected )
+  , PipelineResult(..), runPipeline, runPipelineSelected, withResidentPipelineSelected )
 import Tidepool.PreparedStg (PreparedModule(..))
 import qualified Data.Map.Strict as Map
 import qualified Tidepool.ExecutionProjection as Projection
@@ -21,7 +26,8 @@ import Tidepool.EffectSchema (SiteType(..), YieldSite(..), sitedVerbs, vsName)
 import Tidepool.ExecutionIR
   ( LiteralInventory(..), PreparedFact(..), PreparedInventory(..), PreparedSupport(..), inventoryPreparedModule
   , renderPreparedInventory )
-import Tidepool.PreparedSites (buildYieldSite)
+import Tidepool.PreparedSites (buildYieldSite, lookupPreparedVerb, resolvePreparedSiblings)
+import Tidepool.Translate (lowerModule, LoweredModule(..))
 import RetainedPluginTest (verifyCompilerReuse)
 
 assert :: Bool -> String -> IO ()
@@ -112,6 +118,11 @@ expectFailureContaining label needle action = do
 
 main :: IO ()
 main = do
+  let normalized = stripNospecSpine
+        (Var nospecId, [Type boolTy, Var nospecId, Type boolTy])
+  assert (case normalized of
+    (Var _, [Type ty]) -> eqType ty boolTy
+    _ -> False) "nospec normalization discarded a remaining type argument"
   tmp <- getTemporaryDirectory
   let work = tmp </> "tidepool-prepared-stg-pipeline-test"
   bracket
@@ -125,7 +136,7 @@ main = do
           unfoldDir = dir </> "Tidepool" </> "Actors"
           unfold = unfoldDir </> "Unfold.hs"
           siteTarget = dir </> "SiteExpr.hs"
-          malformedSiteTarget = dir </> "MalformedSiteExpr.hs"
+          partialChildTarget = dir </> "PartialChildExpr.hs"
           polySiteTarget = dir </> "PolySiteExpr.hs"
           target = dir </> "Expr.hs"
           validTarget = unlines
@@ -139,11 +150,12 @@ main = do
             ]
       createDirectoryIfMissing True effectsDir
       createDirectoryIfMissing True unfoldDir
-      writeFile dep (unlines
-        [ "module Dep where"
-        , "helper :: Int -> Int"
-        , "helper x = x + 1"
-        ])
+      let originalDep = unlines
+            [ "module Dep where"
+            , "helper :: Int -> Int"
+            , "helper x = x + 1"
+            ]
+      writeFile dep originalDep
       writeFile effects (unlines
         [ "{-# LANGUAGE ExplicitForAll #-}"
         , "{-# LANGUAGE TypeApplications #-}"
@@ -161,9 +173,12 @@ main = do
       writeFile unfold (unlines
         [ "{-# LANGUAGE ExplicitForAll #-}"
         , "module Tidepool.Actors.Unfold where"
-        , "child :: forall result child effects input. input -> Maybe result"
+        , "import Data.Kind (Type)"
+        , "{-# OPAQUE child #-}"
+        , "child :: forall result (child :: Type) input (parent :: Type). input -> Maybe result"
         , "child _ = Nothing"
-        , "childSited :: forall result child effects input. Int -> input -> Maybe result"
+        , "{-# OPAQUE childSited #-}"
+        , "childSited :: forall result (child :: Type) input (parent :: Type). Int -> input -> Maybe result"
         , "childSited _ _ = Nothing"
         ])
       writeFile target validTarget
@@ -194,12 +209,12 @@ main = do
         , "usesNested :: Maybe Bool"
         , "usesNested = polyNested @Bool True \"nested\""
         ])
-      writeFile malformedSiteTarget (unlines
+      writeFile partialChildTarget (unlines
         [ "{-# LANGUAGE TypeApplications #-}"
-        , "module MalformedSiteExpr where"
+        , "module PartialChildExpr where"
         , "import Tidepool.Actors.Unfold"
-        , "malformedSite :: String -> Maybe Bool"
-        , "malformedSite = child @Bool @Int @Char @String"
+        , "partialChild :: Char -> Maybe Bool"
+        , "partialChild = child @Bool @Int @Char @String"
         ])
 
       _legacy <- runPipeline target [dir]
@@ -216,11 +231,13 @@ main = do
                   && show (ysSite site) `isInfixOf` siteInventory
                 _ -> False)
         "typed site was not elaborated before preparation"
-      -- Typed-site failures are deferred to projection: a module compiles, and
-      -- only a program that reaches the failing site is rejected.
-      malformedDirect <- runPipelineSelected PreparedStg malformedSiteTarget [dir]
-      assertSiteRejection "direct malformed recognized site" "is not fully applied"
-        (projectEntry malformedDirect "MalformedSiteExpr" "malformedSite" mempty)
+      partialChildDirect <- runPipelineSelected PreparedStg partialChildTarget [dir]
+      assertProjects "direct value-partial child site"
+        (projectEntry partialChildDirect "PartialChildExpr" "partialChild" mempty)
+      assert (case snd (preparedEvidence "PartialChildExpr" partialChildDirect) of
+        [site] -> stType (ysAnswer site) == "Bool" && map stType (ysInputs site) == ["Char"]
+        _ -> False) "partial child must retain its concrete result and input types"
+      -- Open result types reject only when executable projection reaches them.
       polyDirect <- runPipelineSelected PreparedStg polySiteTarget [dir]
       assertProjects "unrelated top beside a polymorphic site helper"
         (projectEntry polyDirect "PolySiteExpr" "unrelated" mempty)
@@ -245,12 +262,67 @@ main = do
           "resident cold typed-site evidence differs from direct"
         assert (preparedEvidence "SiteExpr" siteWarm == (siteInventory, directSites))
           "resident warm typed-site evidence differs from direct"
-        malformedResident <- compileSite PreparedStg mempty GeneralCompile Nothing malformedSiteTarget [] Nothing
-        assertSiteRejection "resident malformed recognized site" "is not fully applied"
-          (projectEntry malformedResident "MalformedSiteExpr" "malformedSite" mempty)
+        partialChildResident <- compileSite PreparedStg mempty GeneralCompile Nothing partialChildTarget [] Nothing
+        assertProjects "resident value-partial child site"
+          (projectEntry partialChildResident "PartialChildExpr" "partialChild" mempty)
         siteRecovered <- compileSite PreparedStg mempty GeneralCompile Nothing siteTarget [] Nothing
         assert (preparedEvidence "SiteExpr" siteRecovered == (siteInventory, directSites))
-          "resident compiler did not recover after malformed recognized site"
+          "resident compiler did not recover after a partial recognized site"
+
+      -- Use the production forall/dictionary shape with an open effect row.
+      readFile "test-prepared-stg/site-fixtures/Core.hs" >>= writeFile effects
+      let constrainedTarget = dir </> "ConstrainedSites.hs"
+      readFile "test-prepared-stg/site-fixtures/ConstrainedSites.hs" >>= writeFile constrainedTarget
+      constrained <- runPipelineSelected PreparedStg constrainedTarget [dir]
+      let (_, constrainedSites) = preparedEvidence "ConstrainedSites" constrained
+      assert (length constrainedSites == 3 && all ((/= 0) . ysSite) constrainedSites)
+        ("partial, open-row, and higher-order constrained sites must each elaborate once: " ++ show constrainedSites)
+      mapM_ (\entry -> assertProjects ("constrained " ++ entry)
+        (projectEntry constrained "ConstrainedSites" entry mempty))
+        ["partial", "wrapped", "higherOrder", "unrelated"]
+      assertSiteRejection "unresolved constrained partial site" "result type is unresolved"
+        (projectEntry constrained "ConstrainedSites" "unresolved" mempty)
+      legacyConstrained <- runPipeline constrainedTarget [dir]
+      case [(binder, spec) | binder <- concatMap bindersOf (prBinds legacyConstrained)
+                          , Just spec <- [lookupPreparedVerb binder]
+                          , vsName spec == "runLLMTurn"] of
+        (surface, spec) : _ -> do
+          assert (case classifySiteOccurrence mempty spec surface [Var surface] of
+            Left (MissingTypeArgument 0) -> True
+            _ -> False) "malformed site type prefix was accepted"
+          assert (case classifySiteOccurrence (Map.singleton "runLLMTurn" surface)
+                         spec surface [Type boolTy] of
+            Left IncompatibleSibling -> True
+            _ -> False) "surface/sibling signature drift was accepted"
+        [] -> ioError (userError "constrained fixture lost its surface verb")
+      mapM_ (\entry -> do
+        let lowered = lowerModule (prBinds legacyConstrained) entry mempty
+            sites = lmYieldSites lowered
+        assert (Map.member "runLLMTurn" (resolvePreparedSiblings (lmReachBinds lowered)))
+          ("legacy reachability dropped the generated sibling: " ++ entry)
+        assert (length sites == 1 && all ((== "Bool") . stType . ysAnswer) sites)
+          ("legacy constrained site missing: " ++ entry))
+        ["partial", "wrapped", "higherOrder"]
+
+      writeFile dep (unlines
+        [ "{-# LANGUAGE CPP #-}"
+        , "module Dep where"
+        , "#include \"Value.h\""
+        , "helper :: Int -> Int"
+        , "helper x = x + VALUE"
+        ])
+      let header = dir </> "Value.h"
+      writeFile header "#define VALUE 1\n"
+      withResidentPipelineSelected [dir] $ \compileCpp -> do
+        before <- compileCpp PreparedStg mempty GeneralCompile Nothing target [] Nothing
+        warm <- compileCpp PreparedStg mempty GeneralCompile Nothing target [] Nothing
+        assert (preparedEvidence "Dep" before == preparedEvidence "Dep" warm)
+          "unchanged CPP module changed its prepared result"
+        writeFile header "#define VALUE 2\n"
+        after <- compileCpp PreparedStg mempty GeneralCompile Nothing target [] Nothing
+        assert (preparedEvidence "Dep" before /= preparedEvidence "Dep" after)
+          "resident memo reused stale Core after an included header changed"
+      writeFile dep originalDep
 
       writeFile target "module Expr where\nresult =\n"
       expectFailure "direct prepared" $

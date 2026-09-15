@@ -25,7 +25,6 @@ import GHC
 import Control.Exception (throw)
 import Tidepool.DiagJson (SourceRejection(..))
 import GHC.Core
-import qualified GHC.Core.Utils as Core
 import GHC.Types.Id
 import GHC.Types.Id.Info (IdDetails(FCallId))
 import GHC.Types.ForeignCall (ForeignCall(..), CCallSpec(..), CCallTarget(..))
@@ -49,8 +48,7 @@ import GHC.Core.TyCon
 import GHC.Core.Type (splitTyConApp_maybe, splitFunTy_maybe, isUnliftedType)
 import GHC.Builtin.Types.Prim (statePrimTyCon)
 import GHC.Core.TyCo.Rep (Scaled(..))
-import GHC.Core.TyCo.FVs (tyConsOfType, tyCoVarsOfType)
-import GHC.Types.Var.Set (isEmptyVarSet)
+import GHC.Core.TyCo.FVs (tyConsOfType)
 import GHC.Types.Unique.Set as USet (nonDetEltsUniqSet)
 import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet, mkUniqSet)
 import GHC.Types.Basic (JoinPointHood(..))
@@ -76,23 +74,21 @@ import System.IO (hPutStrLn, stderr)
 import Tidepool.Resolve (resolveExternals, UnresolvedVar(..))
 import Tidepool.IR (FlatNode(..), FlatAlt(..), FlatAltCon(..), LitEnc(..))
 import Tidepool.Identity
-  ( binderQualName, checkedKeyToIdx, normalizeMod, qualifiedName, varId )
+  ( binderQualName, checkedKeyToIdx, qualifiedName, varId )
 import Tidepool.Metadata (DCMeta(..))
 import Tidepool.PrimOps
   ( floatMathToDouble, mapPrimOp, primOpArity, splitMultiReturnPrimOp
   , splitTripleReturnPrimOp, splitUnaryMultiReturnPrimOp, splitWord2DivPrimOp )
-import Tidepool.PreparedSites (buildYieldSite, lookupPreparedVerb)
+import Tidepool.PreparedSites (buildYieldSite, lookupPreparedVerb, resolvePreparedSiblings)
+import Tidepool.SiteClassifier
 import Tidepool.EffectSchema
-  ( SiteAnswerSource (..)
-  , SiteTypePosition (..)
-  , polymorphicSiteMessage
-  , VerbSpec (..)
+  ( VerbSpec (..)
   , YieldSite (..)
   , sitedVerbs
   )
 import Tidepool.Session (isSessionValModule)
 import Tidepool.TypePolicy
-  ( isGhcCompilerName, isGhcCompilerTyCon, stabilizeEffectRows )
+  ( isGhcCompilerName, isGhcCompilerTyCon )
 import System.IO.Unsafe (unsafePerformIO)
 import qualified System.Environment
 import qualified Data.List
@@ -118,20 +114,8 @@ data TransState = TransState
   -- sentinel. The emitted node carries the slot; metadata maps it back to the
   -- missing symbol's name.
   , tsPoisonSlots :: !(Map.Map Word64 Word64)
-  -- The varId of each sited verb's
-  -- hidden @*Sited@ sibling, keyed by the SURFACE verb's occurrence name
-  -- ('vsName'). Seeded once per 'lowerModule' run by 'resolveSitedIds',
-  -- which walks 'sitedVerbs' — so this map's key set is exactly the table's,
-  -- minus any verb whose sibling isn't in the closed program.
-  --
-  -- A key is ABSENT when the effect's generated helper text isn't there at
-  -- all; an interception site with no sibling available is an
-  -- extract-pipeline bug (see the head-swap arm's 'Nothing' branch for the
-  -- one benign caller that hits it deliberately).
-  --
-  -- A map keyed by the schema's surface name keeps lookup aligned with the
-  -- declarative verb table.
-  , tsSitedIds :: !(Map.Map String Word64)
+  -- Exact generated siblings retain their GHC types for the shared classifier.
+  , tsSitedIds :: !(Map.Map String Id)
   , tsSiteCounters :: !(Map.Map Text Word64) -- binder-local typed-site ordinals
   -- GHC-derived metadata for typed suspension sites. Besides the answer type,
   -- a site may name live inputs an interpreter must mount into a later
@@ -500,7 +484,7 @@ lowerModule allBinds targetName unresolvedIds =
         { tsUnresolvedIds = unresolvedIds
         -- Sited helpers are generated siblings, not syntactic dependencies of
         -- the surface call that translation rewrites to use them.
-        , tsSitedIds = resolveSitedIds allBinds
+        , tsSitedIds = resolvedSiblings
         }
       (_, finalState) = runState (wrapAllBinds neededBinds targetId) initState
   in LoweredModule
@@ -511,6 +495,8 @@ lowerModule allBinds targetName unresolvedIds =
       , lmPoisonSlots = tsPoisonSlots finalState
       }
   where
+    resolvedSiblings = resolvePreparedSiblings allBinds
+
     findTargetId name binds =
       case filter isTarget (concatMap localBindersOf binds) of
         (b:_) -> b
@@ -602,7 +588,9 @@ lowerModule allBinds targetName unresolvedIds =
         go bound expr = case expr of
           Var v | isErasedBinder v -> Set.empty
                 | varId v `Set.member` bound -> Set.empty
-                | otherwise -> Set.singleton (varId v)
+                | otherwise -> Set.fromList (varId v :
+                    [varId sibling | Just spec <- [lookupSitedVerb v]
+                     , Just sibling <- [Map.lookup (vsName spec) resolvedSiblings]])
           Lit{} -> Set.empty
           App f a -> go bound f `Set.union` go bound a
           Lam b e -> go (bindV b bound) e
@@ -1874,119 +1862,33 @@ translate expr =
             emitNode $ NCase argIdx binderId altData
           _ -> error $ "dataToTag# without resolvable type argument"
 
-    -- EVERY sited verb's call site — @runLLMTurn \@T prompt@,
-    -- @runLLMTurnFork@, @runLLMTurnFanout@, @fork@, @forkAll@, @forkMap@,
-    -- @forkCata@, @finalize@ — through ONE arm driven by 'sitedVerbs'.
-    -- Detected the same way as the tagToEnum# arm above: a known Var
-    -- ('lookupSitedVerb' — occurrence name AND defining module) applied to
-    -- the verb's leading @Type@ arguments plus its own trailing value args,
-    -- which are translated like any other Core expression. The ONLY Core
-    -- synthesis permitted is the head-swap to the hidden @*Sited@ sibling
-    -- (its varId resolved once, by name, in 'lowerModule') with a fresh
-    -- site-id literal prepended — the sibling's REAL body (which builds the
-    -- "typedSite"-tagged payload) then runs normally at JIT runtime; we
-    -- never construct that payload ourselves.
-    --
-    -- Everything these sites used to differ on — how many type args the
-    -- call carries, how many value args are the verb's own, which answer-type
-    -- rejection applies, whether the sidecar records @T@ or @[T]@ — is a
-    -- FIELD of the verb's row, so this arm carries no per-verb constant.
-    Var v | Just spec <- lookupSitedVerb v
-          , let typeArgs = filter (not . isValueArg) allArgs
-          -- 'vsTypeArgs' says how many visible type arguments the site's
-          -- shape requires. Primitive verbs take their answer from the first;
-          -- higher-level action combinators expose it as the applied result.
-          , Just siteTys@(ty : _) <- leadingTypes (vsTypeArgs spec) typeArgs
-          -- The trailing 'vsValueArity' args are the verb's own; anything
-          -- before them is 0+ leading `Member <Eff> effs` dictionaries (see
-          -- 'splitTrailingArgs').
-          , Just (dictArgs, valueArgs) <- splitTrailingArgs (vsValueArity spec) args -> do
-        let answerTy = case vsAnswerSource spec of
-              FirstTypeArgument -> ty
-              TypeArgument index -> siteTys !! index
-              AppliedResultType -> Core.exprType expr
-        stableTy <- checkSiteType spec answerTy
-        stableInputs <- mapM (checkSiteInputType spec siteTys) (vsInputTypeArgs spec)
-        sitedIdM <- gets (Map.lookup (vsName spec) . tsSitedIds)
-        case sitedIdM of
-          -- The sibling's varId is resolved ONCE, by name, by a scan over
-          -- the full closed bind pool ('lowerModule'/'resolveSitedIds')
-          -- — always populated on the real writeWholeModuleClosed pass (the
-          -- effect's helper text is always present). This branch instead
-          -- fires when OTHER callers re-run 'translate' with a throwaway,
-          -- unseeded TransState purely to harvest 'tsUsedDCs' (e.g.
-          -- 'collectUsedDataCons'/'collectTransitiveDCons' rescanning
-          -- 'reachBinds' for the meta.cbor constructor table) — those callers
-          -- discard 'tsNodes' entirely, so emitting a poison here (mirroring
-          -- 'emitFfiPoison') is harmless; still translate the value args (and
-          -- any dictionary args) so their own DataCon usage isn't missed by
-          -- that scan.
-          Nothing -> do
-            mapM_ translate dictArgs
-            mapM_ translate valueArgs
-            emitFfiPoison
-          Just sitedVarId -> do
+    -- Insert a site after the type-derived evidence prefix. The sibling
+    -- retains the surface function's remaining (possibly partial) application.
+    Var v | Just spec <- lookupSitedVerb v -> do
+        siblings <- gets tsSitedIds
+        case classifySiteOccurrence siblings spec v allArgs of
+          Left MissingSibling -> mapM_ translate args >> emitFfiPoison
+          Left failure -> do
+            binder <- gets tsCurrentBinder
+            throw $ SourceRejection $
+              renderSiteFailure (maybe "<top level>" T.unpack binder) spec failure
+          Right plan -> do
+            -- Number nested occurrences before their enclosing site, matching
+            -- the typed prepared-Core traversal.
+            missingIds <- mapM (const freshSynthVarId) (spMissingEvidence plan)
+            missingRefs <- mapM (emitNode . NVar) missingIds
+            suppliedDictIdxs <- mapM translate (spEvidence plan)
+            let dictIdxs = suppliedDictIdxs ++ missingRefs
+            valueIdxs <- mapM translate (filter isValueArg (spRest plan))
             (siteOrigin, siteOrdinal) <- freshSiteOrdinal
-            -- A fanout-shaped verb's answer type is `[T]` (N children each
-            -- answering T), but `ty` here is the per-child element type `T`
-            -- applied at the call site (`@T`) — record the LIST type in the
-            -- asks.json sidecar so the harness's rendered type matches what
-            -- actually resumes the parent; the harness derives the element
-            -- type back by stripping the outer `[]`. 'vsListAnswer' is which
-            -- verbs those are.
-            let site = buildYieldSite spec siteOrigin siteOrdinal stableTy stableInputs
-                siteId = ysSite site
-            -- Modules are resolved from the per-child element type `ty`
-            -- itself (never the `[]`-wrapped 'typeStr') — a fanout site's
-            -- shim needs T's own defining module(s), not '[]''s.
+            let site = buildYieldSite spec siteOrigin siteOrdinal (spAnswer plan) (spInputs plan)
             recordYieldSite site
-            sitedRef <- emitNode $ NVar sitedVarId
-            -- Re-apply any `Member <Eff> effs` dictionaries verbatim, in
-            -- their original order, before the injected site-id literal —
-            -- the *Sited sibling has the SAME dictionary parameters (it's
-            -- declared with the identical `Member` constraint) at the same
-            -- position in its own application spine.
-            dictIdxs <- mapM translate dictArgs
+            sitedRef <- emitNode $ NVar (varId (spSibling plan))
             withDicts <- foldM (\fIdx aIdx -> emitNode $ NApp fIdx aIdx) sitedRef dictIdxs
-            litIdx <- emitNode $ NLit (LEInt (fromIntegral siteId))
+            litIdx <- emitNode $ NLit (LEInt (fromIntegral (ysSite site)))
             appLit <- emitNode $ NApp withDicts litIdx
-            -- Then the verb's own value args, left to right — one 'NApp' per
-            -- arg, emitted right after that arg's own subtree, exactly as
-            -- the per-arity arms this replaced spelled it out.
-            foldM (\fIdx a -> translate a >>= emitNode . NApp fIdx) appLit valueArgs
-
-    -- A mis-shaped occurrence (partial application, a type-argument count
-    -- that doesn't match the row's, a mis-arity value-arg list) of a verb
-    -- whose row sets 'vsMisShapeIsError': Fork.hs's own module haddock is
-    -- explicit that its combinators have "no runtime fallback" — every
-    -- well-formed call site head-swaps to the *Sited sibling, and a call
-    -- extract genuinely cannot rewrite must fail HERE, naming the site,
-    -- rather than silently falling through to the (OPAQUE, dead-at-runtime)
-    -- stub. 'lookupSitedVerb' already gates on the Var's own DEFINING MODULE
-    -- (not just its occurrence name), so this stays disjoint from the
-    -- fallthrough below: a user's own same-named-but-different-module
-    -- forkMap/forkCata (see `user_defined_forkmap_does_not_abort_extract`,
-    -- fork-catchall-fallthrough) never matches the table and always falls
-    -- through untouched.
-    Var v | Just spec <- lookupSitedVerb v
-          , vsMisShapeIsError spec -> do
-        binder <- gets tsCurrentBinder
-        let siteDesc = maybe "<top level>" T.unpack binder
-        error $ vsName spec ++ " site in " ++ siteDesc
-              ++ " is not fully applied or its answer type is not a concrete "
-              ++ "monomorphic type at this call site — apply it to both of "
-              ++ "its arguments and ensure the answer type is instantiated "
-              ++ "here (partial application and un-instantiated type "
-              ++ "variables cannot be extracted)."
-
-    -- Any OTHER shape at a forkMap/forkCata head sharing only the
-    -- OCCURRENCE name with the real Tidepool.Answerer.Fork combinator (e.g. a user's
-    -- own project-local helper) is deliberately NOT special-cased here,
-    -- mirroring the runLLMTurn/runLLMTurnFork/runLLMTurnFanout arm above:
-    -- no catch-all error, just fall through to ordinary Var/App
-    -- translation below. A hard failure here would abort the WHOLE eval on
-    -- any user binding merely named forkMap/forkCata, not just a genuine
-    -- misuse of the real combinator.
+            body <- foldM (\fIdx aIdx -> emitNode $ NApp fIdx aIdx) appLit valueIdxs
+            foldM (\rhs binder -> emitNode $ NLam binder rhs) body (reverse missingIds)
 
     Var v | Just pop <- isPrimOpId_maybe v
           , length args == primOpArity pop -> do
@@ -2348,58 +2250,6 @@ isValueArg _ = True
 isErasedBinder :: Var -> Bool
 isErasedBinder b = isTyVar b || isCoVar b
 
--- | Split a typed-yield call site's (already 'isValueArg'-filtered) value-arg
--- list into "0+ leading extra args" and "the trailing @n@ args the verb's own
--- non-Member signature always had" (e.g. @[prompt]@ for runLLMTurn,
--- @[fn, xs]@ for forkMap). Generalizes what used to be an exact-arity list
--- pattern (@[promptArg] <- args@) so a `Member <Eff> effs` dictionary now
--- threaded ahead of the real arguments (once the typed-yield verbs are
--- Member-polymorphic — see 'checkRunLLMTurnType' callers) doesn't break the
--- match: the dictionary rides along as an ordinary extra leading value arg,
--- re-applied verbatim to the *Sited sibling in 'splitTrailingArgs's caller.
--- 'Nothing' when there are fewer than @n@ args (mis-arity / partial
--- application) — callers fall through to the existing "not fully applied"
--- error arm, unchanged.
-splitTrailingArgs :: Int -> [a] -> Maybe ([a], [a])
-splitTrailingArgs n xs
-  | length xs >= n = Just (splitAt (length xs - n) xs)
-  | otherwise = Nothing
-
--- | Re-flatten a `nospec`-wrapped call site into ONE spine, headed by
--- whatever `nospec` was protecting. GHC's specializer wraps a
--- class-constrained call `f \@T $dInstance x...` as
--- `nospec \@ty (f \@T) $dInstance x...` whenever the dictionary is a
--- statically-known top-level instance (see 'isNospecVar') — now common at
--- typed-yield call sites once the verbs carry a `Member <Eff> effs`
--- constraint. 'collectArgs' peels the WHOLE @App@ spine down to `nospec`
--- itself, so `f \@T` (nospec's own function argument) ends up as ONE opaque,
--- still-partially-applied argument sitting BEFORE the dictionary/value args
--- that logically belong to `f` — e.g. @nospec \@ty (runLLMTurn \@Bool
--- \@effs) $dMember "gate"@, where `f = runLLMTurn \@Bool \@effs` carries
--- runLLMTurn's own two type args but ZERO value args yet. Left alone, the
--- runLLMTurn/finalize/forkMap interception arms below (which match on the
--- combined type-arg-then-value-arg shape of a single spine) never see the
--- dictionary or the prompt in the same place as the answer type, and the
--- site silently falls through untranslated.
---
--- Recursively re-collects `f`'s own spine and splices it in front of
--- `rest`, discarding nospec's own (always-irrelevant) type argument — this
--- reconstructs EXACTLY the spine that would exist if `nospec` had never
--- been inserted, so every existing by-name interception arm (and the
--- ordinary fallthrough App-translation case) sees one uniform shape
--- regardless of whether the specializer wrapped the call. Terminates: each
--- recursive step strictly shrinks the expression (peels one `nospec`
--- layer); a nested `nospec` (however unlikely) is handled by re-checking
--- the new head. A bare, zero-value-arg `nospec` (point-free) is left
--- untouched here — 'translateHead's own eta-expansion arm handles it.
-stripNospecSpine :: (CoreExpr, [CoreExpr]) -> (CoreExpr, [CoreExpr])
-stripNospecSpine (hd, allArgs)
-  | Var v <- hd, isNospecVar v
-  , (f : rest) <- filter isValueArg allArgs
-  , (fHd, fArgs) <- collectArgs (stripTicksAndCasts f)
-  = stripNospecSpine (fHd, fArgs ++ rest)
-  | otherwise = (hd, allArgs)
-
 -- | Strip a single-field box constructor from a wrapper DataCon arg.
 -- When a DataCon wrapper is applied, its args are boxed:
 --   Text (ByteArray ba#) (I# off#) (I# len#)
@@ -2643,15 +2493,6 @@ isUnsafeEqualityCase expr =
 isRunRWVar :: Id -> Bool
 isRunRWVar v = occNameString (nameOccName (idName v)) == "runRW#"
 
--- | GHC.Magic.nospec :: a -> a — the specializer's identity wrapper (emitted
--- once Opt_Specialise is on). No unfolding, so it can't be resolved as an
--- external; we desugar it to the identity (see the App + translateHead cases).
-isNospecVar :: Id -> Bool
-isNospecVar v =
-     occNameString (nameOccName (idName v)) == "nospec"
-  && maybe False ((== "GHC.Magic") . normalizeMod . moduleNameString . moduleName)
-           (nameModule_maybe (idName v))
-
 -- | Recognize boxed GHC type-representation metadata. The name prefix alone
 -- is insufficient because the simplifier may give floated runtime constants
 -- the same prefix; requiring a lifted type distinguishes metadata objects from
@@ -2762,60 +2603,6 @@ isParseISO8601Var = isIntrinsicVerb "parseISO8601"
 -- including the @*Sited@ siblings themselves.
 lookupSitedVerb :: Id -> Maybe VerbSpec
 lookupSitedVerb = lookupPreparedVerb
-
--- | The first @n@ arguments of an (already 'isValueArg'-filtered) spine as
--- 'Type's — 'Nothing' when there are fewer than @n@, or when any of them is
--- a Coercion rather than a Type. This is 'vsTypeArgs' spelled as a match:
--- @n = 1@ reproduces @(Type ty : _)@, @n = 2@ reproduces
--- @(Type ty : Type _ : _)@.
-leadingTypes :: Int -> [CoreExpr] -> Maybe [Type]
-leadingTypes n as
-  | length leading == n = mapM asType leading
-  | otherwise           = Nothing
-  where
-    leading = take n as
-    asType (Type t) = Just t
-    asType _        = Nothing
-
--- | Resolve site-aware siblings from the full bind pool before reachability
--- pruning. Missing siblings remain absent; a call that requires one will then
--- produce a site-shape error. Module qualification prevents user bindings with
--- the same occurrence name from being selected.
-resolveSitedIds :: [CoreBind] -> Map.Map String Word64
-resolveSitedIds binds = Map.fromList
-  [ (vsName spec, varId b)
-  | spec <- sitedVerbs
-  , (b:_) <- [filter (isSibling spec) topBinders] ]
-  where
-    topBinders = concatMap bindersOf binds   -- GHC.Core's own
-    isSibling spec b =
-      occNameString (nameOccName (idName b)) == vsSitedName spec
-      && not (isSystemName (idName b))
-      && definedIn (vsSitedModule spec) b
-
-checkSiteType :: VerbSpec -> Type -> TransM Type
-checkSiteType spec ty = do
-  checkMonomorphicSite (vsName spec) SiteResult ty
-  pure (stabilizeEffectRows ty)
-
-checkSiteInputType :: VerbSpec -> [Type] -> Int -> TransM Type
-checkSiteInputType spec tys index =
-  case drop index tys of
-    ty : _ -> do
-      checkMonomorphicSite (vsName spec) SiteInput ty
-      pure (stabilizeEffectRows ty)
-    [] -> error $ "sited verb " ++ vsName spec
-      ++ " declares missing input type argument " ++ show index
-
--- | Suspension sites carry concrete type metadata, so their answer type must
--- be monomorphic at extraction time.
-checkMonomorphicSite :: String -> SiteTypePosition -> Type -> TransM ()
-checkMonomorphicSite verb position ty = do
-  binder <- gets tsCurrentBinder
-  let siteDesc = maybe "<top level>" T.unpack binder
-  when (not (isEmptyVarSet (tyCoVarsOfType ty))) $
-    throw $ SourceRejection $
-      polymorphicSiteMessage verb position siteDesc (Tidepool.GhcPipeline.renderType ty)
 
 -- | Recognize GHC's unpackAppendCString# builtin.
 -- unpackAppendCString# :: Addr# -> [Char] -> [Char]

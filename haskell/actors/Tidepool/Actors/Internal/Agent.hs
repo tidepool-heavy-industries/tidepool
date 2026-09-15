@@ -275,7 +275,7 @@ request
   => AgentRef
   -> Assignment input
   -> Eff effs (Response result)
-request = requestSited @result @input 0
+request = error "request: extractor must assign a typed site"
 
 -- Extractor substrate. The caller's input and result monotypes are attached
 -- to this site and reused by the target's external-agent session.
@@ -297,7 +297,7 @@ requestWith
   => AgentRef
   -> Assignment input
   -> Eff effs (Response result)
-requestWith = requestWithSited @result @input 0
+requestWith = error "requestWith: extractor must assign a typed site"
 
 {-# OPAQUE requestWithProgress #-}
 requestWithProgress
@@ -306,7 +306,7 @@ requestWithProgress
   => AgentRef
   -> Assignment input
   -> Eff effs (Response result, Progress progress)
-requestWithProgress = requestWithProgressSited @progress @result @input 0
+requestWithProgress = error "requestWithProgress: extractor must assign a typed site"
 
 {-# OPAQUE requestWithProgressSited #-}
 requestWithProgressSited
@@ -331,7 +331,7 @@ requestWithProgressInto
   -> Assignment input
   -> ((Response result, Progress progress) -> Eff effs ())
   -> Eff effs (Response result, Progress progress)
-requestWithProgressInto = requestWithProgressIntoSited @progress @result @input 0
+requestWithProgressInto = error "requestWithProgressInto: extractor must assign a typed site"
 
 {-# OPAQUE requestWithProgressIntoSited #-}
 requestWithProgressIntoSited

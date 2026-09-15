@@ -36,7 +36,7 @@ import GHC.Data.Graph.Directed (flattenSCCs)
 import GHC.Core.Opt.Pipeline (core2core)
 import GHC.Core.Ppr (pprCoreBindings)
 import GHC.Driver.Session
-  ( updOptLevel, gopt_set, gopt_unset
+  ( updOptLevel, gopt_set, gopt_unset, xopt
   , WarningFlag
       ( Opt_WarnMissingFields
       , Opt_WarnIncompletePatterns
@@ -81,7 +81,8 @@ import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.TypeEnv (typeEnvIds, typeEnvTyCons)
-import GHC.Tc.Types (TcGblEnv, tcg_binds, tcg_rdr_env, tcg_type_env, tcg_insts)
+import GHC.LanguageExtensions.Type qualified as LangExt
+import GHC.Tc.Types (TcGblEnv, tcg_dependent_files, tcg_binds, tcg_rdr_env, tcg_type_env, tcg_insts)
 import GHC.Types.Name.Reader (GlobalRdrEnv)
 import GHC.Types.Name.Ppr (mkNamePprCtx)
 import GHC.Types.Name (nameOccName, nameUnique, mkExternalName, nameModule_maybe)
@@ -620,6 +621,13 @@ runCompileCycle preparation mCache mMemoRef retained timing sessionT0 variant pa
     -- never re-demands the package interfaces that define their instances —
     -- they never re-enter the fresh EPS, and typechecking fails with e.g.
     -- "No instance for Monad (Eff '[Console, …])".
+    -- GHC may reuse a preprocessed summary solely from the source hash.
+    -- A changed include must run preprocessing again before memo validation.
+    previous <- getSession
+    let keepSummary (ModuleNode _ summary) = not (xopt LangExt.Cpp (ms_hspp_opts summary))
+        keepSummary _ = True
+    setSession previous {hsc_mod_graph = mkModuleGraph
+      (filter keepSummary (mgModSummaries' (hsc_mod_graph previous)))}
     modGraphRaw <- depanal (pvDownsweepExcludes variant) False
     -- 'ghc_setup' phase (TIDEPOOL_TIMING): 'guessTarget'/'setTargets' + this
     -- 'depanal' call, nothing else, on EVERY caller — a lone compile also
@@ -758,9 +766,9 @@ runCompileCycle preparation mCache mMemoRef retained timing sessionT0 variant pa
             siblings <- liftIO $ atomicModifyIORef' preparedSiblingsRef $ \known ->
               let known' = Map.union (resolvePreparedSiblings (cg_binds cgGuts)) known
               in (known', known')
-            let (elaboratedBindings, yieldSites, rejections) =
-                  elaboratePreparedSites siblings (cg_binds cgGuts)
-                elaboration = PreparedElaboration
+            (elaboratedBindings, yieldSites, rejections) <- liftIO $
+              elaboratePreparedSites siblings (cg_binds cgGuts)
+            let elaboration = PreparedElaboration
                   { peGuts = cgGuts
                   , peBindings = elaboratedBindings
                   , peSitedSiblings = siblings
@@ -769,7 +777,7 @@ runCompileCycle preparation mCache mMemoRef retained timing sessionT0 variant pa
                   }
             Just <$> liftIO (prepareModule (mfHscEnv mf) (mfSummary mf) elaboration)
         rememberPreparedSiblings prepared = liftIO $
-          modifyIORef' preparedSiblingsRef (Map.union (pmSitedSiblings prepared))
+          modifyIORef' preparedSiblingsRef (\known -> Map.union known (pmSitedSiblings prepared))
     -- Module names do not identify generated content across independent
     -- requests. A memo hit therefore requires both the current source hash
     -- and valid direct home-module imports. Summaries are visited in
@@ -791,16 +799,24 @@ runCompileCycle preparation mCache mMemoRef retained timing sessionT0 variant pa
           Nothing  -> pure Nothing
           Just ref -> do
             depsOk <- depsValidSoFar modSum
-            if not depsOk
+            if not depsOk || xopt LangExt.Cpp (ms_hspp_opts modSum)
               then pure Nothing
               else liftIO $ do
                 m <- readIORef ref
-                pure $ do
-                  entry <- Map.lookup (ms_mod_name modSum) m
-                  if ms_hs_hash (mfSummary (gmeFront entry)) == ms_hs_hash modSum
-                    && gmeRetained entry == retained
-                    then Just entry
-                    else Nothing
+                case Map.lookup (ms_mod_name modSum) m of
+                  Nothing -> pure Nothing
+                  Just entry -> do
+                    dependentFiles <- readIORef (tcg_dependent_files (mfTcGblEnv (gmeFront entry)))
+                    let cachedSummary = mfSummary (gmeFront entry)
+                    -- Source hashes do not cover CPP includes or TH's
+                    -- addDependentFile inputs. Recompile these modules until
+                    -- the memo owns fingerprints for those dependencies.
+                    pure $ if null dependentFiles
+                        && not (xopt LangExt.Cpp (ms_hspp_opts cachedSummary))
+                        && ms_hs_hash cachedSummary == ms_hs_hash modSum
+                        && gmeRetained entry == retained
+                      then Just entry
+                      else Nothing
     (fronts, results, preparedModules, mReachable) <- case cpTier plan of
       OptimizeEveryModule -> do
         pairs <- forM summaries $ \modSum -> do

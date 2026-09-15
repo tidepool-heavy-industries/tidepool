@@ -57,22 +57,18 @@ data VerbSpec = VerbSpec
   , vsModule :: String
   , vsSitedName :: String
   , vsSitedModule :: String
-  , vsTypeArgs :: Int
-  , vsValueArity :: Int
   , vsListAnswer :: Bool
-  , vsMisShapeIsError :: Bool
   , vsInputTypeArgs :: [Int]
   , vsAnswerSource :: SiteAnswerSource
   }
   deriving (Eq, Show)
 
 -- | Where a surface verb exposes the value an eventual suspension resumes.
--- Most primitive verbs name it as their first visible type argument. A
--- higher-level action combinator can instead return that value directly.
+-- Most verbs name it as their first type argument; progress-aware verbs
+-- select a later argument so progress remains separate from the result.
 data SiteAnswerSource
   = FirstTypeArgument
   | TypeArgument Int
-  | AppliedResultType
   deriving (Eq, Show)
 
 -- | The complete typed-suspension vocabulary understood by the extractor.
@@ -81,51 +77,48 @@ data SiteAnswerSource
 sitedVerbs :: [VerbSpec]
 sitedVerbs =
   [ verb "runLLMTurn" "Tidepool.Effects.Core"
-      "runLLMTurnSited" "Tidepool.Effects.Core" 1 1 False False []
+      "runLLMTurnSited" "Tidepool.Effects.Core" False []
   , verb "runLLMTurnFork" "Tidepool.Effects.Core"
-      "runLLMTurnForkSited" "Tidepool.Effects.Core" 1 1 False False []
+      "runLLMTurnForkSited" "Tidepool.Effects.Core" False []
   , verb "runLLMTurnFanout" "Tidepool.Effects.Core"
-      "runLLMTurnFanoutSited" "Tidepool.Effects.Core" 1 1 True False []
+      "runLLMTurnFanoutSited" "Tidepool.Effects.Core" True []
   , verb "finalize" "Tidepool.Effects.Core"
-      "finalizeSited" "Tidepool.Effects.Core" 2 1 False False []
+      "finalizeSited" "Tidepool.Effects.Core" False []
   , verb "fork" "Tidepool.Answerer.Fork"
-      "forkSited" "Tidepool.Effects.Core" 1 1 False False []
+      "forkSited" "Tidepool.Effects.Core" False []
   , verb "forkAll" "Tidepool.Answerer.Fork"
-      "forkAllSited" "Tidepool.Effects.Core" 1 1 True False []
+      "forkAllSited" "Tidepool.Effects.Core" True []
   , verb "forkMap" "Tidepool.Answerer.Fork"
-      "forkMapSited" "Tidepool.Answerer.Fork" 2 2 True True []
+      "forkMapSited" "Tidepool.Answerer.Fork" True []
   , verb "forkCata" "Tidepool.Answerer.Fork"
-      "forkCataSited" "Tidepool.Answerer.Fork" 2 2 True True []
+      "forkCataSited" "Tidepool.Answerer.Fork" True []
   , verb "request" "Tidepool.Actors.Internal.Agent"
-      "requestSited" "Tidepool.Actors.Internal.Agent" 2 2 False True [1]
+      "requestSited" "Tidepool.Actors.Internal.Agent" False [1]
   , verb "requestWith" "Tidepool.Actors.Internal.Agent"
-      "requestWithSited" "Tidepool.Actors.Internal.Agent" 2 2 False True [1]
+      "requestWithSited" "Tidepool.Actors.Internal.Agent" False [1]
   , (verb "requestWithProgress" "Tidepool.Actors.Internal.Agent"
-      "requestWithProgressSited" "Tidepool.Actors.Internal.Agent" 3 2 False True [2, 0])
+      "requestWithProgressSited" "Tidepool.Actors.Internal.Agent" False [2, 0])
       { vsAnswerSource = TypeArgument 1 }
   , (verb "requestWithProgressInto" "Tidepool.Actors.Internal.Agent"
-      "requestWithProgressIntoSited" "Tidepool.Actors.Internal.Agent" 3 3 False True [2, 0])
+      "requestWithProgressIntoSited" "Tidepool.Actors.Internal.Agent" False [2, 0])
       { vsAnswerSource = TypeArgument 1 }
   , VerbSpec
       { vsName = "child"
       , vsModule = "Tidepool.Actors.Unfold"
       , vsSitedName = "childSited"
       , vsSitedModule = "Tidepool.Actors.Unfold"
-      , vsTypeArgs = 4
-      , vsValueArity = 1
       , vsListAnswer = False
-      , vsMisShapeIsError = True
       , vsInputTypeArgs = [2]
       , vsAnswerSource = TypeArgument 0
       }
   , (verb "childWithProgress" "Tidepool.Actors.Unfold"
-      "childWithProgressSited" "Tidepool.Actors.Unfold" 5 1 False True [3, 0])
+      "childWithProgressSited" "Tidepool.Actors.Unfold" False [3, 0])
       { vsAnswerSource = TypeArgument 1 }
   , verb "receive" "Tidepool.Actor"
-      "receiveSited" "Tidepool.Actor" 1 1 False True []
+      "receiveSited" "Tidepool.Actor" False []
   , verb "serve" "Tidepool.Actor"
-      "serveSited" "Tidepool.Actor" 1 2 False True []
+      "serveSited" "Tidepool.Actor" False []
   ]
   where
-    verb name source sibling siblingSource typeArgs valueArity listAnswer shapeError inputs =
-      VerbSpec name source sibling siblingSource typeArgs valueArity listAnswer shapeError inputs FirstTypeArgument
+    verb name source sibling siblingSource listAnswer inputs =
+      VerbSpec name source sibling siblingSource listAnswer inputs FirstTypeArgument

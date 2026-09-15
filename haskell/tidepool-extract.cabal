@@ -4,6 +4,7 @@ version:       0.1.0.0
 build-type:    Simple
 extra-source-files:
   lib/Tidepool/Double.hs
+  test-prepared-stg/site-fixtures/*.hs
 
 -- Internal (unexposed) sub-library: the genuinely shared extractor
 -- implementation, compiled ONCE per configuration instead of once per
@@ -35,6 +36,7 @@ library tidepool-extract-internal
     Tidepool.PreparedBuiltins
     Tidepool.PreparedFacts
     Tidepool.PreparedFormatting
+    Tidepool.SiteClassifier
     Tidepool.PreparedSites
     Tidepool.RetainedUnfoldings
     Tidepool.ExecutionIR

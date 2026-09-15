@@ -304,7 +304,7 @@ receive
    . Member (ActorLocal protocol) effs
   => (forall result. protocol result -> Eff effs (result, next))
   -> Eff effs next
-receive = receiveSited @next 0
+receive _ = error "receive: extractor must assign a typed site"
 
 -- Extractor substrate. The stable site key correlates the receive suspension
 -- with its two private settlement steps and gives observability a source-level
