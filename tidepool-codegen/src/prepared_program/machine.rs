@@ -2647,25 +2647,17 @@ mod tests {
         ));
     }
 
-    // ---- S2 acceptance: T1, T3 pass; T2 is a pinned, `#[ignore]`d FINDING; --
-    // ---- T4 is not attempted -----------------------------------------------
+    // ---- S2 acceptance: T1, T2, T3 pass (T2 closed by X2, see its doc -----
+    // ---- comment above); T4 is still not attempted -------------------------
     //
-    // T2 (closure application across programs via emit_exact_call) does not
-    // pass -- see the FINDING recorded on its #[ignore] attribute below: the
-    // per-program dispatcher only recognizes descriptors from ITS OWN
-    // compiled function table, so a foreign closure falls through to
-    // BadThunkState/Unavailable, confirmed empirically. T4 ("a variant of
-    // T2") is not attempted for the same underlying reason (it needs a
-    // cross-program closure CALL to reach the returned static object in the
-    // first place) plus its own new-fixture cost (a genuinely static,
-    // StaticImage-embedded, not nursery-allocated object). `admit_static_
-    // reference`'s machine-wide `static_regions` set
-    // (`tidepool-heap/src/gc/raw.rs`) IS implemented and exercised
-    // indirectly (every `PreparedMachine` install instantiates and unions a
-    // program's statics into it), but the specific proof that a
-    // cross-program *closure result* takes the already-stable path through
-    // that union (not a manufactured arena) is not pinned by a test
-    // here. See the implementer report's OPEN section.
+    // T4 ("a variant of T2") needs a genuinely static, `StaticImage`-embedded
+    // (not nursery-allocated) object reached through a cross-program CLOSURE
+    // CALL, plus its own new-fixture cost. The machine-wide `static_regions`
+    // union (`tidepool-heap/src/gc/raw.rs`) is exercised by every
+    // `PreparedMachine` install and directly by
+    // `s2b_a_static_object_is_retained_through_b_via_the_shared_static_region_set`;
+    // only the specific proof that a cross-program *closure result* takes
+    // that already-stable path is not pinned by a test here.
 
     /// A constructor with one scalar field, as a zero-argument CAF -- used as
     /// program A's producer for T1 (cross-program managed argument/result).
@@ -3114,28 +3106,30 @@ mod tests {
         CompiledProgram::compile(&linked, base).expect("closure_caller_program fixture compiles")
     }
 
+    /// HISTORY: at S2 this test was a pinned `#[ignore]`d FINDING, not a
+    /// regression from this card. `emit_exact_call`'s dispatcher
+    /// (`apply.rs::emit_dispatchers`, the terminal fallback) matched the
+    /// entered callee's header word against ONLY the COMPILING program's own
+    /// `plan.functions`/`plan.pap_layouts` -- a closed, closed-world table
+    /// baked in at that program's own codegen time. A closure produced by a
+    /// DIFFERENT installed program had a descriptor that program never
+    /// declared, so the match loop found nothing and fell through to
+    /// `emit_bad_state` -> `BadThunkState(0)`, Unavailable. S2's shared
+    /// `DescriptorSpace` fixed GC-time recognition (the collector walking an
+    /// object by tag) -- a different concern from compile-time call-target
+    /// recognition (which native function to jump to), which this test needed
+    /// but S2 alone did not provide.
+    ///
+    /// X2 closes it: `apply.rs::emit_dispatchers`' terminal fallback now
+    /// calls the host fn `prepared_resolve_call(vmctx, header, fingerprint)`,
+    /// and `PreparedMachine::install` fills the machine-wide
+    /// `prepared_callables`/`prepared_enters` maps via
+    /// `MachineState::register_prepared_entries` as its LAST step, so a
+    /// foreign callee this machine actually owns resolves and its code runs
+    /// with the caller's frame live. Only a genuine signature mismatch or an
+    /// unowned header still misses (see
+    /// `x2_foreign_callee_with_mismatching_signature_is_a_typed_reusable_failure`).
     #[test]
-    #[ignore = "FINDING (S2, not a regression from this card): emit_exact_call's \
-        dispatcher (apply.rs::emit_dispatchers, ~L321 and ~L417) matches the entered \
-        callee's header word against ONLY the COMPILING program's own plan.functions / \
-        plan.pap_layouts -- a closed, closed-world table baked in at that program's own \
-        codegen time. A closure produced by a DIFFERENT installed program has a \
-        descriptor that program never declared, so the match loop finds nothing and \
-        falls through to emit_bad_state -> BadThunkState(0), Unavailable. Confirmed \
-        empirically: this test reproduces that exact failure. This contradicts the S2 \
-        card's 'S2 restated' text (\"emit_exact_call ... accepts a ValueRef::Local \
-        callee through the signature dispatchers, so B can apply an A closure passed \
-        as a managed argument today\") -- that claim does not hold for a GENUINELY \
-        cross-program closure with S1+S2 alone. S2's shared DescriptorSpace (this \
-        card) fixes GC-time recognition (the collector walking an object by tag), \
-        which is a different concern from compile-time call-target recognition (which \
-        native function to jump to) -- the latter needs S3's global/import lowering \
-        (ValueRef::Global) or a generic indirect-call path (reading the callee's own \
-        embedded code pointer, as qApp's real apply presumably does) neither of which \
-        this card adds. Left in as a pinned repro (fixtures below are otherwise sound: \
-        program A's own entry, Envelope construction and field retention all pass) \
-        rather than deleted, since it is exactly the reproduction S3's implementer \
-        will want. See the S2 implementer report's FINDINGS section."]
     fn t2_closure_crosses_programs_and_collects_inside_the_producing_program() {
         let (mut machine, program_a) = PreparedMachine::new(
             closure_producer_program(TopSlotBase::ZERO),
@@ -3337,6 +3331,226 @@ mod tests {
         assert!(machine.release(*unforced));
         assert!(machine.release(*outer_again));
         assert_eq!(machine.handle_count(), 0);
+    }
+
+    fn x2b_thunk_producer_identity() -> SymbolIdentity {
+        testing::identity("X2ThunkForce", "producer")
+    }
+
+    /// Program A for X2b: a memoized CAF `producer :: () -> LiftedRef` whose
+    /// body allocates 32 throwaway `Filler` constructors (forcing a
+    /// collection under a tiny nursery) before constructing and returning a
+    /// fresh `Ready` value. This top is retained via
+    /// [`PreparedMachine::retain_top`] WITHOUT running it, so the handle B
+    /// imports really is still an unforced thunk.
+    fn x2b_thunk_producer_program(base: TopSlotBase) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("X2ThunkForce", "Filler"),
+            family: testing::identity("X2ThunkForce", "Filler"),
+            host_id: tidepool_repr::DataConId(994),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        });
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("X2ThunkForce", "Ready"),
+            family: testing::identity("X2ThunkForce", "Ready"),
+            host_id: tidepool_repr::DataConId(995),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        });
+        wire.expressions.nodes[0] = ExprFrame::Construct {
+            constructor: ConstructorId(1),
+            fields: vec![],
+        };
+        let mut body = 0;
+        for id in 0..32 {
+            wire.expressions.nodes.push(ExprFrame::Let {
+                bindings: Group::NonRecursive(HeapBinding {
+                    id: ValueId(200 + id),
+                    rhs: HeapRhs::Constructor {
+                        constructor: ConstructorId(0),
+                        fields: vec![],
+                    },
+                }),
+                body,
+            });
+            body = wire.expressions.nodes.len() - 1;
+        }
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.identity = x2b_thunk_producer_identity();
+        top.binding.rhs = HeapRhs::Thunk {
+            signature: SignatureId(0),
+            update: UpdatePolicy::Memoize,
+            captures: vec![],
+            body,
+        };
+        let prepared = testing::prepare(wire).expect("x2b thunk producer fixture");
+        let linked = link_program(prepared, &MachineImports::default())
+            .expect("x2b thunk producer fixture links");
+        CompiledProgram::compile(&linked, base).expect("x2b thunk producer fixture compiles")
+    }
+
+    /// Program B for X2b: a zero-argument entry that does nothing but
+    /// `Enter` the imported (still-unforced) global -- forcing it through
+    /// this program's own generated `prepared_enter` state machine, which
+    /// recognizes nothing of its own and falls back to
+    /// `prepared_resolve_enter` (X2's cross-program enter resolution).
+    fn x2b_enter_consumer_program(base: TopSlotBase, identity: SymbolIdentity) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0] = Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        };
+        wire.signatures.push(Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        });
+        wire.globals = vec![GlobalDecl {
+            identity: identity.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        }];
+        wire.expressions.nodes[0] = ExprFrame::Enter {
+            callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+            signature: SignatureId(1),
+        };
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Function {
+            signature: SignatureId(0),
+            parameters: vec![],
+            captures: vec![],
+            body: 0,
+        };
+        let prepared = testing::prepare(wire).expect("x2b enter consumer fixture");
+        let mut imports = MachineImports::default();
+        imports.values.insert(
+            identity.clone(),
+            ImportedValue {
+                identity,
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                evaluated: false,
+                generation: 0,
+            },
+        );
+        let linked = link_program(prepared, &imports).expect("x2b enter consumer fixture links");
+        CompiledProgram::compile(&linked, base).expect("x2b enter consumer fixture compiles")
+    }
+
+    /// X2b: forcing a foreign, still-UNEVALUATED thunk import through a
+    /// generated `Enter` reaches the owning program's own entry code via
+    /// `prepared_resolve_enter` (the enter-side half of X2, mirroring
+    /// `prepared_resolve_call` on the call side). A's thunk is imported
+    /// with `required_evaluated: false` (install never forces it -- the
+    /// handle comes from `retain_top`, which reads the top-table slot
+    /// without running anything), so B's `Enter` genuinely forces A's body,
+    /// with B's frame live, while A allocates under a shared tiny nursery.
+    /// A's own later entry then observes the SAME settled (memoized) cell.
+    #[test]
+    fn x2_b_forces_a_thunk_import_through_the_owning_programs_enter() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            x2b_thunk_producer_program(TopSlotBase::ZERO),
+            PreparedMachineOptions {
+                nursery_bytes: 128,
+                top_slots: 16,
+            },
+        )
+        .expect("A installs");
+
+        let handle_a = machine
+            .retain_top(program_a, ValueId(0))
+            .expect("A's own unforced thunk top can be retained without running anything");
+
+        let base_b = machine.next_top_slot_base();
+        let mut imports = ImportBindings::new();
+        imports.insert(x2b_thunk_producer_identity(), handle_a);
+        let program_b = machine
+            .install_program(
+                x2b_enter_consumer_program(base_b, x2b_thunk_producer_identity()),
+                imports,
+            )
+            .expect(
+                "B installs, importing A's still-unforced thunk as a non-evaluated-required global",
+            );
+
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        let called = machine
+            .run_entry_retained(program_b, ValueId(0), &[], call, RealmId::ROOT)
+            .expect(
+                "B's generated Enter forces A's foreign thunk through prepared_enter's \
+                 cross-program resolve fallback -- A's own code runs, with B's frame live, \
+                 until the thunk settles",
+            );
+        assert!(
+            called.collections >= 1,
+            "A's 32 allocations, forced as B's entered callee, must force a collection under \
+             the tiny shared nursery while B's calling frame is live"
+        );
+        let [PreparedResult::Managed(result)] = called.values.as_slice() else {
+            panic!("the forced import's result must be retained as one managed value");
+        };
+        let PreparedOuter::Constructor {
+            identity: result_identity,
+            ..
+        } = machine
+            .inspect_outer(*result, RealmId::ROOT)
+            .expect("the forced result inspects through the machine-wide descriptor union");
+        assert_eq!(
+            result_identity,
+            tidepool_repr::DataConId(995),
+            "B observes A's freshly constructed Ready value"
+        );
+
+        // A's own entry, run directly, now sees the SAME memoized value -- no
+        // fresh allocation, no second forcing, just the settled cell B's
+        // cross-program Enter updated in place.
+        let after_a = machine
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("A's own entry reads its now-memoized thunk");
+        let [PreparedResult::Managed(via_a)] = after_a.values.as_slice() else {
+            panic!("A must return one managed constructor");
+        };
+        assert_eq!(
+            machine.handle_current_pointer(*result),
+            machine.handle_current_pointer(*via_a),
+            "identity: A's own re-entry resolves to the exact object B's cross-program Enter \
+             forced"
+        );
+
+        assert!(machine.release(handle_a));
+        assert!(machine.release(*result));
+        assert!(machine.release(*via_a));
+        assert_eq!(machine.handle_count(), 0);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 
     // ---- S3: global lowering, per-global admission, import bindings ------
@@ -4281,6 +4495,332 @@ mod tests {
             "no slot may be claimed by a rejected install"
         );
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    // ---- S3b: import-holding heap tops; the default-only Case shortcut ---
+
+    /// B for S3b test (1): a top-level `HeapRhs::Constructor` binding
+    /// `Pair(import, 7)` -- `image.rs::heap_top_partition` classifies this
+    /// as a heap top purely because its first field is
+    /// `Atom::Ref(ValueRef::Global(..))`, so it is materialized fresh at
+    /// install time (never through generated code) and its import field must
+    /// already resolve when `initialize_heap_tops` runs. The entry (this
+    /// same top) simply returns it.
+    fn s3b_pair_import_holder_program(
+        base: TopSlotBase,
+        identity: SymbolIdentity,
+    ) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.globals = vec![GlobalDecl {
+            identity: identity.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: true,
+            required_generation: None,
+        }];
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("S3bImportTop", "Pair"),
+            family: testing::identity("S3bImportTop", "Pair"),
+            host_id: tidepool_repr::DataConId(965),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![RuntimeRep::LiftedRef, RuntimeRep::Int(64)],
+            strict_fields: vec![true, true],
+            layout: CheckedLayout {
+                fields: vec![
+                    FieldLayout {
+                        rep: RuntimeRep::LiftedRef,
+                        offset: 0,
+                    },
+                    FieldLayout {
+                        rep: RuntimeRep::Int(64),
+                        offset: 8,
+                    },
+                ],
+                alignment: 8,
+                payload_size: 16,
+                root_mask: vec![true, false],
+            },
+        });
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Constructor {
+            constructor: ConstructorId(0),
+            fields: vec![
+                Atom::Ref(ValueRef::Global(GlobalId(0))),
+                Atom::Scalar(ScalarLiteral::Int {
+                    bits: 64,
+                    bytes: 7_i64.to_be_bytes().to_vec(),
+                }),
+            ],
+        };
+        // A bare Constructor top has no body index into the expression
+        // arena (`wire_program()`'s default node was the now-replaced
+        // Function rhs's body); leaving it in place fails validation with
+        // an unreachable-node error (see
+        // `execution_schema::validation::top_metadata_errors_precede_earlier_rhs_errors`
+        // for the same pattern).
+        wire.expressions.nodes.clear();
+        let prepared = testing::prepare(wire).expect("s3b pair import holder fixture");
+        let mut imports = MachineImports::default();
+        imports.values.insert(
+            identity.clone(),
+            ImportedValue {
+                identity,
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                evaluated: true,
+                generation: 0,
+            },
+        );
+        let linked =
+            link_program(prepared, &imports).expect("s3b pair import holder fixture links");
+        CompiledProgram::compile(&linked, base).expect("s3b pair import holder fixture compiles")
+    }
+
+    /// S3b test (1): a top-level constructor binding -- not a `Thunk` or
+    /// `Function`, a bare heap top materialized only at install time -- whose
+    /// own field IS the cross-program import. Proves `install`'s ordering
+    /// contract: `publish_imports` runs before `initialize_heap_tops` reads
+    /// the import slot to resolve this field (`run.rs::write_atoms`'s
+    /// `Global` arm), on both the first-program and later-program install
+    /// branches. Correct field resolution survives forced collections on
+    /// both sides.
+    #[test]
+    fn s3b_import_holding_top_is_a_heap_top_published_after_import_slots() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            s3_field_producer_program(TopSlotBase::ZERO),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+                top_slots: 16,
+            },
+        )
+        .expect("A installs");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        let produced = machine
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("A produces its retained Field(99)");
+        let [PreparedResult::Managed(handle_a)] = produced.values.as_slice() else {
+            panic!("A must return one managed constructor");
+        };
+
+        let base_b = machine.next_top_slot_base();
+        let mut imports = ImportBindings::new();
+        imports.insert(s3_field_producer_identity(), *handle_a);
+        let program_b = machine
+            .install_program(
+                s3b_pair_import_holder_program(base_b, s3_field_producer_identity()),
+                imports,
+            )
+            .expect(
+                "B installs: its import-holding top-level Pair is a heap top resolved at \
+                 install time, after the import slot is already published",
+            );
+
+        let pair = machine
+            .run_entry_retained(program_b, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("B's entry returns its pre-materialized Pair top");
+        let [PreparedResult::Managed(handle_pair)] = pair.values.as_slice() else {
+            panic!("B must return one managed constructor");
+        };
+        let PreparedOuter::Constructor {
+            identity: pair_identity,
+            fields: pair_fields,
+        } = machine
+            .inspect_outer(*handle_pair, RealmId::ROOT)
+            .expect("B's Pair inspects through the machine-wide descriptor union");
+        assert_eq!(pair_identity, tidepool_repr::DataConId(965));
+        let [PreparedResult::Managed(handle_field), PreparedResult::Scalar(local_field)] =
+            pair_fields.as_slice()
+        else {
+            panic!("Pair must have one managed field and one scalar field");
+        };
+        assert_eq!(*local_field, 7);
+        assert_eq!(
+            machine.handle_current_pointer(*handle_a),
+            machine.handle_current_pointer(*handle_field),
+            "identity: Pair's own field resolves to A's own object, not a copy"
+        );
+
+        // Force real collections on both sides and re-read: the Pair top's
+        // import field must still resolve to A's (possibly relocated)
+        // object.
+        let collect = PreparedCallOptions {
+            collect_before_observation: true,
+            ..call
+        };
+        let after_a = machine
+            .run_entry_retained(program_a, ValueId(0), &[], collect, RealmId::ROOT)
+            .expect("A's own entry still runs and forces a collection");
+        let [PreparedResult::Managed(handle_a_after)] = after_a.values.as_slice() else {
+            panic!("A must still return one managed constructor");
+        };
+        let pair_after = machine
+            .run_entry_retained(program_b, ValueId(0), &[], collect, RealmId::ROOT)
+            .expect("B's entry still returns its Pair top and forces a collection");
+        let [PreparedResult::Managed(handle_pair_after)] = pair_after.values.as_slice() else {
+            panic!("B must still return one managed constructor");
+        };
+        let PreparedOuter::Constructor {
+            fields: pair_fields_after,
+            ..
+        } = machine
+            .inspect_outer(*handle_pair_after, RealmId::ROOT)
+            .expect("B's re-read Pair still inspects correctly after collection");
+        let [PreparedResult::Managed(handle_field_after), PreparedResult::Scalar(local_field_after)] =
+            pair_fields_after.as_slice()
+        else {
+            panic!("Pair must still have one managed field and one scalar field");
+        };
+        assert_eq!(*local_field_after, 7);
+        assert_eq!(
+            machine.handle_current_pointer(*handle_a_after),
+            machine.handle_current_pointer(*handle_field_after),
+            "Pair's field still resolves to A's own (possibly relocated) object after \
+             collections on both sides"
+        );
+
+        assert!(machine.release(*handle_a));
+        assert!(machine.release(*handle_field));
+        assert!(machine.release(*handle_pair));
+        assert!(machine.release(*handle_a_after));
+        assert!(machine.release(*handle_field_after));
+        assert!(machine.release(*handle_pair_after));
+        assert_eq!(machine.handle_count(), 0);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// B for S3b test (2): compiled STANDALONE (`CompiledProgram::compile`,
+    /// never `compile_for_install`) -- it shares no constructor descriptor
+    /// with A at all, only the import. Its entry does a default-only
+    /// algebraic `Case` on the imported, required-evaluated constructor and
+    /// returns a LOCAL scalar from the default branch.
+    fn s3b_default_only_case_consumer_program(
+        base: TopSlotBase,
+        identity: SymbolIdentity,
+    ) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0] = Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+        };
+        wire.globals = vec![GlobalDecl {
+            identity: identity.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: true,
+            required_generation: None,
+        }];
+        wire.expressions.nodes = vec![
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]),
+            ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::Int {
+                bits: 64,
+                bytes: 123_i64.to_be_bytes().to_vec(),
+            })]),
+            ExprFrame::Case {
+                scrutinee: 0,
+                binder: ValueId(49),
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+                kind: CaseKind::Algebraic(testing::identity("S3ImportStandalone", "Field")),
+                alternatives: vec![Alternative {
+                    pattern: AlternativePattern::Default,
+                    binders: vec![],
+                    body: 1,
+                }],
+            },
+        ];
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Function {
+            signature: SignatureId(0),
+            parameters: vec![],
+            captures: vec![],
+            body: 2,
+        };
+        let prepared = testing::prepare(wire).expect("s3b default-only case consumer fixture");
+        let mut imports = MachineImports::default();
+        imports.values.insert(
+            identity.clone(),
+            ImportedValue {
+                identity,
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                evaluated: true,
+                generation: 0,
+            },
+        );
+        let linked =
+            link_program(prepared, &imports).expect("s3b default-only case consumer fixture links");
+        CompiledProgram::compile(&linked, base).expect(
+            "s3b default-only case consumer fixture compiles standalone, with no shared \
+             interner",
+        )
+    }
+
+    /// S3b test (2): `emit_algebraic_dispatch`'s default-only shortcut (no
+    /// named alternatives means there is nothing for a header comparison to
+    /// rule out) lets a genuinely generated `Case` dispatch on a foreign
+    /// import even when the compiling program shares NO interned descriptor
+    /// with the producer -- B here is compiled standalone, unlike
+    /// [`x1_generated_case_reads_a_foreign_constructor_through_the_interned_descriptor`],
+    /// which needs `compile_for_install` because it names a real
+    /// alternative.
+    #[test]
+    fn s3b_default_only_case_on_an_import_skips_dispatch() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            s3_field_producer_program(TopSlotBase::ZERO),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+                top_slots: 16,
+            },
+        )
+        .expect("A installs");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        let produced = machine
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("A produces its retained Field(99)");
+        let [PreparedResult::Managed(handle_a)] = produced.values.as_slice() else {
+            panic!("A must return one managed constructor");
+        };
+
+        let base_b = machine.next_top_slot_base();
+        let mut imports = ImportBindings::new();
+        imports.insert(s3_field_producer_identity(), *handle_a);
+        let program_b = machine
+            .install_program(
+                s3b_default_only_case_consumer_program(base_b, s3_field_producer_identity()),
+                imports,
+            )
+            .expect(
+                "B installs standalone -- it shares no constructor descriptor with A, only \
+                 the default-only case shortcut lets its generated Case dispatch on the import",
+            );
+
+        let result = machine
+            .run_entry(program_b, ValueId(0), &[], call, RealmId::ROOT)
+            .expect(
+                "B's default-only algebraic Case never compares the scrutinee's header \
+                 against B's own (empty) descriptor family, so it reaches the default branch \
+                 without a foreign-constructor trap",
+            );
+        assert!(matches!(
+            result.values.as_slice(),
+            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(
+                123
+            ))]
+        ));
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+        assert!(machine.release(*handle_a));
+        assert_eq!(machine.handle_count(), 0);
     }
 
     // ---- S2b: GC residuals -------------------------------------------
