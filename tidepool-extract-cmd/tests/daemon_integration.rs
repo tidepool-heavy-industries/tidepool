@@ -896,9 +896,15 @@ fn check_j_retained_generation_transitions_through_warm_daemon(
     // cannot pass this by accident.
     let steps: [(&str, &[SymbolIdentity]); 5] = [
         ("empty-1", &[]),
-        ("both-1", &[producer_value_id.clone(), producer_fn_id.clone()]),
+        (
+            "both-1",
+            &[producer_value_id.clone(), producer_fn_id.clone()],
+        ),
         ("fn-only", &[producer_fn_id.clone()]),
-        ("both-2", &[producer_value_id.clone(), producer_fn_id.clone()]),
+        (
+            "both-2",
+            &[producer_value_id.clone(), producer_fn_id.clone()],
+        ),
         ("empty-2", &[]),
     ];
 
@@ -964,7 +970,13 @@ fn check_j_retained_generation_transitions_through_warm_daemon(
                     let end = (at + needle.len() + 96).min(daemon_cbor.len());
                     daemon_cbor[start..end]
                         .iter()
-                        .map(|b| if b.is_ascii_graphic() { *b as char } else { '.' })
+                        .map(|b| {
+                            if b.is_ascii_graphic() {
+                                *b as char
+                            } else {
+                                '.'
+                            }
+                        })
                         .collect::<String>()
                 })
                 .collect::<Vec<_>>()

@@ -133,6 +133,19 @@ pub enum Stage {
     Comparison,
 }
 
+impl Stage {
+    /// Every stage in pipeline order; a stage's position here is its
+    /// discriminant, which [`StageRecords`] relies on for lookup.
+    pub const ALL: [Stage; 6] = [
+        Stage::Projection,
+        Stage::Validation,
+        Stage::Admission,
+        Stage::Compilation,
+        Stage::Execution,
+        Stage::Comparison,
+    ];
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Outcome {
@@ -143,16 +156,96 @@ pub enum Outcome {
     NotReached,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StageRecord {
     pub stage: Stage,
     pub outcome: Outcome,
 }
 
+/// Exactly one record per [`Stage`], in [`Stage::ALL`] order. The shape is
+/// established once -- at construction or when a report is parsed -- so
+/// every later lookup by stage is total. Serializes as the same JSON array
+/// of stage records the corpus scripts read.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(try_from = "Vec<StageRecord>", into = "Vec<StageRecord>")]
+pub struct StageRecords([StageRecord; 6]);
+
+impl StageRecords {
+    fn not_reached() -> Self {
+        Self(Stage::ALL.map(|stage| StageRecord {
+            stage,
+            outcome: Outcome::NotReached,
+        }))
+    }
+
+    pub fn get(&self, stage: Stage) -> &StageRecord {
+        &self.0[stage as usize]
+    }
+
+    pub fn get_mut(&mut self, stage: Stage) -> &mut StageRecord {
+        &mut self.0[stage as usize]
+    }
+}
+
+impl TryFrom<Vec<StageRecord>> for StageRecords {
+    type Error = String;
+
+    fn try_from(records: Vec<StageRecord>) -> Result<Self, Self::Error> {
+        let stages: Vec<Stage> = records.iter().map(|record| record.stage).collect();
+        if stages != Stage::ALL {
+            return Err(format!(
+                "a program record must list every stage once in pipeline order, found {stages:?}"
+            ));
+        }
+        let records: [StageRecord; 6] = records
+            .try_into()
+            .map_err(|_| "a program record must list exactly six stages".to_owned())?;
+        Ok(Self(records))
+    }
+}
+
+impl From<StageRecords> for Vec<StageRecord> {
+    fn from(records: StageRecords) -> Self {
+        records.0.into()
+    }
+}
+
+impl std::ops::Deref for StageRecords {
+    type Target = [StageRecord];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for StageRecords {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<'a> IntoIterator for &'a StageRecords {
+    type Item = &'a StageRecord;
+    type IntoIter = std::slice::Iter<'a, StageRecord>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut StageRecords {
+    type Item = &'a mut StageRecord;
+    type IntoIter = std::slice::IterMut<'a, StageRecord>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter_mut()
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ProgramRecord {
     pub name: String,
-    pub stages: Vec<StageRecord>,
+    pub stages: StageRecords,
 }
 
 /// Run one already-produced prepared artifact through the consumer boundary.
@@ -380,29 +473,12 @@ impl ProgramRecord {
     pub fn new(name: String) -> Self {
         Self {
             name,
-            stages: [
-                Stage::Projection,
-                Stage::Validation,
-                Stage::Admission,
-                Stage::Compilation,
-                Stage::Execution,
-                Stage::Comparison,
-            ]
-            .into_iter()
-            .map(|stage| StageRecord {
-                stage,
-                outcome: Outcome::NotReached,
-            })
-            .collect(),
+            stages: StageRecords::not_reached(),
         }
     }
 
     pub fn record(&mut self, stage: Stage, outcome: Outcome) {
-        self.stages
-            .iter_mut()
-            .find(|entry| entry.stage == stage)
-            .expect("the fixed stage list contains every Stage")
-            .outcome = outcome;
+        self.stages.get_mut(stage).outcome = outcome;
     }
 }
 
@@ -474,7 +550,12 @@ pub fn compare_values(
                 } => {
                     let got = f64::from_value(value, constructors)
                         .map_err(|error| mismatch("Float64", error))?;
-                    if !((got - *want).abs() <= *absolute_tolerance) {
+                    // A NaN distance is outside every tolerance.
+                    let within = matches!(
+                        (got - *want).abs().partial_cmp(absolute_tolerance),
+                        Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                    );
+                    if !within {
                         return Err(format!(
                             "expected Float64 within {absolute_tolerance} of {want}, received {got}"
                         ));
@@ -1106,5 +1187,28 @@ mod tests {
         ));
         assert!(matches!(record.stages[5].outcome, Outcome::NotReached));
         assert!(!saw_execution_running);
+    }
+
+    #[test]
+    fn stage_records_lookup_matches_pipeline_order_and_rejects_bad_shapes() {
+        for (position, stage) in Stage::ALL.into_iter().enumerate() {
+            assert_eq!(stage as usize, position);
+        }
+        let mut record = ProgramRecord::new("row".into());
+        record.record(Stage::Execution, Outcome::Passed);
+        assert!(matches!(
+            record.stages.get(Stage::Execution).outcome,
+            Outcome::Passed
+        ));
+        let json = serde_json::to_string(&record).unwrap();
+        let back: ProgramRecord = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back.stages[4].outcome, Outcome::Passed));
+
+        let mut reordered: Vec<StageRecord> = record.stages.clone().into();
+        reordered.swap(0, 1);
+        assert!(StageRecords::try_from(reordered).is_err());
+        let mut short: Vec<StageRecord> = record.stages.clone().into();
+        short.pop();
+        assert!(StageRecords::try_from(short).is_err());
     }
 }

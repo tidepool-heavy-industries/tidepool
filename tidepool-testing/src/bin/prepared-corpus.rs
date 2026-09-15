@@ -655,25 +655,10 @@ fn read_child_report(path: &Path, name: &str, status: ExitStatus) -> ProgramReco
     }
 }
 
+/// A parsed report already lists every stage once in order (`StageRecords`
+/// rejects anything else at parse time), so only the row identity is checked.
 fn valid_child_record(record: &ProgramRecord, name: &str) -> bool {
     record.name == name
-        && [
-            Stage::Projection,
-            Stage::Validation,
-            Stage::Admission,
-            Stage::Compilation,
-            Stage::Execution,
-            Stage::Comparison,
-        ]
-        .into_iter()
-        .all(|stage| {
-            record
-                .stages
-                .iter()
-                .filter(|entry| entry.stage == stage)
-                .count()
-                == 1
-        })
 }
 
 fn failed_without_report(name: &str, reason: String) -> ProgramRecord {
@@ -696,17 +681,12 @@ fn fail_abnormal(record: &mut ProgramRecord, reason: String) {
         return;
     }
 
-    let native_was_reached = record
-        .stages
-        .iter()
-        .find(|stage| stage.stage == Stage::Execution)
-        .is_some_and(|stage| !matches!(stage.outcome, Outcome::NotReached));
+    let native_was_reached = !matches!(
+        record.stages.get(Stage::Execution).outcome,
+        Outcome::NotReached
+    );
     if native_was_reached {
-        let execution = record
-            .stages
-            .iter_mut()
-            .find(|stage| stage.stage == Stage::Execution)
-            .expect("ProgramRecord always has an execution stage");
+        let execution = record.stages.get_mut(Stage::Execution);
         if matches!(execution.outcome, Outcome::Passed) {
             execution.outcome = Outcome::Failed { reason };
         }
@@ -724,42 +704,30 @@ fn fail_abnormal(record: &mut ProgramRecord, reason: String) {
 }
 
 fn stage_totals(programs: &[ProgramRecord]) -> Vec<StageTotal> {
-    [
-        Stage::Projection,
-        Stage::Validation,
-        Stage::Admission,
-        Stage::Compilation,
-        Stage::Execution,
-        Stage::Comparison,
-    ]
-    .into_iter()
-    .map(|stage| {
-        let mut total = StageTotal {
-            stage,
-            passed: 0,
-            failed: 0,
-            missing_expectation: 0,
-            running: 0,
-            not_reached: 0,
-        };
-        for record in programs {
-            let outcome = record
-                .stages
-                .iter()
-                .find(|entry| entry.stage == stage)
-                .map(|entry| &entry.outcome)
-                .expect("ProgramRecord always has the fixed stage list");
-            match outcome {
-                Outcome::Passed => total.passed += 1,
-                Outcome::Failed { .. } => total.failed += 1,
-                Outcome::MissingExpectation => total.missing_expectation += 1,
-                Outcome::Running => total.running += 1,
-                Outcome::NotReached => total.not_reached += 1,
+    Stage::ALL
+        .into_iter()
+        .map(|stage| {
+            let mut total = StageTotal {
+                stage,
+                passed: 0,
+                failed: 0,
+                missing_expectation: 0,
+                running: 0,
+                not_reached: 0,
+            };
+            for record in programs {
+                let outcome = &record.stages.get(stage).outcome;
+                match outcome {
+                    Outcome::Passed => total.passed += 1,
+                    Outcome::Failed { .. } => total.failed += 1,
+                    Outcome::MissingExpectation => total.missing_expectation += 1,
+                    Outcome::Running => total.running += 1,
+                    Outcome::NotReached => total.not_reached += 1,
+                }
             }
-        }
-        total
-    })
-    .collect()
+            total
+        })
+        .collect()
 }
 
 fn persist_or_exit(path: &Path, record: &ProgramRecord) {

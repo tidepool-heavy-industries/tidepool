@@ -97,7 +97,7 @@ mod tests {
             .map(|global| {
                 let value = ImportedValue {
                     identity: global.identity.clone(),
-                    rep: global.rep.clone(),
+                    rep: global.rep,
                     entry_signature: global
                         .entry_signature
                         .map(|id| prepared.signatures()[id.0 as usize].clone()),

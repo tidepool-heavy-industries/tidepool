@@ -107,14 +107,11 @@ pub unsafe fn heap_to_value(
 pub fn contains_closure(val: &Value) -> bool {
     let mut stack: Vec<&Value> = vec![val];
     while let Some(v) = stack.pop() {
-        match v {
-            Value::Con(tag, fields) => {
-                if *tag == tidepool_codegen::heap_bridge::CLOSURE_SENTINEL {
-                    return true;
-                }
-                stack.extend(fields.iter());
+        if let Value::Con(tag, fields) = v {
+            if *tag == tidepool_codegen::heap_bridge::CLOSURE_SENTINEL {
+                return true;
             }
-            _ => {}
+            stack.extend(fields.iter());
         }
     }
     false

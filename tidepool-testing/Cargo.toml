@@ -31,10 +31,6 @@ criterion = { version = "0.8", features = ["html_reports"] }
 serial_test.workspace = true
 
 [[bench]]
-name = "optimize"
-harness = false
-
-[[bench]]
 name = "codegen"
 harness = false
 
