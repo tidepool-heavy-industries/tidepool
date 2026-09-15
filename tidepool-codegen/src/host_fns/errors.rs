@@ -95,12 +95,12 @@ pub enum RuntimeError {
     /// retained through unwind; the invocation is permanently unavailable.
     #[error("incomplete retention promotion: {0}")]
     IncompletePromotion(tidepool_heap::execution_descriptor::DescriptorTraceError),
-    /// A cross-program call/enter fallback (`prepared_resolve_call`/
-    /// `prepared_resolve_enter`) found no registered entry -- or a
-    /// fingerprint mismatch -- for an otherwise-known descriptor header. The
-    /// decision is made before any call runs and the heap is untouched, so
-    /// this is a reusable, ordinary runtime failure, not an integrity one.
-    #[error("unresolved cross-program callee (no installed program exports this descriptor's entry, or its signature fingerprint does not match)")]
+    /// Application exhausted its full-signature and prefix probes for an
+    /// otherwise-owned callable header. The failing application has not
+    /// invoked a target and leaves the machine reusable.
+    #[error(
+        "unresolved cross-program callee (no installed target satisfies the demanded signature)"
+    )]
     UnresolvedCallee,
 }
 

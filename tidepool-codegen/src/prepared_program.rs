@@ -62,6 +62,8 @@ mod entry;
 mod fallible;
 mod floating;
 mod forcing;
+#[cfg(test)]
+mod foreign_apply_tests;
 mod formatting;
 mod plan;
 mod primitives;
@@ -120,6 +122,8 @@ pub enum Unsupported {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CompileError {
+    #[error("application demand has no declared dispatcher: {0:?}")]
+    MissingDemand(Signature),
     #[error("checked keepAlive call lacks dispatcher for {0:?}")]
     MissingKeepAliveDispatcher(Signature),
     #[error(transparent)]
@@ -200,36 +204,34 @@ unsafe extern "C" fn prepared_blackhole(vmctx: *mut crate::context::VMContext) -
     machine.prepared_call_status() as i32
 }
 
-/// Resolve a foreign callee for `apply::emit_dispatchers`' terminal
-/// fallback call site: `header` is the callee object's masked
-/// header word, `fingerprint` is the CALLER's expectation of that
-/// callee's signature shape (see `resolve::signature_fingerprint`).
-/// Returns the code pointer on a fingerprint-matching hit, 0 on any
-/// miss -- a fingerprint mismatch is treated exactly like "nothing
-/// registered", never a silent wrong-ABI jump.
+/// Non-mutating application probe. `demand` points to a boxed signature
+/// owned by the calling CompiledProgram, which outlives its native frames.
+/// Neither a hit nor a miss changes the machine's failure state.
 unsafe extern "C" fn prepared_resolve_call(
     vmctx: *mut crate::context::VMContext,
     header: u64,
-    fingerprint: u64,
+    demand: *const Signature,
 ) -> u64 {
     let machine = unsafe { crate::machine_state::machine_state(vmctx) };
     let masked = (header as usize) & !7;
-    match machine.resolve_prepared_call(masked) {
-        Some(entry) if entry.fingerprint == fingerprint => entry.code as u64,
-        _ => {
-            // A header some installed program can enter names a real
-            // callable (a function with another arity/signature, or a PAP):
-            // the application is unservable here, the heap is untouched,
-            // the machine stays reusable. Any other header is not a
-            // callable object at all.
-            if machine.owns_prepared_entry(masked) {
-                machine.set_first_cause(crate::host_fns::RuntimeError::UnresolvedCallee);
-            } else {
-                machine.set_first_cause(crate::host_fns::RuntimeError::BadThunkState(0));
-            }
-            0
-        }
-    }
+    machine
+        .resolve_prepared_call(masked, unsafe { &*demand })
+        .map_or(0, |code| code as u64)
+}
+
+/// Report an exhausted application search exactly once.
+unsafe extern "C" fn prepared_unresolved_call(
+    vmctx: *mut crate::context::VMContext,
+    header: u64,
+) -> i32 {
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    let cause = if machine.owns_prepared_entry((header as usize) & !7) {
+        crate::host_fns::RuntimeError::UnresolvedCallee
+    } else {
+        crate::host_fns::RuntimeError::BadThunkState(0)
+    };
+    machine.set_first_cause(cause);
+    machine.prepared_call_status() as i32
 }
 
 /// Resolve the owning program's `prepared_enter` for a foreign
@@ -297,6 +299,8 @@ pub struct CompiledProgram {
     /// resolution table, which `apply::emit_dispatchers`' fallback queries
     /// through `prepared_resolve_call`.
     pub(crate) callables: Vec<resolve::CallableExport>,
+    /// Pins every demand address embedded in the generated resolver calls.
+    _dispatchers: apply::Dispatchers,
     /// This program's own `prepared_enter` FuncId. `PreparedMachine::install`
     /// registers it as the owner for every header in `enter_owned_headers`.
     pub(crate) enter: FuncId,
@@ -363,6 +367,10 @@ impl CompiledProgram {
                 ("prepared_bad_state", prepared_bad_state as *const u8),
                 ("prepared_blackhole", prepared_blackhole as *const u8),
                 ("prepared_resolve_call", prepared_resolve_call as *const u8),
+                (
+                    "prepared_unresolved_call",
+                    prepared_unresolved_call as *const u8,
+                ),
                 (
                     "prepared_resolve_enter",
                     prepared_resolve_enter as *const u8,
@@ -627,6 +635,16 @@ impl CompiledProgram {
                 &prepared_status_signature,
             )
             .map_err(|error| PipelineError::Declaration(error.to_string()))?;
+        let mut unresolved_signature = prepared_status_signature.clone();
+        unresolved_signature.params.push(AbiParam::new(types::I64));
+        let prepared_unresolved_call = pipeline
+            .module
+            .declare_function(
+                "prepared_unresolved_call",
+                Linkage::Import,
+                &unresolved_signature,
+            )
+            .map_err(|error| PipelineError::Declaration(error.to_string()))?;
         let mut write_barrier_signature = ir::Signature::new(pipeline.isa.default_call_conv());
         write_barrier_signature
             .params
@@ -711,7 +729,7 @@ impl CompiledProgram {
             prepared_enter,
             prepared_bad_state,
             prepared_resolve_call,
-            prepared_recorded_failure,
+            prepared_unresolved_call,
             &mut pipeline,
         )?;
         // Every function address has been declared, including recursive peers.
@@ -895,19 +913,7 @@ impl CompiledProgram {
                 },
             );
         }
-        let callables = plan
-            .functions
-            .iter()
-            .filter_map(|(id, function)| {
-                functions
-                    .get(id)
-                    .map(|&function_id| resolve::CallableExport {
-                        header: function.descriptor.initial_header_word(),
-                        function: function_id,
-                        fingerprint: resolve::signature_fingerprint(function.signature),
-                    })
-            })
-            .collect::<Vec<_>>();
+        let callables = dispatchers.exports(&plan);
         let enter_owned_headers = thunk_entries
             .iter()
             .map(|thunk_entry| thunk_entry.descriptor.initial_header_word())
@@ -946,6 +952,7 @@ impl CompiledProgram {
             heap_top_specs: plan.heap_top_specs,
             force_adapter,
             callables,
+            _dispatchers: dispatchers,
             enter: prepared_enter,
             enter_owned_headers,
         })
@@ -977,6 +984,18 @@ pub(crate) fn emit_direct_call(
 ) -> Result<Option<Vec<SsaValue>>, CompileError> {
     let call = builder.ins().call(callee, arguments);
     let returned = builder.inst_results(call).to_vec();
+    emit_call_results(builder, pipeline, vmctx, &returned, results)
+}
+
+/// Shared status, terminal-return and result-rooting contract for direct and
+/// resolved indirect calls. No caller may consume a payload before this check.
+pub(crate) fn emit_call_results(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut CodegenPipeline,
+    vmctx: SsaValue,
+    returned: &[SsaValue],
+    results: &ResultContract,
+) -> Result<Option<Vec<SsaValue>>, CompileError> {
     let success = builder.create_block();
     let failure = builder.create_block();
     let ok = builder

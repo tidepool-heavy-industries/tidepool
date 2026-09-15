@@ -63,7 +63,6 @@ use std::sync::Arc;
 
 use crate::context::VMContext;
 use crate::host_fns::{GcState, RuntimeError};
-use crate::prepared_program::resolve;
 use crate::stack_map::StackMapRegistry;
 
 pub use tidepool_heap::external_storage::{ExternalStorageKind, ExternalStorageValidationError};
@@ -293,14 +292,19 @@ pub struct MachineState {
     external_freed_bytes: Cell<usize>,
     external_freed_objects: Cell<usize>,
     /// Cross-program call targets, keyed by the callee's descriptor header
-    /// word: registered at install (a later wave), read by the
+    /// word and full demand signature: registered at install, read by the
     /// `prepared_resolve_call` host fn a foreign dispatcher call falls back
     /// to. Holds raw code pointers into an installed pipeline's finalized
     /// module -- valid exactly as long as that pipeline (owned by the
     /// installed program, which the stack-map chain's lifetime rule also
     /// governs) is alive, and must be cleared before the machine's programs
     /// drop (`clear_prepared_entries`, called from `Drop for PreparedMachine`).
-    prepared_callables: RefCell<HashMap<usize, resolve::ResolvedEntry>>,
+    prepared_callables: RefCell<
+        HashMap<
+            usize,
+            std::collections::BTreeMap<tidepool_repr::execution_schema::Signature, *const u8>,
+        >,
+    >,
     /// Cross-program force targets: a thunk/function/PAP descriptor header ->
     /// the OWNING program's `prepared_enter` code pointer, so a foreign
     /// `Enter` can force an imported thunk through the program that knows how
@@ -1117,16 +1121,19 @@ impl MachineState {
     // fallback and `entry::emit_prepared_enter` read these tables at a miss.
 
     /// Register one installed program's exported call targets and owned
-    /// enter headers. Called from `PreparedMachine::install`; additive only
-    /// -- a header already registered by an earlier program is left alone
-    /// by `extend`'s "later entries overwrite" semantics, which is fine here
-    /// because header words are unique per descriptor across the machine.
+    /// enter headers. Headers are unique per descriptor across the machine;
+    /// each program emits one target per compatible header/signature pair.
     pub(crate) fn register_prepared_entries(
         &self,
-        callables: impl IntoIterator<Item = (usize, resolve::ResolvedEntry)>,
+        callables: impl IntoIterator<
+            Item = (usize, tidepool_repr::execution_schema::Signature, *const u8),
+        >,
         enters: impl IntoIterator<Item = (usize, *const u8)>,
     ) {
-        self.prepared_callables.borrow_mut().extend(callables);
+        let mut targets = self.prepared_callables.borrow_mut();
+        for (header, signature, code) in callables {
+            targets.entry(header).or_default().insert(signature, code);
+        }
         self.prepared_enters.borrow_mut().extend(enters);
     }
 
@@ -1137,8 +1144,16 @@ impl MachineState {
         self.prepared_enters.borrow_mut().clear();
     }
 
-    pub(crate) fn resolve_prepared_call(&self, header: usize) -> Option<resolve::ResolvedEntry> {
-        self.prepared_callables.borrow().get(&header).copied()
+    pub(crate) fn resolve_prepared_call(
+        &self,
+        header: usize,
+        signature: &tidepool_repr::execution_schema::Signature,
+    ) -> Option<*const u8> {
+        self.prepared_callables
+            .borrow()
+            .get(&header)?
+            .get(signature)
+            .copied()
     }
 
     pub(crate) fn resolve_prepared_enter(&self, header: usize) -> Option<*const u8> {
@@ -1148,8 +1163,7 @@ impl MachineState {
     /// Whether some installed program owns an enter routine for `header` (a
     /// masked object header word): the object is a real function, PAP or
     /// thunk of this machine. A call-resolution miss on such a header is an
-    /// ordinary, reusable `UnresolvedCallee` (wrong arity or signature, or a
-    /// PAP, which phase 2 of cross-program application will serve); a miss
+    /// ordinary, reusable `UnresolvedCallee` (incompatible demand); a miss
     /// on any other header means the callee word does not name a callable
     /// object at all, which is an integrity failure.
     pub(crate) fn owns_prepared_entry(&self, header: usize) -> bool {

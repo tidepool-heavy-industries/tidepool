@@ -111,7 +111,7 @@ impl ResultContract {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Signature {
     pub arguments: Vec<RuntimeRep>,
     pub results: ResultContract,

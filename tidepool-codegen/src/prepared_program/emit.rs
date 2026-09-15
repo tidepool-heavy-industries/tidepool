@@ -1472,17 +1472,17 @@ fn emit_exact_call(
         node,
     )?;
     let _ = functions;
-    let callee_ref = *dispatchers
-        .get(&signature)
-        .ok_or_else(|| unsupported(owner, node))?;
-    let callee_ref = pipeline
-        .module
-        .declare_func_in_func(callee_ref, builder.func);
     let signature = plan
         .program
         .signatures()
         .get(signature.0 as usize)
         .ok_or_else(|| unsupported(owner, node))?;
+    let callee_ref = dispatchers
+        .find(signature)
+        .ok_or_else(|| CompileError::MissingDemand(signature.clone()))?;
+    let callee_ref = pipeline
+        .module
+        .declare_func_in_func(callee_ref, builder.func);
     if arguments.len() != signature.arguments.len() {
         return Err(unsupported(owner, node));
     }

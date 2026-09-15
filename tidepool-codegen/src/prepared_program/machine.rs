@@ -671,10 +671,8 @@ impl<'code> PreparedMachine<'code> {
             compiled.callables.iter().map(|c| {
                 (
                     c.header,
-                    super::resolve::ResolvedEntry {
-                        code: compiled.pipeline.get_function_ptr(c.function),
-                        fingerprint: c.fingerprint,
-                    },
+                    c.signature.clone(),
+                    compiled.pipeline.get_function_ptr(c.function),
                 )
             }),
             compiled
@@ -3128,7 +3126,7 @@ mod tests {
     /// but S2 alone did not provide.
     ///
     /// X2 closes it: `apply.rs::emit_dispatchers`' terminal fallback now
-    /// calls the host fn `prepared_resolve_call(vmctx, header, fingerprint)`,
+    /// calls the host fn `prepared_resolve_call(vmctx, header, demand)`,
     /// and `PreparedMachine::install` fills the machine-wide
     /// `prepared_callables`/`prepared_enters` maps via
     /// `MachineState::register_prepared_entries` as its LAST step, so a
@@ -3214,7 +3212,7 @@ mod tests {
     /// Program B' for the X2 signature-mismatch test: like
     /// [`closure_caller_program`] but applies its first argument TO its
     /// second through a one-argument call site. A's `f` is a zero-argument
-    /// function, so the call-site fingerprint (argument reps and result
+    /// function, so the call-site signature (argument reps and result
     /// contract) can never match A's exported one.
     fn closure_miscaller_program(base: TopSlotBase) -> CompiledProgram {
         let mut wire = testing::wire_program();
@@ -3247,8 +3245,8 @@ mod tests {
     }
 
     /// X2: a foreign callee the machine knows but cannot serve at this call
-    /// site (here: an arity/signature mismatch; a foreign PAP takes the same
-    /// path until phase 2) is an ordinary, reusable `UnresolvedCallee`. The
+    /// site (here: an arity/signature mismatch) is an ordinary, reusable
+    /// `UnresolvedCallee`. The
     /// decision is made before any code of A runs and the heap is untouched,
     /// so the machine latch stays clear and the next entry succeeds. Pins the
     /// two halves of that contract that were previously wrong: the miss block

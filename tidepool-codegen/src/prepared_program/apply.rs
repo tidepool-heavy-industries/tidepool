@@ -26,30 +26,55 @@ use tidepool_repr::execution_schema::{
     RuntimeRep, Signature, StorageLayout, TargetDescriptor, ValueId,
 };
 
-/// The source arena names ordinary calls by `SignatureId`, but an
-/// oversaturated call can demand a suffix which is not itself written in the
-/// arena.  Keep both views rather than pretending every generated ABI has a
-/// wire ID.
+/// Source calls, owner offers and generated suffixes share one signature map.
 pub(super) struct Dispatchers {
-    by_id: BTreeMap<tidepool_repr::execution_schema::SignatureId, FuncId>,
-    entries: Vec<(Signature, FuncId)>,
+    // Boxed keys pin the metadata addresses embedded in generated code.
+    entries: BTreeMap<Box<Signature>, FuncId>,
 }
 
 impl Dispatchers {
-    pub(super) fn get(&self, id: &tidepool_repr::execution_schema::SignatureId) -> Option<&FuncId> {
-        self.by_id.get(id)
-    }
-
     pub(super) fn find(&self, signature: &Signature) -> Option<FuncId> {
-        self.entries
-            .iter()
-            .find_map(|(candidate, function)| (candidate == signature).then_some(*function))
+        self.entries.get(signature).copied()
     }
 
     fn iter(&self) -> impl Iterator<Item = (&Signature, FuncId)> {
         self.entries
             .iter()
-            .map(|(signature, function)| (signature, *function))
+            .map(|(signature, function)| (signature.as_ref(), *function))
+    }
+
+    pub(super) fn exports(&self, plan: &ProgramPlan<'_>) -> Vec<resolve::CallableExport> {
+        let headers = plan
+            .functions
+            .values()
+            .map(|f| (f.descriptor.initial_header_word(), f.signature, 0))
+            .chain(plan.pap_layouts.iter().map(|(&(id, pending), pap)| {
+                (
+                    pap.descriptor.initial_header_word(),
+                    plan.functions[&id].signature,
+                    pending,
+                )
+            }));
+        let mut exports = Vec::new();
+        for (header, entry, pending) in headers {
+            for (demand, function) in self.iter() {
+                if classify(entry, pending, demand).is_some() {
+                    exports.push(resolve::CallableExport {
+                        header,
+                        function,
+                        signature: demand.clone(),
+                    });
+                }
+            }
+        }
+        exports
+    }
+
+    fn demand_address(&self, signature: &Signature) -> Result<i64, super::CompileError> {
+        self.entries
+            .get_key_value(signature)
+            .map(|(key, _)| key.as_ref() as *const Signature as i64)
+            .ok_or_else(|| super::CompileError::MissingDemand(signature.clone()))
     }
 }
 
@@ -73,6 +98,15 @@ pub(super) enum Application {
         consumed: usize,
     },
     Excess {
+        consumed: usize,
+        remainder: Signature,
+    },
+}
+
+enum ResolvedContinuation {
+    Return,
+    Terminal,
+    Apply {
         consumed: usize,
         remainder: Signature,
     },
@@ -167,11 +201,10 @@ pub(super) fn declare_dispatchers(
 ) -> Result<Dispatchers, super::CompileError> {
     let mut demanded = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    let mut source_ids = BTreeMap::new();
     for declaration in plan.program.operations() {
         let signature = &plan.program.signatures()[declaration.signature.0 as usize];
         if let Some(callback) = super::lifetime::callback_signature(declaration, signature) {
-            if seen.insert(signature_key(&callback)) {
+            if seen.insert(callback.clone()) {
                 demanded.push(callback);
             }
         }
@@ -188,32 +221,65 @@ pub(super) fn declare_dispatchers(
                 signature.0,
             )))?
             .clone();
-        if seen.insert(signature_key(&semantic)) {
+        if seen.insert(semantic.clone()) {
             demanded.push(semantic.clone());
         }
-        source_ids.insert(*signature, semantic);
     }
-    // Close the finite demand set over known oversaturation suffixes before
-    // declaring or defining any dispatcher. The cursor only visits newly
-    // appended demands, preserving source order without rescanning the full
-    // growing set at every fixpoint round.
-    let mut cursor = 0;
-    while let Some(demand) = demanded.get(cursor).cloned() {
-        cursor += 1;
-        for function in plan.functions.values() {
-            for pending in 0..function.signature.arguments.len() {
-                let Some(Application::Excess { remainder, .. }) =
-                    classify(function.signature, pending, &demand)
-                else {
-                    continue;
+    // Every owner serves exact PAP suffixes and all proper partial prefixes,
+    // even when no call in its own source demands that shape.
+    for function in plan.functions.values() {
+        let entry = function.signature;
+        for pending in 0..entry.arguments.len().max(1) {
+            let remaining = &entry.arguments[pending..];
+            let exact = Signature {
+                arguments: remaining.to_vec(),
+                results: entry.results.clone(),
+            };
+            if seen.insert(exact.clone()) {
+                demanded.push(exact);
+            }
+            for supplied in 0..remaining.len() {
+                let partial = Signature {
+                    arguments: remaining[..supplied].to_vec(),
+                    results: super::ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
                 };
-                if seen.insert(signature_key(&remainder)) {
-                    demanded.push(remainder);
+                if seen.insert(partial.clone()) {
+                    demanded.push(partial);
                 }
             }
         }
     }
-    let mut entries = Vec::with_capacity(demanded.len());
+    // Close over foreign excess suffixes and the statically typed prefix
+    // probes. Every new signature is a slice of an existing argument vector.
+    let mut cursor = 0;
+    while let Some(demand) = demanded.get(cursor).cloned() {
+        cursor += 1;
+        for consumed in 0..=demand.arguments.len() {
+            let terminal = Signature {
+                arguments: demand.arguments[..consumed].to_vec(),
+                results: super::ResultContract::NoSuccess,
+            };
+            if seen.insert(terminal.clone()) {
+                demanded.push(terminal);
+            }
+            if consumed > 0 && consumed < demand.arguments.len() {
+                let prefix = Signature {
+                    arguments: demand.arguments[..consumed].to_vec(),
+                    results: super::ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+                };
+                let suffix = Signature {
+                    arguments: demand.arguments[consumed..].to_vec(),
+                    results: demand.results.clone(),
+                };
+                for shape in [prefix, suffix] {
+                    if seen.insert(shape.clone()) {
+                        demanded.push(shape);
+                    }
+                }
+            }
+        }
+    }
+    let mut entries = BTreeMap::new();
     for (index, semantic) in demanded.into_iter().enumerate() {
         let abi = EntryAbi::lower_internal(profile, &semantic, EnvironmentMode::Captured)?;
         let native = abi.cranelift_signature(profile, CallConv::Tail)?;
@@ -222,26 +288,9 @@ pub(super) fn declare_dispatchers(
             Linkage::Local,
             &native,
         )?;
-        entries.push((semantic, function));
+        entries.insert(Box::new(semantic), function);
     }
-    let mut by_id = BTreeMap::new();
-    for (id, signature) in source_ids {
-        let function = entries
-            .iter()
-            .find_map(|(candidate, function)| (candidate == &signature).then_some(*function))
-            .ok_or(super::CompileError::MissingRepresentation(ValueId(id.0)))?;
-        by_id.insert(id, function);
-    }
-    Ok(Dispatchers { by_id, entries })
-}
-
-fn signature_key(
-    signature: &Signature,
-) -> (
-    Vec<RuntimeRep>,
-    tidepool_repr::execution_schema::ResultContract,
-) {
-    (signature.arguments.clone(), signature.results.clone())
+    Ok(Dispatchers { entries })
 }
 
 /// Emit the exact-application portion of a dispatcher. PAP allocation and
@@ -262,9 +311,11 @@ pub(super) fn emit_dispatchers(
     prepared_enter: FuncId,
     prepared_bad_state: FuncId,
     prepared_resolve_call: FuncId,
-    prepared_recorded_failure: FuncId,
+    prepared_unresolved_call: FuncId,
     pipeline: &mut CodegenPipeline,
 ) -> Result<(), super::CompileError> {
+    let started = std::time::Instant::now();
+    let mut code_bytes = 0usize;
     for (signature, output) in dispatchers.iter() {
         let abi = EntryAbi::lower_internal(profile, signature, EnvironmentMode::Captured)?;
         let mut context = cranelift_codegen::Context::new();
@@ -499,62 +550,124 @@ pub(super) fn emit_dispatchers(
         if next != entered {
             builder.seal_block(next);
         }
-        // No local function/PAP descriptor matched. Fall back to the
-        // machine-wide resolution table before giving up: the callee may be
-        // a foreign (cross-program) function or PAP whose header this
-        // program never interned. A resolution hit is dispatched through
-        // via this dispatcher's own Cranelift signature, since a foreign
-        // Exact application uses the identical calling convention as a
-        // local one.
+        // Full-demand lookup may find an owner's exact or partial adapter.
+        // Prefix probes are non-mutating; only exhaustion records failure.
         let object = builder.ins().band_imm(callee, !7_i64);
         let header = builder
             .ins()
             .load(types::I64, MemFlags::trusted(), object, 0);
-        let fingerprint = resolve::signature_fingerprint(signature);
-        let fingerprint_const = builder.ins().iconst(types::I64, fingerprint as i64);
         let resolve_ref = pipeline
             .module
             .declare_func_in_func(prepared_resolve_call, builder.func);
-        let resolve_call = builder
-            .ins()
-            .call(resolve_ref, &[vmctx, header, fingerprint_const]);
-        let code = builder.inst_results(resolve_call)[0];
-        let found = builder
-            .ins()
-            .icmp_imm(ir::condcodes::IntCC::NotEqual, code, 0);
-        let resolved_block = builder.create_block();
-        let still_bad_block = builder.create_block();
-        builder
-            .ins()
-            .brif(found, resolved_block, &[], still_bad_block, &[]);
-
-        builder.switch_to_block(resolved_block);
-        builder.seal_block(resolved_block);
-        let dispatcher_signature = builder.func.signature.clone();
-        let sig_ref = builder.import_signature(dispatcher_signature);
-        let resolved_arguments = call_arguments(vmctx, callee, &physical_arguments);
-        let call = builder
-            .ins()
-            .call_indirect(sig_ref, code, &resolved_arguments);
-        let returned = builder.inst_results(call).to_vec();
-        builder.ins().return_(&returned);
-
-        // The resolver already recorded why it missed (`UnresolvedCallee`
-        // for a real callable it cannot serve, `BadThunkState` for a word
-        // that is no callable at all); return that status, do not record a
-        // second cause.
-        builder.switch_to_block(still_bad_block);
-        builder.seal_block(still_bad_block);
+        let mut probes = vec![(signature.clone(), ResolvedContinuation::Return)];
+        for consumed in (0..=signature.arguments.len()).rev() {
+            let terminal = Signature {
+                arguments: signature.arguments[..consumed].to_vec(),
+                results: super::ResultContract::NoSuccess,
+            };
+            if terminal != *signature {
+                probes.push((terminal, ResolvedContinuation::Terminal));
+            }
+        }
+        // A NoSuccess demand cannot acquire evidence of terminal behavior by
+        // first running a merely lifted-returning function (classify agrees).
+        if signature.results != super::ResultContract::NoSuccess {
+            for consumed in (1..signature.arguments.len()).rev() {
+                probes.push((
+                    Signature {
+                        arguments: signature.arguments[..consumed].to_vec(),
+                        results: super::ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+                    },
+                    ResolvedContinuation::Apply {
+                        consumed,
+                        remainder: Signature {
+                            arguments: signature.arguments[consumed..].to_vec(),
+                            results: signature.results.clone(),
+                        },
+                    },
+                ));
+            }
+        }
+        for (demand, application) in probes {
+            let metadata = builder
+                .ins()
+                .iconst(types::I64, dispatchers.demand_address(&demand)?);
+            let lookup = builder.ins().call(resolve_ref, &[vmctx, header, metadata]);
+            let code = builder.inst_results(lookup)[0];
+            let found = builder
+                .ins()
+                .icmp_imm(ir::condcodes::IntCC::NotEqual, code, 0);
+            let hit = builder.create_block();
+            let miss = builder.create_block();
+            builder.ins().brif(found, hit, &[], miss, &[]);
+            builder.switch_to_block(hit);
+            builder.seal_block(hit);
+            let native = EntryAbi::lower_internal(profile, &demand, EnvironmentMode::Captured)?
+                .cranelift_signature(profile, CallConv::Tail)?;
+            let sig_ref = builder.import_signature(native);
+            let args = call_arguments(
+                vmctx,
+                callee,
+                physical_arguments.iter().take(demand.arguments.len()),
+            );
+            let call = builder.ins().call_indirect(sig_ref, code, &args);
+            let returned = builder.inst_results(call).to_vec();
+            match application {
+                ResolvedContinuation::Return => {
+                    builder.ins().return_(&returned);
+                }
+                ResolvedContinuation::Terminal => {
+                    super::emit_call_results(
+                        &mut builder,
+                        pipeline,
+                        vmctx,
+                        &returned,
+                        &demand.results,
+                    )?;
+                }
+                ResolvedContinuation::Apply {
+                    consumed,
+                    remainder,
+                } => {
+                    if let Some(payload) = super::emit_call_results(
+                        &mut builder,
+                        pipeline,
+                        vmctx,
+                        &returned,
+                        &demand.results,
+                    )? {
+                        let suffix = dispatchers
+                            .find(&remainder)
+                            .ok_or_else(|| super::CompileError::MissingDemand(remainder.clone()))?;
+                        let suffix_ref = pipeline.module.declare_func_in_func(suffix, builder.func);
+                        let args =
+                            call_arguments(vmctx, payload[0], &physical_arguments[consumed..]);
+                        let call = builder.ins().call(suffix_ref, &args);
+                        let result = builder.inst_results(call).to_vec();
+                        builder.ins().return_(&result);
+                    }
+                }
+            }
+            builder.switch_to_block(miss);
+            builder.seal_block(miss);
+        }
         let recorded_ref = pipeline
             .module
-            .declare_func_in_func(prepared_recorded_failure, builder.func);
-        let recorded = builder.ins().call(recorded_ref, &[vmctx]);
+            .declare_func_in_func(prepared_unresolved_call, builder.func);
+        let recorded = builder.ins().call(recorded_ref, &[vmctx, header]);
         let status = builder.inst_results(recorded)[0];
         crate::alloc::emit_prepared_failure_return(&mut builder, status);
         builder.seal_all_blocks();
         builder.finalize();
         pipeline.define_function(output, &mut context)?;
+        if let Some(compiled) = context.compiled_code() {
+            code_bytes += compiled.code_buffer().len();
+        }
     }
+    tracing::debug!(target: "tidepool::prepared_apply",
+        dispatchers = dispatchers.entries.len(), code_bytes,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "compiled application dispatchers");
     Ok(())
 }
 
