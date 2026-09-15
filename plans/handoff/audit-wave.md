@@ -203,3 +203,41 @@ backwards `set_val_gen`.
    `observe.rs:148,193,408`); move to `*_tests.rs`.
 6. Dead `include` field under `#[allow(dead_code)]` (`session/resident.rs:621`).
 
+## Numeric and formatting intrinsic parity
+1. Medium — shortest-digit double rendering (`tidepool-bignum/src/lib.rs:127`,
+   `:138`, via `formatting.rs:63`) uses Rust's search, which admits the
+   rounding boundary for even mantissas; GHC's `floatToDigits` never does.
+   `show (1e23 :: Double)`: GHC `9.999999999999999e22`, tidepool `1.0e23`
+   (auditor certain of this one; others need the oracle). Port Burger–Dybvig
+   with boundaries excluded; add `1e23`, `9007199254740993`, `5.0e-324`,
+   `1.7976931348623157e308`, `0.1`, `1e7`, `9999999.999999998` to a
+   `FormattingExecutionContract` binding with a native GHC oracle.
+2. Low, deliberate — `double2Int#` (`fallible.rs:182`) raises `Overflow` on
+   NaN, ±Infinity, ≥ 2^63; GHC x86-64 returns `minBound`. Document the policy
+   or match; oracle test over `truncate`/`round` on NaN and 1e19.
+3. Low, Core-only — `decodeFloat_Int#` (`tidepool-bignum/src/lib.rs:85-90`,
+   `host_fns/primops.rs:572`) decodes Float infinity as `(±1, 0)` and NaN as
+   `(0, 0)`; GHC gives `(8388608, 105)` and raw-bit NaN. Prepared rejects the
+   primop (not in its table).
+Matching GHC: word/int carry and 2-word primops, `decodeDouble_Int64#`,
+negative precedence handling, formatting authority, MD5 context layout,
+native-bignum `Integer`/`Natural` (Haskell over word primops), `encode_double`.
+Oracle gaps: `integerToDouble` rounding, `Natural` subtraction underflow.
+
+## Extractor memo and cache invalidation
+Rust cache keys are sound (endpoint identity hashes frontend, worker and GHC
+libdir plus daemon epoch; undecodable cached artifacts recompile,
+`artifacts.rs:485`); the invocation lane refuses to cache unknown flags;
+`preparedSiblingsRef` is per compile.
+1. Low — a memo hit merges siblings with `Map.union cached known`
+   (`GhcPipeline.hs:772`), so a hit module's stale sibling map overwrites a
+   freshly recompiled sibling Id (e.g. `Tidepool.Actors.Unfold` edited under a
+   running daemon); a later importer is rewritten against the old Id (Core Lint
+   failure or wrong call type). Use `Map.union known cached` or re-merge only
+   the module's own siblings. Test: three resident requests with a sibling type
+   change and a non-importing module between.
+2. Medium-low — memo validity uses `ms_hs_hash` (source bytes only), missing
+   CPP `#include` files and TH/quasiquoter dependent files; the Rust layer
+   recompiles but the daemon memo returns stale Core. Skip the memo for CPP or
+   modules with dependent files. Affects user include dirs (stdlib has no CPP).
+
