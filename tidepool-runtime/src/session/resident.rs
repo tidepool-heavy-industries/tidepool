@@ -864,7 +864,7 @@ where
         nursery_size: usize,
         lib: Option<SessionLib>,
     ) -> Result<Self, JitError> {
-        let mut core = PersistentSession::new(lib, nursery_size, EngineKind::Core);
+        let mut core = PersistentSession::new(lib, nursery_size, EngineKind::from_env());
         core.bootstrap_if_needed(expr, &table)?;
         core.seed_session_table(table);
         Ok(ResidentSession {
@@ -898,7 +898,7 @@ where
         lib: Option<SessionLib>,
     ) -> Self {
         Self::unbootstrapped_on(
-            EngineKind::Core,
+            EngineKind::from_env(),
             handlers,
             captured,
             include,

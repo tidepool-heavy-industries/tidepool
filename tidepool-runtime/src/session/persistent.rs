@@ -79,14 +79,15 @@ impl EngineKind {
     /// The environment variable the composition roots read once per session.
     pub const ENV: &'static str = "TIDEPOOL_ENGINE";
 
-    /// The route named by `TIDEPOOL_ENGINE` (`prepared` selects the prepared
-    /// machine; anything else, or unset, is Core). Read once at session
-    /// construction by the composition roots, never inside a turn.
+    /// The route named by `TIDEPOOL_ENGINE` (`core` opts out to the Core
+    /// machine; `prepared`, unset, or anything else selects the prepared
+    /// machine, now the default). Read once at session construction by the
+    /// composition roots, never inside a turn.
     #[must_use]
     pub fn from_env() -> Self {
         match std::env::var(Self::ENV) {
-            Ok(value) if value.eq_ignore_ascii_case("prepared") => Self::Prepared,
-            _ => Self::Core,
+            Ok(value) if value.eq_ignore_ascii_case("core") => Self::Core,
+            _ => Self::Prepared,
         }
     }
 }
@@ -2295,7 +2296,7 @@ mod tests {
     }
 
     #[test]
-    fn persistent_session_allows_reuse_after_language_error() {
+    fn persistent_session_allows_reuse_after_language_error_on_core() {
         let mut builder = TreeBuilder::new();
         let numerator = builder.push(CoreFrame::Lit(Literal::LitInt(5)));
         let zero = builder.push(CoreFrame::Lit(Literal::LitInt(0)));
@@ -2329,7 +2330,7 @@ mod tests {
     }
 
     #[test]
-    fn persistent_session_refuses_unavailable_machine_reuse() {
+    fn persistent_session_refuses_unavailable_machine_reuse_on_core() {
         let mut builder = TreeBuilder::new();
         builder.push(CoreFrame::Var(VarId(0xfeed)));
         let expr = builder.build();
@@ -2361,7 +2362,7 @@ mod tests {
     }
 
     #[test]
-    fn persistent_session_cancels_suspended_work_without_poisoning_reuse() {
+    fn persistent_session_cancels_suspended_work_without_poisoning_reuse_on_core() {
         let expr = suspending_expr();
         let table = effect_table();
         let mut session = PersistentSession::new(None, 4096, EngineKind::Core);

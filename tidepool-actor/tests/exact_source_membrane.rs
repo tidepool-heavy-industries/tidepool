@@ -18,7 +18,7 @@ fn actor_context_carries_an_exact_facade_into_an_isolated_compile_view() {
     let lib = SessionLib::open(session_id, root.path(), ModuleEnv::standalone_default())
         .expect("open declaration plane")
         .with_validation_include(vec![stdlib]);
-    let mut session = PersistentSession::new(Some(lib), 1 << 20, EngineKind::Core);
+    let mut session = PersistentSession::new(Some(lib), 1 << 20, EngineKind::from_env());
     session
         .define_scoped(&["data Public = Public Int\n\
              data Secret = Secret\n\

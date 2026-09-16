@@ -120,7 +120,7 @@ fn mount(core: &mut PersistentSession, scope: ScopeId, name: &str, raw: u64, slo
 }
 
 #[test]
-fn rehoming_a_handle_moves_its_cleanup_scope() {
+fn rehoming_a_handle_moves_its_cleanup_scope_on_core() {
     let mut core = session();
     let slot = tenure(&mut core, "transferred", 9);
     let roots_before = core.persistent_roots_count();
@@ -163,7 +163,7 @@ fn entry(name: &str, raw: u64, slot: RootSlot) -> BindingEntry {
 }
 
 #[test]
-fn automatic_observation_expiry_releases_roots_and_preserves_explicit_capture() {
+fn automatic_observation_expiry_releases_roots_and_preserves_explicit_capture_on_core() {
     let mut core = session();
     let baseline = core.persistent_roots_count();
     let scope = core.mint_scope(ScopeId::ROOT).unwrap();
@@ -198,7 +198,7 @@ fn classes_1_and_2(core: &PersistentSession) -> (usize, usize, usize) {
 }
 
 #[test]
-fn isolated_scope_has_an_independent_value_chain() {
+fn isolated_scope_has_an_independent_value_chain_on_core() {
     let mut core = session();
     let root_slot = tenure(&mut core, "root_value", 7);
     mount(&mut core, ScopeId::ROOT, "rootValue", 1, root_slot);
@@ -229,7 +229,7 @@ fn isolated_scope_has_an_independent_value_chain() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn retiring_a_scope_releases_exactly_the_roots_its_receipt_reports() {
+fn retiring_a_scope_releases_exactly_the_roots_its_receipt_reports_on_core() {
     let mut core = session();
 
     // A ROOT-scope mount (the flat session's), plus a live handle over its own
@@ -330,7 +330,7 @@ fn retiring_a_scope_releases_exactly_the_roots_its_receipt_reports() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_slot_a_surviving_scope_also_holds_is_not_deregistered() {
+fn a_slot_a_surviving_scope_also_holds_is_not_deregistered_on_core() {
     let mut core = session();
 
     // ONE tenured value, reachable under two names: the escapee is mounted
@@ -377,7 +377,7 @@ fn a_slot_a_surviving_scope_also_holds_is_not_deregistered() {
 /// see it (both are drained before either is examined), so exactly-once is
 /// carried by the released-address set instead. One release, one ledger step.
 #[test]
-fn two_names_in_one_frame_over_one_root_release_it_exactly_once() {
+fn two_names_in_one_frame_over_one_root_release_it_exactly_once_on_core() {
     let mut core = session();
     let child = core.mint_scope(ScopeId::ROOT).expect("ROOT is live");
     let shared = tenure(&mut core, "shared", 9);
@@ -398,7 +398,7 @@ fn two_names_in_one_frame_over_one_root_release_it_exactly_once() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn retiring_an_already_retired_scope_is_a_no_op() {
+fn retiring_an_already_retired_scope_is_a_no_op_on_core() {
     let mut core = session();
     let child = core.mint_scope(ScopeId::ROOT).expect("ROOT is live");
     let slot = tenure(&mut core, "v", 5);
@@ -419,7 +419,7 @@ fn retiring_an_already_retired_scope_is_a_no_op() {
 }
 
 #[test]
-fn a_retired_scopes_sibling_and_the_flat_session_are_untouched() {
+fn a_retired_scopes_sibling_and_the_flat_session_are_untouched_on_core() {
     let mut core = session();
     let flat = tenure(&mut core, "flat", 1);
     mount(&mut core, ScopeId::ROOT, "x", 1, flat);
@@ -472,7 +472,7 @@ fn a_retired_scopes_sibling_and_the_flat_session_are_untouched() {
 /// lookup chain can ever see and no `retire_scope` can ever drain. Covers both
 /// a retired id and an id that was never minted.
 #[test]
-fn bind_in_rejects_a_dead_scope_and_touches_nothing() {
+fn bind_in_rejects_a_dead_scope_and_touches_nothing_on_core() {
     let mut core = session();
     let child = core.mint_scope(ScopeId::ROOT).expect("ROOT is live");
     core.retire_scope(child);
@@ -557,7 +557,7 @@ mod resident_delegation {
     }
 
     #[test]
-    fn the_no_arg_surface_means_root_and_an_empty_scope_retires_to_zero() {
+    fn the_no_arg_surface_means_root_and_an_empty_scope_retires_to_zero_on_core() {
         let mut s = resident();
         assert_eq!(s.persistent_roots_count(), 0, "no binds yet");
         assert_eq!(s.binding_names(), s.binding_names_in(ScopeId::ROOT));

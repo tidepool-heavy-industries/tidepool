@@ -176,7 +176,8 @@ and not a green workspace. Commands below enter the repository toolchain.
 
 That checkpoint's neutral prepared fixture was emitted by the documented Cabal probe,
 not edited by hand: `haskell/test-prepared-stg/fixtures/m3-vertical.cbor`, SHA-256
-`90e8d8c660a3470de5451e0ba2e38050d23b885438a98f8e51ee59bc697eb1b0`.
+`85b4258cefbbd829ffd69f1ca9c3cfba3fac901538cb7400ba127dbb1e383373` (regenerated
+under schema 11).
 The two historical float reds were not rerun or compared with main. The three
 red focused cases above remain open; full workspace compilation remains unclaimed.
 

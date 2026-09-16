@@ -2,7 +2,8 @@
 
 Costs and gaps of the prepared-STG engine that are understood but not yet
 fixed. Each entry says what happens, why, and where the design or evidence
-lives. Remove an entry when it is fixed.
+lives. Remove an entry when it is fixed. Prepared is the default route;
+`TIDEPOOL_ENGINE=core` selects the old engine.
 
 ## Front-end cost
 

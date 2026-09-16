@@ -17,7 +17,7 @@ fn facade_preserves_exact_types_without_leaking_ambient_declarations() {
     let mut session = PersistentSession::new(
         Some(lib),
         1 << 20,
-        tidepool_runtime::session::EngineKind::Core,
+        tidepool_runtime::session::EngineKind::from_env(),
     );
     session
         .lib_mut()

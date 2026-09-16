@@ -933,8 +933,9 @@ impl Harness {
         let lib = self.node_decl_plane(node);
         let mut include = self.cfg.include.clone();
         include.extend(extra_include);
-        // The engine route is read once per session at this composition root
-        // (`TIDEPOOL_ENGINE=prepared`), never inside a turn.
+        // The engine route is read once per session at this composition root.
+        // The prepared machine is the default; `TIDEPOOL_ENGINE=core` opts
+        // out to the Core engine.
         let session = ResidentSession::unbootstrapped_on(
             EngineKind::from_env(),
             stack,

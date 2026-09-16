@@ -229,7 +229,7 @@ fn a_sibling_define_between_mint_and_first_use_does_not_leak() {
     let mut core = PersistentSession::new(
         Some(lib),
         NURSERY,
-        tidepool_runtime::session::EngineKind::Core,
+        tidepool_runtime::session::EngineKind::from_env(),
     );
 
     // ---- (1) ROOT defines the name both children will shadow. ----
@@ -362,7 +362,7 @@ fn isolated_scope_has_an_empty_independent_declaration_chain() {
     let mut core = PersistentSession::new(
         Some(lib),
         NURSERY,
-        tidepool_runtime::session::EngineKind::Core,
+        tidepool_runtime::session::EngineKind::from_env(),
     );
 
     let root_generation = core
@@ -425,7 +425,7 @@ fn define_and_retract_scoped_in_reject_a_dead_scope_without_touching_the_log() {
     let mut core = PersistentSession::new(
         Some(lib),
         NURSERY,
-        tidepool_runtime::session::EngineKind::Core,
+        tidepool_runtime::session::EngineKind::from_env(),
     );
 
     let child = core.mint_scope(ScopeId::ROOT).expect("ROOT is live");
