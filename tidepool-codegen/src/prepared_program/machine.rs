@@ -817,16 +817,17 @@ impl<'code> PreparedMachine<'code> {
         // declares them and are never retired, so union by header identity:
         // a plain extend would grow this list by each install's shared
         // layouts forever, and promotion and compaction walk all of it.
-        let known: HashSet<usize> = self
-            .descriptors
-            .iter()
-            .map(|descriptor| descriptor.initial_header_word())
-            .collect();
+        // `descriptor_registry` is keyed by exactly the headers of
+        // `descriptors` (every program registers each descriptor it lists,
+        // and retirement removes the same owned set from both), so it is the
+        // membership index; consult it before this program's rows join it.
+        debug_assert_eq!(self.descriptors.len(), self.descriptor_registry.len());
+        let registry = &self.descriptor_registry;
         self.descriptors.extend(
             compiled
                 .descriptors
                 .iter()
-                .filter(|descriptor| !known.contains(&descriptor.initial_header_word()))
+                .filter(|descriptor| !registry.contains_key(&descriptor.initial_header_word()))
                 .cloned(),
         );
         self.descriptor_registry.extend(
