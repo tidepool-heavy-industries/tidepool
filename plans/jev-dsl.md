@@ -60,6 +60,16 @@ rounded probability maps that failed the provisional sum check despite choosing
 the expected key, so response-contract validity and action policy must remain
 separate from selected-answer identity.
 
+The efficacy-maximizing follow-up substantially raises the expected request
+surface. A 640-question speculative fan-out returned every expected judgment in
+586 ms, and a seven-answer Shoal decision microprogram succeeded in five observed
+runs at 135–208 ms. Prefer one question-rich request when all evidence is already
+available; consume branch-relevant answers afterward. Shared-state size remains
+bounded: a single question passed with 32,568 input tokens but larger test states
+were rejected. Choice alternative keys are model-facing labels and measurably
+bias duplicate alternatives, so coalesce equivalent continuations before calling
+Jev and give retained alternatives intentional semantic names.
+
 The user wants TypeSafe's Jev available as a fluent, expressive Haskell effect for
 resident LLM-authored programs. Previously considered FunctionGemma, Haiku, and
 Luna for this role. The motivating workloads are small semantic decisions embedded

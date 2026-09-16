@@ -33,6 +33,13 @@ should compute exact structure; Jev should decide what the structure means.
   decisions against an exact temporal question.
 - Six overlapping positive and negative Noul judgments over revision approval,
   receipt versus handling, and whether a local contract resolves an issue.
+- Speculative fan-out from 8 through 1,024 independent Noul questions over one
+  shared state.
+- A seven-answer Shoal microprogram combining mechanism diagnosis, next LSP
+  action, focused verification, wake policy, evidence sufficiency, and semantic
+  completeness in one request.
+- Equivalent continuations under different Choice identifiers, plus a stable
+  decision surrounded by 0 through 1,024 irrelevant structured records.
 
 Strict success requires the expected answer, HTTP success, and a response that
 passes the harness's provisional contract checks. Thus a correct selected key
@@ -80,6 +87,38 @@ Representative cost and latency from the first clean run:
 These are observations, not latency or calibration guarantees. The samples are
 small and the endpoint is stochastic.
 
+### Efficacy-maximizing round
+
+The next round targeted useful work per request rather than adversarial input.
+It produced four additional boundaries:
+
+1. **Speculative fan-out scales extremely well.** All answers were correct at
+   8, 32, 64, 128, 256, 512, and 640 parallel Noul questions. The 640-question
+   request completed in 586 ms with aggregate usage of 43,784 input and 14,724
+   output tokens. A 1,024-question request was rejected with HTTP 400
+   `max_tokens_exceeded`; no inference result was returned.
+2. **A realistic multi-decision microprogram works.** One 931-input-token call
+   answered three Choices and four Nouls: callback mechanism, next code query,
+   verification target, wake-now policy, mechanism support, local-contract
+   completeness, and whether a semantic decision remained. It produced every
+   expected answer in five observed attempts, each in 135–208 ms.
+3. **Large shared state, not aggregate fan-out usage, is the tighter envelope.**
+   One Choice remained correct with probability 1.0 as irrelevant state grew
+   through 768 records and 32,568 input tokens. The 896-, 960-, and 1,024-record
+   forms were rejected with `max_tokens_exceeded`. In contrast, 640 independent
+   questions could report more aggregate tokens because each question is
+   evaluated independently over a smaller shared state. This is an inference
+   from the observed request shapes, consistent with the documented parallel
+   question model; it is not a published fixed context limit.
+4. **Choice identifiers participate in meaning.** Two descriptions were
+   intentionally identical and jointly received probability 1.0, but readable
+   keys produced concentrated splits: `route_a`/`route_b` was 0.88/0.12,
+   `first`/`second` was 0.90/0.10, and `option_z`/`option_a` was 0.06/0.94.
+   Opaque `k019`/`k873` was less concentrated at 0.66/0.34. Question IDs are
+   documented as code-only, but Choice keys name the options and must be treated
+   as model-facing semantics. Do not expect fair probability division across
+   duplicate continuations.
+
 ## The Pareto frontier
 
 The surprising positive result is fan-out. Jev can inspect hundreds of rich,
@@ -87,6 +126,12 @@ nearly matching candidates in one fast call, enforce several simultaneous
 constraints, recognize that none qualify, and handle local semantic graph and
 temporal-policy questions. That is enough to collapse many tool-observe,
 inspect, choose, and route turns into one resident microprogram.
+
+The stronger second result is that a native request can expose hundreds of
+independent judgments at once without serial decision latency. This favors
+question-rich requests over forcing one giant Choice or serially asking branch
+questions. Haskell can speculatively construct every judgment whose evidence is
+already present, then consume only the branch-relevant typed answers.
 
 The failure is sequential exact execution. With opaque identifiers, confidence
 degrades rapidly as Jev must repeatedly apply a relation: depth four is correct
@@ -125,6 +170,11 @@ combinator layer around it should make the safe pattern pleasant:
 6. escalate or gather more evidence on low margin, contradiction, or malformed
    distributions.
 
+Before step 3, coalesce semantically equivalent continuations. Choice keys
+should have intentional, complete labels; arbitrary ordinal names can alter the
+distribution even when descriptions are identical. When many labels may
+simultaneously apply, use independent Nouls rather than duplicate Choice options.
+
 Do not treat the top Choice as authority merely because the endpoint returned
 200. The Rust interpreter must validate finite probabilities, exact key sets,
 sum tolerance, and selected-key membership. The authored Haskell layer should
@@ -143,11 +193,13 @@ amount of deterministic work delegated to Jev.
 ```sh
 bash scripts/dev-shell.sh cargo build -p jev-integration
 TYPESAFE_API_KEY="$(< /path/to/key)" \
-  target/debug/jev-integration frontier \
-  --output-dir jev-integration/evidence/frontier-new
+target/debug/jev-integration frontier \
+  --output-dir jev-integration/evidence/frontier-new \
+  --only optional-case-name-fragment
 ```
 
 Evidence directories are git-ignored, exclusively created, and mode 0600. The
-recorded local runs were `frontier-001` through `frontier-004`; summaries report
-18/18, 17/22, 20/25, and 21/25 strict passes respectively. Failures in runs 002
-and 003 include the intermittent probability-sum diagnostics described above.
+The original full runs were `frontier-001` through `frontier-005`; later focused
+runs use `frontier-006-*` through `frontier-008-*`. Evidence remains local and
+untracked. `--only` filters the deterministic case catalog, allowing repetitions
+without paying for the entire suite.

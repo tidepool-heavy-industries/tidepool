@@ -9,7 +9,17 @@ enum Expected {
         question: &'static str,
         selected: String,
     },
-    Nouls(BTreeMap<&'static str, bool>),
+    ChoiceSet {
+        question: &'static str,
+        allowed: Vec<String>,
+        min_allowed_mass: f64,
+        max_pair_gap: f64,
+    },
+    Nouls(BTreeMap<String, bool>),
+    Mixed {
+        choices: BTreeMap<String, String>,
+        nouls: BTreeMap<String, bool>,
+    },
 }
 
 struct Case {
@@ -182,14 +192,149 @@ fn temporal_case(model: &str, conflict: bool) -> Case {
     }
 }
 
+fn ambiguity_case(model: &str, salt: usize) -> Case {
+    let (left, right) = [
+        ("route_a", "route_b"),
+        ("first", "second"),
+        ("k019", "k873"),
+        ("option_z", "option_a"),
+    ][salt % 4];
+    let mut criteria = Map::new();
+    criteria.insert(left.into(), json!({"action":"Ask the parser owner to inspect the production caller","timing":"next normal wake","authority":"read-only investigation"}));
+    criteria.insert(right.into(), json!({"action":"Ask the parser owner to inspect the production caller","timing":"next normal wake","authority":"read-only investigation"}));
+    criteria.insert("route_c".into(), json!({"action":"Wake the release owner immediately","reason":"No release impact is present"}));
+    criteria.insert(
+        "route_d".into(),
+        json!({"action":"Ask the renderer owner","reason":"Different subsystem"}),
+    );
+    Case {
+        name: format!("equivalent-routes-{salt}"),
+        request: json!({"model":model,"state":{
+            "finding":"A parser helper has a type mismatch in a non-urgent branch.",
+            "policy":"Use the owning subsystem; queue non-urgent investigations for normal wake. Equivalent continuations are equally acceptable."
+        },"questions":{"route":{"type":"choice","instructions":"Which continuation best matches the finding and policy? Reflect genuine equivalence in the probability distribution.","criteria":criteria}}}),
+        expected: Expected::ChoiceSet {
+            question: "route",
+            allowed: vec![left.into(), right.into()],
+            min_allowed_mass: 0.80,
+            max_pair_gap: 0.35,
+        },
+    }
+}
+
+fn fanout_case(model: &str, count: usize) -> Case {
+    let facts: Vec<Value> = (0..count)
+        .filter(|i| i % 2 == 0)
+        .map(|i| json!({"agent":format!("agent_{i:03}"),"status":"blocked","cause":"awaiting review"}))
+        .collect();
+    let mut questions = Map::new();
+    let mut expected = BTreeMap::new();
+    for i in 0..count {
+        let name = format!("agent_{i:03}_blocked");
+        questions.insert(name.clone(), json!({"type":"noul","instructions":{
+            "question":format!("Does state.agents explicitly report agent_{i:03} as blocked awaiting review?"),
+            "evidence_rule":"Answer from an exact matching agent record only; absence is false."
+        }}));
+        expected.insert(name, i % 2 == 0);
+    }
+    Case {
+        name: format!("fanout-{count}"),
+        request: json!({"model":model,"state":{"agents":facts},"questions":questions}),
+        expected: Expected::Nouls(expected),
+    }
+}
+
+fn noise_case(model: &str, noise_count: usize) -> Case {
+    let noise: Vec<Value> = (0..noise_count)
+        .map(|i| json!({"seq":i,"component":format!("unrelated_{}",i % 17),"event":"heartbeat completed normally","revision":format!("r{}",i % 23)}))
+        .collect();
+    Case {
+        name: format!("irrelevant-state-{noise_count}"),
+        request: json!({"model":model,"state":{
+            "current_finding":{"symptom":"E0308 mismatched types","owner":"parser","urgency":"normal","next_evidence":"production callers"},
+            "historical_unrelated_events":noise
+        },"questions":{"continuation":{"type":"choice","instructions":{
+            "question":"Which next action follows current_finding?",
+            "focus":"Use current_finding. Historical unrelated events are deliberately irrelevant."
+        },"criteria":{
+            "inspect_callers":"Inspect production callers of the parser symbol",
+            "wake_release":"Wake the release owner for an emergency",
+            "inspect_renderer":"Inspect renderer styling",
+            "stop":"Stop without further evidence"
+        }}}}),
+        expected: Expected::Choice {
+            question: "continuation",
+            selected: "inspect_callers".into(),
+        },
+    }
+}
+
+fn microprogram_case(model: &str, sample: usize) -> Case {
+    Case {
+        name: format!("shoal-microprogram-fanout-{sample}"),
+        request: json!({"model":model,"state":{
+            "goal":"Explain and safely advance a duplicate visible history row after message retry.",
+            "observations":{
+                "inbox":"message m42 admitted once",
+                "actor":"handler callback observed twice for stable message id m42, second callback followed acknowledgment timeout retry",
+                "projection":"one visible history row is inserted per handler callback; no stable-message-id deduplication",
+                "current_test":"retry fixture reproduces two callbacks and two visible rows"
+            },
+            "accepted_contract":{
+                "delivery":"Retries may repeat delivery",
+                "duplicate_callback":"Receiver deduplication is required for stable message IDs",
+                "duplicate_visibility":"Undecided"
+            },
+            "ownership":{"inbox":"node","callback_delivery":"actor","visible_projection":"shoal"},
+            "wake_policy":"Wake immediately only for active outage, data loss, deadlock, or a decision blocking all useful work; otherwise queue for normal wake."
+        },"questions":{
+            "mechanism":{"type":"choice","instructions":"Which mechanism directly explains the second callback?","criteria":{
+                "actor_redelivery":"Retry redelivered stable message m42 to the actor callback",
+                "inbox_double_admit":"The inbox admitted two distinct records",
+                "projection_duplication":"The projection itself invoked the actor callback",
+                "unknown":"The supplied observations do not distinguish a mechanism"
+            }},
+            "next_tool":{"type":"choice","instructions":"Which focused code-exploration action best advances a fix for the callback mechanism?","criteria":{
+                "actor_handler_references":"Find references and callers for the actor message handler and its retry boundary",
+                "inbox_insert_references":"Inspect only inbox insertion call sites",
+                "projection_styles":"Inspect history-row rendering styles",
+                "broad_repository_search":"Run a broad unstructured repository search"
+            }},
+            "verification_target":{"type":"choice","instructions":"Which focused verification should be run first after changing callback deduplication?","criteria":{
+                "actor_retry_fixture":"The actor retry fixture using stable message id m42",
+                "inbox_admission_fixture":"A fixture testing only first-time inbox admission",
+                "projection_snapshot":"A visual snapshot without retries",
+                "full_workspace":"Every workspace test regardless of ownership"
+            }},
+            "wake_now":{"type":"noul","instructions":"Does the supplied state satisfy wake_policy for immediately waking the actor owner?"},
+            "mechanism_supported":{"type":"noul","instructions":"Do the supplied observations support actor retry redelivery as the mechanism for the second callback?"},
+            "visibility_contract_resolved":{"type":"noul","instructions":"Does accepted_contract decide whether a second visible history row is permitted?"},
+            "visibility_decision_needed":{"type":"noul","instructions":"Is a semantic decision still needed before declaring the second visible history row correct or incorrect?"}
+        }}),
+        expected: Expected::Mixed {
+            choices: BTreeMap::from([
+                ("mechanism".into(), "actor_redelivery".into()),
+                ("next_tool".into(), "actor_handler_references".into()),
+                ("verification_target".into(), "actor_retry_fixture".into()),
+            ]),
+            nouls: BTreeMap::from([
+                ("wake_now".into(), false),
+                ("mechanism_supported".into(), true),
+                ("visibility_contract_resolved".into(), false),
+                ("visibility_decision_needed".into(), true),
+            ]),
+        },
+    }
+}
+
 fn consistency_case(model: &str) -> Case {
     let expected = BTreeMap::from([
-        ("approved", false),
-        ("not_approved", true),
-        ("receipt_proves_handling", false),
-        ("handling_can_be_unknown", true),
-        ("local_contract_resolves", false),
-        ("semantic_decision_needed", true),
+        ("approved".into(), false),
+        ("not_approved".into(), true),
+        ("receipt_proves_handling".into(), false),
+        ("handling_can_be_unknown".into(), true),
+        ("local_contract_resolves".into(), false),
+        ("semantic_decision_needed".into(), true),
     ]);
     Case {
         name: "overlapping-judgments".into(),
@@ -231,17 +376,40 @@ fn cases(model: &str) -> Vec<Case> {
     out.push(temporal_case(model, false));
     out.push(temporal_case(model, true));
     out.push(consistency_case(model));
+    for salt in 0..4 {
+        out.push(ambiguity_case(model, salt));
+    }
+    for &count in &[8, 32, 64, 128, 256, 512, 640, 1024] {
+        out.push(fanout_case(model, count));
+    }
+    for &count in &[0, 64, 256, 384, 512, 768, 896, 960, 1024] {
+        out.push(noise_case(model, count));
+    }
+    for sample in 0..4 {
+        out.push(microprogram_case(model, sample));
+    }
     out
 }
 
-pub async fn run(output_dir: PathBuf, model: &str) -> Result<ExitCode, Box<dyn std::error::Error>> {
+pub async fn run(
+    output_dir: PathBuf,
+    model: &str,
+    only: Option<&str>,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let key = std::env::var("TYPESAFE_API_KEY")
         .map_err(|_| "Set TYPESAFE_API_KEY before frontier runs")?;
     crate::bearer(&key)?;
     std::fs::create_dir(&output_dir)?;
     let mut summary_file = crate::new_evidence_file(&output_dir.join("summary.json"))?;
     let mut observations = Vec::new();
-    for case in cases(model) {
+    let selected_cases: Vec<Case> = cases(model)
+        .into_iter()
+        .filter(|case| only.is_none_or(|needle| case.name.contains(needle)))
+        .collect();
+    if selected_cases.is_empty() {
+        return Err(format!("no frontier cases matched {only:?}").into());
+    }
+    for case in selected_cases {
         let path = output_dir.join(format!("{}.json", case.name));
         let (evidence, valid) = crate::capture_exchange(
             "https://api.typesafe.ai/v1/systemone",
@@ -270,13 +438,73 @@ pub async fn run(output_dir: PathBuf, model: &str) -> Result<ExitCode, Box<dyn s
                     _ => (false, json!({"expected":selected,"error":"missing choice"})),
                 }
             }
+            Expected::ChoiceSet {
+                question,
+                allowed,
+                min_allowed_mass,
+                max_pair_gap,
+            } => match evaluation.and_then(|e| e.answers.get(question)) {
+                Some(Answer::Choice {
+                    choice,
+                    probabilities,
+                    ..
+                }) => {
+                    let values: Vec<f64> = allowed
+                        .iter()
+                        .map(|key| probabilities.get(key).copied().unwrap_or(0.0))
+                        .collect();
+                    let mass: f64 = values.iter().sum();
+                    let gap = values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+                        - values.iter().copied().fold(f64::INFINITY, f64::min);
+                    (
+                        valid
+                            && allowed.contains(choice)
+                            && mass >= min_allowed_mass
+                            && gap <= max_pair_gap,
+                        json!({"allowed":allowed,"selected":choice,"allowed_probabilities":values,
+                            "allowed_mass":mass,"pair_gap":gap,"min_allowed_mass":min_allowed_mass,
+                            "max_pair_gap":max_pair_gap}),
+                    )
+                }
+                _ => (false, json!({"allowed":allowed,"error":"missing choice"})),
+            },
             Expected::Nouls(expected) => {
                 let answers:Map<String,Value>=expected.iter().map(|(name,want)|{
-                    let p=match evaluation.and_then(|e|e.answers.get(*name)){Some(Answer::Noul{noul})=>Some(*noul),_=>None};
-                    ((*name).into(),json!({"expected":want,"p_yes":p,"correct_side":p.is_some_and(|x|(x>=0.5)==*want)}))}).collect();
+                    let p=match evaluation.and_then(|e|e.answers.get(name)){Some(Answer::Noul{noul})=>Some(*noul),_=>None};
+                    (name.clone(),json!({"expected":want,"p_yes":p,"correct_side":p.is_some_and(|x|(x>=0.5)==*want)}))}).collect();
                 (
                     valid && answers.values().all(|v| v["correct_side"] == json!(true)),
                     Value::Object(answers),
+                )
+            }
+            Expected::Mixed { choices, nouls } => {
+                let choice_answers: Map<String, Value> = choices
+                    .iter()
+                    .map(|(name, want)| {
+                        let got = match evaluation.and_then(|e| e.answers.get(name)) {
+                            Some(Answer::Choice { choice, .. }) => Some(choice.as_str()),
+                            _ => None,
+                        };
+                        (name.clone(), json!({"expected":want,"selected":got,"correct":got == Some(want.as_str())}))
+                    })
+                    .collect();
+                let noul_answers: Map<String, Value> = nouls
+                    .iter()
+                    .map(|(name, want)| {
+                        let p = match evaluation.and_then(|e| e.answers.get(name)) {
+                            Some(Answer::Noul { noul }) => Some(*noul),
+                            _ => None,
+                        };
+                        (name.clone(), json!({"expected":want,"p_yes":p,"correct_side":p.is_some_and(|x|(x>=0.5)==*want)}))
+                    })
+                    .collect();
+                let answers_ok = choice_answers.values().all(|v| v["correct"] == json!(true))
+                    && noul_answers
+                        .values()
+                        .all(|v| v["correct_side"] == json!(true));
+                (
+                    valid && answers_ok,
+                    json!({"choices":choice_answers,"nouls":noul_answers}),
                 )
             }
         };
@@ -333,7 +561,7 @@ mod tests {
     #[test]
     fn suite_has_expected_boundary_cases() {
         let suite = cases("test");
-        assert_eq!(suite.len(), 25);
+        assert_eq!(suite.len(), 50);
         assert!(suite
             .iter()
             .any(|case| case.name == "constraints-255-valid-3"));

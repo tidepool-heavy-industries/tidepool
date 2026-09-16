@@ -39,6 +39,9 @@ wide conjunctive selection, semantic graph paths, temporal exceptions,
 overlapping judgments, and exact pointer traversal. The observed result is a
 sharp distinction between strong semantic width and unreliable deterministic
 depth; see [frontier experiments](FRONTIER-EXPERIMENTS.md).
+Use `--only <case-name-fragment>` for focused repetitions. Later experiments
+showed 640-question fan-out and a seven-answer Shoal microprogram succeeding in
+one call, while also locating shared-state and duplicate-Choice-label limits.
 
 ## Live experiments
 
@@ -108,3 +111,9 @@ contract or use a total builder. Positive tests use `-Wall -Werror`.
 See [the design handoff](../plans/jev-dsl.md) for user decisions and remaining
 questions. The TypeSafe skill's live-doc workflow informed the probe matrix; its
 batching suggestions are not part of this integration's design.
+
+The publisher's TypeSafe skill is vendored under
+[`vendor/typesafe-ai`](vendor/typesafe-ai/UPSTREAM.md) at a recorded upstream
+commit, including its MIT license. It is a research input and agent guide, not
+runtime code. Its repeated recommendation is the same boundary found in live
+tests: code owns exact work and execution; Jev contributes semantic judgments.

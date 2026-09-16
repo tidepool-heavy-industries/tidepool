@@ -37,6 +37,9 @@ enum Command {
         output_dir: PathBuf,
         #[arg(long, default_value = "jev-latest")]
         model: String,
+        /// Run only case names containing this text.
+        #[arg(long)]
+        only: Option<String>,
     },
     /// Run a bounded synthetic notebook decision chain; no shell commands execute.
     Simulate {
@@ -158,8 +161,12 @@ async fn main() -> ExitCode {
 
 async fn execute(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let (endpoint, probe, request, key, output, timeout) = match cli.command {
-        Command::Frontier { output_dir, model } => {
-            return frontier::run(output_dir, &model).await;
+        Command::Frontier {
+            output_dir,
+            model,
+            only,
+        } => {
+            return frontier::run(output_dir, &model, only.as_deref()).await;
         }
         Command::Simulate {
             scenario,
