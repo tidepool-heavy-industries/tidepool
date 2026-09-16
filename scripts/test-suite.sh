@@ -34,6 +34,13 @@ resolve_tidepool_extract
 trap teardown_battery_daemon EXIT INT TERM
 start_battery_daemon
 
+# Build every integration target in one parallel pass first. Each shard below
+# is its own `cargo nextest run`, so without this a later target's compile
+# waits for the previous target's (possibly long, low-parallelism) run. Same
+# package, profile and features as the shards, so they reuse these artifacts.
+echo "==> suite $crate: building ${total} integration targets"
+cargo nextest run --no-run -p "$crate"
+
 for index in "${!targets[@]}"; do
   echo "==> suite $crate: shard $((index + 1))/$total"
   scripts/battery-shard.sh "$crate" --test "${targets[$index]}"
