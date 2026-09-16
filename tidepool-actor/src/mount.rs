@@ -6,8 +6,8 @@ use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::{Generation, PrincipalId, SessionId};
 use tidepool_runtime::session::{
-    MaterializedFacade, OutputSink, PreparedRuntime, ResidentError, ResidentSession,
-    SessionCompileView, SessionRunContext, SourceImports,
+    MaterializedFacade, OutputSink, ResidentError, ResidentSession, SessionCompileView,
+    SessionRunContext, SourceImports,
 };
 
 use crate::ActorRef;
@@ -272,40 +272,6 @@ where
             handles,
             leases: 0,
             scope_roots: scope.roots_released,
-        }
-    }
-}
-
-/// Temporary compatibility target for the prepared-engine retirement proof.
-/// Production actor sessions mount [`ResidentSession`]; this implementation
-/// remains until prepared suspension is driven through that owner, so the
-/// actor-level exact-incarnation retirement test continues to exercise the
-/// same `ActorRunTarget` boundary as production.
-impl ActorRunTarget for PreparedRuntime {
-    type Error = std::convert::Infallible;
-    type Hole = tidepool_runtime::session::prepared::PreparedHole;
-
-    fn install_actor_execution(
-        &mut self,
-        context: SessionRunContext,
-        effect_policy: EffectRunPolicy,
-        live_payload: LivePayloadPolicy,
-    ) -> Result<(), Self::Error> {
-        self.set_actor_execution(context, effect_policy, live_payload);
-        Ok(())
-    }
-
-    fn retire_placement(
-        &mut self,
-        resource_scope: RealmId,
-        _lexical_scope: ScopeId,
-    ) -> PlacementRetirement {
-        let report = self.close_realm_report(resource_scope);
-        PlacementRetirement {
-            frames: report.frames,
-            handles: report.handles_released,
-            leases: report.leases_released,
-            scope_roots: 0,
         }
     }
 }

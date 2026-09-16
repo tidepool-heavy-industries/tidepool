@@ -4,9 +4,9 @@ use tidepool_bridge::Value;
 use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::jit_machine::MachineDisposition;
 use tidepool_codegen::prepared_program::{
-    CompiledProgram, ExecutionError, ObservationFailure, PreparedCallOptions, PreparedHandle,
-    PreparedInput as CodegenPreparedInput, PreparedMachine, PreparedMachineOptions,
-    PreparedOuter as PreparedOuterCodegen, PreparedResult, ProgramId,
+    CompiledProgram, ExecutionError, ImportBindings, ObservationFailure, PreparedCallOptions,
+    PreparedHandle, PreparedInput as CodegenPreparedInput, PreparedMachine, PreparedMachineOptions,
+    PreparedOuter as PreparedOuterCodegen, PreparedResult, ProgramId, RunOptions, RunResult,
 };
 use tidepool_repr::execution_schema::{
     link_program, parse_program, Architecture, DecodeLimits, Endianness, ImportedValue, LinkError,
@@ -16,12 +16,63 @@ use tidepool_repr::execution_schema::{
 use tidepool_repr::freer_names::{
     find_declared, E_DEFINING_MODULE, UNION_DEFINING_MODULE, VAL_DEFINING_MODULE,
 };
-use tidepool_repr::{DataConId, Generation};
-use tidepool_runtime::prepared_execution::{
-    run_prepared_once, PreparedArgument, PreparedFailureKind, PreparedOuter, PreparedRuntimeError,
-    PreparedValue, PreparedValueResult, RealmId,
-};
-use tidepool_runtime::session::PreparedRuntime;
+use tidepool_repr::DataConId;
+use tidepool_runtime::prepared_execution::{PreparedFailureKind, PreparedRuntimeError, RealmId};
+
+/// This file drives `tidepool_codegen::prepared_program::PreparedMachine`
+/// directly: the deleted `PreparedRuntime` session-bookkeeping wrapper
+/// (bindings/generations/leases) duplicated the real production owner,
+/// `PreparedEngine` (`tidepool-runtime/src/session/prepared.rs`), and none of
+/// the tests below exercise session-level bookkeeping -- they are all
+/// machine-level (parking, resuming, realms, cancellation, freer-resume
+/// loops, cross-program imports, GC), so they are ported onto the lower
+/// layer instead of onto `PreparedEngine`.
+///
+/// One-shot convenience equivalent to the deleted
+/// `tidepool_runtime::prepared_execution::run_prepared_once`: parse, link,
+/// compile, install on a fresh ephemeral machine, and run the artifact's
+/// designated entry with no arguments, using the same default nursery size
+/// and observation budget the deleted wrapper used
+/// ([`RunOptions::default`]).
+fn run_prepared_once(
+    artifact: &[u8],
+    requirements: &ProgramRequirements,
+    limits: DecodeLimits,
+    imports: MachineImports,
+    cancel: Arc<AtomicBool>,
+) -> Result<RunResult, PreparedRuntimeError> {
+    // A caller may pre-cancel before this function even parses the artifact
+    // (e.g. a request already cancelled before compilation started); a
+    // trivial entry may never reach a tail-call safepoint that would
+    // otherwise observe `cancel`, so this up-front check is load-bearing,
+    // not redundant with `run_entry_with_raw_cancel`'s own safepoint checks.
+    if cancel.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(PreparedRuntimeError::Cancelled);
+    }
+    let prepared = parse_program(artifact, requirements, limits)?;
+    let entry = prepared.entry();
+    let linked = link_program(prepared, &imports)?;
+    let compiled = CompiledProgram::compile(&linked).map_err(PreparedRuntimeError::Compile)?;
+    let (mut machine, program) = PreparedMachine::new(
+        compiled,
+        PreparedMachineOptions {
+            nursery_bytes: RunOptions::default().nursery_bytes,
+        },
+    )
+    .map_err(PreparedRuntimeError::Run)?;
+    let options = PreparedCallOptions {
+        observation_budget: RunOptions::default().observation_budget,
+        collect_before_observation: true,
+    };
+    machine
+        .run_entry_with_raw_cancel(program, entry, &[], options, cancel)
+        .map_err(|error| match &error {
+            ExecutionError::Runtime(failure) if failure.cause == RuntimeError::Cancelled => {
+                PreparedRuntimeError::Cancelled
+            }
+            _ => PreparedRuntimeError::Run(error),
+        })
+}
 
 const ARTIFACT: &[u8] = include_bytes!("../../haskell/test-prepared-stg/fixtures/m3-vertical.cbor");
 const FREER_RETENTION_ARTIFACT: &[u8] =
@@ -193,6 +244,65 @@ fn strict_artifact() -> Vec<u8> {
     ])
 }
 
+fn strict_program() -> PreparedProgram {
+    parse_program(&strict_artifact(), &requirements(), DecodeLimits::default())
+        .expect("strict_artifact() parses")
+}
+
+/// The default [`PreparedCallOptions`] `PreparedRuntime`'s deleted
+/// convenience wrappers used everywhere: the same observation budget
+/// [`RunOptions::default`] carries, with `collect_before_observation` set
+/// per call site.
+fn call_options(collect_before_observation: bool) -> PreparedCallOptions {
+    PreparedCallOptions {
+        observation_budget: RunOptions::default().observation_budget,
+        collect_before_observation,
+    }
+}
+
+fn machine_options() -> PreparedMachineOptions {
+    PreparedMachineOptions {
+        nursery_bytes: RunOptions::default().nursery_bytes,
+    }
+}
+
+/// A fresh machine with `strict_program()` installed as its only, closed
+/// program -- the direct-`PreparedMachine` equivalent of
+/// `PreparedRuntime::from_artifact(&strict_artifact(), ...)`.
+fn open_strict_machine() -> (PreparedMachine<'static>, ProgramId) {
+    let linked =
+        link_program(strict_program(), &MachineImports::default()).expect("strict links closed");
+    let compiled = CompiledProgram::compile(&linked).expect("strict artifact compiles");
+    PreparedMachine::new(compiled, machine_options()).expect("strict artifact installs")
+}
+
+/// Link `prepared` with no imports, compile and install it as a fresh
+/// machine's only program -- the direct-`PreparedMachine` equivalent of
+/// `PreparedRuntime::from_prepared(prepared, MachineImports::default())` for
+/// a closed artifact.
+fn open_closed_machine_from(prepared: PreparedProgram) -> (PreparedMachine<'static>, ProgramId) {
+    let linked = link_program(prepared, &MachineImports::default()).expect("artifact links closed");
+    let compiled = CompiledProgram::compile(&linked).expect("artifact compiles");
+    PreparedMachine::new(compiled, machine_options()).expect("artifact installs")
+}
+
+/// Parse, link with no imports, compile and install `artifact` as a fresh
+/// machine's only program, returning its own designated entry alongside --
+/// the direct-`PreparedMachine` equivalent of
+/// `PreparedRuntime::from_artifact(artifact, ..., MachineImports::default())`
+/// for a closed artifact whose tests drive the designated entry (what the
+/// deleted wrapper's `run_entry(None, ...)` meant).
+fn open_closed_machine(artifact: &[u8]) -> (PreparedMachine<'static>, ProgramId, ValueId) {
+    let prepared =
+        parse_program(artifact, &requirements(), DecodeLimits::default()).expect("artifact parses");
+    let entry = prepared.entry();
+    let linked = link_program(prepared, &MachineImports::default()).expect("artifact links closed");
+    let compiled = CompiledProgram::compile(&linked).expect("artifact compiles");
+    let (machine, program) =
+        PreparedMachine::new(compiled, machine_options()).expect("artifact installs");
+    (machine, program, entry)
+}
+
 fn requirements() -> ProgramRequirements {
     ProgramRequirements {
         schema_version: SCHEMA_VERSION,
@@ -302,18 +412,24 @@ fn one_shot_rejects_missing_import_malformed_and_precancel() {
 
 #[test]
 fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
-    let mut session = PreparedRuntime::from_artifact(
-        &strict_artifact(),
-        &requirements(),
-        DecodeLimits::default(),
-        MachineImports::default(),
-    )
-    .unwrap();
-    let first = session
-        .run_entry(Some(ValueId(0)), &[], true, RealmId::ROOT)
+    let (mut machine, closed_program) = open_strict_machine();
+    let first = machine
+        .run_entry(
+            closed_program,
+            ValueId(0),
+            &[],
+            call_options(true),
+            RealmId::ROOT,
+        )
         .unwrap();
-    let second = session
-        .run_entry(Some(ValueId(0)), &[], false, RealmId::ROOT)
+    let second = machine
+        .run_entry(
+            closed_program,
+            ValueId(0),
+            &[],
+            call_options(false),
+            RealmId::ROOT,
+        )
         .unwrap();
     assert!(matches!(
         first.values.as_slice(),
@@ -323,89 +439,95 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
         second.values.as_slice(),
         [Value::Con(DataConId(100), fields)] if fields.is_empty()
     ));
-    assert_eq!(session.disposition(), MachineDisposition::Reusable);
+    assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 
-    let mut unclosed = PreparedRuntime::from_artifact(
-        ARTIFACT,
-        &requirements(),
-        DecodeLimits::default(),
-        imports(),
+    // `imports()` builds a `MachineImports` whose facts satisfy `ARTIFACT`'s
+    // own declared globals exactly (so `link_program` succeeds), but no real
+    // `PreparedHandle` backs any of those identities: `install_program`
+    // refuses with `ExecutionError::UnknownPreparedHandle`, the same
+    // `PreparedFailureKind::Rejected` classification the deleted
+    // `PreparedRuntime::run_entry(None, ...)` surfaced for an artifact whose
+    // declared imports were never actually bound. Installing it as a SECOND
+    // program on an already-open, already-working machine (rather than as
+    // the very first program) lets this test also observe that the refusal
+    // leaves that machine's own disposition untouched.
+    let (mut unclosed_machine, _first) = open_strict_machine();
+    let unclosed_linked = link_program(
+        parse_program(ARTIFACT, &requirements(), DecodeLimits::default()).unwrap(),
+        &imports(),
     )
-    .unwrap();
-    let rejected = unclosed
-        .run_entry(None, &[], false, RealmId::ROOT)
+    .expect("ARTIFACT's declared globals satisfy imports()'s fabricated facts");
+    let unclosed_compiled = unclosed_machine
+        .compile_for_install(&unclosed_linked)
+        .expect("ARTIFACT compiles");
+    let rejected = unclosed_machine
+        .install_program(unclosed_compiled, ImportBindings::new())
         .unwrap_err();
-    assert_eq!(
-        rejected.kind(),
-        PreparedFailureKind::Rejected,
+    assert!(
+        matches!(rejected, ExecutionError::UnknownPreparedHandle),
         "an unclosed artifact is refused, not run: {rejected:?}"
     );
-    assert_eq!(unclosed.disposition(), MachineDisposition::Reusable);
+    assert_eq!(unclosed_machine.disposition(), MachineDisposition::Reusable);
 
-    let mut session = PreparedRuntime::from_artifact(
-        &strict_artifact(),
-        &requirements(),
-        DecodeLimits::default(),
-        MachineImports::default(),
-    )
-    .unwrap();
-    let cancelled_realm = session.open_realm();
-    session.cancel_handle(cancelled_realm).unwrap().cancel();
+    let (mut cancel_machine, cancel_program) = open_strict_machine();
+    let cancelled_realm = RealmId::fresh();
+    cancel_machine.realm_cancel_handle(cancelled_realm).cancel();
+    let cancelled = cancel_machine.run_entry(
+        cancel_program,
+        ValueId(0),
+        &[],
+        call_options(false),
+        cancelled_realm,
+    );
     assert!(matches!(
-        session.run_entry(Some(ValueId(0)), &[], false, cancelled_realm),
-        Err(PreparedRuntimeError::Cancelled)
+        &cancelled,
+        Err(ExecutionError::Runtime(failure)) if failure.cause == RuntimeError::Cancelled
     ));
-    assert_eq!(session.disposition(), MachineDisposition::Reusable);
+    assert_eq!(cancel_machine.disposition(), MachineDisposition::Reusable);
 }
 
 #[test]
 fn runtime_retains_a_real_freer_continuation_without_observing_it() {
-    let mut runtime = PreparedRuntime::from_artifact(
-        FREER_RETENTION_ARTIFACT,
-        &requirements(),
-        DecodeLimits::default(),
-        MachineImports::default(),
-    )
-    .expect("FreerRetention artifact is closed and admitted");
-    let first = runtime
-        .run_entry_retained(None, &[], false, RealmId::ROOT)
+    let (mut machine, program, entry) = open_closed_machine(FREER_RETENTION_ARTIFACT);
+    let first = machine
+        .run_entry_retained(program, entry, &[], call_options(false), RealmId::ROOT)
         .expect("first Freer request is retained");
     let mut first_values = first.values.into_iter();
-    let Some(PreparedValueResult::Managed(outer)) = first_values.next() else {
+    let Some(PreparedResult::Managed(outer)) = first_values.next() else {
         panic!("Freer request must return one managed outer value");
     };
     assert!(first_values.next().is_none());
 
-    let second = runtime
-        .run_entry_retained(None, &[], true, RealmId::ROOT)
+    let second = machine
+        .run_entry_retained(program, entry, &[], call_options(true), RealmId::ROOT)
         .expect("a later collection retains the first Freer request");
     assert!(second.collections >= 1);
     let mut second_values = second.values.into_iter();
-    let Some(PreparedValueResult::Managed(second_outer)) = second_values.next() else {
+    let Some(PreparedResult::Managed(second_outer)) = second_values.next() else {
         panic!("second Freer request must return one managed outer value");
     };
     assert!(second_values.next().is_none());
 
-    let PreparedOuter::Constructor { identity, fields } = runtime
-        .inspect_outer(&outer, RealmId::ROOT)
+    let PreparedOuterCodegen::Constructor { identity, fields } = machine
+        .inspect_outer(outer, RealmId::ROOT)
         .expect("retained outer request survives the later collection");
     assert_eq!(identity, freer_effect_identity());
     let mut children: Vec<_> = fields
         .into_iter()
         .filter_map(|field| match field {
-            PreparedValueResult::Managed(value) => Some(value),
-            PreparedValueResult::Void | PreparedValueResult::Scalar(_) => None,
+            PreparedResult::Managed(value) => Some(value),
+            PreparedResult::Void | PreparedResult::Scalar(_) => None,
         })
         .collect();
     let Some(continuation) = children.pop() else {
         panic!("the real E continuation remains an opaque managed child");
     };
-    assert!(runtime.release(outer));
-    assert!(runtime.release(continuation));
+    assert!(machine.release(outer));
+    assert!(machine.release(continuation));
     for child in children {
-        assert!(runtime.release(child));
+        assert!(machine.release(child));
     }
-    assert!(runtime.release(second_outer));
+    assert!(machine.release(second_outer));
 }
 
 /// One `TopBinding` (with its enclosing group's recursion flattened) matching
@@ -471,27 +593,34 @@ fn freer_resume_artifact_admits_program_and_resume_int_as_two_entries() {
          because Eff is not IO"
     );
 
-    // `PreparedRuntime::from_artifact` parses and links; compilation (and
-    // therefore whole-program admission) is deferred to the first entry run.
-    let mut runtime = PreparedRuntime::from_artifact(
-        FREER_RESUME_ARTIFACT,
-        &requirements(),
-        DecodeLimits::default(),
-        MachineImports::default(),
-    )
-    .expect("freer-resume artifact is closed and links with no missing imports");
+    // The deleted `PreparedRuntime::from_artifact` parsed and linked eagerly
+    // but deferred compilation (and therefore whole-program admission) to
+    // the first entry run; `PreparedMachine::new` below compiles and admits
+    // the whole artifact up front instead, so this test's own compile step
+    // already stands in for that deferred-admission moment.
+    let (mut machine, program) = open_closed_machine_from(
+        parse_program(
+            FREER_RESUME_ARTIFACT,
+            &requirements(),
+            DecodeLimits::default(),
+        )
+        .expect("freer-resume artifact parses"),
+    );
 
-    let program_run = runtime
-        .run_entry_retained(Some(program_top.binding.id), &[], false, RealmId::ROOT)
+    let program_run = machine
+        .run_entry_retained(
+            program,
+            program_top.binding.id,
+            &[],
+            call_options(false),
+            RealmId::ROOT,
+        )
         .expect(
             "running the `program` top compiles (and whole-program-admits) \
              the artifact, which includes `resumeInt` as a second top",
         );
     assert_eq!(program_run.values.len(), 1);
-    assert!(matches!(
-        program_run.values[0],
-        PreparedValueResult::Managed(_)
-    ));
+    assert!(matches!(program_run.values[0], PreparedResult::Managed(_)));
 
     // `admit_prepared` (`tidepool_codegen::prepared_program::admission`) is
     // documented whole-program: it walks every top in `program.bindings()`
@@ -527,19 +656,19 @@ fn freer_resume_constructor_identity(module: &str, occurrence: &str) -> DataConI
 
 /// Take one field as a managed value, replacing it with `Void` so the
 /// `Vec` stays a valid (if partially consumed) field list.
-fn take_managed(fields: &mut [PreparedValueResult], index: usize) -> PreparedValue {
-    match std::mem::replace(&mut fields[index], PreparedValueResult::Void) {
-        PreparedValueResult::Managed(value) => value,
-        PreparedValueResult::Void | PreparedValueResult::Scalar(_) => {
+fn take_managed(fields: &mut [PreparedResult], index: usize) -> PreparedHandle {
+    match std::mem::replace(&mut fields[index], PreparedResult::Void) {
+        PreparedResult::Managed(value) => value,
+        PreparedResult::Void | PreparedResult::Scalar(_) => {
             panic!("field {index} expected a managed value")
         }
     }
 }
 
-fn take_scalar(fields: &[PreparedValueResult], index: usize) -> u64 {
+fn take_scalar(fields: &[PreparedResult], index: usize) -> u64 {
     match fields[index] {
-        PreparedValueResult::Scalar(word) => word,
-        PreparedValueResult::Void | PreparedValueResult::Managed(_) => {
+        PreparedResult::Scalar(word) => word,
+        PreparedResult::Void | PreparedResult::Managed(_) => {
             panic!("field {index} expected a scalar value")
         }
     }
@@ -606,55 +735,56 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments() {
     let val_id = freer_resume_constructor_identity(VAL_DEFINING_MODULE, "Val");
     let union_id = freer_resume_constructor_identity(UNION_DEFINING_MODULE, "Union");
 
-    let mut runtime = PreparedRuntime::from_artifact(
-        FREER_RESUME_ARTIFACT,
-        &requirements(),
-        DecodeLimits::default(),
-        MachineImports::default(),
-    )
-    .expect("freer-resume artifact is closed and admitted");
+    let (mut machine, program) = open_closed_machine_from(prepared);
 
-    let first = runtime
-        .run_entry_retained(Some(program_top.binding.id), &[], true, RealmId::ROOT)
+    let first = machine
+        .run_entry_retained(
+            program,
+            program_top.binding.id,
+            &[],
+            call_options(true),
+            RealmId::ROOT,
+        )
         .expect("running `program` compiles the artifact and suspends on the first Ask");
     let mut first_values = first.values.into_iter();
-    let Some(PreparedValueResult::Managed(mut outer)) = first_values.next() else {
+    let Some(PreparedResult::Managed(mut outer)) = first_values.next() else {
         panic!("`program` must return one managed `Eff` outer value");
     };
     assert!(first_values.next().is_none());
 
     let mut seen_answers = Vec::new();
     let final_value = loop {
-        let PreparedOuter::Constructor {
+        let PreparedOuterCodegen::Constructor {
             identity,
             mut fields,
-        } = runtime
-            .inspect_outer(&outer, RealmId::ROOT)
+        } = machine
+            .inspect_outer(outer, RealmId::ROOT)
             .expect("the retained Eff value survives its collection and inspects");
 
         if identity == val_id {
             assert_eq!(fields.len(), 1, "Val has exactly one field");
             // The boxed `Int` field itself is an ordinary lazy field (`pure
             // (a + b)` is never forced by anything on the path back to
-            // Rust); `valResult` forces it below via `&outer` directly, so
+            // Rust); `valResult` forces it below via `outer` directly, so
             // this field is released unread.
             let boxed = take_managed(&mut fields, 0);
-            assert!(runtime.release(boxed));
+            assert!(machine.release(boxed));
 
-            let value_result = runtime
+            let value_result = machine
                 .run_entry_retained(
-                    Some(val_result_top.binding.id),
-                    &[PreparedArgument::Managed(&outer)],
-                    true,
+                    program,
+                    val_result_top.binding.id,
+                    &[CodegenPreparedInput::Managed(outer)],
+                    call_options(true),
                     RealmId::ROOT,
                 )
                 .expect("valResult (Val (I# n) -> n) forces program's final Int");
             let mut value_values = value_result.values.into_iter();
-            let Some(PreparedValueResult::Scalar(word)) = value_values.next() else {
+            let Some(PreparedResult::Scalar(word)) = value_values.next() else {
                 panic!("valResult must return one scalar Int#");
             };
             assert!(value_values.next().is_none());
-            assert!(runtime.release(outer));
+            assert!(machine.release(outer));
             break word as i64;
         }
 
@@ -662,13 +792,13 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments() {
         assert_eq!(fields.len(), 2, "E has exactly two fields: Union and Arrs");
         let union = take_managed(&mut fields, 0);
         let k = take_managed(&mut fields, 1);
-        assert!(runtime.release(outer));
+        assert!(machine.release(outer));
 
-        let PreparedOuter::Constructor {
+        let PreparedOuterCodegen::Constructor {
             identity: union_identity,
             fields: mut union_fields,
-        } = runtime
-            .inspect_outer(&union, RealmId::ROOT)
+        } = machine
+            .inspect_outer(union, RealmId::ROOT)
             .expect("Union inspects");
         assert_eq!(union_identity, union_id);
         assert_eq!(
@@ -679,40 +809,45 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments() {
         let tag = take_scalar(&union_fields, 0);
         assert_eq!(tag, 0, "the only effect in '[Req] is index 0");
         let payload = take_managed(&mut union_fields, 1);
-        assert!(runtime.release(union));
+        assert!(machine.release(union));
 
         // `payload` (`Union`'s second field) is an ordinary lazy field, so
         // it is still a `Thunk` object here; `askArgument` forces it (and,
         // since `Ask :: !Int -> Req Int` is strict, unboxes straight to
         // `Int#`) via an ordinary pattern match, compiled and called like
         // any other top -- not a Rust-side freer walker.
-        let ask_result = runtime
+        let ask_result = machine
             .run_entry_retained(
-                Some(ask_argument_top.binding.id),
-                &[PreparedArgument::Managed(&payload)],
-                true,
+                program,
+                ask_argument_top.binding.id,
+                &[CodegenPreparedInput::Managed(payload)],
+                call_options(true),
                 RealmId::ROOT,
             )
             .expect("askArgument (Ask (I# n) -> n) forces the Ask request's Int#");
         let mut ask_values = ask_result.values.into_iter();
-        let Some(PreparedValueResult::Scalar(n)) = ask_values.next() else {
+        let Some(PreparedResult::Scalar(n)) = ask_values.next() else {
             panic!("askArgument must return one scalar Int#");
         };
         assert!(ask_values.next().is_none());
-        assert!(runtime.release(payload));
+        assert!(machine.release(payload));
         seen_answers.push(n);
 
-        let resumed = runtime
+        let resumed = machine
             .run_entry_retained(
-                Some(resume_int_top.binding.id),
-                &[PreparedArgument::Managed(&k), PreparedArgument::Scalar(n)],
-                true,
+                program,
+                resume_int_top.binding.id,
+                &[
+                    CodegenPreparedInput::Managed(k),
+                    CodegenPreparedInput::Scalar(n),
+                ],
+                call_options(true),
                 RealmId::ROOT,
             )
             .expect("resumeInt (qApp k (I# n)) applies the retained continuation");
-        assert!(runtime.release(k));
+        assert!(machine.release(k));
         let mut resumed_values = resumed.values.into_iter();
-        let Some(PreparedValueResult::Managed(next_outer)) = resumed_values.next() else {
+        let Some(PreparedResult::Managed(next_outer)) = resumed_values.next() else {
             panic!("resumeInt must return one managed `Eff` outer value");
         };
         assert!(resumed_values.next().is_none());
@@ -730,7 +865,7 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments() {
         "resume loop result must match FreerResumeOracle.hs's GHC-computed value"
     );
     assert_eq!(
-        runtime.retained_handle_count(),
+        machine.handle_count(),
         0,
         "every PreparedValue produced along the resume loop must be released"
     );
@@ -780,37 +915,39 @@ impl FreerResumeFixture {
 /// forces a moving collection between every suspend/resume step, the same
 /// guarantee E2's single-continuation test relies on.
 fn drive_freer_program_to_val(
-    runtime: &mut PreparedRuntime,
+    machine: &mut PreparedMachine<'static>,
+    program: ProgramId,
     fixture: &FreerResumeFixture,
-    mut outer: PreparedValue,
+    mut outer: PreparedHandle,
 ) -> i64 {
     loop {
-        let PreparedOuter::Constructor {
+        let PreparedOuterCodegen::Constructor {
             identity,
             mut fields,
-        } = runtime
-            .inspect_outer(&outer, RealmId::ROOT)
+        } = machine
+            .inspect_outer(outer, RealmId::ROOT)
             .expect("the retained Eff value survives its collection and inspects");
 
         if identity == fixture.val_id {
             assert_eq!(fields.len(), 1, "Val has exactly one field");
             let boxed = take_managed(&mut fields, 0);
-            assert!(runtime.release(boxed));
+            assert!(machine.release(boxed));
 
-            let value_result = runtime
+            let value_result = machine
                 .run_entry_retained(
-                    Some(fixture.val_result_top.binding.id),
-                    &[PreparedArgument::Managed(&outer)],
-                    true,
+                    program,
+                    fixture.val_result_top.binding.id,
+                    &[CodegenPreparedInput::Managed(outer)],
+                    call_options(true),
                     RealmId::ROOT,
                 )
                 .expect("valResult (Val (I# n) -> n) forces the settled Int");
             let mut value_values = value_result.values.into_iter();
-            let Some(PreparedValueResult::Scalar(word)) = value_values.next() else {
+            let Some(PreparedResult::Scalar(word)) = value_values.next() else {
                 panic!("valResult must return one scalar Int#");
             };
             assert!(value_values.next().is_none());
-            assert!(runtime.release(outer));
+            assert!(machine.release(outer));
             return word as i64;
         }
 
@@ -821,13 +958,13 @@ fn drive_freer_program_to_val(
         assert_eq!(fields.len(), 2, "E has exactly two fields: Union and Arrs");
         let union = take_managed(&mut fields, 0);
         let k = take_managed(&mut fields, 1);
-        assert!(runtime.release(outer));
+        assert!(machine.release(outer));
 
-        let PreparedOuter::Constructor {
+        let PreparedOuterCodegen::Constructor {
             identity: union_identity,
             fields: mut union_fields,
-        } = runtime
-            .inspect_outer(&union, RealmId::ROOT)
+        } = machine
+            .inspect_outer(union, RealmId::ROOT)
             .expect("Union inspects");
         assert_eq!(union_identity, fixture.union_id);
         assert_eq!(
@@ -838,34 +975,39 @@ fn drive_freer_program_to_val(
         let tag = take_scalar(&union_fields, 0);
         assert_eq!(tag, 0, "the only effect in '[Req] is index 0");
         let payload = take_managed(&mut union_fields, 1);
-        assert!(runtime.release(union));
+        assert!(machine.release(union));
 
-        let ask_result = runtime
+        let ask_result = machine
             .run_entry_retained(
-                Some(fixture.ask_argument_top.binding.id),
-                &[PreparedArgument::Managed(&payload)],
-                true,
+                program,
+                fixture.ask_argument_top.binding.id,
+                &[CodegenPreparedInput::Managed(payload)],
+                call_options(true),
                 RealmId::ROOT,
             )
             .expect("askArgument (Ask (I# n) -> n) forces the Ask request's Int#");
         let mut ask_values = ask_result.values.into_iter();
-        let Some(PreparedValueResult::Scalar(n)) = ask_values.next() else {
+        let Some(PreparedResult::Scalar(n)) = ask_values.next() else {
             panic!("askArgument must return one scalar Int#");
         };
         assert!(ask_values.next().is_none());
-        assert!(runtime.release(payload));
+        assert!(machine.release(payload));
 
-        let resumed = runtime
+        let resumed = machine
             .run_entry_retained(
-                Some(fixture.resume_int_top.binding.id),
-                &[PreparedArgument::Managed(&k), PreparedArgument::Scalar(n)],
-                true,
+                program,
+                fixture.resume_int_top.binding.id,
+                &[
+                    CodegenPreparedInput::Managed(k),
+                    CodegenPreparedInput::Scalar(n),
+                ],
+                call_options(true),
                 RealmId::ROOT,
             )
             .expect("resumeInt (qApp k (I# n)) applies the retained continuation");
-        assert!(runtime.release(k));
+        assert!(machine.release(k));
         let mut resumed_values = resumed.values.into_iter();
-        let Some(PreparedValueResult::Managed(next_outer)) = resumed_values.next() else {
+        let Some(PreparedResult::Managed(next_outer)) = resumed_values.next() else {
             panic!("resumeInt must return one managed `Eff` outer value");
         };
         assert!(resumed_values.next().is_none());
@@ -877,15 +1019,15 @@ fn drive_freer_program_to_val(
 /// releasing the outer's own root (the `E` constructor cell itself is never
 /// needed again once its fields are retained separately).
 fn split_suspension(
-    runtime: &mut PreparedRuntime,
+    machine: &mut PreparedMachine<'static>,
     fixture: &FreerResumeFixture,
-    outer: PreparedValue,
-) -> (PreparedValue, PreparedValue) {
-    let PreparedOuter::Constructor {
+    outer: PreparedHandle,
+) -> (PreparedHandle, PreparedHandle) {
+    let PreparedOuterCodegen::Constructor {
         identity,
         mut fields,
-    } = runtime
-        .inspect_outer(&outer, RealmId::ROOT)
+    } = machine
+        .inspect_outer(outer, RealmId::ROOT)
         .expect("a freshly suspended Eff value inspects");
     assert_eq!(
         identity, fixture.e_id,
@@ -894,7 +1036,7 @@ fn split_suspension(
     assert_eq!(fields.len(), 2);
     let union = take_managed(&mut fields, 0);
     let k = take_managed(&mut fields, 1);
-    assert!(runtime.release(outer));
+    assert!(machine.release(outer));
     (union, k)
 }
 
@@ -910,40 +1052,43 @@ fn split_suspension(
 #[test]
 fn parked_continuations_resume_out_of_order_with_a_collection_between() {
     let fixture = FreerResumeFixture::load();
-    let mut runtime = PreparedRuntime::from_artifact(
-        FREER_RESUME_ARTIFACT,
-        &requirements(),
-        DecodeLimits::default(),
-        MachineImports::default(),
-    )
-    .expect("freer-resume artifact is closed and admitted");
+    let (mut machine, program) = open_closed_machine_from(
+        parse_program(
+            FREER_RESUME_ARTIFACT,
+            &requirements(),
+            DecodeLimits::default(),
+        )
+        .expect("freer-resume artifact parses"),
+    );
 
-    let first = runtime
+    let first = machine
         .run_entry_retained(
-            Some(fixture.program_top.binding.id),
+            program,
+            fixture.program_top.binding.id,
             &[],
-            true,
+            call_options(true),
             RealmId::ROOT,
         )
         .expect("first `program` run suspends on its first Ask");
-    let Some(PreparedValueResult::Managed(outer1)) = first.values.into_iter().next() else {
+    let Some(PreparedResult::Managed(outer1)) = first.values.into_iter().next() else {
         panic!("`program` must return one managed `Eff` outer value");
     };
 
-    let second = runtime
+    let second = machine
         .run_entry_retained(
-            Some(fixture.program_top.binding.id),
+            program,
+            fixture.program_top.binding.id,
             &[],
-            true,
+            call_options(true),
             RealmId::ROOT,
         )
         .expect("second, independent `program` run also suspends on its first Ask");
-    let Some(PreparedValueResult::Managed(outer2)) = second.values.into_iter().next() else {
+    let Some(PreparedResult::Managed(outer2)) = second.values.into_iter().next() else {
         panic!("`program` must return one managed `Eff` outer value");
     };
 
     assert_eq!(
-        runtime.retained_handle_count(),
+        machine.handle_count(),
         2,
         "both parked E{{union, k}} cells are live roots at once"
     );
@@ -952,22 +1097,22 @@ fn parked_continuations_resume_out_of_order_with_a_collection_between() {
     // first. Every step inside this call forces a collection before
     // observation, so `k1` (still only reachable through `outer1`, untouched
     // here) survives many moving collections while parked.
-    let second_value = drive_freer_program_to_val(&mut runtime, &fixture, outer2);
-    assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
+    let second_value = drive_freer_program_to_val(&mut machine, program, &fixture, outer2);
+    assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 
     // Now resume the first suspension to completion -- the collection(s)
     // just forced while draining `outer2` are the collection between the
     // two resumes the task card asks for.
-    let first_value = drive_freer_program_to_val(&mut runtime, &fixture, outer1);
+    let first_value = drive_freer_program_to_val(&mut machine, program, &fixture, outer1);
 
     assert_eq!(second_value, expected_program_value());
     assert_eq!(first_value, expected_program_value());
     assert_eq!(
-        runtime.retained_handle_count(),
+        machine.handle_count(),
         0,
         "every PreparedValue produced along both resume loops must be released"
     );
-    assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
+    assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 }
 
 /// E3(b): while `k1` sits parked (retained, never inspected or applied), an
@@ -987,26 +1132,28 @@ fn parked_continuations_resume_out_of_order_with_a_collection_between() {
 #[test]
 fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() {
     let fixture = FreerResumeFixture::load();
-    let mut runtime = PreparedRuntime::from_artifact(
-        FREER_RESUME_ARTIFACT,
-        &requirements(),
-        DecodeLimits::default(),
-        MachineImports::default(),
-    )
-    .expect("freer-resume artifact is closed and admitted");
+    let (mut machine, program) = open_closed_machine_from(
+        parse_program(
+            FREER_RESUME_ARTIFACT,
+            &requirements(),
+            DecodeLimits::default(),
+        )
+        .expect("freer-resume artifact parses"),
+    );
 
-    let first = runtime
+    let first = machine
         .run_entry_retained(
-            Some(fixture.program_top.binding.id),
+            program,
+            fixture.program_top.binding.id,
             &[],
-            true,
+            call_options(true),
             RealmId::ROOT,
         )
         .expect("first `program` run suspends on its first Ask");
-    let Some(PreparedValueResult::Managed(outer1)) = first.values.into_iter().next() else {
+    let Some(PreparedResult::Managed(outer1)) = first.values.into_iter().next() else {
         panic!("`program` must return one managed `Eff` outer value");
     };
-    let (union1, k1) = split_suspension(&mut runtime, &fixture, outer1);
+    let (union1, k1) = split_suspension(&mut machine, &fixture, outer1);
 
     // `k1` is now parked: an opaque retained `Arrs` closure, reachable only
     // through this handle, not touched again until the end of this test.
@@ -1021,11 +1168,11 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
     // step reads *that* shape (empirically confirmed: two managed fields,
     // i.e. `Node`'s two `FTCQueue` children) but never releases `k1`
     // itself, so `k1` remains untouched and usable below.
-    let PreparedOuter::Constructor {
+    let PreparedOuterCodegen::Constructor {
         fields: mut node_fields,
         ..
-    } = runtime
-        .inspect_outer(&k1, RealmId::ROOT)
+    } = machine
+        .inspect_outer(k1, RealmId::ROOT)
         .expect("k1's own Node/Leaf FTCQueue cell is ordinary WHNF data and inspects");
     assert_eq!(
         node_fields.len(),
@@ -1040,11 +1187,11 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
     // This is the typed refusal the task card and its reviewer ask for --
     // not at k1's own outer cell (which is real data), but at the closure
     // FTCQueue's leaves actually carry.
-    let PreparedOuter::Constructor {
+    let PreparedOuterCodegen::Constructor {
         fields: mut leaf_fields,
         ..
-    } = runtime
-        .inspect_outer(&left, RealmId::ROOT)
+    } = machine
+        .inspect_outer(left, RealmId::ROOT)
         .expect("Leaf itself is ordinary WHNF data (one field: the closure)");
     assert_eq!(
         leaf_fields.len(),
@@ -1053,44 +1200,45 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
     );
     let closure = take_managed(&mut leaf_fields, 0);
 
-    let forced = runtime.inspect_outer(&closure, RealmId::ROOT);
+    let forced = machine.inspect_outer(closure, RealmId::ROOT);
     assert!(
         matches!(
             forced,
-            Err(PreparedRuntimeError::Run(ExecutionError::Observation(
+            Err(ExecutionError::Observation(
                 ObservationFailure::Unobservable(_)
-            )))
+            ))
         ),
         "a Leaf's own field is a bare closure, never a constructor at WHNF; \
          inspect_outer must refuse it with a typed ObservationFailure"
     );
     assert_eq!(
-        runtime.disposition(),
+        machine.disposition(),
         MachineDisposition::Reusable,
         "a refused observation is not a machine-level failure"
     );
-    assert!(runtime.release(closure));
-    assert!(runtime.release(left));
-    assert!(runtime.release(right));
+    assert!(machine.release(closure));
+    assert!(machine.release(left));
+    assert!(machine.release(right));
 
     // An unrelated entry runs on the same machine while k1 sits parked: a
     // second, independent `program` invocation, sharing no state with k1's
     // suspension, driven all the way to completion.
-    let second = runtime
+    let second = machine
         .run_entry_retained(
-            Some(fixture.program_top.binding.id),
+            program,
+            fixture.program_top.binding.id,
             &[],
-            true,
+            call_options(true),
             RealmId::ROOT,
         )
         .expect("an unrelated `program` run proceeds normally while k1 is parked");
-    let Some(PreparedValueResult::Managed(outer2)) = second.values.into_iter().next() else {
+    let Some(PreparedResult::Managed(outer2)) = second.values.into_iter().next() else {
         panic!("`program` must return one managed `Eff` outer value");
     };
-    let unrelated_value = drive_freer_program_to_val(&mut runtime, &fixture, outer2);
+    let unrelated_value = drive_freer_program_to_val(&mut machine, program, &fixture, outer2);
     assert_eq!(unrelated_value, expected_program_value());
     assert_eq!(
-        runtime.disposition(),
+        machine.disposition(),
         MachineDisposition::Reusable,
         "running an unrelated entry while k1 is parked must leave the \
          machine reusable"
@@ -1098,54 +1246,59 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
 
     // k1 itself is unaffected: resuming its own suspension now still reaches
     // the same GHC-computed answer as any fresh run.
-    let PreparedOuter::Constructor {
+    let PreparedOuterCodegen::Constructor {
         identity: union_identity,
         fields: mut union_fields,
-    } = runtime
-        .inspect_outer(&union1, RealmId::ROOT)
+    } = machine
+        .inspect_outer(union1, RealmId::ROOT)
         .expect("Union inspects");
     assert_eq!(union_identity, fixture.union_id);
     let payload = take_managed(&mut union_fields, 1);
-    assert!(runtime.release(union1));
+    assert!(machine.release(union1));
 
-    let ask_result = runtime
+    let ask_result = machine
         .run_entry_retained(
-            Some(fixture.ask_argument_top.binding.id),
-            &[PreparedArgument::Managed(&payload)],
-            true,
+            program,
+            fixture.ask_argument_top.binding.id,
+            &[CodegenPreparedInput::Managed(payload)],
+            call_options(true),
             RealmId::ROOT,
         )
         .expect("askArgument still forces k1's own Ask request after the unrelated run");
     let mut ask_values = ask_result.values.into_iter();
-    let Some(PreparedValueResult::Scalar(n)) = ask_values.next() else {
+    let Some(PreparedResult::Scalar(n)) = ask_values.next() else {
         panic!("askArgument must return one scalar Int#");
     };
     assert!(ask_values.next().is_none());
-    assert!(runtime.release(payload));
+    assert!(machine.release(payload));
 
-    let resumed = runtime
+    let resumed = machine
         .run_entry_retained(
-            Some(fixture.resume_int_top.binding.id),
-            &[PreparedArgument::Managed(&k1), PreparedArgument::Scalar(n)],
-            true,
+            program,
+            fixture.resume_int_top.binding.id,
+            &[
+                CodegenPreparedInput::Managed(k1),
+                CodegenPreparedInput::Scalar(n),
+            ],
+            call_options(true),
             RealmId::ROOT,
         )
         .expect("resumeInt still applies k1 after an unrelated entry ran while it was parked");
-    assert!(runtime.release(k1));
+    assert!(machine.release(k1));
     let mut resumed_values = resumed.values.into_iter();
-    let Some(PreparedValueResult::Managed(next_outer)) = resumed_values.next() else {
+    let Some(PreparedResult::Managed(next_outer)) = resumed_values.next() else {
         panic!("resumeInt must return one managed `Eff` outer value");
     };
     assert!(resumed_values.next().is_none());
-    let first_value = drive_freer_program_to_val(&mut runtime, &fixture, next_outer);
+    let first_value = drive_freer_program_to_val(&mut machine, program, &fixture, next_outer);
 
     assert_eq!(first_value, expected_program_value());
     assert_eq!(
-        runtime.retained_handle_count(),
+        machine.handle_count(),
         0,
         "every PreparedValue produced by this test must be released"
     );
-    assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
+    assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 }
 
 /// E3(c): cancellation set so a running entry's own compiled safepoint poll
@@ -1755,142 +1908,48 @@ fn two_realms_share_one_machine_cancel_reset_close_independently_of_each_other()
 // `unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable`)
 // already pins interleaved parked work WITHIN one installed program. Rung 3
 // as stated in the acceptance ladder is about two installed programs
-// sharing one heap: `drive_freer_program_to_val`'s `PreparedRuntime`-scoped
-// calls (`run_entry_retained`, no program argument) always address the
-// session's first program, so those tests cannot exercise a second one.
-// This section installs the freer-resume artifact a second time on the
-// SAME machine (`PreparedRuntime::install`, no imports -- the two copies
-// share no data) and drives both through the program-scoped API
-// (`run_entry_retained_in`), which is the whole reason that API exists.
+// sharing one heap. This section installs the freer-resume artifact a
+// second time on the SAME machine (`install_program`, no imports -- the two
+// copies share no data) and drives both through `drive_freer_program_to_val`,
+// which already takes an explicit [`ProgramId`] (the deleted
+// `PreparedRuntime::run_entry_retained_in`'s whole reason to exist, folded
+// directly into the one direct-`PreparedMachine` helper above rather than
+// kept as a second, now-identical copy).
 
-/// [`drive_freer_program_to_val`] for a specific installed program, so C0
-/// can drive two independent copies of the freer-resume artifact -- each
-/// on its own [`ProgramId`], both on the one machine -- without either
-/// touching the other's continuation.
-fn drive_freer_program_to_val_in(
-    runtime: &mut PreparedRuntime,
-    program: ProgramId,
-    fixture: &FreerResumeFixture,
-    mut outer: PreparedValue,
-) -> i64 {
-    loop {
-        let PreparedOuter::Constructor {
-            identity,
-            mut fields,
-        } = runtime
-            .inspect_outer(&outer, RealmId::ROOT)
-            .expect("the retained Eff value survives its collection and inspects");
-
-        if identity == fixture.val_id {
-            assert_eq!(fields.len(), 1, "Val has exactly one field");
-            let boxed = take_managed(&mut fields, 0);
-            assert!(runtime.release(boxed));
-
-            let value_result = runtime
-                .run_entry_retained_in(
-                    program,
-                    fixture.val_result_top.binding.id,
-                    &[PreparedArgument::Managed(&outer)],
-                    true,
-                    RealmId::ROOT,
-                )
-                .expect("valResult (Val (I# n) -> n) forces the settled Int");
-            let mut value_values = value_result.values.into_iter();
-            let Some(PreparedValueResult::Scalar(word)) = value_values.next() else {
-                panic!("valResult must return one scalar Int#");
-            };
-            assert!(value_values.next().is_none());
-            assert!(runtime.release(outer));
-            return word as i64;
-        }
-
-        assert_eq!(
-            identity, fixture.e_id,
-            "an Eff value at WHNF is either Val or E"
-        );
-        assert_eq!(fields.len(), 2, "E has exactly two fields: Union and Arrs");
-        let union = take_managed(&mut fields, 0);
-        let k = take_managed(&mut fields, 1);
-        assert!(runtime.release(outer));
-
-        let PreparedOuter::Constructor {
-            identity: union_identity,
-            fields: mut union_fields,
-        } = runtime
-            .inspect_outer(&union, RealmId::ROOT)
-            .expect("Union inspects");
-        assert_eq!(union_identity, fixture.union_id);
-        assert_eq!(
-            union_fields.len(),
-            2,
-            "Union has an unpacked tag word and a payload"
-        );
-        let tag = take_scalar(&union_fields, 0);
-        assert_eq!(tag, 0, "the only effect in '[Req] is index 0");
-        let payload = take_managed(&mut union_fields, 1);
-        assert!(runtime.release(union));
-
-        let ask_result = runtime
-            .run_entry_retained_in(
-                program,
-                fixture.ask_argument_top.binding.id,
-                &[PreparedArgument::Managed(&payload)],
-                true,
-                RealmId::ROOT,
-            )
-            .expect("askArgument (Ask (I# n) -> n) forces the Ask request's Int#");
-        let mut ask_values = ask_result.values.into_iter();
-        let Some(PreparedValueResult::Scalar(n)) = ask_values.next() else {
-            panic!("askArgument must return one scalar Int#");
-        };
-        assert!(ask_values.next().is_none());
-        assert!(runtime.release(payload));
-
-        let resumed = runtime
-            .run_entry_retained_in(
-                program,
-                fixture.resume_int_top.binding.id,
-                &[PreparedArgument::Managed(&k), PreparedArgument::Scalar(n)],
-                true,
-                RealmId::ROOT,
-            )
-            .expect("resumeInt (qApp k (I# n)) applies the retained continuation");
-        assert!(runtime.release(k));
-        let mut resumed_values = resumed.values.into_iter();
-        let Some(PreparedValueResult::Managed(next_outer)) = resumed_values.next() else {
-            panic!("resumeInt must return one managed `Eff` outer value");
-        };
-        assert!(resumed_values.next().is_none());
-        outer = next_outer;
-    }
+/// Parse, link with no imports, and install `artifact` as a SECOND (or
+/// later) program on `machine` -- the direct-`PreparedMachine` equivalent of
+/// the deleted `PreparedRuntime::install`.
+fn install_closed(machine: &mut PreparedMachine<'static>, artifact: &[u8]) -> ProgramId {
+    let prepared =
+        parse_program(artifact, &requirements(), DecodeLimits::default()).expect("artifact parses");
+    let linked = link_program(prepared, &MachineImports::default()).expect("artifact links closed");
+    let compiled = machine
+        .compile_for_install(&linked)
+        .expect("artifact compiles for install");
+    machine
+        .install_program(compiled, ImportBindings::new())
+        .expect("artifact installs")
 }
 
-/// Install the freer-resume artifact a second time on `runtime`'s machine
-/// (no imports: the two installed programs share no data, only the heap
-/// and machinery), run its `program` entry to first suspension, and return
-/// the program id with the parked outer value.
+/// Install the freer-resume artifact a second time on `machine` (no
+/// imports: the two installed programs share no data, only the heap and
+/// machinery), run its `program` entry to first suspension, and return the
+/// program id with the parked outer value.
 fn park_second_program(
-    runtime: &mut PreparedRuntime,
+    machine: &mut PreparedMachine<'static>,
     fixture: &FreerResumeFixture,
-) -> (ProgramId, PreparedValue) {
-    let program = runtime
-        .install(
-            FREER_RESUME_ARTIFACT,
-            &requirements(),
-            DecodeLimits::default(),
-            &[],
-        )
-        .expect("a second, independent copy of freer-resume installs alongside the first");
-    let result = runtime
-        .run_entry_retained_in(
+) -> (ProgramId, PreparedHandle) {
+    let program = install_closed(machine, FREER_RESUME_ARTIFACT);
+    let result = machine
+        .run_entry_retained(
             program,
             fixture.program_top.binding.id,
             &[],
-            true,
+            call_options(true),
             RealmId::ROOT,
         )
         .expect("the second program's own `program` run suspends on its first Ask");
-    let Some(PreparedValueResult::Managed(outer)) = result.values.into_iter().next() else {
+    let Some(PreparedResult::Managed(outer)) = result.values.into_iter().next() else {
         panic!("`program` must return one managed `Eff` outer value");
     };
     (program, outer)
@@ -1906,35 +1965,35 @@ fn park_second_program(
 #[test]
 fn c0_two_installed_programs_park_and_resume_out_of_order_with_a_collection_between() {
     let fixture = FreerResumeFixture::load();
-    let mut runtime = PreparedRuntime::from_artifact(
-        FREER_RESUME_ARTIFACT,
-        &requirements(),
-        DecodeLimits::default(),
-        MachineImports::default(),
-    )
-    .expect("freer-resume artifact is closed and admitted");
-    let program_a = runtime.first_program().expect("the first program installs");
+    let (mut machine, program_a) = open_closed_machine_from(
+        parse_program(
+            FREER_RESUME_ARTIFACT,
+            &requirements(),
+            DecodeLimits::default(),
+        )
+        .expect("freer-resume artifact parses"),
+    );
 
-    let a_first = runtime
-        .run_entry_retained_in(
+    let a_first = machine
+        .run_entry_retained(
             program_a,
             fixture.program_top.binding.id,
             &[],
-            true,
+            call_options(true),
             RealmId::ROOT,
         )
         .expect("program A's `program` run suspends on its first Ask");
-    let Some(PreparedValueResult::Managed(outer_a)) = a_first.values.into_iter().next() else {
+    let Some(PreparedResult::Managed(outer_a)) = a_first.values.into_iter().next() else {
         panic!("`program` must return one managed `Eff` outer value");
     };
 
-    let (program_b, outer_b) = park_second_program(&mut runtime, &fixture);
+    let (program_b, outer_b) = park_second_program(&mut machine, &fixture);
     assert_ne!(
         program_a, program_b,
         "the second install is a distinct program on the same machine"
     );
     assert_eq!(
-        runtime.retained_handle_count(),
+        machine.handle_count(),
         2,
         "both programs' parked E{{union, k}} cells are live roots at once"
     );
@@ -1943,19 +2002,19 @@ fn c0_two_installed_programs_park_and_resume_out_of_order_with_a_collection_betw
     // collection before observation, so A's `k` -- reachable only through
     // `outer_a`, on a DIFFERENT installed program, untouched here -- must
     // survive every one of B's collections while parked.
-    let value_b = drive_freer_program_to_val_in(&mut runtime, program_b, &fixture, outer_b);
-    assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
+    let value_b = drive_freer_program_to_val(&mut machine, program_b, &fixture, outer_b);
+    assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 
-    let value_a = drive_freer_program_to_val_in(&mut runtime, program_a, &fixture, outer_a);
+    let value_a = drive_freer_program_to_val(&mut machine, program_a, &fixture, outer_a);
 
     assert_eq!(value_b, expected_program_value());
     assert_eq!(value_a, expected_program_value());
     assert_eq!(
-        runtime.retained_handle_count(),
+        machine.handle_count(),
         0,
         "every PreparedValue produced along both resume loops must be released"
     );
-    assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
+    assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 }
 
 /// The second half of rung 3's statement: while program A's `k` sits
@@ -1967,38 +2026,38 @@ fn c0_two_installed_programs_park_and_resume_out_of_order_with_a_collection_betw
 #[test]
 fn c0_unrelated_entry_of_a_second_installed_program_runs_while_the_first_stays_parked() {
     let fixture = FreerResumeFixture::load();
-    let mut runtime = PreparedRuntime::from_artifact(
-        FREER_RESUME_ARTIFACT,
-        &requirements(),
-        DecodeLimits::default(),
-        MachineImports::default(),
-    )
-    .expect("freer-resume artifact is closed and admitted");
-    let program_a = runtime.first_program().expect("the first program installs");
+    let (mut machine, program_a) = open_closed_machine_from(
+        parse_program(
+            FREER_RESUME_ARTIFACT,
+            &requirements(),
+            DecodeLimits::default(),
+        )
+        .expect("freer-resume artifact parses"),
+    );
 
-    let a_first = runtime
-        .run_entry_retained_in(
+    let a_first = machine
+        .run_entry_retained(
             program_a,
             fixture.program_top.binding.id,
             &[],
-            true,
+            call_options(true),
             RealmId::ROOT,
         )
         .expect("program A's `program` run suspends on its first Ask");
-    let Some(PreparedValueResult::Managed(outer_a)) = a_first.values.into_iter().next() else {
+    let Some(PreparedResult::Managed(outer_a)) = a_first.values.into_iter().next() else {
         panic!("`program` must return one managed `Eff` outer value");
     };
-    assert_eq!(runtime.retained_handle_count(), 1);
+    assert_eq!(machine.handle_count(), 1);
 
     // B installs and runs its own unrelated `program` entry to its own
     // fresh suspension, sharing no data with A's parked continuation.
-    let (program_b, outer_b) = park_second_program(&mut runtime, &fixture);
+    let (program_b, outer_b) = park_second_program(&mut machine, &fixture);
     assert_eq!(
-        runtime.retained_handle_count(),
+        machine.handle_count(),
         2,
         "A's parked k plus B's own fresh suspension are both live roots"
     );
-    assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
+    assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 
     // A's parked k must still be a valid, opaque continuation. k1 (an
     // `Arrs`/FTCQueue) is itself ordinary `Node(Leaf, Leaf)` data and
@@ -2006,35 +2065,35 @@ fn c0_unrelated_entry_of_a_second_installed_program_runs_while_the_first_stays_p
     // field (a bare closure, never a constructor at WHNF) -- the same
     // shape `unrelated_entry_runs_while_a_parked_k_stays_untouched_...`
     // (single-program E3) already established for this fixture's k.
-    let PreparedOuter::Constructor {
+    let PreparedOuterCodegen::Constructor {
         fields: outer_a_fields,
         ..
-    } = runtime
-        .inspect_outer(&outer_a, RealmId::ROOT)
+    } = machine
+        .inspect_outer(outer_a, RealmId::ROOT)
         .expect("A's parked E{union, k} outer still inspects");
     let mut outer_a_fields = outer_a_fields.into_iter();
-    let Some(PreparedValueResult::Managed(union_a)) = outer_a_fields.next() else {
+    let Some(PreparedResult::Managed(union_a)) = outer_a_fields.next() else {
         panic!("E's first field must be the managed Union");
     };
-    assert!(runtime.release(union_a));
-    let Some(PreparedValueResult::Managed(k_a)) = outer_a_fields.next() else {
+    assert!(machine.release(union_a));
+    let Some(PreparedResult::Managed(k_a)) = outer_a_fields.next() else {
         panic!("E's second field must be the managed continuation");
     };
-    let PreparedOuter::Constructor {
+    let PreparedOuterCodegen::Constructor {
         fields: mut node_fields,
         ..
-    } = runtime
-        .inspect_outer(&k_a, RealmId::ROOT)
+    } = machine
+        .inspect_outer(k_a, RealmId::ROOT)
         .expect("k_a's own Node/Leaf FTCQueue cell is ordinary WHNF data and inspects");
     assert_eq!(node_fields.len(), 2, "program's k is Node(Leaf, Leaf)");
     let leaf = take_managed(&mut node_fields, 0);
     let other_leaf = take_managed(&mut node_fields, 1);
-    assert!(runtime.release(other_leaf));
-    let PreparedOuter::Constructor {
+    assert!(machine.release(other_leaf));
+    let PreparedOuterCodegen::Constructor {
         fields: mut leaf_fields,
         ..
-    } = runtime
-        .inspect_outer(&leaf, RealmId::ROOT)
+    } = machine
+        .inspect_outer(leaf, RealmId::ROOT)
         .expect("Leaf itself is ordinary WHNF data (one field: the closure)");
     assert_eq!(
         leaf_fields.len(),
@@ -2042,31 +2101,31 @@ fn c0_unrelated_entry_of_a_second_installed_program_runs_while_the_first_stays_p
         "Leaf has exactly one field: the closure"
     );
     let closure = take_managed(&mut leaf_fields, 0);
-    assert!(runtime.release(leaf));
+    assert!(machine.release(leaf));
     assert!(
         matches!(
-            runtime.inspect_outer(&closure, RealmId::ROOT),
-            Err(PreparedRuntimeError::Run(ExecutionError::Observation(
+            machine.inspect_outer(closure, RealmId::ROOT),
+            Err(ExecutionError::Observation(
                 ObservationFailure::Unobservable(_)
-            )))
+            ))
         ),
         "a Leaf's own field is a bare closure, never a constructor at WHNF; \
          inspect_outer must refuse it with a typed ObservationFailure"
     );
-    assert!(runtime.release(closure));
-    assert!(runtime.release(k_a));
+    assert!(machine.release(closure));
+    assert!(machine.release(k_a));
 
     // A still resumes correctly to completion after B ran unrelated work.
-    let value_a = drive_freer_program_to_val_in(&mut runtime, program_a, &fixture, outer_a);
+    let value_a = drive_freer_program_to_val(&mut machine, program_a, &fixture, outer_a);
     assert_eq!(value_a, expected_program_value());
 
     // B's own suspension is untouched by any of the above and still
     // resumes to the same expected value.
-    let value_b = drive_freer_program_to_val_in(&mut runtime, program_b, &fixture, outer_b);
+    let value_b = drive_freer_program_to_val(&mut machine, program_b, &fixture, outer_b);
     assert_eq!(value_b, expected_program_value());
 
-    assert_eq!(runtime.retained_handle_count(), 0);
-    assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
+    assert_eq!(machine.handle_count(), 0);
+    assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 }
 
 // ---- S6: end-to-end retained import through the session runtime ---------
@@ -2145,6 +2204,60 @@ fn top_arity(prepared: &PreparedProgram, top: &TopBinding) -> usize {
             .count(),
         _ => 0,
     }
+}
+
+/// The [`ImportedValue`] `link_program` checks a declared import against,
+/// read from `handle`'s live state under `generation` -- the same facts
+/// `PreparedEngine::install` (`tidepool-runtime/src/session/prepared.rs`)
+/// assembles per import before linking, and the direct-`PreparedMachine`
+/// equivalent of what the deleted `PreparedRuntime::bind_top`'s generation
+/// bookkeeping produced.
+fn imported_value_for(
+    machine: &PreparedMachine<'static>,
+    owner: &PreparedProgram,
+    top: &TopBinding,
+    identity: SymbolIdentity,
+    handle: PreparedHandle,
+    generation: u64,
+) -> ImportedValue {
+    let entry_signature = match &top.binding.rhs {
+        tidepool_repr::execution_schema::HeapRhs::Function { signature, .. } => {
+            Some(owner.signatures()[signature.0 as usize].clone())
+        }
+        _ => None,
+    };
+    ImportedValue {
+        identity,
+        rep: handle.rep(),
+        entry_signature,
+        evaluated: machine.handle_is_evaluated(handle).expect("handle is live"),
+        generation,
+    }
+}
+
+/// Link and install `prepared` against exactly the imports named -- the
+/// direct-`PreparedMachine` equivalent of the deleted
+/// `PreparedRuntime::install_prepared`'s link-then-compile-then-install
+/// sequence, minus the `SessionVarId`/lease bookkeeping that wrapper alone
+/// carried.
+fn install_importing(
+    machine: &mut PreparedMachine<'static>,
+    prepared: PreparedProgram,
+    imports: &[(SymbolIdentity, PreparedHandle, ImportedValue)],
+) -> Result<ProgramId, PreparedRuntimeError> {
+    let mut values = MachineImports::default();
+    let mut bindings = ImportBindings::new();
+    for (identity, handle, imported) in imports {
+        values.values.insert(identity.clone(), imported.clone());
+        bindings.insert(identity.clone(), *handle);
+    }
+    let linked = link_program(prepared, &values)?;
+    let compiled = machine
+        .compile_for_install(&linked)
+        .map_err(PreparedRuntimeError::Compile)?;
+    machine
+        .install_program(compiled, bindings)
+        .map_err(PreparedRuntimeError::Run)
 }
 
 fn producer_identity(occurrence: &str) -> SymbolIdentity {
@@ -2266,56 +2379,69 @@ fn retained_import_end_to_end_links_consumer_against_bound_producer_tops() {
         &["consumerValueAt", "$wconsumerValueAt"],
     );
     let scalar_args = vec![0_u64; top_arity(&consumer, &consumer_value_top)];
-    let managed_args: Vec<PreparedArgument<'_>> = scalar_args
+    let managed_args: Vec<CodegenPreparedInput> = scalar_args
         .iter()
-        .map(|word| PreparedArgument::Scalar(*word))
+        .map(|word| CodegenPreparedInput::Scalar(*word))
         .collect();
 
-    let mut runtime = PreparedRuntime::from_prepared(producer, MachineImports::default())
-        .expect("producer links closed");
-    let first = runtime.first_program().expect("producer installs");
-    runtime
-        .set_val_gen(Generation(11))
-        .expect("the session starts the turn the consumer was projected against");
-    let bound_value = runtime
-        .bind_top(first, producer_value_top.binding.id, "producerValue")
-        .expect("producerValue binds at generation 11");
-    let bound_fn = runtime
-        .bind_top(first, producer_fn_top.binding.id, "producerFn")
-        .expect("producerFn binds at generation 11");
-    assert_eq!(runtime.retained_handle_count(), 2);
+    let (mut machine, first) = open_closed_machine_from(producer.clone());
+    let bound_value = machine
+        .retain_top(first, producer_value_top.binding.id)
+        .expect("producerValue retains");
+    let bound_fn = machine
+        .retain_top(first, producer_fn_top.binding.id)
+        .expect("producerFn retains");
+    assert_eq!(machine.handle_count(), 2);
 
-    let program = runtime
-        .install_prepared(
-            consumer.clone(),
-            &[
-                (value_identity.clone(), bound_value),
-                (fn_identity.clone(), bound_fn),
-            ],
-        )
-        .expect("consumer links against both generation-11 bindings and installs");
+    let imported_value = imported_value_for(
+        &machine,
+        &producer,
+        &producer_value_top,
+        value_identity.clone(),
+        bound_value,
+        11,
+    );
+    let imported_fn = imported_value_for(
+        &machine,
+        &producer,
+        &producer_fn_top,
+        fn_identity.clone(),
+        bound_fn,
+        11,
+    );
+    let program = install_importing(
+        &mut machine,
+        consumer.clone(),
+        &[
+            (value_identity.clone(), bound_value, imported_value),
+            (fn_identity.clone(), bound_fn, imported_fn),
+        ],
+    )
+    .expect("consumer links against both generation-11 bindings and installs");
     assert_ne!(program, first);
-    assert_eq!(runtime.bindings().lease_count(bound_value), 1);
-    assert_eq!(runtime.bindings().lease_count(bound_fn), 1);
+    // `bindings().lease_count(...)` was dead bookkeeping specific to the
+    // deleted `PreparedRuntime` wrapper: `PreparedEngine::install` (the
+    // production owner) never calls `BindingTable::acquire_leases`, so no
+    // import is ever leased on the real prepared route either. Dropped.
 
     let expected = expected_consumer_value();
-    let observed = runtime
-        .run_entry_in(
+    let observed = machine
+        .run_entry(
             program,
             consumer_value_top.binding.id,
             &scalar_args,
-            true,
+            call_options(true),
             RealmId::ROOT,
         )
         .expect("consumerValueAt reads producerValue through its import slot");
     assert_eq!(observed.values.len(), 1);
     assert_eq!(observed_int_list(&observed.values[0]), expected);
-    let again = runtime
-        .run_entry_in(
+    let again = machine
+        .run_entry(
             program,
             consumer_value_top.binding.id,
             &scalar_args,
-            true,
+            call_options(true),
             RealmId::ROOT,
         )
         .expect("a second run after another collection reads the same import");
@@ -2323,19 +2449,19 @@ fn retained_import_end_to_end_links_consumer_against_bound_producer_tops() {
 
     // The consumer reads through the slot: one new root for the retained
     // result, the two bound roots untouched, and the result releases.
-    let mut retained = runtime
-        .run_entry_retained_in(
+    let mut retained = machine
+        .run_entry_retained(
             program,
             consumer_value_top.binding.id,
             &managed_args,
-            true,
+            call_options(true),
             RealmId::ROOT,
         )
         .expect("consumerValueAt retains");
-    assert_eq!(runtime.retained_handle_count(), 3);
+    assert_eq!(machine.handle_count(), 3);
     let value = take_managed(&mut retained.values, 0);
-    assert!(runtime.release(value));
-    assert_eq!(runtime.retained_handle_count(), 2);
+    assert!(machine.release(value));
+    assert_eq!(machine.handle_count(), 2);
 
     // The pinned target holds the imported function as a constructor field:
     // it flows through bind/link/install as a value and is readable.
@@ -2344,44 +2470,42 @@ fn retained_import_end_to_end_links_consumer_against_bound_producer_tops() {
         "ImportConsumer",
         &["consumerEntries", "$wconsumerEntries"],
     );
-    let entries_args: Vec<PreparedArgument<'_>> = (0..top_arity(&consumer, &entries_top))
-        .map(|_| PreparedArgument::Scalar(0))
+    let entries_args: Vec<CodegenPreparedInput> = (0..top_arity(&consumer, &entries_top))
+        .map(|_| CodegenPreparedInput::Scalar(0))
         .collect();
-    let mut entries = runtime
-        .run_entry_retained_in(
+    let mut entries = machine
+        .run_entry_retained(
             program,
             entries_top.binding.id,
             &entries_args,
-            true,
+            call_options(true),
             RealmId::ROOT,
         )
         .expect("consumerEntries builds its pair at run time");
     let pair = take_managed(&mut entries.values, 0);
-    let PreparedOuter::Constructor {
+    let PreparedOuterCodegen::Constructor {
         fields: mut pair_fields,
         ..
-    } = runtime
-        .inspect_outer(&pair, RealmId::ROOT)
+    } = machine
+        .inspect_outer(pair, RealmId::ROOT)
         .expect("the pair inspects");
-    assert!(runtime.release(pair));
+    assert!(machine.release(pair));
     assert_eq!(pair_fields.len(), 2);
     let list = take_managed(&mut pair_fields, 0);
     let function = take_managed(&mut pair_fields, 1);
     // The list field is this module's own lazy `consumerValueAt n`: a thunk
     // the host never forces (the evaluated list was already read above
     // through the entry itself).
-    match runtime.inspect_outer(&list, RealmId::ROOT) {
-        Err(PreparedRuntimeError::Run(ExecutionError::Observation(
-            ObservationFailure::Unobservable(kind),
-        ))) => assert_eq!(format!("{kind:?}"), "Thunk"),
+    match machine.inspect_outer(list, RealmId::ROOT) {
+        Err(ExecutionError::Observation(ObservationFailure::Unobservable(kind))) => {
+            assert_eq!(format!("{kind:?}"), "Thunk")
+        }
         Err(other) => panic!("expected the typed Unobservable(Thunk) refusal, got {other:?}"),
         Ok(_) => panic!("an unforced thunk must not inspect as a constructor"),
     }
-    assert!(runtime.release(list));
-    match runtime.inspect_outer(&function, RealmId::ROOT) {
-        Err(PreparedRuntimeError::Run(ExecutionError::Observation(
-            ObservationFailure::Unobservable(kind),
-        ))) => assert_eq!(
+    assert!(machine.release(list));
+    match machine.inspect_outer(function, RealmId::ROOT) {
+        Err(ExecutionError::Observation(ObservationFailure::Unobservable(kind))) => assert_eq!(
             format!("{kind:?}"),
             "Function",
             "the imported function is held as a callable, never entered"
@@ -2389,51 +2513,67 @@ fn retained_import_end_to_end_links_consumer_against_bound_producer_tops() {
         Err(other) => panic!("expected the typed Unobservable(Function) refusal, got {other:?}"),
         Ok(_) => panic!("a function-typed import must not inspect as a constructor"),
     }
-    assert!(runtime.release(function));
-    assert_eq!(runtime.retained_handle_count(), 2);
+    assert!(machine.release(function));
+    assert_eq!(machine.handle_count(), 2);
 
     // A consumer projected against generation 11 does not link against
-    // bindings made at generation 12, and the refusal installs nothing.
-    runtime.advance_generation();
-    let stale_value = runtime
-        .bind_top(first, producer_value_top.binding.id, "producerValue")
-        .expect("producerValue rebinds at generation 12");
-    let stale_fn = runtime
-        .bind_top(first, producer_fn_top.binding.id, "producerFn")
-        .expect("producerFn rebinds at generation 12");
-    let handles_before = runtime.retained_handle_count();
-    let error = runtime
-        .install_prepared(
-            consumer,
-            &[
-                (value_identity.clone(), stale_value),
-                (fn_identity.clone(), stale_fn),
-            ],
-        )
-        .expect_err("a stale generation must not link");
+    // bindings whose `ImportedValue.generation` reads 12, and the refusal
+    // installs nothing. `PreparedMachine` carries no generation-stamped
+    // binding table of its own (that tracking lived only in the deleted
+    // `PreparedRuntime` wrapper's `bind_top`/`set_val_gen`), so this step
+    // retains two fresh handles to the same tops and hand-builds their
+    // `ImportedValue`s at a fabricated stale generation instead of
+    // advancing a real session generation counter and rebinding.
+    let stale_value = machine
+        .retain_top(first, producer_value_top.binding.id)
+        .expect("producerValue retains again for the stale-generation probe");
+    let stale_fn = machine
+        .retain_top(first, producer_fn_top.binding.id)
+        .expect("producerFn retains again for the stale-generation probe");
+    let handles_before = machine.handle_count();
+    let stale_value_import = imported_value_for(
+        &machine,
+        &producer,
+        &producer_value_top,
+        value_identity.clone(),
+        stale_value,
+        12,
+    );
+    let stale_fn_import = imported_value_for(
+        &machine,
+        &producer,
+        &producer_fn_top,
+        fn_identity.clone(),
+        stale_fn,
+        12,
+    );
+    let error = install_importing(
+        &mut machine,
+        consumer,
+        &[
+            (value_identity.clone(), stale_value, stale_value_import),
+            (fn_identity.clone(), stale_fn, stale_fn_import),
+        ],
+    )
+    .expect_err("a stale generation must not link");
     assert!(
         matches!(&error, PreparedRuntimeError::Link(link) if matches!(**link, LinkError::ImportContract(_))),
         "expected ImportContract, got {error:?}"
     );
     assert_eq!(error.kind(), PreparedFailureKind::Rejected);
-    assert_eq!(runtime.retained_handle_count(), handles_before);
-    assert_eq!(runtime.bindings().lease_count(stale_value), 0);
-    assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
+    assert_eq!(machine.handle_count(), handles_before);
+    assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 
-    // Leased bindings stay for the importing program's lifetime; the
-    // never-leased generation-12 bindings release.
-    assert!(matches!(
-        runtime.release_binding(bound_value),
-        Err(PreparedRuntimeError::BindingLeased { leases: 1, .. })
-    ));
-    runtime
-        .release_binding(stale_value)
-        .expect("an unleased binding releases");
-    runtime
-        .release_binding(stale_fn)
-        .expect("an unleased binding releases");
-    assert_eq!(runtime.retained_handle_count(), 2);
-    assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
+    // `bound_value`/`bound_fn` are left retained (the production
+    // `PreparedEngine` route never leases them either, so nothing refuses
+    // their release the way the deleted `PreparedRuntime` wrapper's
+    // `BindingLeased` did; leaving them alive here matches the same
+    // "installed program's import slot stays live" end state). The
+    // never-installed-against stale handles release cleanly.
+    assert!(machine.release(stale_value));
+    assert!(machine.release(stale_fn));
+    assert_eq!(machine.handle_count(), 2);
+    assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 }
 
 const IMPORT_CONSUMER_RESULT_ARTIFACT: &[u8] =
@@ -2478,18 +2618,13 @@ fn s6_direct_global_call_runs_against_the_oracle() {
     let producer_value_top = top_named(&producer, "ImportProducer", "producerValue");
     let producer_fn_top = top_named(&producer, "ImportProducer", "producerFn");
 
-    let mut runtime = PreparedRuntime::from_prepared(producer, MachineImports::default())
-        .expect("producer links closed");
-    let first = runtime.first_program().expect("producer installs");
-    runtime
-        .set_val_gen(Generation(11))
-        .expect("the session starts the turn the fixture was projected against");
-    let bound_value = runtime
-        .bind_top(first, producer_value_top.binding.id, "producerValue")
-        .expect("producerValue binds at generation 11");
-    let bound_fn = runtime
-        .bind_top(first, producer_fn_top.binding.id, "producerFn")
-        .expect("producerFn binds at generation 11");
+    let (mut machine, first) = open_closed_machine_from(producer.clone());
+    let bound_value = machine
+        .retain_top(first, producer_value_top.binding.id)
+        .expect("producerValue retains");
+    let bound_fn = machine
+        .retain_top(first, producer_fn_top.binding.id)
+        .expect("producerFn retains");
 
     let result_top = top_named_any(
         &consumer_result,
@@ -2498,25 +2633,43 @@ fn s6_direct_global_call_runs_against_the_oracle() {
     );
     let scalar_args = vec![0_u64; top_arity(&consumer_result, &result_top)];
 
-    let program = runtime
-        .install_prepared(
-            consumer_result,
-            &[
-                (value_identity.clone(), bound_value),
-                (fn_identity.clone(), bound_fn),
-            ],
-        )
-        .expect("a direct call to an imported function is admitted and links");
+    let imported_value = imported_value_for(
+        &machine,
+        &producer,
+        &producer_value_top,
+        value_identity.clone(),
+        bound_value,
+        11,
+    );
+    let imported_fn = imported_value_for(
+        &machine,
+        &producer,
+        &producer_fn_top,
+        fn_identity.clone(),
+        bound_fn,
+        11,
+    );
+    let program = install_importing(
+        &mut machine,
+        consumer_result,
+        &[
+            (value_identity.clone(), bound_value, imported_value),
+            (fn_identity.clone(), bound_fn, imported_fn),
+        ],
+    )
+    .expect("a direct call to an imported function is admitted and links");
     assert_ne!(program, first);
-    assert_eq!(runtime.bindings().lease_count(bound_value), 1);
-    assert_eq!(runtime.bindings().lease_count(bound_fn), 1);
+    // `bindings().lease_count(...)` was dead bookkeeping specific to the
+    // deleted `PreparedRuntime` wrapper -- see the matching comment in
+    // `retained_import_end_to_end_links_consumer_against_bound_producer_tops`.
+    // Dropped.
 
-    let observed = runtime
-        .run_entry_in(
+    let observed = machine
+        .run_entry(
             program,
             result_top.binding.id,
             &scalar_args,
-            true,
+            call_options(true),
             RealmId::ROOT,
         )
         .expect("consumerResultAt applies the imported producerFn through the resolver");
@@ -2526,21 +2679,23 @@ fn s6_direct_global_call_runs_against_the_oracle() {
         expected_consumer_result(),
         "producerFn (length producerValue) per ImportConsumerOracle.hs"
     );
-    let again = runtime
-        .run_entry_in(
+    let again = machine
+        .run_entry(
             program,
             result_top.binding.id,
             &scalar_args,
-            true,
+            call_options(true),
             RealmId::ROOT,
         )
         .expect("a second run after another collection resolves the same import");
     assert_eq!(observed_int(&again.values[0]), expected_consumer_result());
 
-    assert_eq!(runtime.retained_handle_count(), 2);
-    assert_eq!(runtime.disposition(), MachineDisposition::Reusable);
-    assert!(matches!(
-        runtime.release_binding(bound_fn),
-        Err(PreparedRuntimeError::BindingLeased { leases: 1, .. })
-    ));
+    assert_eq!(machine.handle_count(), 2);
+    assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    // The deleted `PreparedRuntime` wrapper's `release_binding(bound_fn)`
+    // refused with `BindingLeased` here because ITS OWN bookkeeping leased
+    // every import; `PreparedMachine` (and the production `PreparedEngine`
+    // route) never leases, so `bound_fn` is simply left retained -- the
+    // same "installed program's import slot stays live" state, reached
+    // without a lease-refusal assertion to port.
 }
