@@ -880,7 +880,7 @@ impl<'code> PreparedMachine<'code> {
             receipt.block_words += self.retire(id)?;
             receipt.programs.push(id);
         }
-        receipt.old_bytes = self.old_space.bytes_used();
+        receipt.old_bytes = self.old_space.prepared_bytes_used();
         self.assert_rooting_receipt();
         Ok(receipt)
     }
@@ -6562,6 +6562,9 @@ mod tests {
             .expect("retain the first top");
         let mut latest = first;
         let mut baseline: Option<ResidencyCounts> = None;
+        // Reported, not yet flat: dead descriptor arenas wait for compaction
+        // (slice 1c), so the prepared old-space figure may only grow here.
+        let mut old_bytes = 0;
         for iteration in 0..iterations {
             let compiled = machine
                 .compile_for_install(&unit_thunk_linked())
@@ -6585,6 +6588,11 @@ mod tests {
                 "iteration {iteration}: exactly the released program retires"
             );
             assert!(receipt.pinned_by_bytes.is_empty());
+            assert!(
+                receipt.old_bytes >= old_bytes,
+                "iteration {iteration}: prepared old-space bytes went backwards"
+            );
+            old_bytes = receipt.old_bytes;
             latest = program;
             let counts = machine.residency();
             assert_eq!(counts.programs, 1);

@@ -449,6 +449,15 @@ impl OldSpace {
         self.used
     }
 
+    /// Bytes held in the prepared descriptor arenas (one arena per retention
+    /// promotion until compaction), separate from the Core arenas above.
+    pub fn prepared_bytes_used(&self) -> usize {
+        self.prepared_arenas
+            .iter()
+            .map(tidepool_heap::descriptor_region::DescriptorArena::bytes_used)
+            .sum()
+    }
+
     pub(crate) fn contains(&self, pointer: *const u8) -> bool {
         let address = pointer as usize;
         self.arenas.iter().any(|arena| {

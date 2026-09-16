@@ -63,6 +63,11 @@ impl DescriptorArena {
         })
     }
 
+    /// Bytes of sealed objects this arena holds.
+    pub fn bytes_used(&self) -> usize {
+        self.used
+    }
+
     pub fn allocation_range(&self) -> Range<usize> {
         let base = self.words.as_ptr() as usize;
         base..base + self.words.len() * 8
