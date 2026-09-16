@@ -24,7 +24,7 @@ import GHC.Types.SourceError (SourceError)
 import GHC (moduleName, moduleNameString, moduleUnit)
 import GHC.Driver.Env (HscEnv)
 import GHC.Unit.Types (unitString)
-import GHC.Core (Bind(..))
+import GHC.Core (Bind(..), CoreBind)
 import GHC.Core.DataCon (DataCon)
 import GHC.Types.Name (nameOccName, nameModule_maybe)
 import GHC.Types.Id (idName)
@@ -307,8 +307,8 @@ processFile compiler timing args path = do
     let preparedTargets = case requestTargets args of
           targets@(_ : _) -> targets
           [] -> maybe [] pure mTarget
-    preparedArtifacts <- prepareArtifacts path hscEnv (pprModules prepared) preparedTargets []
-      (requestRetainedGenerations args)
+    preparedArtifacts <- prepareArtifacts path hscEnv (pprModules prepared) preparedTargets
+      (standardAuxiliaryRoots binds) (requestRetainedGenerations args)
     let preparedConstructors = concatMap paConstructors preparedArtifacts
 
     if not (null (requestTargets args))
@@ -501,6 +501,28 @@ prepareArtifacts input hscEnv modules targets auxiliaryRoots retainedGenerations
     bytes <- evaluate (encodeWireProgram program)
     pure (PreparedArtifact target bytes constructors)
 
+-- | Filter the standard prepared-turn auxiliary root names
+-- ('preparedResumeTargetName', 'preparedDecodeTargetName') down to those the
+-- module actually defines as top-level binders. Shared by 'processFile' and
+-- 'runTurnMode' so both admit @__resume@\/@__decodeValue@ as auxiliary roots
+-- exactly when a compiled module (e.g. the harness's fused turn module)
+-- defines them, and admit nothing extra for an ordinary module with no
+-- scaffold.
+standardAuxiliaryRoots :: [CoreBind] -> [String]
+standardAuxiliaryRoots binds =
+  [ name
+  | name <- [preparedResumeTargetName, preparedDecodeTargetName]
+  , name `Set.member` topLevelNames
+  ]
+  where
+    topLevelNames = Set.fromList
+      [ occNameString (nameOccName (idName b))
+      | bind <- binds
+      , b <- case bind of
+               NonRec b' _ -> [b']
+               Rec pairs   -> map fst pairs
+      ]
+
 writePreparedArtifacts :: FilePath -> [PreparedArtifact] -> IO ()
 writePreparedArtifacts outDir artifacts = forM_ artifacts $ \artifact -> do
   let output = outDir </> paTarget artifact ++ ".prepared.cbor"
@@ -631,7 +653,7 @@ runTurnMode compiler args path = do
         -- scaffold, and its constructors join the shared metadata before write.
         preparedArtifacts <- if requestPreparedTurn args
           then prepareArtifacts compiledPath hscEnv preparedModules
-                 [preparedScaffoldTargetName] [preparedResumeTargetName, preparedDecodeTargetName] (requestRetainedGenerations args)
+                 [preparedScaffoldTargetName] (standardAuxiliaryRoots binds) (requestRetainedGenerations args)
           else pure []
         asksSites <- writeWholeModuleClosed timing outDir hscEnv binds (prTyCons result)
           (concatMap paConstructors preparedArtifacts) mCapturedTy warnTexts targetName scaffoldOutputBase
