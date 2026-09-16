@@ -5,7 +5,7 @@
 //! (`maybe_compact_answerer`).
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use serde_json::Value as Json;
@@ -567,11 +567,25 @@ impl SelfHarnessDriver {
                     .then(|| session.prepared_retained())
             })
             .map_err(|e| DriverError::Session(e.to_string()))?;
+        // The outer session's include set: the template's scaffold imports
+        // `Tidepool.Internal.Resume`, which the Core route resolves from the
+        // deployed stdlib package but the prepared route projects from
+        // source, so the prelude dir must be searchable here as for every
+        // other outer compile.
+        let include: Vec<&Path> = self
+            .outer
+            .as_ref()
+            .ok_or_else(not_bootstrapped)?
+            .cfg
+            .include
+            .iter()
+            .map(PathBuf::as_path)
+            .collect();
 
         let turn = tidepool_runtime::session::run_turn(tidepool_runtime::session::TurnRequest {
             turn_text: &statement,
             templates: std::slice::from_ref(&template),
-            include: &[],
+            include: &include,
             session_root: &session_root,
             inject_modules: &[],
             gen: 0,
