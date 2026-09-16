@@ -36,16 +36,19 @@ pub struct StaticImage {
     words: Vec<u64>,
     relocations: Vec<StaticRelocation>,
     entries: BTreeMap<ValueId, usize>,
-    descriptors: BTreeMap<usize, Arc<ObjectDescriptor>>,
-    starts: Vec<u64>,
+    /// Arc-wrapped: `instantiate` hands its `StaticRegion` the same owner by
+    /// `Arc::clone` rather than rebuilding the map/bitmap -- both are fixed
+    /// once the image validates, and `instantiate` may run once per install.
+    descriptors: Arc<BTreeMap<usize, Arc<ObjectDescriptor>>>,
+    starts: Arc<[u64]>,
 }
 
 /// Owns a stable allocation. Only the image can construct one, after all
 /// relocation has completed. The descriptor owners outlive every header.
 pub struct StaticRegion {
     words: Box<[u64]>,
-    descriptors: BTreeMap<usize, Arc<ObjectDescriptor>>,
-    starts: Vec<u64>,
+    descriptors: Arc<BTreeMap<usize, Arc<ObjectDescriptor>>>,
+    starts: Arc<[u64]>,
     entries: BTreeMap<ValueId, usize>,
 }
 
@@ -132,8 +135,8 @@ impl StaticImage {
             words,
             relocations,
             entries,
-            descriptors,
-            starts,
+            descriptors: Arc::new(descriptors),
+            starts: Arc::from(starts),
         })
     }
 
@@ -172,8 +175,8 @@ impl StaticImage {
 
         Ok(StaticRegion {
             words,
-            descriptors: self.descriptors.clone(),
-            starts: self.starts.clone(),
+            descriptors: Arc::clone(&self.descriptors),
+            starts: Arc::clone(&self.starts),
             entries,
         })
     }
