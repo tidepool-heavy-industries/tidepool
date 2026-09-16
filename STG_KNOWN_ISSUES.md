@@ -101,30 +101,30 @@ naming gap was fixed alongside it: `Either`'s defining module is
 reader queries); `Tidepool.Identity.moduleAliasTable` now normalizes it,
 mirroring the existing `GHC.Internal.Maybe`/`Data.Text.Internal` entries.
 
-### `__decodeValue`'s own execution is not implemented on the prepared route
-Distinct from the evidence gap above, and still open. `__decodeValue`'s
-projected entry is a zero-arity thunk (`eitherDecodeValue` carries
-`{-# OPAQUE #-}` specifically so GHC never exposes its arity to callers for
-eta-expansion, per its own doc comment in
-`haskell/lib/Tidepool/Aeson/Value.hs`), but the session's prepared-runtime
-caller (`decode_json_leaf` / `run_entry_retained`) calls it as if it were an
-arity-1 function entry — `prepared engine: prepared execution failed: entry
-arguments: expected 0 physical scalar slots, got 1`, reproduced by
-`notebook_value_answers_on_prepared_stg`'s `kvGet`/`Just`-`Object` case.
-Separately, and regardless of arity: the legacy Core path intercepts calls
-to `eitherDecodeValue` in `Translate.hs` and lowers them to the `JsonDecode`
-primop (Rust `serde_json` builds the `Value` ADT directly; the Haskell body
-is a stub, `eitherDecodeValue _ = Left T.empty`, that "never actually runs
-at a call site" per its own comment). No such interception exists for the
-prepared-STG path — `PreparedBuiltins.hs`'s `deferredFunction` table has no
-`eitherDecodeValue` entry, and no `JsonDecode`-equivalent primop exists in
-`tidepool-codegen`'s prepared-program machinery
-(`tidepool-codegen/src/prepared_program/*.rs`) — so even with the arity
-fixed, `__decodeValue`'s projected body would run the OPAQUE stub verbatim
-(always `Left`), not a real JSON parse. Fixing this is a prepared-machine
-feature addition (a real primop or an equivalent `DeferredFunction`-style
-registered replacement, plus the arity/eta handling above), not a
-projection-evidence fix; out of scope for the evidence fix above.
+### JSON decode runs a real Haskell parser on prepared, `serde_json` on Core
+Fixed. `__decodeValue`'s two remaining gaps — the arity mismatch
+(`entry arguments: expected 0 physical scalar slots, got 1`, from treating
+the projected zero-arity thunk as an arity-1 entry) and the OPAQUE stub body
+(`eitherDecodeValue _ = Left T.empty`, which "never actually runs at a call
+site" on Core but is the whole story on prepared, since no
+`JsonDecode`-equivalent primop or `deferredFunction` interception exists for
+prepared-STG) — are both closed. The arity fix names the scaffold's
+parameter like `__resume` does (`tidepool-runtime/src/session/turn.rs`); the
+stub is now a real, total RFC 8259 recursive-descent parser over `Text`
+(`haskell/lib/Tidepool/Aeson/Value.hs`, unit-tested by the
+`aeson-value-spec-test` cabal test-suite).
+Remaining, load-bearing difference: the two routes are NOT one
+implementation wearing two hats. Core intercepts `eitherDecodeValue` by name
+in `Translate.hs` and lowers it to the `JsonDecode` primop, which dispatches
+to Rust `serde_json` and builds the `Value` ADT directly on the heap; no such
+interception exists on prepared-STG, so a prepared program compiles and runs
+the Haskell parser for real, on every decode. Both must accept/reject the
+same grammar and produce `Scientific` values that compare and render
+identically (`Eq`/`Show` are representation-independent — see that module's
+Haddock) — checked by `notebook_either_decode_renders_the_same_on_both_engines`
+(`tidepool-runtime/tests/prepared_turn.rs`) — but they are not required to
+agree on `Left` error MESSAGE text, and the prepared route pays a real
+interpreted-parser cost per decode that Core's native primop does not.
 
 ### `LiveReentry` deliveries are not answerable yet
 Handle and framed-handle answers are supported (bare and framed delivery by

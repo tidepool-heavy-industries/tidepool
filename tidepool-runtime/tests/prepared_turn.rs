@@ -1940,3 +1940,32 @@ fn notebook_handle_delivery_on_core() {
 fn notebook_handle_delivery_on_prepared_stg() {
     notebook_handle_delivery(EngineKind::Prepared);
 }
+
+/// `eitherDecode`'s two engine bodies must render the same `Value` for the
+/// same input: the Core route intercepts `eitherDecodeValue` and lowers it
+/// to the `JsonDecode` primop (Rust `serde_json`); the prepared-STG route
+/// compiles `Tidepool.Aeson.Value`'s hand-written RFC 8259 parser from
+/// source and runs it for real (see that function's Haddock and
+/// `STG_KNOWN_ISSUES.md`'s "Host answers and effects"). This is a
+/// same-expression, cross-engine comparison rather than a variant of the
+/// `notebook_*(engine: EngineKind)` pattern above, since the point is that
+/// the two independently-implemented decoders agree.
+#[test]
+fn notebook_either_decode_renders_the_same_on_both_engines() {
+    let expr = r#"eitherDecode "{\"a\":[1,2.5,\"x\"]}" :: Either Text Value"#;
+
+    let mut core = Notebook::new(EngineKind::Core);
+    let core_rendered = core.expression(expr).to_string();
+
+    let mut prepared = Notebook::new(EngineKind::Prepared);
+    let prepared_rendered = prepared.expression(expr).to_string();
+
+    assert_eq!(
+        core_rendered, prepared_rendered,
+        "eitherDecode rendered differently across engines: core={core_rendered} prepared={prepared_rendered}"
+    );
+    assert!(
+        prepared_rendered.contains("Right"),
+        "expected a successful decode, got {prepared_rendered}"
+    );
+}
