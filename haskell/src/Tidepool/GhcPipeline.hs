@@ -117,7 +117,8 @@ import Tidepool.PreparedStg (PreparedElaboration(..), PreparedModule(..), prepar
 import Tidepool.PreparedSites
   ( elaboratePreparedSites, resolvePreparedSiblings, resolveSiteAuthority )
 import Tidepool.ExecutionSchema (SymbolIdentity)
-import Tidepool.RetainedUnfoldings (installRetainedUnfoldingsPlugin)
+import Tidepool.RetainedUnfoldings
+  (installRetainedUnfoldingsPlugin, retainedDefinedBy, scopeRetainedModuleGraph)
 import Tidepool.TurnSource (extractModuleName)
 
 -- | Selects the compiler representation produced at the internal GHC API
@@ -558,16 +559,20 @@ data GutsMemoEntry = GutsMemoEntry
     -- ^ Post-externalize result, exactly the shape 'results' carries.
   , gmePrepared :: Maybe PreparedModule
   , gmeRetained :: Set.Set SymbolIdentity
-    -- ^ The retained-generation set THIS entry was compiled under
-    -- (see 'Tidepool.RetainedUnfoldings'). A module's Core is not just a
+    -- ^ The retained identities this module DEFINES, from the set THIS entry
+    -- was compiled under ('retainedDefinedBy'; see
+    -- 'Tidepool.RetainedUnfoldings'). A module's Core is not just a
     -- function of its own source hash: 'installRetainedUnfoldingsPlugin'
     -- withholds unfoldings for whatever set the compiling request wrote into
     -- its 'IORef' before 'core2core' ran, so the SAME source module compiled
     -- under a DIFFERENT retained set can legitimately produce different
     -- simplified guts (an unfolding withheld here, or newly exposed there).
-    -- 'lookupValidMemo' checks this alongside the source hash so a memo hit
-    -- can never hand a later request a dependency module's guts baked under
-    -- an earlier, no-longer-current retained set.
+    -- The pass rewrites only the module's own top-level binders, so only
+    -- this intersection matters; retained identities defined by a dependency
+    -- invalidate through that dependency. 'lookupValidMemo' checks this
+    -- alongside the source hash so a memo hit can never hand a later request
+    -- guts baked under a no-longer-current set of the module's own retained
+    -- definitions.
   }
 
 type GutsMemo = Map.Map ModuleName GutsMemoEntry
@@ -656,7 +661,7 @@ runCompileCycle preparation mCache mMemoRef retained timing sessionT0 variant pa
           ms { ms_hspp_opts = gopt_unset (ms_hspp_opts ms) Opt_IgnoreInterfacePragmas }
     loadT0 <- monotonicTime
     loadFlag <- load' mCache LoadAllTargets mkUnknownDiagnostic (Just batchMsg)
-               (mapMG unpoison (cpLoadGraph plan))
+               (scopeRetainedModuleGraph (mapMG unpoison (cpLoadGraph plan)))
     loadT1 <- monotonicTime
     -- 'ghc_load' phase (TIDEPOOL_TIMING): the 'load'' call alone, nothing
     -- else. FLAT — see 'ghc_setup' above; the two rows partition the work,
@@ -802,6 +807,10 @@ runCompileCycle preparation mCache mMemoRef retained timing sessionT0 variant pa
                , let mn = unLoc lmn
                , mn `Set.member` cycleModNames ]
     validThisCycleRef <- liftIO (newIORef (Map.empty :: Map.Map ModuleName Bool))
+    -- The withholding pass can change only a module's own retained
+    -- definitions; retained identities defined elsewhere reach it through
+    -- a dependency, whose invalidity is already covered by 'depsValidSoFar'.
+    let retainedFor modSum = retainedDefinedBy (ms_mod modSum) retained
     let depsValidSoFar modSum = liftIO $ do
           validMap <- readIORef validThisCycleRef
           pure (all (\d -> Map.findWithDefault False d validMap) (directHomeDeps modSum))
@@ -826,7 +835,7 @@ runCompileCycle preparation mCache mMemoRef retained timing sessionT0 variant pa
                     pure $ if null dependentFiles
                         && not (xopt LangExt.Cpp (ms_hspp_opts cachedSummary))
                         && ms_hs_hash cachedSummary == ms_hs_hash modSum
-                        && gmeRetained entry == retained
+                        && gmeRetained entry == retainedFor modSum
                       then Just entry
                       else Nothing
     (fronts, results, preparedModules, mReachable) <- case cpTier plan of
@@ -866,7 +875,7 @@ runCompileCycle preparation mCache mMemoRef retained timing sessionT0 variant pa
               prepared <- prepareSelected mf simplified
               case mMemoRef of
                 Just ref -> liftIO (modifyIORef' ref
-                  (Map.insert mn (GutsMemoEntry mf simplified r prepared retained)))
+                  (Map.insert mn (GutsMemoEntry mf simplified r prepared (retainedFor modSum))))
                 Nothing  -> pure ()
               pure (mf, r, prepared)
         pure ([f | (f, _, _) <- pairs], [r | (_, r, _) <- pairs],
@@ -961,7 +970,7 @@ runCompileCycle preparation mCache mMemoRef retained timing sessionT0 variant pa
                 case mMemoRef of
                   Just ref -> liftIO (modifyIORef' ref
                     (Map.insert (ms_mod_name (mfSummary f))
-                      (GutsMemoEntry f simplified r prepared retained)))
+                      (GutsMemoEntry f simplified r prepared (retainedFor (mfSummary f)))))
                   Nothing  -> pure ()
                 pure [(r, prepared)]
             -- Not reachable: never core2core'd this cycle (matches every

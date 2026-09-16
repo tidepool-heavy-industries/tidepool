@@ -49,8 +49,35 @@
 -- @test-prepared-stg/ImportProducer.hs@) -- this pass only derives the same
 -- effect from the retained-generation map instead of requiring the pragma
 -- text, so a notebook user never has to write it.
+--
+-- VALIDITY
+--
+-- The pass rewrites only the module's OWN top-level binders (and their
+-- occurrences). A module's output is therefore a function of its source,
+-- the interfaces it imports, and @retained ∩ definedBy(module)@; a retained
+-- identity defined elsewhere reaches it only through that defining module's
+-- interface, which GHC's usage fingerprints and the memo's dependency check
+-- already track. Both validity checks use exactly that intersection
+-- ('retainedDefinedBy'): the pipeline's memo, and the plugin's
+-- recompilation fingerprint.
+--
+-- GHC 9.12 calls @pluginRecompile@ with the plugin's arguments only, with no
+-- module in scope, both when checking an old interface ('checkPlugins' in
+-- @hscRecompStatus@) and when stamping a new one ('fingerprintPlugins' in
+-- 'mkFullIface'). The make driver's 'compileOne'' however runs
+-- 'initializePlugins' on the module-local 'HscEnv' (the summary's
+-- @ms_hspp_opts@) immediately before both, and that runs each uninitialised
+-- static plugin's @driverPlugin@. 'scopeRetainedModuleGraph' records each
+-- summary's module identity as a plugin option in those flags; the driver
+-- action copies it into the plugin's own arguments and leaves the plugin
+-- uninitialised so the next module re-scopes it. Plugin options are not part
+-- of GHC's flag fingerprint. A check without a recorded module (a session
+-- 'HscEnv', or a graph that was not scoped) fingerprints the full retained
+-- set, which is conservative.
 module Tidepool.RetainedUnfoldings
   ( installRetainedUnfoldingsPlugin
+  , scopeRetainedModuleGraph
+  , retainedDefinedBy
   , withholdRetainedUnfoldings
   ) where
 
@@ -64,6 +91,7 @@ import GHC.Core
   ( Alt(..), Bind(..), CoreBind, CoreProgram, Expr(..), noUnfolding )
 import GHC.Core.Opt.Pipeline.Types (CoreToDo(..), bindsOnlyPass)
 import GHC.Data.FastString (unpackFS)
+import GHC.Driver.Session (DynFlags(..))
 import GHC.Driver.Env.Types (HscEnv(..))
 import GHC.Driver.Plugins
   ( Plugin(..), PluginWithArgs(..), Plugins(..), StaticPlugin(..)
@@ -74,7 +102,10 @@ import GHC.Types.Id (Id, idName, setIdUnfolding, setInlinePragma)
 import GHC.Types.Name (isExternalName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (fieldOcc_maybe, occNameString)
 import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
-import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
+import GHC.Unit.Module (Module, ModuleName, mkModuleName, moduleName, moduleNameString, moduleUnit)
+import GHC.Unit.Module.Graph (ModuleGraph, mapMG)
+import GHC.Unit.Module.ModSummary (ModSummary(..))
+import Text.Read (readMaybe)
 import GHC.Unit.Types (unitString)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 
@@ -97,23 +128,76 @@ installRetainedUnfoldingsPlugin retainedRef hscEnv =
     staticPlugin = StaticPlugin
       { spPlugin = PluginWithArgs
           { paPlugin = withholdingPlugin retainedRef
-          , paArguments = []
+          , paArguments = [pluginMarker]
           }
-      -- No 'driverPlugin' action to run; nothing further to initialise.
-      , spInitialised = True
+      -- Uninitialised so that every 'initializePlugins' call, including the
+      -- per-module one, runs 'scopeToModule' (see VALIDITY above).
+      , spInitialised = False
       }
+
+-- | Record each summary's module identity for the withholding plugin's
+-- per-module recompilation fingerprint. Apply to the graph handed to @load'@.
+scopeRetainedModuleGraph :: ModuleGraph -> ModuleGraph
+scopeRetainedModuleGraph = mapMG scope
+  where
+    scope ms = ms { ms_hspp_opts = tag (ms_mod ms) (ms_hspp_opts ms) }
+    tag m flags = flags
+      { pluginModNameOpts =
+          (pluginModule, show (moduleKey m))
+            : [ opt | opt@(owner, _) <- pluginModNameOpts flags, owner /= pluginModule ]
+      }
+
+-- | The retained identities a module defines: the only part of the retained
+-- set that can change the module's own compilation (see VALIDITY above).
+retainedDefinedBy :: Module -> Set SymbolIdentity -> Set SymbolIdentity
+retainedDefinedBy m = definedIn (moduleKey m)
+
+definedIn :: (Text.Text, Text.Text) -> Set SymbolIdentity -> Set SymbolIdentity
+definedIn (unit, modName) =
+  Set.filter (\i -> symbolUnit i == unit && symbolModule i == modName)
+
+moduleKey :: Module -> (Text.Text, Text.Text)
+moduleKey m =
+  (Text.pack (unitString (moduleUnit m)), Text.pack (moduleNameString (moduleName m)))
+
+pluginModule :: ModuleName
+pluginModule = mkModuleName "Tidepool.RetainedUnfoldings"
+
+-- Identifies this plugin's entry among the session's static plugins.
+pluginMarker :: String
+pluginMarker = "tidepool-retained-unfoldings"
+
+-- | Driver action: set this plugin's arguments to the module recorded in the
+-- current flags (none for a session-level 'HscEnv'), and stay uninitialised.
+scopeToModule :: HscEnv -> HscEnv
+scopeToModule env = env { hsc_plugins = plugins { staticPlugins = map rescope (staticPlugins plugins) } }
+  where
+    plugins = hsc_plugins env
+    recorded = [ opt | (owner, opt) <- pluginModNameOpts (hsc_dflags env), owner == pluginModule ]
+    rescope sp
+      | (pluginMarker : _) <- paArguments (spPlugin sp) = sp
+          { spPlugin = (spPlugin sp) { paArguments = pluginMarker : take 1 recorded }
+          , spInitialised = False
+          }
+      | otherwise = sp
 
 withholdingPlugin :: IORef (Set SymbolIdentity) -> Plugin
 withholdingPlugin retainedRef = defaultPlugin
   { installCoreToDos = \_args todos ->
       pure (CoreDoPluginPass "WithholdRetainedUnfoldings" pass : todos)
-  , pluginRecompile = \_args -> do
+  , driverPlugin = \_args env -> pure (scopeToModule env)
+  , pluginRecompile = \args -> do
       retained <- readIORef retainedRef
       -- Show's escaped, delimited representation preserves every identity
       -- field; Set ordering makes the encoding independent of insertion order.
       -- Bump the version when the withholding transformation changes.
+      let (scopeLabel, relevant) = case args of
+            [_, recorded] | Just key <- readMaybe recorded ->
+              ("module " ++ show key, definedIn key retained)
+            _ -> ("unscoped", retained)
       pure (MaybeRecompile (fingerprintString
-        ("tidepool-retained-unfoldings-v1:" ++ show (Set.toAscList retained))))
+        ("tidepool-retained-unfoldings-v2:" ++ scopeLabel ++ ":"
+          ++ show (Set.toAscList relevant))))
   }
   where
     pass = bindsOnlyPass $ \binds -> do
