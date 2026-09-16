@@ -634,8 +634,9 @@ impl<'code> PreparedMachine<'code> {
 
         let statics = Arc::new(compiled.statics.instantiate()?);
         let block = &compiled.root_block;
+        let heap_tops: HashSet<_> = compiled.heap_top_specs.iter().map(|spec| spec.id).collect();
         for (&id, &slot) in &compiled.top_slots {
-            if compiled.heap_top_specs.iter().any(|spec| spec.id == id) {
+            if heap_tops.contains(&id) {
                 continue;
             }
             let value = statics
