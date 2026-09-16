@@ -127,13 +127,6 @@ an old-space object cannot be dropped by the minor and compacting collectors
 separately; it is deferred (`RetirementReceipt::deferred`) and retried at the
 next major collection. Untested.
 
-### Major collection runs after every run
-`PreparedEngine::quiesce_and_collect` performs a full mark and compaction on
-every completed run, so a session that binds a large value once pays for it
-on every later turn.
-Direction: collect past a threshold (programs installed, or promoted bytes
-relative to old bytes).
-
 ### Shadowed bindings keep their programs
 Root bindings and handles pin every program they reach, so nothing is
 reclaimable until a shadowed notebook binding retires. Lease re-keying and a

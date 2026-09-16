@@ -921,7 +921,36 @@ pub struct PreparedEngine {
     /// `RetirementReceipt::old_bytes` reports); `0` before any collection
     /// has run.
     old_bytes: usize,
+    /// Programs installed ([`Self::bootstrap`] counts as the first one)
+    /// since the last successful major collection. Reset to `0` only when
+    /// [`Self::quiesce_and_collect_now`] actually runs `collect_major`; a
+    /// `NotQuiescent` refusal leaves it untouched so the next eligible turn
+    /// retries with the same count. Read by [`Self::major_collection_due`].
+    installs_since_major: usize,
+    /// [`ResidencyCounts::block_words`] as of the last successful major
+    /// collection -- the cheapest live proxy for old-space growth this crate
+    /// can read without a cross-crate byte accessor (`residency()` is
+    /// callable at any time, not only right after a collection). `0` before
+    /// any collection has run, which disables the growth trigger until
+    /// there is a real baseline to grow from (see
+    /// [`Self::major_collection_due`]).
+    block_words_at_last_major: usize,
 }
+
+/// How many programs may install between major collections before one runs
+/// regardless of byte growth. Bounds the residency test's `programs` count:
+/// `programs <= live_bindings + 1 + MAJOR_COLLECTION_INSTALL_INTERVAL`.
+const MAJOR_COLLECTION_INSTALL_INTERVAL: usize = 4;
+
+/// Root-block growth since the last major collection, in bytes, that forces
+/// one early even inside the install-count window -- whichever this or the
+/// 50% relative threshold in [`PreparedEngine::major_collection_due`]
+/// reaches first.
+const MAJOR_COLLECTION_GROWTH_BYTES: usize = 1024 * 1024;
+
+/// Word width [`ResidencyCounts::block_words`] is counted in, for turning it
+/// into a byte figure comparable against `MAJOR_COLLECTION_GROWTH_BYTES`.
+const ROOT_WORD_BYTES: usize = std::mem::size_of::<u64>();
 
 /// The run's parking policy, carried onto the eval thread beside the settle
 /// plan: what a suspension is parked with.
@@ -1016,6 +1045,8 @@ impl PreparedEngine {
             sites: BTreeMap::new(),
             verb_sites: BTreeMap::new(),
             old_bytes: 0,
+            installs_since_major: 0,
+            block_words_at_last_major: 0,
         };
         // The first program can conflict only with itself.
         let plan = engine.plan_evidence(&facts)?;
@@ -1028,6 +1059,7 @@ impl PreparedEngine {
             .machine
             .pin(program)
             .map_err(PreparedRuntimeError::Run)?;
+        engine.installs_since_major += 1;
         Ok((engine, program))
     }
 
@@ -1204,6 +1236,7 @@ impl PreparedEngine {
         self.machine
             .pin(program)
             .map_err(PreparedRuntimeError::Run)?;
+        self.installs_since_major += 1;
         Ok(program)
     }
 
@@ -2054,19 +2087,79 @@ impl PreparedEngine {
         self.machine.unpin(program)
     }
 
-    /// The between-turn quiescent point: prove the machine is quiescent
+    /// Whether [`Self::quiesce_and_collect`] should actually run a major
+    /// collection at this between-turn point, rather than return without
+    /// touching the machine: either the install-count window has closed
+    /// (`installs_since_major >= MAJOR_COLLECTION_INSTALL_INTERVAL`), or
+    /// root-block bytes have grown by at least
+    /// [`MAJOR_COLLECTION_GROWTH_BYTES`] or 50% since the baseline recorded
+    /// at the last major collection ([`Self::block_words_at_last_major`]).
+    /// The growth check is skipped while there is no baseline yet (`0`,
+    /// before any collection has run) -- the install count alone gates the
+    /// first collection, matching the residency test's bound.
+    ///
+    /// `residency().block_words` is read fresh here as the cheapest
+    /// available proxy for old-space bytes: it is an ordinary live snapshot,
+    /// callable at any time, and grows with root-block table size the same
+    /// way old-space occupancy does; there is no cross-crate accessor for a
+    /// live old-space byte count (only the compacted figure a completed
+    /// collection's `RetirementReceipt` reports).
+    #[must_use]
+    fn major_collection_due(&self) -> bool {
+        if self.installs_since_major >= MAJOR_COLLECTION_INSTALL_INTERVAL {
+            return true;
+        }
+        if self.block_words_at_last_major == 0 {
+            return false;
+        }
+        let baseline_bytes = self.block_words_at_last_major * ROOT_WORD_BYTES;
+        let current_bytes = self.machine.residency().block_words * ROOT_WORD_BYTES;
+        let grown = current_bytes.saturating_sub(baseline_bytes);
+        grown >= MAJOR_COLLECTION_GROWTH_BYTES || current_bytes.saturating_mul(2) >= baseline_bytes.saturating_mul(3)
+    }
+
+    /// Programs installed since the last successful major collection --
+    /// [`Self::bootstrap`] and every accepted [`Self::install`] count.
+    /// Exposed for tests and diagnostics; production code drives this only
+    /// through [`Self::quiesce_and_collect`].
+    #[must_use]
+    pub fn installs_since_major(&self) -> usize {
+        self.installs_since_major
+    }
+
+    /// The between-turn quiescent point, gated by [`Self::major_collection_due`]:
+    /// when the policy is not due, this returns `Ok(())` without proving
+    /// quiescence or touching the machine at all -- most turns pay nothing
+    /// here. When it is due, this proves the machine is quiescent and, if
+    /// so, runs a major collection exactly as [`Self::quiesce_and_collect_now`]
+    /// does. A `quiesce` refusal ([`ExecutionError::NotQuiescent`]: the
+    /// machine is mid-call, holds temporary roots, or an observation borrows
+    /// old space) is not reported: the caller is simply not at a quiescent
+    /// point yet, the policy's counters are left exactly as they are, and
+    /// the next eligible turn retries.
+    pub fn quiesce_and_collect(&mut self) -> Result<(), PreparedRuntimeError> {
+        if !self.major_collection_due() {
+            return Ok(());
+        }
+        self.quiesce_and_collect_now()
+    }
+
+    /// Force the between-turn quiescent point regardless of
+    /// [`Self::major_collection_due`]: prove the machine is quiescent
     /// (`PreparedMachine::quiesce`) and, if so, run a major collection and
     /// drain its retirement receipt -- removing each retired program's
     /// [`ProgramFacts`] and re-homing or dropping the site witnesses it
     /// canonically owned ([`Self::retire_site_witnesses`]). A `quiesce`
-    /// refusal ([`ExecutionError::NotQuiescent`]: the machine is mid-call,
-    /// holds temporary roots, or an observation borrows old space) is not
-    /// reported: the caller is simply not at a quiescent point yet, and the
-    /// next one drains instead. Every other failure of the gate or the
-    /// collection is returned. The prepared route currently leases nothing
-    /// per program, so there are no leases to release here (see the S4/G2
-    /// test module doc below).
-    pub fn quiesce_and_collect(&mut self) -> Result<(), PreparedRuntimeError> {
+    /// refusal ([`ExecutionError::NotQuiescent`]) is not reported and resets
+    /// nothing (see [`Self::quiesce_and_collect`]'s doc); every other
+    /// failure of the gate or the collection is returned. On a successful
+    /// collection, [`Self::installs_since_major`] resets to `0` and
+    /// [`Self::block_words_at_last_major`] is rebaselined from the
+    /// post-collection residency snapshot. The prepared route currently
+    /// leases nothing per program, so there are no leases to release here
+    /// (see the S4/G2 test module doc below). Used directly by tests and by
+    /// any explicit session-level "collect now" entry point.
+    pub fn quiesce_and_collect_now(&mut self) -> Result<(), PreparedRuntimeError> {
         let token = match self.machine.quiesce() {
             Ok(token) => token,
             Err(ExecutionError::NotQuiescent) => return Ok(()),
@@ -2083,6 +2176,8 @@ impl PreparedEngine {
                 self.retire_site_witnesses(*program, &facts);
             }
         }
+        self.installs_since_major = 0;
+        self.block_words_at_last_major = self.machine.residency().block_words;
         Ok(())
     }
 

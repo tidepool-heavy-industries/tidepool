@@ -2261,10 +2261,14 @@ where
         };
         // The between-turn quiescent point: a fresh or resumed turn that
         // settled or parked just released whatever it retired-in-place, so
-        // this is where a major collection (if the machine happens to be
-        // quiescent) drains its retirement receipt. Not reached on an
-        // error path above -- an aborted/failed turn leaves nothing settled
-        // to quiesce over, and the next successful turn drains instead. A
+        // this is where a major collection -- if the collection policy
+        // judges one due (install-count window closed, or root-block bytes
+        // grew enough since the last one) and the machine happens to be
+        // quiescent -- drains its retirement receipt. Most turns are not
+        // due and this returns immediately without touching the machine
+        // (`PreparedEngine::quiesce_and_collect`). Not reached on an error
+        // path above -- an aborted/failed turn leaves nothing settled to
+        // quiesce over, and the next successful turn drains instead. A
         // collection failure (anything but "not quiescent yet") is this
         // turn's failure.
         if let Some(engine) = self.core.prepared_mut() {

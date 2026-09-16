@@ -2,6 +2,22 @@
 //! actually drains a major collection, so residency stays bounded across
 //! many turns instead of growing one program per turn forever.
 //!
+//! The collection itself is amortized (`PreparedEngine::quiesce_and_collect`,
+//! `tidepool-runtime/src/session/prepared.rs`): it only actually runs a
+//! major collection every `MAJOR_COLLECTION_INSTALL_INTERVAL` installed
+//! programs (or sooner on enough root-block byte growth), not after every
+//! turn. `N` below mirrors that constant -- it is not reachable from here
+//! (private to `prepared.rs`, and `ResidentSession` exposes only
+//! `residency()`/`old_bytes()`, no install-count accessor), so this file
+//! treats it as a fixture constant instead. Each expression/bind turn below
+//! installs exactly one program (confirmed by the pre-amortization version
+//! of this test), so a major collection lands deterministically every `N`th
+//! turn as long as byte growth never trips the earlier threshold first --
+//! true for these tiny arithmetic turns. Counters are therefore only
+//! expected to be flat turn-over-turn *at* those collection boundaries; in
+//! between, `programs` (and the other counts) may grow up to the
+//! amortized bound before the next collection folds them back down.
+//!
 //! Needs a resolvable `$TIDEPOOL_EXTRACT` and its Haskell worker (as
 //! `prepared_turn.rs` does); no Core-route counterpart -- `residency()` is
 //! `None` on Core, so there is nothing to assert there.
@@ -144,26 +160,55 @@ impl Notebook {
     }
 }
 
-/// Forty `1 + <i>` expression turns on the prepared route: after a warm-up
-/// of five turns (the first few installs may still be settling machine
-/// bootstrap/site-index bookkeeping, and descriptor-arena compaction commits
-/// before retirement per the lifetime contract's decision 7, so a retiring
-/// program's bytes leave one collection later than its other counters),
-/// every `ResidencyCounts` field -- `old_bytes` included, now that
-/// descriptor-arena compaction has landed -- is flat turn over turn, and
-/// `programs` never exceeds the number of live bindings plus one (the turn
-/// currently running). A binding is then introduced (`x <- pure 1`) and
-/// twenty more expression turns run importing nothing new: `programs` stays
-/// flat there too -- the bound bind's own program does not accumulate one
-/// retained program per subsequent turn.
+/// Fixture mirror of `PreparedEngine::MAJOR_COLLECTION_INSTALL_INTERVAL`
+/// (`tidepool-runtime/src/session/prepared.rs`) -- see the module doc for
+/// why this file cannot read the real constant.
+const N: usize = 4;
+
+/// Assert every `ResidencyCounts` field, plus `old_bytes`, is identical to
+/// `previous` -- the flatness a completed major collection should leave
+/// behind, since it folds every earlier collection boundary's counters back
+/// to the same live set (no live bindings changed in between).
+fn assert_counts_flat(
+    label: &str,
+    counts: tidepool_codegen::prepared_program::ResidencyCounts,
+    previous: tidepool_codegen::prepared_program::ResidencyCounts,
+    old_bytes: usize,
+    previous_old_bytes: usize,
+) {
+    assert_eq!(counts, previous, "{label}: counts moved across collections");
+    assert_eq!(
+        old_bytes, previous_old_bytes,
+        "{label}: old_bytes moved across collections"
+    );
+}
+
+/// Forty `1 + <i>` expression turns on the prepared route, each installing
+/// exactly one program: `quiesce_and_collect` only actually collects every
+/// `N`th install (see the module doc), so `programs` is checked against the
+/// amortized bound every turn, and exact flatness across every counter --
+/// `old_bytes` included -- is only checked collection-boundary to
+/// collection-boundary (every `N`th turn). The first boundary is a warm-up:
+/// the first few installs may still be settling machine bootstrap/site-index
+/// bookkeeping, and descriptor-arena compaction commits before retirement
+/// per the lifetime contract's decision 7, so a retiring program's bytes can
+/// still be one collection behind its other counters at that point.
+/// Comparisons start at the second boundary, once both have stabilized.
+///
+/// A binding is then introduced (`x <- pure 1`) and twenty more expression
+/// turns run importing nothing new: the same amortized-bound-every-turn,
+/// flat-at-every-boundary structure applies, now against the post-bind
+/// baseline -- the bound bind's own program does not accumulate one
+/// retained program per subsequent collection.
 #[test]
 fn prepared_session_residency_stays_bounded_across_many_turns() {
     let mut notebook = Notebook::new(EngineKind::Prepared);
 
-    const WARMUP: usize = 5;
     const TOTAL: usize = 40;
-    let mut last_counts: Option<tidepool_codegen::prepared_program::ResidencyCounts> = None;
-    let mut last_old_bytes: Option<usize> = None;
+    let live_bindings = 0;
+    let mut boundary_counts: Option<tidepool_codegen::prepared_program::ResidencyCounts> = None;
+    let mut boundary_old_bytes: Option<usize> = None;
+    let mut boundaries_seen = 0;
     for i in 0..TOTAL {
         notebook.expression(&format!("1 + {i}"));
         let counts = notebook
@@ -171,87 +216,79 @@ fn prepared_session_residency_stays_bounded_across_many_turns() {
             .residency()
             .expect("the prepared route reports residency counts");
         assert!(
-            counts.programs <= 1,
-            "turn {i}: programs={} exceeds the bound (0 live bindings + 1)",
+            counts.programs <= live_bindings + 1 + N,
+            "turn {i}: programs={} exceeds the amortized bound ({live_bindings} live bindings + 1 + N)",
             counts.programs
         );
-        if i + 1 > WARMUP {
-            if let Some(previous) = last_counts {
-                assert_eq!(
-                    counts.block_words, previous.block_words,
-                    "turn {i}: block_words grew past warm-up"
-                );
-                assert_eq!(
-                    counts.persistent_roots, previous.persistent_roots,
-                    "turn {i}: persistent_roots grew past warm-up"
-                );
-                assert_eq!(
-                    counts.handles, previous.handles,
-                    "turn {i}: handles grew past warm-up"
-                );
-                assert_eq!(
-                    counts.parked, previous.parked,
-                    "turn {i}: parked grew past warm-up"
-                );
-                assert_eq!(
-                    counts.stack_map_links, previous.stack_map_links,
-                    "turn {i}: stack_map_links grew past warm-up"
-                );
-                assert_eq!(
-                    counts.static_regions, previous.static_regions,
-                    "turn {i}: static_regions grew past warm-up"
-                );
-                assert_eq!(
-                    counts.descriptor_rows, previous.descriptor_rows,
-                    "turn {i}: descriptor_rows grew past warm-up"
-                );
-                assert_eq!(
-                    counts.callable_rows, previous.callable_rows,
-                    "turn {i}: callable_rows grew past warm-up"
-                );
-                assert_eq!(
-                    counts.enter_rows, previous.enter_rows,
-                    "turn {i}: enter_rows grew past warm-up"
-                );
-            }
+        // A collection boundary: `installs_since_major` (turn number, since
+        // each turn installs exactly one program) hit the window.
+        if (i + 1) % N == 0 {
+            boundaries_seen += 1;
             let old_bytes = notebook
                 .session
                 .old_bytes()
                 .expect("the prepared route reports old-space bytes");
-            if let Some(previous) = last_old_bytes {
-                assert_eq!(old_bytes, previous, "turn {i}: old_bytes grew past warm-up");
+            if boundaries_seen > 1 {
+                assert_counts_flat(
+                    &format!("turn {i} (boundary {boundaries_seen})"),
+                    counts,
+                    boundary_counts.expect("a prior boundary was recorded"),
+                    old_bytes,
+                    boundary_old_bytes.expect("a prior boundary was recorded"),
+                );
             }
-            last_old_bytes = Some(old_bytes);
+            boundary_counts = Some(counts);
+            boundary_old_bytes = Some(old_bytes);
         }
-        last_counts = Some(counts);
     }
+    assert!(
+        boundaries_seen >= 2,
+        "expected at least two collection boundaries in {TOTAL} turns at N={N}"
+    );
 
     // Introduce a live binding, then keep running: the bound value's
     // producing program may or may not stay resident (it depends on whether
     // the binding's value keeps any of its code reachable), but no further
-    // program should accumulate turn over turn.
+    // program should accumulate collection over collection.
     notebook.bind("x <- pure 1");
-    let after_bind = notebook
-        .session
-        .residency()
-        .expect("the prepared route reports residency counts");
+    let live_bindings = 1;
 
-    let mut last_programs = after_bind.programs;
-    for i in 0..20 {
+    const POST_BIND: usize = 20;
+    let mut boundary_counts: Option<tidepool_codegen::prepared_program::ResidencyCounts> = None;
+    let mut boundary_old_bytes: Option<usize> = None;
+    let mut boundaries_seen = 0;
+    for i in 0..POST_BIND {
         notebook.expression(&format!("x + {i}"));
         let counts = notebook
             .session
             .residency()
             .expect("the prepared route reports residency counts");
         assert!(
-            counts.programs <= 2,
-            "post-bind turn {i}: programs={} exceeds the bound (1 live binding + 1)",
+            counts.programs <= live_bindings + 1 + N,
+            "post-bind turn {i}: programs={} exceeds the amortized bound ({live_bindings} live binding + 1 + N)",
             counts.programs
         );
-        assert_eq!(
-            counts.programs, last_programs,
-            "post-bind turn {i}: programs grew turn over turn"
-        );
-        last_programs = counts.programs;
+        if (i + 1) % N == 0 {
+            boundaries_seen += 1;
+            let old_bytes = notebook
+                .session
+                .old_bytes()
+                .expect("the prepared route reports old-space bytes");
+            if boundaries_seen > 1 {
+                assert_counts_flat(
+                    &format!("post-bind turn {i} (boundary {boundaries_seen})"),
+                    counts,
+                    boundary_counts.expect("a prior boundary was recorded"),
+                    old_bytes,
+                    boundary_old_bytes.expect("a prior boundary was recorded"),
+                );
+            }
+            boundary_counts = Some(counts);
+            boundary_old_bytes = Some(old_bytes);
+        }
     }
+    assert!(
+        boundaries_seen >= 2,
+        "expected at least two post-bind collection boundaries in {POST_BIND} turns at N={N}"
+    );
 }
