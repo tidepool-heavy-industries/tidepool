@@ -8,17 +8,26 @@
 //! `plans/handoff/designs/synthetic-sites.md`). A refusal on a verb whose
 //! reply the host cannot build means a suspended frame on that verb parks
 //! forever: it can never resume. This test finds every such verb up front by
-//! compiling ONE turn module that mentions every effect verb of the generated
-//! surface (`tidepool_mcp::standard_decls()` -- the same decls
-//! `ResidentSession`'s Notebook-shaped tests build their preamble/effect-stack
-//! from), then walking the compiled prepared artifact's site rows
+//! compiling ONE turn module that mentions every effect verb of a generated
+//! surface, then walking the compiled prepared artifact's site rows
 //! (`PreparedProgram::sites()`/`verb_sites()`/`type_node()`,
 //! `tidepool-repr/src/execution_schema.rs`) for `TypeNode::Unconstructible`.
+//! It runs this audit twice, over two different surfaces:
+//!
+//! - `tidepool_mcp::standard_decls()` -- the ordinary MCP eval/session
+//!   surface (`ResidentSession`'s own Notebook-shaped tests build their
+//!   preamble/effect-stack from this).
+//! - `tidepool_mcp::all_decls()` -- the WIDER surface Shoal's actor host
+//!   actually compiles against (`tidepool-harness/src/engine.rs`'s
+//!   `agent_decls()` is `standard_decls()` plus `Fork`/`Finalize`; `all_decls`
+//!   is that plus every other schema-owned effect --
+//!   `tidepool-mcp/src/generated/mod.rs`'s `schema_decls()`: `Journal`,
+//!   `Worktree`, repo/agent events, `Actor*`, `Sleep`, `Green`, and more).
 //!
 //! Each verb is mentioned, never RUN: the compiled turn expression is `do {
 //! _ <- verb1 arg; _ <- verb2 arg arg; ...; pure () }`, but this test only
 //! ever calls `compile()`, never `run_with_sites` -- the artifact is built
-//! and inspected, the action inside it never executes. Two things had to be
+//! and inspected, the action inside it never executes. Three things had to be
 //! learned empirically to get real per-verb sites out of the compiled
 //! artifact:
 //!
@@ -27,9 +36,7 @@
 //!   projector interns a request GADT constructor from its actual `Con`
 //!   occurrence in Core (`synthetic-sites.md` decision 1); a verb like
 //!   `readFile = send . FsRead` only produces that occurrence once INLINED
-//!   at an application site, so every verb is actually applied here (to
-//!   type-directed dummy arguments parsed at test time out of
-//!   `EffectDecl::helpers`'s literal Haskell source).
+//!   at an application site, so every verb is actually applied here.
 //! - A dead-branch guard (`if False then do {...} else pure ()`) ALSO
 //!   registers no sites: GHC's case-of-known-constructor reduction on a
 //!   literal `False` scrutinee eliminates the live branch, taking every
@@ -37,6 +44,12 @@
 //!   instead on this test never calling `run_with_sites` is what actually
 //!   keeps the applications both live in the compiled Core and never
 //!   executed.
+//! - Every argument is `(error "prepared_reply_types dummy")`, not a
+//!   type-directed literal: `error :: forall a. HasCallStack => String -> a`
+//!   type-checks at ANY concrete argument type -- records, bridged types,
+//!   whatever a wider surface's verbs demand -- without this test needing a
+//!   type-directed dummy-value table at all. Since nothing here ever runs,
+//!   the bottom is never forced.
 //!
 //! Needs a resolvable `$TIDEPOOL_EXTRACT` and its Haskell worker (as
 //! `prepared_turn.rs`/`prepared_residency.rs` do):
@@ -45,6 +58,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use tidepool_mcp::EffectDecl;
 use tidepool_repr::execution_schema::{PreparedProgram, TypeNode, TypeNodeId};
 use tidepool_runtime::session::{
     resident_workbench_templates, run_turn, EngineKind, ModuleEnv, ResidentSession, SessionLib,
@@ -55,7 +69,8 @@ use tidepool_testing::eval_harness;
 /// The minimal parts of `prepared_residency.rs`'s own `Notebook` this file
 /// needs: one resident session, its compile plumbing, and an expression-turn
 /// compile that stops short of running anything. Copied rather than shared so
-/// this file never has to touch `prepared_turn.rs`.
+/// this file never has to touch `prepared_turn.rs`. Parameterized over the
+/// decl list (`standard_decls()` vs `all_decls()`), unlike the original.
 struct Notebook {
     session: ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
     preamble: String,
@@ -67,12 +82,27 @@ struct Notebook {
 }
 
 impl Notebook {
-    fn new(engine: EngineKind) -> Self {
+    fn new(engine: EngineKind, decls: &[EffectDecl]) -> Self {
         eval_harness::require_extract();
-        let decls = tidepool_mcp::standard_decls();
-        let preamble = tidepool_mcp::build_preamble(&decls, false);
-        let effect_stack = tidepool_mcp::build_effect_stack_type(&decls);
-        let mut include = eval_harness::effects_include().to_vec();
+        let preamble = tidepool_mcp::build_preamble(decls, false);
+        let effect_stack = tidepool_mcp::build_effect_stack_type(decls);
+        // NOT `eval_harness::effects_include()`: that helper hardcodes
+        // `standard_decls()`, materializing `Tidepool/Effects.hs` (the
+        // per-window SHIM, which defines `type M = Eff '[<these decls>]`) for
+        // the wrong, narrower row. `Tidepool.Effects.Core` (the OTHER half)
+        // is genuinely universal regardless of which decls are passed
+        // (`ensure_effects_module_at` always renders it from the full
+        // `all_decls()` vocabulary) -- only the shim's `M` is decls-scoped,
+        // and it must match THIS test's own `decls`, or a verb outside
+        // `standard_decls()` (e.g. `RepoEvent`'s `awaitSubscriptionRaw`)
+        // resolves fine (Core has its GADT universally) but its `Member`
+        // constraint fails against the stale, narrower `M` row -- confirmed
+        // empirically: exactly this mismatch, naming exactly the
+        // `standard_decls()` row, on the first `all_decls()` attempt here.
+        let mut include = tidepool_mcp::ensure_effects_module(decls)
+            .expect("write Tidepool.Effects module for this test's own decls")
+            .include_paths()
+            .to_vec();
         include.push(eval_harness::prelude_path());
         let root = tempfile::tempdir().expect("session root");
         let lib = SessionLib::open(
@@ -165,23 +195,33 @@ fn extract_verb_sig(helper: &str) -> Option<(String, String)> {
     None
 }
 
-/// Strip a declared type's `forall ... .` and `(Member|Members) ... =>`
-/// prefix, returning the plain arrow chain plus the `forall` variable names
-/// (in declaration order) so a caller can tell whether the verb is
-/// additionally polymorphic in its ANSWER type (a stray non-`effs` variable,
-/// e.g. `RunLLMTurn`'s `forall a effs. ... -> Eff effs a`).
+/// Strip a declared type's `forall ... .` and constraint (`Member`/`Members`
+/// / a tuple context) `... =>` prefix, repeatedly (some declarations stack
+/// more than one), returning the plain arrow chain plus every `forall`
+/// variable name seen (in declaration order) so a caller can tell whether the
+/// verb is additionally polymorphic in its ANSWER type (a stray non-`effs`
+/// variable, e.g. `RunLLMTurn`'s `forall a effs. ... -> Eff effs a`, or
+/// `Finalize`'s `forall v a effs. ...`).
 fn strip_prefix(ty: &str) -> (String, Vec<String>) {
     let mut s = ty.to_string();
     let mut forall_vars = Vec::new();
-    if let Some(fpos) = s.find("forall ") {
-        if let Some(dot_rel) = s[fpos..].find(". ") {
-            let vars_part = &s[fpos + 7..fpos + dot_rel];
-            forall_vars = vars_part.split_whitespace().map(str::to_string).collect();
-            s = format!("{}{}", &s[..fpos], &s[fpos + dot_rel + 2..]);
+    loop {
+        let mut changed = false;
+        if let Some(fpos) = s.find("forall ") {
+            if let Some(dot_rel) = s[fpos..].find(". ") {
+                let vars_part = &s[fpos + 7..fpos + dot_rel];
+                forall_vars.extend(vars_part.split_whitespace().map(str::to_string));
+                s = format!("{}{}", &s[..fpos], &s[fpos + dot_rel + 2..]);
+                changed = true;
+            }
         }
-    }
-    if let Some(arrow) = s.find("=> ") {
-        s = s[arrow + 3..].to_string();
+        if let Some(arrow) = s.find("=> ") {
+            s = s[arrow + 3..].to_string();
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
     }
     (s, forall_vars)
 }
@@ -215,22 +255,10 @@ fn split_arrows(s: &str) -> Vec<String> {
     parts
 }
 
-/// A type-directed dummy literal for one argument type, or `None` when this
-/// test does not know how to construct one (reported as a dropped verb, per
-/// the task's "minimal form that type-checks, note any verb you had to drop"
-/// fallback).
-fn dummy_value(ty: &str) -> Option<&'static str> {
-    let t = ty.trim();
-    match t {
-        "Text" | "FilePath" => Some("\"x\""),
-        "Int" => Some("0"),
-        "Bool" => Some("False"),
-        "Value" => Some("(object [])"),
-        _ if t.starts_with("Maybe ") => Some("Nothing"),
-        _ if t.starts_with('[') && t.ends_with(']') => Some("[]"),
-        _ => None,
-    }
-}
+/// A universal dummy argument, valid at any type: `error` type-checks against
+/// any concrete argument type (records, bridged FFI types, whatever a wider
+/// surface's verbs demand) since nothing this test compiles is ever run.
+const DUMMY_ARG: &str = "(error \"prepared_reply_types dummy\")";
 
 /// One verb, split into its argument types and whether it is an effectful
 /// verb at all (helpers also carry pure utility functions, e.g. `findTally`,
@@ -238,10 +266,11 @@ fn dummy_value(ty: &str) -> Option<&'static str> {
 struct Verb {
     name: String,
     args: Vec<String>,
-    /// Extra `forall` variables beyond `effs` -- the verb is polymorphic in
-    /// its own answer type (`RunLLMTurn`'s family) and needs a `@Value` type
-    /// application to pin it before it can be applied at all.
-    answer_type_var: bool,
+    /// Extra `forall` variables beyond `effs`, in declaration order -- the
+    /// verb is polymorphic in its own answer type (`RunLLMTurn`/`Fork`'s
+    /// family: `forall a effs. ...`) and needs a type application to pin it
+    /// before it can be applied at all.
+    extra_forall_vars: Vec<String>,
 }
 
 fn parse_verb(name: &str, ty: &str) -> Option<Verb> {
@@ -254,18 +283,42 @@ fn parse_verb(name: &str, ty: &str) -> Option<Verb> {
     Some(Verb {
         name: name.to_string(),
         args: parts,
-        answer_type_var: forall_vars.iter().any(|v| v != "effs"),
+        extra_forall_vars: forall_vars.into_iter().filter(|v| v != "effs").collect(),
     })
 }
 
+/// Verbs skipped outright, with why -- not "dropped" for lack of a dummy
+/// value (that no longer happens: `DUMMY_ARG` is universal), but because no
+/// well-typed call could apply them AT ALL, or because a site could never be
+/// minted for them regardless of how they are called.
+///
+/// `finalize`/`finalizeSited` (`Finalize`, `type_params ["v"]`): its answer
+/// index is the request GADT's own last argument `a` in `FinalizeWith :: Int
+/// -> v -> Finalize v a`, which `synthetic-sites.md` decision 1 explicitly
+/// documents as "skipped as open" -- no site is EVER minted for it, so
+/// calling it (which would also need `v` pinned to the row's `Finalize Void`
+/// default via a `@Void` application before `a` could be pinned by a second
+/// one -- `v` precedes `a` in its `forall`) buys this audit nothing.
+const SKIPPED_VERBS: &[(&str, &str)] = &[
+    (
+        "finalize",
+        "Finalize's reply index (`a` in `Finalize v a`) is open, not closed -- \
+         synthetic-sites.md decision 1 skips it; no site is ever minted",
+    ),
+    (
+        "finalizeSited",
+        "same as `finalize` -- its reply index is open, no site is ever minted",
+    ),
+];
+
 /// Every `(verb name, declared type)` pair this test can extract from
-/// `tidepool_mcp::standard_decls()`'s helper text, plus the names it could
-/// not parse a signature out of (reported, not silently dropped).
-fn verb_signatures() -> (Vec<(String, String)>, Vec<String>) {
+/// `decls`'s helper text, plus the names it could not parse a signature out
+/// of (reported, not silently dropped).
+fn verb_signatures(decls: &[EffectDecl]) -> (Vec<(String, String)>, Vec<String>) {
     let mut seen = BTreeSet::new();
     let mut sigs = Vec::new();
     let mut unparsed = Vec::new();
-    for decl in tidepool_mcp::standard_decls() {
+    for decl in decls {
         for helper in decl.helpers {
             match extract_verb_sig(helper) {
                 Some((name, ty)) => {
@@ -329,75 +382,68 @@ fn walk(
     }
 }
 
-/// Explicit allow-list: the verbs whose reply type the prepared host answer
-/// builder currently cannot construct. A future change to the generated
-/// surface or to `TypePolicy.hs`/`lower_answer`'s constructibility policy
-/// must show up as a diff here, not as a frame that silently never resumes.
-const EXPECTED_UNCONSTRUCTIBLE: &[&str] = &[];
+/// The generated effects module's fixed name, independent of which decls
+/// populate it.
+const EFFECTS_MODULE: &str = "Tidepool.Effects.Core";
 
-#[test]
-fn prepared_reply_types_are_constructible() {
-    let (verbs, unparsed) = verb_signatures();
+/// Compile one turn module applying every effect verb `decls` exposes, then
+/// return the set of request constructors (as `Module.Ctor` labels) whose
+/// reply type is `Unconstructible` outside the `Value` family. Prints the
+/// full verb table.
+fn audit(surface_name: &str, decls: &[EffectDecl]) -> BTreeSet<String> {
+    let (verbs, unparsed) = verb_signatures(decls);
     assert!(
         !verbs.is_empty(),
-        "expected at least one verb signature out of tidepool_mcp::standard_decls()"
+        "[{surface_name}] expected at least one verb signature"
     );
     if !unparsed.is_empty() {
         eprintln!(
-            "note: {} helper string(s) carried no parseable `name :: type` line and were \
-             dropped: {unparsed:?}",
+            "[{surface_name}] note: {} helper string(s) carried no parseable `name :: type` \
+             line and were dropped: {unparsed:?}",
             unparsed.len()
         );
     }
 
-    let mut notebook = Notebook::new(EngineKind::Prepared);
-    let mut dropped = Vec::new();
+    let mut notebook = Notebook::new(EngineKind::Prepared, decls);
+    let mut skipped = Vec::new();
     let mut statements = Vec::new();
     for (name, ty) in &verbs {
+        if let Some((_, reason)) = SKIPPED_VERBS.iter().find(|(n, _)| n == name) {
+            skipped.push(format!("{name} :: {ty} ({reason})"));
+            continue;
+        }
         let Some(verb) = parse_verb(name, ty) else {
             continue; // a pure helper (e.g. `findTally`), not an effect verb
         };
         let mut call_parts = vec![verb.name.clone()];
-        if verb.answer_type_var {
+        for var in &verb.extra_forall_vars {
+            // `Finalize`-shaped verbs (more than one extra var) are handled
+            // via `SKIPPED_VERBS` above, never reach here; every verb that
+            // does has exactly one (`a`), pinned to `Value`.
+            let _ = var;
             call_parts.push("@Value".to_string());
         }
-        let mut ok = true;
-        for arg_ty in &verb.args {
-            match dummy_value(arg_ty) {
-                Some(lit) => call_parts.push(lit.to_string()),
-                None => {
-                    ok = false;
-                    dropped.push(format!("{name} :: {ty} (no dummy value for arg `{arg_ty}`)"));
-                    break;
-                }
-            }
-        }
-        if ok {
-            statements.push(format!("_ <- {}", call_parts.join(" ")));
-        }
+        call_parts.extend(std::iter::repeat_n(DUMMY_ARG.to_string(), verb.args.len()));
+        statements.push(format!("_ <- {}", call_parts.join(" ")));
     }
-    if !dropped.is_empty() {
+    if !skipped.is_empty() {
         eprintln!(
-            "note: {} verb(s) dropped -- could not build a well-typed dummy call: {dropped:#?}",
-            dropped.len()
+            "[{surface_name}] note: {} verb(s) skipped outright: {skipped:#?}",
+            skipped.len()
         );
     }
     assert!(
         !statements.is_empty(),
-        "no effect verb could be applied; nothing to check"
+        "[{surface_name}] no effect verb could be applied; nothing to check"
     );
-    // No dead-branch guard (an earlier `if False then do {...} else pure ()`
-    // version of this test found nothing beyond one stray, unrelated site):
-    // GHC's case-of-known-constructor reduction eliminates a literal `False`
-    // scrutinee's branch before the extractor ever sees it, taking every
-    // verb application with it. This test only ever calls `compile()`, never
-    // `run_with_sites` -- the whole `do` block below is compiled into the
-    // prepared artifact and inspected there, but genuinely never executed,
-    // so "each verb is mentioned, never run" holds without a dead branch.
+    // No dead-branch guard: this test only ever calls `compile()`, never
+    // `run_with_sites` -- the whole `do` block is compiled into the prepared
+    // artifact and inspected there, but genuinely never executed, so "each
+    // verb is mentioned, never run" holds without one (see module doc).
     let turn_text = format!("do {{ {} ; pure () }}", statements.join(" ; "));
 
     let TurnResult::Expr { compiled, .. } = notebook.compile(&turn_text) else {
-        panic!("the verb-surface turn did not classify as an expression");
+        panic!("[{surface_name}] the verb-surface turn did not classify as an expression");
     };
     let prepared = compiled
         .prepared
@@ -414,9 +460,8 @@ fn prepared_reply_types_are_constructible() {
     // node ... breadth is the safer error" -- and in practice does pick up
     // at least one non-effect constructor from this turn's own machinery
     // (`GHC.Internal.Data.Typeable.Internal.TrType`, from the `@Value` type
-    // application `RunLLMTurn`'s helpers need). Only the generated effects
-    // module's own constructors are this test's subject.
-    const EFFECTS_MODULE: &str = "Tidepool.Effects.Core";
+    // application some helpers need). Only the generated effects module's
+    // own constructors are this test's subject.
     let constructors = prepared.constructors();
     let mut verb_site: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
     let mut ignored_noise = Vec::new();
@@ -432,18 +477,19 @@ fn prepared_reply_types_are_constructible() {
     }
     if !ignored_noise.is_empty() {
         eprintln!(
-            "note: ignored {} verb_sites entry(ies) outside `{EFFECTS_MODULE}` (the projector's \
-             deliberately broad net, `synthetic-sites.md` decision 1, picking up incidental \
-             non-effect constructors this turn's own machinery touches): {ignored_noise:?}",
+            "[{surface_name}] note: ignored {} verb_sites entry(ies) outside \
+             `{EFFECTS_MODULE}` (the projector's deliberately broad net, \
+             `synthetic-sites.md` decision 1, picking up incidental non-effect \
+             constructors this turn's own machinery touches): {ignored_noise:?}",
             ignored_noise.len()
         );
     }
 
     println!(
-        "\n{:<40} {:<24} {}",
+        "\n[{surface_name}] {:<40} {:<24} {}",
         "VERB (request constructor)", "constructible?", "reason"
     );
-    println!("{}", "-".repeat(100));
+    println!("{}", "-".repeat(110));
 
     let mut unconstructible = BTreeSet::new();
     let mut reported_any_site = false;
@@ -467,19 +513,51 @@ fn prepared_reply_types_are_constructible() {
     }
     assert!(
         reported_any_site,
-        "the compiled artifact's verb_sites table is empty -- no synthetic site was minted for \
-         any of the {} mentioned verbs; the turn module's mentions may not be reaching the \
-         extractor's constructor-interning pass",
+        "[{surface_name}] the compiled artifact's verb_sites table is empty -- no synthetic \
+         site was minted for any of the {} mentioned verbs; the turn module's mentions may not \
+         be reaching the extractor's constructor-interning pass",
         verbs.len()
     );
+    unconstructible
+}
 
+/// Explicit allow-list: the verbs whose reply type the prepared host answer
+/// builder currently cannot construct, on the ordinary `standard_decls()`
+/// surface. A future change to the generated surface or to
+/// `TypePolicy.hs`/`lower_answer`'s constructibility policy must show up as a
+/// diff here, not as a frame that silently never resumes.
+const EXPECTED_UNCONSTRUCTIBLE: &[&str] = &[];
+
+#[test]
+fn prepared_reply_types_are_constructible() {
+    let unconstructible = audit("standard_decls", &tidepool_mcp::standard_decls());
     let expected: BTreeSet<String> = EXPECTED_UNCONSTRUCTIBLE
         .iter()
         .map(|s| s.to_string())
         .collect();
     assert_eq!(
         unconstructible, expected,
-        "the set of unconstructible verbs changed -- update EXPECTED_UNCONSTRUCTIBLE (and tell \
-         Shoal) if this is an intended surface/policy change; found: {unconstructible:#?}"
+        "[standard_decls] the set of unconstructible verbs changed -- update \
+         EXPECTED_UNCONSTRUCTIBLE (and tell Shoal) if this is an intended surface/policy \
+         change; found: {unconstructible:#?}"
+    );
+}
+
+/// Same allow-list, on `all_decls()` -- the wider surface Shoal's actor host
+/// actually compiles against (see the module doc).
+const EXPECTED_UNCONSTRUCTIBLE_ALL: &[&str] = &[];
+
+#[test]
+fn prepared_reply_types_are_constructible_on_all_decls() {
+    let unconstructible = audit("all_decls", &tidepool_mcp::all_decls());
+    let expected: BTreeSet<String> = EXPECTED_UNCONSTRUCTIBLE_ALL
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        unconstructible, expected,
+        "[all_decls] the set of unconstructible verbs changed -- update \
+         EXPECTED_UNCONSTRUCTIBLE_ALL (and tell Shoal) if this is an intended surface/policy \
+         change; found: {unconstructible:#?}"
     );
 }
