@@ -6438,7 +6438,7 @@ mod request_tests {
                 None,
             )
             .unwrap();
-            machines.insert_idle(id, session);
+            machines.insert_idle(id, Box::new(session));
         }
         let access =
             ResidentMachineAccess::new(machines.clone(), ActorWorkbenchSource::new("", Vec::new()));
@@ -6516,13 +6516,13 @@ mod request_tests {
         let uninitialized_id = SessionId(11);
         let reusable_id = SessionId(12);
         let unavailable_id = SessionId(13);
-        machines.insert_idle(uninitialized_id, unbootstrapped());
+        machines.insert_idle(uninitialized_id, Box::new(unbootstrapped()));
         let mut literal = TreeBuilder::new();
         literal.push(CoreFrame::Lit(Literal::LitInt(42)));
-        machines.insert_idle(reusable_id, bootstrapped(literal.build()));
+        machines.insert_idle(reusable_id, Box::new(bootstrapped(literal.build())));
         let mut literal = TreeBuilder::new();
         literal.push(CoreFrame::Lit(Literal::LitInt(42)));
-        machines.insert_idle(unavailable_id, bootstrapped(literal.build()));
+        machines.insert_idle(unavailable_id, Box::new(bootstrapped(literal.build())));
 
         let source = ActorWorkbenchSource::new("", Vec::new());
         let runner = ResidentActorRunner::new(Arc::clone(&machines), source.clone());
@@ -6558,7 +6558,7 @@ mod request_tests {
             machines.remove(reusable_id),
             Some(Slot::Running { .. })
         ));
-        machines.insert_idle(reusable_id, unbootstrapped());
+        machines.insert_idle(reusable_id, Box::new(unbootstrapped()));
         drop(checkout);
         assert_eq!(
             runner.resident_session_state(reusable_id),

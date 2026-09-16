@@ -1686,6 +1686,11 @@ impl MachineState {
         &self,
         resolve: impl FnMut(&crate::prepared_program::static_bytes::PinnedBytes) -> Option<R>,
     ) -> Option<R> {
+        // `.borrow()`'s guard lives for the whole chained expression, so
+        // `resolve` runs, once per pool, while `prepared_byte_pools` is
+        // still borrowed. Both callers (`fingerprint.rs`, `failures.rs`)
+        // only read bytes out of the pool inside `resolve`; neither one
+        // registers a pool or calls back into this method from within it.
         self.prepared_byte_pools
             .borrow()
             .iter()

@@ -200,7 +200,10 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     /// caller decides whether that is a reset or a collision) — this is the
     /// ONE place an entry's epoch is minted, so a caller that never reuses an
     /// id (every consumer today) never needs to think about epochs at all.
-    pub fn insert_idle(&self, id: SessionId, machine: M) -> Option<Slot<M, H>> {
+    /// Takes the machine already boxed, matching `Slot::Idle`'s own payload,
+    /// so the caller controls where the machine is allocated instead of an
+    /// internal `Box::new` doing it implicitly.
+    pub fn insert_idle(&self, id: SessionId, machine: Box<M>) -> Option<Slot<M, H>> {
         let epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
         let previous = self
             .slots
@@ -209,7 +212,7 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
                 id,
                 Entry {
                     epoch,
-                    slot: Slot::Idle(Box::new(machine)),
+                    slot: Slot::Idle(machine),
                 },
             )
             .map(|e| e.slot);
@@ -729,7 +732,7 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SingleSlot<M, H> {
         if current.is_some() {
             return Err(machine);
         }
-        self.registry.insert_idle(id, machine);
+        self.registry.insert_idle(id, Box::new(machine));
         *current = Some(id);
         Ok(())
     }
@@ -858,7 +861,7 @@ mod tests {
         );
         let registry: SessionRegistry<LargeMachine, Hole> = SessionRegistry::new();
         let id = SessionId(99);
-        registry.insert_idle(id, [7; 64 * 1024]);
+        registry.insert_idle(id, Box::new([7; 64 * 1024]));
         let original = registry
             .peek(id, |machine| machine.as_ptr() as usize)
             .unwrap();
@@ -895,7 +898,7 @@ mod tests {
     fn idle_run_completes_back_to_idle() {
         let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
         let id = SessionId(1);
-        reg.insert_idle(id, FakeMachine { turns: 0 });
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
         assert!(is_idle(&reg, id));
 
         let mut co = reg.checkout_run(id).expect("idle → run");
@@ -914,7 +917,7 @@ mod tests {
     fn multi_hole_any_order_resume_and_run_over_parked() {
         let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
         let id = SessionId(2);
-        reg.insert_idle(id, FakeMachine { turns: 0 });
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
 
         let co = reg.checkout_run(id).expect("idle → run");
         co.restore_suspended(vec![Hole("h1")]);
@@ -936,7 +939,7 @@ mod tests {
     fn resume_on_non_member_hole_is_wrong_hole_and_consumes_nothing() {
         let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
         let id = SessionId(3);
-        reg.insert_idle(id, FakeMachine { turns: 0 });
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
         let co = reg.checkout_run(id).expect("idle → run");
         co.restore_suspended(vec![Hole("h1")]);
 
@@ -963,7 +966,7 @@ mod tests {
     fn child_checkout_on_idle_is_not_suspended() {
         let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
         let id = SessionId(6);
-        reg.insert_idle(id, FakeMachine { turns: 0 });
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
         assert_eq!(err(reg.checkout_child(id)), CheckoutError::NotSuspended(id));
     }
 
@@ -971,7 +974,7 @@ mod tests {
     fn dropping_a_checkout_restores_the_carried_hole_set() {
         let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
         let id = SessionId(11);
-        reg.insert_idle(id, FakeMachine { turns: 0 });
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut co = reg.checkout_run(id).expect("idle -> run");
@@ -1001,7 +1004,7 @@ mod tests {
     fn a_stale_checkout_cannot_resurrect_a_removed_entry() {
         let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
         let id = SessionId(20);
-        reg.insert_idle(id, FakeMachine { turns: 0 });
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
         let co = reg.checkout_run(id).expect("idle -> run");
 
         // The entry is removed while `co` is still outstanding (e.g. a
@@ -1024,11 +1027,11 @@ mod tests {
     fn a_stale_checkout_cannot_clobber_a_reinstalled_entry() {
         let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
         let id = SessionId(21);
-        reg.insert_idle(id, FakeMachine { turns: 1 });
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 1 }));
         let stale = reg.checkout_run(id).expect("idle -> run");
 
         reg.remove(id);
-        reg.insert_idle(id, FakeMachine { turns: 2 });
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 2 }));
 
         stale.restore_suspended(Vec::new());
         let mut co = reg
@@ -1049,7 +1052,7 @@ mod tests {
     fn receipt_settles_like_a_checkout_and_respects_the_epoch_guard() {
         let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
         let id = SessionId(40);
-        reg.insert_idle(id, FakeMachine { turns: 0 });
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
 
         let co = reg.checkout_run(id).expect("idle -> run");
         let (mut machine, receipt) = co.into_parts();
@@ -1071,11 +1074,11 @@ mod tests {
         // A stale receipt from BEFORE a remove+reinstall must not resurrect
         // or clobber — same epoch guard as a borrowed `Checkout`.
         reg.remove(id);
-        reg.insert_idle(id, FakeMachine { turns: 9 });
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 9 }));
         let stale_co = reg.checkout_run(id).expect("fresh entry checkoutable");
         let (stale_machine, stale_receipt) = stale_co.into_parts();
         reg.remove(id);
-        reg.insert_idle(id, FakeMachine { turns: 99 });
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 99 }));
         reg.settle_suspended(stale_receipt, stale_machine, Vec::new());
         let mut co = reg.checkout_run(id).expect("the fresh entry survives");
         assert_eq!(co.machine().turns, 99);
@@ -1086,7 +1089,7 @@ mod tests {
     fn wedged_refuses_every_checkout_until_removed() {
         let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
         let id = SessionId(30);
-        reg.insert_idle(id, FakeMachine { turns: 0 });
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
         let co = reg.checkout_run(id).expect("idle -> run");
         co.mark_wedged(Instant::now());
 
@@ -1097,7 +1100,7 @@ mod tests {
         assert_eq!(reg.label(id), Some("wedged (a turn timed out)".to_string()));
 
         reg.remove(id);
-        reg.insert_idle(id, FakeMachine { turns: 0 });
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
         assert!(is_idle(&reg, id), "reinstalling reclaims the slot");
     }
 
@@ -1106,7 +1109,7 @@ mod tests {
         let reg: std::sync::Arc<SessionRegistry<FakeMachine, Hole>> =
             std::sync::Arc::new(SessionRegistry::new());
         let id = SessionId(31);
-        reg.insert_idle(id, FakeMachine { turns: 7 });
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 7 }));
         let running = reg.checkout_run(id).expect("first owner");
 
         let waiter_registry = std::sync::Arc::clone(&reg);
@@ -1130,7 +1133,7 @@ mod tests {
             std::sync::Arc::new(SessionRegistry::new());
         let order = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
         let id = SessionId(33);
-        reg.insert_idle(id, FakeMachine { turns: 0 });
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
         let running = reg.checkout_run(id).expect("hold the machine");
 
         let mut waiters = Vec::new();
@@ -1161,8 +1164,8 @@ mod tests {
             std::sync::Arc::new(SessionRegistry::new());
         let first = SessionId(34);
         let second = SessionId(35);
-        reg.insert_idle(first, FakeMachine { turns: 0 });
-        reg.insert_idle(second, FakeMachine { turns: 0 });
+        reg.insert_idle(first, Box::new(FakeMachine { turns: 0 }));
+        reg.insert_idle(second, Box::new(FakeMachine { turns: 0 }));
         let first_running = reg.checkout_run(first).expect("hold first machine");
         let second_running = reg.checkout_run(second).expect("hold second machine");
 
@@ -1209,7 +1212,7 @@ mod tests {
     async fn waiting_checkout_reports_its_timeout_distinctly() {
         let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
         let id = SessionId(32);
-        reg.insert_idle(id, FakeMachine { turns: 0 });
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
         let running = reg.checkout_run(id).expect("hold the machine");
         let waited = std::time::Duration::from_millis(1);
 
@@ -1228,7 +1231,7 @@ mod tests {
     async fn queued_checkout_survives_long_ownership_and_cancelled_waiters() {
         let reg = std::sync::Arc::new(SessionRegistry::<FakeMachine, Hole>::new());
         let id = SessionId(36);
-        reg.insert_idle(id, FakeMachine { turns: 0 });
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
         let running = reg.checkout_run(id).unwrap();
         let first_registry = std::sync::Arc::clone(&reg);
         let first = tokio::spawn(async move {

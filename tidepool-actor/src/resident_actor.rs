@@ -6458,7 +6458,7 @@ where
         launch_resolver: Option<crate::WorkerLaunchResolver>,
     ) -> (Self, mpsc::UnboundedReceiver<LocalResidentDeployment>) {
         let machines = Arc::new(ActorMachineRegistry::<H, O>::new());
-        machines.insert_idle(session, machine);
+        machines.insert_idle(session, Box::new(machine));
         let runner = ResidentActorRunner::new(machines, source);
         let (deployments, receiver) = mpsc::unbounded_channel();
         let environment = ResidentEnvironment {

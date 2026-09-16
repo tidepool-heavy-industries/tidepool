@@ -997,7 +997,7 @@ impl Harness {
         sid: tidepool_repr::SessionId,
         session: Session,
     ) -> Result<(), HarnessError> {
-        self.tree.registry().insert_idle(sid, session);
+        self.tree.registry().insert_idle(sid, Box::new(session));
         Ok(())
     }
 

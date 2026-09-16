@@ -164,7 +164,7 @@ mod tests {
     fn refused_admission_restores_the_untouched_checkout_and_reports_the_holes() {
         let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
         let id = tidepool_repr::SessionId(1);
-        reg.insert_idle(id, FakeMachine { turns: 0 });
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
         let co = reg.checkout_run(id).expect("idle -> run");
         co.restore_suspended(vec![Hole("h1")]);
 
@@ -188,7 +188,7 @@ mod tests {
     fn admitted_checkout_is_returned_for_the_caller_to_drive() {
         let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
         let id = tidepool_repr::SessionId(2);
-        reg.insert_idle(id, FakeMachine { turns: 0 });
+        reg.insert_idle(id, Box::new(FakeMachine { turns: 0 }));
         let co = reg.checkout_run(id).expect("idle -> run");
 
         let mut co = admit_checkout(co, |holes| holes.is_empty()).expect("idle admits");

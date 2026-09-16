@@ -148,7 +148,7 @@ impl<M> NodeTree<M> {
         let mut inner = self.inner.lock();
         let session = SessionId(inner.next_session_id);
         inner.next_session_id += 1;
-        self.registry.insert_idle(session, machine);
+        self.registry.insert_idle(session, Box::new(machine));
         session
     }
 
@@ -215,7 +215,7 @@ impl<M> NodeTree<M> {
 
         let session = SessionId(inner.next_session_id);
         inner.next_session_id += 1;
-        self.registry.insert_idle(session, machine);
+        self.registry.insert_idle(session, Box::new(machine));
 
         #[allow(clippy::expect_used, reason = "checked present above")]
         let entry = inner.nodes.get_mut(&node).expect("checked present above");

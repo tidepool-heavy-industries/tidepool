@@ -480,7 +480,16 @@ async fn hosted_lookup_and_status_use_actor_owned_views() {
         .and_then(|section| section.lines().nth(1))
         .and_then(|line| line.trim().split_once(" :: "))
         // Value lines carry an availability label: `[available] name :: type`.
-        .and_then(|(labelled, _)| labelled.rsplit(' ').next())
+        // Require the label itself, not just a parseable trailing token —
+        // an `[unavailable]`/`[unknown]` entry must not silently supply the
+        // callable spelling this test goes on to probe with.
+        .and_then(|(labelled, _)| {
+            assert!(
+                labelled.contains("[available]"),
+                "expected an `[available]` value line, got: {labelled}"
+            );
+            labelled.rsplit(' ').next()
+        })
         .expect("type query must return a callable spelling");
 
     let source = format!("({returned} probe :: Await (Settlement Int))");
