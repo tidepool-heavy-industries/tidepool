@@ -1479,7 +1479,9 @@ impl<'code> PreparedMachine<'code> {
             // externally reachable, as on Core.
             self.machine.deregister_persistent_root(root.addr());
         }
-        let raw = self.handles.insert_handle(slot, realm);
+        let raw = self
+            .handles
+            .insert_handle(slot, realm, evidence.continuation_rep);
         self.assert_rooting_receipt();
         Ok((
             PreparedHandle {
@@ -1605,7 +1607,7 @@ impl<'code> PreparedMachine<'code> {
                 return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
             }
             for ((field_index, rep), root) in managed.into_iter().zip(roots) {
-                let raw = self.handles.insert_handle(root, realm);
+                let raw = self.handles.insert_handle(root, realm, rep);
                 output[field_index] = PreparedResult::Managed(PreparedHandle { raw, rep });
             }
         }
@@ -1824,7 +1826,9 @@ impl<'code> PreparedMachine<'code> {
             }
             return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
         };
-        let raw = self.handles.insert_handle(root, RealmId::ROOT);
+        let raw = self
+            .handles
+            .insert_handle(root, RealmId::ROOT, RuntimeRep::LiftedRef);
         Ok(PreparedHandle {
             raw,
             rep: RuntimeRep::LiftedRef,
@@ -1972,7 +1976,9 @@ impl<'code> PreparedMachine<'code> {
             }
             return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
         };
-        let raw = self.handles.insert_handle(root, realm);
+        let raw = self
+            .handles
+            .insert_handle(root, realm, RuntimeRep::LiftedRef);
         Ok(PreparedHandle {
             raw,
             rep: RuntimeRep::LiftedRef,
@@ -2097,10 +2103,10 @@ impl<'code> PreparedMachine<'code> {
     /// scopes.
     #[must_use]
     pub fn prepared_handle_of(&self, raw: ValueHandle) -> Option<PreparedHandle> {
-        self.handles.handle(raw)?;
+        let entry = self.handles.handle(raw)?;
         Some(PreparedHandle {
             raw,
-            rep: RuntimeRep::LiftedRef,
+            rep: entry.rep,
         })
     }
 
@@ -2446,7 +2452,7 @@ impl<'code> InstalledProgram<'code> {
                     matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef)
                 });
             for ((logical, rep), root) in managed.zip(roots) {
-                let raw = handles.insert_handle(root, realm);
+                let raw = handles.insert_handle(root, realm, rep);
                 output[logical] = PreparedResult::Managed(PreparedHandle { raw, rep });
             }
         }

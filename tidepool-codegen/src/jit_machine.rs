@@ -2771,7 +2771,11 @@ impl JitEffectMachine {
         let Some(slot) = frame.live_payload_root.take() else {
             return Ok(None);
         };
-        Ok(Some(self.resources.insert_handle(slot, realm)))
+        Ok(Some(self.resources.insert_handle(
+            slot,
+            realm,
+            tidepool_repr::execution_schema::RuntimeRep::LiftedRef,
+        )))
     }
 
     /// The runtime resource scope owning `handle`, if it is live (minted and not yet released
@@ -2794,7 +2798,11 @@ impl JitEffectMachine {
         realm: RealmId,
     ) -> Result<ValueHandle, JitError> {
         self.ensure_reusable()?;
-        Ok(self.resources.insert_handle(slot, realm))
+        Ok(self.resources.insert_handle(
+            slot,
+            realm,
+            tidepool_repr::execution_schema::RuntimeRep::LiftedRef,
+        ))
     }
 
     /// Borrow the rooted slot behind a live handle without changing ownership.

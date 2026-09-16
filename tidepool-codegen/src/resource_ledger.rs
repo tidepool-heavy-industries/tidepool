@@ -82,10 +82,15 @@ pub(crate) struct ContinuationFrame {
     pub(crate) evidence: FrameEvidence,
 }
 
-/// One live handle's rooted slot and cleanup owner.
+/// One live handle's rooted slot, cleanup owner, and the representation of
+/// the word its slot holds. Core mints only lifted heap pointers; the
+/// prepared machine also mints `UnliftedRef` handles (byte arrays, boxed
+/// arrays), and a bare-handle delivery must recover that representation from
+/// the ledger, not assume it.
 pub(crate) struct HandleEntry {
     pub(crate) slot: RootSlot,
     pub(crate) realm: RealmId,
+    pub(crate) rep: RuntimeRep,
 }
 
 /// The one machine-local owner for opaque rooted-value identities.
@@ -110,9 +115,11 @@ impl RootHandleLedger {
         self.handles.len()
     }
 
-    pub(crate) fn insert(&mut self, slot: RootSlot, realm: RealmId) -> ValueHandle {
+    pub(crate) fn insert(&mut self, slot: RootSlot, realm: RealmId, rep: RuntimeRep) -> ValueHandle {
         let handle = ValueHandle::fresh();
-        let replaced = self.handles.insert(handle.0, HandleEntry { slot, realm });
+        let replaced = self
+            .handles
+            .insert(handle.0, HandleEntry { slot, realm, rep });
         debug_assert!(replaced.is_none(), "fresh value handle must not collide");
         handle
     }
@@ -269,8 +276,15 @@ impl ResourceLedger {
         self.handles.try_reserve(additional)
     }
 
-    pub(crate) fn insert_handle(&mut self, slot: RootSlot, realm: RealmId) -> ValueHandle {
-        self.handles.insert(slot, realm)
+    /// Mint a handle for `slot`, recording `rep` as the representation of the
+    /// word the slot holds (see [`HandleEntry::rep`]).
+    pub(crate) fn insert_handle(
+        &mut self,
+        slot: RootSlot,
+        realm: RealmId,
+        rep: RuntimeRep,
+    ) -> ValueHandle {
+        self.handles.insert(slot, realm, rep)
     }
 
     pub(crate) fn handle(&self, handle: ValueHandle) -> Option<&HandleEntry> {
@@ -323,6 +337,22 @@ impl ResourceLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_handle_records_the_representation_it_was_minted_with() {
+        let mut ledger = ResourceLedger::default();
+        let mut cell: *mut u8 = std::ptr::null_mut();
+        // SAFETY: the ledger only stores the slot address here; nothing reads
+        // through it in this test, and `cell` outlives the ledger.
+        let slot = unsafe { RootSlot::new(&mut cell) };
+        let lifted = ledger.insert_handle(slot, RealmId::ROOT, RuntimeRep::LiftedRef);
+        let unlifted = ledger.insert_handle(slot, RealmId::ROOT, RuntimeRep::UnliftedRef);
+        assert_eq!(ledger.handle(lifted).map(|e| e.rep), Some(RuntimeRep::LiftedRef));
+        assert_eq!(
+            ledger.handle(unlifted).map(|e| e.rep),
+            Some(RuntimeRep::UnliftedRef)
+        );
+    }
 
     #[test]
     fn cancel_flags_are_stable_within_a_scope_and_isolated_between_scopes() {
