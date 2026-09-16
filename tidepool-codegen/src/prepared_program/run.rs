@@ -79,6 +79,11 @@ pub enum ExecutionError {
     /// A host answer could not be built; nothing was allocated or published.
     #[error("host answer: {0}")]
     Answer(#[from] super::answer::AnswerBuildError),
+    /// A major collection or retirement was requested while generated frames,
+    /// temporary roots or an observation borrow were live, or before any
+    /// program installed a heap. Nothing was moved or freed.
+    #[error("the machine is not quiescent")]
+    NotQuiescent,
     #[error("constructor host id {host_id:?} already names {existing:?}, not {identity:?}")]
     HostIdConflict {
         host_id: tidepool_repr::DataConId,

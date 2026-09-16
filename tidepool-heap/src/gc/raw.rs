@@ -104,6 +104,23 @@ impl DescriptorSpace {
         Ok(())
     }
 
+    /// Retire one installed program's contribution: the layouts only it
+    /// owned (`headers`) and its static region. Shared layouts (interned
+    /// constructors) are not named here and stay admitted.
+    pub fn retire_owner(
+        &mut self,
+        headers: &[usize],
+        region: Option<&Arc<crate::static_region::StaticRegion>>,
+    ) {
+        for header in headers {
+            self.descriptors.remove(header);
+        }
+        if let Some(region) = region {
+            self.static_regions
+                .retain(|admitted| !Arc::ptr_eq(admitted, region));
+        }
+    }
+
     /// Union another installed program's immutable static image into this
     /// space's admitted set. See [`Self::admit_static_reference`].
     pub fn extend_static_region(

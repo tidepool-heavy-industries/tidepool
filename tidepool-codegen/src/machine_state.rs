@@ -419,6 +419,27 @@ impl MachineState {
         self.stack_map_registry.borrow_mut().clear();
     }
 
+    /// Unlink one program's registry by identity, wherever it sits in the
+    /// chain: program retirement, which is not LIFO. `true` if it was linked.
+    pub(crate) fn remove_stack_map_registry(&self, registry: &StackMapRegistry) -> bool {
+        let mut chain = self.stack_map_registry.borrow_mut();
+        let before = chain.len();
+        chain.retain(|linked| !std::ptr::eq(*linked, registry));
+        chain.len() != before
+    }
+
+    /// Number of linked stack-map registries: one per installed program
+    /// (accounting for retirement receipts).
+    pub(crate) fn stack_map_link_count(&self) -> usize {
+        self.stack_map_registry.borrow().len()
+    }
+
+    /// Depth of generated non-tail calls currently on the native stack: zero
+    /// at quiescence.
+    pub(crate) fn call_depth(&self) -> u32 {
+        self.call_depth.get()
+    }
+
     pub(crate) fn stack_map_registries(&self) -> Vec<*const StackMapRegistry> {
         self.stack_map_registry.borrow().clone()
     }
@@ -1172,6 +1193,60 @@ impl MachineState {
     pub(crate) fn clear_prepared_entries(&self) {
         self.prepared_callables.borrow_mut().clear();
         self.prepared_enters.borrow_mut().clear();
+    }
+
+    /// Program retirement: drop the call and enter rows one program owned,
+    /// before its pipeline is freed. An enterable header is owned by exactly
+    /// one program (its descriptors are minted per compile), so a retired
+    /// owner's rows have no other pointer to switch to; a header a live object
+    /// still carried would have kept the program live.
+    pub(crate) fn retire_prepared_entries(&self, callables: &[usize], enters: &[usize]) {
+        let mut targets = self.prepared_callables.borrow_mut();
+        for header in callables {
+            targets.remove(header);
+        }
+        let mut owners = self.prepared_enters.borrow_mut();
+        for header in enters {
+            owners.remove(header);
+        }
+    }
+
+    /// `(callable rows, enter rows)` currently registered.
+    pub(crate) fn prepared_entry_rows(&self) -> (usize, usize) {
+        (
+            self.prepared_callables.borrow().len(),
+            self.prepared_enters.borrow().len(),
+        )
+    }
+
+    /// Program retirement: remove the layouts only that program owned and
+    /// its static region from the live descriptor space.
+    pub(crate) fn retire_prepared_descriptors(
+        &self,
+        headers: &[usize],
+        region: &Arc<tidepool_heap::static_region::StaticRegion>,
+    ) -> Result<(), RuntimeError> {
+        let mut active = self
+            .gc_state
+            .try_borrow_mut()
+            .map_err(|_| RuntimeError::BadPointer)?;
+        let prepared = active
+            .as_mut()
+            .and_then(|state| state.prepared.as_mut())
+            .ok_or(RuntimeError::BadPointer)?;
+        prepared.space.retire_owner(headers, Some(region));
+        Ok(())
+    }
+
+    /// Program retirement: forget a literal pool once no installed program
+    /// can address it.
+    pub(crate) fn remove_prepared_byte_pool(
+        &self,
+        pool: &Arc<crate::prepared_program::static_bytes::PinnedBytes>,
+    ) {
+        self.prepared_byte_pools
+            .borrow_mut()
+            .retain(|known| !Arc::ptr_eq(known, pool));
     }
 
     pub(crate) fn resolve_prepared_call(

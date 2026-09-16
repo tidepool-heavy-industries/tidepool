@@ -7,7 +7,9 @@ use tidepool_bridge::Value;
 use tidepool_heap::execution_descriptor::{
     DescriptorState, DescriptorTraceError, ObjectDescriptor, ObjectKind,
 };
-use tidepool_heap::external_storage::{ExternalStorageKind, ExternalStorageValidationError};
+use tidepool_heap::external_storage::{
+    ExternalPayloadOwner, ExternalStorageKind, ExternalStorageValidationError,
+};
 use tidepool_heap::managed_reference::{tag_of, tag_valid, untag};
 use tidepool_heap::static_region::StaticRegion;
 use tidepool_repr::execution_schema::{RuntimeRep, StorageLayout};
@@ -357,6 +359,65 @@ impl<'a> ObservationHeap<'a> {
         self.object(encoded).map(|_| ())
     }
 
+    /// One step of a non-moving mark over the whole heap: classify `encoded`
+    /// and, for a heap object, read its managed edges without forcing
+    /// anything. A static reference names the region (by index in this
+    /// heap's admitted set) and is not traced into: a static object reaches
+    /// only its own program's statics and bytes. A boxed array's elements
+    /// come from the machine's external-payload view; a bytes payload has
+    /// no managed edges. Null edges are dropped.
+    pub(super) fn trace_step(&self, encoded: usize) -> Result<Traced, ObservationFailure> {
+        for (index, region) in self.statics.iter().enumerate() {
+            if region.admit(encoded)?.is_some() {
+                return Ok(Traced::Static { region: index });
+            }
+        }
+        let (descriptor, object, _) = self.object(encoded)?;
+        let header = descriptor.initial_header_word();
+        let mut children = Vec::new();
+        match descriptor.external_kind() {
+            Some(ExternalStorageKind::BoxedArray) => {
+                let owner = self
+                    .external_owner
+                    .ok_or(ObservationFailure::Unobservable(descriptor.kind()))?;
+                let handle = unsafe {
+                    descriptor.external_payload_slot(
+                        object.cast_mut(),
+                        descriptor.allocation_extent() as usize,
+                    )?
+                };
+                let published = unsafe { handle.read() };
+                if !published.is_null() {
+                    let slots = owner
+                        .slots(published, ExternalStorageKind::BoxedArray)
+                        .map_err(external_observation_error)?;
+                    for slot in slots {
+                        children.push(unsafe { slot.read() } as usize);
+                    }
+                }
+            }
+            Some(_) => {}
+            None => unsafe {
+                descriptor.for_each_trace_slot(
+                    object.cast_mut(),
+                    descriptor.allocation_extent() as usize,
+                    |slot| children.push(slot.read() as usize),
+                )?;
+            },
+        }
+        children.retain(|word| *word != 0);
+        Ok(Traced::Object { header, children })
+    }
+}
+
+/// What one mark step found: a reference into an installed program's static
+/// image, or a heap object with its descriptor header and managed edges.
+pub(super) enum Traced {
+    Static { region: usize },
+    Object { header: usize, children: Vec<usize> },
+}
+
+impl ObservationHeap<'_> {
     /// Read exactly one constructor descriptor without forcing any child.
     ///
     /// The returned seeds own copied field words, so the caller may root and

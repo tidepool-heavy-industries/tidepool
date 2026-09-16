@@ -52,6 +52,7 @@ pub use answer::{AnswerBuildError, AnswerPlan, MAX_ANSWER_DEPTH};
 pub use machine::{
     ImportBindings, PreparedCallOptions, PreparedHandle, PreparedInput, PreparedMachine,
     PreparedMachineOptions, PreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
+    Quiescent, ResidencyCounts, RetirementReceipt,
 };
 pub use run::{ExecutionError, ImportShapeFact, RunOptions, RunResult};
 #[cfg(test)]

@@ -205,7 +205,8 @@ impl PreparedRuntimeError {
                 | ExecutionError::HostIdConflict { .. }
                 | ExecutionError::UnknownProgram(_)
                 | ExecutionError::UnknownContinuation(_)
-                | ExecutionError::Answer(_) => PreparedFailureKind::Rejected,
+                | ExecutionError::Answer(_)
+                | ExecutionError::NotQuiescent => PreparedFailureKind::Rejected,
                 ExecutionError::Runtime(failure) => {
                     if failure.disposition == MachineDisposition::Unavailable {
                         PreparedFailureKind::Integrity

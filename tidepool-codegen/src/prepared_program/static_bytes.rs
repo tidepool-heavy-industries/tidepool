@@ -41,6 +41,12 @@ impl PinnedBytes {
         self.by_value.get(logical)
     }
 
+    /// Whether this program pinned any literal bytes at all: a program with
+    /// none has no `Addr#` edges into itself and can retire by reachability.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.by_value.is_empty()
+    }
+
     /// Observe only logical literal bytes, excluding the implicit terminal NUL.
     pub(crate) fn logical_suffix(&self, address: usize) -> Option<&[u8]> {
         let candidate = self

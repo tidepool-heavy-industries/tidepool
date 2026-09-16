@@ -3030,7 +3030,7 @@ impl Drop for JitEffectMachine {
         // roots, but only on a session machine — doing it here makes the
         // "registered from park until resume, and no longer" invariant hold on
         // every drop path.
-        for mut frame in self.resources.drain_continuations() {
+        for frame in self.resources.drain_continuations() {
             let slot: *mut *mut u8 = frame.cell.slot();
             self.machine_state.deregister_stowed_root(slot);
         }

@@ -19,43 +19,51 @@ in a receipt without ever aliasing a later install.
 
 ## Slice 1b: liveness, retirement and the receipt (decisions 6, 3, 2 without compaction, 7, 8)
 
-Interfaces:
+Landed on the machine side. Interfaces as built:
 
-- `PreparedMachine::quiesce(&mut self) -> Result<Quiescent<'_>, ExecutionError>`
-  returns a token only when `call_depth == 0`, `rust_roots_len() == 0`,
-  `prepared_old_space().is_none()`, GC state is installed, and the disposition
-  is `Reusable`. `collect_major`, `retire` and install-time `collect_on` take
-  the token. The allocation trigger cannot construct one.
-- `InstalledProgram` keeps, beside its code custody, the program's static
-  region, the descriptor headers it owns (thunk, function and PAP layouts:
-  its `enter_owned_headers` plus its PAP layouts) and its byte ranges.
-- Owner sets: `owners: BTreeMap<usize /* header */, BTreeSet<ProgramId>>`
-  for enterable headers; the interner's constructor descriptors stay
-  ownerless and are kept alive by the census.
-- Mark: a worklist over tagged words seeded from every persistent root
-  (handles, bindings), every stowed root (parked frames) and every pin,
-  classified through the same three-way test `ObservationHeap::object` uses
-  (static region, old-space arena, nursery exact start) and traced through
-  `ObjectDescriptor::for_each_trace_slot`. A static hit marks the region's
-  program and stops. A traced object's header marks its owners and joins the
-  census. `Updated` thunks trace only their target. Programs with byte
-  storage stay pinned and are reported, not retired (edge (c) deferred).
-- Retirement, per unmarked program, in the contract's order: deregister its
-  block roots and purge remembered slots inside its block, static region and
-  byte ranges; remove its owner from call and enter rows (a row whose owner
-  set empties and whose header the census did not see is deleted, and a
-  surviving owner's code pointer replaces a retired owner's); remove its
-  descriptors from the machine-wide sets unless the census saw them; unlink
-  its stack-map registry by identity; drop its static region; free the
-  block; push the receipt; drop the `CompiledProgram`.
-- `RetirementReceipt { programs, handles, block_words, old_bytes,
-  external_bytes, code_owners_freed }` is returned from `collect_major`, and
-  the runtime drains it synchronously: remove `ProgramFacts`, release that
-  program's leases, drop its site witnesses (a canonical witness whose owner
-  retires moves to a surviving equivalent owner or is deleted).
+- `PreparedMachine::quiesce(&self) -> Result<Quiescent, ExecutionError>`
+  mints the token only when the disposition is `Reusable`, `call_depth == 0`,
+  `rust_roots_len() == 0`, no observation borrows old space and GC state is
+  installed; otherwise `NotQuiescent` (the runtime classifies it as a
+  rejection). `collect_major(Quiescent)` consumes the token, re-checks, runs
+  ordinary collection, marks, retires. The allocation trigger cannot mint one.
+- `InstalledProgram` records what install minted for the program: its static
+  region, the descriptor headers it owns (`owned_headers`), its callable
+  headers, and whether it has pinned byte storage. Ownership is per program;
+  a header owned by two programs is not shared (each program owns its own
+  enterable descriptors), so no header-to-owners map was needed. Interned
+  constructors have no owner and are never retired.
+- Mark: a worklist over tagged words seeded from every value handle, every
+  parked frame's cell (a prepared frame's evidence owner and runner are live
+  by construction), every pin, and the root blocks of programs found live.
+  `ObservationHeap::trace_step` classifies a word as `Traced::Static
+  { region }` (marks the region's program, stops) or `Traced::Object
+  { header, children }` (marks the header's owner, continues). The mark is
+  non-moving and forces nothing. Programs with byte storage are pinned and
+  reported (edge (c) deferred). There is no census: a descriptor row is
+  retired iff its owner retires, which is sound because owned descriptors are
+  only ever reached through their owner's objects, and a reachable owned
+  object keeps its owner live.
+- Retirement follows decision 7's order: block roots and remembered ranges
+  (block and static region), call/enter rows, owned descriptor rows and
+  descriptor-space admission (`DescriptorSpace::retire_owner`), the stack-map
+  registry by identity, the static region and literal pool; the block, the
+  receipt entry and the code drop with the program.
+- `RetirementReceipt { programs, block_words, pinned_by_bytes, old_bytes }`
+  and `ResidencyCounts` (programs, block words, persistent roots, handles,
+  parked, stack-map links, static regions, descriptor/callable/enter rows).
+  `pin`/`unpin` hold a program across the install-to-bind gap.
 
-Acceptance for 1b: the contract's 10k loop with every counter flat except
-old and external bytes, which are reported.
+Acceptance met: `repeated_installs_retire_and_keep_residency_flat` (2k in the
+suite, `TIDEPOOL_RESIDENCY_ITERATIONS=10000` for the contract's loop) holds
+every `ResidencyCounts` field flat on every iteration; old bytes are reported
+until slice 1c.
+
+Still open from this slice, for the runtime (S4): drain the receipt
+synchronously after each major collection: remove `ProgramFacts`, release
+that program's leases, and re-home or drop its site witnesses; call
+`quiesce`/`collect_major` at the session's between-turn point; surface the
+counts in the session receipt.
 
 ## Slice 1c: descriptor-arena compaction (decision 2 remainder)
 

@@ -67,7 +67,7 @@ use crate::resource_ledger::{
     ContinuationFrame, FrameCell, FrameEvidence, PreparedFrameEvidence, ResourceLedger,
 };
 use crate::suspension::{ContinuationId, ParkKind, RealmId, ValueHandle};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -107,18 +107,70 @@ impl ProgramCustody<'_> {
 pub struct ProgramId(u32);
 
 /// One installed program's code custody, root block included (the block is
-/// a field of the `CompiledProgram`). Its contribution to the shared heap
-/// (pinned descriptor layouts, instantiated static image, stack maps) was
-/// folded into the machine-wide sets at install time and is not kept here
-/// either -- see the module doc.
+/// a field of the `CompiledProgram`), plus what retirement needs to undo
+/// its install: its static region, the descriptor headers only it owns (its
+/// thunk, function, PAP and external layouts; interned constructors are
+/// shared and ownerless), and its call/enter rows.
 struct InstalledProgram<'code> {
     program: ProgramCustody<'code>,
+    statics: Arc<StaticRegion>,
+    owned_headers: Vec<usize>,
+    callable_headers: Vec<usize>,
+    /// A program whose code embeds addresses into its own byte storage
+    /// cannot yet be proven unreachable through those addresses (lifetime
+    /// contract edge (c)); it stays installed and is reported instead.
+    pinned_by_bytes: bool,
+}
+
+/// Proof that the machine is at a quiescent point: no generated frame is
+/// live, no temporary root is registered, no observation borrows old space,
+/// the heap exists and the machine is reusable. Minted only by
+/// [`PreparedMachine::quiesce`] and consumed by the operations that may
+/// move or free what running code could otherwise be using. The allocation
+/// trigger has no `&mut PreparedMachine` and can never mint one.
+#[must_use]
+pub struct Quiescent(());
+
+/// What one major collection retired, for the runtime to drain
+/// synchronously: it removes the retired programs' facts and leases, and
+/// it reads the counts as residency evidence.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RetirementReceipt {
+    /// Programs retired, in id order.
+    pub programs: Vec<ProgramId>,
+    /// Root-block words freed with them.
+    pub block_words: usize,
+    /// Programs kept only because their byte storage may be addressed
+    /// (edge (c), deferred): reported, never retired.
+    pub pinned_by_bytes: Vec<ProgramId>,
+    /// Old-space bytes in use after the collection (reported; compaction of
+    /// descriptor arenas is a later slice).
+    pub old_bytes: usize,
+}
+
+/// Machine residency counters, each reported separately so a leak in one
+/// class cannot hide behind another.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResidencyCounts {
+    pub programs: usize,
+    pub block_words: usize,
+    pub persistent_roots: usize,
+    pub handles: usize,
+    pub parked: usize,
+    pub stack_map_links: usize,
+    pub static_regions: usize,
+    pub descriptor_rows: usize,
+    pub callable_rows: usize,
+    pub enter_rows: usize,
 }
 
 pub struct PreparedMachine<'code> {
     programs: BTreeMap<ProgramId, InstalledProgram<'code>>,
     /// The next id [`Self::install`] mints; never decremented.
     next_program: u32,
+    /// Programs a caller holds live regardless of reachability
+    /// ([`Self::pin`]): the install-to-bind gap, and explicit retention.
+    pins: BTreeSet<ProgramId>,
     nursery_bytes: usize,
     /// Value handles, parked continuations AND realm-scoped cancellation
     /// flags for this machine, shared exactly as `JitEffectMachine` shares
@@ -318,6 +370,7 @@ impl<'code> PreparedMachine<'code> {
         Ok(Self {
             programs: BTreeMap::new(),
             next_program: 0,
+            pins: BTreeSet::new(),
             nursery_bytes: options.nursery_bytes,
             handles: ResourceLedger::default(),
             // No heap exists until the first program installs
@@ -398,10 +451,37 @@ impl<'code> PreparedMachine<'code> {
         // Rollback (if any) deregisters the candidate block's roots while
         // `program` still owns the block.
         drop(transaction);
-        staged?;
+        let statics = staged?;
+        let compiled = program.get();
+        let constructors: HashSet<usize> = compiled
+            .interned_constructors
+            .iter()
+            .map(|(_, descriptor)| descriptor.initial_header_word())
+            .collect();
+        let owned_headers = compiled
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.initial_header_word())
+            .filter(|header| !constructors.contains(header))
+            .collect();
+        let callable_headers = compiled
+            .callables
+            .iter()
+            .map(|callable| callable.header)
+            .collect();
+        let pinned_by_bytes = !compiled.bytes.is_empty();
         let id = ProgramId(self.next_program);
         self.next_program += 1;
-        self.programs.insert(id, InstalledProgram { program });
+        self.programs.insert(
+            id,
+            InstalledProgram {
+                program,
+                statics,
+                owned_headers,
+                callable_headers,
+                pinned_by_bytes,
+            },
+        );
         Ok(id)
     }
 
@@ -409,7 +489,7 @@ impl<'code> PreparedMachine<'code> {
         &mut self,
         compiled: &CompiledProgram,
         imports: &ImportBindings,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<Arc<StaticRegion>, ExecutionError> {
         // A constructor identity this machine already shares must be
         // declared identically, with the same descriptor, by the incoming
         // program; otherwise nothing is absorbed and nothing else happens.
@@ -672,7 +752,7 @@ impl<'code> PreparedMachine<'code> {
         // program's own heap tops initialized -- see the per-branch comments
         // above), so there is nothing left to publish here.
 
-        self.statics.push(statics);
+        self.statics.push(Arc::clone(&statics));
         self.machine
             .register_prepared_byte_pool(Arc::clone(&compiled.bytes));
         self.descriptors
@@ -702,7 +782,230 @@ impl<'code> PreparedMachine<'code> {
         );
 
         self.interner = staged_interner;
+        Ok(statics)
+    }
+
+    // --- residency: pins, quiescence, major collection, retirement --------
+
+    /// Hold `program` live until [`Self::unpin`], whatever reaches it. The
+    /// runtime pins a program between install and the first binding made
+    /// from its tops; a test pins what it means to keep.
+    pub fn pin(&mut self, program: ProgramId) -> Result<(), ExecutionError> {
+        if !self.programs.contains_key(&program) {
+            return Err(ExecutionError::UnknownProgram(program));
+        }
+        self.pins.insert(program);
         Ok(())
+    }
+
+    /// Release a pin. `false` if it was not held.
+    pub fn unpin(&mut self, program: ProgramId) -> bool {
+        self.pins.remove(&program)
+    }
+
+    /// Prove the machine is quiescent (see [`Quiescent`]). A typed refusal
+    /// otherwise: a major collection or retirement must never run while
+    /// generated frames, temporary roots or an observation borrow could be
+    /// looking at what it moves or frees.
+    pub fn quiesce(&self) -> Result<Quiescent, ExecutionError> {
+        let unavailable = |cause| runtime_error(&self.machine, cause);
+        if self.machine.disposition() != MachineDisposition::Reusable {
+            return Err(self.machine.last_failure().map_or_else(
+                || unavailable(RuntimeError::BadPointer),
+                ExecutionError::Runtime,
+            ));
+        }
+        if self.machine.call_depth() != 0
+            || self.machine.rust_roots_len() != 0
+            || unsafe { self.machine.prepared_old_space() }.is_some()
+            || self.machine.gc_active_range().is_none()
+        {
+            return Err(ExecutionError::NotQuiescent);
+        }
+        Ok(Quiescent(()))
+    }
+
+    /// The residency counters at this quiescent point.
+    #[must_use]
+    pub fn residency(&self) -> ResidencyCounts {
+        let (callable_rows, enter_rows) = self.machine.prepared_entry_rows();
+        ResidencyCounts {
+            programs: self.programs.len(),
+            block_words: self
+                .programs
+                .values()
+                .map(|installed| installed.program.get().root_block.len())
+                .sum(),
+            persistent_roots: self.machine.persistent_roots_count(),
+            handles: self.handle_count(),
+            parked: self.parked_count(),
+            stack_map_links: self.machine.stack_map_link_count(),
+            static_regions: self.statics.len(),
+            descriptor_rows: self.descriptor_registry.len(),
+            callable_rows,
+            enter_rows,
+        }
+    }
+
+    /// Mark the live programs and retire the rest.
+    ///
+    /// A program is live when the mark reaches it from a handle, a parked
+    /// frame (its evidence owner and runner included), a pin, or a live
+    /// program's root block: through a live object whose header is a
+    /// descriptor the program owns, or a reference into its static image
+    /// (lifetime contract decision 1). The mark is non-moving and forces
+    /// nothing; ordinary collection runs first so it sees a compact nursery.
+    /// Programs with byte storage are pinned and reported (edge (c) is a
+    /// later slice). Retirement follows decision 7's order; the receipt is
+    /// what the runtime drains.
+    pub fn collect_major(&mut self, token: Quiescent) -> Result<RetirementReceipt, ExecutionError> {
+        drop(token);
+        // Re-check: the token proves the caller went through the gate, and
+        // nothing may have changed between the two calls.
+        let _still_quiescent = self.quiesce()?;
+        collect_on(&self.machine, &mut self.vmctx, &self.old_space, 0)?;
+        let live = self.mark_live_programs()?;
+        let retiring: Vec<ProgramId> = self
+            .programs
+            .keys()
+            .copied()
+            .filter(|id| !live.contains(id))
+            .collect();
+        let mut receipt = RetirementReceipt {
+            pinned_by_bytes: self.byte_pinned_programs().collect(),
+            ..RetirementReceipt::default()
+        };
+        for id in retiring {
+            receipt.block_words += self.retire(id)?;
+            receipt.programs.push(id);
+        }
+        receipt.old_bytes = self.old_space.bytes_used();
+        self.assert_rooting_receipt();
+        Ok(receipt)
+    }
+
+    /// Programs held live by their byte storage (edge (c), deferred): never
+    /// retired, always reported.
+    fn byte_pinned_programs(&self) -> impl Iterator<Item = ProgramId> + '_ {
+        self.programs
+            .iter()
+            .filter(|(_, installed)| installed.pinned_by_bytes)
+            .map(|(id, _)| *id)
+    }
+
+    /// The set of live programs, by a worklist mark over handles, frames,
+    /// pins and live programs' root blocks.
+    fn mark_live_programs(&self) -> Result<BTreeSet<ProgramId>, ExecutionError> {
+        let order: Vec<ProgramId> = self.programs.keys().copied().collect();
+        let regions: Vec<Arc<StaticRegion>> = self
+            .programs
+            .values()
+            .map(|installed| Arc::clone(&installed.statics))
+            .collect();
+        let owners: HashMap<usize, ProgramId> = self
+            .programs
+            .iter()
+            .flat_map(|(id, installed)| installed.owned_headers.iter().map(move |h| (*h, *id)))
+            .collect();
+        let heap = self.observation_heap_over(&regions)?;
+
+        let mut live: BTreeSet<ProgramId> = self.pins.iter().copied().collect();
+        live.extend(self.byte_pinned_programs());
+        let mut work: Vec<usize> = self
+            .handles
+            .handle_slots()
+            .map(|slot| unsafe { slot.current() } as usize)
+            .collect();
+        for (root, evidence) in self.handles.frame_roots() {
+            work.push(unsafe { root.read() } as usize);
+            if let Some(evidence) = evidence {
+                live.insert(evidence.owner);
+                live.insert(evidence.runner);
+            }
+        }
+        let block_words = |id: ProgramId| -> Vec<usize> {
+            self.programs.get(&id).map_or_else(Vec::new, |installed| {
+                installed
+                    .program
+                    .get()
+                    .root_block
+                    .snapshot()
+                    .into_iter()
+                    .map(|word| word as usize)
+                    .collect()
+            })
+        };
+        for id in live.clone() {
+            work.extend(block_words(id));
+        }
+        let mut visited: HashSet<usize> = HashSet::new();
+        while let Some(word) = work.pop() {
+            if word == 0 || !visited.insert(tidepool_heap::managed_reference::untag(word)) {
+                continue;
+            }
+            let reached = match heap.trace_step(word)? {
+                super::observe::Traced::Static { region } => Some(order[region]),
+                super::observe::Traced::Object { header, children } => {
+                    work.extend(children);
+                    owners.get(&header).copied()
+                }
+            };
+            if let Some(program) = reached {
+                if live.insert(program) {
+                    work.extend(block_words(program));
+                }
+            }
+        }
+        Ok(live)
+    }
+
+    /// Retire one unreachable program in the contract's order; returns the
+    /// root-block words freed. Nothing here allocates or runs generated code.
+    fn retire(&mut self, id: ProgramId) -> Result<usize, ExecutionError> {
+        let installed = self
+            .programs
+            .remove(&id)
+            .ok_or(ExecutionError::UnknownProgram(id))?;
+        self.pins.remove(&id);
+        let compiled = installed.program.get();
+        // 1. Block roots and remembered slots inside the block and statics.
+        let block = &compiled.root_block;
+        for slot in 0..block.len() {
+            if let Some(root) = block.slot_address(slot) {
+                self.machine.deregister_persistent_root(root);
+                unsafe { root.write(std::ptr::null_mut()) };
+            }
+        }
+        let block_start = block.as_mut_ptr().cast::<u8>().cast_const();
+        self.machine.forget_remembered_range(block_start, unsafe {
+            block_start.add(block.len() * std::mem::size_of::<u64>())
+        });
+        let range = installed.statics.address_range();
+        self.machine
+            .forget_remembered_range(range.start as *const u8, range.end as *const u8);
+        // 2. Call and enter rows.
+        self.machine
+            .retire_prepared_entries(&installed.callable_headers, &compiled.enter_owned_headers);
+        // 3. Descriptor rows and the descriptor space: only what this program
+        //    owned; interned constructors stay shared.
+        let owned: HashSet<usize> = installed.owned_headers.iter().copied().collect();
+        self.descriptors
+            .retain(|descriptor| !owned.contains(&descriptor.initial_header_word()));
+        for header in &owned {
+            self.descriptor_registry.remove(header);
+        }
+        self.machine
+            .retire_prepared_descriptors(&installed.owned_headers, &installed.statics)
+            .map_err(|cause| runtime_error(&self.machine, cause))?;
+        // 4. Stack maps, by identity.
+        self.machine
+            .remove_stack_map_registry(&compiled.pipeline.stack_maps);
+        // 5. Static region and literal pool.
+        self.statics
+            .retain(|region| !Arc::ptr_eq(region, &installed.statics));
+        self.machine.remove_prepared_byte_pool(&compiled.bytes);
+        // 6-8. The block, the receipt entry and the code go with `installed`.
+        Ok(block.len())
     }
 
     /// Publish each verified import into the candidate's root block as a
@@ -1112,6 +1415,16 @@ impl<'code> PreparedMachine<'code> {
     /// installed); [`Self::install`] only reaches this after a declared
     /// import's handle has resolved, which itself requires a live heap.
     fn observation_heap(&self) -> Result<super::observe::ObservationHeap<'_>, ExecutionError> {
+        self.observation_heap_over(&self.statics)
+    }
+
+    /// [`Self::observation_heap`] admitting exactly `statics` (in that
+    /// order), so a caller that maps static hits back to programs supplies
+    /// the regions in the order it indexes them.
+    fn observation_heap_over<'s>(
+        &'s self,
+        statics: &'s [Arc<StaticRegion>],
+    ) -> Result<super::observe::ObservationHeap<'s>, ExecutionError> {
         let (start, size) = self
             .machine
             .gc_active_range()
@@ -1133,7 +1446,7 @@ impl<'code> PreparedMachine<'code> {
         )?;
         super::observe::ObservationHeap::new_with_registry_and_starts(
             nursery,
-            &self.statics,
+            statics,
             &self.descriptor_registry,
             &starts,
             Some(&*self.old_space),
@@ -1970,7 +2283,7 @@ impl Drop for PreparedMachine<'_> {
         // compiled pipelines, whose stack maps the chain points into) drop.
         // Parked frames first, so the "registered from park until take, and
         // no longer" invariant holds on every drop path.
-        for mut frame in self.handles.drain_continuations() {
+        for frame in self.handles.drain_continuations() {
             self.machine.deregister_stowed_root(frame.cell.slot());
         }
         self.machine.clear_prepared_old_space();
@@ -5931,6 +6244,187 @@ mod tests {
 
         assert!(machine.release(handle));
         assert_eq!(machine.handle_count(), handles_before);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// The same program `machine()` installs, as a linked program a later
+    /// install compiles against the machine's interner: a memoized CAF whose
+    /// top is a thunk (an owned header) returning the shared `Unit`.
+    fn unit_thunk_linked() -> tidepool_repr::execution_schema::LinkedProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("W5", "Unit"),
+            family: testing::identity("W5", "Unit"),
+            host_id: tidepool_repr::DataConId(900),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        });
+        wire.expressions.nodes[0] = ExprFrame::Construct {
+            constructor: ConstructorId(0),
+            fields: vec![],
+        };
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Thunk {
+            signature: SignatureId(0),
+            update: UpdatePolicy::Memoize,
+            captures: vec![],
+            body: 0,
+        };
+        link_program(
+            testing::prepare(wire).expect("unit thunk fixture"),
+            &MachineImports::default(),
+        )
+        .expect("unit thunk fixture links")
+    }
+
+    /// Bounded residency (lifetime contract, first slice): install a program
+    /// per iteration, retain its top (a thunk: an owned header, so the handle
+    /// keeps the program live), run it, release the previous iteration's
+    /// handle, quiesce and collect. Exactly the previous program retires each
+    /// time and every residency counter is flat after warm-up, so repeated
+    /// turns far beyond any fixed slot budget leave a bounded machine. The
+    /// surviving handle still observes at the end.
+    #[test]
+    fn repeated_installs_retire_and_keep_residency_flat() {
+        // 2,000 cycles run in the ordinary suite; the contract's 10,000 is
+        // the same loop with `TIDEPOOL_RESIDENCY_ITERATIONS=10000`.
+        let iterations = std::env::var("TIDEPOOL_RESIDENCY_ITERATIONS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(2_000_usize);
+        let (mut machine, first) = machine();
+        let call = PreparedCallOptions {
+            observation_budget: 100,
+            collect_before_observation: false,
+        };
+        let mut previous = machine
+            .retain_top(first, ValueId(0))
+            .expect("retain the first top");
+        let mut latest = first;
+        let mut baseline: Option<ResidencyCounts> = None;
+        for iteration in 0..iterations {
+            let compiled = machine
+                .compile_for_install(&unit_thunk_linked())
+                .expect("the shared Unit compiles against the machine interner");
+            let program = machine
+                .install_program(compiled, ImportBindings::new())
+                .expect("install");
+            let handle = machine
+                .retain_top(program, ValueId(0))
+                .expect("retain the new top");
+            machine
+                .run_entry(program, ValueId(0), &[], call, RealmId::ROOT)
+                .expect("the new program runs");
+            assert!(machine.release(previous));
+            previous = handle;
+            let token = machine.quiesce().expect("quiescent between calls");
+            let receipt = machine.collect_major(token).expect("major collection");
+            assert_eq!(
+                receipt.programs,
+                vec![latest],
+                "iteration {iteration}: exactly the released program retires"
+            );
+            assert!(receipt.pinned_by_bytes.is_empty());
+            latest = program;
+            let counts = machine.residency();
+            assert_eq!(counts.programs, 1);
+            match baseline {
+                None => baseline = Some(counts),
+                Some(baseline) => assert_eq!(counts, baseline, "iteration {iteration}"),
+            }
+        }
+        assert!(matches!(
+            machine.observe_handle(latest, previous, 100),
+            Ok(Value::Con(id, ref fields)) if id == DataConId(900) && fields.is_empty()
+        ));
+        assert!(machine.release(previous));
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// Liveness edges (a), (b) and (g): a consumer whose root block imports a
+    /// producer's static closure keeps the producer installed while the
+    /// consumer is pinned, even after every handle to the producer is
+    /// released; unpinning the consumer retires both. A pinned program is
+    /// never retired, and the gate refuses a collection while a temporary
+    /// root is registered.
+    #[test]
+    fn a_static_import_keeps_its_producer_live_until_the_consumer_retires() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            s3_closure_producer_program(),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("A installs");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        let produced = machine
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("A produces its retained closure f");
+        let [PreparedResult::Managed(handle_f)] = produced.values.as_slice() else {
+            panic!("A must return one managed closure");
+        };
+        let mut imports = ImportBindings::new();
+        imports.insert(s3_closure_producer_identity(), *handle_f);
+        let program_b = machine
+            .install_program(
+                s3_import_consumer_program(
+                    s3_closure_producer_identity(),
+                    RuntimeRep::LiftedRef,
+                    true,
+                ),
+                imports,
+            )
+            .expect("B installs against A's closure");
+        machine.pin(program_b).expect("B is installed");
+        assert!(machine.release(*handle_f));
+
+        // B is pinned; its block imports A's static closure, so A stays.
+        let token = machine.quiesce().expect("quiescent");
+        let receipt = machine.collect_major(token).expect("major collection");
+        assert!(receipt.programs.is_empty(), "nothing retires: {receipt:?}");
+        assert_eq!(machine.residency().programs, 2);
+        machine
+            .run_entry_retained(program_b, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("B still reads its import after the collection")
+            .values
+            .into_iter()
+            .for_each(|value| {
+                if let PreparedResult::Managed(handle) = value {
+                    assert!(machine.release(handle));
+                }
+            });
+
+        // Unpinned, B is unreachable, and with it A.
+        assert!(machine.unpin(program_b));
+        let token = machine.quiesce().expect("quiescent");
+        let receipt = machine.collect_major(token).expect("major collection");
+        assert_eq!(receipt.programs, vec![program_a, program_b]);
+        let counts = machine.residency();
+        assert_eq!(counts.programs, 0);
+        assert_eq!(counts.block_words, 0);
+        assert_eq!(counts.persistent_roots, 0);
+        assert_eq!(counts.stack_map_links, 0);
+        assert_eq!(counts.static_regions, 0);
+        assert_eq!((counts.callable_rows, counts.enter_rows), (0, 0));
+        assert!(matches!(
+            machine.run_entry(program_a, ValueId(0), &[], call, RealmId::ROOT),
+            Err(ExecutionError::UnknownProgram(id)) if id == program_a
+        ));
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 }

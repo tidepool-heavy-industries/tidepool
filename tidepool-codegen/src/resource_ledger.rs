@@ -34,9 +34,9 @@ pub(crate) enum FrameCell {
 
 impl FrameCell {
     /// The slot address the collector reads and rewrites.
-    pub(crate) fn slot(&mut self) -> *mut *mut u8 {
+    pub(crate) fn slot(&self) -> *mut *mut u8 {
         match self {
-            Self::Boxed(cell) => &mut **cell,
+            Self::Boxed(cell) => std::ptr::from_ref::<*mut u8>(&**cell).cast_mut(),
             Self::Slot(slot) => slot.addr(),
         }
     }
@@ -139,6 +139,11 @@ impl RootHandleLedger {
             .any(|entry| std::ptr::eq(entry.slot.addr(), slot.addr()))
     }
 
+    /// Every live handle's root slot.
+    pub(crate) fn slots(&self) -> impl Iterator<Item = RootSlot> + '_ {
+        self.handles.values().map(|entry| entry.slot)
+    }
+
     pub(crate) fn take_realm(&mut self, realm: RealmId) -> Vec<HandleEntry> {
         let ids: Vec<_> = self
             .handles
@@ -211,6 +216,28 @@ impl ResourceLedger {
 
     pub(crate) fn take_continuation(&mut self, id: ContinuationId) -> Option<ContinuationFrame> {
         self.continuations.remove(&id)
+    }
+
+    /// The root slot of every live handle: what a machine-level mark seeds
+    /// from, beside the parked frames' cells and payload roots.
+    pub(crate) fn handle_slots(&self) -> impl Iterator<Item = RootSlot> + '_ {
+        self.handles.slots()
+    }
+
+    /// Every parked frame's continuation cell and untaken live-payload root,
+    /// plus the frame's prepared evidence when it has one.
+    pub(crate) fn frame_roots(&self) -> Vec<(*mut *mut u8, Option<&PreparedFrameEvidence>)> {
+        self.continuations
+            .values()
+            .flat_map(|frame| {
+                let evidence = match &frame.evidence {
+                    FrameEvidence::Prepared(evidence) => Some(evidence),
+                    FrameEvidence::Core(_) => None,
+                };
+                let payload = frame.live_payload_root.map(|root| (root.addr(), evidence));
+                std::iter::once((frame.cell.slot(), evidence)).chain(payload)
+            })
+            .collect()
     }
 
     pub(crate) fn parked_ids(&self) -> Vec<ContinuationId> {
