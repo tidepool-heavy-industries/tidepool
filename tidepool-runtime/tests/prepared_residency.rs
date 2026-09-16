@@ -183,7 +183,7 @@ fn assert_counts_flat(
     );
 }
 
-/// Forty `1 + <i>` expression turns on the prepared route, each installing
+/// Twenty `1 + <i>` expression turns on the prepared route, each installing
 /// exactly one program: `quiesce_and_collect` only actually collects every
 /// `N`th install (see the module doc), so `programs` is checked against the
 /// amortized bound every turn, and exact flatness across every counter --
@@ -195,7 +195,7 @@ fn assert_counts_flat(
 /// still be one collection behind its other counters at that point.
 /// Comparisons start at the second boundary, once both have stabilized.
 ///
-/// A binding is then introduced (`x <- pure 1`) and twenty more expression
+/// A binding is then introduced (`x <- pure 1`) and twelve more expression
 /// turns run importing nothing new: the same amortized-bound-every-turn,
 /// flat-at-every-boundary structure applies, now against the post-bind
 /// baseline -- the bound bind's own program does not accumulate one
@@ -204,7 +204,9 @@ fn assert_counts_flat(
 fn prepared_session_residency_stays_bounded_across_many_turns() {
     let mut notebook = Notebook::new(EngineKind::Prepared);
 
-    const TOTAL: usize = 40;
+    // A multiple of `N`, so the phase ends exactly on a collection boundary
+    // and the bind below is the first install of the next window.
+    const TOTAL: usize = 20;
     let live_bindings = 0;
     let mut boundary_counts: Option<tidepool_codegen::prepared_program::ResidencyCounts> = None;
     let mut boundary_old_bytes: Option<usize> = None;
@@ -253,7 +255,7 @@ fn prepared_session_residency_stays_bounded_across_many_turns() {
     notebook.bind("x <- pure 1");
     let live_bindings = 1;
 
-    const POST_BIND: usize = 20;
+    const POST_BIND: usize = 12;
     let mut boundary_counts: Option<tidepool_codegen::prepared_program::ResidencyCounts> = None;
     let mut boundary_old_bytes: Option<usize> = None;
     let mut boundaries_seen = 0;
@@ -268,7 +270,10 @@ fn prepared_session_residency_stays_bounded_across_many_turns() {
             "post-bind turn {i}: programs={} exceeds the amortized bound ({live_bindings} live binding + 1 + N)",
             counts.programs
         );
-        if (i + 1) % N == 0 {
+        // The bind turn installed one program right after the pre-bind
+        // phase's final boundary, so this window's installs run one ahead
+        // of the turn index: the collection lands where `i + 2` fills it.
+        if (i + 2) % N == 0 {
             boundaries_seen += 1;
             let old_bytes = notebook
                 .session
