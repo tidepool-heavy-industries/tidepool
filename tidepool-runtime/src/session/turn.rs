@@ -482,42 +482,58 @@ const AESON_VALUE_ALIAS: &str = "TidepoolScaffoldAeson";
 /// scaffold the prepared route projects, the resume entry it re-enters
 /// parked continuations through, and the decode entry it lowers
 /// `Value`-carrying answers through. All three are unreachable from
-/// `__result`, so the Core closure never sees them. A specialization of
-/// [`prepared_scaffold_binding_named`] at the fixed
-/// [`PREPARED_SCAFFOLD_TARGET`]/[`PREPARED_RESUME_TARGET`]/[`PREPARED_DECODE_TARGET`]
-/// names every resident-turn template uses.
+/// `__result`, so the Core closure never sees them. Built from
+/// [`prepared_scaffold_binding_named`] (the settled line) and
+/// [`prepared_resume_decode_binding`] (the shared resume/decode pair) at the
+/// fixed [`PREPARED_SCAFFOLD_TARGET`]/[`PREPARED_RESUME_TARGET`]/
+/// [`PREPARED_DECODE_TARGET`] names every resident-turn template uses.
 fn prepared_scaffold_binding(target: &str) -> String {
-    prepared_scaffold_binding_named(
-        PREPARED_SCAFFOLD_TARGET,
-        PREPARED_RESUME_TARGET,
-        PREPARED_DECODE_TARGET,
-        target,
-    )
+    let mut out = prepared_scaffold_binding_named(PREPARED_SCAFFOLD_TARGET, target);
+    out.push_str(&prepared_resume_decode_binding());
+    out
 }
 
-/// As [`prepared_scaffold_binding`], but with the settled/resume/decode
-/// binder names supplied by the caller rather than fixed to
-/// [`PREPARED_SCAFFOLD_TARGET`]/[`PREPARED_RESUME_TARGET`]/[`PREPARED_DECODE_TARGET`].
-/// Every OTHER caller in this module settles exactly one target per compiled
-/// module and can use the fixed names via [`prepared_scaffold_binding`]; a
-/// caller settling MORE THAN ONE target in the same module (compiling
-/// several `--targets` in one spawn against a shared `meta.cbor`) must give
-/// each target's scaffold its own names here or the two settled bindings
-/// collide as duplicate top-level declarations. This is the ONE place the
-/// three scaffold lines' text is built — [`prepared_scaffold_binding`] is a
-/// thin specialization, not a second copy.
+/// As [`prepared_scaffold_binding`]'s settled line, but with the settled
+/// binder name supplied by the caller rather than fixed to
+/// [`PREPARED_SCAFFOLD_TARGET`]. Every OTHER caller in this module settles
+/// exactly one target per compiled module and can use the fixed name via
+/// [`prepared_scaffold_binding`]; a caller settling MORE THAN ONE target in
+/// the same module (compiling several `--targets` in one spawn against a
+/// shared `meta.cbor`) must give each target's settled binding its own name
+/// here or the settled bindings collide as duplicate top-level
+/// declarations. This is the ONE place the settled line's text is built —
+/// [`prepared_scaffold_binding`] is a thin specialization, not a second
+/// copy.
+///
+/// Does NOT emit `__resume`/`__decodeValue` — see
+/// [`prepared_resume_decode_binding`]'s doc for why those stay
+/// fixed-named and module-shared rather than following `scaffold_target`.
 #[must_use]
-pub fn prepared_scaffold_binding_named(
-    scaffold_target: &str,
-    resume_target: &str,
-    decode_target: &str,
-    target: &str,
-) -> String {
+pub fn prepared_scaffold_binding_named(scaffold_target: &str, target: &str) -> String {
+    format!("{scaffold_target} = {RESUME_ALIAS}.settle {target}\n")
+}
+
+/// The resume and decode entries a module needs beside its settled scaffold
+/// line(s) — see [`prepared_scaffold_binding`]'s doc for what each does.
+/// UNLIKE the settled line itself, these are fixed at
+/// [`PREPARED_RESUME_TARGET`]/[`PREPARED_DECODE_TARGET`] no matter how many
+/// targets a module settles: the runtime resolves a program's resume/decode
+/// roots by looking these exact names up in the program's own top-level
+/// bindings (`ProgramFacts::of` in `tidepool-runtime/src/session/prepared.rs`
+/// scans for `identity.occurrence == PREPARED_RESUME_TARGET`/
+/// `PREPARED_DECODE_TARGET`), and `__resume`/`__decodeValue`'s own bodies
+/// take no target-specific argument (`resumeLifted`/`eitherDecodeValue` are
+/// the same computation regardless of which settled entry suspended) — so a
+/// module settling several targets ([`with_settled_scaffolds`] in
+/// `tidepool-harness::engine`) emits this ONCE for the whole module, not
+/// once per target the way [`prepared_scaffold_binding_named`]'s settled
+/// line must be.
+#[must_use]
+pub fn prepared_resume_decode_binding() -> String {
     format!(
-        "{scaffold_target} = {RESUME_ALIAS}.settle {target}\n\
-         {resume_target} q x = {RESUME_ALIAS}.settle ({RESUME_ALIAS}.resumeLifted q x)\n\
-         {decode_target} :: {TEXT_ALIAS}.Text -> Either {TEXT_ALIAS}.Text {AESON_VALUE_ALIAS}.Value\n\
-         {decode_target} = {AESON_VALUE_ALIAS}.eitherDecodeValue\n"
+        "{PREPARED_RESUME_TARGET} q x = {RESUME_ALIAS}.settle ({RESUME_ALIAS}.resumeLifted q x)\n\
+         {PREPARED_DECODE_TARGET} :: {TEXT_ALIAS}.Text -> Either {TEXT_ALIAS}.Text {AESON_VALUE_ALIAS}.Value\n\
+         {PREPARED_DECODE_TARGET} = {AESON_VALUE_ALIAS}.eitherDecodeValue\n"
     )
 }
 

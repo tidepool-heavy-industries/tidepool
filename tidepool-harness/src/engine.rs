@@ -55,7 +55,9 @@ use tidepool_bridge::Value;
 use tidepool_extract_cmd::ResolvedExtractBin;
 pub use tidepool_extract_cmd::{extract_spawn_count, reset_extract_spawn_count};
 use tidepool_repr::{CoreExpr, DataConTable};
-use tidepool_runtime::session::turn::{prepared_scaffold_binding_named, with_resume_import};
+use tidepool_runtime::session::turn::{
+    prepared_resume_decode_binding, prepared_scaffold_binding_named, with_resume_import,
+};
 use tidepool_runtime::session::{assemble_bind_module, insert_preamble_imports, place_turn_stmt, TurnCode};
 pub use tidepool_runtime::YieldSites;
 use tidepool_runtime::{
@@ -214,43 +216,50 @@ pub fn compile_turns_with_stable_inject(
         .collect())
 }
 
-/// The settled/resume/decode binder names one `target` gets when
-/// [`with_settled_scaffolds`] appends its scaffold — unique per target (not
-/// the fixed [`tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET`] triple
+/// The settled binder name one `target` gets when [`with_settled_scaffolds`]
+/// appends its scaffold line — unique per target (not the fixed
+/// [`tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET`]
 /// `run_turn`'s resident-turn templates use) because a fused compile can
 /// settle MORE than one target in the same module (the render+loop fusion —
 /// see [`compile_turns_prepared`]'s doc): two settled bindings both named
-/// `__prepared` would be a duplicate top-level declaration.
-fn settled_names(target: &str) -> (String, String, String) {
-    (
-        format!("__prepared_{target}"),
-        format!("__resume_{target}"),
-        format!("__decode_{target}"),
-    )
+/// `__prepared` would be a duplicate top-level declaration. `__resume`/
+/// `__decodeValue` stay FIXED-named and module-shared instead — see
+/// [`with_settled_scaffolds`]'s doc.
+fn settled_name(target: &str) -> String {
+    format!("__prepared_{target}")
 }
 
 /// Append the settled-scaffold lines every fragment compiled for a PREPARED
-/// session run needs, one per `targets` entry, using
-/// [`tidepool_runtime::session::prepared_scaffold_binding_named`] /
-/// [`tidepool_runtime::session::with_resume_import`] — the SAME text
-/// `run_turn`'s resident-turn templates append (`turn.rs`'s
-/// `prepared_scaffold_binding`/`with_resume_import`), not a second copy —
-/// rather than the fixed single-target names those templates use, since more
-/// than one target can share this module (see [`settled_names`]). Returns
-/// the augmented source and, for each of `targets` in order, the settled
-/// binder name to additionally request as a `--targets` entry: `target`
-/// itself stays the ordinary (unsettled) Core binder every existing reader
-/// of `.expr`/`.table` still gets, while the settled binder is the ONLY one
-/// whose `.prepared` a caller should keep.
+/// session run needs: one `__prepared_<target> = TidepoolResume.settle
+/// <target>` line per `targets` entry
+/// ([`tidepool_runtime::session::turn::prepared_scaffold_binding_named`],
+/// unique per target so a fused multi-target module never collides two
+/// settled bindings under one name), plus a SINGLE, fixed-named
+/// `__resume`/`__decodeValue` pair for the whole module
+/// ([`tidepool_runtime::session::turn::prepared_resume_decode_binding`]) —
+/// the runtime resolves a program's resume/decode roots by looking up those
+/// exact fixed names in its own top-level bindings (`ProgramFacts::of`,
+/// `tidepool-runtime/src/session/prepared.rs`), and their bodies take no
+/// target-specific argument, so emitting one pair per target would be both
+/// unresolvable (the wrong name) and redundant (identical text). Both
+/// pieces reuse the SAME text `run_turn`'s resident-turn templates append
+/// (`turn.rs`'s `prepared_scaffold_binding`/`with_resume_import` are built
+/// from the same two functions), not a second copy. Returns the augmented
+/// source and, for each of `targets` in order, the settled binder name to
+/// additionally request as a `--targets` entry: `target` itself stays the
+/// ordinary (unsettled) Core binder every existing reader of `.expr`/
+/// `.table` still gets, while the settled binder is the ONLY one whose
+/// `.prepared` a caller should keep.
 fn with_settled_scaffolds(source: &str, targets: &[&str]) -> (String, Vec<String>) {
     let mut out = with_resume_import(source);
     let mut scaffolds = Vec::with_capacity(targets.len());
     for target in targets {
-        let (scaffold, resume, decode) = settled_names(target);
-        out.push_str(&prepared_scaffold_binding_named(
-            &scaffold, &resume, &decode, target,
-        ));
+        let scaffold = settled_name(target);
+        out.push_str(&prepared_scaffold_binding_named(&scaffold, target));
         scaffolds.push(scaffold);
+    }
+    if !targets.is_empty() {
+        out.push_str(&prepared_resume_decode_binding());
     }
     (out, scaffolds)
 }
