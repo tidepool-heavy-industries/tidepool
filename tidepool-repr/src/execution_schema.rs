@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u64 = 10;
+pub const SCHEMA_VERSION: u64 = 11;
 pub const EXECUTION_ABI_VERSION: u64 = 5;
 
 macro_rules! dense_id {
@@ -331,6 +331,12 @@ pub enum SiteDelivery {
     ExitCellFill,
     TerminalCapture,
 }
+
+/// The bit that marks a synthetic reply site: the site an ordinary effect
+/// request is answered at, named by its request constructor in
+/// [`WireProgram::verb_sites`] rather than carried by the request. Dynamic
+/// site ids never set it, so the two ranges are disjoint.
+pub const SYNTHETIC_SITE_BIT: u64 = 1 << 63;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SiteRow {
@@ -731,6 +737,9 @@ pub struct WireProgram {
     pub entry: ValueId,
     pub types: Vec<TypeNode>,
     pub sites: Vec<SiteRow>,
+    /// Request constructors paired with the synthetic site row
+    /// ([`SYNTHETIC_SITE_BIT`]) that answers them.
+    pub verb_sites: Vec<(ConstructorId, u64)>,
 }
 
 /// Validated but not yet linked program. Its fields remain private so every
@@ -770,6 +779,9 @@ impl PreparedProgram {
     }
     pub fn sites(&self) -> &[SiteRow] {
         &self.wire.sites
+    }
+    pub fn verb_sites(&self) -> &[(ConstructorId, u64)] {
+        &self.wire.verb_sites
     }
     pub fn site(&self, site: u64) -> Option<&SiteRow> {
         self.wire.sites.iter().find(|row| row.site == site)

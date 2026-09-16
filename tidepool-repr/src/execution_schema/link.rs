@@ -103,6 +103,7 @@ mod tests {
             entry: ValueId(0),
             types: vec![],
             sites: vec![],
+            verb_sites: vec![],
         })
     }
 

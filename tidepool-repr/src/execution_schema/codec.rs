@@ -204,7 +204,7 @@ impl Decoder {
         if schema_version != super::SCHEMA_VERSION {
             return Err(ParseError::UnsupportedVersion(schema_version));
         }
-        let fields = array(value, 15, "program")?;
+        let fields = array(value, 16, "program")?;
         let target = self.target(&fields[5])?;
         let signatures = self.list(&fields[6], true, |this, value| this.signature(value))?;
         let globals = self.list(&fields[7], true, |this, value| this.global(value))?;
@@ -214,6 +214,7 @@ impl Decoder {
         let bindings = self.list(&fields[11], true, |this, value| this.top_group(value))?;
         let types = self.type_nodes(&fields[13])?;
         let sites = self.sites(&fields[14])?;
+        let verb_sites = self.verb_sites(&fields[15])?;
         Ok(WireProgram {
             envelope: ProgramEnvelope {
                 schema_version,
@@ -231,6 +232,7 @@ impl Decoder {
             entry: ValueId(u32_value(&fields[12], "entry value ID")?),
             types,
             sites,
+            verb_sites,
         })
     }
 
@@ -252,6 +254,22 @@ impl Decoder {
             return Err(ParseError::LimitExceeded("sites"));
         }
         self.list(value, false, |this, value| this.site_row(value))
+    }
+
+    fn verb_sites(&mut self, value: &Value) -> Result<Vec<(ConstructorId, u64)>, ParseError> {
+        let Value::Array(values) = value else {
+            return Err(malformed("verb site table", "array"));
+        };
+        if values.len() > self.limits.max_sites {
+            return Err(ParseError::LimitExceeded("verb sites"));
+        }
+        self.list(value, false, |_, value| {
+            let fields = array(value, 2, "verb site")?;
+            Ok((
+                ConstructorId(u32_value(&fields[0], "verb site constructor ID")?),
+                unsigned(&fields[1], "verb site ID")?,
+            ))
+        })
     }
 
     fn target(&mut self, value: &Value) -> Result<TargetDescriptor, ParseError> {
@@ -972,6 +990,7 @@ mod tests {
                 ]),
             ])]),
             n(0),
+            array(vec![]),
             array(vec![]),
             array(vec![]),
         ]);

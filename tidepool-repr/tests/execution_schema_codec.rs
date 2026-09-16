@@ -1,7 +1,8 @@
 use ciborium::value::Value as Cbor;
 use tidepool_repr::execution_schema::{
-    parse_program, Architecture, DecodeLimits, Endianness, ParseError, ProgramRequirements,
-    SiteDelivery, TargetDescriptor, TypeNode, TypeNodeId, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
+    parse_program, Architecture, ConstructorId, DecodeLimits, Endianness, ParseError,
+    ProgramRequirements, SiteDelivery, TargetDescriptor, TypeNode, TypeNodeId,
+    EXECUTION_ABI_VERSION, SCHEMA_VERSION, SYNTHETIC_SITE_BIT,
 };
 
 fn int(value: u64) -> Cbor {
@@ -30,6 +31,7 @@ fn root(signatures: Cbor) -> Cbor {
         Cbor::Array(vec![]),
         Cbor::Array(vec![]),
         int(0),
+        Cbor::Array(vec![]),
         Cbor::Array(vec![]),
         Cbor::Array(vec![]),
     ])
@@ -97,7 +99,23 @@ fn valid_closed_shape_reaches_semantic_validation() {
 }
 
 #[test]
-fn codec_rejects_schema_9_shape_before_enforcing_schema_10_length() {
+fn codec_rejects_schema_10_shape_before_enforcing_schema_11_length() {
+    // A schema-10 artifact has no verb-site table: it is refused by version,
+    // not misread as a malformed schema-11 program.
+    let mut old = root(Cbor::Array(vec![]));
+    let Cbor::Array(fields) = &mut old else {
+        unreachable!()
+    };
+    fields[1] = int(10);
+    fields.truncate(15);
+    assert!(matches!(
+        parse_program(&bytes(&old), &requirements(), DecodeLimits::default()),
+        Err(ParseError::UnsupportedVersion(10))
+    ));
+}
+
+#[test]
+fn codec_rejects_schema_9_shape_before_enforcing_schema_11_length() {
     let mut old = root(Cbor::Array(vec![]));
     let Cbor::Array(fields) = &mut old else {
         unreachable!()
@@ -583,6 +601,82 @@ fn codec_decodes_type_graph_and_site_rows() {
     assert!(matches!(
         parse_program(&bytes(&program), &requirements(), DecodeLimits::default()),
         Err(ParseError::InvalidReference(detail)) if detail.contains("type node")
+    ));
+}
+
+#[test]
+fn codec_decodes_verb_sites_beside_synthetic_rows() {
+    let mut program = scalar_program(Cbor::Array(vec![int(4), int(64)]));
+    let Cbor::Array(fields) = &mut program else {
+        unreachable!()
+    };
+    let symbol = |occurrence: &str| {
+        Cbor::Array(vec![
+            Cbor::Text("fixture".into()),
+            Cbor::Text("Effects".into()),
+            Cbor::Text("value".into()),
+            Cbor::Text(occurrence.into()),
+            Cbor::Array(vec![int(0)]),
+        ])
+    };
+    fields[8] = Cbor::Array(vec![Cbor::Array(vec![
+        symbol("Print"),
+        symbol("Console"),
+        Cbor::Array(vec![]),
+        Cbor::Array(vec![]),
+        Cbor::Array(vec![
+            Cbor::Array(vec![]),
+            int(1),
+            int(0),
+            Cbor::Array(vec![]),
+        ]),
+        Cbor::Array(vec![int(1)]),
+        int(1),
+        int(1),
+        int(9001),
+    ])]);
+    fields[13] = Cbor::Array(vec![Cbor::Array(vec![int(1)])]);
+    let synthetic = SYNTHETIC_SITE_BIT | 7;
+    fields[14] = Cbor::Array(vec![Cbor::Array(vec![
+        int(synthetic),
+        Cbor::Text("Effects.Print".into()),
+        int(0),
+        int(0),
+        int(0),
+        Cbor::Array(vec![]),
+    ])]);
+    fields[15] = Cbor::Array(vec![Cbor::Array(vec![int(0), int(synthetic)])]);
+
+    let prepared =
+        parse_program(&bytes(&program), &requirements(), DecodeLimits::default()).unwrap();
+    assert_eq!(prepared.verb_sites(), &[(ConstructorId(0), synthetic)]);
+    let row = prepared.site(synthetic).unwrap();
+    assert_eq!(row.delivery, SiteDelivery::HostAnswer);
+    assert!(row.inputs.is_empty());
+
+    // The table is bounded by the site limit and its entries are pairs.
+    let limits = DecodeLimits {
+        max_sites: 0,
+        ..DecodeLimits::default()
+    };
+    assert!(parse_program(&bytes(&program), &requirements(), limits).is_err());
+    let Cbor::Array(fields) = &mut program else {
+        unreachable!()
+    };
+    fields[15] = Cbor::Array(vec![Cbor::Array(vec![int(0)])]);
+    assert!(matches!(
+        parse_program(&bytes(&program), &requirements(), DecodeLimits::default()),
+        Err(ParseError::Malformed(_))
+    ));
+    // A synthetic id names only a synthetic row: a dynamic id is refused.
+    let Cbor::Array(fields) = &mut program else {
+        unreachable!()
+    };
+    fields[14] = Cbor::Array(vec![]);
+    fields[15] = Cbor::Array(vec![Cbor::Array(vec![int(0), int(7)])]);
+    assert!(matches!(
+        parse_program(&bytes(&program), &requirements(), DecodeLimits::default()),
+        Err(ParseError::InvalidReference(detail)) if detail.contains("synthetic range")
     ));
 }
 

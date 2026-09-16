@@ -5,7 +5,7 @@ use super::{
     Expr, ExprFrame, GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationId,
     ParseError, ProgramRequirements, ResultContract, RuntimeRep, ScalarLiteral, SignatureId,
     SymbolIdentity, TypeNode, TypeNodeId, ValueId, ValueRef, WireProgram, EXECUTION_ABI_VERSION,
-    SCHEMA_VERSION,
+    SCHEMA_VERSION, SYNTHETIC_SITE_BIT,
 };
 use recursion::{try_expand_and_collapse, MappableFrame, PartiallyApplied};
 use std::{cell::RefCell, rc::Rc};
@@ -1274,6 +1274,9 @@ impl<'a> Validator<'a> {
         if self.wire.sites.len() > self.limits.max_sites {
             return Err(ParseError::LimitExceeded("sites"));
         }
+        if self.wire.verb_sites.len() > self.limits.max_sites {
+            return Err(ParseError::LimitExceeded("verb sites"));
+        }
 
         for signature in &self.wire.signatures {
             self.bump_work(
@@ -1372,6 +1375,7 @@ impl<'a> Validator<'a> {
 
         self.check_type_nodes(&family_sizes)?;
         self.check_sites()?;
+        self.check_verb_sites()?;
 
         let mut operation_contracts = BTreeSet::new();
         for operation in &self.wire.operations {
@@ -1779,6 +1783,50 @@ impl<'a> Validator<'a> {
         Ok(())
     }
 
+    /// Each verb-site entry names a declared constructor (at most once) and
+    /// an admitted synthetic row; every synthetic row is named by one. With
+    /// dynamic ids never carrying [`SYNTHETIC_SITE_BIT`], the two site ranges
+    /// cannot collide.
+    fn check_verb_sites(&mut self) -> Result<(), ParseError> {
+        let mut constructors = BTreeSet::new();
+        let mut named = BTreeSet::new();
+        for index in 0..self.wire.verb_sites.len() {
+            self.bump_work(1)?;
+            let (constructor, site) = self.wire.verb_sites[index];
+            if constructor.0 as usize >= self.wire.constructors.len() {
+                return Err(ParseError::InvalidReference(format!(
+                    "verb site constructor {constructor:?}"
+                )));
+            }
+            if !constructors.insert(constructor) {
+                return Err(ParseError::DuplicateDefinition("verb site".into()));
+            }
+            if site & SYNTHETIC_SITE_BIT == 0 {
+                return Err(ParseError::InvalidReference(format!(
+                    "verb site {site} is not in the synthetic range"
+                )));
+            }
+            if !self.wire.sites.iter().any(|row| row.site == site) {
+                return Err(ParseError::InvalidReference(format!(
+                    "verb site {site} names no site row"
+                )));
+            }
+            named.insert(site);
+        }
+        if let Some(row) = self
+            .wire
+            .sites
+            .iter()
+            .find(|row| row.site & SYNTHETIC_SITE_BIT != 0 && !named.contains(&row.site))
+        {
+            return Err(ParseError::InvalidReference(format!(
+                "synthetic site {} is named by no verb site",
+                row.site
+            )));
+        }
+        Ok(())
+    }
+
     fn type_node(&self, id: TypeNodeId) -> Result<&TypeNode, ParseError> {
         self.wire
             .types
@@ -2062,6 +2110,7 @@ mod tests {
             entry: ValueId(0),
             types: vec![],
             sites: vec![],
+            verb_sites: vec![],
         }
     }
 
@@ -2293,6 +2342,54 @@ mod tests {
             validate_program(&program, &requirements(), DecodeLimits::default()),
             Err(ParseError::InvalidReference(detail)) if detail.contains("type node")
         ));
+    }
+
+    #[test]
+    fn verb_sites_name_declared_constructors_and_synthetic_rows() {
+        let mut program = valid_program();
+        program.types = vec![TypeNode::Text];
+        program.constructors = vec![empty_constructor("Print", 1, 1)];
+        let synthetic = SYNTHETIC_SITE_BIT | 41;
+        program.sites = vec![SiteRow {
+            site: synthetic,
+            origin: "Fixture.Print".into(),
+            ordinal: 0,
+            delivery: SiteDelivery::HostAnswer,
+            wire: TypeNodeId(0),
+            inputs: vec![],
+        }];
+        program.verb_sites = vec![(ConstructorId(0), synthetic)];
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+
+        // A synthetic row nobody names, and a verb site naming no row.
+        program.verb_sites.clear();
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidReference(detail)) if detail.contains("named by no verb site")
+        ));
+        program.verb_sites = vec![(ConstructorId(0), SYNTHETIC_SITE_BIT | 42)];
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidReference(detail)) if detail.contains("names no site row")
+        ));
+        // A dynamic id is never a verb site.
+        program.sites[0].site = 41;
+        program.verb_sites = vec![(ConstructorId(0), 41)];
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidReference(detail)) if detail.contains("synthetic range")
+        ));
+        program.sites[0].site = synthetic;
+        program.verb_sites = vec![(ConstructorId(1), synthetic)];
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidReference(detail)) if detail.contains("constructor")
+        ));
+        program.verb_sites = vec![(ConstructorId(0), synthetic), (ConstructorId(0), synthetic)];
+        assert_eq!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::DuplicateDefinition("verb site".into()))
+        );
     }
 
     #[test]
