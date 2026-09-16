@@ -43,6 +43,7 @@ pub(super) enum BasicScalarOperation {
     EqChar,
     NeChar,
     LeChar,
+    LtChar,
     GtChar,
     GeChar,
     Clz8,
@@ -100,6 +101,12 @@ impl ScalarFamily for BasicScalarFamily {
                     && returns_exact(signature, &[Int(64)]) =>
             {
                 Some(BasicScalarOperation::LeChar)
+            }
+            "ltChar#"
+                if signature.arguments == [Word(64), Word(64)]
+                    && returns_exact(signature, &[Int(64)]) =>
+            {
+                Some(BasicScalarOperation::LtChar)
             }
             "gtChar#"
                 if signature.arguments == [Word(64), Word(64)]
@@ -168,6 +175,14 @@ impl ScalarFamily for BasicScalarFamily {
                     arguments[1],
                 );
                 builder.ins().uextend(ir::types::I64, less_or_equal)
+            }
+            BasicScalarOperation::LtChar => {
+                let less = builder.ins().icmp(
+                    ir::condcodes::IntCC::UnsignedLessThan,
+                    arguments[0],
+                    arguments[1],
+                );
+                builder.ins().uextend(ir::types::I64, less)
             }
             BasicScalarOperation::GtChar => {
                 let greater = builder.ins().icmp(

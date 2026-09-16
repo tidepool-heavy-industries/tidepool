@@ -355,6 +355,7 @@ mod tests {
         for (name, arguments, results, operation) in [
             ("ord#", vec![w], vec![i], BasicScalarOperation::Ord),
             ("geChar#", vec![w, w], vec![i], BasicScalarOperation::GeChar),
+            ("ltChar#", vec![w, w], vec![i], BasicScalarOperation::LtChar),
             ("clz#", vec![w], vec![w], BasicScalarOperation::Clz),
         ] {
             let identity = OperationIdentity::PrimOp(name.into());
@@ -453,6 +454,26 @@ mod tests {
         ] {
             let values = run_operation(
                 "geChar#",
+                vec![w, w],
+                vec![i],
+                vec![word(left), word(right)],
+            )
+            .unwrap();
+            assert!(matches!(
+                values.as_slice(),
+                [Value::Lit(Literal::LitInt(actual))] if *actual == expected
+            ));
+        }
+        // `ltChar#` is the strict complement of `geChar#` over the same
+        // unsigned code-point comparison.
+        for (left, right, expected) in [
+            (0x10ffff, 0x10ffff, 0),
+            (0, 0x10ffff, 1),
+            (0x10ffff, 0, 0),
+            (0, u64::MAX, 1),
+        ] {
+            let values = run_operation(
+                "ltChar#",
                 vec![w, w],
                 vec![i],
                 vec![word(left), word(right)],
