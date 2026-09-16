@@ -915,10 +915,10 @@ mod tests {
             storage,
         )]));
         let owner = crate::machine_state::MachineState::new();
-        owner.register_prepared_byte_pool(Arc::new(super::super::static_bytes::PinnedBytes::new(
+        owner.absorb_interned_bytes(&Arc::new(super::super::static_bytes::PinnedBytes::new(
             BTreeMap::new(),
         )));
-        owner.register_prepared_byte_pool(Arc::new(pool));
+        owner.absorb_interned_bytes(&Arc::new(pool));
         let statics = statics();
         let constructors = BTreeMap::new();
         let mut heap = ObservationHeap::new(&[], &statics, [], &constructors).unwrap();

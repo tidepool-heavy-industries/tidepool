@@ -276,7 +276,7 @@ mod tests {
             .expect("external input initialization");
         let pinned: Arc<[u8]> = Arc::from(&b"abc"[..]);
         let pinned_address = pinned.as_ptr() as usize;
-        machine.register_prepared_byte_pool(Arc::new(PinnedBytes::new(BTreeMap::from([(
+        machine.absorb_interned_bytes(&Arc::new(PinnedBytes::new(BTreeMap::from([(
             b"abc".to_vec(),
             pinned,
         )]))));

@@ -626,7 +626,7 @@ mod tests {
             pinned.clone(),
         )]));
         let machine = crate::machine_state::MachineState::new();
-        machine.register_prepared_byte_pool(Arc::new(pool));
+        machine.absorb_interned_bytes(&Arc::new(pool));
         let mut vmctx = vmctx(&machine);
         let mut output = -1;
         assert_eq!(
@@ -677,7 +677,7 @@ mod tests {
             pinned.clone(),
         )]));
         let machine = crate::machine_state::MachineState::new();
-        machine.register_prepared_byte_pool(Arc::new(pool));
+        machine.absorb_interned_bytes(&Arc::new(pool));
         let mut vmctx = vmctx(&machine);
 
         let mut signed = 0;
@@ -851,7 +851,7 @@ mod tests {
             pinned,
         )]));
         let machine = crate::machine_state::MachineState::new();
-        machine.register_prepared_byte_pool(Arc::new(pool));
+        machine.absorb_interned_bytes(&Arc::new(pool));
         let mut vmctx = vmctx(&machine);
         let mut output = u64::MAX;
         assert_eq!(

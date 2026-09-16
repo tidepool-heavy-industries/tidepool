@@ -8,14 +8,25 @@ use cranelift_frontend::FunctionBuilder;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_heap::external_storage::ExternalStorageKind;
 
-/// Freeze after planning and retain the same Arc in CompiledProgram. Generated
-/// host calls may embed Arc::as_ptr to this owner, never a pointer to a movable
-/// map field. The address index is a second view of the same pinned storage.
+/// The machine-wide permanent literal pool (see [`crate::machine_state::MachineState::intern_literal_bytes`])
+/// and, before install, one program's own view of it: every literal its
+/// generated code embeds an address for, whether reused from an
+/// already-installed program or newly minted by this compile.
+///
+/// Content-addressed and append-only: a logical byte string always maps to
+/// the same storage once interned, so entries are never removed and a
+/// conflicting re-insertion never happens. Generated host calls may embed
+/// `Arc::as_ptr` to a stored owner, never a pointer to a movable map field --
+/// the address index is a second view of the same pinned storage, and an
+/// entry, once inserted, is never replaced or dropped from either map for
+/// the life of the value.
+#[derive(Clone)]
 pub(crate) struct PinnedBytes {
     by_value: BTreeMap<Vec<u8>, Arc<[u8]>>,
-    by_address: Vec<PinnedLiteral>,
+    by_address: BTreeMap<usize, PinnedLiteral>,
 }
 
+#[derive(Clone)]
 struct PinnedLiteral {
     storage: Arc<[u8]>,
     logical_len: usize,
@@ -23,38 +34,75 @@ struct PinnedLiteral {
 
 impl PinnedBytes {
     pub(super) fn new(by_value: BTreeMap<Vec<u8>, Arc<[u8]>>) -> Self {
-        let mut by_address: Vec<_> = by_value
+        let by_address = by_value
             .iter()
-            .map(|(logical, storage)| PinnedLiteral {
-                storage: Arc::clone(storage),
-                logical_len: logical.len(),
+            .map(|(logical, storage)| {
+                (
+                    storage.as_ptr() as usize,
+                    PinnedLiteral {
+                        storage: Arc::clone(storage),
+                        logical_len: logical.len(),
+                    },
+                )
             })
             .collect();
-        by_address.sort_unstable_by_key(|literal| literal.storage.as_ptr() as usize);
         Self {
             by_value,
             by_address,
         }
     }
 
+    /// A pool with no interned literals: the machine's pool before any
+    /// program installs, or a standalone compile's own starting point.
+    pub(crate) fn empty() -> Self {
+        Self::new(BTreeMap::new())
+    }
+
     pub(super) fn get(&self, logical: &[u8]) -> Option<&Arc<[u8]>> {
         self.by_value.get(logical)
     }
 
-    /// Whether this program pinned any literal bytes at all: a program with
-    /// none has no `Addr#` edges into itself and can retire by reachability.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.by_value.is_empty()
+    fn insert_owned(&mut self, value: Vec<u8>, storage: Arc<[u8]>) {
+        self.by_address.insert(
+            storage.as_ptr() as usize,
+            PinnedLiteral {
+                storage: Arc::clone(&storage),
+                logical_len: value.len(),
+            },
+        );
+        self.by_value.insert(value, storage);
+    }
+
+    /// This pool plus every entry of `additions` not already present here
+    /// (by content). Content this pool already has keeps the address every
+    /// earlier compile already baked into generated code -- `additions`
+    /// never overrides an existing entry.
+    pub(crate) fn merged(&self, additions: &BTreeMap<Vec<u8>, Arc<[u8]>>) -> Self {
+        let mut merged = self.clone();
+        for (value, storage) in additions {
+            if !merged.by_value.contains_key(value) {
+                merged.insert_owned(value.clone(), Arc::clone(storage));
+            }
+        }
+        merged
+    }
+
+    /// Fold every entry of `other` not already present here (by content)
+    /// into this pool, in place. Used to absorb one installed program's own
+    /// literal view into the permanent machine-wide pool; idempotent, and a
+    /// no-op for content this pool already carries.
+    pub(crate) fn absorb(&mut self, other: &PinnedBytes) {
+        for (value, storage) in &other.by_value {
+            if !self.by_value.contains_key(value) {
+                self.insert_owned(value.clone(), Arc::clone(storage));
+            }
+        }
     }
 
     /// Observe only logical literal bytes, excluding the implicit terminal NUL.
     pub(crate) fn logical_suffix(&self, address: usize) -> Option<&[u8]> {
-        let candidate = self
-            .by_address
-            .partition_point(|literal| literal.storage.as_ptr() as usize <= address)
-            .checked_sub(1)?;
-        let literal = &self.by_address[candidate];
-        let offset = address.checked_sub(literal.storage.as_ptr() as usize)?;
+        let (&base, literal) = self.by_address.range(..=address).next_back()?;
+        let offset = address.checked_sub(base)?;
         literal.storage.get(offset..literal.logical_len)
     }
 
@@ -62,13 +110,13 @@ impl PinnedBytes {
     /// its slice to the first NUL, never dereference the numeric input address
     /// or cross an allocation boundary looking for a terminator.
     pub(crate) fn c_string_len(&self, address: usize) -> Option<usize> {
-        let candidate = self
-            .by_address
-            .partition_point(|literal| literal.storage.as_ptr() as usize <= address)
-            .checked_sub(1)?;
-        let storage = &self.by_address[candidate].storage;
-        let offset = address.checked_sub(storage.as_ptr() as usize)?;
-        storage.get(offset..)?.iter().position(|byte| *byte == 0)
+        let (&base, literal) = self.by_address.range(..=address).next_back()?;
+        let offset = address.checked_sub(base)?;
+        literal
+            .storage
+            .get(offset..)?
+            .iter()
+            .position(|byte| *byte == 0)
     }
 
     /// A complete span from one pinned allocation. This also admits an empty
@@ -86,12 +134,8 @@ impl PinnedBytes {
         offset: i64,
         length: usize,
     ) -> Option<&[u8]> {
-        let candidate = self
-            .by_address
-            .partition_point(|literal| literal.storage.as_ptr() as usize <= address)
-            .checked_sub(1)?;
-        let storage = &self.by_address[candidate].storage;
-        let base = storage.as_ptr() as usize;
+        let (&base, literal) = self.by_address.range(..=address).next_back()?;
+        let storage = &literal.storage;
         if address.checked_sub(base)? > storage.len() {
             return None;
         }
@@ -387,7 +431,7 @@ mod tests {
         vmctx.machine_state = &machine as *const _ as *mut _;
         let storage: Arc<[u8]> = Arc::from(&b"ab\0"[..]);
         let base = storage.as_ptr() as usize;
-        machine.register_prepared_byte_pool(Arc::new(PinnedBytes::new(BTreeMap::from([(
+        machine.absorb_interned_bytes(&Arc::new(PinnedBytes::new(BTreeMap::from([(
             b"ab".to_vec(),
             storage,
         )]))));

@@ -203,6 +203,7 @@ impl<'a> ProgramPlan<'a> {
     pub fn new(
         program: &'a PreparedProgram,
         interner: &mut super::DescriptorInterner,
+        existing_bytes: &Arc<PinnedBytes>,
     ) -> Result<Self, CompileError> {
         // wave4:LAYOUT_PLAN — collect top/local RHS types, function and join
         // parameter reps, case binder/alternative reps from checked signatures
@@ -221,7 +222,7 @@ impl<'a> ProgramPlan<'a> {
                 let slot = top_slots.len();
                 top_slots.insert(top.binding.id, slot);
                 binding_rep(program, &top.binding, &mut values);
-                collect_binding_literals(&top.binding, &mut bytes);
+                collect_binding_literals(&top.binding, &mut bytes, existing_bytes);
             }
         }
 
@@ -231,19 +232,19 @@ impl<'a> ProgramPlan<'a> {
                 | ExprFrame::Jump {
                     arguments: atoms, ..
                 } => {
-                    collect_atoms(atoms, &mut bytes);
+                    collect_atoms(atoms, &mut bytes, existing_bytes);
                 }
-                ExprFrame::Enter { callee, .. } => collect_atom(callee, &mut bytes),
+                ExprFrame::Enter { callee, .. } => collect_atom(callee, &mut bytes, existing_bytes),
                 ExprFrame::Call {
                     callee, arguments, ..
                 } => {
-                    collect_atom(callee, &mut bytes);
-                    collect_atoms(arguments, &mut bytes);
+                    collect_atom(callee, &mut bytes, existing_bytes);
+                    collect_atoms(arguments, &mut bytes, existing_bytes);
                 }
                 ExprFrame::Operation { arguments, .. }
                 | ExprFrame::Construct {
                     fields: arguments, ..
-                } => collect_atoms(arguments, &mut bytes),
+                } => collect_atoms(arguments, &mut bytes, existing_bytes),
                 ExprFrame::Case {
                     binder,
                     scrutinee_results,
@@ -264,7 +265,7 @@ impl<'a> ProgramPlan<'a> {
                     }
                     for alternative in alternatives {
                         if let AlternativePattern::Literal(literal) = &alternative.pattern {
-                            collect_literal(literal, &mut bytes);
+                            collect_literal(literal, &mut bytes, existing_bytes);
                         }
                         let reps: &[RuntimeRep] = match (&alternative.pattern, kind) {
                             (_, CaseKind::MultiValue) => scrutinee_reps,
@@ -281,7 +282,7 @@ impl<'a> ProgramPlan<'a> {
                 ExprFrame::Let { bindings, .. } => {
                     for binding in group_items(bindings) {
                         binding_rep(program, binding, &mut values);
-                        collect_binding_literals(binding, &mut bytes);
+                        collect_binding_literals(binding, &mut bytes, existing_bytes);
                     }
                 }
                 ExprFrame::LetJoins { bindings, .. } => {
@@ -481,7 +482,11 @@ impl<'a> ProgramPlan<'a> {
             import_slots,
             root_block,
             interned_constructors,
-            bytes: Arc::new(PinnedBytes::new(bytes)),
+            bytes: if bytes.is_empty() {
+                Arc::clone(existing_bytes)
+            } else {
+                Arc::new(existing_bytes.merged(&bytes))
+            },
             heap_tops,
             heap_top_specs,
             pap_layouts,
@@ -577,33 +582,45 @@ fn value_ref_rep(
     }
 }
 
-fn collect_binding_literals(binding: &HeapBinding, bytes: &mut BTreeMap<Vec<u8>, Arc<[u8]>>) {
+fn collect_binding_literals(
+    binding: &HeapBinding,
+    bytes: &mut BTreeMap<Vec<u8>, Arc<[u8]>>,
+    existing: &PinnedBytes,
+) {
     match &binding.rhs {
-        HeapRhs::Bytes(value) => pin_bytes(value, bytes),
-        HeapRhs::Constructor { fields, .. } => collect_atoms(fields, bytes),
+        HeapRhs::Bytes(value) => pin_bytes(value, bytes, existing),
+        HeapRhs::Constructor { fields, .. } => collect_atoms(fields, bytes, existing),
         HeapRhs::Function { .. } | HeapRhs::Thunk { .. } => {}
     }
 }
 
-fn collect_atoms(atoms: &[Atom], bytes: &mut BTreeMap<Vec<u8>, Arc<[u8]>>) {
+fn collect_atoms(atoms: &[Atom], bytes: &mut BTreeMap<Vec<u8>, Arc<[u8]>>, existing: &PinnedBytes) {
     for atom in atoms {
-        collect_atom(atom, bytes);
+        collect_atom(atom, bytes, existing);
     }
 }
 
-fn collect_atom(atom: &Atom, bytes: &mut BTreeMap<Vec<u8>, Arc<[u8]>>) {
+fn collect_atom(atom: &Atom, bytes: &mut BTreeMap<Vec<u8>, Arc<[u8]>>, existing: &PinnedBytes) {
     if let Atom::Scalar(literal) = atom {
-        collect_literal(literal, bytes);
+        collect_literal(literal, bytes, existing);
     }
 }
 
-fn collect_literal(literal: &ScalarLiteral, bytes: &mut BTreeMap<Vec<u8>, Arc<[u8]>>) {
+fn collect_literal(literal: &ScalarLiteral, bytes: &mut BTreeMap<Vec<u8>, Arc<[u8]>>, existing: &PinnedBytes) {
     if let ScalarLiteral::Bytes(value) = literal {
-        pin_bytes(value, bytes);
+        pin_bytes(value, bytes, existing);
     }
 }
 
-fn pin_bytes(value: &[u8], bytes: &mut BTreeMap<Vec<u8>, Arc<[u8]>>) {
+fn pin_bytes(value: &[u8], bytes: &mut BTreeMap<Vec<u8>, Arc<[u8]>>, existing: &PinnedBytes) {
+    // Content this program's machine (or, for a standalone compile, this
+    // compile's own empty starting pool) already interned resolves through
+    // `existing` at the end of `ProgramPlan::new` (see `bytes.merged`);
+    // minting a second, unindexed copy here would bake a stale address into
+    // generated code for content that already has a canonical one.
+    if existing.get(value).is_some() {
+        return;
+    }
     bytes.entry(value.to_vec()).or_insert_with(|| {
         // GHC's primitive string literals have an implicit trailing NUL; the
         // wire payload is the logical key, not the complete backing storage.

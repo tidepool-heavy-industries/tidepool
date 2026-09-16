@@ -115,10 +115,6 @@ struct InstalledProgram<'code> {
     statics: Arc<StaticRegion>,
     owned_headers: Vec<usize>,
     callable_headers: Vec<usize>,
-    /// A program whose code embeds addresses into its own byte storage
-    /// cannot yet be proven unreachable through those addresses (lifetime
-    /// contract edge (c)); it stays installed and is reported instead.
-    pinned_by_bytes: bool,
 }
 
 /// Proof that the machine is at a quiescent point: no generated frame is
@@ -139,9 +135,6 @@ pub struct RetirementReceipt {
     pub programs: Vec<ProgramId>,
     /// Root-block words freed with them.
     pub block_words: usize,
-    /// Programs kept only because their byte storage may be addressed
-    /// (edge (c), deferred): reported, never retired.
-    pub pinned_by_bytes: Vec<ProgramId>,
     /// Unreachable programs whose roots were detached but whose metadata a
     /// surviving nursery object still names: garbage the generational
     /// collectors cannot drop in one pass (an old-to-young remembered edge
@@ -439,7 +432,16 @@ impl<'code> PreparedMachine<'code> {
         linked: &tidepool_repr::execution_schema::LinkedProgram,
     ) -> Result<CompiledProgram, super::CompileError> {
         let mut staged = self.interner.clone();
-        CompiledProgram::compile_with(linked, &mut staged)
+        // A cheap `Arc::clone` snapshot of the machine's current permanent
+        // literal pool: content it already carries resolves to that same
+        // address here, so `Case`, enter and observation recognise a
+        // literal an earlier program interned. Any content this program
+        // newly needs is minted into its own returned `bytes` view (never
+        // mutating this snapshot or the machine's live pool directly);
+        // `install` folds it into the live pool once this program actually
+        // installs (see `Self::install_staged`).
+        let existing_bytes = self.machine.interned_bytes();
+        CompiledProgram::compile_with(linked, &mut staged, &existing_bytes)
     }
 
     /// Install one more program on this machine. Its tops live in its own
@@ -512,7 +514,6 @@ impl<'code> PreparedMachine<'code> {
             .iter()
             .map(|callable| callable.header)
             .collect();
-        let pinned_by_bytes = !compiled.bytes.is_empty();
         let id = ProgramId(self.next_program);
         self.next_program += 1;
         self.header_owners
@@ -525,7 +526,6 @@ impl<'code> PreparedMachine<'code> {
                 statics,
                 owned_headers,
                 callable_headers,
-                pinned_by_bytes,
             },
         );
         Ok(id)
@@ -815,8 +815,6 @@ impl<'code> PreparedMachine<'code> {
         // above), so there is nothing left to publish here.
 
         self.statics.push(Arc::clone(&statics));
-        self.machine
-            .register_prepared_byte_pool(Arc::clone(&compiled.bytes));
         // Interned constructor layouts are shared by every program that
         // declares them and are never retired, so union by header identity:
         // a plain extend would grow this list by each install's shared
@@ -860,6 +858,20 @@ impl<'code> PreparedMachine<'code> {
 
         self.interner.commit_absorb(&compiled.interned_constructors);
         self.interner.commit_externals(&compiled.externals);
+        // Fold this program's own literal view into the one permanent
+        // machine-wide pool. A compile against this same machine's
+        // `interned_bytes()` snapshot (`compile_for_install`) already
+        // reused every address the machine already had, so this is a cheap
+        // no-op union for content already shared; a standalone
+        // `CompiledProgram::compile` (no machine involved) contributes its
+        // own freshly minted addresses here for the first time. Placed
+        // last, alongside the other commits above, because nothing here can
+        // fail -- but the choice is not load-bearing: every entry absorbed
+        // is an `Arc<[u8]>` this `CompiledProgram` already owns, so even a
+        // failed install earlier in this function could not have left a
+        // dangling address, only (harmlessly) an uninstalled program's
+        // literals never reaching the pool at all.
+        self.machine.absorb_interned_bytes(&compiled.bytes);
         Ok(statics)
     }
 
@@ -936,8 +948,11 @@ impl<'code> PreparedMachine<'code> {
     /// descriptor the program owns, or a reference into its static image
     /// (lifetime contract decision 1). The mark is non-moving and forces
     /// nothing; ordinary collection runs first so it sees a compact nursery.
-    /// Programs with byte storage are pinned and reported (edge (c) is a
-    /// later slice).
+    /// A program's own literal-bytes storage is no longer a liveness edge
+    /// (edge (c)): every literal is interned into the one permanent
+    /// machine-wide pool at install (see
+    /// `crate::machine_state::MachineState::absorb_interned_bytes`), so a
+    /// program with no other root is retired exactly like one with none.
     ///
     /// Retirement is split around the collectors (decision 7): every
     /// unreachable program's block roots are detached first, so one ordinary
@@ -963,10 +978,7 @@ impl<'code> PreparedMachine<'code> {
             .copied()
             .filter(|id| !live.contains(id))
             .collect();
-        let mut receipt = RetirementReceipt {
-            pinned_by_bytes: self.byte_pinned_programs().collect(),
-            ..RetirementReceipt::default()
-        };
+        let mut receipt = RetirementReceipt::default();
         // 1. Detach, then collect: the nursery keeps nothing only a
         //    retiring block reached.
         for id in &retiring {
@@ -1042,15 +1054,6 @@ impl<'code> PreparedMachine<'code> {
         .map_err(|cause| runtime_error(&self.machine, cause))
     }
 
-    /// Programs held live by their byte storage (edge (c), deferred): never
-    /// retired, always reported.
-    fn byte_pinned_programs(&self) -> impl Iterator<Item = ProgramId> + '_ {
-        self.programs
-            .iter()
-            .filter(|(_, installed)| installed.pinned_by_bytes)
-            .map(|(id, _)| *id)
-    }
-
     /// The set of live programs, by a worklist mark over handles, frames,
     /// pins and live programs' root blocks. With `from_nursery`, every
     /// nursery object is a seed too: the result then also names each
@@ -1072,12 +1075,11 @@ impl<'code> PreparedMachine<'code> {
         let (heap, nursery_base, nursery_starts) = self.observation_heap_and_starts(&regions)?;
 
         let mut live: BTreeSet<ProgramId> = self.pins.iter().copied().collect();
-        live.extend(self.byte_pinned_programs());
         // One worklist of program ids still needing their root block
         // snapshotted into `work`, seeded with the programs live from the
-        // start (pins, byte-pinned); a program discovered live later by the
-        // trace below is pushed here exactly once (`live.insert` guards it),
-        // never re-snapshotted.
+        // start (pins); a program discovered live later by the trace below
+        // is pushed here exactly once (`live.insert` guards it), never
+        // re-snapshotted.
         let mut program_work: Vec<ProgramId> = live.iter().copied().collect();
         let mut work: Vec<usize> = self
             .handles
@@ -1197,11 +1199,15 @@ impl<'code> PreparedMachine<'code> {
         // 4. Stack maps, by identity.
         self.machine
             .remove_stack_map_registry(&compiled.pipeline.stack_maps);
-        // 5. Static region and literal pool.
+        // 5. Static region. This program's own literal bytes are NOT
+        //    removed from the machine's permanent pool: they are interned
+        //    forever (see `MachineState::absorb_interned_bytes`), since
+        //    another still-installed program's code may share the same
+        //    address and, unlike a static region, an interned literal
+        //    cannot be proven ownerless by header identity alone.
         self.statics
             .retain(|region| !Arc::ptr_eq(region, &installed.statics));
         self.region_owners.retain(|(owner, _)| *owner != id);
-        self.machine.remove_prepared_byte_pool(&compiled.bytes);
         // 6-8. The block, the receipt entry and the code go with `installed`.
         block.len()
     }
@@ -6880,7 +6886,6 @@ mod tests {
                 vec![latest],
                 "iteration {iteration}: exactly the released program retires"
             );
-            assert!(receipt.pinned_by_bytes.is_empty());
             assert!(machine.old_space.prepared_arenas.len() <= 1);
             latest = program;
             let counts = machine.residency();
@@ -7030,23 +7035,125 @@ mod tests {
             turn(&mut machine, program, &format!("empty table, turn {index}"));
         }
         assert_eq!(machine.residency().programs, 0);
+    }
 
-        // A byte-pinned program stays and is marked every collection.
-        let (mut machine, bytes) = PreparedMachine::new(
-            byte_top_program(),
+    /// A program whose only top is a byte literal retires by ordinary
+    /// reachability, exactly like any other program with no live root: its
+    /// own literal storage is no longer a liveness edge (see
+    /// `PreparedMachine::mark_live_programs`'s doc). The literal content
+    /// itself stays resolvable through the machine's one permanent pool for
+    /// the rest of the machine's life, regardless of whether the program
+    /// that first interned it is still installed.
+    #[test]
+    fn byte_top_program_retires_and_its_literal_stays_resolvable() {
+        let program = byte_top_program();
+        let address = program
+            .byte_tops
+            .values()
+            .next()
+            .expect("byte_top_program has one byte top")
+            .as_ptr() as usize;
+        let (mut machine, id) = PreparedMachine::new(
+            program,
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
             },
         )
         .expect("byte-top program installs");
-        for index in 0..3 {
-            let program = install_linked(&mut machine, &unit_thunk_linked(), ImportBindings::new())
-                .expect("installs beside the byte-pinned program");
-            turn(&mut machine, program, &format!("byte-pinned, turn {index}"));
-        }
-        assert_eq!(machine.residency().programs, 1);
-        assert!(machine.programs.contains_key(&bytes));
-        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+        let token = machine.quiesce().expect("quiescent after install");
+        let receipt = machine.collect_major(token).expect("major collection");
+        assert_eq!(
+            receipt.programs,
+            vec![id],
+            "nothing references the byte-top program's own top, so it retires"
+        );
+        assert!(machine.programs.is_empty());
+        assert_eq!(
+            machine
+                .machine
+                .resolve_literal_bytes(|pool| pool.read_range(address, 9).map(<[u8]>::to_vec)),
+            Some(b"residency".to_vec()),
+            "the literal stays resolvable through the permanent pool after retirement"
+        );
+    }
+
+    /// Two programs that each declare the same literal content compile
+    /// against the same address (`compile_for_install` resolves every
+    /// literal against the machine's live pool); retiring the first leaves
+    /// the second's reads of that same address valid.
+    #[test]
+    fn shared_literal_content_gets_one_address_across_programs() {
+        let (mut machine, first) =
+            PreparedMachine::new(byte_top_program(), PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            })
+            .expect("first byte-top program installs");
+        let first_address = machine
+            .programs
+            .get(&first)
+            .expect("just installed")
+            .program
+            .get()
+            .byte_tops
+            .values()
+            .next()
+            .expect("byte_top_program has one byte top")
+            .as_ptr() as usize;
+
+        let linked = link_program(
+            testing::prepare({
+                let mut wire = testing::wire_program();
+                wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
+                wire.expressions.nodes[0] =
+                    ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(1)))]);
+                wire.bindings.push(Group::NonRecursive(TopBinding {
+                    identity: testing::identity("MachineBytesTwo", "bytes"),
+                    binding: HeapBinding {
+                        id: ValueId(1),
+                        rhs: HeapRhs::Bytes(b"residency".to_vec()),
+                    },
+                }));
+                wire
+            })
+            .expect("second byte-top fixture"),
+            &MachineImports::default(),
+        )
+        .expect("second byte-top fixture links");
+        let compiled = machine
+            .compile_for_install(&linked)
+            .expect("second byte-top program compiles against the machine pool");
+        let second_address = compiled
+            .byte_tops
+            .values()
+            .next()
+            .expect("second byte_top program has one byte top")
+            .as_ptr() as usize;
+        assert_eq!(
+            first_address, second_address,
+            "identical literal content resolves to the same interned address"
+        );
+        let second = machine
+            .install_program(compiled, ImportBindings::new())
+            .expect("second byte-top program installs");
+        // Pin the second program so it survives the collection below: its
+        // own top is a raw literal address, not a heap reference, so (like
+        // the first program) nothing else marks it live -- the pin isolates
+        // this test to the one fact under test, that retiring `first` does
+        // not disturb `second`'s interned address.
+        machine.pin(second).expect("pin second");
+
+        // Retiring the first program leaves the second's own reads of the
+        // same address valid: the pool is permanent, not owned per-program.
+        let token = machine.quiesce().expect("quiescent");
+        let receipt = machine.collect_major(token).expect("major collection");
+        assert_eq!(receipt.programs, vec![first]);
+        assert!(machine.programs.contains_key(&second));
+        assert_eq!(
+            machine
+                .machine
+                .resolve_literal_bytes(|pool| pool.read_range(second_address, 9).map(<[u8]>::to_vec)),
+            Some(b"residency".to_vec())
+        );
     }
 
     /// A program declaring a nullary `Unit` (its CAF's result) and a

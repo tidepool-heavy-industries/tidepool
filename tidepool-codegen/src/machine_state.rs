@@ -316,10 +316,14 @@ pub struct MachineState {
     /// `Enter` can force an imported thunk through the program that knows how
     /// to run it. Same lifetime contract as `prepared_callables`.
     prepared_enters: RefCell<HashMap<usize, *const u8>>,
-    /// Every immutable literal pool compiled by a prepared program running on
-    /// this machine: the one authority for literal `Addr#` bytes, consulted
-    /// by observation and by every address primitive before the ledger.
-    prepared_byte_pools: RefCell<Vec<Arc<crate::prepared_program::static_bytes::PinnedBytes>>>,
+    /// The one permanent, append-only literal-bytes pool for this machine:
+    /// the sole authority for literal `Addr#` bytes, consulted by
+    /// observation and by every address primitive before the ledger. Every
+    /// installed program's compiled-in literal addresses resolve against it
+    /// for the machine's whole life -- interned content is never removed,
+    /// even once every program that referenced it has retired (see
+    /// `intern_literal_bytes`/`absorb_interned_bytes`).
+    interned_bytes: RefCell<Arc<crate::prepared_program::static_bytes::PinnedBytes>>,
 }
 
 // SAFETY: MachineState is only ever accessed from the single thread driving
@@ -384,7 +388,9 @@ impl MachineState {
             external_freed_objects: Cell::new(0),
             prepared_callables: RefCell::new(HashMap::new()),
             prepared_enters: RefCell::new(HashMap::new()),
-            prepared_byte_pools: RefCell::new(Vec::new()),
+            interned_bytes: RefCell::new(Arc::new(
+                crate::prepared_program::static_bytes::PinnedBytes::empty(),
+            )),
         }
     }
 
@@ -1368,17 +1374,6 @@ impl MachineState {
         prepared.space.retire_owner(headers, Some(region));
     }
 
-    /// Program retirement: forget a literal pool once no installed program
-    /// can address it.
-    pub(crate) fn remove_prepared_byte_pool(
-        &self,
-        pool: &Arc<crate::prepared_program::static_bytes::PinnedBytes>,
-    ) {
-        self.prepared_byte_pools
-            .borrow_mut()
-            .retain(|known| !Arc::ptr_eq(known, pool));
-    }
-
     pub(crate) fn resolve_prepared_call(
         &self,
         header: usize,
@@ -1872,35 +1867,53 @@ impl MachineState {
             })
     }
 
-    /// Register one compiled program's literal pool as an `Addr#` authority
-    /// for the life of this machine. Registering the same pool again is a
-    /// no-op.
-    pub(crate) fn register_prepared_byte_pool(
+    /// Get-or-insert `value` into the one permanent machine-wide literal
+    /// pool, returning its (possibly freshly minted) pinned storage. Called
+    /// while planning a compile against this machine: content this pool
+    /// already carries returns the SAME storage (and therefore the same
+    /// address) every earlier compile already baked into generated code;
+    /// genuinely new content is minted and interned here, permanently, for
+    /// the rest of this machine's life -- including when the compile that
+    /// asked for it never ends up installed (see `absorb_interned_bytes`'s
+    /// doc for why that leak is acceptable).
+    pub(crate) fn interned_bytes(
         &self,
-        pool: Arc<crate::prepared_program::static_bytes::PinnedBytes>,
-    ) {
-        let mut pools = self.prepared_byte_pools.borrow_mut();
-        if !pools.iter().any(|known| Arc::ptr_eq(known, &pool)) {
-            pools.push(pool);
-        }
+    ) -> Arc<crate::prepared_program::static_bytes::PinnedBytes> {
+        Arc::clone(&self.interned_bytes.borrow())
     }
 
-    /// Resolve a literal `Addr#` through every registered pool. Pools own
-    /// disjoint pinned allocations, so at most one answers.
+    /// Fold `other`'s literals into the permanent pool: every entry `other`
+    /// carries that this pool does not already have (by content) joins it,
+    /// in place, forever. Called once a program installs, absorbing its own
+    /// compiled-in literal view (whether reused or newly minted at compile
+    /// time -- see `interned_bytes`) into the one authority every program's
+    /// generated `Addr#` accesses resolve against.
+    ///
+    /// Content is never removed once absorbed, even by a program that never
+    /// finished installing or later retired: an interned literal is static
+    /// data, indistinguishable in cost from a compiled program's own code,
+    /// and reclaiming it would need tracking exactly which programs still
+    /// reference which addresses -- the same cost this machine already
+    /// avoids for code (see `tidepool-codegen/CLAUDE.md`'s "JIT allocation").
+    pub(crate) fn absorb_interned_bytes(
+        &self,
+        other: &Arc<crate::prepared_program::static_bytes::PinnedBytes>,
+    ) {
+        let mut pool = self.interned_bytes.borrow_mut();
+        if Arc::ptr_eq(&pool, other) {
+            return;
+        }
+        let mut merged = (**pool).clone();
+        merged.absorb(other);
+        *pool = Arc::new(merged);
+    }
+
+    /// Resolve a literal `Addr#` against the one permanent pool.
     pub(crate) fn resolve_literal_bytes<R>(
         &self,
-        resolve: impl FnMut(&crate::prepared_program::static_bytes::PinnedBytes) -> Option<R>,
+        mut resolve: impl FnMut(&crate::prepared_program::static_bytes::PinnedBytes) -> Option<R>,
     ) -> Option<R> {
-        // `.borrow()`'s guard lives for the whole chained expression, so
-        // `resolve` runs, once per pool, while `prepared_byte_pools` is
-        // still borrowed. Both callers (`fingerprint.rs`, `failures.rs`)
-        // only read bytes out of the pool inside `resolve`; neither one
-        // registers a pool or calls back into this method from within it.
-        self.prepared_byte_pools
-            .borrow()
-            .iter()
-            .map(Arc::as_ref)
-            .find_map(resolve)
+        resolve(&self.interned_bytes.borrow())
     }
 
     /// Find a terminal NUL inside an authenticated byte array's logical extent.

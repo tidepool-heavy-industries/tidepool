@@ -341,15 +341,29 @@ impl CompiledProgram {
     /// install). Later programs on a machine compile through
     /// `PreparedMachine::compile_for_install` so they share descriptors.
     pub fn compile(linked: &LinkedProgram) -> Result<Self, CompileError> {
-        Self::compile_with(linked, &mut DescriptorInterner::default())
+        Self::compile_with(
+            linked,
+            &mut DescriptorInterner::default(),
+            &std::sync::Arc::new(static_bytes::PinnedBytes::empty()),
+        )
     }
 
     /// [`Self::compile`] against `interner`: constructor identities already
     /// interned reuse their descriptor, so this program's `Case`, enter and
-    /// observation recognise objects an earlier program built.
-    pub fn compile_with(
+    /// observation recognise objects an earlier program built. Likewise
+    /// against `existing_bytes` (see [`crate::machine_state::MachineState::interned_bytes`]
+    /// for a machine's live pool, or a fresh [`static_bytes::PinnedBytes::empty`]
+    /// for a standalone compile): literal content it already carries
+    /// resolves to the SAME address here, so `Case`, enter and observation
+    /// -- and every `Addr#` host primitive -- recognise a literal an
+    /// earlier program interned. This program's own newly minted literals
+    /// join `existing_bytes` in the returned [`CompiledProgram::bytes`];
+    /// the installing machine folds them into its permanent pool (see
+    /// `PreparedMachine::install`).
+    pub(crate) fn compile_with(
         linked: &LinkedProgram,
         interner: &mut DescriptorInterner,
+        existing_bytes: &std::sync::Arc<static_bytes::PinnedBytes>,
     ) -> Result<Self, CompileError> {
         let target = &linked.prepared().envelope().target;
         let host_matches = cfg!(all(target_os = "linux", target_arch = "x86_64"))
@@ -367,7 +381,7 @@ impl CompiledProgram {
         use cranelift_codegen::isa::CallConv;
         use cranelift_module::Linkage;
         use tidepool_repr::execution_schema::{HeapRhs, RuntimeRep};
-        let plan = plan::ProgramPlan::new(linked.prepared(), interner)?;
+        let plan = plan::ProgramPlan::new(linked.prepared(), interner, existing_bytes)?;
         let profile = NativeAbiProfile::new(plan.program.envelope().target.clone(), 0)?;
         let statics = image::build_static_image(&plan)?;
         let mut pipeline = CodegenPipeline::new(

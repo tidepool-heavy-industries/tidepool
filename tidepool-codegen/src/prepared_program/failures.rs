@@ -230,10 +230,10 @@ mod tests {
         let payload: Arc<[u8]> = Arc::from(&b"Suite.hs:3|f\0"[..]);
         let address = payload.as_ptr() as usize;
         let machine = crate::machine_state::MachineState::new();
-        machine.register_prepared_byte_pool(Arc::new(
+        machine.absorb_interned_bytes(&Arc::new(
             super::super::static_bytes::PinnedBytes::new(BTreeMap::new()),
         ));
-        machine.register_prepared_byte_pool(Arc::new(
+        machine.absorb_interned_bytes(&Arc::new(
             super::super::static_bytes::PinnedBytes::new(BTreeMap::from([(
                 b"Suite.hs:3|f".to_vec(),
                 payload,
