@@ -16,6 +16,7 @@
 //! planes are handled elsewhere; this module is a standalone, usable
 //! declaration REPL on its own.
 
+mod binding_table;
 mod dialect;
 pub mod engine;
 pub mod facade;

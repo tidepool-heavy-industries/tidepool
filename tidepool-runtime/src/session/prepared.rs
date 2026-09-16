@@ -11,6 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use tidepool_bridge::Value;
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
+
+use super::binding_table::BindingIndex;
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
     AnswerPlan, CompileError, CompiledProgram, ExecutionError, ImportBindings, PreparedCallOptions,
@@ -979,21 +981,18 @@ pub enum PreparedSettlement {
 /// The live binding an artifact's declared import resolves to by identity:
 /// the newest prepared binding whose recorded identity is `identity`, or the
 /// one at `generation` when the artifact pins one.
+///
+/// `index` answers the "which id" question in O(1) (amortized) instead of
+/// scanning every live binding -- see [`super::binding_table`] -- and `get`
+/// on the resolved id is an ordinary `BindingTable` id lookup.
 fn resolve_prepared_import<'a>(
     bindings: &'a BindingTable,
+    index: &BindingIndex,
     identity: &SymbolIdentity,
     generation: Option<u64>,
 ) -> Option<&'a BindingEntry> {
-    bindings
-        .iter_live()
-        .filter(|entry| {
-            matches!(
-                &entry.value,
-                BoundValue::Prepared { origin: Some(origin), .. } if &origin.identity == identity
-            )
-        })
-        .filter(|entry| generation.is_none_or(|generation| entry.module.gen().0 == generation))
-        .max_by_key(|entry| entry.module.gen())
+    let id = index.resolve_prepared(identity, generation)?;
+    bindings.get(id)
 }
 
 impl PreparedEngine {
@@ -1144,18 +1143,22 @@ impl PreparedEngine {
     /// the artifact is linked against those bindings' live shape before
     /// anything is compiled, so a stale generation or an unresolvable
     /// identity is a typed link error with no machine side effect.
-    pub fn install(
+    pub(crate) fn install(
         &mut self,
         prepared: PreparedProgram,
         bindings: &BindingTable,
+        index: &BindingIndex,
     ) -> Result<ProgramId, PreparedRuntimeError> {
         let mut values = MachineImports::default();
         let mut imports = ImportBindings::new();
         for declaration in prepared.globals() {
             let identity = &declaration.identity;
-            let Some(entry) =
-                resolve_prepared_import(bindings, identity, declaration.required_generation)
-            else {
+            let Some(entry) = resolve_prepared_import(
+                bindings,
+                index,
+                identity,
+                declaration.required_generation,
+            ) else {
                 // Left absent: `link_program` reports the typed `MissingImport`.
                 continue;
             };
@@ -2577,8 +2580,9 @@ mod tests {
         let (mut engine, first) =
             PreparedEngine::bootstrap(verb_program(site, TypeNode::Text)).expect("bootstrap");
         let bindings = BindingTable::new();
+        let index = BindingIndex::new();
         let second = engine
-            .install(verb_program(site, TypeNode::Text), &bindings)
+            .install(verb_program(site, TypeNode::Text), &bindings, &index)
             .expect("an equivalent duplicate is not a SiteConflict");
         assert_ne!(first, second);
         let witness = engine.verb_sites[&DataConId(77)];
@@ -2591,6 +2595,7 @@ mod tests {
             .install(
                 verb_program(SYNTHETIC_SITE_BIT | 6, TypeNode::Integer),
                 &bindings,
+                &index,
             )
             .expect_err("a conflicting verb reply refuses the install");
         assert!(

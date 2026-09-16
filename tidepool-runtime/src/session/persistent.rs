@@ -52,6 +52,7 @@ use tidepool_repr::{
 use tidepool_codegen::binding_table::BoundValue;
 use tidepool_repr::execution_schema::{PreparedProgram, SymbolIdentity};
 
+use super::binding_table::{BindRecord, BindingIndex};
 use super::engine::OutputSink;
 use super::prepared::{PreparedEngine, PreparedRuntimeError};
 use super::{
@@ -292,6 +293,12 @@ pub struct PersistentSession {
     /// The value plane: `name → (SessionVarId, RootSlot, Val.G<g>)` for each
     /// materialized bind, seeded into a later fragment's [`ExternalEnv`].
     bindings: BindingTable,
+    /// Incremental indexes over `bindings`' live set (prepared-import
+    /// resolution, retained-import pairs, live module names, root-slot
+    /// aliasing refcounts), kept in sync at every bind/evict site below so
+    /// no per-turn caller scans the whole live set. See
+    /// [`super::binding_table`].
+    binding_index: BindingIndex,
     /// Monotonic value-binding generation. Each materialized bind mints a fresh
     /// `Val.G<g>` so its `stableVarId` is collision-free and a rebind shadows
     /// without clobbering the prior root.
@@ -355,6 +362,7 @@ impl PersistentSession {
             session_table: DataConTable::new(),
             lib,
             bindings: BindingTable::new(),
+            binding_index: BindingIndex::new(),
             val_gen: Generation(0),
             scopes: ScopeTree::new(),
             turn_counter: 0,
@@ -402,14 +410,16 @@ impl PersistentSession {
     }
 
     pub(super) fn release_binding_roots(&mut self, entries: Vec<BindingEntry>) -> usize {
-        let mut released = Vec::new();
+        let mut released = 0usize;
         for entry in entries {
             let slot = entry.value.root();
-            let aliased = self
-                .bindings
-                .iter_live()
-                .any(|entry| std::ptr::eq(entry.value.root().addr(), slot.addr()));
-            if aliased || released.contains(&slot.addr()) {
+            // `on_evict` is the single point of truth for whether any OTHER
+            // live entry still shares this root slot (an alias published by
+            // `bind_alias_in`, or a same-batch sibling evicted alongside
+            // this entry) -- replacing the old whole-table scan. It must run
+            // exactly once per entry that leaves `live`, which this is.
+            let safe_to_release = self.binding_index.on_evict(&entry);
+            if !safe_to_release {
                 continue;
             }
             match (&entry.value, self.machine.as_mut()) {
@@ -417,7 +427,7 @@ impl PersistentSession {
                 // the handle deregisters the root.
                 (BoundValue::Prepared { handle, .. }, Some(ResidentEngine::Prepared(engine))) => {
                     if engine.release(*handle) {
-                        released.push(slot.addr());
+                        released += 1;
                     }
                 }
                 (_, Some(ResidentEngine::Core(machine))) => {
@@ -425,13 +435,13 @@ impl PersistentSession {
                     debug_assert!(!held, "retiring binding root still owned by a handle");
                     if !held {
                         machine.retire_scope_root(slot);
-                        released.push(slot.addr());
+                        released += 1;
                     }
                 }
                 _ => {}
             }
         }
-        released.len()
+        released
     }
     /// The accumulated constructor table.
     pub fn session_table(&self) -> &DataConTable {
@@ -670,7 +680,9 @@ impl PersistentSession {
                 self.machine = Some(ResidentEngine::Prepared(engine));
                 Ok(program)
             }
-            Some(ResidentEngine::Prepared(engine)) => engine.install(prepared, &self.bindings),
+            Some(ResidentEngine::Prepared(engine)) => {
+                engine.install(prepared, &self.bindings, &self.binding_index)
+            }
             _ => Err(PreparedRuntimeError::WrongEngine),
         }
     }
@@ -681,20 +693,7 @@ impl PersistentSession {
     /// binding instead of recompiling a body it does not have.
     #[must_use]
     pub fn prepared_retained(&self) -> Vec<(SymbolIdentity, u64)> {
-        let mut retained: Vec<(SymbolIdentity, u64)> = self
-            .bindings
-            .iter_live()
-            .filter_map(|entry| match &entry.value {
-                BoundValue::Prepared {
-                    origin: Some(origin),
-                    ..
-                } => Some((origin.identity.clone(), entry.module.gen().0)),
-                _ => None,
-            })
-            .collect();
-        retained.sort();
-        retained.dedup();
-        retained
+        self.binding_index.prepared_retained()
     }
 
     /// Move the resident machine out onto a [`MachineLease`] (to run a turn on
@@ -1350,6 +1349,7 @@ impl PersistentSession {
 
     /// Record a materialized value binding on the value plane.
     pub fn bind(&mut self, entry: BindingEntry) {
+        self.binding_index.on_bind(&entry);
         self.bindings.bind(entry);
     }
 
@@ -1357,14 +1357,7 @@ impl PersistentSession {
     /// so already-compiled fragments / closure captures keep resolving. Includes
     /// shadowed older gens.
     pub fn live_val_modules(&self) -> Vec<String> {
-        let mut v: Vec<String> = self
-            .bindings
-            .live_modules()
-            .map(|m| m.module_name())
-            .collect();
-        v.sort();
-        v.dedup();
-        v
+        self.binding_index.live_modules()
     }
 
     /// The CURRENT (newest) `Val.G<g>` module per still-live name — what a turn
@@ -1729,6 +1722,7 @@ impl PersistentSession {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
+        self.binding_index.on_bind(&entry);
         self.bindings.bind_in(scope, entry);
         Ok(())
     }
@@ -1769,6 +1763,11 @@ impl PersistentSession {
             name,
             module: entry.module,
         };
+        // Built from `entry` BEFORE the fallible `bind_alias_in` call
+        // consumes it, but only indexed after that call actually succeeds
+        // (below) -- an alias whose bind never happened must never appear
+        // in the index either.
+        let record = BindRecord::of(&entry);
         #[allow(
             clippy::expect_used,
             reason = "source liveness and identity are checked by the sole caller, publish_captured_alias_in, and retract_many_in above touches only the decl plane, never source's value-plane entry"
@@ -1777,6 +1776,7 @@ impl PersistentSession {
             .bindings
             .bind_alias_in(scope, entry, source)
             .expect("source and alias identity validated before declaration retraction");
+        self.binding_index.on_bind_record(&record);
         self.release_binding_roots(expired);
         Ok(receipt)
     }
@@ -1815,6 +1815,7 @@ impl PersistentSession {
                     name: entry.name.0.clone(),
                     module: entry.module,
                 };
+                self.binding_index.on_bind(&entry);
                 self.bindings.bind_in(scope, entry);
                 receipt
             })
@@ -1921,11 +1922,16 @@ impl PersistentSession {
             .collect();
         replaced_names.sort();
         replaced_names.dedup();
+        // Built once and consulted by `.contains` instead of re-scanning
+        // `replaced_names` per current binding below: this scope's current
+        // frame can hold many live names, and it is scanned twice.
+        let replaced_set: std::collections::HashSet<&str> =
+            replaced_names.iter().map(String::as_str).collect();
         let mut evicted_values: Vec<String> = self
             .bindings
             .iter_current_in(&self.scopes, scope)
             .into_iter()
-            .filter(|(name, _)| replaced_names.iter().any(|replaced| replaced == &name.0))
+            .filter(|(name, _)| replaced_set.contains(name.0.as_str()))
             .map(|(name, _)| name.0.clone())
             .collect();
         evicted_values.sort();
@@ -1937,7 +1943,7 @@ impl PersistentSession {
             .bindings
             .iter_current_in(&self.scopes, scope)
             .into_iter()
-            .filter(|(name, _)| !replaced_names.iter().any(|replaced| replaced == &name.0))
+            .filter(|(name, _)| !replaced_set.contains(name.0.as_str()))
             .map(|(_, entry)| (entry.id.var(), entry.module.module_name()))
             .unzip();
         import_modules.sort();
