@@ -687,7 +687,7 @@ pub(super) fn emit_dispatchers(
         let recorded_ref = pipeline
             .module
             .declare_func_in_func(prepared_unresolved_call, builder.func);
-        let recorded = builder.ins().call(recorded_ref, &[vmctx, header]);
+        let recorded = builder.ins().call(recorded_ref, &[vmctx, object]);
         let status = builder.inst_results(recorded)[0];
         crate::alloc::emit_prepared_failure_return(&mut builder, status);
         builder.seal_all_blocks();

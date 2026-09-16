@@ -93,6 +93,16 @@ pub(super) fn caf_program(
     local_thunk: bool,
     update: UpdatePolicy,
 ) -> CompiledProgram {
+    CompiledProgram::compile(&caf_linked(garbage_objects, local_thunk, update)).unwrap()
+}
+
+/// [`caf_program`]'s linked program, for installs that compile against an
+/// existing machine's interner.
+pub(super) fn caf_linked(
+    garbage_objects: u32,
+    local_thunk: bool,
+    update: UpdatePolicy,
+) -> tidepool_repr::execution_schema::LinkedProgram {
     let mut wire = testing::wire_program();
     wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
     wire.constructors.push(ConstructorDecl {
@@ -160,8 +170,7 @@ pub(super) fn caf_program(
         body,
     };
     let prepared = testing::prepare(wire).unwrap();
-    let linked = link_program(prepared, &MachineImports::default()).unwrap();
-    CompiledProgram::compile(&linked).unwrap()
+    link_program(prepared, &MachineImports::default()).unwrap()
 }
 
 /// The real adapter must enter a heap CAF, allocate its value and settle it.
@@ -789,4 +798,107 @@ fn w5_a4_forcing_observation_20k_constructors_small_stack() {
         .expect("small-stack worker should start")
         .join();
     join.expect("deep forcing observation must not overflow the worker stack");
+}
+
+/// Machine-shared descriptors (interned constructors, external wrappers) have
+/// no owning program: installing a program that declares one must not make
+/// its enter row that program's, and retiring that program must not remove
+/// what later programs rely on.
+mod shared_constructor_rows {
+    use super::super::{
+        AnswerPlan, ImportBindings, PreparedCallOptions, PreparedMachine, PreparedMachineOptions,
+        RunOptions,
+    };
+    use super::{caf_linked, caf_program};
+    use crate::suspension::RealmId;
+    use tidepool_bridge::Value;
+    use tidepool_repr::execution_schema::{
+        link_program, testing, MachineImports, UpdatePolicy, ValueId,
+    };
+    use tidepool_repr::DataConId;
+
+    /// A program that declares no constructor at all: any constructor value it
+    /// enters is foreign to its own `prepared_enter` chain.
+    fn constructor_free() -> tidepool_repr::execution_schema::LinkedProgram {
+        link_program(
+            testing::prepare(testing::wire_program()).expect("baseline fixture validates"),
+            &MachineImports::default(),
+        )
+        .expect("baseline fixture links")
+    }
+
+    #[test]
+    fn prepared_program_retiring_a_declarer_keeps_shared_constructor_entry() {
+        let options = PreparedMachineOptions {
+            nursery_bytes: RunOptions::default().nursery_bytes,
+        };
+        // A and B both declare the shared `Unit`; C declares nothing.
+        let (mut machine, program_a) =
+            PreparedMachine::new(caf_program(0, false, UpdatePolicy::Memoize), options)
+                .expect("A installs");
+        let compiled_b = machine
+            .compile_for_install(&caf_linked(0, false, UpdatePolicy::Memoize))
+            .expect("B compiles against the machine interner");
+        let program_b = machine
+            .install_program(compiled_b, ImportBindings::new())
+            .expect("B installs");
+        let compiled_c = machine
+            .compile_for_install(&constructor_free())
+            .expect("C compiles");
+        let program_c = machine
+            .install_program(compiled_c, ImportBindings::new())
+            .expect("C installs");
+        machine.pin(program_b).expect("B is installed");
+        machine.pin(program_c).expect("C is installed");
+
+        let call = PreparedCallOptions {
+            observation_budget: 100,
+            collect_before_observation: false,
+        };
+        machine
+            .run_entry(program_b, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("B builds its Unit");
+        let unit = machine
+            .build_answer(
+                RealmId::ROOT,
+                &AnswerPlan::Constructor {
+                    host_id: DataConId(900),
+                    fields: Vec::new(),
+                },
+            )
+            .expect("a shared Unit builds");
+        let before = machine.residency().enter_rows;
+
+        let token = machine.quiesce().expect("quiescent");
+        let receipt = machine.collect_major(token).expect("major collection");
+        assert_eq!(receipt.programs, vec![program_a], "{receipt:?}");
+        assert!(
+            machine.residency().enter_rows < before,
+            "A's own thunk row leaves with A"
+        );
+
+        // Constructor references are normally pointer-tagged, which `prepared_enter`
+        // returns without reading the header. The untagged encoding is equally
+        // valid and takes the header path, where C has no local row for `Unit`.
+        let slot = machine.handle_root(unit).expect("the Unit handle is live");
+        unsafe {
+            let word = slot.current() as usize;
+            assert_ne!(word & 7, 0, "host answers are pointer-tagged");
+            slot.addr().write((word & !7) as *mut u8);
+        }
+
+        for program in [program_c, program_b] {
+            assert!(
+                matches!(
+                    machine.observe_handle(program, unit, 100),
+                    Ok(Value::Con(id, ref fields)) if id == DataConId(900) && fields.is_empty()
+                ),
+                "entering the shared constructor through {program:?} after A retired"
+            );
+        }
+        machine
+            .run_entry(program_b, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("B still runs after A retired");
+        assert!(machine.release(unit));
+    }
 }

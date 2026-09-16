@@ -218,13 +218,19 @@ unsafe extern "C" fn prepared_resolve_call(
         .map_or(0, |code| code as u64)
 }
 
-/// Report an exhausted application search exactly once.
+/// Report an exhausted application search exactly once. `object` is the
+/// untagged callee whose header the dispatcher just read.
 unsafe extern "C" fn prepared_unresolved_call(
     vmctx: *mut crate::context::VMContext,
-    header: u64,
+    object: u64,
 ) -> i32 {
     let machine = unsafe { crate::machine_state::machine_state(vmctx) };
-    let cause = if machine.owns_prepared_entry((header as usize) & !7) {
+    let header = unsafe { (object as *const usize).read() } & !7;
+    // A live object of this machine is a reusable miss (incompatible
+    // demand); anything else does not name an object at all.
+    let known = machine.owns_prepared_entry(header)
+        || unsafe { machine.prepared_constructor_tag(object as usize) }.is_ok();
+    let cause = if known {
         crate::host_fns::RuntimeError::UnresolvedCallee
     } else {
         crate::host_fns::RuntimeError::BadThunkState(0)
@@ -233,25 +239,31 @@ unsafe extern "C" fn prepared_unresolved_call(
     machine.prepared_call_status() as i32
 }
 
-/// Resolve the owning program's `prepared_enter` for a foreign
-/// thunk/function/PAP header, so `entry.rs`'s per-program enter chain
-/// can fall back to it. Returns 0 on a miss: the enter map is the union
-/// of every installed program's enterable headers, so a miss means no
-/// program owns the object -- an integrity failure, not an unresolved
-/// callee.
+/// `prepared_resolve_enter`'s answer for an object that is already a value:
+/// the caller returns the reference unchanged. Never a code address.
+pub(crate) const ENTER_EVALUATED: u64 = 1;
+
+/// Resolve how to enter an untagged object `entry.rs`'s per-program chain
+/// does not know. A foreign thunk/function/PAP resolves to its owning
+/// program's `prepared_enter`. A constructor is a value whatever program
+/// declared it: interned constructors are machine-shared and have no owner
+/// row, so they answer [`ENTER_EVALUATED`] from the live descriptor space.
+/// Returns 0 on a miss -- no installed program owns the object, an
+/// integrity failure rather than an unresolved callee.
 unsafe extern "C" fn prepared_resolve_enter(
     vmctx: *mut crate::context::VMContext,
-    header: u64,
+    object: u64,
 ) -> u64 {
     let machine = unsafe { crate::machine_state::machine_state(vmctx) };
-    let masked = (header as usize) & !7;
-    match machine.resolve_prepared_enter(masked) {
-        Some(code) => code as u64,
-        None => {
-            machine.set_first_cause(crate::host_fns::RuntimeError::BadThunkState(0));
-            0
-        }
+    let header = unsafe { (object as *const usize).read() } & !7;
+    if let Some(code) = machine.resolve_prepared_enter(header) {
+        return code as u64;
     }
+    if unsafe { machine.prepared_constructor_tag(object as usize) }.is_ok() {
+        return ENTER_EVALUATED;
+    }
+    machine.set_first_cause(crate::host_fns::RuntimeError::BadThunkState(0));
+    0
 }
 
 /// Status-only failure return for a site whose cause was already recorded
@@ -313,14 +325,13 @@ pub struct CompiledProgram {
     /// This program's own `prepared_enter` FuncId. `PreparedMachine::install`
     /// registers it as the owner for every header in `enter_owned_headers`.
     pub(crate) enter: FuncId,
-    /// Every thunk/function/PAP descriptor header THIS program's own
-    /// `prepared_enter` (the `enter` field above) knows how to force --
-    /// i.e. the union of `plan.thunks`' and the evaluated-chain descriptors'
-    /// header words, mirroring what `entry::emit_prepared_enter`'s
-    /// `thunks`/`evaluated` parameters already cover for this program.
+    /// Every thunk/function/PAP descriptor header this program owns and its
+    /// `prepared_enter` (the `enter` field above) knows how to force.
     /// `PreparedMachine::install` registers these against `enter` so
     /// `prepared_resolve_enter` can dispatch foreign headers to their
-    /// owning program.
+    /// owning program, and retirement removes exactly these rows. Shared
+    /// descriptors (interned constructors, external wrappers) are never
+    /// listed: another program may rely on them after this one retires.
     pub(crate) enter_owned_headers: Vec<usize>,
 }
 
@@ -942,6 +953,12 @@ impl CompiledProgram {
             );
         }
         let callables = dispatchers.exports(&plan);
+        let shared = plan
+            .constructors
+            .iter()
+            .map(|descriptor| descriptor.initial_header_word())
+            .chain(plan.externals.headers())
+            .collect::<std::collections::HashSet<_>>();
         let enter_owned_headers = thunk_entries
             .iter()
             .map(|thunk_entry| thunk_entry.descriptor.initial_header_word())
@@ -950,6 +967,7 @@ impl CompiledProgram {
                     .iter()
                     .map(|descriptor| descriptor.initial_header_word()),
             )
+            .filter(|header| !shared.contains(header))
             .collect::<Vec<_>>();
         let byte_tops = plan
             .top_bindings

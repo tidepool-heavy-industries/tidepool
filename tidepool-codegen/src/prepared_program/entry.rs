@@ -294,14 +294,27 @@ pub(super) fn emit_prepared_enter(
         builder.switch_to_block(next);
         builder.seal_block(next);
     }
-    let call = builder.ins().call(resolve_ref, &[vmctx, header]);
+    let call = builder.ins().call(resolve_ref, &[vmctx, reference]);
     let code = builder.inst_results(call)[0];
     let found = builder.ins().icmp_imm(IntCC::NotEqual, code, 0);
+    let resolved_block = builder.create_block();
     let foreign_block = builder.create_block();
     let truly_invalid_block = builder.create_block();
     builder
         .ins()
-        .brif(found, foreign_block, &[], truly_invalid_block, &[]);
+        .brif(found, resolved_block, &[], truly_invalid_block, &[]);
+    builder.switch_to_block(resolved_block);
+    builder.seal_block(resolved_block);
+    let evaluated = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, code, super::ENTER_EVALUATED as i64);
+    builder.ins().brif(
+        evaluated,
+        return_value,
+        &[reference.into()],
+        foreign_block,
+        &[],
+    );
     builder.switch_to_block(foreign_block);
     builder.seal_block(foreign_block);
     let sig_ref = builder.import_signature(signature());
