@@ -577,3 +577,305 @@ fn prepared_turn_includes_the_complete_site_answer_family_in_shared_metadata() {
         "prepared constructors absent from the shared DataConTable: {missing:?}"
     );
 }
+
+/// Run a single-binder ask turn `<binder> <- <expr>` to its suspension,
+/// checking (as `Notebook::suspend_ask` does for the `Bool` ask) that the
+/// request names one of the turn's declared sites and, on the prepared
+/// route, that the artifact admits the resume entry. Generalizes
+/// `suspend_ask` over the binder name and the ask expression so the data-
+/// and `Maybe`-shaped answer turns below can reuse the same idiom.
+fn suspend_typed_ask(
+    notebook: &mut Notebook,
+    engine: EngineKind,
+    binder_name: &str,
+    expr: &str,
+) -> (BoundBinder, tidepool_runtime::session::ResidentHole) {
+    let TurnResult::Bind {
+        bound, compiled, ..
+    } = notebook.compile(&format!("{binder_name} <- {expr}"))
+    else {
+        panic!("{engine:?}: the {binder_name} ask did not classify as a bind");
+    };
+    let [binder] = bound.as_slice() else {
+        panic!(
+            "{engine:?}: the {binder_name} ask bound {} names",
+            bound.len()
+        );
+    };
+    assert_eq!(binder.name, binder_name);
+    let code = compiled.code();
+    let declared_sites: Vec<u64> = match engine {
+        EngineKind::Prepared => {
+            let prepared = compiled
+                .prepared
+                .as_ref()
+                .expect("prepared request returned no prepared program");
+            let admits_resume = prepared
+                .bindings()
+                .iter()
+                .flat_map(|group| match group {
+                    Group::NonRecursive(top) => std::slice::from_ref(top),
+                    Group::Recursive(tops) => tops.as_slice(),
+                })
+                .any(|top| top.identity.occurrence == "__resume");
+            assert!(admits_resume, "the turn artifact admits no __resume top");
+            prepared.sites().iter().map(|row| row.site).collect()
+        }
+        EngineKind::Core => code.sites.iter().map(|site| site.site).collect(),
+    };
+    assert!(
+        !declared_sites.is_empty(),
+        "{engine:?}: the {binder_name} ask declares no site"
+    );
+    let outcome = notebook
+        .session
+        .run_bind_with_sites(
+            "notebook_typed_ask",
+            compiled.code(),
+            binder,
+            Generation(notebook.generation),
+        )
+        .unwrap_or_else(|error| panic!("{engine:?}: the {binder_name} ask failed to run: {error}"));
+    let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
+        panic!("{engine:?}: the {binder_name} ask did not suspend: {outcome:?}");
+    };
+    let request = tidepool_runtime::value_to_json(&request, code.table, 0);
+    let site = typed_site_of(&request).unwrap_or_else(|| {
+        panic!("{engine:?}: the {binder_name} request names no typedSite: {request}")
+    });
+    assert!(
+        declared_sites.contains(&site),
+        "{engine:?}: site {site} is not one of the turn's {declared_sites:?}"
+    );
+    (binder.clone(), hole)
+}
+
+/// Two host-built answers that are constructors with fields -- a boxed `Int`
+/// (`I#`) and a `Maybe Int` (`Just`/`Nothing`) -- resuming parked prepared
+/// turns on both engines. This extends `notebook_suspension`'s `Bool`
+/// coverage (a nullary constructor) to constructors that carry scalar and
+/// nested-constructor fields.
+///
+/// On the prepared route the validator refuses a bare literal for a `Data`
+/// site (`AnswerShape`: a constructor is required, not a scalar directly)
+/// and a constructor from another family (`AnswerConstructor`) before the
+/// frame is touched, exactly as `notebook_suspension` documents for `Bool`.
+/// Core has no validator of its own -- the harness validates answers
+/// upstream -- so these probes are prepared-only.
+fn notebook_data_answers(engine: EngineKind) {
+    use tidepool_bridge::Value;
+    use tidepool_repr::Literal;
+
+    let mut notebook = Notebook::new(engine);
+    let rendered = notebook.expression("41 + 1").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: warm-up rendered {rendered}"
+    );
+    // Brings `I#` into the session table.
+    let i_hash_id = notebook.constructor("I#");
+    // Brings `True`/`False` into the session table beside `I#`.
+    let rendered = notebook.expression("not False").to_string();
+    assert!(
+        rendered.contains("true"),
+        "{engine:?}: not False rendered as {rendered}"
+    );
+    let true_id = notebook.constructor("True");
+    // Brings `Just`/`Nothing` into the session table. `Just` alone is
+    // ambiguous by bare name in this table (more than one constructor
+    // shares it), so resolve it by arity instead of `Notebook::constructor`.
+    let rendered = notebook
+        .expression("maybe (0 :: Int) (+ 1) (Just (2 :: Int))")
+        .to_string();
+    assert!(
+        rendered.contains('3'),
+        "{engine:?}: warm-up maybe rendered as {rendered}"
+    );
+    let just_id = notebook
+        .last_table
+        .as_ref()
+        .expect("an expression turn ran")
+        .get_by_name_arity("Just", 1)
+        .unwrap_or_else(|| panic!("{engine:?}: Just/1 is not in the session table"));
+
+    assert_eq!(notebook.session.parked_count(), 0);
+
+    // --- n <- runLLMTurn @Int: a `Data` site whose one row (`I#`) carries a
+    // scalar field. ---
+    let handles_before = notebook.session.value_handle_count();
+    let (n_binder, n_hole) = suspend_typed_ask(
+        &mut notebook,
+        engine,
+        "n",
+        "(runLLMTurn @Int \"how many\" :: M Int)",
+    );
+    assert_eq!(notebook.session.parked_count(), 1);
+    assert_eq!(notebook.session.stowed_roots_count(), 1);
+
+    if engine == EngineKind::Prepared {
+        let handles_parked = notebook.session.value_handle_count();
+        let roots_parked = notebook.session.persistent_roots_count();
+        let literal = notebook
+            .session
+            .resume(n_hole.clone(), Value::Lit(Literal::LitInt(7)))
+            .expect_err("a bare literal is not the I# constructor");
+        assert!(
+            matches!(
+                literal,
+                ResidentError::Prepared(PreparedRuntimeError::AnswerShape { .. })
+            ),
+            "unexpected refusal: {literal}"
+        );
+        let wrong_family = notebook
+            .session
+            .resume(n_hole.clone(), Value::Con(true_id, Vec::new()))
+            .expect_err("a Bool constructor is not an Int");
+        assert!(
+            matches!(
+                wrong_family,
+                ResidentError::Prepared(PreparedRuntimeError::AnswerConstructor { .. })
+            ),
+            "unexpected refusal: {wrong_family}"
+        );
+        assert_eq!(notebook.session.parked_holes(), vec![n_hole.cont_id()]);
+        assert_eq!(notebook.session.parked_count(), 1);
+        assert_eq!(notebook.session.stowed_roots_count(), 1);
+        assert_eq!(notebook.session.value_handle_count(), handles_parked);
+        assert_eq!(notebook.session.persistent_roots_count(), roots_parked);
+    }
+
+    let outcome = notebook
+        .session
+        .resume(
+            n_hole.clone(),
+            Value::Con(i_hash_id, vec![Value::Lit(Literal::LitInt(41))]),
+        )
+        .unwrap_or_else(|error| panic!("{engine:?}: resuming n with 41 failed: {error}"));
+    assert!(
+        matches!(outcome, ResidentOutcome::Completed { .. }),
+        "{engine:?}: the resumed n bind did not complete: {outcome:?}"
+    );
+    assert!(notebook.session.parked_holes().is_empty(), "{engine:?}");
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    assert_eq!(notebook.session.stowed_roots_count(), 0, "{engine:?}");
+    // A prepared binding keeps its value as a ROOT-realm ledger handle
+    // (`BoundValue::Prepared`); Core moves the tenured root out of the handle
+    // registry into the binding table.
+    let n_bound_handles = match engine {
+        EngineKind::Prepared => 1,
+        EngineKind::Core => 0,
+    };
+    assert_eq!(
+        notebook.session.value_handle_count(),
+        handles_before + n_bound_handles,
+        "{engine:?}: the resumed n turn leaked a value handle"
+    );
+    let second = notebook
+        .session
+        .resume(
+            n_hole.clone(),
+            Value::Con(i_hash_id, vec![Value::Lit(Literal::LitInt(0))]),
+        )
+        .expect_err("the n hole is already settled");
+    assert!(
+        matches!(second, ResidentError::WrongContinuation { .. }),
+        "{engine:?}: a second resume of the settled n hole reported {second}"
+    );
+
+    notebook.injected.push(n_binder.module.clone());
+    let rendered = notebook.expression("n + 1").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: n + 1 rendered as {rendered}"
+    );
+
+    // --- m <- runLLMTurn @(Maybe Int): a `Data` site whose rows are
+    // `Just`/`Nothing`, `Just` carrying a nested `I#` field. ---
+    let handles_before = notebook.session.value_handle_count();
+    let (m_binder, m_hole) = suspend_typed_ask(
+        &mut notebook,
+        engine,
+        "m",
+        "(runLLMTurn @(Maybe Int) \"maybe\" :: M (Maybe Int))",
+    );
+    assert_eq!(notebook.session.parked_count(), 1);
+    assert_eq!(notebook.session.stowed_roots_count(), 1);
+
+    if engine == EngineKind::Prepared {
+        let wrong_family = notebook
+            .session
+            .resume(
+                m_hole.clone(),
+                Value::Con(i_hash_id, vec![Value::Lit(Literal::LitInt(1))]),
+            )
+            .expect_err("an I# constructor is not a Maybe Int");
+        assert!(
+            matches!(
+                wrong_family,
+                ResidentError::Prepared(PreparedRuntimeError::AnswerConstructor { .. })
+            ),
+            "unexpected refusal: {wrong_family}"
+        );
+        assert_eq!(notebook.session.parked_holes(), vec![m_hole.cont_id()]);
+        assert_eq!(notebook.session.parked_count(), 1);
+        assert_eq!(notebook.session.stowed_roots_count(), 1);
+    }
+
+    let outcome = notebook
+        .session
+        .resume(
+            m_hole.clone(),
+            Value::Con(
+                just_id,
+                vec![Value::Con(i_hash_id, vec![Value::Lit(Literal::LitInt(4))])],
+            ),
+        )
+        .unwrap_or_else(|error| panic!("{engine:?}: resuming m with Just 4 failed: {error}"));
+    assert!(
+        matches!(outcome, ResidentOutcome::Completed { .. }),
+        "{engine:?}: the resumed m bind did not complete: {outcome:?}"
+    );
+    assert!(notebook.session.parked_holes().is_empty(), "{engine:?}");
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    assert_eq!(notebook.session.stowed_roots_count(), 0, "{engine:?}");
+    let m_bound_handles = match engine {
+        EngineKind::Prepared => 1,
+        EngineKind::Core => 0,
+    };
+    assert_eq!(
+        notebook.session.value_handle_count(),
+        handles_before + m_bound_handles,
+        "{engine:?}: the resumed m turn leaked a value handle"
+    );
+    let second = notebook
+        .session
+        .resume(
+            m_hole.clone(),
+            Value::Con(
+                just_id,
+                vec![Value::Con(i_hash_id, vec![Value::Lit(Literal::LitInt(0))])],
+            ),
+        )
+        .expect_err("the m hole is already settled");
+    assert!(
+        matches!(second, ResidentError::WrongContinuation { .. }),
+        "{engine:?}: a second resume of the settled m hole reported {second}"
+    );
+
+    notebook.injected.push(m_binder.module.clone());
+    let rendered = notebook.expression("maybe (0 :: Int) (+ 1) m").to_string();
+    assert!(
+        rendered.contains('5'),
+        "{engine:?}: maybe 0 (+ 1) m rendered as {rendered}"
+    );
+}
+
+#[test]
+fn notebook_data_answers_on_core() {
+    notebook_data_answers(EngineKind::Core);
+}
+
+#[test]
+fn notebook_data_answers_on_prepared_stg() {
+    notebook_data_answers(EngineKind::Prepared);
+}
