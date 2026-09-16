@@ -70,23 +70,34 @@ Only the verbs in `EffectSchema.sitedVerbs` carry a dynamic site; ordinary
 effects (`say`, file, KV, HTTP, form `ask`) get synthetic sites keyed by the
 request constructor. Design: `plans/handoff/designs/synthetic-sites.md`.
 
-### `Value`-carrying replies are unconstructible
+### `Value`-carrying replies go through a leaf adapter
 `kvGet`, `httpGet`/`httpPost` and form `ask` reply with Aeson `Value`, whose
-`KeyMap`/`Map`/`Vector` spines the type policy refuses, so the answer is
-refused with the frame still parked. Options (a compiled decode adapter or
-an Aeson-aware host builder) are in `synthetic-sites.md`, decision 4.
-Boundary decision pending.
+`KeyMap`/`Map`/`Vector` spines the type policy still refuses field-by-field.
+A `Value`-typed answer node is instead lowered whole as rendered JSON text
+and decoded through the turn's admitted `__decodeValue` root
+(`Tidepool.Aeson.Value.eitherDecodeValue`), spliced into the outer answer as
+a borrowed handle (design: `synthetic-sites.md`, decision 4 — taken). A
+decode failure (`Left`) is a typed `AnswerRejected` refusal with the frame
+left parked; nothing else host-side builds a `KeyMap`/`Scientific` directly.
 
-### Handle and framed answers
-Live handles, framed custody and `LiveReentry` deliveries are not answerable
-on the prepared route yet (`NotYetSupported`).
+### `LiveReentry` deliveries are not answerable yet
+Handle and framed-handle answers are supported (bare and framed delivery by
+borrow, mirroring Core's handle-delivery contract). A site whose delivery is
+`LiveReentry` rather than `HostAnswer` still has no prepared-route producer.
 
 ## Residency
 
-### Programs with pinned byte storage are never retired
-A program whose code embeds literal-pool addresses is kept live and reported
-in `RetirementReceipt::pinned_by_bytes`; raw `Address` fields carry no header
-edge back to it. Lifetime contract edge (c).
+### Interned literal bytes are never freed
+Literal `Addr#` bytes are interned once into one permanent, content-keyed
+machine-wide pool (`MachineState`'s `PinnedBytes`); a program's own literal
+addresses always resolve against it, and two programs declaring the same
+content share one address. Content is never removed, even once every
+program that referenced it has retired: the pool is bounded by the number
+of distinct literal contents compiled across the session's programs, not by
+which programs are still installed. A program with no other root now
+retires by ordinary reachability exactly like one with none -- its own
+literal storage is no longer a liveness edge (lifetime contract edge (c) is
+closed).
 
 ### External payloads are not swept from old space
 Boxed-array and byte payloads reachable only from dead old-space objects stay

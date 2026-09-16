@@ -70,6 +70,7 @@ module Tidepool.Session
   , scaffoldTargetName
   , preparedScaffoldTargetName
   , preparedResumeTargetName
+  , preparedDecodeTargetName
   , scaffoldOutputBase
   , evalUserBinder
   ) where
@@ -354,6 +355,18 @@ preparedScaffoldTargetName = "__prepared"
 -- artifact whose suspensions the host refuses to park.
 preparedResumeTargetName :: String
 preparedResumeTargetName = "__resume"
+
+-- | The scaffold-reserved decode entry a prepared turn admits beside
+-- 'preparedScaffoldTargetName' and 'preparedResumeTargetName':
+-- @__decodeValue :: Text -> Either Text Value@, the leaf adapter the host
+-- enters to turn a JSON-rendered bridge answer into a retained
+-- @Tidepool.Aeson.Value.Value@ before it is spliced into an outer answer's
+-- constructor tree ('Tidepool.Aeson.Value.Value' itself, and any type built
+-- from it, is otherwise unconstructible host-side: aeson's 'Object' row
+-- needs 'Data.Map.Internal.Map', which the host cannot build directly).
+-- Projected as an auxiliary root beside 'preparedResumeTargetName'.
+preparedDecodeTargetName :: String
+preparedDecodeTargetName = "__decodeValue"
 
 -- | Base name of the CBOR file(s) every Rust caller reads for the scaffold
 -- target (@result.cbor@), and the Haskell binder name the ONE-SHOT eval

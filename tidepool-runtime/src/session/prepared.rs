@@ -24,9 +24,9 @@ use tidepool_codegen::prepared_program::{
 pub use tidepool_codegen::jit_machine::CancelHandle;
 pub use tidepool_codegen::jit_machine::MachineDisposition;
 use tidepool_codegen::suspension::ContinuationId;
-pub use tidepool_codegen::suspension::RealmId;
+pub use tidepool_codegen::suspension::{RealmId, ValueHandle};
 use tidepool_repr::execution_schema::{
-    link_program, Group, HeapRhs, ImportedValue, LinkError, MachineImports, ParseError,
+    link_program, CtorRow, Group, HeapRhs, ImportedValue, LinkError, MachineImports, ParseError,
     PreparedProgram, RuntimeRep, Signature, SiteDelivery, SiteRow, SymbolIdentity, TypeNode,
     TypeNodeId, ValueId,
 };
@@ -34,7 +34,7 @@ use tidepool_repr::{DataConId, DataConTable, Literal, PrincipalId, SessionVarId}
 
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 
-use super::turn::PREPARED_RESUME_TARGET;
+use super::turn::{PREPARED_DECODE_TARGET, PREPARED_RESUME_TARGET};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreparedFailureKind {
@@ -81,12 +81,6 @@ pub enum PreparedRuntimeError {
     /// request was compiled Core-only. Never a fallback; the turn fails.
     #[error("the turn was compiled without its prepared program")]
     MissingProgram,
-    /// A turn shape the prepared route does not carry yet (the cutover lands
-    /// them in order: effect suspension with the resume contract, pattern
-    /// binds with the multi-binder slice). The turn fails; Core is never
-    /// consulted.
-    #[error("the prepared route does not yet support {0}")]
-    NotYetSupported(&'static str),
     /// One artifact declares the same typed site twice with different
     /// evidence: a projection defect, refused before anything installs.
     #[error("the artifact declares typed site {site} twice with different evidence")]
@@ -144,6 +138,27 @@ pub enum PreparedRuntimeError {
     /// parked.
     #[error("typed site {site} has an unconstructible answer type: {reason}")]
     AnswerUnconstructible { site: u64, reason: String },
+    /// The program that produced a suspension admits no decode entry
+    /// (`__decodeValue`), so a `Value`-carrying leaf of its answer could
+    /// never be lowered. Every turn template defines the entry; this is a
+    /// stale or foreign artifact, never a user error.
+    #[error("program {program:?} admits no `{entry}` entry, so a Value-carrying answer cannot be decoded")]
+    NoDecodeEntry {
+        program: ProgramId,
+        entry: &'static str,
+    },
+    /// A `Value`-carrying leaf's JSON rendering did not decode back to a
+    /// `Tidepool.Aeson.Value.Value` (aeson's decoder disagrees with the
+    /// bridge renderer that produced the text, or the leaf reached a
+    /// malformed shape the renderer could not fully express). The frame
+    /// stays parked; every handle built before the failure is released.
+    #[error("typed site {site} rejects a Value-carrying answer: {detail}")]
+    AnswerRejected { site: u64, detail: String },
+    /// A resumed handle (bare or framed) is not live in this engine's
+    /// ledger: unknown, released, or minted under a different engine. The
+    /// frame stays parked.
+    #[error("resume delivered a handle that is not live in this engine's ledger")]
+    UnknownHandle,
 }
 
 impl PreparedRuntimeError {
@@ -156,7 +171,6 @@ impl PreparedRuntimeError {
             | Self::UnsettledEntry { .. }
             | Self::WrongEngine
             | Self::MissingProgram
-            | Self::NotYetSupported(_)
             | Self::DuplicateSite { .. }
             | Self::ProjectionShape { .. }
             | Self::SiteConflict { .. }
@@ -164,10 +178,13 @@ impl PreparedRuntimeError {
             | Self::UntypedRequest
             | Self::UnhandledRequest
             | Self::NoResumeEntry { .. }
+            | Self::NoDecodeEntry { .. }
             | Self::AnswerDelivery { .. }
             | Self::AnswerConstructor { .. }
             | Self::AnswerShape { .. }
             | Self::AnswerUnconstructible { .. }
+            | Self::AnswerRejected { .. }
+            | Self::UnknownHandle
             | Self::CrossRealmArgument { .. } => PreparedFailureKind::Rejected,
             Self::Cancelled => PreparedFailureKind::Cancelled,
             Self::Compile(_) => PreparedFailureKind::Rejected,
@@ -227,6 +244,11 @@ struct ProgramFacts {
     /// q x)`, beside the entry in its module), when the artifact retained it.
     /// A suspension of a program without one is refused before parking.
     resume: Option<ValueId>,
+    /// The turn's admitted decode entry (`__decodeValue :: Text -> Either
+    /// Text Value`, beside the entry in its module), when the artifact
+    /// retained it. A `Value`-carrying leaf of an answer to a program
+    /// without one is refused before anything is built.
+    decode: Option<ValueId>,
     /// The typed sites this program declares and the type graph they point
     /// into, kept for site-evidence resolution and answer validation after
     /// the machine has taken the program's code.
@@ -301,15 +323,19 @@ impl ProgramFacts {
             })
             .collect();
         let entry = prepared.entry();
-        let resume = tops
-            .get(&entry)
-            .map(|(identity, _)| identity.module.clone())
-            .and_then(|module| {
-                tops.iter().find_map(|(id, (identity, _))| {
-                    (identity.module == module && identity.occurrence == PREPARED_RESUME_TARGET)
-                        .then_some(*id)
-                })
-            });
+        let entry_module = tops.get(&entry).map(|(identity, _)| identity.module.clone());
+        let resume = entry_module.clone().and_then(|module| {
+            tops.iter().find_map(|(id, (identity, _))| {
+                (identity.module == module && identity.occurrence == PREPARED_RESUME_TARGET)
+                    .then_some(*id)
+            })
+        });
+        let decode = entry_module.and_then(|module| {
+            tops.iter().find_map(|(id, (identity, _))| {
+                (identity.module == module && identity.occurrence == PREPARED_DECODE_TARGET)
+                    .then_some(*id)
+            })
+        });
         let constructors: Vec<(SymbolIdentity, DataConId)> = prepared
             .constructors()
             .iter()
@@ -341,6 +367,7 @@ impl ProgramFacts {
             tops,
             settled: SettledIds::of(&by_identity),
             resume,
+            decode,
             sites,
             verb_sites,
             types: prepared.types().to_vec(),
@@ -366,14 +393,23 @@ impl ProgramFacts {
     /// node `node` of this (evidence-owning) program: every constructor must
     /// be one of the node's rows, every field count must match, every scalar
     /// must fit its declared representation. Text, Integer and Natural leaves
-    /// are a later slice; an unconstructible node refuses. Nothing here
-    /// touches the machine, so a refusal leaves the frame exactly as parked.
+    /// are a later slice; an unconstructible node refuses, EXCEPT the family
+    /// this checks first: `Tidepool.Aeson.Value.Value` itself is
+    /// unconstructible field-by-field (its `Object` row needs
+    /// `Data.Map.Internal.Map`, its `Number` row needs `Scientific`'s
+    /// unpacked fields), so any node of that family is lowered whole as a
+    /// [`AnswerPlan::Json`] leaf instead of walking its rows — the leaf
+    /// adapter `session::prepared`'s resume path resolves through the
+    /// program's decode root before building. `table` names constructors for
+    /// that rendering only; nothing here touches the machine, so a refusal
+    /// leaves the frame exactly as parked.
     fn lower_answer(
         &self,
         site: u64,
         node: TypeNodeId,
         value: &Value,
         depth: usize,
+        table: &DataConTable,
     ) -> Result<AnswerPlan, PreparedRuntimeError> {
         if depth > MAX_ANSWER_DEPTH {
             return Err(PreparedRuntimeError::AnswerShape {
@@ -384,6 +420,10 @@ impl ProgramFacts {
         let shape = |detail| PreparedRuntimeError::AnswerShape { site, detail };
         match self.type_node(node) {
             None => Err(shape("the site's type evidence names an undeclared node")),
+            Some(TypeNode::Data { family, .. }) if is_aeson_value(family) => {
+                let rendered = crate::value_to_json(value, table, 0);
+                Ok(AnswerPlan::Json(rendered.to_string()))
+            }
             Some(TypeNode::Data { rows, .. }) => {
                 let Value::Con(host_id, fields) = value else {
                     return Err(shape("a constructor of the site's answer type is required"));
@@ -406,7 +446,7 @@ impl ProgramFacts {
                 }
                 let mut planned = Vec::with_capacity(fields.len());
                 for (field_node, field) in row.fields.iter().zip(fields) {
-                    planned.push(self.lower_answer(site, *field_node, field, depth + 1)?);
+                    planned.push(self.lower_answer(site, *field_node, field, depth + 1, table)?);
                 }
                 Ok(AnswerPlan::Constructor {
                     host_id: *host_id,
@@ -439,6 +479,20 @@ impl ProgramFacts {
         self.by_identity
             .get(&(module.to_string(), occurrence.to_string()))
             .copied()
+    }
+
+    /// The declared row for `host_id` among `node`'s rows, when `node` is a
+    /// `Data` node. A framed-handle delivery validates its prefix fields
+    /// against this row the same way an ordinary answer's constructor does.
+    fn row_for(&self, node: TypeNodeId, host_id: DataConId) -> Option<&CtorRow> {
+        match self.type_node(node)? {
+            TypeNode::Data { rows, .. } => rows.iter().find(|row| {
+                self.constructors
+                    .get(row.constructor.0 as usize)
+                    .is_some_and(|(_, declared)| *declared == host_id)
+            }),
+            _ => None,
+        }
     }
 
     /// One byte-backed leaf: the constructor `module.occurrence` over a
@@ -596,6 +650,32 @@ impl ProgramFacts {
 const TEXT_MODULE: &str = "Data.Text.Internal";
 const INTEGER_MODULE: &str = "GHC.Num.Integer";
 const NATURAL_MODULE: &str = "GHC.Num.Natural";
+const AESON_VALUE_MODULE: &str = "Tidepool.Aeson.Value";
+const AESON_VALUE_OCCURRENCE: &str = "Value";
+const EITHER_MODULE: &str = "Data.Either";
+
+/// Whether `family` names the vendored `Tidepool.Aeson.Value.Value` type
+/// (module+name, never the numeric `TypeNodeId`, which is per-artifact) —
+/// the one family [`ProgramFacts::lower_answer`] lowers whole as JSON rather
+/// than walking rows.
+fn is_aeson_value(family: &SymbolIdentity) -> bool {
+    family.module == AESON_VALUE_MODULE && family.occurrence == AESON_VALUE_OCCURRENCE
+}
+
+/// Every [`AnswerPlan::Handle`] leaf reachable from `plan`, for rollback: a
+/// partially resolved plan's already-built handles are released this way
+/// when a later field's resolution fails.
+fn collect_handles(plan: &AnswerPlan, out: &mut Vec<PreparedHandle>) {
+    match plan {
+        AnswerPlan::Handle(handle) => out.push(*handle),
+        AnswerPlan::Constructor { fields, .. } => {
+            for field in fields {
+                collect_handles(field, out);
+            }
+        }
+        AnswerPlan::Scalar { .. } | AnswerPlan::Bytes(_) | AnswerPlan::Json(_) => {}
+    }
+}
 
 /// The raw bytes behind a bridge byte-array value, in any of the forms the
 /// bridge emits for a `ByteArray#` backing.
@@ -1246,6 +1326,21 @@ impl PreparedEngine {
             })
     }
 
+    /// The admitted decode entry of `program`, read without holding a
+    /// borrow past this call.
+    fn decode_entry_of(&self, program: ProgramId) -> Result<ValueId, PreparedRuntimeError> {
+        self.programs
+            .get(&program)
+            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                program,
+            )))?
+            .decode
+            .ok_or(PreparedRuntimeError::NoDecodeEntry {
+                program,
+                entry: PREPARED_DECODE_TARGET,
+            })
+    }
+
     /// Park a suspension `program`'s settled layer produced under `realm`:
     /// read the `Union` layer of `request`, observe its payload through the
     /// machine observe path (the request the host reports, as on Core), read
@@ -1420,6 +1515,146 @@ impl PreparedEngine {
         })
     }
 
+    /// [`Self::resume_parked`], but `answer` is BORROWED rather than
+    /// consumed: it is delivered to the resume entry and left exactly as
+    /// live afterward, custody unchanged — the prepared analogue of Core's
+    /// `ResumeInput::Handle` delivery
+    /// (`docs/continuation-parking-contract.md`), which reads a handle's
+    /// current heap pointer without releasing its root. No realm check: a
+    /// handle is meant to move between parked continuations across resource
+    /// scopes (see `ValueHandle`'s own doc), unlike a freshly built answer,
+    /// which is always realm-scoped to the frame it answers.
+    fn resume_parked_borrowed(
+        &mut self,
+        id: ContinuationId,
+        answer: PreparedHandle,
+    ) -> Result<PreparedResumed, PreparedRuntimeError> {
+        let (realm, _) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
+            ExecutionError::UnknownContinuation(id),
+        ))?;
+        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+            return Err(PreparedRuntimeError::Cancelled);
+        }
+        let (continuation, evidence) = self
+            .machine
+            .take_parked(id)
+            .map_err(PreparedRuntimeError::Run)?;
+        let batch = self.machine.run_entry_retained(
+            evidence.runner,
+            evidence.resume_entry,
+            &[
+                PreparedInput::Managed(continuation),
+                PreparedInput::Managed(answer),
+            ],
+            SETTLE_CALL,
+            realm,
+        );
+        self.machine.release(continuation);
+        // `answer` stays live: its custody is the caller's, before and after.
+        let batch = batch.map_err(PreparedRuntimeError::Run)?;
+        let settlement = self.settle_batch(evidence.runner, realm, batch)?;
+        Ok(PreparedResumed {
+            settlement,
+            realm,
+            runner: evidence.runner,
+        })
+    }
+
+    /// Re-enter the frame parked under `id` by delivering an
+    /// already-retained value verbatim — no materialization, closures
+    /// included, the same shape Core's `ResumeInput::Handle` delivers. `raw`
+    /// must be live in this engine's ledger; the only check possible on this
+    /// route is its `RuntimeRep` (every handle this engine mints is
+    /// `LiftedRef`), matching Core's own lack of a deeper type check on this
+    /// path. The handle's root is a BORROW: this call does not release it.
+    pub fn resume_with_handle(
+        &mut self,
+        id: ContinuationId,
+        raw: ValueHandle,
+    ) -> Result<PreparedResumed, PreparedRuntimeError> {
+        let handle = self
+            .machine
+            .prepared_handle_of(raw)
+            .ok_or(PreparedRuntimeError::UnknownHandle)?;
+        self.resume_parked_borrowed(id, handle)
+    }
+
+    /// Re-enter the frame parked under `id` with a constructor whose final
+    /// field borrows `raw` verbatim: `prefix` is lowered against the site's
+    /// declared row for `constructor` exactly as an ordinary answer's fields
+    /// are (`Value`-carrying prefix fields resolve through the decode entry
+    /// the same way), and the borrowed field is spliced in unvalidated
+    /// beyond its `RuntimeRep`, mirroring Core's own framed delivery
+    /// (`docs/continuation-parking-contract.md`). The built constructor is
+    /// released as usual once the resume entry has read it; `raw`'s root is
+    /// untouched throughout.
+    pub fn resume_with_framed_handle(
+        &mut self,
+        id: ContinuationId,
+        raw: ValueHandle,
+        constructor: DataConId,
+        prefix: Vec<Value>,
+        table: &DataConTable,
+    ) -> Result<PreparedResumed, PreparedRuntimeError> {
+        let handle = self
+            .machine
+            .prepared_handle_of(raw)
+            .ok_or(PreparedRuntimeError::UnknownHandle)?;
+        let (realm, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
+            ExecutionError::UnknownContinuation(id),
+        ))?;
+        let site = evidence.site;
+        let owner = self
+            .programs
+            .get(&evidence.owner)
+            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                evidence.owner,
+            )))?;
+        let row = owner
+            .sites
+            .iter()
+            .find(|row| row.site == site)
+            .ok_or(PreparedRuntimeError::UnknownSite { site })?;
+        if row.delivery != SiteDelivery::HostAnswer {
+            return Err(PreparedRuntimeError::AnswerDelivery {
+                site,
+                delivery: row.delivery,
+            });
+        }
+        let ctor_row = owner
+            .row_for(row.wire, constructor)
+            .ok_or(PreparedRuntimeError::AnswerConstructor {
+                site,
+                host_id: constructor,
+            })?;
+        if ctor_row.fields.len() != prefix.len() + 1 {
+            return Err(PreparedRuntimeError::AnswerShape {
+                site,
+                detail: "the framed constructor's declared field count does not match the \
+                         supplied prefix plus the borrowed handle field",
+            });
+        }
+        let field_nodes = ctor_row.fields[..prefix.len()].to_vec();
+        let mut fields = Vec::with_capacity(prefix.len() + 1);
+        for (field_node, field) in field_nodes.iter().zip(&prefix) {
+            fields.push(owner.lower_answer(site, *field_node, field, 0, table)?);
+        }
+        fields.push(AnswerPlan::Handle(handle));
+        let plan = AnswerPlan::Constructor {
+            host_id: constructor,
+            fields,
+        };
+        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+            return Err(PreparedRuntimeError::Cancelled);
+        }
+        let plan = self.resolve_json_leaves(site, evidence.runner, realm, plan)?;
+        let built = self
+            .machine
+            .build_answer(realm, &plan)
+            .map_err(PreparedRuntimeError::Run)?;
+        self.resume_parked(id, built)
+    }
+
     /// The pre-take checks of a resume, then the take: the frame exists,
     /// `answer` is live under its realm, the realm is not cancelled.
     fn take_for_resume(
@@ -1452,6 +1687,7 @@ impl PreparedEngine {
         &self,
         id: ContinuationId,
         value: &Value,
+        table: &DataConTable,
     ) -> Result<AnswerPlan, PreparedRuntimeError> {
         let (_, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
             ExecutionError::UnknownContinuation(id),
@@ -1475,25 +1711,164 @@ impl PreparedEngine {
                 delivery: row.delivery,
             });
         }
-        owner.lower_answer(row.site, row.wire, value, 0)
+        owner.lower_answer(row.site, row.wire, value, 0, table)
+    }
+
+    /// Resolve every [`AnswerPlan::Json`] leaf of `plan` (a `Value`-carrying
+    /// field [`ProgramFacts::lower_answer`] could not walk into rows) to an
+    /// [`AnswerPlan::Handle`]: render the leaf as a retained `Text`, enter
+    /// `runner`'s admitted decode entry, and project `Right v` to `v`'s
+    /// handle. `Left _` is a typed [`PreparedRuntimeError::AnswerRejected`]
+    /// refusal. Every handle this pass has already built is released before
+    /// a failure propagates, so a refusal leaves nothing extra rooted; the
+    /// frame stays parked throughout (this runs before the take, like
+    /// [`Self::answer_plan`] and `build_answer`).
+    fn resolve_json_leaves(
+        &mut self,
+        site: u64,
+        runner: ProgramId,
+        realm: RealmId,
+        plan: AnswerPlan,
+    ) -> Result<AnswerPlan, PreparedRuntimeError> {
+        match plan {
+            AnswerPlan::Json(text) => {
+                let handle = self.decode_json_leaf(site, runner, realm, &text)?;
+                Ok(AnswerPlan::Handle(handle))
+            }
+            AnswerPlan::Constructor { host_id, fields } => {
+                let mut resolved = Vec::with_capacity(fields.len());
+                for field in fields {
+                    match self.resolve_json_leaves(site, runner, realm, field) {
+                        Ok(field) => resolved.push(field),
+                        Err(error) => {
+                            let mut built = Vec::new();
+                            for field in &resolved {
+                                collect_handles(field, &mut built);
+                            }
+                            self.release_all(built);
+                            return Err(error);
+                        }
+                    }
+                }
+                Ok(AnswerPlan::Constructor {
+                    host_id,
+                    fields: resolved,
+                })
+            }
+            other @ (AnswerPlan::Scalar { .. } | AnswerPlan::Bytes(_) | AnswerPlan::Handle(_)) => {
+                Ok(other)
+            }
+        }
+    }
+
+    /// Decode one `Value`-carrying leaf's JSON text through `runner`'s
+    /// admitted decode entry, returning the decoded value's retained handle.
+    fn decode_json_leaf(
+        &mut self,
+        site: u64,
+        runner: ProgramId,
+        realm: RealmId,
+        text: &str,
+    ) -> Result<PreparedHandle, PreparedRuntimeError> {
+        let decode_entry = self.decode_entry_of(runner)?;
+        let owner = self
+            .programs
+            .get(&runner)
+            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                runner,
+            )))?;
+        let reject = |detail: &str| PreparedRuntimeError::AnswerRejected {
+            site,
+            detail: detail.to_string(),
+        };
+        let left = owner.constructor_named(EITHER_MODULE, "Left");
+        let right = owner.constructor_named(EITHER_MODULE, "Right");
+        let (left, right) = match (left, right) {
+            (Some(left), Some(right)) => (left, right),
+            _ => {
+                return Err(reject(
+                    "the runner declares no Either constructors to read the decode result",
+                ))
+            }
+        };
+        let text_plan =
+            owner.lower_text(site, &Value::Lit(Literal::LitString(text.as_bytes().to_vec())))?;
+        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+            return Err(PreparedRuntimeError::Cancelled);
+        }
+        let text_handle = self
+            .machine
+            .build_answer(realm, &text_plan)
+            .map_err(PreparedRuntimeError::Run)?;
+        let batch = self.machine.run_entry_retained(
+            runner,
+            decode_entry,
+            &[PreparedInput::Managed(text_handle)],
+            SETTLE_CALL,
+            realm,
+        );
+        self.machine.release(text_handle);
+        let batch = batch.map_err(PreparedRuntimeError::Run)?;
+        let outer = self
+            .take_first_managed(batch.values)
+            .ok_or_else(|| reject("the decode entry returned no managed Either value"))?;
+        let layer = self.machine.inspect_outer(outer, realm);
+        self.machine.release(outer);
+        let CodegenPreparedOuter::Constructor { identity, fields } =
+            layer.map_err(PreparedRuntimeError::Run)?;
+        let managed: Vec<PreparedHandle> = fields
+            .into_iter()
+            .filter_map(|field| match field {
+                PreparedResult::Managed(handle) => Some(handle),
+                PreparedResult::Void | PreparedResult::Scalar(_) => None,
+            })
+            .collect();
+        if identity == right {
+            match managed.as_slice() {
+                [value] => Ok(*value),
+                _ => {
+                    self.release_all(managed);
+                    Err(reject("Right carried other than one managed field"))
+                }
+            }
+        } else {
+            self.release_all(managed);
+            if identity == left {
+                Err(reject("the Value-carrying answer failed to decode"))
+            } else {
+                Err(reject("the decode entry returned neither Left nor Right"))
+            }
+        }
     }
 
     /// Re-enter the frame parked under `id` with a host-built answer: peek,
-    /// validate and lower `value` against the site evidence, build it into a
-    /// realm-owned handle, then take the frame and enter the resume entry
-    /// ([`Self::resume_parked`]). Every failure before the take leaves the
-    /// frame parked with the handle and root counts unchanged.
+    /// validate and lower `value` against the site evidence, resolve any
+    /// `Value`-carrying leaves through the decode entry
+    /// ([`Self::resolve_json_leaves`]), build the result into a realm-owned
+    /// handle, then take the frame and enter the resume entry
+    /// ([`Self::resume_parked`]). A plan that is itself one resolved `Value`
+    /// leaf (the site's whole answer type is `Value`) delivers that leaf's
+    /// handle directly — a decoded `Value` is already a retained heap object,
+    /// so wrapping it in another constructor is unnecessary. Every failure
+    /// before the take leaves the frame parked with the handle and root
+    /// counts unchanged.
     pub fn resume_with_answer(
         &mut self,
         id: ContinuationId,
         value: &Value,
+        table: &DataConTable,
     ) -> Result<PreparedResumed, PreparedRuntimeError> {
-        let plan = self.answer_plan(id, value)?;
-        let (realm, _) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
+        let plan = self.answer_plan(id, value, table)?;
+        let (realm, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
             ExecutionError::UnknownContinuation(id),
         ))?;
         if self.machine.realm_cancel_handle(realm).is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
+        }
+        let site = evidence.site;
+        let plan = self.resolve_json_leaves(site, evidence.runner, realm, plan)?;
+        if let AnswerPlan::Handle(handle) = plan {
+            return self.resume_parked(id, handle);
         }
         let answer = self
             .machine

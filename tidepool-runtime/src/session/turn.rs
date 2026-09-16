@@ -457,17 +457,31 @@ pub const PREPARED_SCAFFOLD_TARGET: &str = "__prepared";
 /// that lacks it.
 pub const PREPARED_RESUME_TARGET: &str = "__resume";
 
+/// The decode entry every prepared turn admits beside
+/// [`PREPARED_SCAFFOLD_TARGET`] and [`PREPARED_RESUME_TARGET`]
+/// (`Tidepool.Session.preparedDecodeTargetName` on the worker side):
+/// `__decodeValue :: Text -> Either Text Value`, the leaf adapter the
+/// session enters to turn a JSON-rendered bridge answer into a retained
+/// `Tidepool.Aeson.Value.Value` before splicing it into an outer answer
+/// ([`crate::session::prepared`]'s `Value`-carrying-reply lowering). The
+/// extractor projects it as an auxiliary root beside
+/// [`PREPARED_RESUME_TARGET`].
+pub const PREPARED_DECODE_TARGET: &str = "__decodeValue";
+
 /// The qualified alias every template imports `Tidepool.Internal.Resume` under.
 const RESUME_ALIAS: &str = "TidepoolResume";
 
-/// The two lines every executable template ends with: the settled scaffold
-/// the prepared route projects and the resume entry it re-enters parked
-/// continuations through. Both are unreachable from `__result`, so the Core
-/// closure never sees them.
+/// The three lines every executable template ends with: the settled
+/// scaffold the prepared route projects, the resume entry it re-enters
+/// parked continuations through, and the decode entry it lowers
+/// `Value`-carrying answers through. All three are unreachable from
+/// `__result`, so the Core closure never sees them.
 fn prepared_scaffold_binding(target: &str) -> String {
     format!(
         "{PREPARED_SCAFFOLD_TARGET} = {RESUME_ALIAS}.settle {target}\n\
-         {PREPARED_RESUME_TARGET} q x = {RESUME_ALIAS}.settle ({RESUME_ALIAS}.resumeLifted q x)\n"
+         {PREPARED_RESUME_TARGET} q x = {RESUME_ALIAS}.settle ({RESUME_ALIAS}.resumeLifted q x)\n\
+         {PREPARED_DECODE_TARGET} :: Text -> Either Text Value\n\
+         {PREPARED_DECODE_TARGET} = Aeson.eitherDecodeValue\n"
     )
 }
 
@@ -475,7 +489,10 @@ fn prepared_scaffold_binding(target: &str) -> String {
 fn with_resume_import(preamble_with_imports: &str) -> String {
     insert_preamble_imports(
         preamble_with_imports,
-        &format!("qualified Tidepool.Internal.Resume as {RESUME_ALIAS}"),
+        &format!(
+            "qualified Tidepool.Internal.Resume as {RESUME_ALIAS}\n\
+             qualified Tidepool.Aeson.Value as Aeson"
+        ),
     )
 }
 

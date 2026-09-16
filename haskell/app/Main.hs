@@ -64,7 +64,7 @@ import Tidepool.ExtractRequest (InspectionRequest(..), WorkerRequest(..), worker
 import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
 import Tidepool.Session
   ( SessionScope(..), scaffoldTargetName, preparedScaffoldTargetName, preparedResumeTargetName
-  , scaffoldOutputBase )
+  , preparedDecodeTargetName, scaffoldOutputBase )
 import Tidepool.SessionArtifacts
   ( mkBoundBinders, parseValModule )
 import Tidepool.Translate
@@ -631,7 +631,7 @@ runTurnMode compiler args path = do
         -- scaffold, and its constructors join the shared metadata before write.
         preparedArtifacts <- if requestPreparedTurn args
           then prepareArtifacts compiledPath hscEnv preparedModules
-                 [preparedScaffoldTargetName] [preparedResumeTargetName] (requestRetainedGenerations args)
+                 [preparedScaffoldTargetName] [preparedResumeTargetName, preparedDecodeTargetName] (requestRetainedGenerations args)
           else pure []
         asksSites <- writeWholeModuleClosed timing outDir hscEnv binds (prTyCons result)
           (concatMap paConstructors preparedArtifacts) mCapturedTy warnTexts targetName scaffoldOutputBase

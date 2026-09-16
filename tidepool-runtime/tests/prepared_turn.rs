@@ -1595,11 +1595,10 @@ impl Notebook {
 /// prepared route the request is classified by its constructor through the
 /// machine's verb index and answered at the constructor's synthetic reply
 /// site: `say` takes a host-built `()` and `readFile` takes either side of
-/// `Either FsError Text`. A `Value`-carrying reply (`kvGet`) still parks
-/// and is refused as unconstructible with the frame intact.
+/// `Either FsError Text`. `kvGet`'s `Value`-carrying reply is covered
+/// separately by `notebook_value_answers`.
 fn notebook_ordinary_effects(engine: EngineKind) {
     use tidepool_bridge::{ToCore, Value};
-    use tidepool_repr::Literal;
 
     let mut notebook = Notebook::new(engine);
     let rendered = notebook.expression("41 + 1").to_string();
@@ -1682,44 +1681,8 @@ fn notebook_ordinary_effects(engine: EngineKind) {
     assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
     assert_eq!(notebook.session.stowed_roots_count(), 0, "{engine:?}");
 
-    // --- Deferred: a `Value`-carrying reply parks and is refused. ---
-    // `kvGet`'s reply is `Maybe Value`. The `Maybe` and `Value` layers are
-    // ordinary data evidence, so `Nothing` is answerable; an `Object` must
-    // build aeson's `KeyMap` spine, whose evidence is unconstructible, and is
-    // refused with the frame intact.
-    if engine == EngineKind::Prepared {
-        let (hole, request, binder) = notebook.suspend_ordinary(engine, "e <- kvGet \"key\"");
-        assert!(
-            request.to_string().contains("key"),
-            "{engine:?}: the KvGet request rendered as {request}"
-        );
-        let binder = binder.expect("a bind turn");
-        let nothing_id = notebook.constructor("Nothing");
-        let just_id = notebook.constructor("Just");
-        let object_id = notebook.constructor("Object");
-        notebook.assert_refusal_leaves_frame_parked(
-            &hole,
-            Value::Con(
-                just_id,
-                vec![Value::Con(object_id, vec![Value::Lit(Literal::LitInt(0))])],
-            ),
-            |error| {
-                matches!(
-                    error,
-                    ResidentError::Prepared(PreparedRuntimeError::AnswerUnconstructible { .. })
-                )
-            },
-            1,
-        );
-        notebook.resume_bind(hole, &binder, Value::Con(nothing_id, Vec::new()));
-        assert_eq!(notebook.session.parked_count(), 0);
-        assert_eq!(notebook.session.stowed_roots_count(), 0);
-        let rendered = notebook.expression("isNothing e").to_string();
-        assert!(
-            rendered.contains("true"),
-            "{engine:?}: isNothing e rendered as {rendered}"
-        );
-    }
+    // `Value`-carrying replies (`kvGet`'s `Maybe Value`) have their own
+    // dedicated coverage: see `notebook_value_answers`.
 
     // The session stays usable.
     let rendered = notebook.expression("40 + 2").to_string();
@@ -1737,4 +1700,112 @@ fn notebook_ordinary_effects_on_core() {
 #[test]
 fn notebook_ordinary_effects_on_prepared_stg() {
     notebook_ordinary_effects(EngineKind::Prepared);
+}
+
+/// `Value`-carrying host answers (`kvGet`'s `Maybe Value` reply). `Nothing`
+/// is ordinary data evidence, answerable exactly as before. A `Just` payload
+/// used to be refused outright once it reached `Value`'s `Object`/`Number`
+/// rows (`KeyMap`/`Scientific` are unconstructible field-by-field); the leaf
+/// adapter now lowers any `Value`-typed node whole through the turn's
+/// decode root instead of walking into it, so a JSON object round-trips and
+/// a bare `Number` (previously refused unconditionally) now succeeds too. A
+/// `Maybe`-shaped answer supplied as a bare scalar is still refused: the
+/// adapter widens what `Value` itself admits, not the surrounding `Maybe`
+/// evidence.
+fn notebook_value_answers(engine: EngineKind) {
+    use tidepool_bridge::{ToCore, Value};
+    use tidepool_repr::Literal;
+
+    let mut notebook = Notebook::new(engine);
+    let rendered = notebook.expression("41 + 1").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: warm-up rendered {rendered}"
+    );
+
+    // A bare scalar where a `Maybe Value` constructor is required is
+    // refused before the leaf adapter is ever reached.
+    let (hole, request, binder) = notebook.suspend_ordinary(engine, "e <- kvGet \"key\"");
+    assert!(
+        request.to_string().contains("key"),
+        "{engine:?}: the KvGet request rendered as {request}"
+    );
+    let binder = binder.expect("a bind turn");
+    if engine == EngineKind::Prepared {
+        notebook.assert_refusal_leaves_frame_parked(
+            &hole,
+            Value::Lit(Literal::LitInt(0)),
+            |error| {
+                matches!(
+                    error,
+                    ResidentError::Prepared(PreparedRuntimeError::AnswerShape { .. })
+                )
+            },
+            1,
+        );
+    }
+
+    // A JSON object round-trips through the decode leaf adapter.
+    let table = notebook.last_table.clone().expect("the ask turn's table");
+    let just_id = notebook.constructor("Just");
+    let nothing_id = notebook.constructor("Nothing");
+    let payload = serde_json::json!({"k": 1, "s": "x"})
+        .to_value(&table)
+        .expect("a JSON object converts to a bridge Value");
+    notebook.resume_bind(hole, &binder, Value::Con(just_id, vec![payload]));
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    assert_eq!(notebook.session.stowed_roots_count(), 0, "{engine:?}");
+    let rendered = notebook.expression("e").to_string();
+    assert!(
+        rendered.replace(' ', "").contains("\"k\":1"),
+        "{engine:?}: the Just(Object) answer rendered as {rendered}"
+    );
+    assert!(
+        rendered.contains('x'),
+        "{engine:?}: the Just(Object) answer rendered as {rendered}"
+    );
+
+    // `Nothing` stays answerable directly: ordinary data evidence, untouched
+    // by the leaf adapter.
+    let (hole, _, binder) = notebook.suspend_ordinary(engine, "e2 <- kvGet \"missing\"");
+    let binder = binder.expect("a bind turn");
+    notebook.resume_bind(hole, &binder, Value::Con(nothing_id, Vec::new()));
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    let rendered = notebook.expression("isNothing e2").to_string();
+    assert!(
+        rendered.contains("true"),
+        "{engine:?}: isNothing e2 rendered as {rendered}"
+    );
+
+    // A bare `Number` reply -- previously refused unconditionally, since
+    // `Scientific`'s unpacked fields are unconstructible -- now succeeds.
+    let (hole, _, binder) = notebook.suspend_ordinary(engine, "e3 <- kvGet \"count\"");
+    let binder = binder.expect("a bind turn");
+    let number = serde_json::json!(7)
+        .to_value(&table)
+        .expect("a JSON number converts to a bridge Value");
+    notebook.resume_bind(hole, &binder, Value::Con(just_id, vec![number]));
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    let rendered = notebook.expression("e3").to_string();
+    assert!(
+        rendered.contains('7'),
+        "{engine:?}: the Just(Number) answer rendered as {rendered}"
+    );
+
+    // The session stays usable.
+    let rendered = notebook.expression("40 + 2").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: 40 + 2 rendered as {rendered}"
+    );
+}
+
+#[test]
+fn notebook_value_answers_on_core() {
+    notebook_value_answers(EngineKind::Core);
+}
+
+#[test]
+fn notebook_value_answers_on_prepared_stg() {
+    notebook_value_answers(EngineKind::Prepared);
 }

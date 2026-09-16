@@ -22,6 +22,7 @@ use tidepool_heap::external_storage::ExternalStorageValidationError;
 use tidepool_repr::execution_schema::RuntimeRep;
 use tidepool_repr::DataConId;
 
+use super::machine::PreparedHandle;
 use crate::descriptor_bridge::{
     marshal_descriptor_object, DescriptorMarshalError, DescriptorValue,
 };
@@ -39,6 +40,19 @@ pub enum AnswerPlan {
     Scalar { rep: RuntimeRep, bits: [u8; 16] },
     /// An unlifted `ByteArray#` field holding exactly these bytes.
     Bytes(Vec<u8>),
+    /// A `Value`-carrying leaf rendered as JSON text, not yet decoded: the
+    /// session's `lower_answer` produces this in place of walking an
+    /// unconstructible `Tidepool.Aeson.Value.Value` node. `session::prepared`
+    /// resolves every `Json` leaf of a plan to a [`Self::Handle`] (by
+    /// entering the program's decode root) before the plan reaches
+    /// [`FlattenedAnswer::resolve`] — a `Json` leaf reaching the builder is
+    /// an invariant violation, not an ordinary refusal.
+    Json(String),
+    /// A value already retained elsewhere in this program's heap, borrowed as
+    /// this field's reference: the decoded outer constructor of a resolved
+    /// `Json` leaf, or a caller-supplied framed-handle delivery. The build
+    /// does not release it; the caller's own custody governs its lifetime.
+    Handle(PreparedHandle),
 }
 
 /// Why a plan could not be built. Every variant leaves the heap untouched.
@@ -81,6 +95,16 @@ pub enum AnswerBuildError {
     /// for more cannot be laid out in the span the builder reserves.
     #[error("constructor {host_id:?} requires {required}-byte alignment, above the nursery's word alignment")]
     Alignment { host_id: DataConId, required: u32 },
+    /// A plan still carried an unresolved [`AnswerPlan::Json`] leaf. The
+    /// session's decode pre-pass resolves every one to a [`AnswerPlan::Handle`]
+    /// before a plan reaches the builder; reaching this is an invariant
+    /// violation in the caller, not a normal refusal.
+    #[error("an answer plan reached the builder with an unresolved Value-carrying leaf")]
+    UnresolvedJson,
+    /// A [`AnswerPlan::Handle`] leaf named a handle no longer live in this
+    /// engine's ledger (already released, or minted under another engine).
+    #[error("an answer plan's borrowed handle is not live")]
+    UnknownHandle,
 }
 
 /// Nesting bound for a plan: a bridge `Value` is an owned tree and the
@@ -103,6 +127,11 @@ enum PlannedField {
     Scalar([u8; 16]),
     /// Index into the flattened byte-array list.
     Bytes(usize),
+    /// Index into the flattened handle list — a borrowed reference, resolved
+    /// to its live tagged word at write time (after any collection
+    /// [`Self::resolve`]'s caller runs to make room, mirroring how byte
+    /// payloads are allocated after sizing rather than during it).
+    Handle(usize),
 }
 
 /// One `ByteArray#` wrapper of a flattened plan: the wrapper object lives in
@@ -118,6 +147,9 @@ struct PlannedBytes {
 pub(super) struct FlattenedAnswer {
     objects: Vec<PlannedObject>,
     byte_arrays: Vec<PlannedBytes>,
+    /// Borrowed handles referenced by [`AnswerPlan::Handle`] leaves, in the
+    /// order [`Self::write`] expects their resolved tagged words.
+    handles: Vec<PreparedHandle>,
     /// The external `Bytes` wrapper descriptor every byte array is written
     /// with, from the program the answer is built for.
     bytes_descriptor: Arc<ObjectDescriptor>,
@@ -152,6 +184,7 @@ impl FlattenedAnswer {
         let mut flattened = Self {
             objects: Vec::new(),
             byte_arrays: Vec::new(),
+            handles: Vec::new(),
             bytes_descriptor: Arc::clone(bytes_descriptor),
             root: 0,
             extent: 0,
@@ -173,6 +206,12 @@ impl FlattenedAnswer {
     /// [`Self::write`] expects them.
     pub(super) fn byte_arrays(&self) -> impl Iterator<Item = &[u8]> + '_ {
         self.byte_arrays.iter().map(|bytes| bytes.data.as_slice())
+    }
+
+    /// The borrowed handles the build needs resolved tagged words for, in
+    /// the order [`Self::write`] expects them.
+    pub(super) fn handles(&self) -> impl Iterator<Item = PreparedHandle> + '_ {
+        self.handles.iter().copied()
     }
 
     /// Lay one object of `descriptor` out at the next word-aligned offset.
@@ -203,6 +242,11 @@ impl FlattenedAnswer {
                     offset,
                 });
                 Ok(PlannedField::Bytes(self.byte_arrays.len() - 1))
+            }
+            AnswerPlan::Json(_) => Err(AnswerBuildError::UnresolvedJson),
+            AnswerPlan::Handle(handle) => {
+                self.handles.push(*handle);
+                Ok(PlannedField::Handle(self.handles.len() - 1))
             }
             AnswerPlan::Constructor { host_id, fields } => {
                 let descriptor =
@@ -248,12 +292,18 @@ impl FlattenedAnswer {
     /// `span` must name `self.extent` writable bytes inside the live nursery,
     /// beyond the allocation cursor, so no collection or generated code can
     /// observe them until the caller advances the cursor.
+    /// `handle_words` are the resolved tagged words of [`Self::handles`], in
+    /// order — resolved by the caller after any collection its sizing
+    /// triggers, exactly as `payloads` are allocated after sizing rather
+    /// than during it.
     pub(super) unsafe fn write(
         &self,
         span: *mut u8,
         payloads: &[*mut u8],
+        handle_words: &[usize],
     ) -> Result<usize, AnswerBuildError> {
         debug_assert_eq!(payloads.len(), self.byte_arrays.len());
+        debug_assert_eq!(handle_words.len(), self.handles.len());
         let tagged = |pointer: *mut u8, descriptor: &ObjectDescriptor| {
             // Reference words carry the descriptor's tag, as generated code
             // tags every reference it constructs.
@@ -283,6 +333,9 @@ impl FlattenedAnswer {
                     }
                     PlannedField::Bytes(index) => {
                         DescriptorValue::Managed(wrappers[*index] as *mut u8)
+                    }
+                    PlannedField::Handle(index) => {
+                        DescriptorValue::Managed(handle_words[*index] as *mut u8)
                     }
                 });
             }
