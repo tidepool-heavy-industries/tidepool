@@ -652,7 +652,6 @@ const INTEGER_MODULE: &str = "GHC.Num.Integer";
 const NATURAL_MODULE: &str = "GHC.Num.Natural";
 const AESON_VALUE_MODULE: &str = "Tidepool.Aeson.Value";
 const AESON_VALUE_OCCURRENCE: &str = "Value";
-const EITHER_MODULE: &str = "Data.Either";
 
 /// Whether `family` names the vendored `Tidepool.Aeson.Value.Value` type
 /// (module+name, never the numeric `TypeNodeId`, which is per-artifact) —
@@ -1604,6 +1603,10 @@ impl PreparedEngine {
             ExecutionError::UnknownContinuation(id),
         ))?;
         let site = evidence.site;
+        // Copied out before the cancellation check below takes `self.machine`
+        // mutably: `evidence` itself stays borrowed from it, so a field read
+        // after that point would conflict.
+        let runner = evidence.runner;
         let owner = self
             .programs
             .get(&evidence.owner)
@@ -1647,7 +1650,7 @@ impl PreparedEngine {
         if self.machine.realm_cancel_handle(realm).is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
-        let plan = self.resolve_json_leaves(site, evidence.runner, realm, plan)?;
+        let plan = self.resolve_json_leaves(site, runner, realm, plan, table)?;
         let built = self
             .machine
             .build_answer(realm, &plan)
@@ -1729,16 +1732,17 @@ impl PreparedEngine {
         runner: ProgramId,
         realm: RealmId,
         plan: AnswerPlan,
+        table: &DataConTable,
     ) -> Result<AnswerPlan, PreparedRuntimeError> {
         match plan {
             AnswerPlan::Json(text) => {
-                let handle = self.decode_json_leaf(site, runner, realm, &text)?;
+                let handle = self.decode_json_leaf(site, runner, realm, &text, table)?;
                 Ok(AnswerPlan::Handle(handle))
             }
             AnswerPlan::Constructor { host_id, fields } => {
                 let mut resolved = Vec::with_capacity(fields.len());
                 for field in fields {
-                    match self.resolve_json_leaves(site, runner, realm, field) {
+                    match self.resolve_json_leaves(site, runner, realm, field, table) {
                         Ok(field) => resolved.push(field),
                         Err(error) => {
                             let mut built = Vec::new();
@@ -1769,6 +1773,7 @@ impl PreparedEngine {
         runner: ProgramId,
         realm: RealmId,
         text: &str,
+        table: &DataConTable,
     ) -> Result<PreparedHandle, PreparedRuntimeError> {
         let decode_entry = self.decode_entry_of(runner)?;
         let owner = self
@@ -1781,8 +1786,17 @@ impl PreparedEngine {
             site,
             detail: detail.to_string(),
         };
-        let left = owner.constructor_named(EITHER_MODULE, "Left");
-        let right = owner.constructor_named(EITHER_MODULE, "Right");
+        // `Either`'s constructors are never walked by `TypePolicy` (it only
+        // interns a SITE's own answer type; `__decodeValue`'s signature is
+        // not a site), so `owner`'s own declared-constructor table never
+        // carries them. The session-wide `DataConTable` does: every
+        // compile's `prTyCons` registers every constructor GHC's own type
+        // checker sees, `Either`'s included, regardless of which types a
+        // site happens to answer with. `DataConId` is the same bridge-wide
+        // space `inspect_outer`'s `identity` reads from, so the two compare
+        // directly.
+        let left = table.get_by_qualified_name("Data.Either.Left");
+        let right = table.get_by_qualified_name("Data.Either.Right");
         let (left, right) = match (left, right) {
             (Some(left), Some(right)) => (left, right),
             _ => {
@@ -1862,11 +1876,12 @@ impl PreparedEngine {
         let (realm, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
             ExecutionError::UnknownContinuation(id),
         ))?;
+        let site = evidence.site;
+        let runner = evidence.runner;
         if self.machine.realm_cancel_handle(realm).is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
-        let site = evidence.site;
-        let plan = self.resolve_json_leaves(site, evidence.runner, realm, plan)?;
+        let plan = self.resolve_json_leaves(site, runner, realm, plan, table)?;
         if let AnswerPlan::Handle(handle) = plan {
             return self.resume_parked(id, handle);
         }

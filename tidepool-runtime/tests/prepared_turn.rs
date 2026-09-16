@@ -1809,3 +1809,134 @@ fn notebook_value_answers_on_core() {
 fn notebook_value_answers_on_prepared_stg() {
     notebook_value_answers(EngineKind::Prepared);
 }
+
+/// Handle and framed-handle delivery: a bound value's own retained handle
+/// (`ResidentSession::prepared_binding_handle`, the prepared route's test
+/// surface for the same custody `ResumeInput::Handle`/`FramedHandle`
+/// carries) resumes a SIBLING parked frame by borrow -- no materialization,
+/// no type check beyond the runtime representation
+/// (`docs/continuation-parking-contract.md`) -- and the binding's own root
+/// stays exactly as live afterward. Prepared-only: the notebook DSL has no
+/// Core-route equivalent of `prepared_binding_handle`, and Core's own
+/// handle-delivery contract already has separate coverage
+/// (`green_thread_representation.rs`).
+fn notebook_handle_delivery(engine: EngineKind) {
+    let mut notebook = Notebook::new(engine);
+    let rendered = notebook.expression("41 + 1").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: warm-up rendered {rendered}"
+    );
+
+    // A `Maybe Int` binding to deliver bare, and a bare `Int` binding to
+    // frame as `Just` into a second `Maybe Int` site.
+    let x = notebook.bind("x <- pure (Just (41 :: Int))");
+    let rendered = notebook.expression("x").to_string();
+    assert!(rendered.contains('4'), "{engine:?}: x rendered as {rendered}");
+    let y = notebook.bind("y <- pure (7 :: Int)");
+    let just_id = notebook
+        .last_table
+        .as_ref()
+        .expect("an expression turn ran")
+        .get_by_name_arity("Just", 1)
+        .unwrap_or_else(|| panic!("{engine:?}: Just/1 is not in the session table"));
+
+    if engine != EngineKind::Prepared {
+        // Core's own handle-delivery contract is covered elsewhere; this
+        // notebook has no minting surface for it.
+        return;
+    }
+
+    let handles_before = notebook.session.value_handle_count();
+
+    // --- Bare handle delivery: x's own handle answers a sibling `Maybe
+    // Int` ask directly. ---
+    let (n_binder, n_hole) = notebook.suspend_ask(
+        engine,
+        "n",
+        "(runLLMTurn @(Maybe Int) \"how many\" :: M (Maybe Int))",
+    );
+    let x_custody = notebook
+        .session
+        .prepared_binding_handle(&x.name)
+        .unwrap_or_else(|| panic!("{engine:?}: x has no prepared binding handle"));
+    let outcome = notebook
+        .session
+        .resume_handle(n_hole, x_custody)
+        .unwrap_or_else(|error| panic!("{engine:?}: resuming n by handle failed: {error}"));
+    assert!(
+        matches!(outcome, ResidentOutcome::Completed { .. }),
+        "{engine:?}: the handle resume of n did not complete: {outcome:?}"
+    );
+    notebook.injected.push(n_binder.module.clone());
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    assert_eq!(notebook.session.stowed_roots_count(), 0, "{engine:?}");
+    let rendered = notebook.expression("n").to_string();
+    assert!(
+        rendered.contains("41"),
+        "{engine:?}: n (delivered by handle) rendered as {rendered}"
+    );
+    // Borrow: x's own root is untouched by the delivery -- the only new
+    // root is `n`'s own bound-result handle (`BoundValue::Prepared`, as
+    // every prepared bind mints, per `notebook_data_answers`).
+    assert_eq!(
+        notebook.session.value_handle_count(),
+        handles_before + 1,
+        "{engine:?}: resuming by handle disturbed x's own root"
+    );
+
+    // --- Framed handle delivery: y's bare `Int` handle is framed as `Just`
+    // into a second `Maybe Int` site, still borrowed afterward. ---
+    let (m_binder, m_hole) = notebook.suspend_ask(
+        engine,
+        "m",
+        "(runLLMTurn @(Maybe Int) \"how many\" :: M (Maybe Int))",
+    );
+    let y_custody = notebook
+        .session
+        .prepared_binding_handle(&y.name)
+        .unwrap_or_else(|| panic!("{engine:?}: y has no prepared binding handle"));
+    let outcome = notebook
+        .session
+        .resume_framed_custody(m_hole, &y_custody, just_id, Vec::new())
+        .unwrap_or_else(|error| {
+            panic!("{engine:?}: resuming m by framed handle failed: {error}")
+        });
+    assert!(
+        matches!(outcome, ResidentOutcome::Completed { .. }),
+        "{engine:?}: the framed handle resume of m did not complete: {outcome:?}"
+    );
+    notebook.injected.push(m_binder.module.clone());
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    let rendered = notebook.expression("m").to_string();
+    assert!(
+        rendered.contains('7'),
+        "{engine:?}: m (delivered by framed handle) rendered as {rendered}"
+    );
+    // Borrow: y's own root is still live -- `resume_framed_custody` takes
+    // the custody by reference, and the framed constructor only borrowed
+    // its field.
+    drop(y_custody);
+    assert_eq!(
+        notebook.session.value_handle_count(),
+        handles_before + 2,
+        "{engine:?}: resuming by framed handle disturbed y's own root"
+    );
+
+    // The session stays usable.
+    let rendered = notebook.expression("40 + 2").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: 40 + 2 rendered as {rendered}"
+    );
+}
+
+#[test]
+fn notebook_handle_delivery_on_core() {
+    notebook_handle_delivery(EngineKind::Core);
+}
+
+#[test]
+fn notebook_handle_delivery_on_prepared_stg() {
+    notebook_handle_delivery(EngineKind::Prepared);
+}

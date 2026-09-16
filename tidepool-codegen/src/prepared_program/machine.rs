@@ -249,6 +249,17 @@ impl PreparedHandle {
     pub fn rep(&self) -> RuntimeRep {
         self.rep
     }
+
+    /// This handle's opaque cross-engine identity, the same `ValueHandle`
+    /// a `suspension::ResumeInput::Handle`/`FramedHandle` delivery carries. A
+    /// caller that already holds a `PreparedHandle` (a session binding's own
+    /// linking handle, a run result) uses this to deliver it by handle
+    /// through the ordinary session resume path, rather than reaching into
+    /// the machine a second time.
+    #[must_use]
+    pub fn raw(&self) -> ValueHandle {
+        self.raw
+    }
 }
 
 /// Caller-owned import resolution for [`PreparedMachine::install_program`]:
@@ -1907,11 +1918,27 @@ impl<'code> PreparedMachine<'code> {
                 }
             }
         }
+        // Borrowed handles' tagged words, resolved now (after any collection
+        // the sizing pass above triggered) rather than at `visit` time — the
+        // same reason byte payloads are allocated after sizing rather than
+        // during it: a compacting collection can move what a handle roots,
+        // and only the ledger's own slot is updated by that move, never a
+        // copy taken earlier.
+        let mut handle_words: Vec<usize> = Vec::with_capacity(flattened.handles().count());
+        for handle in flattened.handles() {
+            let word = self
+                .handles
+                .handle(handle.raw)
+                .map(|entry| unsafe { entry.slot.current() } as usize)
+                .filter(|word| *word != 0)
+                .ok_or(super::answer::AnswerBuildError::UnknownHandle)?;
+            handle_words.push(word);
+        }
         let span = self.vmctx.alloc_ptr;
         // SAFETY: `span..span + extent` lies inside the live nursery beyond
         // the allocation cursor (checked above), so nothing reaches it until
         // the cursor advances below.
-        let root = match unsafe { flattened.write(span, &payloads) } {
+        let root = match unsafe { flattened.write(span, &payloads, &handle_words) } {
             Ok(root) => root,
             Err(error) => {
                 revoke(&self.machine, &payloads)?;
@@ -2058,6 +2085,23 @@ impl<'code> PreparedMachine<'code> {
     #[must_use]
     pub fn handle_realm(&self, handle: PreparedHandle) -> Option<RealmId> {
         self.handles.handle(handle.raw).map(|entry| entry.realm)
+    }
+
+    /// Look up a bare `ValueHandle` (as a `Handle`/`FramedHandle` resume
+    /// delivers it) as this machine's own [`PreparedHandle`], when it is
+    /// live in this machine's ledger. Every handle this engine mints roots a
+    /// lifted reference, so `rep` is always `RuntimeRep::LiftedRef` — the
+    /// only check possible on this route, matching Core's own lack of a
+    /// deeper type check for a bare handle delivery. No realm check: a
+    /// handle is meant to move between parked continuations across resource
+    /// scopes.
+    #[must_use]
+    pub fn prepared_handle_of(&self, raw: ValueHandle) -> Option<PreparedHandle> {
+        self.handles.handle(raw)?;
+        Some(PreparedHandle {
+            raw,
+            rep: RuntimeRep::LiftedRef,
+        })
     }
 
     /// Test-only: fail the `occurrence`th poll of `point` in the next call(s)

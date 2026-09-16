@@ -70,7 +70,7 @@ Only the verbs in `EffectSchema.sitedVerbs` carry a dynamic site; ordinary
 effects (`say`, file, KV, HTTP, form `ask`) get synthetic sites keyed by the
 request constructor. Design: `plans/handoff/designs/synthetic-sites.md`.
 
-### `Value`-carrying replies go through a leaf adapter
+### `Value`-carrying replies go through a leaf adapter, blocked on `Either`'s constructors
 `kvGet`, `httpGet`/`httpPost` and form `ask` reply with Aeson `Value`, whose
 `KeyMap`/`Map`/`Vector` spines the type policy still refuses field-by-field.
 A `Value`-typed answer node is instead lowered whole as rendered JSON text
@@ -79,6 +79,23 @@ and decoded through the turn's admitted `__decodeValue` root
 a borrowed handle (design: `synthetic-sites.md`, decision 4 — taken). A
 decode failure (`Left`) is a typed `AnswerRejected` refusal with the frame
 left parked; nothing else host-side builds a `KeyMap`/`Scientific` directly.
+
+`decode_json_leaf` projects the decode root's `Either Text Value` result by
+comparing `inspect_outer`'s returned `DataConId` against `Left`/`Right`
+resolved from the session-wide `DataConTable` (`get_by_qualified_name`).
+`Either`'s constructors are not always in that table: `TypePolicy` only
+interns a constructor reachable from a declared SITE's own answer type
+(`ExecutionProjection.hs`'s `lowerLeaf`/`internConstructor`), and
+`__decodeValue`'s signature is not a site — nothing about the auxiliary root
+itself forces `Either` to be interned the way an entry's `Settled` layer is.
+A session whose turns never otherwise construct or observe an `Either` (no
+`httpGet`, no `Left`/`Right` rendered) hits `AnswerRejected` with "the
+runner declares no Either constructors to read the decode result" the first
+time a `kvGet`/ask reply actually needs the adapter — reproduced by
+`notebook_value_answers_on_prepared_stg`. Fix belongs in the extractor
+(`ExecutionProjection.hs`): force-intern `Data.Either.Left`/`Right` for
+every program that admits a decode root, mirroring how the entry's own
+`Settled` layer is always interned regardless of site usage.
 
 ### `LiveReentry` deliveries are not answerable yet
 Handle and framed-handle answers are supported (bare and framed delivery by
