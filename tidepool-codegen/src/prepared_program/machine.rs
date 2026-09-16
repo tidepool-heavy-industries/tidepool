@@ -640,7 +640,10 @@ impl<'code> PreparedMachine<'code> {
         }
 
         let heap_reserve = heap_top_extent(&compiled.heap_top_specs)?;
-        if self.programs.is_empty() {
+        // The heap, not the program table, says whether this is the first
+        // install: retirement can empty the table while the heap (handles,
+        // old space, nursery) lives on.
+        if self.machine.gc_active_range().is_none() {
             // First program: nothing exists yet. Create the shared nursery
             // and GcState from scratch, exactly as a single-program machine
             // always did; every later program extends this same heap instead
@@ -1005,7 +1008,11 @@ impl<'code> PreparedMachine<'code> {
                 continue;
             }
             let block = &installed.program.get().root_block;
-            block_roots.extend((0..block.len()).filter_map(|slot| block.slot_address(slot)));
+            block_roots.extend(
+                installed
+                    .reference_slots()
+                    .filter_map(|slot| block.slot_address(slot)),
+            );
         }
         // SAFETY: the token proves no generated frame, temporary root or
         // observation borrow exists; machine, vmctx and old space are this
@@ -1084,15 +1091,8 @@ impl<'code> PreparedMachine<'code> {
         loop {
             if let Some(id) = program_work.pop() {
                 if let Some(installed) = self.programs.get(&id) {
-                    work.extend(
-                        installed
-                            .program
-                            .get()
-                            .root_block
-                            .snapshot()
-                            .into_iter()
-                            .map(|word| word as usize),
-                    );
+                    let block = installed.program.get().root_block.snapshot();
+                    work.extend(installed.reference_slots().map(|slot| block[slot] as usize));
                 }
                 continue;
             }
@@ -2168,6 +2168,19 @@ fn collect_on(
 }
 
 impl<'code> InstalledProgram<'code> {
+    /// The root-block slots that may hold a managed or static reference:
+    /// every slot but a byte top's, whose word is a raw literal-pool address
+    /// (its liveness is edge (c), not a heap edge).
+    fn reference_slots(&self) -> impl Iterator<Item = usize> + '_ {
+        let compiled = self.program.get();
+        let byte_slots: HashSet<usize> = compiled
+            .byte_tops
+            .keys()
+            .filter_map(|top| compiled.top_slots.get(top).copied())
+            .collect();
+        (0..compiled.root_block.len()).filter(move |slot| !byte_slots.contains(slot))
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "retained entry execution independently borrows this program's own compiled entry alongside the machine-wide shared heap (machine, vmctx, old space, descriptor union) and the shared handle ledger"
@@ -6934,6 +6947,87 @@ mod tests {
             .collect_major(token)
             .expect("second major collection");
         assert!(receipt.programs.is_empty(), "B is pinned: {receipt:?}");
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// A program whose only top is a byte literal: its root block holds a
+    /// raw address into its literal pool, not a managed reference.
+    fn byte_top_program() -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
+        wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(1)))]);
+        wire.bindings.push(Group::NonRecursive(TopBinding {
+            identity: testing::identity("MachineBytes", "bytes"),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Bytes(b"residency".to_vec()),
+            },
+        }));
+        let linked = link_program(
+            testing::prepare(wire).expect("byte-top fixture"),
+            &MachineImports::default(),
+        )
+        .expect("byte-top fixture links");
+        let program = CompiledProgram::compile(&linked).expect("byte-top fixture compiles");
+        assert!(!program.byte_tops.is_empty());
+        program
+    }
+
+    /// Turns on a machine that ends each one with zero handles: a
+    /// byte-pinned program's block (a raw literal address among its words)
+    /// is marked every collection without being mistaken for a managed
+    /// reference, and a turn that retires every other program -- the table
+    /// then holding only the byte-pinned one, or nothing at all -- leaves a
+    /// heap the next install extends rather than recreates.
+    #[test]
+    fn zero_handle_turns_collect_and_reinstall() {
+        let call = PreparedCallOptions {
+            observation_budget: 100,
+            collect_before_observation: false,
+        };
+        let turn = |machine: &mut PreparedMachine<'static>, program, label: &str| {
+            let batch = machine
+                .run_entry_retained(program, ValueId(0), &[], call, RealmId::ROOT)
+                .unwrap_or_else(|error| panic!("{label}: runs: {error:?}"));
+            for value in batch.values {
+                if let PreparedResult::Managed(handle) = value {
+                    assert!(machine.release(handle));
+                }
+            }
+            assert_eq!(machine.handle_count(), 0);
+            let token = machine.quiesce().expect("quiescent");
+            let receipt = machine
+                .collect_major(token)
+                .unwrap_or_else(|error| panic!("{label}: major collection: {error:?}"));
+            assert_eq!(receipt.programs, vec![program], "{label}");
+            assert!(receipt.deferred.is_empty(), "{label}");
+        };
+
+        // Every program retires: the table empties under a live heap.
+        let (mut machine, first) = machine();
+        turn(&mut machine, first, "first, alone");
+        for index in 0..3 {
+            let program = install_linked(&mut machine, &unit_thunk_linked(), ImportBindings::new())
+                .expect("installs into the emptied table");
+            turn(&mut machine, program, &format!("empty table, turn {index}"));
+        }
+        assert_eq!(machine.residency().programs, 0);
+
+        // A byte-pinned program stays and is marked every collection.
+        let (mut machine, bytes) = PreparedMachine::new(
+            byte_top_program(),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("byte-top program installs");
+        for index in 0..3 {
+            let program = install_linked(&mut machine, &unit_thunk_linked(), ImportBindings::new())
+                .expect("installs beside the byte-pinned program");
+            turn(&mut machine, program, &format!("byte-pinned, turn {index}"));
+        }
+        assert_eq!(machine.residency().programs, 1);
+        assert!(machine.programs.contains_key(&bytes));
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 
