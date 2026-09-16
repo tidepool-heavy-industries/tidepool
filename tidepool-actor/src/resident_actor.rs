@@ -1044,11 +1044,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 self.descriptor.effective_role().role(),
                 self.descriptor.effective_role().workspace(),
                 self.descriptor.effective_role().descendants().maximum_depth,
-                self.descriptor
-                    .effective_role()
-                    .descendants()
-                    .maximum_active_children
-                    .map_or_else(|| "unbounded".to_owned(), |children| children.to_string()),
+                crate::render_child_budget(
+                    self.descriptor
+                        .effective_role()
+                        .descendants()
+                        .maximum_active_children,
+                ),
                 self.launch_worktrees.first(),
                 runtime.workbench_posture,
                 roster_summary,

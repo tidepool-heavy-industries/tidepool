@@ -163,7 +163,7 @@ impl ActorRuntimeObservation {
         let mut text = format!(
             "Actor authority: role={:?}; native_tools={:?}; workspace={:?}; descendant_depth={}; max_active_children={}.",
             role.role(), role.native_tools(), role.workspace(),
-            budget.maximum_depth, budget.maximum_active_children.map_or_else(|| "unbounded".to_owned(), |children| children.to_string()),
+            budget.maximum_depth, crate::render_child_budget(budget.maximum_active_children),
         );
         if let Some(workspace) = &self.workspace {
             text.push_str("\nWorkspace binding: ");

@@ -4875,9 +4875,7 @@ fn append_effective_role(mut instructions: String, role: &tidepool_actor::Effect
         role.native_tools(),
         role.workspace(),
         descendants.maximum_depth,
-        descendants
-            .maximum_active_children
-            .map_or_else(|| "unbounded".to_owned(), |children| children.to_string()),
+        tidepool_actor::render_child_budget(descendants.maximum_active_children),
     ));
     instructions
 }
