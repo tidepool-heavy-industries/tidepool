@@ -90,8 +90,18 @@ pub enum ExecutionError {
         identity: Box<tidepool_repr::execution_schema::SymbolIdentity>,
         existing: Box<tidepool_repr::execution_schema::SymbolIdentity>,
     },
-    #[error("constructor {identity:?} is declared differently from the descriptor this machine already shares for it")]
-    DescriptorShape { identity: Box<SymbolIdentity> },
+    #[error(
+        "constructor {identity:?} is declared differently from the descriptor this machine \
+         already shares for it: interned field representations {existing_field_reps:?} \
+         (arity {existing_arity}), incoming {incoming_field_reps:?} (arity {incoming_arity})",
+        existing_arity = existing_field_reps.len(),
+        incoming_arity = incoming_field_reps.len(),
+    )]
+    DescriptorShape {
+        identity: Box<SymbolIdentity>,
+        existing_field_reps: Vec<RuntimeRep>,
+        incoming_field_reps: Vec<RuntimeRep>,
+    },
     #[error("the program was compiled against another machine's external wrapper descriptors")]
     ForeignExternals,
     #[error(transparent)]

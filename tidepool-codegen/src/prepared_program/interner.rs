@@ -23,7 +23,14 @@ use tidepool_repr::DataConId;
 
 #[derive(Debug)]
 pub(super) enum AbsorbConflict {
-    Identity(SymbolIdentity),
+    /// The incoming batch declares `identity` with a shape (arity, field
+    /// representations) that disagrees with `existing`, the declaration
+    /// already interned for it -- both are carried so the message can name
+    /// the mismatch, not just the identity.
+    Identity {
+        existing: Box<ConstructorDecl>,
+        incoming: Box<ConstructorDecl>,
+    },
     HostId {
         host_id: DataConId,
         identity: Box<SymbolIdentity>,
@@ -195,6 +202,8 @@ impl DescriptorInterner {
             if existing != declaration {
                 return Err(CompileError::DescriptorShape {
                     identity: Box::new(declaration.identity.clone()),
+                    existing_field_reps: existing.field_reps.clone(),
+                    incoming_field_reps: declaration.field_reps.clone(),
                 });
             }
             return Ok(Arc::clone(descriptor));
@@ -230,8 +239,11 @@ impl DescriptorInterner {
                 .constructor(&declaration.identity)
                 .map(|(decl, _)| decl)
                 .or_else(|| identities.get(&declaration.identity).copied());
-            if existing.is_some_and(|existing| existing != declaration) {
-                return Err(AbsorbConflict::Identity(declaration.identity.clone()));
+            if let Some(existing) = existing.filter(|existing| *existing != declaration) {
+                return Err(AbsorbConflict::Identity {
+                    existing: Box::new(existing.clone()),
+                    incoming: Box::new(declaration.clone()),
+                });
             }
             let existing = self
                 .host_identity(&declaration.host_id)
@@ -415,6 +427,60 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_shape_conflict_names_both_declarations_field_reps() {
+        let mut interner = DescriptorInterner::default();
+        let mut existing = declaration("First", 1);
+        existing.field_reps = vec![RuntimeRep::Int(64)];
+        existing.strict_fields = vec![true];
+        existing.layout = CheckedLayout {
+            fields: vec![tidepool_repr::execution_schema::FieldLayout {
+                rep: RuntimeRep::Int(64),
+                offset: 0,
+            }],
+            alignment: 8,
+            payload_size: 8,
+            root_mask: vec![false],
+        };
+        interner.intern(&target(), &existing).unwrap();
+
+        let mut incoming = existing.clone();
+        incoming.field_reps = vec![RuntimeRep::LiftedRef, RuntimeRep::Int(32)];
+
+        // Exercised through `intern()` (a same-compile conflict against an
+        // already-interned identity)...
+        let error = interner.intern(&target(), &incoming).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("{:?}", existing.field_reps)),
+            "message should name the interned field reps: {message}"
+        );
+        assert!(
+            message.contains(&format!("{:?}", incoming.field_reps)),
+            "message should name the incoming field reps: {message}"
+        );
+
+        // ...and through `check_absorb` (a cross-program conflict at
+        // install), which is the same conflict class under a different
+        // caller.
+        let descriptor = DescriptorInterner::default()
+            .intern(&target(), &incoming)
+            .unwrap();
+        let conflict = interner
+            .check_absorb(&[(incoming.clone(), descriptor)])
+            .unwrap_err();
+        match conflict {
+            AbsorbConflict::Identity {
+                existing: found_existing,
+                incoming: found_incoming,
+            } => {
+                assert_eq!(found_existing.field_reps, existing.field_reps);
+                assert_eq!(found_incoming.field_reps, incoming.field_reps);
+            }
+            other => panic!("expected an Identity conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn absorb_refuses_divergent_declarations_within_batch() {
         let first = declaration("First", 1);
         let mut second = first.clone();
@@ -425,7 +491,7 @@ mod tests {
         let mut interner = DescriptorInterner::default();
         assert!(matches!(
             interner.absorb(&[(first, descriptor.clone()), (second, descriptor)]),
-            Err(AbsorbConflict::Identity(_))
+            Err(AbsorbConflict::Identity { .. })
         ));
         assert_eq!(interner.constructor_count(), 0);
         assert_eq!(interner.host_count(), 0);
