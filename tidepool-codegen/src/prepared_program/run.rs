@@ -72,6 +72,12 @@ pub enum ExecutionError {
     },
     #[error("program {0:?} is not installed on this machine")]
     UnknownProgram(ProgramId),
+    #[error("constructor host id {host_id:?} already names {existing:?}, not {identity:?}")]
+    HostIdConflict {
+        host_id: tidepool_repr::DataConId,
+        identity: Box<tidepool_repr::execution_schema::SymbolIdentity>,
+        existing: Box<tidepool_repr::execution_schema::SymbolIdentity>,
+    },
     #[error("constructor {identity:?} is declared differently from the descriptor this machine already shares for it")]
     DescriptorShape { identity: Box<SymbolIdentity> },
     #[error("top table exhausted: program requests {requested} slots, {available} available")]

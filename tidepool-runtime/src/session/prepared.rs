@@ -139,6 +139,7 @@ impl PreparedRuntimeError {
                 | ExecutionError::UnknownPreparedHandle
                 | ExecutionError::ImportShape { .. }
                 | ExecutionError::DescriptorShape { .. }
+                | ExecutionError::HostIdConflict { .. }
                 | ExecutionError::UnknownProgram(_)
                 | ExecutionError::TopTableExhausted { .. }
                 | ExecutionError::TopSlotBaseMismatch { .. } => PreparedFailureKind::Rejected,
@@ -646,7 +647,7 @@ impl PreparedRuntime {
     /// caller-supplied import list to get wrong). This is
     /// [`Self::install_prepared`] followed by [`Self::bind_top`] against the
     /// freshly installed program's own entry — the link+install+bind
-    /// sequence [`super::prepared_turn::SessionTurns::run`] drives after it
+    /// sequence the resident prepared route drives after it
     /// has projected `prepared` through `ExtractCmd`'s `--target` mode.
     pub fn turn(
         &mut self,

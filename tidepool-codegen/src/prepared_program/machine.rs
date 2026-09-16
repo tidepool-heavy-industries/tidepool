@@ -466,8 +466,21 @@ impl<'code> PreparedMachine<'code> {
         let mut staged_interner = self.interner.clone();
         staged_interner
             .absorb(&compiled.interned_constructors)
-            .map_err(|identity| ExecutionError::DescriptorShape {
-                identity: Box::new(identity),
+            .map_err(|conflict| match conflict {
+                super::interner::AbsorbConflict::Identity(identity) => {
+                    ExecutionError::DescriptorShape {
+                        identity: Box::new(identity),
+                    }
+                }
+                super::interner::AbsorbConflict::HostId {
+                    host_id,
+                    identity,
+                    existing,
+                } => ExecutionError::HostIdConflict {
+                    host_id,
+                    identity,
+                    existing,
+                },
             })?;
 
         // Reserve (capacity/contiguity, above) then verify EVERY declared

@@ -142,6 +142,12 @@ pub enum CompileError {
     Descriptor(#[from] tidepool_heap::execution_descriptor::DescriptorConstructionError),
     #[error("checked program lacks representation for {0:?}")]
     MissingRepresentation(ValueId),
+    #[error("constructor host id {host_id:?} already names {existing:?}, not {identity:?}")]
+    HostIdConflict {
+        host_id: tidepool_repr::DataConId,
+        identity: Box<tidepool_repr::execution_schema::SymbolIdentity>,
+        existing: Box<tidepool_repr::execution_schema::SymbolIdentity>,
+    },
     #[error("constructor {identity:?} is declared differently from the descriptor already interned for it")]
     DescriptorShape {
         identity: Box<tidepool_repr::execution_schema::SymbolIdentity>,

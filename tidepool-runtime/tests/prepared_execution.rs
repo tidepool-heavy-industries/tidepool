@@ -13,6 +13,9 @@ use tidepool_repr::execution_schema::{
     MachineImports, PreparedProgram, ProgramRequirements, SymbolIdentity, TargetDescriptor,
     TopBinding, ValueId, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
 };
+use tidepool_repr::freer_names::{
+    find_declared, E_DEFINING_MODULE, UNION_DEFINING_MODULE, VAL_DEFINING_MODULE,
+};
 use tidepool_repr::{DataConId, Generation};
 use tidepool_runtime::prepared_execution::{
     run_prepared_once, PreparedArgument, PreparedFailureKind, PreparedOuter, PreparedRuntimeError,
@@ -234,10 +237,7 @@ fn freer_effect_identity() -> DataConId {
         DecodeLimits::default(),
     )
     .expect("FreerRetention artifact parses");
-    prepared
-        .constructors()
-        .iter()
-        .find(|constructor| constructor.identity.occurrence == "E")
+    find_declared(prepared.constructors(), E_DEFINING_MODULE, "E")
         .expect("FreerRetention artifact includes the real freer E constructor")
         .host_id
 }
@@ -510,21 +510,15 @@ fn expected_program_value() -> i64 {
         .expect("FreerResumeExpectations.json's program expectation is an integer")
 }
 
-/// One constructor's host identity in `FREER_RESUME_ARTIFACT`, found by
-/// occurrence name. Every occurrence the resume loop below inspects by
-/// identity (`E`, `Val`, `Union`) appears exactly once in the artifact's
-/// constructor table.
-fn freer_resume_constructor_identity(occurrence: &str) -> DataConId {
+/// Resolve a freer constructor from the artifact by its defining module.
+fn freer_resume_constructor_identity(module: &str, occurrence: &str) -> DataConId {
     let prepared = parse_program(
         FREER_RESUME_ARTIFACT,
         &requirements(),
         DecodeLimits::default(),
     )
     .expect("freer-resume artifact parses");
-    prepared
-        .constructors()
-        .iter()
-        .find(|constructor| constructor.identity.occurrence == occurrence)
+    find_declared(prepared.constructors(), module, occurrence)
         .unwrap_or_else(|| panic!("freer-resume artifact has no constructor named {occurrence}"))
         .host_id
 }
@@ -606,9 +600,9 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments() {
     let ask_argument_top = freer_resume_top(&prepared, "askArgument");
     let val_result_top = freer_resume_top(&prepared, "valResult");
 
-    let e_id = freer_resume_constructor_identity("E");
-    let val_id = freer_resume_constructor_identity("Val");
-    let union_id = freer_resume_constructor_identity("Union");
+    let e_id = freer_resume_constructor_identity(E_DEFINING_MODULE, "E");
+    let val_id = freer_resume_constructor_identity(VAL_DEFINING_MODULE, "Val");
+    let union_id = freer_resume_constructor_identity(UNION_DEFINING_MODULE, "Union");
 
     let mut runtime = PreparedRuntime::from_artifact(
         FREER_RESUME_ARTIFACT,
@@ -766,9 +760,9 @@ impl FreerResumeFixture {
             resume_int_top: freer_resume_top(&prepared, "resumeInt"),
             ask_argument_top: freer_resume_top(&prepared, "askArgument"),
             val_result_top: freer_resume_top(&prepared, "valResult"),
-            e_id: freer_resume_constructor_identity("E"),
-            val_id: freer_resume_constructor_identity("Val"),
-            union_id: freer_resume_constructor_identity("Union"),
+            e_id: freer_resume_constructor_identity(E_DEFINING_MODULE, "E"),
+            val_id: freer_resume_constructor_identity(VAL_DEFINING_MODULE, "Val"),
+            union_id: freer_resume_constructor_identity(UNION_DEFINING_MODULE, "Union"),
         }
     }
 }
@@ -1187,8 +1181,8 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
     let program_top = freer_resume_top(&prepared, "program");
     let resume_int_top = freer_resume_top(&prepared, "resumeInt");
     let ask_argument_top = freer_resume_top(&prepared, "askArgument");
-    let e_id = freer_resume_constructor_identity("E");
-    let union_id = freer_resume_constructor_identity("Union");
+    let e_id = freer_resume_constructor_identity(E_DEFINING_MODULE, "E");
+    let union_id = freer_resume_constructor_identity(UNION_DEFINING_MODULE, "Union");
 
     let linked = link_program(prepared, &MachineImports::default())
         .expect("freer-resume artifact is closed and admits with no imports");

@@ -41,6 +41,33 @@ pub const LEAF_QUALIFIED: &str = "Data.FTCQueue.Leaf";
 /// Module-qualified spelling of `Node`.
 pub const NODE_QUALIFIED: &str = "Data.FTCQueue.Node";
 
+/// Defining modules carried by prepared constructor identities.
+pub const VAL_DEFINING_MODULE: &str = "Control.Monad.Freer.Internal";
+pub const E_DEFINING_MODULE: &str = VAL_DEFINING_MODULE;
+pub const UNION_DEFINING_MODULE: &str = "Data.OpenUnion.Internal";
+pub const LEAF_DEFINING_MODULE: &str = "Data.FTCQueue";
+pub const NODE_DEFINING_MODULE: &str = LEAF_DEFINING_MODULE;
+
+/// Resolve one declared constructor by defining module and occurrence.
+/// Multiple matching package identities are ambiguous and are refused.
+pub fn find_declared<'a>(
+    constructors: &'a [crate::execution_schema::ConstructorDecl],
+    module: &str,
+    occurrence: &str,
+) -> Option<&'a crate::execution_schema::ConstructorDecl> {
+    let mut matches = constructors.iter().filter(|constructor| {
+        constructor.identity.module == module
+            && constructor.identity.occurrence == occurrence
+            && constructor.identity.namespace == "constructor"
+    });
+    let found = matches.next()?;
+    if matches.next().is_some() {
+        None
+    } else {
+        Some(found)
+    }
+}
+
 /// Resolve one of the five constructors by qualified name first, falling back
 /// to the unqualified name only when the qualified spelling is absent
 /// (preserves no-collision behavior for a producer that omits qualified
@@ -61,6 +88,52 @@ mod tests {
     use crate::datacon::DataCon;
     use crate::types::DataConId;
     use crate::DataConTable;
+
+    #[test]
+    fn prepared_resolution_ignores_user_names_and_refuses_package_ambiguity() {
+        use crate::execution_schema::{CheckedLayout, ConstructorDecl, RuntimeRep, SymbolIdentity};
+        let declaration = |unit: &str, module: &str, host| ConstructorDecl {
+            identity: SymbolIdentity {
+                unit: unit.into(),
+                module: module.into(),
+                namespace: "constructor".into(),
+                occurrence: "E".into(),
+                record_parent: None,
+            },
+            family: SymbolIdentity {
+                unit: unit.into(),
+                module: module.into(),
+                namespace: "type".into(),
+                occurrence: "Eff".into(),
+                record_parent: None,
+            },
+            host_id: DataConId(host),
+            result_rep: RuntimeRep::LiftedRef,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+            tag: 1,
+            family_size: 1,
+        };
+        let mut constructors = vec![
+            declaration("user", "User", 1),
+            declaration("freer", E_DEFINING_MODULE, 2),
+        ];
+        assert_eq!(
+            find_declared(&constructors, E_DEFINING_MODULE, "E")
+                .unwrap()
+                .host_id,
+            DataConId(2)
+        );
+        assert!(find_declared(&constructors, E_DEFINING_MODULE, "Val").is_none());
+        constructors.push(declaration("other-package", E_DEFINING_MODULE, 3));
+        assert!(find_declared(&constructors, E_DEFINING_MODULE, "E").is_none());
+    }
 
     #[test]
     fn resolve_prefers_qualified_over_bare_on_collision() {

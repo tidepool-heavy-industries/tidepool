@@ -37,6 +37,9 @@ use tidepool_repr::execution_schema::{
     PreparedProgram, ProgramRequirements, RuntimeRep, SymbolIdentity, TargetDescriptor, TopBinding,
     EXECUTION_ABI_VERSION, SCHEMA_VERSION,
 };
+use tidepool_repr::freer_names::{
+    find_declared, E_DEFINING_MODULE, UNION_DEFINING_MODULE, VAL_DEFINING_MODULE,
+};
 use tidepool_repr::{DataConId, Generation, SessionId};
 use tidepool_runtime::prepared_execution::{
     PreparedArgument, PreparedHole, PreparedOuter, PreparedRuntime, PreparedRuntimeError,
@@ -180,11 +183,12 @@ fn freer_resume_top(prepared: &PreparedProgram, occurrence: &str) -> TopBinding 
         .unwrap_or_else(|| panic!("FreerResume artifact has no top named {occurrence}"))
 }
 
-fn freer_resume_constructor_identity(prepared: &PreparedProgram, occurrence: &str) -> DataConId {
-    prepared
-        .constructors()
-        .iter()
-        .find(|constructor| constructor.identity.occurrence == occurrence)
+fn freer_resume_constructor_identity(
+    prepared: &PreparedProgram,
+    module: &str,
+    occurrence: &str,
+) -> DataConId {
+    find_declared(prepared.constructors(), module, occurrence)
         .unwrap_or_else(|| panic!("freer-resume artifact has no constructor named {occurrence}"))
         .host_id
 }
@@ -220,9 +224,9 @@ impl FreerResumeFixture {
             resume_int_top: freer_resume_top(&prepared, "resumeInt"),
             ask_argument_top: freer_resume_top(&prepared, "askArgument"),
             val_result_top: freer_resume_top(&prepared, "valResult"),
-            e_id: freer_resume_constructor_identity(&prepared, "E"),
-            val_id: freer_resume_constructor_identity(&prepared, "Val"),
-            union_id: freer_resume_constructor_identity(&prepared, "Union"),
+            e_id: freer_resume_constructor_identity(&prepared, E_DEFINING_MODULE, "E"),
+            val_id: freer_resume_constructor_identity(&prepared, VAL_DEFINING_MODULE, "Val"),
+            union_id: freer_resume_constructor_identity(&prepared, UNION_DEFINING_MODULE, "Union"),
         }
     }
 }
