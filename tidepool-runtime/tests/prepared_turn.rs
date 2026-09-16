@@ -879,3 +879,529 @@ fn notebook_data_answers_on_core() {
 fn notebook_data_answers_on_prepared_stg() {
     notebook_data_answers(EngineKind::Prepared);
 }
+
+/// A host answer aimed at a continuation that is no longer parked -- because
+/// it already completed, or because it was aborted -- is the session's
+/// shared `WrongContinuation` bookkeeping error on either engine (the same
+/// validate-before-consume path `reenter` uses for `resume` and `abort`
+/// alike, already exercised once in `notebook_data_answers` for a completed
+/// bind without checking counts). Neither rejection touches the parked set,
+/// the stowed roots, the value handles or the persistent roots, and the
+/// session is not latched: a following valid ask still resolves normally.
+fn notebook_resume_after_settle(engine: EngineKind) {
+    use tidepool_bridge::Value;
+
+    let mut notebook = Notebook::new(engine);
+    let rendered = notebook.expression("41 + 1").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: warm-up rendered {rendered}"
+    );
+    // Brings `True`/`False` into the session table.
+    let rendered = notebook.expression("not False").to_string();
+    assert!(
+        rendered.contains("true"),
+        "{engine:?}: not False rendered as {rendered}"
+    );
+    let true_id = notebook.constructor("True");
+    assert_eq!(notebook.session.parked_count(), 0);
+
+    // --- A second answer to an id that already completed. ---
+    let (binder, hole) = notebook.suspend_ask(engine);
+    let outcome = notebook
+        .session
+        .resume(hole.clone(), Value::Con(true_id, Vec::new()))
+        .unwrap_or_else(|error| panic!("{engine:?}: the first resume failed: {error}"));
+    assert!(
+        matches!(outcome, ResidentOutcome::Completed { .. }),
+        "{engine:?}: the first resume did not complete: {outcome:?}"
+    );
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    assert_eq!(notebook.session.stowed_roots_count(), 0, "{engine:?}");
+
+    let handles_settled = notebook.session.value_handle_count();
+    let roots_settled = notebook.session.persistent_roots_count();
+    let second = notebook
+        .session
+        .resume(hole.clone(), Value::Con(true_id, Vec::new()))
+        .expect_err("the hole already completed");
+    assert!(
+        matches!(
+            &second,
+            ResidentError::WrongContinuation { attempted, pending }
+                if attempted == hole.cont_id() && pending.is_empty()
+        ),
+        "{engine:?}: a second resume of the completed hole reported {second}"
+    );
+    assert_eq!(
+        notebook.session.parked_count(),
+        0,
+        "{engine:?}: the second resume changed parked_count"
+    );
+    assert_eq!(
+        notebook.session.stowed_roots_count(),
+        0,
+        "{engine:?}: the second resume changed stowed_roots_count"
+    );
+    assert_eq!(
+        notebook.session.value_handle_count(),
+        handles_settled,
+        "{engine:?}: the second resume changed value_handle_count"
+    );
+    assert_eq!(
+        notebook.session.persistent_roots_count(),
+        roots_settled,
+        "{engine:?}: the second resume changed persistent_roots_count"
+    );
+
+    // The session is not latched: a following valid ask still resolves.
+    notebook.injected.push(binder.module.clone());
+    let rendered = notebook.expression("not b").to_string();
+    assert!(
+        rendered.contains("false"),
+        "{engine:?}: not b rendered as {rendered}"
+    );
+
+    // --- An answer to an id that was aborted. ---
+    let (_, hole) = notebook.suspend_ask(engine);
+    let cont_id = hole.cont_id().to_string();
+    let aborted = notebook
+        .session
+        .abort(&cont_id, "test abort".into())
+        .expect_err("abort fails the ask");
+    assert!(
+        aborted
+            .to_string()
+            .contains("ask aborted by caller: test abort"),
+        "{engine:?}: abort reported {aborted}"
+    );
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    assert_eq!(notebook.session.stowed_roots_count(), 0, "{engine:?}");
+
+    let handles_aborted = notebook.session.value_handle_count();
+    let roots_aborted = notebook.session.persistent_roots_count();
+    let after_abort = notebook
+        .session
+        .resume(hole, Value::Con(true_id, Vec::new()))
+        .expect_err("the aborted hole is no longer parked");
+    assert!(
+        matches!(
+            &after_abort,
+            ResidentError::WrongContinuation { attempted, pending }
+                if attempted == &cont_id && pending.is_empty()
+        ),
+        "{engine:?}: resuming the aborted hole reported {after_abort}"
+    );
+    assert_eq!(
+        notebook.session.parked_count(),
+        0,
+        "{engine:?}: the post-abort resume changed parked_count"
+    );
+    assert_eq!(
+        notebook.session.stowed_roots_count(),
+        0,
+        "{engine:?}: the post-abort resume changed stowed_roots_count"
+    );
+    assert_eq!(
+        notebook.session.value_handle_count(),
+        handles_aborted,
+        "{engine:?}: the post-abort resume changed value_handle_count"
+    );
+    assert_eq!(
+        notebook.session.persistent_roots_count(),
+        roots_aborted,
+        "{engine:?}: the post-abort resume changed persistent_roots_count"
+    );
+
+    // The session stays usable after both rejections.
+    let rendered = notebook.expression("40 + 2").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: 40 + 2 rendered as {rendered}"
+    );
+}
+
+#[test]
+fn notebook_resume_after_settle_on_core() {
+    notebook_resume_after_settle(EngineKind::Core);
+}
+
+#[test]
+fn notebook_resume_after_settle_on_prepared_stg() {
+    notebook_resume_after_settle(EngineKind::Prepared);
+}
+
+/// Three more shapes of host-answer rejection the prepared validator refuses
+/// before touching the frame, extending `notebook_suspension` (a Bool site
+/// rejecting an `I#`) and `notebook_data_answers` (`Int`/`Maybe Int` sites
+/// rejecting a `Bool`): a Bool site rejecting a constructor from a family
+/// with fields (`Just`, not the nullary `I#`), an arity mismatch on a
+/// same-family constructor, and a nested `Maybe Bool` payload whose `Just`
+/// field is the wrong family. Core has no validator of its own -- the harness
+/// validates answers upstream -- so every rejection probe below is
+/// prepared-only, exactly as the two tests it extends already gate theirs.
+/// Each rejection is followed by the valid answer completing normally.
+fn notebook_answer_shape_rejections(engine: EngineKind) {
+    use tidepool_bridge::Value;
+    use tidepool_repr::Literal;
+
+    let mut notebook = Notebook::new(engine);
+    let rendered = notebook.expression("41 + 1").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: warm-up rendered {rendered}"
+    );
+    // Brings `I#` into the session table.
+    let i_hash_id = notebook.constructor("I#");
+    // Brings `True`/`False` into the session table beside `I#`.
+    let rendered = notebook.expression("not False").to_string();
+    assert!(
+        rendered.contains("true"),
+        "{engine:?}: not False rendered as {rendered}"
+    );
+    let true_id = notebook.constructor("True");
+    // Brings `Just`/`Nothing` into the session table. `Just` alone is
+    // ambiguous by bare name (more than one constructor shares it), so
+    // resolve it by arity instead of `Notebook::constructor`.
+    let rendered = notebook
+        .expression("maybe (0 :: Int) (+ 1) (Just (2 :: Int))")
+        .to_string();
+    assert!(
+        rendered.contains('3'),
+        "{engine:?}: warm-up maybe rendered as {rendered}"
+    );
+    let just_id = notebook
+        .last_table
+        .as_ref()
+        .expect("an expression turn ran")
+        .get_by_name_arity("Just", 1)
+        .unwrap_or_else(|| panic!("{engine:?}: Just/1 is not in the session table"));
+
+    assert_eq!(notebook.session.parked_count(), 0);
+
+    // --- b <- runLLMTurn @Bool: rejects `Just True`, a constructor from a
+    // different family that (unlike `I#`) carries a nested constructor
+    // field rather than a scalar. ---
+    let (b_binder, b_hole) = suspend_typed_ask(
+        &mut notebook,
+        engine,
+        "b",
+        "(runLLMTurn @Bool \"q\" :: M Bool)",
+    );
+    assert_eq!(notebook.session.parked_count(), 1);
+    assert_eq!(notebook.session.stowed_roots_count(), 1);
+
+    if engine == EngineKind::Prepared {
+        let handles_parked = notebook.session.value_handle_count();
+        let roots_parked = notebook.session.persistent_roots_count();
+        let wrong_family = notebook
+            .session
+            .resume(
+                b_hole.clone(),
+                Value::Con(just_id, vec![Value::Con(true_id, Vec::new())]),
+            )
+            .expect_err("a Just constructor is not a Bool");
+        assert!(
+            matches!(
+                wrong_family,
+                ResidentError::Prepared(PreparedRuntimeError::AnswerConstructor { .. })
+            ),
+            "unexpected refusal: {wrong_family}"
+        );
+        assert_eq!(notebook.session.parked_holes(), vec![b_hole.cont_id()]);
+        assert_eq!(notebook.session.parked_count(), 1);
+        assert_eq!(notebook.session.stowed_roots_count(), 1);
+        assert_eq!(notebook.session.value_handle_count(), handles_parked);
+        assert_eq!(notebook.session.persistent_roots_count(), roots_parked);
+    }
+
+    let outcome = notebook
+        .session
+        .resume(b_hole.clone(), Value::Con(true_id, Vec::new()))
+        .unwrap_or_else(|error| panic!("{engine:?}: resuming b with True failed: {error}"));
+    assert!(
+        matches!(outcome, ResidentOutcome::Completed { .. }),
+        "{engine:?}: the resumed b bind did not complete: {outcome:?}"
+    );
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    assert_eq!(notebook.session.stowed_roots_count(), 0, "{engine:?}");
+    notebook.injected.push(b_binder.module.clone());
+    let rendered = notebook.expression("not b").to_string();
+    assert!(
+        rendered.contains("false"),
+        "{engine:?}: not b rendered as {rendered}"
+    );
+
+    // --- n <- runLLMTurn @Int: rejects `I#` applied to two fields instead of
+    // one -- the right family, the wrong arity. ---
+    let (n_binder, n_hole) = suspend_typed_ask(
+        &mut notebook,
+        engine,
+        "n",
+        "(runLLMTurn @Int \"how many\" :: M Int)",
+    );
+    assert_eq!(notebook.session.parked_count(), 1);
+    assert_eq!(notebook.session.stowed_roots_count(), 1);
+
+    if engine == EngineKind::Prepared {
+        let handles_parked = notebook.session.value_handle_count();
+        let roots_parked = notebook.session.persistent_roots_count();
+        let arity_mismatch = notebook
+            .session
+            .resume(
+                n_hole.clone(),
+                Value::Con(
+                    i_hash_id,
+                    vec![
+                        Value::Lit(Literal::LitInt(1)),
+                        Value::Lit(Literal::LitInt(2)),
+                    ],
+                ),
+            )
+            .expect_err("I# takes one field, not two");
+        assert!(
+            matches!(
+                arity_mismatch,
+                ResidentError::Prepared(PreparedRuntimeError::AnswerShape { .. })
+            ),
+            "unexpected refusal: {arity_mismatch}"
+        );
+        assert_eq!(notebook.session.parked_holes(), vec![n_hole.cont_id()]);
+        assert_eq!(notebook.session.parked_count(), 1);
+        assert_eq!(notebook.session.stowed_roots_count(), 1);
+        assert_eq!(notebook.session.value_handle_count(), handles_parked);
+        assert_eq!(notebook.session.persistent_roots_count(), roots_parked);
+    }
+
+    let outcome = notebook
+        .session
+        .resume(
+            n_hole.clone(),
+            Value::Con(i_hash_id, vec![Value::Lit(Literal::LitInt(41))]),
+        )
+        .unwrap_or_else(|error| panic!("{engine:?}: resuming n with 41 failed: {error}"));
+    assert!(
+        matches!(outcome, ResidentOutcome::Completed { .. }),
+        "{engine:?}: the resumed n bind did not complete: {outcome:?}"
+    );
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    assert_eq!(notebook.session.stowed_roots_count(), 0, "{engine:?}");
+    notebook.injected.push(n_binder.module.clone());
+    let rendered = notebook.expression("n + 1").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: n + 1 rendered as {rendered}"
+    );
+
+    // --- mb <- runLLMTurn @(Maybe Bool): rejects `Just (I# 1)` -- the outer
+    // constructor is right, but its field is the wrong family for the site's
+    // nested `Bool` node -- then accepts `Just True`. ---
+    let (mb_binder, mb_hole) = suspend_typed_ask(
+        &mut notebook,
+        engine,
+        "mb",
+        "(runLLMTurn @(Maybe Bool) \"maybe bool\" :: M (Maybe Bool))",
+    );
+    assert_eq!(notebook.session.parked_count(), 1);
+    assert_eq!(notebook.session.stowed_roots_count(), 1);
+
+    if engine == EngineKind::Prepared {
+        let handles_parked = notebook.session.value_handle_count();
+        let roots_parked = notebook.session.persistent_roots_count();
+        let nested_wrong_family = notebook
+            .session
+            .resume(
+                mb_hole.clone(),
+                Value::Con(
+                    just_id,
+                    vec![Value::Con(i_hash_id, vec![Value::Lit(Literal::LitInt(1))])],
+                ),
+            )
+            .expect_err("Just's field is I#, not a Bool constructor");
+        assert!(
+            matches!(
+                nested_wrong_family,
+                ResidentError::Prepared(PreparedRuntimeError::AnswerConstructor { .. })
+            ),
+            "unexpected refusal: {nested_wrong_family}"
+        );
+        assert_eq!(notebook.session.parked_holes(), vec![mb_hole.cont_id()]);
+        assert_eq!(notebook.session.parked_count(), 1);
+        assert_eq!(notebook.session.stowed_roots_count(), 1);
+        assert_eq!(notebook.session.value_handle_count(), handles_parked);
+        assert_eq!(notebook.session.persistent_roots_count(), roots_parked);
+    }
+
+    let outcome = notebook
+        .session
+        .resume(
+            mb_hole.clone(),
+            Value::Con(just_id, vec![Value::Con(true_id, Vec::new())]),
+        )
+        .unwrap_or_else(|error| panic!("{engine:?}: resuming mb with Just True failed: {error}"));
+    assert!(
+        matches!(outcome, ResidentOutcome::Completed { .. }),
+        "{engine:?}: the resumed mb bind did not complete: {outcome:?}"
+    );
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    assert_eq!(notebook.session.stowed_roots_count(), 0, "{engine:?}");
+    notebook.injected.push(mb_binder.module.clone());
+    let rendered = notebook.expression("maybe False id mb").to_string();
+    assert!(
+        rendered.contains("true"),
+        "{engine:?}: maybe False id mb rendered as {rendered}"
+    );
+}
+
+#[test]
+fn notebook_answer_shape_rejections_on_core() {
+    notebook_answer_shape_rejections(EngineKind::Core);
+}
+
+#[test]
+fn notebook_answer_shape_rejections_on_prepared_stg() {
+    notebook_answer_shape_rejections(EngineKind::Prepared);
+}
+
+/// Two typed asks suspend in the same session before either is answered. A
+/// wrong-family answer to the first frame is refused with both frames
+/// intact; the second is then answered validly, then the first -- completion
+/// order follows answer order (not park order), and each hole's binder
+/// resolves to its own answer, not the other's.
+fn notebook_interleaved_parked_continuations(engine: EngineKind) {
+    use tidepool_bridge::Value;
+    use tidepool_repr::Literal;
+
+    let mut notebook = Notebook::new(engine);
+    let rendered = notebook.expression("41 + 1").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: warm-up rendered {rendered}"
+    );
+    // Brings `I#` into the session table.
+    let i_hash_id = notebook.constructor("I#");
+    // Brings `True`/`False` into the session table beside `I#`.
+    let rendered = notebook.expression("not False").to_string();
+    assert!(
+        rendered.contains("true"),
+        "{engine:?}: not False rendered as {rendered}"
+    );
+    let true_id = notebook.constructor("True");
+    assert_eq!(notebook.session.parked_count(), 0);
+
+    let (p_binder, p_hole) = suspend_typed_ask(
+        &mut notebook,
+        engine,
+        "p",
+        "(runLLMTurn @Bool \"first\" :: M Bool)",
+    );
+    assert_eq!(notebook.session.parked_count(), 1);
+    let (q_binder, q_hole) = suspend_typed_ask(
+        &mut notebook,
+        engine,
+        "q",
+        "(runLLMTurn @Int \"second\" :: M Int)",
+    );
+    assert_eq!(notebook.session.parked_count(), 2);
+    assert_eq!(notebook.session.stowed_roots_count(), 2);
+    let mut expected_holes = vec![p_hole.cont_id(), q_hole.cont_id()];
+    expected_holes.sort_unstable();
+    let mut holes = notebook.session.parked_holes();
+    holes.sort_unstable();
+    assert_eq!(holes, expected_holes, "{engine:?}: both frames are parked");
+
+    if engine == EngineKind::Prepared {
+        // Core has no answer validator of its own; the wrong-family rejection
+        // itself is exercised elsewhere (`notebook_suspension`,
+        // `notebook_answer_shape_rejections`). Here it is only the probe that
+        // the SECOND parked frame is undisturbed by a rejected answer to the
+        // first.
+        let handles_parked = notebook.session.value_handle_count();
+        let roots_parked = notebook.session.persistent_roots_count();
+        let wrong_family = notebook
+            .session
+            .resume(
+                p_hole.clone(),
+                Value::Con(i_hash_id, vec![Value::Lit(Literal::LitInt(1))]),
+            )
+            .expect_err("an I# constructor is not a Bool");
+        assert!(
+            matches!(
+                wrong_family,
+                ResidentError::Prepared(PreparedRuntimeError::AnswerConstructor { .. })
+            ),
+            "unexpected refusal: {wrong_family}"
+        );
+        assert_eq!(notebook.session.parked_count(), 2);
+        assert_eq!(notebook.session.stowed_roots_count(), 2);
+        assert_eq!(notebook.session.value_handle_count(), handles_parked);
+        assert_eq!(notebook.session.persistent_roots_count(), roots_parked);
+        let mut holes = notebook.session.parked_holes();
+        holes.sort_unstable();
+        assert_eq!(
+            holes, expected_holes,
+            "{engine:?}: the rejection disturbed the parked set"
+        );
+    }
+
+    // Answer the SECOND frame first: completion order follows answer order,
+    // not park order.
+    let outcome = notebook
+        .session
+        .resume(
+            q_hole.clone(),
+            Value::Con(i_hash_id, vec![Value::Lit(Literal::LitInt(7))]),
+        )
+        .unwrap_or_else(|error| panic!("{engine:?}: resuming q with 7 failed: {error}"));
+    assert!(
+        matches!(outcome, ResidentOutcome::Completed { .. }),
+        "{engine:?}: the resumed q bind did not complete: {outcome:?}"
+    );
+    assert_eq!(notebook.session.parked_count(), 1, "{engine:?}");
+    assert_eq!(
+        notebook.session.parked_holes(),
+        vec![p_hole.cont_id()],
+        "{engine:?}: only the first frame remains parked"
+    );
+
+    // Then the first.
+    let outcome = notebook
+        .session
+        .resume(p_hole.clone(), Value::Con(true_id, Vec::new()))
+        .unwrap_or_else(|error| panic!("{engine:?}: resuming p with True failed: {error}"));
+    assert!(
+        matches!(outcome, ResidentOutcome::Completed { .. }),
+        "{engine:?}: the resumed p bind did not complete: {outcome:?}"
+    );
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    assert_eq!(notebook.session.stowed_roots_count(), 0, "{engine:?}");
+
+    // Each binder resolves to its own answer, not the other's.
+    notebook.injected.push(p_binder.module.clone());
+    notebook.injected.push(q_binder.module.clone());
+    let rendered = notebook.expression("(p, q)").to_string();
+    assert!(
+        rendered.contains("true") && rendered.contains('7'),
+        "{engine:?}: (p, q) rendered as {rendered}"
+    );
+    let rendered = notebook.expression("not p").to_string();
+    assert!(
+        rendered.contains("false"),
+        "{engine:?}: not p rendered as {rendered}"
+    );
+    let rendered = notebook.expression("q + 1").to_string();
+    assert!(
+        rendered.contains('8'),
+        "{engine:?}: q + 1 rendered as {rendered}"
+    );
+}
+
+#[test]
+fn notebook_interleaved_parked_continuations_on_core() {
+    notebook_interleaved_parked_continuations(EngineKind::Core);
+}
+
+#[test]
+fn notebook_interleaved_parked_continuations_on_prepared_stg() {
+    notebook_interleaved_parked_continuations(EngineKind::Prepared);
+}
