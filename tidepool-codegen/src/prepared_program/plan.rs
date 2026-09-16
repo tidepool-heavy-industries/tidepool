@@ -485,7 +485,7 @@ impl<'a> ProgramPlan<'a> {
             bytes: if bytes.is_empty() {
                 Arc::clone(existing_bytes)
             } else {
-                Arc::new(existing_bytes.merged(&bytes))
+                Arc::new(PinnedBytes::overlay(existing_bytes, bytes))
             },
             heap_tops,
             heap_top_specs,

@@ -20,46 +20,36 @@ use tidepool_heap::external_storage::ExternalStorageKind;
 /// the address index is a second view of the same pinned storage, and an
 /// entry, once inserted, is never replaced or dropped from either map for
 /// the life of the value.
+///
+/// An overlay, like [`DescriptorInterner`](super::interner::DescriptorInterner):
+/// `base` is shared by reference-counted pointer and `local` holds what this
+/// value adds on top of it. A compile's own view ([`Self::overlay`]) shares
+/// the machine's `base` outright and stores only its own newly minted
+/// literals in `local`, so building it costs exactly the new content, never
+/// the whole session's pool. The machine's own pool ([`Self::empty`],
+/// mutated only via [`Self::absorb`]) keeps `local` empty forever -- every
+/// absorbed program's content lands in `base` -- so a later compile's
+/// `overlay` can share that `base` by an `Arc::clone`. The two layers never
+/// hold the same key.
 #[derive(Clone)]
 pub(crate) struct PinnedBytes {
+    base: Arc<Tables>,
+    local: Tables,
+}
+
+#[derive(Clone, Default)]
+struct Tables {
     by_value: BTreeMap<Vec<u8>, Arc<[u8]>>,
     by_address: BTreeMap<usize, PinnedLiteral>,
 }
 
-#[derive(Clone)]
-struct PinnedLiteral {
-    storage: Arc<[u8]>,
-    logical_len: usize,
-}
-
-impl PinnedBytes {
-    pub(super) fn new(by_value: BTreeMap<Vec<u8>, Arc<[u8]>>) -> Self {
-        let by_address = by_value
-            .iter()
-            .map(|(logical, storage)| {
-                (
-                    storage.as_ptr() as usize,
-                    PinnedLiteral {
-                        storage: Arc::clone(storage),
-                        logical_len: logical.len(),
-                    },
-                )
-            })
-            .collect();
-        Self {
-            by_value,
-            by_address,
+impl Tables {
+    fn from_map(by_value: BTreeMap<Vec<u8>, Arc<[u8]>>) -> Self {
+        let mut tables = Self::default();
+        for (value, storage) in by_value {
+            tables.insert_owned(value, storage);
         }
-    }
-
-    /// A pool with no interned literals: the machine's pool before any
-    /// program installs, or a standalone compile's own starting point.
-    pub(crate) fn empty() -> Self {
-        Self::new(BTreeMap::new())
-    }
-
-    pub(super) fn get(&self, logical: &[u8]) -> Option<&Arc<[u8]>> {
-        self.by_value.get(logical)
+        tables
     }
 
     fn insert_owned(&mut self, value: Vec<u8>, storage: Arc<[u8]>) {
@@ -72,38 +62,104 @@ impl PinnedBytes {
         );
         self.by_value.insert(value, storage);
     }
+}
 
-    /// This pool plus every entry of `additions` not already present here
-    /// (by content). Content this pool already has keeps the address every
-    /// earlier compile already baked into generated code -- `additions`
-    /// never overrides an existing entry.
-    pub(crate) fn merged(&self, additions: &BTreeMap<Vec<u8>, Arc<[u8]>>) -> Self {
-        let mut merged = self.clone();
-        for (value, storage) in additions {
-            if !merged.by_value.contains_key(value) {
-                merged.insert_owned(value.clone(), Arc::clone(storage));
-            }
+#[derive(Clone)]
+struct PinnedLiteral {
+    storage: Arc<[u8]>,
+    logical_len: usize,
+}
+
+impl PinnedBytes {
+    pub(super) fn new(by_value: BTreeMap<Vec<u8>, Arc<[u8]>>) -> Self {
+        Self {
+            base: Arc::new(Tables::default()),
+            local: Tables::from_map(by_value),
         }
-        merged
     }
 
-    /// Fold one installed program's literal view into this permanent
-    /// machine-wide pool, in place. Idempotent.
+    /// A pool with no interned literals: the machine's pool before any
+    /// program installs, or a standalone compile's own starting point.
+    pub(crate) fn empty() -> Self {
+        Self {
+            base: Arc::new(Tables::default()),
+            local: Tables::default(),
+        }
+    }
+
+    /// One compile's view of `base` (the machine-wide pool at the moment
+    /// this compile started planning, handed out by
+    /// [`crate::machine_state::MachineState::interned_bytes`]) plus
+    /// `additions`: literals this compile newly minted because `base` did
+    /// not already carry them (`plan.rs`'s `pin_bytes` checks `base.get`
+    /// before adding, so `additions` never duplicates `base`'s content by
+    /// key). `base` is shared by `Arc::clone`, never copied, so this costs
+    /// exactly `additions`' size regardless of how large the session's pool
+    /// has grown -- the replacement for the old `merged`, which cloned the
+    /// whole pool on every compile that added even one literal.
+    pub(crate) fn overlay(base: &Arc<PinnedBytes>, additions: BTreeMap<Vec<u8>, Arc<[u8]>>) -> Self {
+        debug_assert!(
+            base.local.by_value.is_empty(),
+            "a compile's overlay base must be the machine's flat pool"
+        );
+        Self {
+            base: Arc::clone(&base.base),
+            local: Tables::from_map(additions),
+        }
+    }
+
+    pub(super) fn get(&self, logical: &[u8]) -> Option<&Arc<[u8]>> {
+        self.local
+            .by_value
+            .get(logical)
+            .or_else(|| self.base.by_value.get(logical))
+    }
+
+    /// The pinned literal owning `address`, if any -- whichever of `local`
+    /// and `base` has the range-closest match, since the two layers never
+    /// share a key and an address always belongs to exactly one allocation.
+    fn address_entry(&self, address: usize) -> Option<(usize, &PinnedLiteral)> {
+        let local = self.local.by_address.range(..=address).next_back();
+        let base = self.base.by_address.range(..=address).next_back();
+        match (local, base) {
+            (Some((&la, ll)), Some((&ba, bl))) => Some(if la >= ba { (la, ll) } else { (ba, bl) }),
+            (Some((&la, ll)), None) => Some((la, ll)),
+            (None, Some((&ba, bl))) => Some((ba, bl)),
+            (None, None) => None,
+        }
+    }
+
+    /// Fold `other`'s own newly minted literals (its `local` layer -- see
+    /// [`Self::overlay`]) into this permanent machine-wide pool's `base`
+    /// layer, in place when nothing else currently shares this pool's
+    /// `base` `Arc` (the common case: a compile that minted a few new
+    /// literals is the sole reference by the time its program installs),
+    /// cloning `base`'s `Tables` only when something else does (an
+    /// outstanding compile still holding this exact snapshot, or an earlier
+    /// installed program that reused it verbatim because it added nothing).
+    /// `other.base` is never rescanned: by the append-only, monotonic
+    /// invariant above, whatever `other.base` carries was already folded
+    /// into `self` before `other` was compiled against it. Idempotent, and
+    /// a no-op when `other` added nothing.
     ///
-    /// Content this pool already carries keeps its canonical storage in
-    /// `by_value`, so later compiles reuse one address. But the program's OWN
-    /// storage for that content is still what its generated code and the
-    /// heap objects it built embed: two programs planned against the same
-    /// pool snapshot each mint storage for content neither had, and the
-    /// second to install must not lose its copy. Every distinct storage is
-    /// therefore kept alive and resolvable through `by_address` for the
-    /// machine's life, even when it is a content duplicate.
+    /// Content this pool already carries keeps its canonical storage, so
+    /// later compiles reuse one address. But the program's OWN storage for
+    /// that content is still what its generated code and the heap objects it
+    /// built embed: two programs planned against the same pool snapshot each
+    /// mint storage for content neither had, and the second to install must
+    /// not lose its copy. Every distinct storage is therefore kept alive and
+    /// resolvable through `by_address` for the machine's life, even when it
+    /// is a content duplicate.
     pub(crate) fn absorb(&mut self, other: &PinnedBytes) {
-        for (value, storage) in &other.by_value {
-            if !self.by_value.contains_key(value) {
-                self.insert_owned(value.clone(), Arc::clone(storage));
+        if other.local.by_value.is_empty() {
+            return;
+        }
+        let base = Arc::make_mut(&mut self.base);
+        for (value, storage) in &other.local.by_value {
+            if !base.by_value.contains_key(value) {
+                base.insert_owned(value.clone(), Arc::clone(storage));
             } else {
-                self.by_address
+                base.by_address
                     .entry(storage.as_ptr() as usize)
                     .or_insert_with(|| PinnedLiteral {
                         storage: Arc::clone(storage),
@@ -115,7 +171,7 @@ impl PinnedBytes {
 
     /// Observe only logical literal bytes, excluding the implicit terminal NUL.
     pub(crate) fn logical_suffix(&self, address: usize) -> Option<&[u8]> {
-        let (&base, literal) = self.by_address.range(..=address).next_back()?;
+        let (base, literal) = self.address_entry(address)?;
         let offset = address.checked_sub(base)?;
         literal.storage.get(offset..literal.logical_len)
     }
@@ -124,7 +180,7 @@ impl PinnedBytes {
     /// its slice to the first NUL, never dereference the numeric input address
     /// or cross an allocation boundary looking for a terminator.
     pub(crate) fn c_string_len(&self, address: usize) -> Option<usize> {
-        let (&base, literal) = self.by_address.range(..=address).next_back()?;
+        let (base, literal) = self.address_entry(address)?;
         let offset = address.checked_sub(base)?;
         literal
             .storage
@@ -148,7 +204,7 @@ impl PinnedBytes {
         offset: i64,
         length: usize,
     ) -> Option<&[u8]> {
-        let (&base, literal) = self.by_address.range(..=address).next_back()?;
+        let (base, literal) = self.address_entry(address)?;
         let storage = &literal.storage;
         if address.checked_sub(base)? > storage.len() {
             return None;

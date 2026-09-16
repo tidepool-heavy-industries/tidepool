@@ -1903,9 +1903,17 @@ impl MachineState {
         if Arc::ptr_eq(&pool, other) {
             return;
         }
-        let mut merged = (**pool).clone();
-        merged.absorb(other);
-        *pool = Arc::new(merged);
+        // `Arc::make_mut` clones only when something else still holds this
+        // exact pool snapshot (an outstanding compile's `existing_bytes`, or
+        // an earlier install that reused it verbatim because it added
+        // nothing -- see `PinnedBytes::overlay`/`absorb`'s docs); the common
+        // case, a compile that minted a few new literals, finds this cell
+        // the sole owner and grows the pool's `base` in place instead of
+        // cloning every literal ever interned in this session. `PinnedBytes`
+        // clones cheaply either way (its own fields are an `Arc` and an
+        // empty `local` layer -- see its overlay doc); the potentially large
+        // clone this guards is the inner `Tables` `absorb` mutates.
+        Arc::make_mut(&mut pool).absorb(other);
     }
 
     /// Resolve a literal `Addr#` against the one permanent pool.
