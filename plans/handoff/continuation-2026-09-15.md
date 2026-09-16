@@ -120,6 +120,13 @@ Before implementation, establish these facts in the owning APIs:
   transcript strings. Shoal's Core-only bootstrap remains a default-routing
   dependency until the effectful prepared path is supported.
 
+The F4 source survey also establishes a separate ordinary-effect obligation:
+Print/file-read/KV handler replies have no dynamic typedSite. The resume
+integration design reuses schema-10 evidence via explicit prepared-only
+synthetic sites generated from each verb's full result type. Generator forcing
+must also preserve the distinction between CoreValue and policy-authorized
+live payloads. Both are included in full step-2 acceptance, beyond Bool-first.
+
 ## Verification retained during recovery
 
 These checks ran before schema-10 mutation began:

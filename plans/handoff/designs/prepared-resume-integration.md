@@ -83,6 +83,64 @@ Rust does not reconstruct freer computations or parse Haskell signatures.
 The precise forcing-generation parcel follows a source survey of existing
 protocol metadata and the effects-module generator.
 
+## Ordinary handled effects also need answer evidence
+
+The dynamic site table alone covers only the typed suspension vocabulary.
+Ordinary requests such as Print and file reads carry no `typedSite`. Core
+materializes handler replies directly from `Response::Complete(Value)` or
+`Response::List`; neither response carries the expected instantiated Haskell
+result type. Prepared handlers therefore need static reply contracts before
+using the same validated answer builder.
+
+Use explicit synthetic prepared sites, reusing schema 10's `SiteRow` and
+`TypeNode` tables. The protocol generator derives the complete result from
+`Verb::result_type()` (including the error/Either wrapper), substitutes the
+compiled row's parameters, and emits a typed internal evidence marker such as
+`replySite @ReplyType`. Prepared elaboration recognizes and rewrites that
+marker before type erasure, records a HostAnswer site, and retains its exact
+owner. The marker belongs to the prepared-only compiler vocabulary; it does
+not join the public `sitedVerbs` or the Core presentation sidecar.
+
+The generated settlement branch carries an explicit evidence-source sum:
+`StaticReply site` or `DynamicTypedSite`. It constructs the static witness
+alongside that branch's request and continuation. Do not infer this distinction
+from an integer sentinel, request name, or response contents. A dynamic site's
+actual ID still comes from the observed typed request. The template's admitted
+roots must preserve the marker-owning settlement function.
+
+Static contracts authorize result shape only. Existing nominal dispatch and
+`EffectRunPolicy` remain unchanged: handled requests use the same validator,
+answer builder and resume entry as external answers; HandleOrSuspend parks
+only unhandled requests, and HandleOrError refuses unhandled requests.
+Preserve the iterative list-response path.
+
+The Bool-first request uses native Bool constructors: the generated
+`runLLMTurnSited` maps `unsafeCoerce` over the nominal Value reply, so it must
+receive `True`/`False`, not a JSON Value constructor wrapping a Bool. The real
+resume test establishes this representation contract.
+
+## Request forcing belongs to the generated schema owner
+
+`EffectDecl` currently carries rendered declaration strings. Extend the
+existing protocol declaration generator (`tidepool-protocol/src/gen/decl_rs.rs`)
+to produce a per-effect forcing function from structured `Verb.args`, `HsType`
+and `RustBinding`. Carry that generated source/name through `EffectDecl`;
+`effects_shim_module_source` assembles row-specific settlement from the same
+ordered row used to declare `M`. Do not parse signature strings or add a second
+tag registry. Legacy macro-owned effects require equivalent generated metadata.
+
+Force concrete data fields fully, using schema-generated supporting instances
+and instances in foreign types' defining modules. Vendored Value, Scientific,
+Duration and generated records do not all have NFData today; blindly emitting
+`deepseq` is not a complete implementation. Unsupported concrete field shapes
+must fail generation explicitly. CoreValue fields are forced only to WHNF,
+without adding constraints to arbitrary authored types.
+
+CoreValue is not live-retention authority. RunLLMTurnWith's ordinary JSON
+payload is CoreValue, and its nested site ID is materialized by observation.
+Only `LivePayloadPolicy` selects a field for retained heap custody. Do not turn
+every CoreValue into an opaque handle or stop observing ordinary JSON data.
+
 ## Rejection and cleanup
 
 Before consuming the frame, verify realm, delivery and structural answer type,
@@ -127,7 +185,10 @@ those owners into independently invented registries or APIs.
 7. Actual turn artifacts contain the required resume and forcing entries.
 8. A consumed continuation cannot resume twice; cancellation/abort and realm
    retirement clean up exactly once without disturbing a sibling.
-9. Evidence and runner owners remain pinned until completion/abort; retirement
+9. Ordinary effects before and after a typed suspension route through actual
+   handlers: Print/Unit, file-read/Either error, and optional/list results.
+   Verify all three EffectRunPolicy modes.
+10. Evidence and runner owners remain pinned until completion/abort; retirement
    cannot free code reached by the continuation.
 
 The existing freer fixture loop remains supporting engine evidence. It does
