@@ -87,14 +87,28 @@ impl PinnedBytes {
         merged
     }
 
-    /// Fold every entry of `other` not already present here (by content)
-    /// into this pool, in place. Used to absorb one installed program's own
-    /// literal view into the permanent machine-wide pool; idempotent, and a
-    /// no-op for content this pool already carries.
+    /// Fold one installed program's literal view into this permanent
+    /// machine-wide pool, in place. Idempotent.
+    ///
+    /// Content this pool already carries keeps its canonical storage in
+    /// `by_value`, so later compiles reuse one address. But the program's OWN
+    /// storage for that content is still what its generated code and the
+    /// heap objects it built embed: two programs planned against the same
+    /// pool snapshot each mint storage for content neither had, and the
+    /// second to install must not lose its copy. Every distinct storage is
+    /// therefore kept alive and resolvable through `by_address` for the
+    /// machine's life, even when it is a content duplicate.
     pub(crate) fn absorb(&mut self, other: &PinnedBytes) {
         for (value, storage) in &other.by_value {
             if !self.by_value.contains_key(value) {
                 self.insert_owned(value.clone(), Arc::clone(storage));
+            } else {
+                self.by_address
+                    .entry(storage.as_ptr() as usize)
+                    .or_insert_with(|| PinnedLiteral {
+                        storage: Arc::clone(storage),
+                        logical_len: value.len(),
+                    });
             }
         }
     }
@@ -383,6 +397,35 @@ pub(super) fn emit_index_char(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn storage_for(value: &[u8]) -> Arc<[u8]> {
+        let mut storage = value.to_vec();
+        storage.push(0);
+        Arc::from(storage)
+    }
+
+    /// Two programs planned against the same pool snapshot each mint their
+    /// own storage for content neither had. After both install, the pool
+    /// resolves BOTH addresses (each program's code and heap objects embed
+    /// its own), while content lookup keeps the first as canonical.
+    #[test]
+    fn absorb_keeps_a_duplicate_content_storage_resolvable_by_address() {
+        let first = storage_for(b"shared");
+        let second = storage_for(b"shared");
+        assert_ne!(first.as_ptr(), second.as_ptr());
+        let program_a = PinnedBytes::new(BTreeMap::from([(b"shared".to_vec(), Arc::clone(&first))]));
+        let program_b =
+            PinnedBytes::new(BTreeMap::from([(b"shared".to_vec(), Arc::clone(&second))]));
+
+        let mut pool = PinnedBytes::empty();
+        pool.absorb(&program_a);
+        pool.absorb(&program_b);
+
+        assert!(Arc::ptr_eq(pool.get(b"shared").unwrap(), &first));
+        assert_eq!(pool.logical_suffix(first.as_ptr() as usize), Some(&b"shared"[..]));
+        assert_eq!(pool.logical_suffix(second.as_ptr() as usize), Some(&b"shared"[..]));
+        assert_eq!(pool.logical_suffix(second.as_ptr() as usize + 2), Some(&b"ared"[..]));
+    }
     use std::collections::HashSet;
     use tidepool_heap::external_storage::ExternalStorageValidationError;
     use tidepool_repr::execution_schema::{Architecture, Endianness, TargetDescriptor};
