@@ -1134,18 +1134,14 @@ fn emit_case_dispatch(
                         AlternativePattern::Literal(_) => return Err(unsupported(owner, node)),
                     }
                 }
-                let descriptors: Vec<_> = plan
-                    .program
-                    .constructors()
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, declaration)| declaration.family == *family)
-                    .map(|(index, _)| plan.constructors[index].clone())
-                    .collect();
+                let descriptors = plan
+                    .constructor_families
+                    .get(family)
+                    .map_or(&[][..], Vec::as_slice);
                 emit_algebraic_dispatch(
                     builder,
                     scrutinee[0],
-                    &descriptors,
+                    descriptors,
                     &alternatives_by_descriptor,
                     default,
                     invalid,

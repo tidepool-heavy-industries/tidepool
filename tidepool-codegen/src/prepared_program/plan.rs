@@ -160,6 +160,9 @@ pub(super) struct ProgramPlan<'a> {
     pub thunks: BTreeMap<ValueId, ThunkPlan<'a>>,
     pub top_bindings: BTreeMap<ValueId, &'a HeapBinding>,
     pub constructors: Vec<Arc<ObjectDescriptor>>,
+    /// Each constructor family's descriptors in declaration order, for
+    /// algebraic case dispatch.
+    pub constructor_families: BTreeMap<SymbolIdentity, Vec<Arc<ObjectDescriptor>>>,
     /// Each declaration with the descriptor it compiled against (interned or
     /// fresh), handed to the installing machine.
     pub interned_constructors: Vec<(ConstructorDecl, Arc<ObjectDescriptor>)>,
@@ -295,9 +298,15 @@ impl<'a> ProgramPlan<'a> {
         let target = &program.envelope().target;
         let mut constructors = Vec::with_capacity(program.constructors().len());
         let mut interned_constructors = Vec::with_capacity(program.constructors().len());
+        let mut constructor_families: BTreeMap<SymbolIdentity, Vec<Arc<ObjectDescriptor>>> =
+            BTreeMap::new();
         for declaration in program.constructors() {
             let descriptor = interner.intern(target, declaration)?;
             interned_constructors.push((declaration.clone(), Arc::clone(&descriptor)));
+            constructor_families
+                .entry(declaration.family.clone())
+                .or_default()
+                .push(Arc::clone(&descriptor));
             constructors.push(descriptor);
         }
 
@@ -463,6 +472,7 @@ impl<'a> ProgramPlan<'a> {
             value_reps: values,
             top_bindings,
             constructors,
+            constructor_families,
             boxed_array: Arc::clone(&externals.boxed_array),
             bytes_array: Arc::clone(&externals.bytes_array),
             mut_var: Arc::clone(&externals.mut_var),
