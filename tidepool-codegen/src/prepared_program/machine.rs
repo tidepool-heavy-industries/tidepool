@@ -332,11 +332,15 @@ impl Drop for InstallTransaction<'_, '_> {
     fn drop(&mut self) {
         if !self.committed {
             let (block, words) = self.block;
-            for slot in 0..words {
-                // SAFETY: the caller holds the candidate `CompiledProgram`
-                // (and so its block) until this transaction has dropped.
-                let root = unsafe { block.add(slot) }.cast::<*mut u8>();
-                self.machine.machine.deregister_persistent_root(root);
+            let roots: Vec<*mut *mut u8> = (0..words)
+                .map(|slot| {
+                    // SAFETY: the caller holds the candidate `CompiledProgram`
+                    // (and so its block) until this transaction has dropped.
+                    unsafe { block.add(slot) }.cast::<*mut u8>()
+                })
+                .collect();
+            self.machine.machine.deregister_persistent_roots(&roots);
+            for root in roots {
                 unsafe { root.write(std::ptr::null_mut()) };
             }
             while self.machine.machine.stack_map_registries().len() > self.stack_maps {
@@ -1135,11 +1139,15 @@ impl<'code> PreparedMachine<'code> {
             .get(&id)
             .ok_or(ExecutionError::UnknownProgram(id))?;
         let block = &installed.program.get().root_block;
+        let mut roots = Vec::with_capacity(block.len());
         for slot in 0..block.len() {
             if let Some(root) = block.slot_address(slot) {
-                self.machine.deregister_persistent_root(root);
-                unsafe { root.write(std::ptr::null_mut()) };
+                roots.push(root);
             }
+        }
+        self.machine.deregister_persistent_roots(&roots);
+        for root in roots {
+            unsafe { root.write(std::ptr::null_mut()) };
         }
         let block_start = block.as_mut_ptr().cast::<u8>().cast_const();
         self.machine.forget_remembered_range(block_start, unsafe {

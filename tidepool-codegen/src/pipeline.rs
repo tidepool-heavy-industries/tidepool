@@ -183,6 +183,22 @@ impl CodegenPipeline {
         flag_builder
             .set("use_colocated_libcalls", "false")
             .map_err(|e| PipelineError::Init(format!("set use_colocated_libcalls: {e}")))?;
+        // Cranelift's own default is "true", which re-verifies every compiled
+        // function's IR on every build. That's worth paying for in debug
+        // builds (catches a malformed IR construction immediately, at its
+        // source, instead of as a much harder to diagnose miscompile or
+        // crash downstream), but it's dead weight in release builds where
+        // IR construction is already exercised under debug_assertions in CI.
+        // TIDEPOOL_CRANELIFT_VERIFY=1 forces it back on in a release build
+        // (e.g. to bisect a release-only miscompile).
+        let verify = if cfg!(debug_assertions) {
+            true
+        } else {
+            std::env::var_os("TIDEPOOL_CRANELIFT_VERIFY").is_some_and(|v| v == "1")
+        };
+        flag_builder
+            .set("enable_verifier", if verify { "true" } else { "false" })
+            .map_err(|e| PipelineError::Init(format!("set enable_verifier: {e}")))?;
 
         let isa_builder = cranelift_native::builder()
             .map_err(|e| PipelineError::Init(format!("host ISA: {e}")))?;

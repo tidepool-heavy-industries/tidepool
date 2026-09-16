@@ -1067,6 +1067,38 @@ impl MachineState {
         }
     }
 
+    /// Deregister a whole batch of persistent-root slots (e.g. a program's
+    /// entire root block) in one pass instead of one linear search +
+    /// `Vec::remove` per slot — O(slots + roots) instead of O(slots * roots).
+    /// Matches [`Self::deregister_persistent_root`] called once per address in
+    /// `roots`, including its multiplicity: a slot registered N times and
+    /// listed N times in `roots` has all N registrations removed; listed
+    /// fewer than N times, only that many are removed (earliest occurrences
+    /// first, same as repeated single calls, which always remove the first
+    /// remaining match). An address in `roots` that was never registered, or
+    /// listed more times than it was registered, is a no-op for the surplus —
+    /// idempotent like the single-root version. `HashSet` alone can't carry
+    /// per-address multiplicity, so this counts remaining removals per
+    /// address instead.
+    pub(crate) fn deregister_persistent_roots(&self, roots: &[*mut *mut u8]) {
+        if roots.is_empty() {
+            return;
+        }
+        let mut remaining: HashMap<*mut *mut u8, usize> = HashMap::with_capacity(roots.len());
+        for &slot in roots {
+            *remaining.entry(slot).or_insert(0) += 1;
+        }
+        self.persistent_roots.borrow_mut().retain(|slot| {
+            if let Some(count) = remaining.get_mut(slot) {
+                if *count > 0 {
+                    *count -= 1;
+                    return false;
+                }
+            }
+            true
+        });
+    }
+
     pub(crate) fn clear_persistent_roots(&self) {
         self.persistent_roots.borrow_mut().clear();
     }
@@ -4374,5 +4406,73 @@ mod tests {
         assert_eq!(ms.reclaim_session_heap(std::ptr::null_mut()), (None, 0));
         ms.clear_run_scratch();
         ms.free_session_heap();
+    }
+
+    /// `deregister_persistent_roots` must remove exactly the registrations
+    /// that calling `deregister_persistent_root` once per listed address
+    /// would remove — including when an address was registered more than
+    /// once (each registration is a separate list slot; "remove-by-position,
+    /// first match" per call). These addresses are never dereferenced by
+    /// either function, only compared and stored, so dangling/fake values are
+    /// fine here.
+    #[test]
+    fn deregister_persistent_roots_matches_single_root_semantics_with_duplicates() {
+        let a = 0x1000_usize as *mut *mut u8;
+        let b = 0x2000_usize as *mut *mut u8;
+        let c = 0x3000_usize as *mut *mut u8;
+        let d = 0x4000_usize as *mut *mut u8;
+
+        // `a` is registered twice (distinct slots that happen to share an
+        // address), `b` once, `c` once, `d` twice.
+        let ms = MachineState::new();
+        ms.register_persistent_root(a);
+        ms.register_persistent_root(b);
+        ms.register_persistent_root(a);
+        ms.register_persistent_root(c);
+        ms.register_persistent_root(d);
+        ms.register_persistent_root(d);
+        assert_eq!(ms.persistent_roots_count(), 6);
+
+        // List `a` twice (removes both registrations), `b` once (removes its
+        // one registration), and `d` once (removes only ONE of its two
+        // registrations, matching what one `deregister_persistent_root(d)`
+        // call would do) — `c` is left untouched.
+        ms.deregister_persistent_roots(&[a, b, a, d]);
+
+        let mut remaining = Vec::new();
+        ms.extend_persistent_roots(&mut remaining);
+        assert_eq!(remaining, vec![c, d], "one `d` registration must survive");
+
+        // Cross-check against the single-root function on a twin machine
+        // built the same way, driven one call per listed address in the same
+        // order.
+        let twin = MachineState::new();
+        twin.register_persistent_root(a);
+        twin.register_persistent_root(b);
+        twin.register_persistent_root(a);
+        twin.register_persistent_root(c);
+        twin.register_persistent_root(d);
+        twin.register_persistent_root(d);
+        for slot in [a, b, a, d] {
+            twin.deregister_persistent_root(slot);
+        }
+        let mut twin_remaining = Vec::new();
+        twin.extend_persistent_roots(&mut twin_remaining);
+        assert_eq!(remaining, twin_remaining);
+
+        // An address listed but never registered, or listed more times than
+        // it was registered, is a no-op for the surplus (idempotent, like
+        // the single-root version).
+        let unregistered = 0x5000_usize as *mut *mut u8;
+        ms.deregister_persistent_roots(&[unregistered, c, c]);
+        let mut after = Vec::new();
+        ms.extend_persistent_roots(&mut after);
+        assert_eq!(after, vec![d]);
+
+        // Empty input is a no-op.
+        ms.deregister_persistent_roots(&[]);
+        let mut after_empty = Vec::new();
+        ms.extend_persistent_roots(&mut after_empty);
+        assert_eq!(after_empty, vec![d]);
     }
 }
