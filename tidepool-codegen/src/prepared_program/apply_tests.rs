@@ -1,10 +1,9 @@
 //! End-to-end generated Tail-ABI application coverage.
 
-use super::{CompiledProgram, ExecutionError, ObservationFailure, RunOptions};
+use super::{CompiledProgram, ExecutionError, RunOptions};
 use crate::host_fns::RuntimeError;
 use crate::prepared_control::PreparedSafepoint;
 use std::sync::{atomic::AtomicBool, Arc};
-use tidepool_heap::execution_descriptor::ObjectKind;
 use tidepool_repr::execution_schema::{testing, *};
 
 fn constructor(index: u64) -> ConstructorDecl {
@@ -138,17 +137,20 @@ fn partial_wire(exact: bool) -> WireProgram {
 
 #[test]
 fn pap_undersaturation_allocates() {
-    let error = compile(partial_wire(false))
+    // The adapter receives the allocated PAP; observation bridges it as the
+    // closure sentinel, as Core does, rather than refusing it.
+    let result = compile(partial_wire(false))
         .run_entry(
             ValueId(0),
             &[],
             &RunOptions::default(),
             Arc::new(AtomicBool::new(false)),
         )
-        .expect_err("the adapter must receive the allocated PAP");
+        .expect("the adapter must receive the allocated PAP");
     assert!(matches!(
-        error,
-        ExecutionError::Observation(ObservationFailure::Unobservable(ObjectKind::Pap))
+        result.values.as_slice(),
+        [tidepool_bridge::Value::Con(id, fields)]
+            if *id == crate::heap_bridge::CLOSURE_SENTINEL && fields.is_empty()
     ));
 }
 
@@ -181,10 +183,9 @@ fn pap_allocation_cancellation_publishes_no_result() {
         Arc::new(AtomicBool::new(false)),
     );
     assert!(matches!(
-        retry,
-        Err(ExecutionError::Observation(
-            ObservationFailure::Unobservable(ObjectKind::Pap)
-        ))
+        retry.as_ref().map(|result| result.values.as_slice()),
+        Ok([tidepool_bridge::Value::Con(id, fields)])
+            if *id == crate::heap_bridge::CLOSURE_SENTINEL && fields.is_empty()
     ));
 }
 

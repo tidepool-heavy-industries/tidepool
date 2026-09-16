@@ -447,7 +447,7 @@ fn w5_a4_lazy_alias_chain_is_observable() {
 }
 
 #[test]
-fn w5_a4_function_result_is_typed_unobservable_failure() {
+fn w5_a4_function_result_observes_as_the_closure_sentinel() {
     let mut wire = testing::wire_program();
     wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
     wire.constructors
@@ -481,19 +481,24 @@ fn w5_a4_function_result_is_typed_unobservable_failure() {
             },
         },
     ])];
-    let error = compile_wire(wire)
+    // A function-valued field observes as the closure sentinel inside its
+    // parent constructor (the Core contract), not as a typed refusal.
+    let result = compile_wire(wire)
         .run_entry(
             ValueId(0),
             &[],
             &RunOptions::default(),
             Arc::new(AtomicBool::new(false)),
         )
-        .unwrap_err();
+        .unwrap();
     assert!(matches!(
-        error,
-        super::ExecutionError::Observation(super::ObservationFailure::Unobservable(
-            tidepool_heap::execution_descriptor::ObjectKind::Function
-        ))
+        result.values.as_slice(),
+        [tidepool_bridge::Value::Con(_, fields)]
+            if matches!(
+                fields.as_slice(),
+                [tidepool_bridge::Value::Con(id, inner)]
+                    if *id == crate::heap_bridge::CLOSURE_SENTINEL && inner.is_empty()
+            )
     ));
 }
 
