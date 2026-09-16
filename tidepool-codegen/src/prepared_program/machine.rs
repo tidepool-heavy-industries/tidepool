@@ -425,8 +425,10 @@ impl<'code> PreparedMachine<'code> {
     /// installed program already declared resolves to the same descriptor
     /// address the existing cells carry. Each compile owns its root block, so
     /// any number of compiles may be outstanding; every one of them compiles
-    /// through a clone of this same machine's interner, so at install time
-    /// [`super::interner::DescriptorInterner::absorb`] finds each declaration
+    /// through a clone of this same machine's interner (an overlay sharing
+    /// the machine's tables, so the clone copies nothing already interned),
+    /// so at install time
+    /// [`super::interner::DescriptorInterner::check_absorb`] finds each declaration
     /// already agreeing with what it staged and keeps the existing `Arc`
     /// rather than minting a second one -- a fresh compile's own externals
     /// are likewise absorbed, or, for a genuinely divergent descriptor,
@@ -537,9 +539,10 @@ impl<'code> PreparedMachine<'code> {
         // A constructor identity this machine already shares must be
         // declared identically, with the same descriptor, by the incoming
         // program; otherwise nothing is absorbed and nothing else happens.
-        let mut staged_interner = self.interner.clone();
-        staged_interner
-            .absorb(&compiled.interned_constructors)
+        // Validate only: the machine's interner is extended at the very end,
+        // after every fallible step, so a refused install leaves it as is.
+        self.interner
+            .check_absorb(&compiled.interned_constructors)
             .map_err(|conflict| match conflict {
                 super::interner::AbsorbConflict::Identity(identity) => {
                     ExecutionError::DescriptorShape {
@@ -557,8 +560,8 @@ impl<'code> PreparedMachine<'code> {
                 },
                 super::interner::AbsorbConflict::Externals => ExecutionError::ForeignExternals,
             })?;
-        staged_interner
-            .absorb_externals(&compiled.externals)
+        self.interner
+            .check_externals(&compiled.externals)
             .map_err(|_| ExecutionError::ForeignExternals)?;
 
         // Reserve (capacity/contiguity, above) then verify EVERY declared
@@ -854,7 +857,8 @@ impl<'code> PreparedMachine<'code> {
                 .map(|&header| (header, compiled.pipeline.get_function_ptr(compiled.enter))),
         );
 
-        self.interner = staged_interner;
+        self.interner.commit_absorb(&compiled.interned_constructors);
+        self.interner.commit_externals(&compiled.externals);
         Ok(statics)
     }
 

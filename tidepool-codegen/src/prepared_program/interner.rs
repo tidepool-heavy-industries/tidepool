@@ -84,17 +84,62 @@ impl ExternalDescriptors {
     }
 }
 
+type ConstructorEntry = (ConstructorDecl, Arc<ObjectDescriptor>);
+
+#[derive(Clone, Default)]
+struct Tables {
+    constructors: BTreeMap<SymbolIdentity, ConstructorEntry>,
+    by_host: BTreeMap<DataConId, SymbolIdentity>,
+}
+
 /// One shared descriptor per constructor identity, with the declaration it
 /// was minted from so a conflicting later declaration is refused rather
 /// than silently aliased; and the one set of external wrapper descriptors.
+///
+/// The tables are an overlay: `base` is shared by reference-counted
+/// pointer, `local` holds what this value added while `base` was shared.
+/// Cloning the machine's interner for a compile therefore copies only the
+/// (normally empty) local layer; the compile's own new constructors land
+/// in its local layer. The machine's interner owns its base uniquely once
+/// no compile is outstanding, so absorbing an install inserts into the
+/// base directly. The two layers never hold the same key.
 #[derive(Clone, Default)]
 pub struct DescriptorInterner {
-    constructors: BTreeMap<SymbolIdentity, (ConstructorDecl, Arc<ObjectDescriptor>)>,
-    by_host: BTreeMap<DataConId, SymbolIdentity>,
+    base: Arc<Tables>,
+    local: Tables,
     externals: Option<ExternalDescriptors>,
 }
 
 impl DescriptorInterner {
+    fn constructor(&self, identity: &SymbolIdentity) -> Option<&ConstructorEntry> {
+        self.local
+            .constructors
+            .get(identity)
+            .or_else(|| self.base.constructors.get(identity))
+    }
+
+    fn host_identity(&self, host_id: &DataConId) -> Option<&SymbolIdentity> {
+        self.local
+            .by_host
+            .get(host_id)
+            .or_else(|| self.base.by_host.get(host_id))
+    }
+
+    /// Insert an identity known to be absent from both layers.
+    fn insert_new(&mut self, declaration: &ConstructorDecl, descriptor: Arc<ObjectDescriptor>) {
+        let tables = match Arc::get_mut(&mut self.base) {
+            Some(base) => base,
+            None => &mut self.local,
+        };
+        tables
+            .by_host
+            .insert(declaration.host_id, declaration.identity.clone());
+        tables.constructors.insert(
+            declaration.identity.clone(),
+            (declaration.clone(), descriptor),
+        );
+    }
+
     /// The machine's external wrapper descriptors, minted on first use.
     pub(super) fn externals(
         &mut self,
@@ -114,19 +159,26 @@ impl DescriptorInterner {
         self.externals.as_ref()
     }
 
-    /// Adopt a program's external descriptors: the first program's become
-    /// the machine's; every later program must carry exactly those.
-    pub(super) fn absorb_externals(
-        &mut self,
+    /// Whether a program's external descriptors may be adopted: the first
+    /// program's become the machine's; every later program must carry
+    /// exactly those. Validation only; see [`Self::commit_externals`].
+    pub(super) fn check_externals(
+        &self,
         incoming: &ExternalDescriptors,
     ) -> Result<(), AbsorbConflict> {
         match &self.externals {
-            None => {
-                self.externals = Some(incoming.clone());
-                Ok(())
-            }
+            None => Ok(()),
             Some(existing) if existing.same_as(incoming) => Ok(()),
             Some(_) => Err(AbsorbConflict::Externals),
+        }
+    }
+
+    /// Adopt external descriptors already accepted by
+    /// [`Self::check_externals`].
+    pub(super) fn commit_externals(&mut self, incoming: &ExternalDescriptors) {
+        debug_assert!(self.check_externals(incoming).is_ok());
+        if self.externals.is_none() {
+            self.externals = Some(incoming.clone());
         }
     }
 
@@ -139,7 +191,7 @@ impl DescriptorInterner {
         target: &TargetDescriptor,
         declaration: &ConstructorDecl,
     ) -> Result<Arc<ObjectDescriptor>, CompileError> {
-        if let Some((existing, descriptor)) = self.constructors.get(&declaration.identity) {
+        if let Some((existing, descriptor)) = self.constructor(&declaration.identity) {
             if existing != declaration {
                 return Err(CompileError::DescriptorShape {
                     identity: Box::new(declaration.identity.clone()),
@@ -147,7 +199,7 @@ impl DescriptorInterner {
             }
             return Ok(Arc::clone(descriptor));
         }
-        if let Some(existing) = self.by_host.get(&declaration.host_id) {
+        if let Some(existing) = self.host_identity(&declaration.host_id) {
             return Err(CompileError::HostIdConflict {
                 host_id: declaration.host_id,
                 identity: Box::new(declaration.identity.clone()),
@@ -160,36 +212,29 @@ impl DescriptorInterner {
             layout,
             None,
         )?);
-        self.by_host
-            .insert(declaration.host_id, declaration.identity.clone());
-        self.constructors.insert(
-            declaration.identity.clone(),
-            (declaration.clone(), Arc::clone(&descriptor)),
-        );
+        self.insert_new(declaration, Arc::clone(&descriptor));
         Ok(descriptor)
     }
 
-    /// Absorb declarations atomically. Both constructor identities and host
-    /// IDs must agree with existing entries and with the entire incoming batch.
-    /// Identical declarations retain the first canonical descriptor.
-    pub(super) fn absorb(
-        &mut self,
+    /// Validate a batch for [`Self::commit_absorb`] without changing
+    /// anything. Both constructor identities and host IDs must agree with
+    /// existing entries and with the entire incoming batch.
+    pub(super) fn check_absorb(
+        &self,
         entries: &[(ConstructorDecl, Arc<ObjectDescriptor>)],
     ) -> Result<(), AbsorbConflict> {
         let mut identities = BTreeMap::new();
         let mut hosts = BTreeMap::new();
         for (declaration, _) in entries {
             let existing = self
-                .constructors
-                .get(&declaration.identity)
+                .constructor(&declaration.identity)
                 .map(|(decl, _)| decl)
                 .or_else(|| identities.get(&declaration.identity).copied());
             if existing.is_some_and(|existing| existing != declaration) {
                 return Err(AbsorbConflict::Identity(declaration.identity.clone()));
             }
             let existing = self
-                .by_host
-                .get(&declaration.host_id)
+                .host_identity(&declaration.host_id)
                 .or_else(|| hosts.get(&declaration.host_id).copied());
             if let Some(existing) = existing.filter(|existing| *existing != &declaration.identity) {
                 return Err(AbsorbConflict::HostId {
@@ -201,21 +246,45 @@ impl DescriptorInterner {
             identities.insert(&declaration.identity, declaration);
             hosts.insert(&declaration.host_id, &declaration.identity);
         }
+        Ok(())
+    }
+
+    /// Insert a batch already accepted by [`Self::check_absorb`] against
+    /// this same, unchanged interner. Identical declarations retain the
+    /// first canonical descriptor.
+    pub(super) fn commit_absorb(&mut self, entries: &[(ConstructorDecl, Arc<ObjectDescriptor>)]) {
         for (declaration, descriptor) in entries {
-            self.by_host
-                .insert(declaration.host_id, declaration.identity.clone());
-            self.constructors
-                .entry(declaration.identity.clone())
-                .or_insert_with(|| (declaration.clone(), Arc::clone(descriptor)));
+            if self.constructor(&declaration.identity).is_none() {
+                self.insert_new(declaration, Arc::clone(descriptor));
+            }
         }
+    }
+
+    /// Absorb declarations atomically (check, then commit).
+    #[cfg(test)]
+    pub(super) fn absorb(
+        &mut self,
+        entries: &[(ConstructorDecl, Arc<ObjectDescriptor>)],
+    ) -> Result<(), AbsorbConflict> {
+        self.check_absorb(entries)?;
+        self.commit_absorb(entries);
         Ok(())
     }
 
     /// Resolve a bridge constructor identity to the machine's canonical descriptor.
     pub fn by_host(&self, id: DataConId) -> Option<&(ConstructorDecl, Arc<ObjectDescriptor>)> {
-        self.by_host
-            .get(&id)
-            .and_then(|identity| self.constructors.get(identity))
+        self.host_identity(&id)
+            .and_then(|identity| self.constructor(identity))
+    }
+
+    #[cfg(test)]
+    fn constructor_count(&self) -> usize {
+        self.base.constructors.len() + self.local.constructors.len()
+    }
+
+    #[cfg(test)]
+    fn host_count(&self) -> usize {
+        self.base.by_host.len() + self.local.by_host.len()
     }
 }
 
@@ -297,7 +366,7 @@ mod tests {
                 .occurrence,
             "First"
         );
-        assert_eq!(interner.constructors.len(), 1);
+        assert_eq!(interner.constructor_count(), 1);
     }
 
     #[test]
@@ -317,8 +386,8 @@ mod tests {
             ),
         ];
         assert!(interner.absorb(&entries).is_err());
-        assert_eq!(interner.constructors.len(), 1);
-        assert!(!interner.constructors.contains_key(&new.identity));
+        assert_eq!(interner.constructor_count(), 1);
+        assert!(interner.constructor(&new.identity).is_none());
         assert!(interner.by_host(DataConId(2)).is_none());
         assert_eq!(
             interner
@@ -358,8 +427,35 @@ mod tests {
             interner.absorb(&[(first, descriptor.clone()), (second, descriptor)]),
             Err(AbsorbConflict::Identity(_))
         ));
-        assert!(interner.constructors.is_empty());
-        assert!(interner.by_host.is_empty());
+        assert_eq!(interner.constructor_count(), 0);
+        assert_eq!(interner.host_count(), 0);
+    }
+
+    #[test]
+    fn clone_overlays_additions_without_touching_the_shared_base() {
+        let mut machine = DescriptorInterner::default();
+        let first = declaration("First", 1);
+        let shared = machine.intern(&target(), &first).unwrap();
+        let mut compile = machine.clone();
+        assert!(Arc::ptr_eq(
+            &compile.intern(&target(), &first).unwrap(),
+            &shared
+        ));
+        let second = declaration("Second", 2);
+        let added = compile.intern(&target(), &second).unwrap();
+        assert_eq!(compile.local.constructors.len(), 1);
+        assert_eq!(machine.constructor_count(), 1);
+        assert!(machine.by_host(second.host_id).is_none());
+        let entries = [(first, shared), (second.clone(), added.clone())];
+        machine.check_absorb(&entries).unwrap();
+        drop(compile);
+        machine.commit_absorb(&entries);
+        // With the compile gone the machine owns its base again.
+        assert!(machine.local.constructors.is_empty());
+        assert!(Arc::ptr_eq(
+            &machine.by_host(second.host_id).unwrap().1,
+            &added
+        ));
     }
 
     #[test]
@@ -373,7 +469,7 @@ mod tests {
         assert!(interner
             .absorb(&[(first, descriptor.clone()), (second, descriptor)])
             .is_err());
-        assert!(interner.constructors.is_empty());
-        assert!(interner.by_host.is_empty());
+        assert_eq!(interner.constructor_count(), 0);
+        assert_eq!(interner.host_count(), 0);
     }
 }
