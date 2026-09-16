@@ -663,21 +663,6 @@ fn is_aeson_value(family: &SymbolIdentity) -> bool {
     family.module == AESON_VALUE_MODULE && family.occurrence == AESON_VALUE_OCCURRENCE
 }
 
-/// Every [`AnswerPlan::Handle`] leaf reachable from `plan`, for rollback: a
-/// partially resolved plan's already-built handles are released this way
-/// when a later field's resolution fails.
-fn collect_handles(plan: &AnswerPlan, out: &mut Vec<PreparedHandle>) {
-    match plan {
-        AnswerPlan::Handle(handle) => out.push(*handle),
-        AnswerPlan::Constructor { fields, .. } => {
-            for field in fields {
-                collect_handles(field, out);
-            }
-        }
-        AnswerPlan::Scalar { .. } | AnswerPlan::Bytes(_) | AnswerPlan::Json(_) => {}
-    }
-}
-
 /// The raw bytes behind a bridge byte-array value, in any of the forms the
 /// bridge emits for a `ByteArray#` backing.
 fn byte_backing(value: &Value) -> Option<Vec<u8>> {
@@ -1686,12 +1671,19 @@ impl PreparedEngine {
         if self.machine.realm_cancel_handle(realm).is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
-        let plan = self.resolve_json_leaves(site, runner, realm, plan, table)?;
+        let mut produced = Vec::new();
         let built = self
-            .machine
-            .build_answer(realm, &plan)
-            .map_err(PreparedRuntimeError::Run)?;
-        self.resume_parked(id, built)
+            .resolve_json_leaves(site, runner, realm, plan, table, &mut produced)
+            .and_then(|plan| {
+                self.machine
+                    .build_answer(realm, &plan)
+                    .map_err(PreparedRuntimeError::Run)
+            });
+        // Decoded prefix leaves are rooted by the built constructor from here
+        // on (or by nothing, on failure); the borrowed final field is not in
+        // `produced` and is untouched either way.
+        self.release_all(produced);
+        self.resume_parked(id, built?)
     }
 
     /// The pre-take checks of a resume, then the take: the frame exists,
@@ -1758,10 +1750,14 @@ impl PreparedEngine {
     /// [`AnswerPlan::Handle`]: render the leaf as a retained `Text`, enter
     /// `runner`'s admitted decode entry, and project `Right v` to `v`'s
     /// handle. `Left _` is a typed [`PreparedRuntimeError::AnswerRejected`]
-    /// refusal. Every handle this pass has already built is released before
-    /// a failure propagates, so a refusal leaves nothing extra rooted; the
-    /// frame stays parked throughout (this runs before the take, like
-    /// [`Self::answer_plan`] and `build_answer`).
+    /// refusal. Every handle this pass decodes is pushed onto `produced`,
+    /// and ONLY those: a caller-supplied [`AnswerPlan::Handle`] (a borrowed
+    /// framed-delivery field) is never listed there. The caller releases
+    /// `produced` on any failure, so a refusal leaves nothing extra rooted,
+    /// and again once `build_answer` has copied the decoded words into the
+    /// built answer, which roots them from then on. The frame stays parked
+    /// throughout (this runs before the take, like [`Self::answer_plan`] and
+    /// `build_answer`).
     fn resolve_json_leaves(
         &mut self,
         site: u64,
@@ -1769,26 +1765,20 @@ impl PreparedEngine {
         realm: RealmId,
         plan: AnswerPlan,
         table: &DataConTable,
+        produced: &mut Vec<PreparedHandle>,
     ) -> Result<AnswerPlan, PreparedRuntimeError> {
         match plan {
             AnswerPlan::Json(text) => {
                 let handle = self.decode_json_leaf(site, runner, realm, &text, table)?;
+                produced.push(handle);
                 Ok(AnswerPlan::Handle(handle))
             }
             AnswerPlan::Constructor { host_id, fields } => {
                 let mut resolved = Vec::with_capacity(fields.len());
                 for field in fields {
-                    match self.resolve_json_leaves(site, runner, realm, field, table) {
-                        Ok(field) => resolved.push(field),
-                        Err(error) => {
-                            let mut built = Vec::new();
-                            for field in &resolved {
-                                collect_handles(field, &mut built);
-                            }
-                            self.release_all(built);
-                            return Err(error);
-                        }
-                    }
+                    resolved.push(self.resolve_json_leaves(
+                        site, runner, realm, field, table, produced,
+                    )?);
                 }
                 Ok(AnswerPlan::Constructor {
                     host_id,
@@ -1917,15 +1907,27 @@ impl PreparedEngine {
         if self.machine.realm_cancel_handle(realm).is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
-        let plan = self.resolve_json_leaves(site, runner, realm, plan, table)?;
+        let mut produced = Vec::new();
+        let plan = match self.resolve_json_leaves(site, runner, realm, plan, table, &mut produced) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.release_all(produced);
+                return Err(error);
+            }
+        };
         if let AnswerPlan::Handle(handle) = plan {
+            // The whole answer is one decoded leaf: it is `produced`'s only
+            // entry, and `resume_parked` releases it after the entry reads it.
             return self.resume_parked(id, handle);
         }
-        let answer = self
+        let built = self
             .machine
             .build_answer(realm, &plan)
-            .map_err(PreparedRuntimeError::Run)?;
-        self.resume_parked(id, answer)
+            .map_err(PreparedRuntimeError::Run);
+        // The built answer now roots every decoded leaf it copied in; the
+        // leaves' own handles are released whether or not the build succeeded.
+        self.release_all(produced);
+        self.resume_parked(id, built?)
     }
 
     /// Consume the frame parked under `id` without entering it: the
