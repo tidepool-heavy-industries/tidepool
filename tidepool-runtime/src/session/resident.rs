@@ -2264,10 +2264,12 @@ where
         // this is where a major collection (if the machine happens to be
         // quiescent) drains its retirement receipt. Not reached on an
         // error path above -- an aborted/failed turn leaves nothing settled
-        // to quiesce over, and the next successful turn drains instead.
+        // to quiesce over, and the next successful turn drains instead. A
+        // collection failure (anything but "not quiescent yet") is this
+        // turn's failure.
         if let Some(engine) = self.core.prepared_mut() {
             if engine.disposition() == tidepool_codegen::jit_machine::MachineDisposition::Reusable {
-                engine.quiesce_and_collect();
+                engine.quiesce_and_collect()?;
             }
         }
         Ok(outcome)

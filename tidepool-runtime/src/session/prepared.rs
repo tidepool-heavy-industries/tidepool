@@ -232,6 +232,9 @@ struct ProgramFacts {
     /// the machine has taken the program's code.
     sites: Vec<SiteRow>,
     types: Vec<TypeNode>,
+    /// The request constructors this program answers at a synthetic site,
+    /// by bridge id, each with the index of its row in `sites`.
+    verb_sites: Vec<(DataConId, usize)>,
     /// Constructor identities and bridge ids by this program's local
     /// `ConstructorId`, so two programs' type graphs compare by identity
     /// rather than local index, and a bridge `Value`'s constructor resolves
@@ -242,6 +245,12 @@ struct ProgramFacts {
     /// ([`Self::constructor_named`]) is one map lookup rather than a full
     /// scan repeated per leaf of an answer.
     by_identity: BTreeMap<(String, String), DataConId>,
+}
+
+/// What installing one program adds to the machine-owned evidence indexes.
+struct EvidencePlan {
+    sites: Vec<(u64, usize)>,
+    verb_sites: Vec<(DataConId, usize)>,
 }
 
 /// Which installed program's site table is authoritative for one site id.
@@ -315,12 +324,25 @@ impl ProgramFacts {
                 )
             })
             .collect();
+        let sites = prepared.sites().to_vec();
+        // Validation guarantees every entry names a declared constructor and
+        // an admitted row.
+        let verb_sites = prepared
+            .verb_sites()
+            .iter()
+            .filter_map(|(constructor, site)| {
+                let (_, host_id) = constructors.get(constructor.0 as usize)?;
+                let row = sites.iter().position(|row| row.site == *site)?;
+                Some((*host_id, row))
+            })
+            .collect();
         Self {
             entry,
             tops,
             settled: SettledIds::of(&by_identity),
             resume,
-            sites: prepared.sites().to_vec(),
+            sites,
+            verb_sites,
             types: prepared.types().to_vec(),
             constructors,
             by_identity,
@@ -808,6 +830,11 @@ pub struct PreparedEngine {
     /// transaction before any code is compiled; a conflicting duplicate
     /// refuses the install (see [`Self::install`]).
     sites: BTreeMap<u64, SiteWitness>,
+    /// The machine-owned verb index: which installed program's synthetic
+    /// site row answers an ordinary effect request, by the request's outer
+    /// constructor. Extended in the same install transaction as `sites`,
+    /// under the same structural-equivalence rule.
+    verb_sites: BTreeMap<DataConId, SiteWitness>,
     /// Prepared old-space bytes as of the last successful
     /// [`Self::quiesce_and_collect`] (the compacted figure
     /// `RetirementReceipt::old_bytes` reports); `0` before any collection
@@ -909,12 +936,13 @@ impl PreparedEngine {
             machine,
             programs: BTreeMap::new(),
             sites: BTreeMap::new(),
+            verb_sites: BTreeMap::new(),
             old_bytes: 0,
         };
         // The first program can conflict only with itself.
-        let rows = engine.plan_sites(&facts)?;
+        let plan = engine.plan_evidence(&facts)?;
         engine.programs.insert(program, facts);
-        engine.publish_sites(program, rows);
+        engine.publish_evidence(program, plan);
         // Held live across the install-to-first-run gap; the turn's
         // bind/complete path (`resident.rs`) unpins it once the run's
         // outcome is bound, released or parked.
@@ -963,17 +991,72 @@ impl PreparedEngine {
         Ok(planned)
     }
 
-    /// Make `program` the canonical owner of the planned rows.
-    fn publish_sites(&mut self, program: ProgramId, rows: Vec<(u64, usize)>) {
-        self.sites.extend(rows.into_iter().map(|(site, row)| {
-            (
-                site,
-                SiteWitness {
-                    owner: program,
-                    row,
-                },
-            )
-        }));
+    /// The verb-index entries of `facts` that installing it would make
+    /// canonical, under [`Self::plan_sites`]'s rule keyed by request
+    /// constructor: a constructor already indexed (or earlier in `facts`)
+    /// must be answered by a structurally equivalent row, and keeps its
+    /// existing owner; otherwise the install is refused.
+    fn plan_verb_sites(
+        &self,
+        facts: &ProgramFacts,
+    ) -> Result<Vec<(DataConId, usize)>, PreparedRuntimeError> {
+        let mut planned: Vec<(DataConId, usize)> = Vec::new();
+        for &(host_id, row) in &facts.verb_sites {
+            let site = &facts.sites[row];
+            let (owner, owner_facts, owner_row) =
+                if let Some(witness) = self.verb_sites.get(&host_id) {
+                    let owner =
+                        self.programs
+                            .get(&witness.owner)
+                            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                                witness.owner,
+                            )))?;
+                    (Some(witness.owner), owner, &owner.sites[witness.row])
+                } else if let Some((_, earlier)) = planned.iter().find(|(id, _)| *id == host_id) {
+                    (None, facts, &facts.sites[*earlier])
+                } else {
+                    planned.push((host_id, row));
+                    continue;
+                };
+            if !sites_equivalent(owner_facts, owner_row, facts, site) {
+                return Err(match owner {
+                    Some(owner) => PreparedRuntimeError::SiteConflict {
+                        site: site.site,
+                        owner,
+                    },
+                    None => PreparedRuntimeError::DuplicateSite { site: site.site },
+                });
+            }
+        }
+        Ok(planned)
+    }
+
+    /// Both indexes' plans for installing `facts`, checked before anything
+    /// is compiled or published.
+    fn plan_evidence(&self, facts: &ProgramFacts) -> Result<EvidencePlan, PreparedRuntimeError> {
+        Ok(EvidencePlan {
+            sites: self.plan_sites(facts)?,
+            verb_sites: self.plan_verb_sites(facts)?,
+        })
+    }
+
+    /// Make `program` the canonical owner of the planned rows and verb
+    /// entries.
+    fn publish_evidence(&mut self, program: ProgramId, plan: EvidencePlan) {
+        let witness = |row| SiteWitness {
+            owner: program,
+            row,
+        };
+        self.sites.extend(
+            plan.sites
+                .into_iter()
+                .map(|(site, row)| (site, witness(row))),
+        );
+        self.verb_sites.extend(
+            plan.verb_sites
+                .into_iter()
+                .map(|(host_id, row)| (host_id, witness(row))),
+        );
     }
 
     /// Install a later turn's program. Every global it declares is resolved
@@ -1021,7 +1104,7 @@ impl PreparedEngine {
         // Site evidence is checked before anything is compiled or published:
         // a conflicting duplicate leaves the machine, its programs and the
         // site index exactly as they were.
-        let rows = self.plan_sites(&facts)?;
+        let plan = self.plan_evidence(&facts)?;
         let linked = link_program(prepared, &values)?;
         let compiled = self
             .machine
@@ -1032,7 +1115,7 @@ impl PreparedEngine {
             .install_program(compiled, imports)
             .map_err(PreparedRuntimeError::Run)?;
         self.programs.insert(program, facts);
-        self.publish_sites(program, rows);
+        self.publish_evidence(program, plan);
         // Held live across the install-to-first-run gap; the turn's
         // bind/complete path (`resident.rs`) unpins it once the run's
         // outcome is bound, released or parked.
@@ -1226,18 +1309,32 @@ impl PreparedEngine {
                 return Err(PreparedRuntimeError::Run(error));
             }
         };
-        let site = match typed_site_of(&request, table) {
-            Some(site) => site,
-            None => {
-                self.machine.release(continuation);
-                return Err(PreparedRuntimeError::UntypedRequest);
-            }
+        // A request carrying a dynamic site names it; an ordinary effect
+        // request is classified by its outer constructor through the verb
+        // index, which names the synthetic row answering it.
+        let classified = match typed_site_of(&request, table) {
+            Some(site) => self
+                .sites
+                .get(&site)
+                .map(|witness| (site, *witness))
+                .ok_or(PreparedRuntimeError::UnknownSite { site }),
+            None => match &request {
+                Value::Con(host_id, _) => self
+                    .verb_sites
+                    .get(host_id)
+                    .and_then(|witness| {
+                        let row = self.programs.get(&witness.owner)?.sites.get(witness.row)?;
+                        Some((row.site, *witness))
+                    })
+                    .ok_or(PreparedRuntimeError::UntypedRequest),
+                _ => Err(PreparedRuntimeError::UntypedRequest),
+            },
         };
-        let witness = match self.sites.get(&site).copied() {
-            Some(witness) => witness,
-            None => {
+        let (site, witness) = match classified {
+            Ok(classified) => classified,
+            Err(error) => {
                 self.machine.release(continuation);
-                return Err(PreparedRuntimeError::UnknownSite { site });
+                return Err(error);
             }
         };
         let evidence = PreparedFrameEvidence {
@@ -1569,17 +1666,23 @@ impl PreparedEngine {
     /// drain its retirement receipt -- removing each retired program's
     /// [`ProgramFacts`] and re-homing or dropping the site witnesses it
     /// canonically owned ([`Self::retire_site_witnesses`]). A `quiesce`
-    /// refusal (the machine is mid-call, holds temporary roots, or an
-    /// observation borrows old space) is not reported: the caller is simply
-    /// not at a quiescent point yet, and the next one drains instead. The
-    /// prepared route currently leases nothing per program, so there are no
-    /// leases to release here (see the S4/G2 test module doc below).
-    pub fn quiesce_and_collect(&mut self) {
-        let Ok(token) = self.machine.quiesce() else {
-            return;
+    /// refusal ([`ExecutionError::NotQuiescent`]: the machine is mid-call,
+    /// holds temporary roots, or an observation borrows old space) is not
+    /// reported: the caller is simply not at a quiescent point yet, and the
+    /// next one drains instead. Every other failure of the gate or the
+    /// collection is returned. The prepared route currently leases nothing
+    /// per program, so there are no leases to release here (see the S4/G2
+    /// test module doc below).
+    pub fn quiesce_and_collect(&mut self) -> Result<(), PreparedRuntimeError> {
+        let token = match self.machine.quiesce() {
+            Ok(token) => token,
+            Err(ExecutionError::NotQuiescent) => return Ok(()),
+            Err(error) => return Err(PreparedRuntimeError::Run(error)),
         };
-        let Ok(receipt) = self.machine.collect_major(token) else {
-            return;
+        let receipt = match self.machine.collect_major(token) {
+            Ok(receipt) => receipt,
+            Err(ExecutionError::NotQuiescent) => return Ok(()),
+            Err(error) => return Err(PreparedRuntimeError::Run(error)),
         };
         self.old_bytes = receipt.old_bytes;
         for program in &receipt.programs {
@@ -1587,6 +1690,7 @@ impl PreparedEngine {
                 self.retire_site_witnesses(*program, &facts);
             }
         }
+        Ok(())
     }
 
     /// Prepared old-space bytes as of the last successful
@@ -1597,10 +1701,11 @@ impl PreparedEngine {
         self.old_bytes
     }
 
-    /// Site witnesses `retired` canonically owned: each moves to a still-
-    /// installed program that declares a structurally equivalent row for the
-    /// same site id ([`sites_equivalent`]), or is dropped if none remains --
-    /// a later install can re-claim the id fresh.
+    /// Site and verb witnesses `retired` canonically owned: each moves to a
+    /// still-installed program that declares a structurally equivalent row
+    /// for the same site id (or request constructor) ([`sites_equivalent`]),
+    /// or is dropped if none remains -- a later install can re-claim it
+    /// fresh.
     fn retire_site_witnesses(&mut self, retired: ProgramId, facts: &ProgramFacts) {
         let owned: Vec<u64> = self
             .sites
@@ -1632,6 +1737,47 @@ impl PreparedEngine {
                 }
                 None => {
                     self.sites.remove(&site);
+                }
+            }
+        }
+        let owned: Vec<(DataConId, usize)> = self
+            .verb_sites
+            .iter()
+            .filter(|(_, witness)| witness.owner == retired)
+            .map(|(host_id, witness)| (*host_id, witness.row))
+            .collect();
+        for (host_id, row) in owned {
+            let Some(row) = facts.sites.get(row) else {
+                self.verb_sites.remove(&host_id);
+                continue;
+            };
+            let successor = self
+                .programs
+                .iter()
+                .find_map(|(candidate, candidate_facts)| {
+                    candidate_facts
+                        .verb_sites
+                        .iter()
+                        .find(|(candidate_host, candidate_row)| {
+                            *candidate_host == host_id
+                                && sites_equivalent(
+                                    facts,
+                                    row,
+                                    candidate_facts,
+                                    &candidate_facts.sites[*candidate_row],
+                                )
+                        })
+                        .map(|(_, candidate_row)| SiteWitness {
+                            owner: *candidate,
+                            row: *candidate_row,
+                        })
+                });
+            match successor {
+                Some(witness) => {
+                    self.verb_sites.insert(host_id, witness);
+                }
+                None => {
+                    self.verb_sites.remove(&host_id);
                 }
             }
         }
@@ -1998,5 +2144,70 @@ mod tests {
             &[(identity, handle, forced)],
         )
         .expect("the same binding now satisfies required_evaluated");
+    }
+
+    /// A program that constructs nothing but declares an effect request
+    /// constructor (bridge id 77) answered at synthetic site `site` whose
+    /// reply evidence is `reply`.
+    fn verb_program(site: u64, reply: TypeNode) -> PreparedProgram {
+        let mut wire = testing::wire_program();
+        wire.constructors = vec![ConstructorDecl {
+            identity: testing::identity("Fixture.Effects", "Print"),
+            family: testing::identity("Fixture.Effects", "Console"),
+            result_rep: RuntimeRep::LiftedRef,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+            tag: 1,
+            family_size: 1,
+            host_id: DataConId(77),
+        }];
+        wire.types = vec![reply];
+        wire.sites = vec![SiteRow {
+            site,
+            origin: "Fixture.Effects.Print".into(),
+            ordinal: 0,
+            delivery: SiteDelivery::HostAnswer,
+            wire: TypeNodeId(0),
+            inputs: vec![],
+        }];
+        wire.verb_sites = vec![(ConstructorId(0), site)];
+        testing::prepare(wire).expect("verb fixture validates")
+    }
+
+    #[test]
+    fn programs_declaring_the_same_effect_constructor_share_one_verb_witness() {
+        use tidepool_repr::execution_schema::SYNTHETIC_SITE_BIT;
+        let site = SYNTHETIC_SITE_BIT | 5;
+        let (mut engine, first) =
+            PreparedEngine::bootstrap(verb_program(site, TypeNode::Text)).expect("bootstrap");
+        let bindings = BindingTable::new();
+        let second = engine
+            .install(verb_program(site, TypeNode::Text), &bindings)
+            .expect("an equivalent duplicate is not a SiteConflict");
+        assert_ne!(first, second);
+        let witness = engine.verb_sites[&DataConId(77)];
+        assert_eq!(witness.owner, first, "the existing owner stays canonical");
+        assert_eq!(engine.sites[&site].owner, first);
+
+        // The same constructor answered by different evidence under another
+        // synthetic id is refused by the verb index, and installs nothing.
+        let error = engine
+            .install(
+                verb_program(SYNTHETIC_SITE_BIT | 6, TypeNode::Integer),
+                &bindings,
+            )
+            .expect_err("a conflicting verb reply refuses the install");
+        assert!(
+            matches!(error, PreparedRuntimeError::SiteConflict { owner, .. } if owner == first),
+            "expected SiteConflict, got {error:?}"
+        );
+        assert_eq!(engine.programs.len(), 2);
+        assert!(!engine.sites.contains_key(&(SYNTHETIC_SITE_BIT | 6)));
     }
 }
