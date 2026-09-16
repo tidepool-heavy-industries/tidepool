@@ -70,7 +70,7 @@ Only the verbs in `EffectSchema.sitedVerbs` carry a dynamic site; ordinary
 effects (`say`, file, KV, HTTP, form `ask`) get synthetic sites keyed by the
 request constructor. Design: `plans/handoff/designs/synthetic-sites.md`.
 
-### `Value`-carrying replies go through a leaf adapter, blocked on `Either`'s constructors
+### `Value`-carrying replies go through a leaf adapter
 `kvGet`, `httpGet`/`httpPost` and form `ask` reply with Aeson `Value`, whose
 `KeyMap`/`Map`/`Vector` spines the type policy still refuses field-by-field.
 A `Value`-typed answer node is instead lowered whole as rendered JSON text
@@ -78,24 +78,53 @@ and decoded through the turn's admitted `__decodeValue` root
 (`Tidepool.Aeson.Value.eitherDecodeValue`), spliced into the outer answer as
 a borrowed handle (design: `synthetic-sites.md`, decision 4 — taken). A
 decode failure (`Left`) is a typed `AnswerRejected` refusal with the frame
-left parked; nothing else host-side builds a `KeyMap`/`Scientific` directly.
+left parked; nothing else host-side builds a `KeyMap` directly.
+`Tidepool.Aeson.Scientific.Scientific` (`Value`'s `Number` field) is
+force-refused by `TypePolicy.isForbidden` rather than classified: its
+strict-field source-vs-runtime layout is not stable across independently
+compiled programs (a compile that recovers `eitherDecodeValue`'s body fresh
+computes different reps than one that only reaches `Scientific` through a
+reply type's structure), and the prepared runtime refuses to install a
+second program whose declaration disagrees with an earlier one's.
 
 `decode_json_leaf` projects the decode root's `Either Text Value` result by
 comparing `inspect_outer`'s returned `DataConId` against `Left`/`Right`
 resolved from the session-wide `DataConTable` (`get_by_qualified_name`).
-`Either`'s constructors are not always in that table: `TypePolicy` only
-interns a constructor reachable from a declared SITE's own answer type
-(`ExecutionProjection.hs`'s `lowerLeaf`/`internConstructor`), and
-`__decodeValue`'s signature is not a site — nothing about the auxiliary root
-itself forces `Either` to be interned the way an entry's `Settled` layer is.
-A session whose turns never otherwise construct or observe an `Either` (no
-`httpGet`, no `Left`/`Right` rendered) hits `AnswerRejected` with "the
-runner declares no Either constructors to read the decode result" the first
-time a `kvGet`/ask reply actually needs the adapter — reproduced by
-`notebook_value_answers_on_prepared_stg`. Fix belongs in the extractor
-(`ExecutionProjection.hs`): force-intern `Data.Either.Left`/`Right` for
-every program that admits a decode root, mirroring how the entry's own
-`Settled` layer is always interned regardless of site usage.
+Fixed: `ExecutionProjection.hs`'s `lowerAuxiliaryRootEvidence` now
+force-interns type evidence for every admitted auxiliary root's own answer
+type (read off the binder's GHC `Type` via `splitFunTys`, not its STG
+result type — `__decodeValue = Aeson.eitherDecodeValue` is an
+eta-unexpanded, zero-arity CAF whose STG result type is the whole function
+arrow), the same way a declared site's answer type is interned. A related
+naming gap was fixed alongside it: `Either`'s defining module is
+`GHC.Internal.Data.Either`, not `Data.Either` (the qualified name the Rust
+reader queries); `Tidepool.Identity.moduleAliasTable` now normalizes it,
+mirroring the existing `GHC.Internal.Maybe`/`Data.Text.Internal` entries.
+
+### `__decodeValue`'s own execution is not implemented on the prepared route
+Distinct from the evidence gap above, and still open. `__decodeValue`'s
+projected entry is a zero-arity thunk (`eitherDecodeValue` carries
+`{-# OPAQUE #-}` specifically so GHC never exposes its arity to callers for
+eta-expansion, per its own doc comment in
+`haskell/lib/Tidepool/Aeson/Value.hs`), but the session's prepared-runtime
+caller (`decode_json_leaf` / `run_entry_retained`) calls it as if it were an
+arity-1 function entry — `prepared engine: prepared execution failed: entry
+arguments: expected 0 physical scalar slots, got 1`, reproduced by
+`notebook_value_answers_on_prepared_stg`'s `kvGet`/`Just`-`Object` case.
+Separately, and regardless of arity: the legacy Core path intercepts calls
+to `eitherDecodeValue` in `Translate.hs` and lowers them to the `JsonDecode`
+primop (Rust `serde_json` builds the `Value` ADT directly; the Haskell body
+is a stub, `eitherDecodeValue _ = Left T.empty`, that "never actually runs
+at a call site" per its own comment). No such interception exists for the
+prepared-STG path — `PreparedBuiltins.hs`'s `deferredFunction` table has no
+`eitherDecodeValue` entry, and no `JsonDecode`-equivalent primop exists in
+`tidepool-codegen`'s prepared-program machinery
+(`tidepool-codegen/src/prepared_program/*.rs`) — so even with the arity
+fixed, `__decodeValue`'s projected body would run the OPAQUE stub verbatim
+(always `Left`), not a real JSON parse. Fixing this is a prepared-machine
+feature addition (a real primop or an equivalent `DeferredFunction`-style
+registered replacement, plus the arity/eta handling above), not a
+projection-evidence fix; out of scope for the evidence fix above.
 
 ### `LiveReentry` deliveries are not answerable yet
 Handle and framed-handle answers are supported (bare and framed delivery by

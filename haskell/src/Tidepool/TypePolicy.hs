@@ -245,6 +245,18 @@ isForbidden tc = any (\(owner, occurrence) -> isSpecial owner occurrence tc)
   [ ("Data.Map.Internal", "Map")
   , ("Data.Set.Internal", "Set")
   , ("Tidepool.Internal.ExitCell", "ExitCell")
+  -- | 'Tidepool.Aeson.Scientific.Scientific' is reached only nested inside
+  -- 'Tidepool.Aeson.Value.Value' (@Number !Scientific@), never admitted as a
+  -- host-answerable type on its own. Its own strict-field
+  -- source-vs-runtime layout is not stable across independently compiled
+  -- programs (the same class of drift 72afb935e guarded within one
+  -- program's own type graph): different compiles can intern it with
+  -- disagreeing field representations, and the prepared runtime refuses to
+  -- install a second program whose declaration disagrees with the first's.
+  -- 'Value' itself stays an ordinary algebraic type (its own constructors'
+  -- reps do not depend on Scientific's internal layout); only the recursion
+  -- into Scientific's own fields is cut off here.
+  , ("Tidepool.Aeson.Scientific", "Scientific")
   ]
 
 containsEff :: Type -> Bool

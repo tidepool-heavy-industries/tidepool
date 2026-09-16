@@ -13,8 +13,9 @@ import Tidepool.GhcPipeline
 -- reachable-owner filtering used by notebook artifact production.
 runTypeEvidenceChecks :: FilePath
   -> (PreparedPipelineResult -> String -> Either ProjectionError WireProgram)
+  -> (PreparedPipelineResult -> String -> [String] -> Either ProjectionError WireProgram)
   -> IO ()
-runTypeEvidenceChecks directory project = do
+runTypeEvidenceChecks directory project projectWithAux = do
   let target = directory </> "TypeEvidence.hs"
   readFile "test-prepared-stg/site-fixtures/TypeEvidence.hs" >>= writeFile target
   result <- runPipelineSelected PreparedStg target [directory]
@@ -99,6 +100,20 @@ runTypeEvidenceChecks directory project = do
   empty <- program "unrelated"
   assert (null (programSites empty) && null (programTypes empty))
     "unreachable typed sites leaked into the selected artifact"
+
+  -- An admitted auxiliary root is not a declared site (mirrors
+  -- 'preparedDecodeTargetName'/'__decodeValue' beside a turn's resume
+  -- entry): its own result type must still be interned, even though
+  -- 'unrelated' -- the selected entry here -- never otherwise constructs or
+  -- observes an 'Either'.
+  auxWire <- either
+    (ioError . userError . ("auxiliaryRootDecode: " ++) . show) pure
+    (projectWithAux result "unrelated" ["auxiliaryRootDecode"])
+  let auxConstructorNames =
+        map (symbolOccurrence . constructorIdentity) (programConstructors auxWire)
+  assert (all (`elem` auxConstructorNames) ["Left", "Right"])
+    ("admitted auxiliary root's own Either evidence is missing: "
+      ++ show auxConstructorNames)
  where
   assert condition message = unless condition (ioError (userError message))
   isRefusal TypeUnconstructible{} = True

@@ -82,3 +82,17 @@ echoRequest = Echo 1
 
 unrelated :: Int
 unrelated = 42
+
+-- Models the extractor's '__decodeValue' contract exactly, including its
+-- eta-unexpanded point-free shape (the turn template writes
+-- @__decodeValue = Aeson.eitherDecodeValue@, a zero-arity CAF whose own STG
+-- result type is the whole function arrow, not its codomain): an admitted
+-- auxiliary root that is not itself a declared site, whose own
+-- 'Left'/'Right' evidence a program must still carry even when 'unrelated'
+-- -- the only entry that reaches it -- never otherwise constructs or
+-- observes an 'Either'.
+auxiliaryRootDecodeHelper :: Text -> Either Text Int
+auxiliaryRootDecodeHelper _ = Left "unused"
+
+auxiliaryRootDecode :: Text -> Either Text Int
+auxiliaryRootDecode = auxiliaryRootDecodeHelper

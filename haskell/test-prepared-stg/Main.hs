@@ -82,7 +82,18 @@ preparedEvidence wanted result = case filter isWanted (pprModules result) of
 -- | Project one entry of a prepared fixture module, as the extractor does.
 projectEntry :: PreparedPipelineResult -> String -> String
   -> Map.Map Schema.SymbolIdentity Word -> Either Projection.ProjectionError Schema.WireProgram
-projectEntry result modul entry retained = Projection.projectPreparedTarget context (pprModules result)
+projectEntry result modul entry retained =
+  projectEntryWithAux result modul entry [] retained
+
+-- | 'projectEntry' plus a set of auxiliary root occurrences in the same
+-- module (mirroring 'preparedDecodeTargetName' beside a turn's resume
+-- entry): admitted the same way a turn's own auxiliary roots are, so a
+-- fixture can assert that an auxiliary root's own result type is interned
+-- even when the selected entry never otherwise reaches it.
+projectEntryWithAux :: PreparedPipelineResult -> String -> String -> [String]
+  -> Map.Map Schema.SymbolIdentity Word -> Either Projection.ProjectionError Schema.WireProgram
+projectEntryWithAux result modul entry auxEntries retained =
+  Projection.projectPreparedTarget context (pprModules result)
   where
     context = Projection.ProjectionContext
       { Projection.projectionProfile = "ghc-9.12-prepared-stg"
@@ -91,7 +102,9 @@ projectEntry result modul entry retained = Projection.projectPreparedTarget cont
           Schema.TargetDescriptor Schema.X86_64 Schema.LittleEndian 64 64 "sysv64" []
       , Projection.projectionRetainedGenerations = Map.map fromIntegral retained
       , Projection.projectionEntry = Schema.SymbolIdentity "main" (fromString modul) "value" (fromString entry) Nothing
-      , Projection.projectionAuxiliaryRoots = []
+      , Projection.projectionAuxiliaryRoots =
+          [ Schema.SymbolIdentity "main" (fromString modul) "value" (fromString aux) Nothing
+          | aux <- auxEntries ]
       , Projection.projectionFormattingAuthority = Nothing
       , Projection.projectionTextUnit = Nothing
       }
@@ -239,6 +252,8 @@ main = do
         ])
       runTypeEvidenceChecks dir
         (\result entry -> projectEntry result "TypeEvidence" entry mempty)
+        (\result entry auxEntries ->
+          projectEntryWithAux result "TypeEvidence" entry auxEntries mempty)
       writeFile target validTarget
       writeFile siteTarget (unlines
         [ "{-# LANGUAGE TypeApplications #-}"

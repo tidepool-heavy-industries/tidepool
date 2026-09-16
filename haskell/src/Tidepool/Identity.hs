@@ -51,6 +51,7 @@ moduleAliasTable :: [(String, String)]
 moduleAliasTable =
   [ ("Data.Text.Internal", "Data.Text")
   , ("GHC.Internal.Maybe", "GHC.Maybe")
+  , ("GHC.Internal.Data.Either", "Data.Either")
   ]
 
 normalizeMod :: String -> String

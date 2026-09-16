@@ -36,7 +36,7 @@ import GHC.Core.DataCon
   , dataConTag, dataConTyCon, dataConOrigResTy, dataConImplBangs, HsImplBang(..)
   , isMarkedStrict, isUnboxedTupleDataCon )
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
-import GHC.Core.Type (splitTyConApp_maybe)
+import GHC.Core.Type (splitFunTys, splitTyConApp_maybe)
 import GHC.Core.TyCon qualified as GHC
 import GHC.Data.FastString (fsLit, unpackFS)
 import GHC.Driver.Env.Types (HscEnv, hsc_unit_env)
@@ -207,7 +207,7 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
   ((bindingGroups, programTypes, programSites, programVerbSites), final) <- runStateT
     (do preallocate projectable
         groups <- concat <$> mapM projectModule projectable
-        (types, sites, verbSites) <- lowerPreparedEvidence projectable
+        (types, sites, verbSites) <- lowerPreparedEvidence context projectable
         pure (groups, types, sites, verbSites)) initial
   entryTop <- maybe (Left (MissingPreparedEntry (projectionEntry context)))
     pure (findTop bindingGroups)
@@ -507,20 +507,23 @@ projectModule = mapM (projectTop . fst) . pmBindings
 -- | Lower only evidence owned by the executable tops retained in each module.
 -- Graph ids are module-local during elaboration; this pass compacts reachable
 -- nodes in module/original order and rebases every edge into one program table.
--- Synthetic reply sites for the program's request constructors follow the
--- module evidence ('lowerVerbEvidence').
-lowerPreparedEvidence :: [PreparedModule]
+-- An admitted auxiliary root's own result type follows the module evidence
+-- ('lowerAuxiliaryRootEvidence'); synthetic reply sites for the program's
+-- request constructors follow that ('lowerVerbEvidence').
+lowerPreparedEvidence :: ProjectionContext -> [PreparedModule]
   -> P ([TypeNode], [SiteRow], [(ConstructorId, Word64)])
-lowerPreparedEvidence modules = do
+lowerPreparedEvidence context modules = do
   (moduleNodes, moduleSites) <- foldM lowerOne ([], []) modules
-  (verbNodes, verbRows, verbSites) <- lowerVerbEvidence (length moduleNodes)
+  auxNodes <- lowerAuxiliaryRootEvidence context modules (length moduleNodes)
+  (verbNodes, verbRows, verbSites) <-
+    lowerVerbEvidence (length moduleNodes + length auxNodes)
   let sites = moduleSites <> verbRows
       duplicates = Map.keys (Map.filter (> (1 :: Int))
         (Map.fromListWith (+) [(siteId site, 1) | site <- sites]))
   case duplicates of
     duplicate : _ -> failShape
       ("duplicate selected prepared site id " <> Text.pack (show duplicate))
-    [] -> pure (moduleNodes <> verbNodes, sites, verbSites)
+    [] -> pure (moduleNodes <> auxNodes <> verbNodes, sites, verbSites)
  where
   lowerOne (priorNodes, priorSites) prepared = do
     let owners = mkUniqSet
@@ -547,6 +550,41 @@ lowerPreparedEvidence modules = do
               , siteInputs = inputs
               }) selected
     pure (priorNodes <> lowered, priorSites <> rows)
+
+-- | Force-intern type evidence for every admitted auxiliary root's own
+-- answer type, the same way a declared site's answer type is interned
+-- ('lowerOne'/'siteWireType' in "Tidepool.PreparedSites"). An auxiliary root
+-- (for example the turn's admitted decode entry, 'preparedDecodeTargetName')
+-- is not itself a site: nothing about ordinary site traversal reaches its
+-- answer type, so a program whose turns never independently construct or
+-- observe that type (no 'httpGet', no rendered 'Left'/'Right') would
+-- otherwise leave its constructors out of the program's evidence even though
+-- the auxiliary root itself needs to read them back.
+--
+-- The answer type is read off the binder's own (pre-erasure) GHC 'Type' via
+-- 'splitFunTys', never off its STG 'StgRhsClosure' result type: an
+-- eta-unexpanded auxiliary root (@__decodeValue = Aeson.eitherDecodeValue@,
+-- a zero-arity CAF) has an STG result type that is the whole function arrow
+-- rather than its codomain, and 'TypePolicy.classifyType' refuses a function
+-- type outright.
+lowerAuxiliaryRootEvidence :: ProjectionContext -> [PreparedModule] -> Int -> P [TypeNode]
+lowerAuxiliaryRootEvidence context modules base = do
+  let roots = Set.fromList (projectionAuxiliaryRoots context)
+  topSymbolMap <- gets topSymbols
+  let answerTypes =
+        [ snd (splitFunTys (varType binder))
+        | prepared <- modules
+        , (binding, _) <- pmBindings prepared
+        , binder <- topBinders binding
+        , Just symbol <- [lookupVarEnv topSymbolMap binder]
+        , symbol `Set.member` roots
+        ]
+      (graphRoots, builder) = runState
+        (traverse TypePolicy.internType answerTypes)
+        TypePolicy.emptyTypeGraphBuilder
+  (lowered, _rebase) <- lowerTypeGraph base
+    (TypePolicy.tgNodes (TypePolicy.finishTypeGraph builder)) graphRoots
+  pure lowered
 
 -- | One synthetic 'HostAnswer' row per interned constructor with a closed
 -- reply index ('requestReplyIndex'), and the table naming it. Only the index
