@@ -471,6 +471,13 @@ pub const PREPARED_DECODE_TARGET: &str = "__decodeValue";
 /// The qualified alias every template imports `Tidepool.Internal.Resume` under.
 const RESUME_ALIAS: &str = "TidepoolResume";
 
+/// The qualified aliases the decode entry's signature is written under.
+/// The scaffold cannot assume a template's own preamble brings `Text` or
+/// `Value` into scope (the harness-ctx template imports almost nothing), so
+/// it imports both modules itself under aliases no authored code uses.
+const TEXT_ALIAS: &str = "TidepoolScaffoldText";
+const AESON_VALUE_ALIAS: &str = "TidepoolScaffoldAeson";
+
 /// The three lines every executable template ends with: the settled
 /// scaffold the prepared route projects, the resume entry it re-enters
 /// parked continuations through, and the decode entry it lowers
@@ -480,8 +487,8 @@ fn prepared_scaffold_binding(target: &str) -> String {
     format!(
         "{PREPARED_SCAFFOLD_TARGET} = {RESUME_ALIAS}.settle {target}\n\
          {PREPARED_RESUME_TARGET} q x = {RESUME_ALIAS}.settle ({RESUME_ALIAS}.resumeLifted q x)\n\
-         {PREPARED_DECODE_TARGET} :: Text -> Either Text Value\n\
-         {PREPARED_DECODE_TARGET} = Aeson.eitherDecodeValue\n"
+         {PREPARED_DECODE_TARGET} :: {TEXT_ALIAS}.Text -> Either {TEXT_ALIAS}.Text {AESON_VALUE_ALIAS}.Value\n\
+         {PREPARED_DECODE_TARGET} = {AESON_VALUE_ALIAS}.eitherDecodeValue\n"
     )
 }
 
@@ -491,7 +498,8 @@ fn with_resume_import(preamble_with_imports: &str) -> String {
         preamble_with_imports,
         &format!(
             "qualified Tidepool.Internal.Resume as {RESUME_ALIAS}\n\
-             qualified Tidepool.Aeson.Value as Aeson"
+             qualified Data.Text as {TEXT_ALIAS}\n\
+             qualified Tidepool.Aeson.Value as {AESON_VALUE_ALIAS}"
         ),
     )
 }
