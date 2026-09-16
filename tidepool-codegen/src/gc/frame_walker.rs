@@ -1,4 +1,4 @@
-use crate::stack_map::StackMapRegistry;
+use crate::stack_map::StackMapLookup;
 
 /// A collected GC root: the address on the stack where a heap pointer lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,9 +176,9 @@ fn query_stack_top() -> Option<usize> {
 /// Nonzero self/backward links and JIT PCs without exact safepoint metadata
 /// are integrity failures, not alternate termination forms.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub unsafe fn walk_frames(
+pub unsafe fn walk_frames<L: StackMapLookup + ?Sized>(
     start_fp: usize,
-    stack_maps: &[&StackMapRegistry],
+    stack_maps: &L,
     bounds: StackBounds,
     diagnostic_mode: bool,
 ) -> Result<Vec<StackRoot>, FrameWalkError> {
@@ -226,12 +226,9 @@ pub unsafe fn walk_frames(
         let return_addr = unsafe { *(return_addr_slot as *const usize) };
         let saved_fp = unsafe { *(fp as *const usize) };
 
-        // Try each registry in the chain in order: return addresses never
-        // collide across pipelines, so at most one recognizes this frame.
-        let Some(owning_registry) = stack_maps
-            .iter()
-            .find(|registry| registry.contains_address(return_addr))
-        else {
+        // Return addresses never collide across pipelines, so at most one
+        // registry recognizes this frame.
+        let Some(owning_registry) = stack_maps.registry_for(return_addr) else {
             // Native frames in a JIT -> host -> JIT sandwich carry no map.
             // A zero saved FP is the explicit clean activation boundary.
             if saved_fp == 0 {

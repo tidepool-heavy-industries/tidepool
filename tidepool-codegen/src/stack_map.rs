@@ -91,6 +91,11 @@ impl StackMapRegistry {
         self.entries.is_empty()
     }
 
+    /// The registered code ranges: sorted, pairwise disjoint `[start, end)`.
+    pub(crate) fn code_ranges(&self) -> &[(usize, usize)] {
+        &self.ranges
+    }
+
     /// Check if an address falls within the known JIT code region.
     ///
     /// Binary search: sound only because `ranges` is sorted AND pairwise
@@ -129,6 +134,138 @@ impl StackMapRegistry {
             hi += 1;
         }
         ranges.splice(lo..hi, std::iter::once((merged_start, merged_end)));
+    }
+}
+
+/// Resolves a return address to the stack-map registry whose code contains
+/// it, for [`crate::gc::frame_walker::walk_frames`].
+pub trait StackMapLookup {
+    /// The registry whose registered code ranges contain `addr`, if any.
+    fn registry_for(&self, addr: usize) -> Option<&StackMapRegistry>;
+}
+
+impl StackMapLookup for StackMapRegistry {
+    fn registry_for(&self, addr: usize) -> Option<&StackMapRegistry> {
+        self.contains_address(addr).then_some(self)
+    }
+}
+
+/// A chain tried in order: return addresses never collide across
+/// pipelines, so at most one registry recognizes any address.
+impl StackMapLookup for [&StackMapRegistry] {
+    fn registry_for(&self, addr: usize) -> Option<&StackMapRegistry> {
+        self.iter()
+            .copied()
+            .find(|registry| registry.contains_address(addr))
+    }
+}
+
+impl<const N: usize> StackMapLookup for [&StackMapRegistry; N] {
+    fn registry_for(&self, addr: usize) -> Option<&StackMapRegistry> {
+        self.as_slice().registry_for(addr)
+    }
+}
+
+/// Machine-wide index from code ranges to the linked registry that owns
+/// them, used when more than one registry is linked (see
+/// `MachineState`'s stack-map chain). Keyed by range start; ranges from
+/// distinct pipelines never overlap, so the last range starting at or
+/// below an address is the only candidate.
+///
+/// Holds raw registry pointers: every entry must be unlinked before its
+/// registry is dropped, exactly as for the chain itself. A registry's
+/// ranges are read at link time and must not change while it is linked
+/// alongside another registry.
+#[derive(Clone, Default)]
+pub(crate) struct StackMapIndex {
+    by_start: BTreeMap<usize, (usize, *const StackMapRegistry)>,
+}
+
+impl StackMapIndex {
+    /// Add every code range of `registry`.
+    ///
+    /// # Safety
+    /// `registry` must be live.
+    pub(crate) unsafe fn link(&mut self, registry: *const StackMapRegistry) {
+        // SAFETY: the caller guarantees `registry` is live.
+        for &(start, end) in unsafe { &*registry }.code_ranges() {
+            debug_assert!(
+                self.by_start
+                    .range(..end)
+                    .next_back()
+                    .is_none_or(|(_, &(prior_end, owner))| {
+                        prior_end <= start || std::ptr::eq(owner, registry)
+                    }),
+                "stack-map code ranges of distinct registries overlap"
+            );
+            self.by_start.insert(start, (end, registry));
+        }
+    }
+
+    /// Remove every range owned by `registry`. Does not dereference it.
+    pub(crate) fn unlink(&mut self, registry: *const StackMapRegistry) {
+        self.by_start
+            .retain(|_, (_, owner)| !std::ptr::eq(*owner, registry));
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.by_start.clear();
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.by_start.is_empty()
+    }
+
+    /// The linked registry whose code contains `addr`.
+    pub(crate) fn find(&self, addr: usize) -> Option<*const StackMapRegistry> {
+        let (_, &(end, registry)) = self.by_start.range(..=addr).next_back()?;
+        (addr < end).then_some(registry)
+    }
+
+    /// Whether this index holds exactly the current code ranges of the
+    /// distinct registries in `chain`.
+    ///
+    /// # Safety
+    /// Every pointer in `chain` must be live.
+    pub(crate) unsafe fn covers_exactly(&self, chain: &[*const StackMapRegistry]) -> bool {
+        let mut expected = 0;
+        for (position, &registry) in chain.iter().enumerate() {
+            if chain[..position]
+                .iter()
+                .any(|&prior| std::ptr::eq(prior, registry))
+            {
+                continue;
+            }
+            // SAFETY: the caller guarantees every chain pointer is live.
+            for &(start, end) in unsafe { &*registry }.code_ranges() {
+                match self.by_start.get(&start) {
+                    Some(&(indexed_end, owner))
+                        if indexed_end == end && std::ptr::eq(owner, registry) => {}
+                    _ => return false,
+                }
+                expected += 1;
+            }
+        }
+        expected == self.by_start.len()
+    }
+}
+
+/// A point-in-time view of a machine's linked registries for one frame
+/// walk; see `MachineState::stack_map_chain`.
+pub(crate) enum StackMapChain {
+    Single(*const StackMapRegistry),
+    Indexed(std::sync::Arc<StackMapIndex>),
+}
+
+impl StackMapLookup for StackMapChain {
+    fn registry_for(&self, addr: usize) -> Option<&StackMapRegistry> {
+        match self {
+            // SAFETY: linked registries outlive every walk over the chain
+            // (they are unlinked before their pipelines drop).
+            Self::Single(registry) => unsafe { &**registry }.registry_for(addr),
+            // SAFETY: as above, for every indexed registry.
+            Self::Indexed(index) => index.find(addr).map(|registry| unsafe { &*registry }),
+        }
     }
 }
 
@@ -267,6 +404,31 @@ mod tests {
             !registry.contains_address(0x1100),
             "exclusive end of the union"
         );
+    }
+
+    #[test]
+    fn index_resolves_each_address_to_its_registry() {
+        let mut first = StackMapRegistry::new();
+        first.register(0x1000, 0x100, &[]);
+        first.register(0x3000, 0x100, &[]);
+        let mut second = StackMapRegistry::new();
+        second.register(0x2000, 0x100, &[]);
+        let mut index = StackMapIndex::default();
+        let chain = [&first as *const _, &second as *const _];
+        unsafe {
+            index.link(chain[0]);
+            index.link(chain[1]);
+            assert!(index.covers_exactly(&chain));
+        }
+        assert_eq!(index.find(0x1050), Some(chain[0]));
+        assert_eq!(index.find(0x2000), Some(chain[1]));
+        assert_eq!(index.find(0x30ff), Some(chain[0]));
+        assert_eq!(index.find(0x2100), None);
+        assert_eq!(index.find(0x0fff), None);
+        index.unlink(chain[0]);
+        assert_eq!(index.find(0x1050), None);
+        assert_eq!(index.find(0x2050), Some(chain[1]));
+        unsafe { assert!(index.covers_exactly(&chain[1..])) };
     }
 
     #[test]

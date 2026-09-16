@@ -22,7 +22,6 @@
 use crate::context::VMContext;
 use crate::gc::frame_walker;
 use crate::machine_state::{machine_state, machine_state_opt, MachineState};
-use crate::stack_map::StackMapRegistry;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
@@ -1141,17 +1140,15 @@ pub(crate) unsafe extern "C" fn prepared_gc_trigger(vmctx: *mut VMContext, reser
 fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
     // SAFETY: vmctx is valid; machine_state was installed before entering JIT code.
     let ms = unsafe { machine_state(vmctx) };
-    let registry_ptrs = ms.stack_map_registries();
-    if registry_ptrs.is_empty() {
+    let Some(registries) = ms.stack_map_chain() else {
         ms.set_first_cause(crate::host_fns::RuntimeError::IncompleteRootSnapshot(
             frame_walker::FrameWalkError::RegistryUnavailable,
         ));
         return;
-    }
-    // SAFETY: every pointer was set by set_stack_map_registry/
-    // push_stack_map_registry and outlives JIT execution.
-    let registries: Vec<&StackMapRegistry> =
-        registry_ptrs.iter().map(|&p| unsafe { &*p }).collect();
+    };
+    // Every linked registry was set by set_stack_map_registry/
+    // push_stack_map_registry and outlives JIT execution; the `registries`
+    // snapshot is dropped as soon as the walk finishes.
     // `stack_low` is a local in THIS frame. perform_gc is always called
     // beneath the JIT call chain (gc_trigger → perform_gc, never the
     // reverse), and the stack grows down, so this address is a sound
@@ -1161,10 +1158,10 @@ fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
     let bounds = frame_walker::StackBounds::capture(&stack_low as *const u8 as usize);
     // SAFETY: fp is a valid frame pointer read from gc_trigger's caller.
     // The chain covers stack maps for every JIT pipeline installed on this
-    // machine, tried in order per frame -- return addresses never collide
-    // across pipelines, so at most one registry in the chain recognizes any
-    // given frame. A violation of that contract is now a controlled failure,
-    // not UB -- see `walk_frames`'s doc.
+    // machine, resolved per frame through the machine's code-range index --
+    // return addresses never collide across pipelines, so at most one
+    // registry recognizes any given frame. A violation of that contract is
+    // now a controlled failure, not UB -- see `walk_frames`'s doc.
     let roots = match unsafe {
         frame_walker::walk_frames(fp, &registries, bounds, heap_verify_enabled())
     } {
@@ -1174,6 +1171,7 @@ fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
             return;
         }
     };
+    drop(registries);
 
     // ── Cheney copying GC ──────────────────────────────
     // SAFETY: vmctx is valid; machine_state was installed before entering

@@ -63,7 +63,7 @@ use std::sync::Arc;
 
 use crate::context::VMContext;
 use crate::host_fns::{GcState, RuntimeError};
-use crate::stack_map::StackMapRegistry;
+use crate::stack_map::{StackMapChain, StackMapIndex, StackMapRegistry};
 
 pub use tidepool_heap::external_storage::{ExternalStorageKind, ExternalStorageValidationError};
 
@@ -211,6 +211,12 @@ pub struct MachineState {
     json_con_ids: Cell<Option<tidepool_bridge::json_builder::JsonConIds>>,
     time_con_ids: Cell<Option<tidepool_bridge::time::TimeConIds>>,
     stack_map_registry: RefCell<Vec<*const StackMapRegistry>>,
+    /// Code-range index over `stack_map_registry`, populated exactly while
+    /// two or more registries are linked (a single registry is searched
+    /// directly). Every link/unlink path below keeps it in step with the
+    /// chain; a frame walk takes an `Arc` snapshot so a walk never borrows
+    /// the cell.
+    stack_map_index: RefCell<Arc<StackMapIndex>>,
     call_depth: Cell<u32>,
     runtime_error: RefCell<Option<RuntimeError>>,
     /// Prepared exception operand; independent of temporary observation marks.
@@ -353,6 +359,7 @@ impl MachineState {
             json_con_ids: Cell::new(None),
             time_con_ids: Cell::new(None),
             stack_map_registry: RefCell::new(Vec::new()),
+            stack_map_index: RefCell::new(Arc::default()),
             call_depth: Cell::new(0),
             runtime_error: RefCell::new(None),
             disposition: Cell::new(MachineDisposition::Reusable),
@@ -392,17 +399,27 @@ impl MachineState {
     /// instead, so its frames are recognized without displacing an earlier
     /// program's registry.
     pub fn set_stack_map_registry(&self, registry: &StackMapRegistry) {
-        *self.stack_map_registry.borrow_mut() = vec![registry as *const _];
+        let mut chain = self.stack_map_registry.borrow_mut();
+        *chain = vec![registry as *const _];
+        self.update_stack_map_index(&chain, |index| index.clear());
     }
 
     /// Extend the chain with one more registry, keeping every previously
     /// installed program's registry reachable. Return addresses never
-    /// collide across pipelines, so the frame walker tries each registry in
-    /// the chain in order until one recognizes a given frame's address.
+    /// collide across pipelines, so the frame walker resolves each frame's
+    /// address through the machine-wide code-range index.
     pub(crate) fn push_stack_map_registry(&self, registry: &StackMapRegistry) {
-        self.stack_map_registry
-            .borrow_mut()
-            .push(registry as *const _);
+        let mut chain = self.stack_map_registry.borrow_mut();
+        chain.push(registry as *const _);
+        self.update_stack_map_index(&chain, |index| {
+            // SAFETY: every linked registry is live while linked.
+            unsafe {
+                if chain.len() == 2 {
+                    index.link(chain[0]);
+                }
+                index.link(registry);
+            }
+        });
     }
 
     /// Undo the most recent [`Self::push_stack_map_registry`]. Install-time
@@ -412,11 +429,23 @@ impl MachineState {
     /// unions, a raw stack-map pointer has no independent lifetime of its
     /// own, so this one entry cannot be left as merely "inert metadata".
     pub(crate) fn pop_stack_map_registry(&self) {
-        self.stack_map_registry.borrow_mut().pop();
+        let mut chain = self.stack_map_registry.borrow_mut();
+        let Some(popped) = chain.pop() else {
+            return;
+        };
+        self.update_stack_map_index(&chain, |index| {
+            if chain.len() < 2 {
+                index.clear();
+            } else if !chain.iter().any(|&linked| std::ptr::eq(linked, popped)) {
+                index.unlink(popped);
+            }
+        });
     }
 
     pub fn clear_stack_map_registry(&self) {
-        self.stack_map_registry.borrow_mut().clear();
+        let mut chain = self.stack_map_registry.borrow_mut();
+        chain.clear();
+        self.update_stack_map_index(&chain, |index| index.clear());
     }
 
     /// Unlink one program's registry by identity, wherever it sits in the
@@ -425,7 +454,53 @@ impl MachineState {
         let mut chain = self.stack_map_registry.borrow_mut();
         let before = chain.len();
         chain.retain(|linked| !std::ptr::eq(*linked, registry));
-        chain.len() != before
+        let removed = chain.len() != before;
+        self.update_stack_map_index(&chain, |index| {
+            if chain.len() < 2 {
+                index.clear();
+            } else if removed {
+                index.unlink(registry);
+            }
+        });
+        removed
+    }
+
+    /// Apply `edit` to the code-range index for the already-updated `chain`
+    /// and check that the two agree. Copy-on-write: a snapshot still held by
+    /// an abandoned walk is left untouched.
+    fn update_stack_map_index(
+        &self,
+        chain: &[*const StackMapRegistry],
+        edit: impl FnOnce(&mut StackMapIndex),
+    ) {
+        let mut index = self.stack_map_index.borrow_mut();
+        if chain.len() < 2 && index.is_empty() {
+            return;
+        }
+        let index = Arc::make_mut(&mut index);
+        edit(index);
+        debug_assert!(
+            if chain.len() < 2 {
+                index.is_empty()
+            } else {
+                // SAFETY: every linked registry is live while linked.
+                unsafe { index.covers_exactly(chain) }
+            },
+            "stack-map index disagrees with the registry chain"
+        );
+    }
+
+    /// The linked registries for one frame walk: `None` when nothing is
+    /// linked. The snapshot must not outlive any registry linked now.
+    pub(crate) fn stack_map_chain(&self) -> Option<StackMapChain> {
+        let chain = self.stack_map_registry.borrow();
+        match chain.as_slice() {
+            [] => None,
+            [single] => Some(StackMapChain::Single(*single)),
+            _ => Some(StackMapChain::Indexed(Arc::clone(
+                &self.stack_map_index.borrow(),
+            ))),
+        }
     }
 
     /// Number of linked stack-map registries: one per installed program
@@ -438,10 +513,6 @@ impl MachineState {
     /// at quiescence.
     pub(crate) fn call_depth(&self) -> u32 {
         self.call_depth.get()
-    }
-
-    pub(crate) fn stack_map_registries(&self) -> Vec<*const StackMapRegistry> {
-        self.stack_map_registry.borrow().clone()
     }
 
     // --- call depth ------------------------------------------------------
