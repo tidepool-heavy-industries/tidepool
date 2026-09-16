@@ -3,6 +3,8 @@
 A focused **member of Tidepool's Cargo workspace** for TypeSafe API experiments.
 It has no Tidepool engine dependencies. The eventual Haskell effect remains a
 single operation; this executable is a research consumer, not a production SDK.
+For the complete pre-compaction inventory of decisions, evidence custody, live
+results, commits, caveats, and next work, see [the session handoff](SESSION-HANDOFF.md).
 
 Run commands from this worktree's repository root. Cargo uses the workspace
 lockfile and this worktree's `target/` directory. Build only this package:
