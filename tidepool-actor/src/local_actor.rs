@@ -23,6 +23,42 @@ pub struct KernelBehaviorError {
     pub detail: String,
 }
 
+/// One shutdown budget computed once by `finish_actor` and threaded to every
+/// component that can otherwise wait unbounded for a busy or hung resource:
+/// hook admission and realm/placement checkout race this deadline, and
+/// supervised children receive `deadline - SHUTDOWN_CHILD_MARGIN` so a
+/// child's own budget always expires before the parent's, and it can report
+/// its own `Unconfirmed` outcome instead of being killed by W3.
+pub(crate) const SHUTDOWN_BUDGET: Duration = Duration::from_secs(30);
+const SHUTDOWN_CHILD_MARGIN: Duration = Duration::from_secs(5);
+
+/// Who is publishing an actor's terminal result.
+///
+/// [`publish_exit`] is the only caller of [`RetainedActorExit::publish`]
+/// outside `termination`'s own tests, so every write to an actor's exit
+/// declares which of the two writers it is.
+pub(crate) enum ExitAuthority<'a> {
+    /// The actor's own `finish_actor`: an ordinary stop (W1) or a
+    /// replacement fence (W2). Carries the children snapshot taken after
+    /// child admission closed; empty for a replaced predecessor, since
+    /// custody of every child already moved to the successor.
+    Own { children: &'a [LocalActorRef] },
+    /// The direct supervisor publishes on behalf of a child whose task is
+    /// gone or was killed (W3, W4). No cleanup proof is retained; the
+    /// child's `cleanup()` stays `None`.
+    SupervisorForced,
+}
+
+/// What `finish_actor` is settling: an ordinary stop, or a replacement
+/// fence handing this actor's identity and custody to a successor.
+enum Disposition {
+    Stop(ActorTerminal),
+    Replaced {
+        successor: crate::ActorRef,
+        summary: String,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct ChildExitNotice {
     pub owner: ActorRef,
@@ -614,11 +650,15 @@ pub trait KernelBehavior: Send + 'static {
     ) -> BoxFuture<'a, Result<(), KernelBehaviorError>>;
 
     /// Explicit component evidence. Generic behavior success cannot attest a
-    /// resident realm it does not own; resident behavior overrides this method.
+    /// resident realm it does not own; resident behavior overrides this
+    /// method. `deadline` is the one shutdown deadline `finish_actor`
+    /// computes for this retirement; a behavior that checks out a shared
+    /// resource races that checkout against it instead of waiting unbounded.
     fn shutdown_components<'a>(
         &'a mut self,
         context: &'a KernelContext,
         terminal: &'a ActorTerminal,
+        _deadline: tokio::time::Instant,
     ) -> BoxFuture<
         'a,
         (
@@ -752,11 +792,21 @@ where
                 state.context.myself.send_message(KernelMessage::Resume)?;
             }
             Ok(KernelStep::Stop { terminal, .. }) => {
-                finish_actor(&state.context.myself.clone(), &mut state, terminal).await;
+                finish_actor(
+                    &state.context.myself.clone(),
+                    &mut state,
+                    Disposition::Stop(terminal),
+                )
+                .await;
             }
             Err(error) => {
                 let terminal = failed_terminal(format!("actor startup failed: {error}"));
-                finish_actor(&state.context.myself.clone(), &mut state, terminal).await;
+                finish_actor(
+                    &state.context.myself.clone(),
+                    &mut state,
+                    Disposition::Stop(terminal),
+                )
+                .await;
                 return Err(Box::new(error));
             }
         }
@@ -814,10 +864,10 @@ where
                 let terminal = finish_actor(
                     &myself,
                     state,
-                    ActorTerminal {
+                    Disposition::Stop(ActorTerminal {
                         kind: ActorExitKind::Cancelled,
                         summary: "replacement preparation aborted".into(),
-                    },
+                    }),
                 )
                 .await;
                 let result = if state
@@ -894,20 +944,23 @@ where
                     state.replacement = Some(pending);
                     return Ok(());
                 }
-                let mut children = state.context.children.lock();
-                let mut inherited = successor_context.children.lock();
-                for (id, child) in children.drain() {
-                    child
-                        .address()
-                        .get_cell()
-                        .link(successor_context.myself.get_cell());
-                    inherited.insert(id, child);
+                {
+                    let mut children = state.context.children.lock();
+                    let mut inherited = successor_context.children.lock();
+                    for (id, child) in children.drain() {
+                        child
+                            .address()
+                            .get_cell()
+                            .link(successor_context.myself.get_cell());
+                        inherited.insert(id, child);
+                    }
                 }
-                drop(inherited);
-                drop(children);
-                for (id, child) in state.context.resources.lock().drain() {
-                    child.cell.link(successor_context.myself.get_cell());
-                    successor_context.resources.lock().insert(id, child);
+                {
+                    let mut resources = state.context.resources.lock();
+                    for (id, child) in resources.drain() {
+                        child.cell.link(successor_context.myself.get_cell());
+                        successor_context.resources.lock().insert(id, child);
+                    }
                 }
                 {
                     let mut inherited = successor_context.forgotten_children.lock();
@@ -919,9 +972,7 @@ where
                         ),
                     );
                 }
-                state
-                    .terminal
-                    .retain_successor(pending.successor.identity());
+                let summary = format!("replaced by {:?}", pending.successor.identity());
                 pending
                     .successor
                     .address()
@@ -929,10 +980,6 @@ where
                         backlog: std::mem::take(&mut state.deferred_mailbox),
                         draining: !matches!(state.drain, DrainState::Open),
                     })?;
-                let terminal = ActorTerminal {
-                    kind: ActorExitKind::Cancelled,
-                    summary: format!("replaced by {:?}", pending.successor.identity()),
-                };
                 if let Some(parent) = state
                     .context
                     .supervisor_identity()
@@ -941,17 +988,21 @@ where
                     parent.children.lock().remove(&myself.get_id());
                     myself.get_cell().unlink(parent.myself.get_cell());
                 }
-                publish_terminal(&state.terminal, &terminal);
-                state
-                    .behavior
-                    .replacement_retired(&state.context, &terminal);
+                let terminal = finish_actor(
+                    &myself,
+                    state,
+                    Disposition::Replaced {
+                        successor: pending.successor.identity(),
+                        summary,
+                    },
+                )
+                .await;
                 for reply in pending.shutdown_waiters {
                     let _ = reply.send(terminal.clone());
                 }
                 if let Some(reply) = pending.reply {
                     let _ = reply.send(Ok(pending.successor));
                 }
-                myself.stop(Some(terminal.summary));
                 return Ok(());
             }
             KernelMessage::ActivateReplacement {
@@ -1191,7 +1242,7 @@ where
                     replacement.shutdown_waiters.push(reply);
                     return Ok(());
                 }
-                let terminal = finish_actor(&myself, state, terminal).await;
+                let terminal = finish_actor(&myself, state, Disposition::Stop(terminal)).await;
                 let _ = reply.send(terminal);
             }
         }
@@ -1253,7 +1304,7 @@ where
             return Ok(());
         };
         if child.terminal().get().is_none() {
-            publish_terminal(child.terminal(), &observed);
+            publish_exit(child.terminal(), &observed, ExitAuthority::SupervisorForced);
         }
         let Some(terminal) = child.terminal().get() else {
             unreachable!("supervision publishes or observes the child terminal result");
@@ -1351,6 +1402,12 @@ where
     ))
 }
 
+/// A handler failure pauses the actor so replacement can recover it in
+/// place — unless a drain was already requested. Once draining, the owner
+/// asked this actor to finish accepted work and exit; parking on a failure
+/// instead would leave `drainActor >> awaitExit` waiting with no exit and no
+/// error. Q1-B: a failing queued message behaves like a failing drain
+/// continuation, which already fails outright.
 async fn fail_handler<B>(
     myself: &RactorRef<KernelMessage>,
     state: &mut LocalActorState<B>,
@@ -1358,9 +1415,12 @@ async fn fail_handler<B>(
 ) where
     B: KernelBehavior,
 {
-    if !state.behavior.pause_failed_handler(&state.context, &detail) {
-        fail_actor(myself, state, detail).await;
+    if matches!(state.drain, DrainState::Open)
+        && state.behavior.pause_failed_handler(&state.context, &detail)
+    {
+        return;
     }
+    fail_actor(myself, state, detail).await;
 }
 
 async fn fail_actor<B>(
@@ -1370,7 +1430,7 @@ async fn fail_actor<B>(
 ) where
     B: KernelBehavior,
 {
-    finish_actor(myself, state, failed_terminal(detail)).await;
+    finish_actor(myself, state, Disposition::Stop(failed_terminal(detail))).await;
 }
 
 async fn finish_after_step<B>(
@@ -1397,7 +1457,7 @@ async fn settle_step<B, T>(
     let (output, terminal, resume) = step.into_parts();
     settle(output);
     if let Some(terminal) = terminal {
-        finish_actor(myself, state, terminal).await;
+        finish_actor(myself, state, Disposition::Stop(terminal)).await;
     } else if resume {
         if let Err(error) = myself.send_message(KernelMessage::Resume) {
             fail_actor(
@@ -1413,7 +1473,7 @@ async fn settle_step<B, T>(
 async fn finish_actor<B>(
     myself: &RactorRef<KernelMessage>,
     state: &mut LocalActorState<B>,
-    requested: ActorTerminal,
+    disposition: Disposition,
 ) -> ActorTerminal
 where
     B: KernelBehavior,
@@ -1428,33 +1488,105 @@ where
     // Wait for admitted startup to register, then permanently reject creation,
     // including through cloned contexts and shutdown hooks.
     *state.context.child_admission_closed.write().await = true;
-    let children = shutdown_children(&state.context, requested.kind, Duration::from_secs(15)).await;
-    let (hook, realm) = state
-        .behavior
-        .shutdown_components(&state.context, &requested)
-        .await;
-    let terminal = match (&hook, &realm) {
-        (crate::CleanupComponentOutcome::Unconfirmed(error), _)
-        | (_, crate::CleanupComponentOutcome::Unconfirmed(error)) => {
-            failed_terminal(format!("actor shutdown failed: {error}"))
+    match disposition {
+        Disposition::Stop(requested) => {
+            // One shutdown deadline, computed once: hook admission and realm
+            // checkout race it directly, and children get the remainder minus
+            // a margin so a child's own budget always expires first and it
+            // reports its own `Unconfirmed` outcome instead of being killed.
+            let deadline = tokio::time::Instant::now() + SHUTDOWN_BUDGET;
+            let children_budget = SHUTDOWN_BUDGET.saturating_sub(SHUTDOWN_CHILD_MARGIN);
+            let children = shutdown_children(&state.context, requested.kind, children_budget).await;
+            let (hook, realm) = state
+                .behavior
+                .shutdown_components(&state.context, &requested, deadline)
+                .await;
+            // Q2-B: the exit kind is what was requested; cleanup uncertainty
+            // is a separate, already-retained fact and never rewrites it.
+            state
+                .terminal
+                .retain_cleanup(crate::ResidentCleanupOutcome {
+                    actor: state.context.identity,
+                    hook,
+                    realm,
+                    children,
+                });
+            let children_snapshot: Vec<LocalActorRef> =
+                state.context.children.lock().values().cloned().collect();
+            publish_exit(
+                &state.terminal,
+                &requested,
+                ExitAuthority::Own {
+                    children: &children_snapshot,
+                },
+            );
+            state.behavior.stopped(&state.context, &requested).await;
+            myself.stop(Some(requested.summary.clone()));
+            requested
         }
-        _ => requested,
-    };
-    state
-        .terminal
-        .retain_cleanup(crate::ResidentCleanupOutcome {
-            actor: state.context.identity,
-            hook,
-            realm,
-            children,
-        });
-    publish_terminal(&state.terminal, &terminal);
-    state.behavior.stopped(&state.context, &terminal).await;
-    myself.stop(Some(terminal.summary.clone()));
-    terminal
+        Disposition::Replaced { successor, summary } => {
+            state.terminal.retain_successor(successor);
+            let terminal = ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary,
+            };
+            // Custody of every child and resource already moved to the
+            // successor before this call (the replacement fence transfers
+            // them under `child_admission_closed`); cleanup is confirmed by
+            // that transfer, not by a hook or realm this actor still owns.
+            state
+                .terminal
+                .retain_cleanup(crate::ResidentCleanupOutcome {
+                    actor: state.context.identity,
+                    hook: crate::CleanupComponentOutcome::Confirmed,
+                    realm: crate::CleanupComponentOutcome::Confirmed,
+                    children: crate::CleanupComponentOutcome::Confirmed,
+                });
+            let children_snapshot: Vec<LocalActorRef> =
+                state.context.children.lock().values().cloned().collect();
+            publish_exit(
+                &state.terminal,
+                &terminal,
+                ExitAuthority::Own {
+                    children: &children_snapshot,
+                },
+            );
+            state
+                .behavior
+                .replacement_retired(&state.context, &terminal);
+            myself.stop(Some(terminal.summary.clone()));
+            terminal
+        }
+    }
 }
 
-fn publish_terminal(retained: &RetainedActorExit, terminal: &ActorTerminal) {
+/// The only caller of [`RetainedActorExit::publish`] outside `termination`'s
+/// own tests. `Own` asserts that every child already has an exit: the
+/// snapshot is valid because `child_admission_closed` was set before it was
+/// taken, and `shutdown_children`/the replacement fence's custody transfer
+/// both already guarantee the property. A violation does not withhold
+/// publication — an owner with no exit at all is worse — it only records the
+/// invariant break.
+fn publish_exit(
+    retained: &RetainedActorExit,
+    terminal: &ActorTerminal,
+    authority: ExitAuthority<'_>,
+) {
+    if let ExitAuthority::Own { children } = &authority {
+        let all_children_exited = children
+            .iter()
+            .all(|child| child.terminal().get().is_some());
+        debug_assert!(
+            all_children_exited,
+            "actor published its own exit before every child had one: {terminal:?}"
+        );
+        if !all_children_exited {
+            tracing::error!(
+                ?terminal,
+                "actor published its own exit before every child had an exit"
+            );
+        }
+    }
     if let Err(error) = retained.publish(terminal.clone()) {
         tracing::error!(?terminal, existing = ?error.existing, "actor terminal result published twice");
     }
@@ -1565,7 +1697,11 @@ async fn shutdown_children(
                 )),
                 _ => {
                     if child.terminal().get().is_none() {
-                        publish_terminal(child.terminal(), &requested);
+                        publish_exit(
+                            child.terminal(),
+                            &requested,
+                            ExitAuthority::SupervisorForced,
+                        );
                     }
                     child.address().kill();
                     crate::CleanupComponentOutcome::Unconfirmed(format!(
@@ -1584,7 +1720,9 @@ async fn shutdown_children(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use crate::ActorLifecycle;
     use std::sync::Arc;
 
     use parking_lot::Mutex;
@@ -1613,6 +1751,24 @@ mod tests {
         mailbox_ready: bool,
         spawned_child: Arc<Mutex<Option<LocalActorRef>>>,
         child_exits: Arc<Mutex<Vec<ActorTerminal>>>,
+        /// Behaviors for children spawned by successive `"spawn_queued"` tool
+        /// invocations, consumed in order.
+        pending_children: VecDeque<ProbeBehavior>,
+        spawned_children: Arc<Mutex<Vec<LocalActorRef>>>,
+        /// Overrides `shutdown_components` for the one-shutdown-deadline and
+        /// Q2-B tests; `None` keeps the trait's default (delegate to
+        /// `shutdown`, realm `Unsupported`).
+        shutdown_override: Option<ShutdownOverride>,
+    }
+
+    #[derive(Clone)]
+    enum ShutdownOverride {
+        Fixed(
+            crate::CleanupComponentOutcome,
+            crate::CleanupComponentOutcome,
+        ),
+        HangRealmUntilDeadline,
+        HangRealmForever(Arc<Notify>),
     }
 
     impl KernelBehavior for ProbeBehavior {
@@ -1637,6 +1793,58 @@ mod tests {
         }
         fn begin_drain(&mut self) -> Result<(), KernelBehaviorError> {
             Ok(())
+        }
+
+        fn shutdown_components<'a>(
+            &'a mut self,
+            context: &'a KernelContext,
+            terminal: &'a ActorTerminal,
+            deadline: tokio::time::Instant,
+        ) -> BoxFuture<
+            'a,
+            (
+                crate::CleanupComponentOutcome,
+                crate::CleanupComponentOutcome,
+            ),
+        > {
+            use crate::CleanupComponentOutcome::{Confirmed, Unconfirmed, Unsupported};
+            match self.shutdown_override.clone() {
+                None => Box::pin(async move {
+                    let hook = match self.shutdown(context, terminal).await {
+                        Ok(()) => Confirmed,
+                        Err(error) => Unconfirmed(error.to_string()),
+                    };
+                    (hook, Unsupported)
+                }),
+                Some(ShutdownOverride::Fixed(hook, realm)) => {
+                    self.calls.lock().push("shutdown");
+                    Box::pin(async move { (hook, realm) })
+                }
+                Some(ShutdownOverride::HangRealmUntilDeadline) => {
+                    self.calls.lock().push("shutdown");
+                    Box::pin(async move {
+                        let realm = match tokio::time::timeout_at(
+                            deadline,
+                            tokio::time::sleep(Duration::MAX),
+                        )
+                        .await
+                        {
+                            Ok(_) => Confirmed,
+                            Err(_) => Unconfirmed(
+                                "realm cleanup did not confirm before the shutdown deadline".into(),
+                            ),
+                        };
+                        (Confirmed, realm)
+                    })
+                }
+                Some(ShutdownOverride::HangRealmForever(notify)) => {
+                    self.calls.lock().push("shutdown");
+                    Box::pin(async move {
+                        notify.notified().await;
+                        (Confirmed, Confirmed)
+                    })
+                }
+            }
         }
 
         fn drain<'a>(
@@ -1718,6 +1926,22 @@ mod tests {
                             detail: error.to_string(),
                         })?;
                     *self.spawned_child.lock() = Some(child);
+                } else if name == "spawn_queued" {
+                    let Some(child_behavior) = self.pending_children.pop_front() else {
+                        return Err(KernelInvocationFailure::Rejected {
+                            actor: context.identity(),
+                            detail: "no queued child behavior".into(),
+                        });
+                    };
+                    let child =
+                        context
+                            .spawn_child(None, child_behavior)
+                            .await
+                            .map_err(|error| KernelInvocationFailure::Failed {
+                                actor: context.identity(),
+                                detail: error.to_string(),
+                            })?;
+                    self.spawned_children.lock().push(child);
                 } else if name == "finish" {
                     return Ok(KernelStep::Stop {
                         output: serde_json::Value::String(name),
@@ -1911,6 +2135,7 @@ mod tests {
         let release = Arc::new(Notify::new());
         let spawned_child = Arc::new(Mutex::new(None));
         let child_exits = Arc::new(Mutex::new(Vec::new()));
+        let spawned_children = Arc::new(Mutex::new(Vec::new()));
         ProbeFixture {
             behavior: ProbeBehavior {
                 replacement_staged: false,
@@ -1922,6 +2147,9 @@ mod tests {
                 mailbox_ready: true,
                 spawned_child: Arc::clone(&spawned_child),
                 child_exits: Arc::clone(&child_exits),
+                pending_children: VecDeque::new(),
+                spawned_children,
+                shutdown_override: None,
             },
             calls,
             mailbox_calls,
@@ -2761,5 +2989,594 @@ mod tests {
                 .unwrap();
             task.await.unwrap();
         }
+    }
+
+    // --- Actor exit contract (Q1-B, Q2-B, single publication owner, one
+    // shutdown deadline): plans/handoff/designs/actor-exit-contract.md ---
+
+    /// A behavior whose `pause_failed_handler` always retains the failed
+    /// input, mirroring the resident actor's real pausing behavior.
+    /// `ProbeBehavior` has no such override and always fails outright, which
+    /// is not useful for exercising Q1-B (pausing must be possible at all
+    /// before "skip the pause while draining" is a meaningful assertion).
+    struct PausingProbe {
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        block: Arc<Notify>,
+        paused: Arc<AtomicBool>,
+    }
+
+    impl KernelBehavior for PausingProbe {
+        fn begin_drain(&mut self) -> Result<(), KernelBehaviorError> {
+            if self.paused.load(Ordering::SeqCst) {
+                Err(KernelBehaviorError {
+                    detail: "actor is paused".into(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+
+        fn drain<'a>(
+            &'a mut self,
+            _context: &'a KernelContext,
+        ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+            Box::pin(async {
+                Ok(KernelStep::Stop {
+                    output: (),
+                    terminal: ActorTerminal {
+                        kind: ActorExitKind::Completed,
+                        summary: "drained".into(),
+                    },
+                })
+            })
+        }
+
+        fn pause_failed_handler(&mut self, context: &KernelContext, detail: &str) -> bool {
+            self.calls.lock().push("paused");
+            self.paused.store(true, Ordering::SeqCst);
+            if let Some(actor) = context.resolve(context.identity()) {
+                actor.terminal().publish_paused(detail.to_owned());
+            }
+            true
+        }
+
+        fn shutdown_components<'a>(
+            &'a mut self,
+            _context: &'a KernelContext,
+            _terminal: &'a ActorTerminal,
+            _deadline: tokio::time::Instant,
+        ) -> BoxFuture<
+            'a,
+            (
+                crate::CleanupComponentOutcome,
+                crate::CleanupComponentOutcome,
+            ),
+        > {
+            Box::pin(async {
+                (
+                    crate::CleanupComponentOutcome::Confirmed,
+                    crate::CleanupComponentOutcome::Confirmed,
+                )
+            })
+        }
+
+        fn start(
+            &mut self,
+            _context: &KernelContext,
+        ) -> BoxFuture<'_, Result<KernelStep<()>, KernelBehaviorError>> {
+            Box::pin(async { Ok(KernelStep::Continue(())) })
+        }
+
+        fn cast(
+            &mut self,
+            _context: &KernelContext,
+            _sender: ActorRef,
+            request: MailboxValue,
+        ) -> BoxFuture<'_, Result<KernelStep<()>, KernelBehaviorError>> {
+            let session = request.session();
+            let block = Arc::clone(&self.block);
+            Box::pin(async move {
+                if session == SessionId(1) {
+                    block.notified().await;
+                    Ok(KernelStep::Continue(()))
+                } else {
+                    Err(KernelBehaviorError {
+                        detail: "second cast failed".into(),
+                    })
+                }
+            })
+        }
+
+        fn call(
+            &mut self,
+            _context: &KernelContext,
+            _caller: ActorRef,
+            _ancestry: crate::CallAncestry,
+            request: MailboxValue,
+        ) -> BoxFuture<'_, Result<KernelStep<MailboxValue>, KernelBehaviorError>> {
+            Box::pin(async move { Ok(KernelStep::Continue(request)) })
+        }
+
+        fn tool<'a>(
+            &'a mut self,
+            context: &'a KernelContext,
+            _invocation: ToolInvocation,
+        ) -> BoxFuture<'a, Result<KernelStep<serde_json::Value>, KernelInvocationFailure>> {
+            Box::pin(async move {
+                Err(KernelInvocationFailure::Rejected {
+                    actor: context.identity(),
+                    detail: "pausing probe has no tools".into(),
+                })
+            })
+        }
+
+        fn workbench(
+            &mut self,
+            _context: &KernelContext,
+            _request: WorkbenchRequest,
+            _control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
+        ) -> BoxFuture<'_, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
+            Box::pin(async {
+                Ok(KernelStep::Continue(WorkbenchResponse {
+                    status: WorkbenchRunStatus::Committed,
+                    summary: None,
+                    items: Vec::new(),
+                    next_index: 0,
+                    total: 0,
+                }))
+            })
+        }
+
+        fn external_application_failed(
+            &mut self,
+            _context: &KernelContext,
+            _failure: ExternalApplicationFailure,
+        ) -> BoxFuture<'_, ExternalFailureDisposition> {
+            Box::pin(async { ExternalFailureDisposition::Applied })
+        }
+
+        fn shutdown(
+            &mut self,
+            _context: &KernelContext,
+            _terminal: &ActorTerminal,
+        ) -> BoxFuture<'_, Result<(), KernelBehaviorError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn stopped(
+            &mut self,
+            _context: &KernelContext,
+            _terminal: &ActorTerminal,
+        ) -> BoxFuture<'_, ()> {
+            Box::pin(async {})
+        }
+
+        fn child_exited(&mut self, _notice: ChildExitNotice) -> BoxFuture<'_, ()> {
+            Box::pin(async {})
+        }
+    }
+
+    /// Q1-B: a handler failure while a drain was already requested ends the
+    /// actor `Failed` immediately, never `Paused`.
+    #[tokio::test(start_paused = true)]
+    async fn paused_handler_while_draining_publishes_failed_exit() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let block = Arc::new(Notify::new());
+        let paused = Arc::new(AtomicBool::new(false));
+        let probe = PausingProbe {
+            calls: Arc::clone(&calls),
+            block: Arc::clone(&block),
+            paused,
+        };
+        let (actor, task) = spawn_local_actor(None, probe).await.unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _connection = actor
+            .terminal()
+            .connect_lifecycle(move |event| tx.send(event).is_ok());
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let sender = ActorRef::first(crate::ActorId(1));
+        actor
+            .address()
+            .send_message(KernelMessage::Cast {
+                sender,
+                request: MailboxValue::probe(SessionId(1), Arc::clone(&dropped)),
+            })
+            .unwrap();
+        // Let the actor start processing the first (blocking) cast before the
+        // drain request and the second cast are enqueued behind it.
+        tokio::task::yield_now().await;
+
+        let (drain_reply, drain_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::Drain {
+                reply: drain_reply.into(),
+            })
+            .unwrap();
+        actor
+            .address()
+            .send_message(KernelMessage::Cast {
+                sender,
+                request: MailboxValue::probe(SessionId(2), Arc::clone(&dropped)),
+            })
+            .unwrap();
+
+        block.notify_one();
+
+        drain_rx.await.unwrap().unwrap();
+        let terminal = actor.terminal().wait().await;
+        task.await.unwrap();
+
+        assert_eq!(terminal.kind, ActorExitKind::Failed);
+        assert!(terminal.summary.contains("second cast failed"));
+        assert_eq!(
+            rx.try_iter().collect::<Vec<_>>(),
+            vec![
+                ActorLifecycle::Live,
+                ActorLifecycle::Exited(terminal.clone())
+            ]
+        );
+        assert!(
+            calls.lock().is_empty(),
+            "pause_failed_handler must not run once a drain was requested"
+        );
+        assert!(actor.terminal().cleanup().unwrap().is_confirmed());
+    }
+
+    /// A pause that happens *before* a drain was requested is unaffected by
+    /// Q1-B: `begin_drain` keeps rejecting a paused actor explicitly.
+    #[tokio::test(start_paused = true)]
+    async fn pause_before_drain_still_rejects_drain_and_stays_live() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let block = Arc::new(Notify::new());
+        let paused = Arc::new(AtomicBool::new(false));
+        let probe = PausingProbe {
+            calls: Arc::clone(&calls),
+            block,
+            paused,
+        };
+        let (actor, task) = spawn_local_actor(None, probe).await.unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _connection = actor
+            .terminal()
+            .connect_lifecycle(move |event| tx.send(event).is_ok());
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let sender = ActorRef::first(crate::ActorId(1));
+        actor
+            .address()
+            .send_message(KernelMessage::Cast {
+                sender,
+                request: MailboxValue::probe(SessionId(2), Arc::clone(&dropped)),
+            })
+            .unwrap();
+        for _ in 0..1000 {
+            if !calls.lock().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(&*calls.lock(), &["paused"]);
+
+        let rejection = actor.drain().await.expect_err("paused actor rejects drain");
+        assert!(matches!(
+            rejection,
+            crate::KernelInvocationFailure::Rejected { .. }
+        ));
+        assert!(actor.terminal().get().is_none());
+
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary: "test finished".into(),
+            })
+            .await
+            .unwrap();
+        task.await.unwrap();
+
+        let events = rx.try_iter().collect::<Vec<_>>();
+        assert_eq!(events[0], ActorLifecycle::Live);
+        assert!(matches!(events[1], ActorLifecycle::Paused(_)));
+        assert!(matches!(
+            events.last().unwrap(),
+            ActorLifecycle::Exited(terminal) if terminal.kind == ActorExitKind::Cancelled
+        ));
+    }
+
+    /// Q2-B: unconfirmed hook/realm cleanup no longer rewrites the exit kind
+    /// to `Failed`. The requested kind is preserved and cleanup uncertainty
+    /// stays a separate, already-retained fact.
+    #[tokio::test(start_paused = true)]
+    async fn unconfirmed_cleanup_preserves_requested_exit_kind() {
+        for kind in [ActorExitKind::Completed, ActorExitKind::Cancelled] {
+            let mut fixture = behavior(false);
+            fixture.behavior.shutdown_override = Some(ShutdownOverride::Fixed(
+                crate::CleanupComponentOutcome::Unconfirmed("hook".into()),
+                crate::CleanupComponentOutcome::Confirmed,
+            ));
+            let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _connection = actor
+                .terminal()
+                .connect_lifecycle(move |event| tx.send(event).is_ok());
+
+            let terminal = actor
+                .shutdown(ActorTerminal {
+                    kind,
+                    summary: "test".into(),
+                })
+                .await
+                .unwrap();
+            task.await.unwrap();
+
+            assert_eq!(terminal.kind, kind);
+            assert!(!actor.terminal().cleanup().unwrap().is_confirmed());
+            assert_eq!(
+                rx.try_iter().collect::<Vec<_>>(),
+                vec![
+                    ActorLifecycle::Live,
+                    ActorLifecycle::Exited(terminal.clone())
+                ]
+            );
+        }
+    }
+
+    /// Single publication owner: the owner's own exit is never published
+    /// (via `finish_actor`/`publish_exit`) before every child already has an
+    /// exit.
+    #[tokio::test(start_paused = true)]
+    async fn owner_exit_follows_every_child_exit() {
+        let events: Arc<Mutex<Vec<(&'static str, ActorLifecycle)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+
+        let mut fixture = behavior(false);
+        fixture
+            .behavior
+            .pending_children
+            .push_back(behavior(false).behavior);
+        fixture
+            .behavior
+            .pending_children
+            .push_back(behavior(false).behavior);
+        let spawned_children = Arc::clone(&fixture.behavior.spawned_children);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+
+        let mut connections = Vec::new();
+        let parent_events = Arc::clone(&events);
+        connections.push(actor.terminal().connect_lifecycle(move |event| {
+            parent_events.lock().push(("parent", event));
+            true
+        }));
+
+        for _ in 0..2 {
+            let (reply, receive) = oneshot::channel();
+            actor
+                .address()
+                .send_message(KernelMessage::Tool {
+                    invocation: tool_invocation("spawn_queued"),
+                    reply: reply.into(),
+                })
+                .unwrap();
+            receive.await.unwrap().unwrap();
+        }
+        let children = spawned_children.lock().clone();
+        assert_eq!(children.len(), 2);
+        for child in &children {
+            let child_events = Arc::clone(&events);
+            connections.push(child.terminal().connect_lifecycle(move |event| {
+                child_events.lock().push(("child", event));
+                true
+            }));
+        }
+
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "owner done".into(),
+            })
+            .await
+            .unwrap();
+        task.await.unwrap();
+        drop(connections);
+
+        let log = events.lock().clone();
+        let parent_exit = log
+            .iter()
+            .position(|(who, event)| *who == "parent" && matches!(event, ActorLifecycle::Exited(_)))
+            .expect("parent exit recorded");
+        let child_exits: Vec<_> = log
+            .iter()
+            .enumerate()
+            .filter(|(_, (who, event))| {
+                *who == "child" && matches!(event, ActorLifecycle::Exited(_))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(child_exits.len(), 2);
+        assert!(
+            child_exits.iter().all(|&index| index < parent_exit),
+            "both child exits must precede the owner's exit: {log:?}"
+        );
+    }
+
+    /// W3: a child whose `shutdown_components` never confirms is forced
+    /// (published `Cancelled` by the supervisor, then killed) once the
+    /// children's share of the shutdown deadline elapses, so the owner's own
+    /// exit still publishes rather than hanging on the hung child.
+    #[tokio::test(start_paused = true)]
+    async fn hung_child_is_forced_before_owner_publishes() {
+        let events: Arc<Mutex<Vec<(&'static str, ActorLifecycle)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let hang = Arc::new(Notify::new());
+
+        let mut fixture = behavior(false);
+        let mut child = behavior(false).behavior;
+        child.shutdown_override = Some(ShutdownOverride::HangRealmForever(Arc::clone(&hang)));
+        fixture.behavior.pending_children.push_back(child);
+        let spawned_children = Arc::clone(&fixture.behavior.spawned_children);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+
+        let (reply, receive) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::Tool {
+                invocation: tool_invocation("spawn_queued"),
+                reply: reply.into(),
+            })
+            .unwrap();
+        receive.await.unwrap().unwrap();
+        let child_ref = spawned_children.lock()[0].clone();
+
+        let mut connections = Vec::new();
+        let parent_events = Arc::clone(&events);
+        connections.push(actor.terminal().connect_lifecycle(move |event| {
+            parent_events.lock().push(("parent", event));
+            true
+        }));
+        let child_events = Arc::clone(&events);
+        connections.push(child_ref.terminal().connect_lifecycle(move |event| {
+            child_events.lock().push(("child", event));
+            true
+        }));
+
+        let terminal = actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "owner done".into(),
+            })
+            .await
+            .unwrap();
+        task.await.unwrap();
+        drop(connections);
+
+        assert_eq!(terminal.kind, ActorExitKind::Completed);
+        assert!(matches!(
+            actor.terminal().cleanup().unwrap().children(),
+            crate::CleanupComponentOutcome::Unconfirmed(_)
+        ));
+        assert!(child_ref.terminal().cleanup().is_none());
+        let child_terminal = child_ref
+            .terminal()
+            .get()
+            .expect("child was force-published");
+        assert_eq!(child_terminal.kind, ActorExitKind::Cancelled);
+        assert!(child_terminal.summary.contains("owner actor stopped"));
+
+        let log = events.lock().clone();
+        let child_exit = log
+            .iter()
+            .position(|(who, event)| *who == "child" && matches!(event, ActorLifecycle::Exited(_)))
+            .expect("child exit recorded");
+        let parent_exit = log
+            .iter()
+            .position(|(who, event)| *who == "parent" && matches!(event, ActorLifecycle::Exited(_)))
+            .expect("parent exit recorded");
+        assert!(child_exit < parent_exit);
+    }
+
+    /// One shutdown deadline: a realm checkout that never confirms on its own
+    /// is still bounded by `finish_actor`'s deadline, so exit publication
+    /// cannot be delayed unboundedly by a busy machine.
+    #[tokio::test(start_paused = true)]
+    async fn busy_machine_cannot_delay_exit_past_deadline() {
+        let mut fixture = behavior(false);
+        fixture.behavior.shutdown_override = Some(ShutdownOverride::HangRealmUntilDeadline);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+
+        let start = tokio::time::Instant::now();
+        let terminal = actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "done".into(),
+            })
+            .await
+            .unwrap();
+        task.await.unwrap();
+
+        assert_eq!(terminal.kind, ActorExitKind::Completed);
+        assert_eq!(tokio::time::Instant::now() - start, SHUTDOWN_BUDGET);
+        assert!(matches!(
+            actor.terminal().cleanup().unwrap().realm(),
+            crate::CleanupComponentOutcome::Unconfirmed(_)
+        ));
+    }
+
+    /// Single publication owner, W2: the replacement fence publishes the
+    /// predecessor's exit through `finish_actor`'s `Disposition::Replaced`
+    /// arm, the same function that publishes an ordinary stop.
+    #[tokio::test(start_paused = true)]
+    async fn replacement_fence_publishes_through_finish_actor() {
+        let (successor, successor_task) = spawn_local_actor(None, behavior(false).behavior)
+            .await
+            .unwrap();
+        // A real actor supplies a legitimate `RactorRef` for `finish_actor`'s
+        // `myself.stop(..)`; its own internal state is otherwise unused here.
+        let (placeholder, placeholder_task) = spawn_local_actor(None, behavior(false).behavior)
+            .await
+            .unwrap();
+
+        let terminal = RetainedActorExit::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _connection = terminal.connect_lifecycle(move |event| tx.send(event).is_ok());
+
+        let context = std::sync::Arc::new(KernelContext {
+            identity: placeholder.identity(),
+            myself: placeholder.address().clone(),
+            children: Arc::new(Mutex::new(HashMap::new())),
+            directory: LocalActorDirectory::default(),
+            child_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
+            resources: Arc::new(Mutex::new(HashMap::new())),
+            forgotten_children: Arc::new(Mutex::new(crate::CleanupComponentOutcome::Confirmed)),
+        });
+        let mut state = LocalActorState {
+            replacement: None,
+            drain: DrainState::Open,
+            mailbox_admission: crate::kernel::MailboxAdmission::default(),
+            hosted_admission: HostedAdmission::Open,
+            context,
+            behavior: behavior(false).behavior,
+            terminal: terminal.clone(),
+            deferred_mailbox: VecDeque::new(),
+            mailbox_drain_scheduled: false,
+        };
+
+        let summary = format!("replaced by {:?}", successor.identity());
+        let published = finish_actor(
+            placeholder.address(),
+            &mut state,
+            Disposition::Replaced {
+                successor: successor.identity(),
+                summary: summary.clone(),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            published,
+            ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary,
+            }
+        );
+        assert_eq!(
+            rx.try_iter().collect::<Vec<_>>(),
+            vec![
+                ActorLifecycle::Live,
+                ActorLifecycle::Exited(published.clone())
+            ]
+        );
+        assert_eq!(terminal.successor(), Some(successor.identity()));
+        assert!(terminal.cleanup().unwrap().is_confirmed());
+
+        placeholder_task.await.unwrap();
+        successor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "test done".into(),
+            })
+            .await
+            .unwrap();
+        successor_task.await.unwrap();
     }
 }

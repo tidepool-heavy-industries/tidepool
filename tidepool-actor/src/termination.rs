@@ -207,10 +207,12 @@ impl RetainedActorExit {
 
     /// Publish the sole terminal result.
     ///
-    /// The actor lifecycle owner is the sole expected writer. Returning an
-    /// error rather than replacing the value makes competing cleanup paths an
-    /// explicit invariant violation while preserving the first result.
-    pub fn publish(&self, terminal: ActorTerminal) -> Result<(), ActorExitAlreadyPublished> {
+    /// The actor lifecycle owner is the sole expected writer:
+    /// `local_actor::publish_exit` is the only caller outside this module's
+    /// own tests. Returning an error rather than replacing the value makes
+    /// competing cleanup paths an explicit invariant violation while
+    /// preserving the first result.
+    pub(crate) fn publish(&self, terminal: ActorTerminal) -> Result<(), ActorExitAlreadyPublished> {
         {
             let mut retained = self.state.lifecycle.lock();
             if let ActorLifecycle::Exited(existing) = &retained.current {

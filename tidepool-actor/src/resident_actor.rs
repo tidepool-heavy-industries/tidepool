@@ -6158,7 +6158,11 @@ where
         terminal: &'a ActorTerminal,
     ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async move {
-            let (hook, realm) = self.shutdown_components(kernel, terminal).await;
+            // Not on the `finish_actor` path (which always calls
+            // `shutdown_components` directly with its own computed deadline);
+            // this fallback keeps the same budget for any other caller.
+            let deadline = tokio::time::Instant::now() + crate::local_actor::SHUTDOWN_BUDGET;
+            let (hook, realm) = self.shutdown_components(kernel, terminal, deadline).await;
             for component in [hook, realm] {
                 if let crate::CleanupComponentOutcome::Unconfirmed(detail) = component {
                     return Err(KernelBehaviorError { detail });
@@ -6172,6 +6176,7 @@ where
         &'a mut self,
         kernel: &'a KernelContext,
         terminal: &'a ActorTerminal,
+        deadline: tokio::time::Instant,
     ) -> futures_util::future::BoxFuture<
         'a,
         (
@@ -6196,6 +6201,11 @@ where
                 "fork owner stopped before tool completion",
             )
             .await;
+            // Hook admission and every realm/placement checkout below race the
+            // same deadline `finish_actor` computed once: a busy machine can
+            // no longer delay exit publication without bound, and a removed
+            // or terminal machine still fails fast (checkout errors, not a
+            // wait).
             let hook = if let Some(hook) = self.shutdown_hook.take() {
                 match self
                     .environment
@@ -6205,7 +6215,7 @@ where
                         hook,
                         context.placement.resource_scope,
                         terminal.kind,
-                        std::time::Duration::from_secs(30),
+                        deadline.saturating_duration_since(tokio::time::Instant::now()),
                     )
                     .await
                 {
@@ -6228,7 +6238,10 @@ where
                 if let Err(error) = self
                     .environment
                     .runner
-                    .retire_root_placement(placement)
+                    .retire_root_placement_wait(
+                        placement,
+                        deadline.saturating_duration_since(tokio::time::Instant::now()),
+                    )
                     .await
                 {
                     retained_errors.push(error.to_string());
@@ -6240,12 +6253,19 @@ where
                 if staged_replacement || self.descriptor.supervisor_parent().is_none() {
                     self.environment
                         .runner
-                        .retire_root_placement(self.descriptor.placement())
+                        .retire_root_placement_wait(
+                            self.descriptor.placement(),
+                            deadline.saturating_duration_since(tokio::time::Instant::now()),
+                        )
                         .await
                 } else {
                     self.environment
                         .runner
-                        .close_realm(context, self.descriptor.placement().resource_scope)
+                        .close_realm_wait(
+                            context,
+                            self.descriptor.placement().resource_scope,
+                            deadline.saturating_duration_since(tokio::time::Instant::now()),
+                        )
                         .await
                 };
             if let Err(error) = realm_result {

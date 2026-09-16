@@ -2441,35 +2441,24 @@ where
                 .map(|binder| binder.name.clone())
                 .collect::<Vec<_>>();
             let outcome = match bound.as_slice() {
-                [] => session.run_with_sites(
-                    "actor_interactive_discard_bind",
-                    &compiled.expr,
-                    &compiled.table,
-                    &compiled.asks,
-                ),
+                [] => session.run_with_sites("actor_interactive_discard_bind", compiled.code()),
                 [binder] if observation.is_some() => session.run_observation_with_sites(
-                    &compiled.expr,
-                    &compiled.table,
+                    compiled.code(),
                     binder,
                     generation,
-                    &compiled.asks,
                     variant == 0,
                 ),
                 [binder] => session.run_bind_with_sites(
                     "actor_interactive_bind",
-                    &compiled.expr,
-                    &compiled.table,
+                    compiled.code(),
                     binder,
                     generation,
-                    &compiled.asks,
                 ),
                 binders => session.run_projected_bind_with_sites(
                     "actor_interactive_pattern_bind",
-                    &compiled.expr,
-                    &compiled.table,
+                    compiled.code(),
                     binders,
                     generation,
-                    &compiled.asks,
                 ),
             };
             let display = if let Some(name) = observation {
@@ -2734,6 +2723,7 @@ where
         })
         .collect::<Vec<_>>();
     let include: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
+    let retained = session.prepared_retained();
     let result = run_turn(TurnRequest {
         turn_text: expression,
         templates: &templates,
@@ -2747,7 +2737,7 @@ where
             items: Vec::new(),
         }),
         target: None,
-        prepared: None,
+        prepared: session.prepared_turn_request(&retained),
     })
     .map_err(|failure| {
         ResidentActorWorkbenchError::Inspection(render_turn_compile_error(
@@ -2763,7 +2753,7 @@ where
         ));
     };
     match session
-        .run_inspection_with_sites(&compiled.expr, &compiled.table, &compiled.asks)
+        .run_inspection_with_sites(compiled.code())
         .map_err(ResidentActorWorkbenchError::Resident)?
     {
         ResidentOutcome::Completed { result, .. } => T::from_value(result.value(), result.table())
@@ -2854,14 +2844,7 @@ where
         ));
     };
     let outcome = session
-        .run_observation_with_sites(
-            &compiled.expr,
-            &compiled.table,
-            page,
-            ready.generation,
-            &compiled.asks,
-            false,
-        )
+        .run_observation_with_sites(compiled.code(), page, ready.generation, false)
         .map_err(ResidentActorWorkbenchError::Resident)?;
     if !matches!(outcome, ResidentOutcome::Completed { .. }) {
         return Err(ResidentActorWorkbenchError::Inspection(
@@ -5002,12 +4985,7 @@ where
                         )
                         .map_err(ResidentActorWorkbenchError::Resident)?;
                     let outcome = session
-                        .run_with_sites(
-                            "forest-root",
-                            &compiled.expr,
-                            &compiled.table,
-                            &compiled.asks,
-                        )
+                        .run_with_sites("forest-root", compiled.code())
                         .map_err(ResidentActorWorkbenchError::Resident)?;
                     Ok::<_, ResidentActorWorkbenchError>(outcome)
                 })();
@@ -5028,9 +5006,21 @@ where
         &self,
         placement: crate::ActorPlacement,
     ) -> Result<(), ResidentActorWorkbenchError> {
+        self.retire_root_placement_wait(placement, None).await
+    }
+
+    /// Bound realm/placement checkout by a caller-computed deadline instead
+    /// of waiting unbounded on a busy machine. `max_wait` uses `checkout_wait`
+    /// (a `WaitTimeout` becomes `Unconfirmed` cleanup); `None` keeps the
+    /// unbounded `checkout_queued` other callers rely on.
+    pub(crate) async fn retire_root_placement_wait(
+        &self,
+        placement: crate::ActorPlacement,
+        max_wait: impl Into<Option<Duration>>,
+    ) -> Result<(), ResidentActorWorkbenchError> {
         use crate::ActorRunTarget;
         self.access
-            .with_host_machine(placement.session, None, move |session, _| {
+            .with_host_machine(placement.session, max_wait.into(), move |session, _| {
                 let _ = session.retire_placement(placement.resource_scope, placement.lexical_scope);
                 Ok(())
             })
@@ -5057,8 +5047,18 @@ where
         context: crate::ActorSessionContext,
         realm: RealmId,
     ) -> Result<(), ResidentActorWorkbenchError> {
+        self.close_realm_wait(context, realm, None).await
+    }
+
+    /// Same bounded-checkout rationale as [`Self::retire_root_placement_wait`].
+    pub(crate) async fn close_realm_wait(
+        &self,
+        context: crate::ActorSessionContext,
+        realm: RealmId,
+        max_wait: impl Into<Option<Duration>>,
+    ) -> Result<(), ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_machine_wait(context, max_wait.into(), move |session, _, _| {
                 let _ = session.close_realm(realm);
                 Ok(())
             })
@@ -6042,6 +6042,9 @@ where
         source = %block.source,
         "compiling resident actor workbench item"
     );
+    // On the prepared route the same compile also projects the turn's program,
+    // linked against every live prepared binding; on Core this is `None`.
+    let retained = session.prepared_retained();
     let request = TurnRequest {
         turn_text: &block.source,
         templates: &templates,
@@ -6051,7 +6054,7 @@ where
         gen: compile_view.next_value_generation().0,
         verdict,
         target: None,
-        prepared: None,
+        prepared: session.prepared_turn_request(&retained),
     };
     // A failed worker may already have published a thin value interface.
     // Its identity is never reused, whether compilation or execution succeeds.

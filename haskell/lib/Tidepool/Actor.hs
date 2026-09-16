@@ -287,7 +287,11 @@ cast (ActorRef actorId incarnation _) request =
 
 -- | Close an owned stateful actor's sources and mailbox and request completion
 -- of accepted messages. Returns after admission closes; 'awaitExit' observes
--- the final state. A paused handler needs repair before draining.
+-- the final state. A paused handler needs repair before draining. Once a
+-- drain has been requested, a handler failure ends the actor as 'Failed'
+-- instead of pausing it: draining means "finish what you accepted, then
+-- exit", and a caller who wants a failure to pause for replacement must
+-- replace before draining.
 drainActor
   :: Member Actor effs
   => ActorRef protocol state
