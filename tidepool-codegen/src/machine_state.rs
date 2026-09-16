@@ -935,7 +935,11 @@ impl MachineState {
         if active.is_some() {
             return Err(RuntimeError::BadPointer);
         }
-        let space = tidepool_heap::gc::raw::DescriptorSpace::new(layouts.iter().cloned())
+        // `layouts` is not read again after this call: hand its Arcs to the
+        // space by move (`into_iter`), not by a second Arc-bump pass over a
+        // borrow -- the caller already paid for one clone to get an owned
+        // `Vec` here (see `PreparedMachine::compile_for_install`'s callers).
+        let space = tidepool_heap::gc::raw::DescriptorSpace::new(layouts)
             .map_err(|_| RuntimeError::HeapOverflow)?;
         let space = if let Some(region) = static_region {
             space.with_static_region(region)
