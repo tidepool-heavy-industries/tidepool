@@ -113,6 +113,7 @@ impl recursion::MappableFrame for ObservationFrame<recursion::PartiallyApplied> 
 /// list with no machine behind it.
 enum DescriptorSource<'a> {
     Registry(&'a BTreeMap<usize, DescriptorMetadata>),
+    #[cfg(test)]
     Owned(BTreeMap<usize, Arc<ObjectDescriptor>>),
 }
 
@@ -122,6 +123,7 @@ impl DescriptorSource<'_> {
             DescriptorSource::Registry(registry) => {
                 registry.get(&header).map(|metadata| &metadata.descriptor)
             }
+            #[cfg(test)]
             DescriptorSource::Owned(map) => map.get(&header),
         }
     }
