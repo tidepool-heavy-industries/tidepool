@@ -95,8 +95,17 @@ using the same validated answer builder.
 Use explicit synthetic prepared sites, reusing schema 10's `SiteRow` and
 `TypeNode` tables. The protocol generator derives the complete result from
 `Verb::result_type()` (including the error/Either wrapper), substitutes the
-compiled row's parameters, and emits a typed internal evidence marker such as
-`replySite @ReplyType`. Prepared elaboration recognizes and rewrites that
+compiled row's parameters, and emits a typed internal evidence marker
+`replySite @ReplyType q`. Its type ties evidence to the captured continuation:
+
+```haskell
+replySite :: forall reply row result. Arrs row reply result -> Int
+replySiteSited :: forall reply row result. Int -> Arrs row reply result -> Int
+```
+
+The sibling returns its supplied site ID without forcing `q`. A phantom
+`forall reply. Int` marker would not check that the declared reply type matches
+the actual continuation. Prepared elaboration recognizes and rewrites the
 marker before type erasure, records a HostAnswer site, and retains its exact
 owner. The marker belongs to the prepared-only compiler vocabulary; it does
 not join the public `sitedVerbs` or the Core presentation sidecar.
