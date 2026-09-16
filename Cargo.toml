@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "jev-integration",
     "tidepool-actor",
     "tidepool-model-output",
     "tidepool-model",
