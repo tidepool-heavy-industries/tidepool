@@ -449,6 +449,15 @@ impl ObservationHeap<'_> {
                 )?;
                 continue;
             }
+            // Refusal stays here: every caller of `inspect_constructor`
+            // (`inspect_outer`'s Union-layer unpack in `park_suspension`, and
+            // the pattern-bind tuple projection in `fields`) asks to peel
+            // exactly one `Con` layer off a settled value whose SHAPE it
+            // already knows -- a bare `Function`/`Pap` at this position is a
+            // genuine observation-contract violation, not an opaque payload
+            // to carry through. `expand`'s per-field walk (used once the
+            // fields themselves are observed) is where a closure a few
+            // layers down is expected and gets the sentinel instead.
             if descriptor.kind() != ObjectKind::Constructor {
                 return Err(ObservationFailure::Unobservable(descriptor.kind()));
             }
@@ -642,6 +651,31 @@ impl ObservationHeap<'_> {
                             return Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitByteArray(
                                 bytes,
                             ))));
+                        }
+                        // A function, PAP, or (post-force, still-callable)
+                        // function-typed object has no data `Value`
+                        // representation -- `crate::heap_bridge::CLOSURE_SENTINEL`
+                        // is the ONE reserved placeholder Core's own tolerant
+                        // bridge already substitutes for exactly this case
+                        // (`tidepool-codegen/CLAUDE.md` "Value handles and
+                        // scope closure": "Observation may bridge a closure as
+                        // the documented sentinel; delivery uses the heap
+                        // pointer itself"). Matching that sentinel here --
+                        // rather than refusing -- lets a request/result value
+                        // that carries a closure at any depth (the
+                        // self-harness's `withHandler`/green-thread/`after`
+                        // payloads) observe successfully; the real callable
+                        // stays live in the JIT heap and is applied by
+                        // reference through its handle, never through this
+                        // bridged `Value`. `Continuation` and a post-force
+                        // `Thunk` remain refused below: those shapes indicate
+                        // a genuine observation-contract violation, not an
+                        // opaque-but-legitimate payload.
+                        ObjectKind::Function | ObjectKind::Pap => {
+                            return Ok(ObservationFrame::Leaf(Value::Con(
+                                crate::heap_bridge::CLOSURE_SENTINEL,
+                                Vec::new(),
+                            )));
                         }
                         kind => return Err(ObservationFailure::Unobservable(kind)),
                     }
@@ -1240,7 +1274,7 @@ mod tests {
     }
 
     #[test]
-    fn cyclic_constructors_exhaust_budget_and_reject_unobservable_shapes() {
+    fn cyclic_constructors_exhaust_budget_and_bridge_function_and_pap_as_the_closure_sentinel() {
         let statics = statics();
         let (nursery, descriptors, constructors, _) = constructor_chain(1, true);
         let root = nursery.as_ptr() as usize | usize::from(descriptors[0].tag());
@@ -1252,6 +1286,11 @@ mod tests {
             Err(ObservationFailure::BudgetExceeded { limit: 3 })
         ));
 
+        // A bare `Function`/`Pap` object observes to the reserved closure
+        // sentinel rather than erroring -- see the comment on `expand`'s
+        // `ObjectKind::Function | ObjectKind::Pap` arm: the real callable
+        // stays live in the JIT heap and is applied by reference, never
+        // through this bridged `Value`.
         let function_layout = StorageLayout::for_reps(&target(), &[]).unwrap();
         let function =
             Arc::new(ObjectDescriptor::new(ObjectKind::Function, function_layout, None).unwrap());
@@ -1266,9 +1305,13 @@ mod tests {
             &function_constructors,
         )
         .unwrap();
+        let observed = function_heap
+            .observe_results(&[function_root as u64], &reps, &layout, 1)
+            .unwrap();
+        assert_eq!(observed.len(), 1);
         assert!(matches!(
-            function_heap.observe_results(&[function_root as u64], &reps, &layout, 1),
-            Err(ObservationFailure::Unobservable(ObjectKind::Function))
+            &observed[0],
+            Value::Con(id, fields) if *id == crate::heap_bridge::CLOSURE_SENTINEL && fields.is_empty()
         ));
 
         let pap_layout = StorageLayout::for_reps(&target(), &[]).unwrap();
@@ -1279,9 +1322,13 @@ mod tests {
         let pap_heap =
             ObservationHeap::new(&pap_nursery, &statics, vec![pap], &function_constructors)
                 .unwrap();
+        let observed = pap_heap
+            .observe_results(&[pap_root as u64], &reps, &layout, 1)
+            .unwrap();
+        assert_eq!(observed.len(), 1);
         assert!(matches!(
-            pap_heap.observe_results(&[pap_root as u64], &reps, &layout, 1),
-            Err(ObservationFailure::Unobservable(ObjectKind::Pap))
+            &observed[0],
+            Value::Con(id, fields) if *id == crate::heap_bridge::CLOSURE_SENTINEL && fields.is_empty()
         ));
 
         let address_reps = [RuntimeRep::Address];

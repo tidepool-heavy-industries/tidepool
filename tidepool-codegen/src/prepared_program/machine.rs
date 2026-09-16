@@ -5541,6 +5541,59 @@ mod tests {
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 
+    /// `observe_handle` (the forcing bridge behind the session's `observe`
+    /// call, and the request-payload read `park_suspension` runs while
+    /// parking a suspension) does NOT refuse a bare function object the way
+    /// `inspect_outer`/`inspect_constructor` do -- it bridges it as the
+    /// reserved closure sentinel, matching Core's own tolerant bridge
+    /// (`tidepool-codegen/CLAUDE.md` "Value handles and scope closure"). This
+    /// is the settled-payload shape the self-harness's outer effect requests
+    /// hit: `withHandler`/green-thread/`after` payloads carry a closure, and
+    /// parking must observe successfully rather than erroring
+    /// "cannot observe Function without forcing or applying it".
+    #[test]
+    fn observe_handle_bridges_a_bare_function_as_the_closure_sentinel() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            s3_closure_producer_program(),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("A installs");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        let produced = machine
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("A produces its retained closure f");
+        let [PreparedResult::Managed(handle_f)] = produced.values.as_slice() else {
+            panic!("A must return one managed closure");
+        };
+        // Confirm the object really is a bare, un-wrapped callable: peeling
+        // it as a constructor layer still gets the typed refusal (unchanged
+        // behavior for `inspect_outer`/`inspect_constructor`).
+        assert!(matches!(
+            machine.inspect_outer(*handle_f, RealmId::ROOT),
+            Err(ExecutionError::Observation(
+                super::super::ObservationFailure::Unobservable(
+                    tidepool_heap::execution_descriptor::ObjectKind::Function
+                )
+            ))
+        ));
+        let observed = machine
+            .observe_handle(program_a, *handle_f, RunOptions::default().observation_budget)
+            .expect("a bare function observes to the closure sentinel, not an error");
+        assert!(matches!(
+            observed,
+            Value::Con(id, ref fields)
+                if id == crate::heap_bridge::CLOSURE_SENTINEL && fields.is_empty()
+        ));
+        assert!(machine.release(*handle_f));
+        assert_eq!(machine.handle_count(), 0);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
     // ---- S3 test (3): rep mismatch, evaluatedness mismatch, unknown handle:
     // typed errors, machine Reusable, no slot claimed. ---------------------
 
@@ -7008,10 +7061,19 @@ mod tests {
             observation_budget: RunOptions::default().observation_budget,
             collect_before_observation: false,
         };
-        // A closure is not observable: the refusal comes after the force.
+        // A closure observes to the reserved closure sentinel, not a data
+        // `Value`, so this `run_entry` (a non-retained observe: no handle is
+        // minted for its result) leaves NOTHING rooting `f` once the call
+        // returns -- the same orphaned-nursery-object setup the refusal used
+        // to produce, now reached via a successful sentinel observation
+        // instead of an `ObservationFailure`.
         assert!(matches!(
             machine.run_entry(program_a, ValueId(0), &[], quiet, RealmId::ROOT),
-            Err(ExecutionError::Observation(_))
+            Ok(ref result) if matches!(
+                result.values.as_slice(),
+                [Value::Con(id, fields)]
+                    if *id == crate::heap_bridge::CLOSURE_SENTINEL && fields.is_empty()
+            )
         ));
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
         assert_eq!(machine.handle_count(), 0);
