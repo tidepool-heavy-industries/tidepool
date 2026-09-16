@@ -168,6 +168,9 @@ pub(super) struct ProgramPlan<'a> {
     /// identity. Hosts must authenticate this distinct descriptor before access.
     pub mut_var: Arc<ObjectDescriptor>,
     pub bytes_array: Arc<ObjectDescriptor>,
+    /// The three above, as the machine-shared set the installing machine
+    /// adopts or checks (see [`super::interner::ExternalDescriptors`]).
+    pub externals: super::interner::ExternalDescriptors,
     /// Compact block-local slots, not ValueId-indexed allocation controlled
     /// by wire IDs.
     pub top_slots: BTreeMap<ValueId, usize>,
@@ -452,6 +455,7 @@ impl<'a> ProgramPlan<'a> {
             });
         }
 
+        let externals = interner.externals(target)?;
         Ok(Self {
             program,
             functions,
@@ -459,18 +463,10 @@ impl<'a> ProgramPlan<'a> {
             value_reps: values,
             top_bindings,
             constructors,
-            boxed_array: Arc::new(ObjectDescriptor::external(
-                tidepool_heap::external_storage::ExternalStorageKind::BoxedArray,
-                target,
-            )?),
-            bytes_array: Arc::new(ObjectDescriptor::external(
-                tidepool_heap::external_storage::ExternalStorageKind::Bytes,
-                target,
-            )?),
-            mut_var: Arc::new(ObjectDescriptor::external(
-                tidepool_heap::external_storage::ExternalStorageKind::BoxedArray,
-                target,
-            )?),
+            boxed_array: Arc::clone(&externals.boxed_array),
+            bytes_array: Arc::clone(&externals.bytes_array),
+            mut_var: Arc::clone(&externals.mut_var),
+            externals,
             top_slots,
             import_slots,
             root_block,

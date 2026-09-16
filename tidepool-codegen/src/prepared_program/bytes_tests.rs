@@ -635,7 +635,7 @@ fn literal_addresses_observe_through_one_shot_and_other_installed_programs() {
         },
     })];
     let linked = link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-    let reader = CompiledProgram::compile(&linked).unwrap();
+    let reader = machine.compile_for_install(&linked).unwrap();
     let reader = machine
         .install_program(reader, ImportBindings::new())
         .unwrap();
@@ -666,7 +666,7 @@ fn literal_addresses_observe_through_one_shot_and_other_installed_programs() {
         &MachineImports::default(),
     )
     .unwrap();
-    let strlen = CompiledProgram::compile(&linked).unwrap();
+    let strlen = machine.compile_for_install(&linked).unwrap();
     let strlen = machine
         .install_program(strlen, ImportBindings::new())
         .unwrap();

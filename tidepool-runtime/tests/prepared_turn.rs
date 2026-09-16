@@ -12,12 +12,12 @@ use std::path::{Path, PathBuf};
 
 use tidepool_repr::{
     execution_schema::{Group, TypeNode},
-    Generation,
+    Generation, SessionId,
 };
 use tidepool_runtime::session::{
-    resident_workbench_templates, run_turn, BoundBinder, EngineKind, PreparedRuntimeError,
-    ResidentError, ResidentOutcome, ResidentSession, TurnRequest, TurnResult, TurnTemplate,
-    ValueTier,
+    resident_workbench_templates, run_turn, BoundBinder, EngineKind, ModuleEnv,
+    PreparedRuntimeError, ResidentError, ResidentOutcome, ResidentSession, SessionLib,
+    SourceImports, TurnRequest, TurnResult, TurnTemplate, ValueTier,
 };
 use tidepool_testing::eval_harness;
 
@@ -48,24 +48,59 @@ impl Notebook {
         let effect_stack = tidepool_mcp::build_effect_stack_type(&decls);
         let mut include = eval_harness::effects_include().to_vec();
         include.push(eval_harness::prelude_path());
+        let root = tempfile::tempdir().expect("session root");
+        // A decl plane, so a notebook can declare top-level functions
+        // (`Notebook::declare`) alongside its value binds. Its gen modules
+        // live under `root` at highest include precedence -- the same rule
+        // `SessionLib::include_dir` documents -- so a later turn's `import
+        // Tidepool.Session.Lib.G<g>` resolves.
+        let lib = SessionLib::open(
+            SessionId(1),
+            root.path().join("decl-lib"),
+            ModuleEnv::standalone_default(),
+        )
+        .expect("open decl plane")
+        .with_validation_include(vec![eval_harness::prelude_path()]);
+        include.push(lib.include_dir().to_path_buf());
         let session = ResidentSession::unbootstrapped_on(
             engine,
             frunk::HNil,
             tidepool_mcp::CapturedOutput::new(),
             include.clone(),
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
-            None,
+            Some(lib),
         );
         Self {
             session,
             preamble,
             effect_stack,
             include,
-            root: tempfile::tempdir().expect("session root"),
+            root,
             injected: Vec::new(),
             generation: 0,
             last_table: None,
         }
+    }
+
+    /// Define a top-level decl (e.g. `addN :: Int -> Int -> Int; addN n x =
+    /// x + n`) on the decl plane's ROOT scope; a later turn sees it because
+    /// its `Lib.G<g>` module is pushed onto `injected`, exactly as `bind`
+    /// pushes a bound value's module.
+    fn declare(&mut self, source: &str) -> Generation {
+        let generation = self
+            .session
+            .define_scoped_with_imports_in(
+                tidepool_codegen::scope::ScopeId::ROOT,
+                &[source],
+                &SourceImports::new(),
+            )
+            .unwrap_or_else(|error| panic!("{source:?} failed to declare: {error}"));
+        let module = self
+            .session
+            .session_import_module_in(tidepool_codegen::scope::ScopeId::ROOT)
+            .expect("declare committed a generation but no lib module is visible");
+        self.injected.push(module);
+        generation
     }
 
     /// A constructor's bridge id from the session table the last expression
@@ -1404,4 +1439,295 @@ fn notebook_interleaved_parked_continuations_on_core() {
 #[test]
 fn notebook_interleaved_parked_continuations_on_prepared_stg() {
     notebook_interleaved_parked_continuations(EngineKind::Prepared);
+}
+
+/// Byte-backed host answers -- `Text` over a fresh byte array, and `Integer`
+/// as `IS` and as multi-limb `IP` -- resuming parked turns on both engines.
+/// On the prepared route the validator refuses invalid UTF-8 and a
+/// non-canonical `BigNat#` (limbs whose value fits `IS`) before the frame is
+/// touched.
+fn notebook_byte_answers(engine: EngineKind) {
+    use tidepool_bridge::{ToCore, Value};
+    use tidepool_repr::Literal;
+
+    let mut notebook = Notebook::new(engine);
+    // Brings `Text` into the session table.
+    let rendered = notebook
+        .expression("T.length (\"abc\" :: Text)")
+        .to_string();
+    assert!(
+        rendered.contains('3'),
+        "{engine:?}: warm-up rendered {rendered}"
+    );
+    let table = notebook.last_table.clone().expect("an expression turn ran");
+    let text_id = notebook.constructor("Text");
+    // Brings `IS`/`IP` into the session table.
+    let rendered = notebook
+        .expression("(2 :: Integer) ^ (70 :: Int) > 0")
+        .to_string();
+    assert!(
+        rendered.contains("true"),
+        "{engine:?}: warm-up rendered {rendered}"
+    );
+    let is_id = notebook.constructor("IS");
+    let ip_id = notebook.constructor("IP");
+    let in_id = notebook.constructor("IN");
+
+    // --- t <- runLLMTurn @Text ---
+    let (t_binder, t_hole) = suspend_typed_ask(
+        &mut notebook,
+        engine,
+        "t",
+        "(runLLMTurn @Text \"say something\" :: M Text)",
+    );
+    assert_eq!(notebook.session.parked_count(), 1);
+    if engine == EngineKind::Prepared {
+        let handles_parked = notebook.session.value_handle_count();
+        let roots_parked = notebook.session.persistent_roots_count();
+        let invalid = Value::Con(
+            text_id,
+            vec![
+                Value::Lit(Literal::LitByteArray(vec![0xff, 0xfe])),
+                Value::Lit(Literal::LitInt(0)),
+                Value::Lit(Literal::LitInt(2)),
+            ],
+        );
+        let refused = notebook
+            .session
+            .resume(t_hole.clone(), invalid)
+            .expect_err("invalid UTF-8 is not a Text");
+        assert!(
+            matches!(
+                refused,
+                ResidentError::Prepared(PreparedRuntimeError::AnswerShape { .. })
+            ),
+            "unexpected refusal: {refused}"
+        );
+        assert_eq!(notebook.session.parked_count(), 1);
+        assert_eq!(notebook.session.value_handle_count(), handles_parked);
+        assert_eq!(notebook.session.persistent_roots_count(), roots_parked);
+    }
+    let answer = "héllo, wörld"
+        .to_string()
+        .to_value(&table)
+        .expect("Text answer");
+    let outcome = notebook
+        .session
+        .resume(t_hole.clone(), answer)
+        .unwrap_or_else(|error| panic!("{engine:?}: resuming t failed: {error}"));
+    assert!(
+        matches!(outcome, ResidentOutcome::Completed { .. }),
+        "{engine:?}: {outcome:?}"
+    );
+    assert_eq!(notebook.session.parked_count(), 0);
+    notebook.injected.push(t_binder.module.clone());
+    let rendered = notebook.expression("T.length t").to_string();
+    assert!(
+        rendered.contains("12"),
+        "{engine:?}: T.length t rendered {rendered}"
+    );
+    let rendered = notebook.expression("T.toUpper t").to_string();
+    assert!(
+        rendered.contains("HÉLLO, WÖRLD"),
+        "{engine:?}: toUpper rendered {rendered}"
+    );
+
+    // --- n <- runLLMTurn @Integer, answered with a multi-limb IP ---
+    let (n_binder, n_hole) = suspend_typed_ask(
+        &mut notebook,
+        engine,
+        "n",
+        "(runLLMTurn @Integer \"how many\" :: M Integer)",
+    );
+    if engine == EngineKind::Prepared {
+        // One limb that fits `IS` is not a canonical `IP`.
+        let refused = notebook
+            .session
+            .resume(
+                n_hole.clone(),
+                Value::Con(
+                    ip_id,
+                    vec![Value::Lit(Literal::LitByteArray(
+                        7_u64.to_le_bytes().to_vec(),
+                    ))],
+                ),
+            )
+            .expect_err("a small IP is not canonical");
+        assert!(
+            matches!(
+                refused,
+                ResidentError::Prepared(PreparedRuntimeError::AnswerShape { .. })
+            ),
+            "unexpected refusal: {refused}"
+        );
+        assert_eq!(notebook.session.parked_count(), 1);
+    }
+    // 2^70 = limbs [0, 64] little-endian.
+    let limbs: Vec<u8> = [0_u64, 1 << 6]
+        .iter()
+        .flat_map(|l| l.to_le_bytes())
+        .collect();
+    let outcome = notebook
+        .session
+        .resume(
+            n_hole,
+            Value::Con(ip_id, vec![Value::Lit(Literal::LitByteArray(limbs))]),
+        )
+        .unwrap_or_else(|error| panic!("{engine:?}: resuming n failed: {error}"));
+    assert!(
+        matches!(outcome, ResidentOutcome::Completed { .. }),
+        "{engine:?}: {outcome:?}"
+    );
+    notebook.injected.push(n_binder.module.clone());
+    let rendered = notebook.expression("n `div` (2 ^ (60 :: Int))").to_string();
+    assert!(
+        rendered.contains("1024"),
+        "{engine:?}: n div rendered {rendered}"
+    );
+
+    // --- m <- runLLMTurn @Integer, answered with IS and with IN ---
+    let (m_binder, m_hole) = suspend_typed_ask(
+        &mut notebook,
+        engine,
+        "m",
+        "(runLLMTurn @Integer \"how few\" :: M Integer)",
+    );
+    let outcome = notebook
+        .session
+        .resume(
+            m_hole,
+            Value::Con(is_id, vec![Value::Lit(Literal::LitInt(-5))]),
+        )
+        .unwrap_or_else(|error| panic!("{engine:?}: resuming m failed: {error}"));
+    assert!(
+        matches!(outcome, ResidentOutcome::Completed { .. }),
+        "{engine:?}: {outcome:?}"
+    );
+    notebook.injected.push(m_binder.module.clone());
+    let rendered = notebook
+        .expression("m * n `div` (2 ^ (60 :: Int))")
+        .to_string();
+    assert!(
+        rendered.contains("-5120"),
+        "{engine:?}: m*n rendered {rendered}"
+    );
+    let _ = in_id;
+    assert_eq!(notebook.session.parked_count(), 0);
+}
+
+#[test]
+fn notebook_byte_answers_on_core() {
+    notebook_byte_answers(EngineKind::Core);
+}
+
+#[test]
+fn notebook_byte_answers_on_prepared_stg() {
+    notebook_byte_answers(EngineKind::Prepared);
+}
+
+/// The step-2 exit scenario end to end: a decl-plane function, a value-plane
+/// partial application of it, a typed ask parked while sibling work runs
+/// against both, a host-built resume, and a final turn that composes the
+/// declared function, the partial application, and the resumed binder
+/// together -- checking the value plane still resolves every binder
+/// afterward. Both engines run the exact same turns through the exact same
+/// `Notebook`.
+fn notebook_end_to_end(engine: EngineKind) {
+    use tidepool_bridge::Value;
+
+    let mut notebook = Notebook::new(engine);
+    assert_eq!(notebook.session.engine_kind(), engine);
+
+    // 1. A decl-plane function, visible to every later turn.
+    notebook.declare("addN :: Int -> Int -> Int\naddN n x = x + n\n");
+
+    // 2. A partial application of it, bound on the value plane; a later turn
+    // applies it.
+    let inc_binder = notebook.bind("inc <- pure (addN 1)");
+    assert_eq!(inc_binder.name, "inc");
+    let rendered = notebook.expression("inc 41").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: inc 41 rendered as {rendered}"
+    );
+
+    // Brings `True`/`False` into the session table for the host-built answer
+    // below, exactly as `notebook_suspension` and `notebook_data_answers` do.
+    let rendered = notebook.expression("not False").to_string();
+    assert!(
+        rendered.contains("true"),
+        "{engine:?}: not False rendered as {rendered}"
+    );
+    let true_id = notebook.constructor("True");
+
+    // 3. Park on a typed ask.
+    let (b_binder, hole) = suspend_typed_ask(
+        &mut notebook,
+        engine,
+        "b",
+        "(runLLMTurn @Bool \"q\" :: M Bool)",
+    );
+    assert_eq!(notebook.session.parked_count(), 1);
+
+    // 4. Sibling work while parked -- against both the partial application
+    // and the declared function -- leaves the frame parked.
+    let rendered = notebook.expression("inc 1").to_string();
+    assert!(
+        rendered.contains('2'),
+        "{engine:?}: inc 1 rendered as {rendered}"
+    );
+    assert_eq!(notebook.session.parked_count(), 1);
+
+    // 5. Resume with a host-built answer.
+    let outcome = notebook
+        .session
+        .resume(hole.clone(), Value::Con(true_id, Vec::new()))
+        .unwrap_or_else(|error| panic!("{engine:?}: resuming b with True failed: {error}"));
+    assert!(
+        matches!(outcome, ResidentOutcome::Completed { .. }),
+        "{engine:?}: the resumed b bind did not complete: {outcome:?}"
+    );
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    notebook.injected.push(b_binder.module.clone());
+
+    // 6. A later turn uses everything: the resumed binder, the partial
+    // application, and the declared function called directly.
+    let rendered = notebook.expression("if b then inc 9 else 0").to_string();
+    assert!(
+        rendered.contains("10"),
+        "{engine:?}: if b then inc 9 else 0 rendered as {rendered}"
+    );
+    let rendered = notebook.expression("addN 2 40").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: addN 2 40 rendered as {rendered}"
+    );
+    assert!(
+        notebook
+            .session
+            .current_binding_in(tidepool_codegen::scope::ScopeId::ROOT, "inc")
+            .is_some(),
+        "{engine:?}: inc is not bound"
+    );
+    assert!(
+        notebook
+            .session
+            .current_binding_in(tidepool_codegen::scope::ScopeId::ROOT, "b")
+            .is_some(),
+        "{engine:?}: b is not bound"
+    );
+
+    // 7. Engine-neutral counts, left where the turn found them.
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    assert_eq!(notebook.session.stowed_roots_count(), 0, "{engine:?}");
+}
+
+#[test]
+fn notebook_end_to_end_on_core() {
+    notebook_end_to_end(EngineKind::Core);
+}
+
+#[test]
+fn notebook_end_to_end_on_prepared_stg() {
+    notebook_end_to_end(EngineKind::Prepared);
 }

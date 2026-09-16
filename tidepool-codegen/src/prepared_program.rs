@@ -45,6 +45,7 @@ mod roots;
 pub use observe::{AddressOrigin, ObservationFailure};
 mod interner;
 pub use interner::DescriptorInterner;
+pub(crate) use interner::ExternalDescriptors;
 mod answer;
 mod run;
 pub use crate::resource_ledger::PreparedFrameEvidence;
@@ -294,10 +295,10 @@ pub struct CompiledProgram {
     /// with no top-level Bytes binding. Keys are logical bytes; values are the
     /// exact allocations whose addresses the emitter used.
     pub(crate) bytes: Arc<static_bytes::PinnedBytes>,
-    /// The external `ByteArray#` wrapper descriptor this program's code
-    /// allocates with (also in `descriptors`); host-built answers for this
-    /// program write their byte arrays through the same one.
-    pub(crate) bytes_array: Arc<ObjectDescriptor>,
+    /// The machine-shared external wrapper descriptors this program compiled
+    /// against (also in `descriptors`); the installing machine adopts the
+    /// first program's and refuses any later program carrying others.
+    pub(crate) externals: ExternalDescriptors,
     pub(crate) heap_top_specs: Vec<plan::HeapTopSpec>,
     /// Platform C-ABI adapter `(vmctx, result_out, managed_ref) -> status`.
     /// The target is generated code which calls Tail `prepared_enter`.
@@ -977,7 +978,7 @@ impl CompiledProgram {
             interned_constructors: plan.interned_constructors,
             byte_tops,
             bytes: plan.bytes,
-            bytes_array: plan.bytes_array,
+            externals: plan.externals,
             heap_top_specs: plan.heap_top_specs,
             force_adapter,
             callables,

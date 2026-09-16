@@ -454,16 +454,19 @@ impl<'code> PreparedMachine<'code> {
         drop(transaction);
         let statics = staged?;
         let compiled = program.get();
-        let constructors: HashSet<usize> = compiled
+        // Shared descriptors (interned constructors, external wrappers) have
+        // no owner; retiring this program leaves them.
+        let shared: HashSet<usize> = compiled
             .interned_constructors
             .iter()
             .map(|(_, descriptor)| descriptor.initial_header_word())
+            .chain(compiled.externals.headers())
             .collect();
         let owned_headers = compiled
             .descriptors
             .iter()
             .map(|descriptor| descriptor.initial_header_word())
-            .filter(|header| !constructors.contains(header))
+            .filter(|header| !shared.contains(header))
             .collect();
         let callable_headers = compiled
             .callables
@@ -512,7 +515,11 @@ impl<'code> PreparedMachine<'code> {
                     identity,
                     existing,
                 },
+                super::interner::AbsorbConflict::Externals => ExecutionError::ForeignExternals,
             })?;
+        staged_interner
+            .absorb_externals(&compiled.externals)
+            .map_err(|_| ExecutionError::ForeignExternals)?;
 
         // Reserve (capacity/contiguity, above) then verify EVERY declared
         // import before any other install side effect -- no statics
@@ -1622,24 +1629,20 @@ impl<'code> PreparedMachine<'code> {
     /// the cursor, the ledger and every root count unchanged.
     ///
     /// Byte arrays in the plan are allocated in the machine's external
-    /// ledger before any object is written and revoked again if anything
-    /// later fails; their wrapper objects use `owner`'s `ByteArray#`
-    /// descriptor, so the built value keeps `owner` live as any object that
-    /// program allocates would.
+    /// ledger before any object is written and released again if anything
+    /// later fails; their wrapper objects use the machine-shared `ByteArray#`
+    /// descriptor every installed program reads with.
     pub fn build_answer(
         &mut self,
         realm: RealmId,
         plan: &super::answer::AnswerPlan,
-        owner: ProgramId,
     ) -> Result<PreparedHandle, ExecutionError> {
         self.ensure_handle_access()?;
         let bytes_descriptor = Arc::clone(
             &self
-                .programs
-                .get(&owner)
-                .ok_or(ExecutionError::UnknownProgram(owner))?
-                .program
-                .get()
+                .interner
+                .shared_externals()
+                .ok_or_else(|| runtime_error(&self.machine, RuntimeError::BadPointer))?
                 .bytes_array,
         );
         let flattened = super::answer::FlattenedAnswer::resolve(
@@ -2665,7 +2668,7 @@ mod tests {
     /// Minimal closed CAF program returning a distinct nullary constructor,
     /// compiled against an explicit base so two of these can install side by
     /// side on one machine.
-    fn base_program(host_id: u64) -> CompiledProgram {
+    fn base_program(host_id: u64) -> tidepool_repr::execution_schema::LinkedProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         // One identity per host id: two programs on one machine may not
@@ -2701,9 +2704,7 @@ mod tests {
             body: 0,
         };
         let prepared = testing::prepare(wire).expect("base_program fixture");
-        let linked =
-            link_program(prepared, &MachineImports::default()).expect("base_program fixture links");
-        CompiledProgram::compile(&linked).expect("base_program fixture compiles")
+        link_program(prepared, &MachineImports::default()).expect("base_program fixture links")
     }
 
     #[test]
@@ -3177,14 +3178,17 @@ mod tests {
     #[test]
     fn two_closed_programs_share_one_machine_across_a_forced_collection() {
         let (mut machine, program_a) = PreparedMachine::new(
-            base_program(950),
+            CompiledProgram::compile(&base_program(950)).expect("A compiles"),
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
             },
         )
         .expect("first program installs");
+        let compiled_b = machine
+            .compile_for_install(&base_program(951))
+            .expect("B compiles against the machine interner");
         let program_b = machine
-            .install_program(base_program(951), ImportBindings::new())
+            .install_program(compiled_b, ImportBindings::new())
             .expect("second program installs alongside the first, on the same machine");
 
         let options = PreparedCallOptions {
@@ -3336,7 +3340,7 @@ mod tests {
     /// allocates 32 throwaway constructors (forcing a collection in a tiny
     /// nursery) before returning its own managed argument unchanged -- used
     /// as program B for T1.
-    fn managed_argument_consumer_program() -> CompiledProgram {
+    fn managed_argument_consumer_program() -> tidepool_repr::execution_schema::LinkedProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![RuntimeRep::LiftedRef],
@@ -3384,10 +3388,8 @@ mod tests {
             body,
         };
         let prepared = testing::prepare(wire).expect("managed_argument_consumer_program fixture");
-        let linked = link_program(prepared, &MachineImports::default())
-            .expect("managed_argument_consumer_program fixture links");
-        CompiledProgram::compile(&linked)
-            .expect("managed_argument_consumer_program fixture compiles")
+        link_program(prepared, &MachineImports::default())
+            .expect("managed_argument_consumer_program fixture links")
     }
 
     #[test]
@@ -3397,9 +3399,12 @@ mod tests {
             PreparedMachineOptions { nursery_bytes: 64 },
         )
         .expect("A installs");
-        let program_b = machine
-            .install_program(managed_argument_consumer_program(), ImportBindings::new())
-            .expect("B (64-byte-class nursery pressure via 32 allocations) installs alongside A");
+        let program_b = install_linked(
+            &mut machine,
+            &managed_argument_consumer_program(),
+            ImportBindings::new(),
+        )
+        .expect("B (64-byte-class nursery pressure via 32 allocations) installs alongside A");
 
         let call = PreparedCallOptions {
             observation_budget: RunOptions::default().observation_budget,
@@ -3487,7 +3492,7 @@ mod tests {
         // without needing a multi-gigabyte test program.
         crate::host_fns::set_max_heap_bytes_for_test(8);
         let (mut machine, program_a) = PreparedMachine::new(
-            base_program(990),
+            first(&base_program(990)),
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
             },
@@ -3502,7 +3507,9 @@ mod tests {
             .expect("A runs once before B's install is attempted");
         let a_roots_before = machine.persistent_roots_count(program_a);
         let total_roots_before = machine.total_persistent_roots();
-        let candidate = base_program(991);
+        let candidate = machine
+            .compile_for_install(&base_program(991))
+            .expect("B compiles for install");
         let candidate_descriptor = Arc::downgrade(&candidate.interned_constructors[0].1);
         let error = machine
             .install_program(candidate, ImportBindings::new())
@@ -3532,8 +3539,7 @@ mod tests {
             .expect("failed install leaves no pending collection failure");
         assert_eq!(machine.close_realm(RealmId::ROOT), (0, 0));
         assert!(machine.handle_root(handle).is_some());
-        machine
-            .install_program(base_program(992), ImportBindings::new())
+        install_linked(&mut machine, &base_program(992), ImportBindings::new())
             .expect("a new install succeeds without running an entry first");
         assert!(machine.release(handle));
 
@@ -3713,7 +3719,7 @@ mod tests {
     /// same-program top reference) and returns the call's own result in tail
     /// position (no separate `Return` needed -- `ExprFrame::Call` at body
     /// position already finishes the entry).
-    fn closure_caller_program() -> CompiledProgram {
+    fn closure_caller_program() -> tidepool_repr::execution_schema::LinkedProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![RuntimeRep::LiftedRef],
@@ -3738,9 +3744,8 @@ mod tests {
             body: 0,
         };
         let prepared = testing::prepare(wire).expect("closure_caller_program fixture");
-        let linked = link_program(prepared, &MachineImports::default())
-            .expect("closure_caller_program fixture links");
-        CompiledProgram::compile(&linked).expect("closure_caller_program fixture compiles")
+        link_program(prepared, &MachineImports::default())
+            .expect("closure_caller_program fixture links")
     }
 
     /// HISTORY: at S2 this test was a pinned `#[ignore]`d FINDING, not a
@@ -3773,11 +3778,14 @@ mod tests {
             PreparedMachineOptions { nursery_bytes: 128 },
         )
         .expect("A installs");
-        let program_b = machine
-            .install_program(closure_caller_program(), ImportBindings::new())
-            .expect(
-                "B installs alongside A, extending the shared descriptor space and stack-map chain",
-            );
+        let program_b = install_linked(
+            &mut machine,
+            &closure_caller_program(),
+            ImportBindings::new(),
+        )
+        .expect(
+            "B installs alongside A, extending the shared descriptor space and stack-map chain",
+        );
 
         let call = PreparedCallOptions {
             observation_budget: 0,
@@ -3842,7 +3850,7 @@ mod tests {
     /// second through a one-argument call site. A's `f` is a zero-argument
     /// function, so the call-site signature (argument reps and result
     /// contract) can never match A's exported one.
-    fn closure_miscaller_program() -> CompiledProgram {
+    fn closure_miscaller_program() -> tidepool_repr::execution_schema::LinkedProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![RuntimeRep::LiftedRef, RuntimeRep::LiftedRef],
@@ -3867,9 +3875,8 @@ mod tests {
             body: 0,
         };
         let prepared = testing::prepare(wire).expect("closure_miscaller_program fixture");
-        let linked = link_program(prepared, &MachineImports::default())
-            .expect("closure_miscaller_program fixture links");
-        CompiledProgram::compile(&linked).expect("closure_miscaller_program fixture compiles")
+        link_program(prepared, &MachineImports::default())
+            .expect("closure_miscaller_program fixture links")
     }
 
     /// X2: a foreign callee the machine knows but cannot serve at this call
@@ -3889,9 +3896,12 @@ mod tests {
             },
         )
         .expect("A installs");
-        let program_b = machine
-            .install_program(closure_miscaller_program(), ImportBindings::new())
-            .expect("B' installs alongside A");
+        let program_b = install_linked(
+            &mut machine,
+            &closure_miscaller_program(),
+            ImportBindings::new(),
+        )
+        .expect("B' installs alongside A");
         let call = PreparedCallOptions {
             observation_budget: 0,
             collect_before_observation: true,
@@ -3984,7 +3994,7 @@ mod tests {
     /// the demanded shape, so before G0 admission refused the whole program
     /// (`admission_admits_a_dynamic_callee_without_a_locally_shaped_function`
     /// pins the admission half; this fixture proves the runtime half).
-    fn scalar_dynamic_caller_program() -> CompiledProgram {
+    fn scalar_dynamic_caller_program() -> tidepool_repr::execution_schema::LinkedProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![RuntimeRep::LiftedRef],
@@ -4009,9 +4019,8 @@ mod tests {
             body: 0,
         };
         let prepared = testing::prepare(wire).expect("scalar dynamic caller fixture");
-        let linked = link_program(prepared, &MachineImports::default())
-            .expect("scalar dynamic caller fixture links");
-        CompiledProgram::compile(&linked).expect("scalar dynamic caller fixture compiles")
+        link_program(prepared, &MachineImports::default())
+            .expect("scalar dynamic caller fixture links")
     }
 
     /// G0: a dynamic callee whose demanded shape matches NO local function
@@ -4030,9 +4039,12 @@ mod tests {
         let function = machine
             .retain_top(program_a, ValueId(0))
             .expect("A's function top is retained as a value");
-        let program_b = machine
-            .install_program(scalar_dynamic_caller_program(), ImportBindings::new())
-            .expect("B installs: its dynamic call is admitted without a locally shaped function");
+        let program_b = install_linked(
+            &mut machine,
+            &scalar_dynamic_caller_program(),
+            ImportBindings::new(),
+        )
+        .expect("B installs: its dynamic call is admitted without a locally shaped function");
         let call = PreparedCallOptions {
             observation_budget: 0,
             collect_before_observation: false,
@@ -4130,7 +4142,9 @@ mod tests {
     /// still-unforced global DIRECTLY (`ValueRef::Global` callee) at
     /// `() -> LiftedRef`. B declares no function of that shape, so the call
     /// is served entirely by the dispatcher's enter-then-resolve fallback.
-    fn direct_import_caller_program(identity: SymbolIdentity) -> CompiledProgram {
+    fn direct_import_caller_program(
+        identity: SymbolIdentity,
+    ) -> tidepool_repr::execution_schema::LinkedProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![],
@@ -4160,8 +4174,7 @@ mod tests {
                 generation: 0,
             },
         );
-        let linked = link_program(prepared, &imports).expect("direct import caller fixture links");
-        CompiledProgram::compile(&linked).expect("direct import caller fixture compiles")
+        link_program(prepared, &imports).expect("direct import caller fixture links")
     }
 
     /// The foreign-resolution fallback applies the ENTERED callee. B calls
@@ -4184,12 +4197,12 @@ mod tests {
             .expect("A's unforced CAF is retained without running it");
         let mut imports = ImportBindings::new();
         imports.insert(thunk_to_closure_identity(), thunk);
-        let program_b = machine
-            .install_program(
-                direct_import_caller_program(thunk_to_closure_identity()),
-                imports,
-            )
-            .expect("B installs, importing A's unforced CAF");
+        let program_b = install_linked(
+            &mut machine,
+            &direct_import_caller_program(thunk_to_closure_identity()),
+            imports,
+        )
+        .expect("B installs, importing A's unforced CAF");
         let call = PreparedCallOptions {
             observation_budget: RunOptions::default().observation_budget,
             collect_before_observation: true,
@@ -4298,7 +4311,9 @@ mod tests {
     /// this program's own generated `prepared_enter` state machine, which
     /// recognizes nothing of its own and falls back to
     /// `prepared_resolve_enter` (X2's cross-program enter resolution).
-    fn x2b_enter_consumer_program(identity: SymbolIdentity) -> CompiledProgram {
+    fn x2b_enter_consumer_program(
+        identity: SymbolIdentity,
+    ) -> tidepool_repr::execution_schema::LinkedProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![],
@@ -4340,8 +4355,7 @@ mod tests {
                 generation: 0,
             },
         );
-        let linked = link_program(prepared, &imports).expect("x2b enter consumer fixture links");
-        CompiledProgram::compile(&linked).expect("x2b enter consumer fixture compiles")
+        link_program(prepared, &imports).expect("x2b enter consumer fixture links")
     }
 
     /// X2b: forcing a foreign, still-UNEVALUATED thunk import through a
@@ -4366,14 +4380,14 @@ mod tests {
             .expect("A's own unforced thunk top can be retained without running anything");
         let mut imports = ImportBindings::new();
         imports.insert(x2b_thunk_producer_identity(), handle_a);
-        let program_b = machine
-            .install_program(
-                x2b_enter_consumer_program(x2b_thunk_producer_identity()),
-                imports,
-            )
-            .expect(
-                "B installs, importing A's still-unforced thunk as a non-evaluated-required global",
-            );
+        let program_b = install_linked(
+            &mut machine,
+            &x2b_enter_consumer_program(x2b_thunk_producer_identity()),
+            imports,
+        )
+        .expect(
+            "B installs, importing A's still-unforced thunk as a non-evaluated-required global",
+        );
 
         let call = PreparedCallOptions {
             observation_budget: RunOptions::default().observation_budget,
@@ -4519,7 +4533,7 @@ mod tests {
         identity: SymbolIdentity,
         rep: RuntimeRep,
         required_evaluated: bool,
-    ) -> CompiledProgram {
+    ) -> tidepool_repr::execution_schema::LinkedProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![],
@@ -4555,8 +4569,7 @@ mod tests {
                 generation: 0,
             },
         );
-        let linked = link_program(prepared, &imports).expect("s3 import consumer fixture links");
-        CompiledProgram::compile(&linked).expect("s3 import consumer fixture compiles")
+        link_program(prepared, &imports).expect("s3 import consumer fixture links")
     }
 
     #[test]
@@ -4581,16 +4594,12 @@ mod tests {
         };
         let mut imports = ImportBindings::new();
         imports.insert(s3_field_producer_identity(), *handle_a);
-        let program_b = machine
-            .install_program(
-                s3_import_consumer_program(
-                    s3_field_producer_identity(),
-                    RuntimeRep::LiftedRef,
-                    true,
-                ),
-                imports,
-            )
-            .expect("B installs, importing A's Field as a required-evaluated global");
+        let program_b = install_linked(
+            &mut machine,
+            &s3_import_consumer_program(s3_field_producer_identity(), RuntimeRep::LiftedRef, true),
+            imports,
+        )
+        .expect("B installs, importing A's Field as a required-evaluated global");
 
         let before = machine
             .run_entry_retained(program_b, ValueId(0), &[], call, RealmId::ROOT)
@@ -4995,7 +5004,9 @@ mod tests {
     /// calls, allocating 32 throwaway constructors under a tiny nursery
     /// (forcing a real collection FROM WITHIN this same call, before the
     /// final read of the import slot) before reading and returning it.
-    fn s3_closure_import_holder_program(identity: SymbolIdentity) -> CompiledProgram {
+    fn s3_closure_import_holder_program(
+        identity: SymbolIdentity,
+    ) -> tidepool_repr::execution_schema::LinkedProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![],
@@ -5061,9 +5072,7 @@ mod tests {
                 generation: 0,
             },
         );
-        let linked =
-            link_program(prepared, &imports).expect("s3 closure import holder fixture links");
-        CompiledProgram::compile(&linked).expect("s3 closure import holder fixture compiles")
+        link_program(prepared, &imports).expect("s3 closure import holder fixture links")
     }
 
     /// S3 test (2): A produces a closure (function-shaped object, not data).
@@ -5095,12 +5104,12 @@ mod tests {
         };
         let mut imports = ImportBindings::new();
         imports.insert(s3_closure_producer_identity(), *handle_f);
-        let program_b = machine
-            .install_program(
-                s3_closure_import_holder_program(s3_closure_producer_identity()),
-                imports,
-            )
-            .expect("B installs, importing A's closure as a non-evaluated-required global");
+        let program_b = install_linked(
+            &mut machine,
+            &s3_closure_import_holder_program(s3_closure_producer_identity()),
+            imports,
+        )
+        .expect("B installs, importing A's closure as a non-evaluated-required global");
 
         let before = machine
             .run_entry_retained(
@@ -5222,16 +5231,16 @@ mod tests {
         };
         let mut imports = ImportBindings::new();
         imports.insert(s3_closure_producer_identity(), *handle_f);
-        let program_b = machine
-            .install_program(
-                s3_import_consumer_program(
-                    s3_closure_producer_identity(),
-                    RuntimeRep::LiftedRef,
-                    true,
-                ),
-                imports,
-            )
-            .expect("a function object is in WHNF and satisfies required_evaluated");
+        let program_b = install_linked(
+            &mut machine,
+            &s3_import_consumer_program(
+                s3_closure_producer_identity(),
+                RuntimeRep::LiftedRef,
+                true,
+            ),
+            imports,
+        )
+        .expect("a function object is in WHNF and satisfies required_evaluated");
         let read = machine
             .run_entry_retained(program_b, ValueId(0), &[], call, RealmId::ROOT)
             .expect("B reads its function import");
@@ -5273,16 +5282,16 @@ mod tests {
         };
         let mut imports = ImportBindings::new();
         imports.insert(s3_field_producer_identity(), *handle_a);
-        let error = machine
-            .install_program(
-                s3_import_consumer_program(
-                    s3_field_producer_identity(),
-                    RuntimeRep::UnliftedRef,
-                    false,
-                ),
-                imports,
-            )
-            .expect_err("a declared UnliftedRef import must not accept a LiftedRef handle");
+        let error = install_linked(
+            &mut machine,
+            &s3_import_consumer_program(
+                s3_field_producer_identity(),
+                RuntimeRep::UnliftedRef,
+                false,
+            ),
+            imports,
+        )
+        .expect_err("a declared UnliftedRef import must not accept a LiftedRef handle");
         assert!(
             matches!(
                 error,
@@ -5340,12 +5349,12 @@ mod tests {
         let identity = testing::identity("S3ImportMismatch", "unforced");
         let mut imports = ImportBindings::new();
         imports.insert(identity.clone(), *unforced);
-        let error = machine
-            .install_program(
-                s3_import_consumer_program(identity, RuntimeRep::LiftedRef, true),
-                imports,
-            )
-            .expect_err("an unforced, never-entered thunk must not satisfy required_evaluated");
+        let error = install_linked(
+            &mut machine,
+            &s3_import_consumer_program(identity, RuntimeRep::LiftedRef, true),
+            imports,
+        )
+        .expect_err("an unforced, never-entered thunk must not satisfy required_evaluated");
         assert!(
             matches!(
                 error,
@@ -5373,16 +5382,12 @@ mod tests {
             },
         )
         .expect("A installs");
-        let error = machine
-            .install_program(
-                s3_import_consumer_program(
-                    s3_field_producer_identity(),
-                    RuntimeRep::LiftedRef,
-                    false,
-                ),
-                ImportBindings::new(),
-            )
-            .expect_err("a declared import with no supplied handle must be refused");
+        let error = install_linked(
+            &mut machine,
+            &s3_import_consumer_program(s3_field_producer_identity(), RuntimeRep::LiftedRef, false),
+            ImportBindings::new(),
+        )
+        .expect_err("a declared import with no supplied handle must be refused");
         assert!(
             matches!(error, ExecutionError::UnknownPreparedHandle),
             "expected the typed UnknownPreparedHandle error, got {error:?}"
@@ -5399,7 +5404,9 @@ mod tests {
     /// install time (never through generated code) and its import field must
     /// already resolve when `initialize_heap_tops` runs. The entry (this
     /// same top) simply returns it.
-    fn s3b_pair_import_holder_program(identity: SymbolIdentity) -> CompiledProgram {
+    fn s3b_pair_import_holder_program(
+        identity: SymbolIdentity,
+    ) -> tidepool_repr::execution_schema::LinkedProgram {
         let mut wire = testing::wire_program();
         wire.globals = vec![GlobalDecl {
             identity: identity.clone(),
@@ -5465,9 +5472,7 @@ mod tests {
                 generation: 0,
             },
         );
-        let linked =
-            link_program(prepared, &imports).expect("s3b pair import holder fixture links");
-        CompiledProgram::compile(&linked).expect("s3b pair import holder fixture compiles")
+        link_program(prepared, &imports).expect("s3b pair import holder fixture links")
     }
 
     /// S3b test (1): a top-level constructor binding -- not a `Thunk` or
@@ -5499,15 +5504,15 @@ mod tests {
         };
         let mut imports = ImportBindings::new();
         imports.insert(s3_field_producer_identity(), *handle_a);
-        let program_b = machine
-            .install_program(
-                s3b_pair_import_holder_program(s3_field_producer_identity()),
-                imports,
-            )
-            .expect(
-                "B installs: its import-holding top-level Pair is a heap top resolved at \
-                 install time, after the import slot is already published",
-            );
+        let program_b = install_linked(
+            &mut machine,
+            &s3b_pair_import_holder_program(s3_field_producer_identity()),
+            imports,
+        )
+        .expect(
+            "B installs: its import-holding top-level Pair is a heap top resolved at \
+             install time, after the import slot is already published",
+        );
 
         let pair = machine
             .run_entry_retained(program_b, ValueId(0), &[], call, RealmId::ROOT)
@@ -5587,7 +5592,9 @@ mod tests {
     /// with A at all, only the import. Its entry does a default-only
     /// algebraic `Case` on the imported, required-evaluated constructor and
     /// returns a LOCAL scalar from the default branch.
-    fn s3b_default_only_case_consumer_program(identity: SymbolIdentity) -> CompiledProgram {
+    fn s3b_default_only_case_consumer_program(
+        identity: SymbolIdentity,
+    ) -> tidepool_repr::execution_schema::LinkedProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![],
@@ -5639,12 +5646,7 @@ mod tests {
                 generation: 0,
             },
         );
-        let linked =
-            link_program(prepared, &imports).expect("s3b default-only case consumer fixture links");
-        CompiledProgram::compile(&linked).expect(
-            "s3b default-only case consumer fixture compiles standalone, with no shared \
-             interner",
-        )
+        link_program(prepared, &imports).expect("s3b default-only case consumer fixture links")
     }
 
     /// S3b test (2): `emit_algebraic_dispatch`'s default-only shortcut (no
@@ -5676,15 +5678,15 @@ mod tests {
         };
         let mut imports = ImportBindings::new();
         imports.insert(s3_field_producer_identity(), *handle_a);
-        let program_b = machine
-            .install_program(
-                s3b_default_only_case_consumer_program(s3_field_producer_identity()),
-                imports,
-            )
-            .expect(
-                "B installs standalone -- it shares no constructor descriptor with A, only \
-                 the default-only case shortcut lets its generated Case dispatch on the import",
-            );
+        let program_b = install_linked(
+            &mut machine,
+            &s3b_default_only_case_consumer_program(s3_field_producer_identity()),
+            imports,
+        )
+        .expect(
+            "B installs standalone -- it shares no constructor descriptor with A, only \
+             the default-only case shortcut lets its generated Case dispatch on the import",
+        );
 
         let result = machine
             .run_entry(program_b, ValueId(0), &[], call, RealmId::ROOT)
@@ -5783,7 +5785,7 @@ mod tests {
         nil_host_id: u64,
         cons_host_id: u64,
         length: u32,
-    ) -> CompiledProgram {
+    ) -> tidepool_repr::execution_schema::LinkedProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![],
@@ -5834,9 +5836,8 @@ mod tests {
             body,
         };
         let prepared = testing::prepare(wire).expect("stack_map_chain_list_program fixture");
-        let linked = link_program(prepared, &MachineImports::default())
-            .expect("stack_map_chain_list_program fixture links");
-        CompiledProgram::compile(&linked).expect("stack_map_chain_list_program fixture compiles")
+        link_program(prepared, &MachineImports::default())
+            .expect("stack_map_chain_list_program fixture links")
     }
 
     /// The length-`n` `Cons` chain `program` returns, read back through
@@ -5908,16 +5909,16 @@ mod tests {
         // collection the test used to observe was result retention after B
         // had returned -- a window in which a truncated chain is harmless.)
         let (mut machine, program_a) = PreparedMachine::new(
-            base_program(995),
+            first(&base_program(995)),
             PreparedMachineOptions { nursery_bytes: 256 },
         )
         .expect("A installs first, occupying the chain's first stack-map slot");
-        let program_b = machine
-            .install_program(
-                stack_map_chain_list_program("S2bChain", 920, 921, 40),
-                ImportBindings::new(),
-            )
-            .expect("B installs second, extending the shared stack-map chain");
+        let program_b = install_linked(
+            &mut machine,
+            &stack_map_chain_list_program("S2bChain", 920, 921, 40),
+            ImportBindings::new(),
+        )
+        .expect("B installs second, extending the shared stack-map chain");
 
         let call_bridged = PreparedCallOptions {
             observation_budget: RunOptions::default().observation_budget,
@@ -5991,9 +5992,12 @@ mod tests {
             },
         )
         .expect("A installs first, occupying the chain's first static-region slot");
-        let program_b = machine
-            .install_program(managed_argument_consumer_program(), ImportBindings::new())
-            .expect("B installs second, extending the shared static-region set");
+        let program_b = install_linked(
+            &mut machine,
+            &managed_argument_consumer_program(),
+            ImportBindings::new(),
+        )
+        .expect("B installs second, extending the shared static-region set");
 
         let call = PreparedCallOptions {
             observation_budget: 0,
@@ -6162,7 +6166,7 @@ mod tests {
             fields: Vec::new(),
         };
         assert!(matches!(
-            machine.build_answer(realm, &unknown, program),
+            machine.build_answer(realm, &unknown),
             Err(ExecutionError::Answer(
                 AnswerBuildError::UnknownConstructor(DataConId(4242))
             ))
@@ -6175,7 +6179,7 @@ mod tests {
             }],
         };
         assert!(matches!(
-            machine.build_answer(realm, &wrong_arity, program),
+            machine.build_answer(realm, &wrong_arity),
             Err(ExecutionError::Answer(AnswerBuildError::FieldCount {
                 expected: 0,
                 actual: 1,
@@ -6191,7 +6195,7 @@ mod tests {
             fields: Vec::new(),
         };
         let handle = machine
-            .build_answer(realm, &unit, program)
+            .build_answer(realm, &unit)
             .expect("the CAF program's Unit constructor builds");
         assert_eq!(machine.handle_realm(handle), Some(realm));
         assert_eq!(machine.handle_count(), handles_before + 1);
@@ -6255,7 +6259,7 @@ mod tests {
             }],
         };
         let handle = machine
-            .build_answer(realm, &good, program)
+            .build_answer(realm, &good)
             .expect("the Field constructor builds with its Int(64) field");
         assert_eq!(machine.handle_realm(handle), Some(realm));
         assert_eq!(machine.handle_count(), handles_before + 1);
@@ -6287,7 +6291,7 @@ mod tests {
             }],
         };
         assert!(matches!(
-            machine.build_answer(realm, &bad, program),
+            machine.build_answer(realm, &bad),
             Err(ExecutionError::Answer(AnswerBuildError::Field {
                 host_id: DataConId(910),
                 index: 0,
@@ -6423,7 +6427,7 @@ mod tests {
             ],
         };
         assert!(matches!(
-            machine.build_answer(realm, &bad, program),
+            machine.build_answer(realm, &bad),
             Err(ExecutionError::Answer(AnswerBuildError::Field {
                 host_id: DataConId(921),
                 index: 2,
@@ -6447,7 +6451,7 @@ mod tests {
             ],
         };
         let handle = machine
-            .build_answer(realm, &good, program)
+            .build_answer(realm, &good)
             .expect("the Text-shaped constructor builds over its byte array");
         assert_eq!(
             machine.machine.external_storage_stats().live_objects,
@@ -6493,6 +6497,27 @@ mod tests {
         assert!(machine.release(handle));
         assert_eq!(machine.handle_count(), handles_before);
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// Compile a fixture as the first program of a fresh machine
+    /// (`PreparedMachine::new` adopts its externals into the machine-wide
+    /// interner).
+    fn first(linked: &tidepool_repr::execution_schema::LinkedProgram) -> CompiledProgram {
+        CompiledProgram::compile(linked).expect("first program compiles")
+    }
+
+    /// Compile a fixture against an existing machine's interner and install
+    /// it as a later program. Every second-and-later install must go
+    /// through `compile_for_install` so its externals are the machine's.
+    fn install_linked(
+        machine: &mut PreparedMachine<'_>,
+        linked: &tidepool_repr::execution_schema::LinkedProgram,
+        imports: ImportBindings,
+    ) -> Result<ProgramId, ExecutionError> {
+        let compiled = machine
+            .compile_for_install(linked)
+            .expect("program compiles for install");
+        machine.install_program(compiled, imports)
     }
 
     /// The same program `machine()` installs, as a linked program a later
@@ -6636,16 +6661,16 @@ mod tests {
         };
         let mut imports = ImportBindings::new();
         imports.insert(s3_closure_producer_identity(), *handle_f);
-        let program_b = machine
-            .install_program(
-                s3_import_consumer_program(
-                    s3_closure_producer_identity(),
-                    RuntimeRep::LiftedRef,
-                    true,
-                ),
-                imports,
-            )
-            .expect("B installs against A's closure");
+        let program_b = install_linked(
+            &mut machine,
+            &s3_import_consumer_program(
+                s3_closure_producer_identity(),
+                RuntimeRep::LiftedRef,
+                true,
+            ),
+            imports,
+        )
+        .expect("B installs against A's closure");
         machine.pin(program_b).expect("B is installed");
         assert!(machine.release(*handle_f));
 

@@ -29,18 +29,107 @@ pub(super) enum AbsorbConflict {
         identity: Box<SymbolIdentity>,
         existing: Box<SymbolIdentity>,
     },
+    /// The program's external wrapper descriptors are not this machine's:
+    /// it was compiled against another interner.
+    Externals,
+}
+
+/// The machine's one set of external wrapper descriptors. A `ByteArray#`,
+/// boxed array or `MutVar#` is authenticated by header identity against the
+/// descriptor the *reading* code was compiled with, so every program on a
+/// machine must share these three exactly as it shares constructor
+/// descriptors; a value one program built is then readable by every later
+/// one (a `Text` bound in one turn and used in the next, a host-built answer).
+#[derive(Clone)]
+pub(crate) struct ExternalDescriptors {
+    pub(crate) boxed_array: Arc<ObjectDescriptor>,
+    /// Fixed one-slot mutable cells share the boxed payload ledger, not array
+    /// identity. Hosts authenticate this distinct descriptor before access.
+    pub(crate) mut_var: Arc<ObjectDescriptor>,
+    pub(crate) bytes_array: Arc<ObjectDescriptor>,
+}
+
+impl ExternalDescriptors {
+    fn mint(target: &TargetDescriptor) -> Result<Self, CompileError> {
+        use tidepool_heap::external_storage::ExternalStorageKind;
+        Ok(Self {
+            boxed_array: Arc::new(ObjectDescriptor::external(
+                ExternalStorageKind::BoxedArray,
+                target,
+            )?),
+            mut_var: Arc::new(ObjectDescriptor::external(
+                ExternalStorageKind::BoxedArray,
+                target,
+            )?),
+            bytes_array: Arc::new(ObjectDescriptor::external(
+                ExternalStorageKind::Bytes,
+                target,
+            )?),
+        })
+    }
+
+    fn same_as(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.boxed_array, &other.boxed_array)
+            && Arc::ptr_eq(&self.mut_var, &other.mut_var)
+            && Arc::ptr_eq(&self.bytes_array, &other.bytes_array)
+    }
+
+    /// Header words of the three descriptors.
+    pub(crate) fn headers(&self) -> [usize; 3] {
+        [
+            self.boxed_array.initial_header_word(),
+            self.mut_var.initial_header_word(),
+            self.bytes_array.initial_header_word(),
+        ]
+    }
 }
 
 /// One shared descriptor per constructor identity, with the declaration it
 /// was minted from so a conflicting later declaration is refused rather
-/// than silently aliased.
+/// than silently aliased; and the one set of external wrapper descriptors.
 #[derive(Clone, Default)]
 pub struct DescriptorInterner {
     constructors: BTreeMap<SymbolIdentity, (ConstructorDecl, Arc<ObjectDescriptor>)>,
     by_host: BTreeMap<DataConId, SymbolIdentity>,
+    externals: Option<ExternalDescriptors>,
 }
 
 impl DescriptorInterner {
+    /// The machine's external wrapper descriptors, minted on first use.
+    pub(super) fn externals(
+        &mut self,
+        target: &TargetDescriptor,
+    ) -> Result<ExternalDescriptors, CompileError> {
+        if let Some(externals) = &self.externals {
+            return Ok(externals.clone());
+        }
+        let minted = ExternalDescriptors::mint(target)?;
+        self.externals = Some(minted.clone());
+        Ok(minted)
+    }
+
+    /// The external descriptors every installed program shares; `None`
+    /// before the first program compiles against this interner.
+    pub(crate) fn shared_externals(&self) -> Option<&ExternalDescriptors> {
+        self.externals.as_ref()
+    }
+
+    /// Adopt a program's external descriptors: the first program's become
+    /// the machine's; every later program must carry exactly those.
+    pub(super) fn absorb_externals(
+        &mut self,
+        incoming: &ExternalDescriptors,
+    ) -> Result<(), AbsorbConflict> {
+        match &self.externals {
+            None => {
+                self.externals = Some(incoming.clone());
+                Ok(())
+            }
+            Some(existing) if existing.same_as(incoming) => Ok(()),
+            Some(_) => Err(AbsorbConflict::Externals),
+        }
+    }
+
     /// The descriptor for `declaration`: the already-interned one when this
     /// identity was minted before with an identical declaration, a fresh one
     /// otherwise. A different declaration under the same identity is

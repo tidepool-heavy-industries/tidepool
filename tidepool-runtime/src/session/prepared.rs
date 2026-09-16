@@ -183,6 +183,7 @@ impl PreparedRuntimeError {
                 | ExecutionError::ImportShape { .. }
                 | ExecutionError::DescriptorShape { .. }
                 | ExecutionError::HostIdConflict { .. }
+                | ExecutionError::ForeignExternals
                 | ExecutionError::UnknownProgram(_)
                 | ExecutionError::UnknownContinuation(_)
                 | ExecutionError::Answer(_)
@@ -1348,16 +1349,15 @@ impl PreparedEngine {
         value: &Value,
     ) -> Result<PreparedResumed, PreparedRuntimeError> {
         let plan = self.answer_plan(id, value)?;
-        let (realm, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
+        let (realm, _) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
             ExecutionError::UnknownContinuation(id),
         ))?;
-        let owner = evidence.owner;
         if self.machine.realm_cancel_handle(realm).is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
         let answer = self
             .machine
-            .build_answer(realm, &plan, owner)
+            .build_answer(realm, &plan)
             .map_err(PreparedRuntimeError::Run)?;
         self.resume_parked(id, answer)
     }

@@ -92,6 +92,8 @@ pub enum ExecutionError {
     },
     #[error("constructor {identity:?} is declared differently from the descriptor this machine already shares for it")]
     DescriptorShape { identity: Box<SymbolIdentity> },
+    #[error("the program was compiled against another machine's external wrapper descriptors")]
+    ForeignExternals,
     #[error(transparent)]
     Unsupported(#[from] Unsupported),
     #[error("{cause}", cause = .0.cause)]

@@ -67,7 +67,12 @@ fn install_caller(machine: &mut PreparedMachine<'_>, demand: Signature) -> Progr
             .collect(),
         0,
     )];
-    let program = compile(wire);
+    let linked = link_program(
+        testing::prepare(wire).expect("valid fixture"),
+        &MachineImports::default(),
+    )
+    .unwrap();
+    let program = machine.compile_for_install(&linked).unwrap();
     machine
         .install_program(program, ImportBindings::new())
         .unwrap()
@@ -529,10 +534,16 @@ fn foreign_excess_can_continue_in_a_third_program() {
         PreparedMachineOptions { nursery_bytes: 128 },
     )
     .unwrap();
-    let third = compile(owner(ResultContract::Returns(vec![
-        RuntimeRep::Int(64),
-        RuntimeRep::LiftedRef,
-    ])));
+    let third_linked = link_program(
+        testing::prepare(owner(ResultContract::Returns(vec![
+            RuntimeRep::Int(64),
+            RuntimeRep::LiftedRef,
+        ])))
+        .expect("valid fixture"),
+        &MachineImports::default(),
+    )
+    .unwrap();
+    let third = machine.compile_for_install(&third_linked).unwrap();
     let c = machine
         .install_program(third, ImportBindings::new())
         .unwrap();
