@@ -117,15 +117,37 @@ row's declared `DataConId` (`prepared.rs:363-373`). Both are the same
 `varId`-minted bridge id (`execution_schema.rs:290-292`), so no translation is
 needed and `answer_plan`/`lower_answer` are unchanged.
 
-## Decision 4 — deferred: `Value`-carrying replies
+## Decision 4 — taken (2026-09-16): `Value`-carrying replies use a leaf adapter
+
+Correction to the original premise: `Value` itself classifies as an ordinary
+`TypeNode::Data` (module `Tidepool.Aeson.Value`; `Array` is `[Value]`, so no
+`Vector`). Only its `Object` row is unconstructible: `type KeyMap v = Map Key v`
+expands through `coreView` to `Data.Map.Internal.Map`, refused at
+`TypePolicy.hs:243-248`. Scalar `Value`s (`String`, `Bool`, `Null`) and
+`Nothing`/`Left` already build; `Number` (`Scientific`, strict unpacked fields)
+and `Object` refuse with `AnswerUnconstructible`, frame intact.
+
+Decision (Claude, at the user's direction, sol not in the loop): option 1 as
+a **leaf adapter**. `lower_answer` treats a `TypeNode::Data` whose family is
+`Tidepool.Aeson.Value.Value` as one leaf: the host renders the bridge value to
+JSON text, builds it as the byte-backed `Text` `lower_text` already produces,
+enters the program's `__decodeValue :: Text -> Either Text Value` root (the
+same `eitherDecodeValue` every program can already call; a third auxiliary
+root beside `__prepared`/`__resume`, admitted by name in `Main.hs`'s
+`prepareArtifacts` list, no schema change), and splices the returned handle
+into the outer answer as an `AnswerPlan::Handle` field. All adapter leaves are
+materialized and rooted before the outer structure allocates; a `Left`, or a
+refusal anywhere, releases them and leaves the frame parked. The host builder's
+type vocabulary stays closed; `Map`'s balance invariants are the program's.
+
+The rest of this section is the original analysis, kept for the record.
 
 `kvGet :: Maybe Value` (`effect_defs.rs:1113`), `httpGet :: Either HttpError
-Value` (`effect_defs.rs:806`) and `ask :: Value` classify as
-`TypeNode::Unconstructible`: Aeson's `Value` nests `KeyMap` (a newtype, refused
-at `TypePolicy.hs:124`) over `Data.Map.Internal.Map` (refused at
-`TypePolicy.hs:243-248`) and `Vector`. `lower_answer` then returns
-`AnswerUnconstructible` (`prepared.rs:400-405`) — a clean refusal with the frame
-intact, not a crash.
+Value` (`effect_defs.rs:806`) and `ask :: Value` were described as
+`TypeNode::Unconstructible` because Aeson's `Value` nests `KeyMap` over
+`Data.Map.Internal.Map` (refused at `TypePolicy.hs:243-248`). `lower_answer`
+then returns `AnswerUnconstructible` (`prepared.rs:400-405`) — a clean refusal
+with the frame intact, not a crash.
 
 Two options, both one-way doors:
 
