@@ -28,8 +28,8 @@ Landed on the machine side. Interfaces as built:
   rejection). `collect_major(Quiescent)` consumes the token, re-checks, runs
   ordinary collection, marks, retires. The allocation trigger cannot mint one.
 - `InstalledProgram` records what install minted for the program: its static
-  region, the descriptor headers it owns (`owned_headers`), its callable
-  headers, and whether it has pinned byte storage. Ownership is per program;
+  region, the descriptor headers it owns (`owned_headers`), and its callable
+  headers. Ownership is per program;
   a header owned by two programs is not shared (each program owns its own
   enterable descriptors), so no header-to-owners map was needed. Interned
   constructors have no owner and are never retired.
@@ -39,8 +39,12 @@ Landed on the machine side. Interfaces as built:
   `ObservationHeap::trace_step` classifies a word as `Traced::Static
   { region }` (marks the region's program, stops) or `Traced::Object
   { header, children }` (marks the header's owner, continues). The mark is
-  non-moving and forces nothing. Programs with byte storage are pinned and
-  reported (edge (c) deferred). There is no census: a descriptor row is
+  non-moving and forces nothing. Edge (c) is closed: every literal `Addr#`
+  is interned once into one permanent, content-keyed machine-wide pool
+  (`MachineState`'s `PinnedBytes`, folded from each installed program's own
+  view at install -- see `PreparedMachine::install_staged`), so a program's
+  own literal storage is no longer a liveness edge and a program with no
+  other root retires like any other. There is no census: a descriptor row is
   retired iff its owner retires, which is sound because owned descriptors are
   only ever reached through their owner's objects, and a reachable owned
   object keeps its owner live.
@@ -49,7 +53,7 @@ Landed on the machine side. Interfaces as built:
   descriptor-space admission (`DescriptorSpace::retire_owner`), the stack-map
   registry by identity, the static region and literal pool; the block, the
   receipt entry and the code drop with the program.
-- `RetirementReceipt { programs, block_words, pinned_by_bytes, old_bytes }`
+- `RetirementReceipt { programs, block_words, deferred, old_bytes, compacted_bytes }`
   and `ResidencyCounts` (programs, block words, persistent roots, handles,
   parked, stack-map links, static regions, descriptor/callable/enter rows).
   `pin`/`unpin` hold a program across the install-to-bind gap.
