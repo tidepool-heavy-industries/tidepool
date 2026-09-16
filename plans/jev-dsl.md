@@ -48,6 +48,11 @@ and the proposed record DSL. They assume the effect exists and are not compiled.
 with five potential LSP-assisted notebook workflows: symptom tracing, focused
 verification, implementation reuse, migration archaeology, and reproducer selection.
 
+[Core Shoal semantic-control examples](jev-core-shoal-uses.md) pair proposed
+Servant-style Haskell usage with representative Jev wire requests for investigation
+compilation, code-graph traversal, swarm traffic, evidence construction, adaptive
+verification, semantic stopping, and cheap supervision.
+
 [Decision-frontier experiments](../jev-integration/FRONTIER-EXPERIMENTS.md) now
 bound the architectural split with live calls. Jev handled 255-way six-field
 selection, explicit absence, seven-edge semantic path validation, temporal

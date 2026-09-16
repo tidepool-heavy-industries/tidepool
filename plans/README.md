@@ -10,6 +10,8 @@ archive).
 
 - [Jev effect and Haskell DSL](jev-dsl.md): recorded design decisions and API
   uncertainties; isolated experiments live in the `jev-integration` workspace crate.
+  Its [core Shoal examples](jev-core-shoal-uses.md) show paired Haskell DSL and
+  Jev request sketches for the intended semantic-control-plane capabilities.
 - [Shoal implementation handoff](../NEXT.md): complete the programmable foundation
   and a usable workspace orchestration package. Model/context selection, frozen
   customization, routes, scoped observations, launch previews and the executable
