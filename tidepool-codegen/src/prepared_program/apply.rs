@@ -43,39 +43,34 @@ impl Dispatchers {
             .map(|(signature, function)| (signature.as_ref(), *function))
     }
 
-    pub(super) fn exports(&self, plan: &ProgramPlan<'_>) -> Vec<resolve::CallableExport> {
-        let headers = plan
-            .functions
-            .values()
-            .map(|f| (f.descriptor.initial_header_word(), f.signature, 0))
-            .chain(plan.pap_layouts.iter().map(|(&(id, pending), pap)| {
-                (
-                    pap.descriptor.initial_header_word(),
-                    plan.functions[&id].signature,
-                    pending,
-                )
-            }));
-        let mut exports = Vec::new();
-        for (header, entry, pending) in headers {
-            for (demand, function) in self.iter() {
-                if classify(entry, pending, demand).is_some() {
-                    exports.push(resolve::CallableExport {
-                        header,
-                        function,
-                        signature: demand.clone(),
-                    });
-                }
-            }
-        }
-        exports
-    }
-
     fn demand_address(&self, signature: &Signature) -> Result<i64, super::CompileError> {
         self.entries
             .get_key_value(signature)
             .map(|(key, _)| key.as_ref() as *const Signature as i64)
             .ok_or_else(|| super::CompileError::MissingDemand(signature.clone()))
     }
+}
+
+/// The zero-argument lifted demand `[] -> LiftedRef` applied to a function
+/// or PAP with at least one remaining argument returns the entered callee
+/// unchanged, which is exactly what `prepared_enter` returns for an evaluated
+/// callee. When the two native signatures agree, owners offer that demand
+/// through `prepared_enter` instead of generating a dispatcher whose header
+/// chain spans every function and PAP layout. A program that itself demands
+/// the shape (a zero-argument source call, or an exact offer of a
+/// zero-argument function) still generates the dispatcher.
+fn zero_argument_lift() -> Signature {
+    Signature {
+        arguments: Vec::new(),
+        results: super::ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+    }
+}
+
+fn enter_serves_zero_argument_lift(
+    profile: &NativeAbiProfile,
+) -> Result<bool, super::CompileError> {
+    let abi = EntryAbi::lower_internal(profile, &zero_argument_lift(), EnvironmentMode::Captured)?;
+    Ok(abi.cranelift_signature(profile, CallConv::Tail)? == super::entry::signature())
 }
 
 /// A flattened partial application of an original function. `pending` counts
@@ -206,6 +201,7 @@ pub(super) fn declare_dispatchers(
     pipeline: &mut CodegenPipeline,
 ) -> Result<Dispatchers, super::CompileError> {
     let result_instances = super::plan::result_instances(plan.program);
+    let enter_lifts = enter_serves_zero_argument_lift(profile)?;
     let mut demanded = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for declaration in plan.program.operations() {
@@ -263,7 +259,10 @@ pub(super) fn declare_dispatchers(
                     demanded.push(exact);
                 }
             }
-            for supplied in 0..remaining.len() {
+            // `supplied == 0` is the zero-argument lift `prepared_enter`
+            // serves (see `zero_argument_lift`).
+            let first = usize::from(enter_lifts);
+            for supplied in first..remaining.len() {
                 let partial = Signature {
                     arguments: remaining[..supplied].to_vec(),
                     results: super::ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
@@ -328,7 +327,7 @@ pub(super) fn declare_dispatchers(
 pub(super) fn emit_dispatchers(
     plan: &ProgramPlan<'_>,
     dispatchers: &Dispatchers,
-    functions: &BTreeMap<(ValueId, super::ResultContract), FuncId>,
+    functions: &BTreeMap<ValueId, BTreeMap<super::ResultContract, FuncId>>,
     profile: &NativeAbiProfile,
     prepared_gc: FuncId,
     prepared_poll: FuncId,
@@ -338,9 +337,12 @@ pub(super) fn emit_dispatchers(
     prepared_resolve_call: FuncId,
     prepared_unresolved_call: FuncId,
     pipeline: &mut CodegenPipeline,
-) -> Result<(), super::CompileError> {
+) -> Result<Vec<resolve::CallableExport>, super::CompileError> {
     let started = std::time::Instant::now();
     let mut code_bytes = 0usize;
+    // Every offer is recorded where its header's chain entry is emitted, so
+    // an owner never offers a shape its dispatcher cannot serve.
+    let mut exports = Vec::new();
     for (signature, output) in dispatchers.iter() {
         let abi = EntryAbi::lower_internal(profile, signature, EnvironmentMode::Captured)?;
         let mut context = cranelift_codegen::Context::new();
@@ -369,14 +371,14 @@ pub(super) fn emit_dispatchers(
             let Some(application) = classify(function.signature, 0, signature) else {
                 continue;
             };
-            let results = if function.signature.results.is_caller_result() {
-                &signature.results
-            } else {
-                &function.signature.results
-            };
-            let Some(&callee_function) = functions.get(&(id, results.clone())) else {
+            let Some(callee_function) = callee_instance(functions, id, function, signature) else {
                 continue;
             };
+            exports.push(resolve::CallableExport {
+                header: function.descriptor.initial_header_word(),
+                function: output,
+                signature: signature.clone(),
+            });
             let hit = builder.create_block();
             let following = builder.create_block();
             builder.switch_to_block(next);
@@ -470,14 +472,14 @@ pub(super) fn emit_dispatchers(
             let Some(application) = classify(function.signature, pending, signature) else {
                 continue;
             };
-            let results = if function.signature.results.is_caller_result() {
-                &signature.results
-            } else {
-                &function.signature.results
-            };
-            let Some(&callee_function) = functions.get(&(id, results.clone())) else {
+            let Some(callee_function) = callee_instance(functions, id, function, signature) else {
                 continue;
             };
+            exports.push(resolve::CallableExport {
+                header: layout.descriptor.initial_header_word(),
+                function: output,
+                signature: signature.clone(),
+            });
             let hit = builder.create_block();
             let following = builder.create_block();
             builder.switch_to_block(next);
@@ -697,11 +699,48 @@ pub(super) fn emit_dispatchers(
             code_bytes += compiled.code_buffer().len();
         }
     }
+    let lift = zero_argument_lift();
+    if dispatchers.find(&lift).is_none() && enter_serves_zero_argument_lift(profile)? {
+        let headers = plan
+            .functions
+            .values()
+            .filter(|function| !function.signature.arguments.is_empty())
+            .map(|function| function.descriptor.initial_header_word())
+            .chain(
+                plan.pap_layouts
+                    .values()
+                    .map(|layout| layout.descriptor.initial_header_word()),
+            );
+        for header in headers {
+            exports.push(resolve::CallableExport {
+                header,
+                function: prepared_enter,
+                signature: lift.clone(),
+            });
+        }
+    }
     tracing::debug!(target: "tidepool::prepared_apply",
         dispatchers = dispatchers.entries.len(), code_bytes,
+        offers = exports.len(),
         elapsed_ms = started.elapsed().as_millis() as u64,
         "compiled application dispatchers");
-    Ok(())
+    Ok(exports)
+}
+
+/// The compiled instance of `id` a demand applies: its own result contract,
+/// or the demand's for a caller-result function.
+fn callee_instance(
+    functions: &BTreeMap<ValueId, BTreeMap<super::ResultContract, FuncId>>,
+    id: ValueId,
+    function: &super::plan::FunctionPlan<'_>,
+    demand: &Signature,
+) -> Option<FuncId> {
+    let results = if function.signature.results.is_caller_result() {
+        &demand.results
+    } else {
+        &function.signature.results
+    };
+    functions.get(&id)?.get(results).copied()
 }
 
 /// What a dispatcher body may use after its entry sequence: the VM context,

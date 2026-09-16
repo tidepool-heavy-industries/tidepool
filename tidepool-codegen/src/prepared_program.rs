@@ -731,23 +731,25 @@ impl CompiledProgram {
                     results: results.clone(),
                 };
                 let abi = EntryAbi::lower_internal(&profile, &concrete, EnvironmentMode::Captured)?;
-                if plan.thunks.contains_key(&id) {
-                    abis.insert((id, results.clone()), abi);
-                    functions.insert((id, results), prepared_enter);
-                    continue;
-                }
-                let native = abi.cranelift_signature(&profile, CallConv::Tail)?;
-                let function = pipeline.declare_function_with_signature(
-                    &format!("prepared_entry_{}_{}", id.0, instance),
-                    Linkage::Local,
-                    &native,
-                )?;
-                functions.insert((id, results.clone()), function);
+                let function = if plan.thunks.contains_key(&id) {
+                    prepared_enter
+                } else {
+                    let native = abi.cranelift_signature(&profile, CallConv::Tail)?;
+                    pipeline.declare_function_with_signature(
+                        &format!("prepared_entry_{}_{}", id.0, instance),
+                        Linkage::Local,
+                        &native,
+                    )?
+                };
+                functions
+                    .entry(id)
+                    .or_insert_with(BTreeMap::new)
+                    .insert(results.clone(), function);
                 abis.insert((id, results), abi);
             }
         }
         let dispatchers = apply::declare_dispatchers(&plan, &profile, &mut pipeline)?;
-        apply::emit_dispatchers(
+        let callables = apply::emit_dispatchers(
             &plan,
             &dispatchers,
             &functions,
@@ -762,24 +764,25 @@ impl CompiledProgram {
             &mut pipeline,
         )?;
         // Every function address has been declared, including recursive peers.
-        for ((id, results), &output) in &functions {
-            let id = *id;
+        for (&id, instances) in &functions {
             if plan.thunks.contains_key(&id) {
                 continue;
             }
-            emit::emit_function(
-                &plan,
-                id,
-                output,
-                results,
-                &dispatchers,
-                prepared_gc,
-                prepared_poll,
-                prepared_stack_overflow,
-                prepared_enter,
-                case_trap,
-                &mut pipeline,
-            )?;
+            for (results, &output) in instances {
+                emit::emit_function(
+                    &plan,
+                    id,
+                    output,
+                    results,
+                    &dispatchers,
+                    prepared_gc,
+                    prepared_poll,
+                    prepared_stack_overflow,
+                    prepared_enter,
+                    case_trap,
+                    &mut pipeline,
+                )?;
+            }
         }
         for (&id, &body) in &thunk_bodies {
             emit::emit_thunk_body(
@@ -849,7 +852,7 @@ impl CompiledProgram {
                 if plan.thunks.contains_key(&id) {
                     prepared_enter
                 } else {
-                    functions[&key]
+                    functions[&id][&signature.results]
                 },
                 &abi,
                 slot_address,
@@ -858,7 +861,7 @@ impl CompiledProgram {
                 id,
                 CompiledEntry {
                     #[cfg(test)]
-                    function: functions[&key],
+                    function: functions[&id][&signature.results],
                     adapter,
                     abi,
                 },
@@ -952,7 +955,6 @@ impl CompiledProgram {
                 },
             );
         }
-        let callables = dispatchers.exports(&plan);
         let shared = plan
             .constructors
             .iter()

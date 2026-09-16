@@ -232,6 +232,26 @@ fn foreign_pap_partial_again_and_exact_results_survive_gc() {
                 )
                 .unwrap(),
         );
+        // The owner offers the zero-argument lift through `prepared_enter`;
+        // its result is the same PAP, still applicable below.
+        let z = install_caller(
+            &mut machine,
+            Signature {
+                arguments: vec![],
+                results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+            },
+        );
+        let lifted = managed(
+            machine
+                .run_entry_retained(
+                    z,
+                    ValueId(0),
+                    &[PreparedInput::Managed(pap2)],
+                    options(),
+                    RealmId::ROOT,
+                )
+                .unwrap(),
+        );
         let d = install_caller(
             &mut machine,
             Signature {
@@ -243,7 +263,7 @@ fn foreign_pap_partial_again_and_exact_results_survive_gc() {
             .run_entry_retained(
                 d,
                 ValueId(0),
-                &[PreparedInput::Managed(pap2), PreparedInput::Scalar(42)],
+                &[PreparedInput::Managed(lifted), PreparedInput::Scalar(42)],
                 options(),
                 RealmId::ROOT,
             )
@@ -268,7 +288,7 @@ fn foreign_pap_partial_again_and_exact_results_survive_gc() {
                 other => panic!("wrong result: {other:?}"),
             }
         }
-        for handle in [function, token, pap, pap2] {
+        for handle in [function, token, pap, pap2, lifted] {
             assert!(machine.release(handle));
         }
         assert_eq!(machine.handle_count(), 0);
