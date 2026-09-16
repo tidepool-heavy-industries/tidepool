@@ -18,6 +18,10 @@ use tidepool_repr::execution_schema::{
     RuntimeRep, Signature, SignatureId, ValueId, ValueRef,
 };
 
+/// One flat map per emitted function. Validation makes every value id
+/// program-unique and admits a reference only where its definition is in
+/// scope (so its SSA value dominates the use); sibling branches therefore
+/// never observe each other's bindings, and no branch needs its own copy.
 type Values = BTreeMap<ValueId, Value>;
 
 #[derive(Clone)]
@@ -38,7 +42,6 @@ enum Work {
         node: usize,
         block: Block,
         block_reps: Vec<RuntimeRep>,
-        values: Values,
         joins: BTreeMap<JoinId, JoinTarget>,
         destination: Destination,
     },
@@ -46,7 +49,6 @@ enum Work {
         node: usize,
         block: Block,
         reps: Vec<RuntimeRep>,
-        values: Values,
         joins: BTreeMap<JoinId, JoinTarget>,
         destination: Destination,
     },
@@ -253,7 +255,6 @@ fn emit_function_at(
         node: root,
         block: entry,
         block_reps: Vec::new(),
-        values,
         joins: BTreeMap::new(),
         destination,
     }];
@@ -263,7 +264,6 @@ fn emit_function_at(
                 node,
                 block,
                 block_reps,
-                values,
                 joins,
                 destination,
             } => {
@@ -294,7 +294,6 @@ fn emit_function_at(
                             node,
                             block: scrutinee_block,
                             reps: scrutinee_reps.to_vec(),
-                            values: values.clone(),
                             joins: joins.clone(),
                             destination,
                         });
@@ -302,7 +301,6 @@ fn emit_function_at(
                             node: *scrutinee,
                             block,
                             block_reps: Vec::new(),
-                            values,
                             joins: joins_visible_in_scrutinee(joins),
                             destination: Destination {
                                 block: scrutinee_block,
@@ -340,9 +338,8 @@ fn emit_function_at(
                             joins.insert(binding.id, target.clone());
                         }
                         for (binding, target) in declared {
-                            let mut body_values = values.clone();
                             bind_block_values(
-                                &mut body_values,
+                                &mut values,
                                 &builder,
                                 target.block,
                                 &binding.parameters,
@@ -352,7 +349,6 @@ fn emit_function_at(
                                 node: binding.body,
                                 block: target.block,
                                 block_reps: target.signature.arguments.clone(),
-                                values: body_values,
                                 joins: joins.clone(),
                                 destination: destination.clone(),
                             });
@@ -361,7 +357,6 @@ fn emit_function_at(
                             node: *body,
                             block,
                             block_reps: Vec::new(),
-                            values,
                             joins,
                             destination,
                         });
@@ -389,13 +384,13 @@ fn emit_function_at(
                     ExprFrame::Let { bindings, body } => {
                         // Validation already enforces nonrecursive visibility;
                         // recursive groups bind every sibling before stores.
-                        let values = emit_let_group(
+                        emit_let_group(
                             &mut builder,
                             vmctx,
                             prepared_gc,
                             pipeline,
                             plan,
-                            values,
+                            &mut values,
                             bindings,
                             id,
                             node,
@@ -407,7 +402,6 @@ fn emit_function_at(
                             node: *body,
                             block: body_block,
                             block_reps: Vec::new(),
-                            values,
                             joins,
                             destination,
                         });
@@ -615,7 +609,6 @@ fn emit_function_at(
                 node,
                 block,
                 reps,
-                values,
                 joins,
                 destination,
             } => {
@@ -628,7 +621,7 @@ fn emit_function_at(
                     id,
                     node,
                     &reps,
-                    values,
+                    &mut values,
                     joins,
                     destination,
                     case_trap,
@@ -885,14 +878,14 @@ fn emit_let_group(
     prepared_gc: FuncId,
     pipeline: &mut CodegenPipeline,
     plan: &ProgramPlan<'_>,
-    mut values: Values,
+    values: &mut Values,
     bindings: &Group<tidepool_repr::execution_schema::HeapBinding>,
     owner: ValueId,
     node: usize,
-) -> Result<Values, CompileError> {
+) -> Result<(), CompileError> {
     let bindings = group_items(bindings);
     if bindings.is_empty() {
-        return Ok(values);
+        return Ok(());
     }
     let mut descriptors = Vec::with_capacity(bindings.len());
     let mut total = 0_u64;
@@ -960,7 +953,7 @@ fn emit_let_group(
                         continue;
                     }
                     let field = &descriptor.payload().fields()[stored as usize];
-                    let value = atom_value(builder, &values, plan, atom, *rep, owner, node)?;
+                    let value = atom_value(builder, values, plan, atom, *rep, owner, node)?;
                     builder.ins().store(
                         flags,
                         value,
@@ -976,8 +969,7 @@ fn emit_let_group(
                     };
                     let field = &descriptor.payload().fields()[stored as usize];
                     let atom = Atom::Ref(capture.clone());
-                    let value =
-                        atom_value(builder, &values, plan, &atom, field.rep(), owner, node)?;
+                    let value = atom_value(builder, values, plan, &atom, field.rep(), owner, node)?;
                     builder.ins().store(
                         flags,
                         value,
@@ -993,8 +985,7 @@ fn emit_let_group(
                     };
                     let field = &descriptor.payload().fields()[stored as usize];
                     let atom = Atom::Ref(capture.clone());
-                    let value =
-                        atom_value(builder, &values, plan, &atom, field.rep(), owner, node)?;
+                    let value = atom_value(builder, values, plan, &atom, field.rep(), owner, node)?;
                     builder.ins().store(
                         flags,
                         value,
@@ -1008,7 +999,7 @@ fn emit_let_group(
             }
         }
     }
-    Ok(values)
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1017,7 +1008,7 @@ fn emit_case_dispatch(
     owner: ValueId,
     node: usize,
     reps: &[RuntimeRep],
-    values: Values,
+    values: &mut Values,
     joins: BTreeMap<JoinId, JoinTarget>,
     destination: Destination,
     case_trap: FuncId,
@@ -1053,32 +1044,22 @@ fn emit_case_dispatch(
             _ => Vec::new(),
         };
         append_params(builder, block, &field_reps)?;
-        let mut body_values = values.clone();
-        if !matches!(kind, CaseKind::MultiValue) {
-            if let Some(&value) = scrutinee.first() {
-                body_values.insert(*binder, value);
-            }
-        }
-        bind_block_values(
-            &mut body_values,
-            builder,
-            block,
-            &alternative.binders,
-            &field_reps,
-        )?;
-        alternative_blocks.push((block, field_reps, body_values));
-    }
-    for (alternative, (block, field_reps, body_values)) in
-        alternatives.iter().zip(alternative_blocks.iter())
-    {
+        bind_block_values(values, builder, block, &alternative.binders, &field_reps)?;
+        alternative_blocks.push(block);
         worklist.push(Work::Emit {
             node: alternative.body,
-            block: *block,
-            block_reps: field_reps.clone(),
-            values: body_values.clone(),
+            block,
+            block_reps: field_reps,
             joins: joins.clone(),
             destination: destination.clone(),
         });
+    }
+    // The binder names the scrutinee (its block parameter dominates every
+    // alternative) and is bound once for all of them.
+    if !matches!(kind, CaseKind::MultiValue) {
+        if let Some(&value) = scrutinee.first() {
+            values.insert(*binder, value);
+        }
     }
     let invalid = builder.create_block();
     if alternatives.is_empty() {
@@ -1087,14 +1068,14 @@ fn emit_case_dispatch(
         builder.ins().jump(invalid, &[]);
     } else {
         match kind {
-            CaseKind::MultiValue => jump_to(builder, &alternative_blocks[0].0, scrutinee),
-            CaseKind::Polymorphic => jump_to(builder, &alternative_blocks[0].0, Vec::new()),
+            CaseKind::MultiValue => jump_to(builder, &alternative_blocks[0], scrutinee),
+            CaseKind::Polymorphic => jump_to(builder, &alternative_blocks[0], Vec::new()),
             CaseKind::Primitive(rep) => {
                 let mut next = None;
                 let mut default = None;
                 for (index, alternative) in alternatives.iter().enumerate() {
                     if matches!(alternative.pattern, AlternativePattern::Default) {
-                        default = Some(alternative_blocks[index].0);
+                        default = Some(alternative_blocks[index]);
                         continue;
                     }
                     let here = next.take();
@@ -1120,7 +1101,7 @@ fn emit_case_dispatch(
                             let otherwise = builder.create_block();
                             builder.ins().brif(
                                 equal,
-                                alternative_blocks[index].0,
+                                alternative_blocks[index],
                                 &[],
                                 otherwise,
                                 &[],
@@ -1149,7 +1130,7 @@ fn emit_case_dispatch(
                             alternatives_by_descriptor
                                 .push((plan.constructors[constructor.0 as usize].clone(), route));
                         }
-                        AlternativePattern::Default => default = Some(alternative_blocks[index].0),
+                        AlternativePattern::Default => default = Some(alternative_blocks[index]),
                         AlternativePattern::Literal(_) => return Err(unsupported(owner, node)),
                     }
                 }
@@ -1189,7 +1170,7 @@ fn emit_case_dispatch(
                             ))
                         })
                         .collect::<Result<Vec<_>, CompileError>>()?;
-                    jump_to(builder, &alternative_blocks[index].0, fields);
+                    jump_to(builder, &alternative_blocks[index], fields);
                 }
             }
         }
