@@ -146,9 +146,11 @@ impl Notebook {
 
 /// Forty `1 + <i>` expression turns on the prepared route: after a warm-up
 /// of five turns (the first few installs may still be settling machine
-/// bootstrap/site-index bookkeeping), every `ResidencyCounts` field other
-/// than `old_bytes` (compaction is a later slice, per
-/// `plans/handoff/designs/residency-slices.md`) is flat turn over turn, and
+/// bootstrap/site-index bookkeeping, and descriptor-arena compaction commits
+/// before retirement per the lifetime contract's decision 7, so a retiring
+/// program's bytes leave one collection later than its other counters),
+/// every `ResidencyCounts` field -- `old_bytes` included, now that
+/// descriptor-arena compaction has landed -- is flat turn over turn, and
 /// `programs` never exceeds the number of live bindings plus one (the turn
 /// currently running). A binding is then introduced (`x <- pure 1`) and
 /// twenty more expression turns run importing nothing new: `programs` stays
@@ -161,6 +163,7 @@ fn prepared_session_residency_stays_bounded_across_many_turns() {
     const WARMUP: usize = 5;
     const TOTAL: usize = 40;
     let mut last_counts: Option<tidepool_codegen::prepared_program::ResidencyCounts> = None;
+    let mut last_old_bytes: Option<usize> = None;
     for i in 0..TOTAL {
         notebook.expression(&format!("1 + {i}"));
         let counts = notebook
@@ -211,6 +214,14 @@ fn prepared_session_residency_stays_bounded_across_many_turns() {
                     "turn {i}: enter_rows grew past warm-up"
                 );
             }
+            let old_bytes = notebook
+                .session
+                .old_bytes()
+                .expect("the prepared route reports old-space bytes");
+            if let Some(previous) = last_old_bytes {
+                assert_eq!(old_bytes, previous, "turn {i}: old_bytes grew past warm-up");
+            }
+            last_old_bytes = Some(old_bytes);
         }
         last_counts = Some(counts);
     }

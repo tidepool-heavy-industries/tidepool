@@ -236,6 +236,16 @@ impl ResidentEngine {
             Self::Prepared(engine) => Some(engine.residency()),
         }
     }
+
+    /// Prepared old-space bytes as of the last successful between-turn
+    /// collection; `None` on the Core route.
+    #[must_use]
+    pub fn old_bytes(&self) -> Option<usize> {
+        match self {
+            Self::Core(_) => None,
+            Self::Prepared(engine) => Some(engine.old_bytes()),
+        }
+    }
 }
 
 /// Cross-thread custody for one completed bind root. The root never moves
@@ -549,6 +559,14 @@ impl PersistentSession {
     #[must_use]
     pub fn residency(&self) -> Option<ResidencyCounts> {
         self.machine.as_ref()?.residency()
+    }
+
+    /// Prepared old-space bytes as of the last successful between-turn
+    /// collection; `None` on the Core route or before the machine has
+    /// bootstrapped.
+    #[must_use]
+    pub fn old_bytes(&self) -> Option<usize> {
+        self.machine.as_ref()?.old_bytes()
     }
 
     // -- table accumulation ------------------------------------------------

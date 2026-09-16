@@ -1318,6 +1318,14 @@ where
         self.core.residency()
     }
 
+    /// Prepared old-space bytes as of the last successful between-turn
+    /// collection, or `None` on the Core route or before the machine has
+    /// bootstrapped.
+    #[must_use]
+    pub fn old_bytes(&self) -> Option<usize> {
+        self.core.old_bytes()
+    }
+
     /// Mint a [`ValueHandle`] over the declared live payload of the frame
     /// parked on `hole` (the payload never bridges to a
     /// data `Value`; the `Send` handle is how it is passed around and

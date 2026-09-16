@@ -808,6 +808,11 @@ pub struct PreparedEngine {
     /// transaction before any code is compiled; a conflicting duplicate
     /// refuses the install (see [`Self::install`]).
     sites: BTreeMap<u64, SiteWitness>,
+    /// Prepared old-space bytes as of the last successful
+    /// [`Self::quiesce_and_collect`] (the compacted figure
+    /// `RetirementReceipt::old_bytes` reports); `0` before any collection
+    /// has run.
+    old_bytes: usize,
 }
 
 /// The run's parking policy, carried onto the eval thread beside the settle
@@ -904,6 +909,7 @@ impl PreparedEngine {
             machine,
             programs: BTreeMap::new(),
             sites: BTreeMap::new(),
+            old_bytes: 0,
         };
         // The first program can conflict only with itself.
         let rows = engine.plan_sites(&facts)?;
@@ -1575,11 +1581,20 @@ impl PreparedEngine {
         let Ok(receipt) = self.machine.collect_major(token) else {
             return;
         };
+        self.old_bytes = receipt.old_bytes;
         for program in &receipt.programs {
             if let Some(facts) = self.programs.remove(program) {
                 self.retire_site_witnesses(*program, &facts);
             }
         }
+    }
+
+    /// Prepared old-space bytes as of the last successful
+    /// [`Self::quiesce_and_collect`] -- the compacted figure
+    /// `RetirementReceipt::old_bytes` reported, not a live recount.
+    #[must_use]
+    pub fn old_bytes(&self) -> usize {
+        self.old_bytes
     }
 
     /// Site witnesses `retired` canonically owned: each moves to a still-
