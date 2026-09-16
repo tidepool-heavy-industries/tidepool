@@ -3,9 +3,20 @@
 Implementation status: the [current execution map](handoff/continuation-2026-09-15.md)
 records recovered work, active assignments and completion gates. F1/F2 connect
 pure prepared notebook turns, pattern binds and cell display through the resident
-session. Schema-10 site evidence is in progress. Production effect suspension,
-general typed resume, bounded retirement/collection, default routing and Core
-removal remain unfinished. Earlier evidence is retained in the
+session. Schema-10 site evidence is in. Production effect suspension now parks
+and resumes on both engines for Bool, data/Maybe and byte-backed
+Text/Integer/Natural host answers (F4/F5); handle/framed answers, Either/list
+wires and ordinary-effect reply sites remain. Bounded residency's machine side
+is landed for per-program root blocks, stable ids, the quiescence gate,
+liveness mark and retirement (F6 slices 1a/1b); the runtime's receipt drain,
+between-turn collection call, and descriptor-arena compaction (slice 1c)
+remain. The duplicate `PreparedRuntime` is deleted; `ResidentSession` is the
+one mounted engine target, with a known gap where its `close_realm`/
+`parked_realm` do not yet forward to the Prepared engine. Step 2 integration
+(general typed resume through real owners), step 3 default-routing
+eligibility, parity and Core removal remain unfinished. See the execution
+map's critical-path table for the current gate-by-gate status. Earlier
+evidence is retained in the
 [2026-09-15 implementation record](handoff/implementation-2026-09-15.md).
 
 Review baseline: `344ecd59a` (2026-09-14). This is a proposed execution plan,

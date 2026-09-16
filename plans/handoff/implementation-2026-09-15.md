@@ -382,3 +382,121 @@ the fixed `a2` test); `cargo clippy --all-targets -D warnings` clean for
 `tidepool-codegen` and `tidepool-runtime`; `just fixtures-update` regenerated
 only the source fingerprint (no corpus output changed). No broad gate has
 run.
+
+**F5 slice 1 (committed as `84064c0a2`), "host-built answers resume parked
+prepared continuations".** A parked prepared turn completes from a
+host-built answer: the session validates a bridge `Value` against the
+frame's site evidence (`ProgramFacts::lower_answer`), the machine builds it
+through the interner into a realm-owned handle (`PreparedMachine::build_answer`,
+new `prepared_program/answer.rs`), the runner's `__resume` entry re-enters
+the continuation, and the settled layer finishes through
+`ResidentSession::complete_prepared`, the one completion routine for both an
+initial and a resumed run. `build_answer` sizes the span, collects once only
+when the nursery cannot hold it, writes every object beyond the allocation
+cursor with no allocating call in between, and only then advances the
+cursor and promotes the root; a failure at any step leaves the cursor, the
+handle ledger and every root count unchanged.
+Test executed: `tidepool-codegen`
+`a_host_answer_builds_through_the_interner_or_leaves_the_heap_untouched` (an
+unknown constructor and a wrong arity are refused with the cursor, ledger and
+roots untouched; the CAF program's `Unit` builds, observes, survives a
+collection and releases). `tidepool-runtime/tests/prepared_turn.rs`
+`notebook_ask_parks_and_aborts_on_{core,prepared_stg}`: a literal and an `I#`
+answer are refused with the frame, handle and root counts intact on the
+prepared route; `True` completes the bind on both engines and `not b`
+renders `false`; a second ask aborts with Core's error on both routes.
+
+**F5 slice 1 coverage (committed as `cd48b57f1`), "data and Maybe host
+answers on both engines".** Extends the same host-answer path to
+constructors carrying fields, on one notebook run through both engines.
+Tests executed: `notebook_data_answers_on_core` /
+`notebook_data_answers_on_prepared_stg` — `n <- runLLMTurn @Int "how many"`:
+a bare literal answer is refused with `AnswerShape` and a `Bool` constructor
+with `AnswerConstructor`, each leaving parked/stowed/handle/root counts
+untouched; a host-built `I# 41` completes the bind on both engines and
+`n + 1` renders 42. The same run covers `m <- runLLMTurn @(Maybe Int)
+"maybe"`: an `I#` answer is refused with `AnswerConstructor` on the prepared
+route; a host-built `Just (I# 4)` completes the bind on both engines and
+`maybe 0 (+ 1) m` renders 5. After each completed resume, `parked_holes()`
+is empty and a second `resume` of the same hole is refused with
+`ResidentError::WrongContinuation` on both engines. A planned codegen-only
+`machine.rs` test for scalar-field host answers was descoped mid-task: the
+codegen crate was mid-refactor for `bef57ecb9` and `machine.rs` was
+explicitly out of scope for this change — compiled/executed only through
+the tests above, not through a dedicated machine.rs unit test.
+
+**F5 slice 2 (committed as `540426a2f`), "byte-backed host answers (Text,
+Integer, Natural)".** `AnswerPlan::Bytes` is an unlifted byte-array field;
+the builder lays out one wrapper object per byte array using the owning
+program's own external `Bytes` descriptor, so a built `Text` keeps that
+program live exactly as any object it allocates would. Payloads are
+allocated in the machine's external ledger and filled before any object is
+written; a later failed step releases them outright, leaving the ledger,
+cursor and root counts untouched (`AnswerBuildError::{Storage, Wrapper}`).
+The runtime lowers `Text` (from a bridge `Text backing off len` or a bare
+string literal, slice-checked and UTF-8-validated), `Integer` (`IS`/`IP`/`IN`
+over canonical little-endian limbs) and `Natural` (`NS`/`NB`); a
+non-canonical payload is refused as `AnswerShape` before the frame is
+touched. Test executed: `a_byte_backed_host_answer_builds_or_releases_its_payload`
+(codegen) — builds a `Text`-shaped constructor over a fresh byte array,
+observes it back as its bytes across a collection, and proves a failing
+later field releases the payload with the ledger's live count, the cursor
+and the counts unchanged.
+
+**F6 slice 1a (committed as `bef57ecb9`), "per-program root blocks and
+stable program ids".** Removes the two things that made a program's roots
+machine-global: the shared top-slot table (`vmctx.prepared_tops`,
+`TopSlotBase`, `TopTableExhausted`, `TopSlotBaseMismatch`,
+`PreparedMachineOptions::top_slots`, `next_top_slot_base` all deleted) and
+the vector-index program id. Every `CompiledProgram` now owns one
+fixed-address `RootWords` root block; `ProgramId`s are minted monotonically
+per machine and never reused (`programs` is a `BTreeMap`); `PreparedMachine::empty`
+is public. Tests executed (compiled and run, per the commit message): the
+exhaustion test is deleted with the capacity it tested; the stale-reservation
+test proves two outstanding compiles install as distinct programs; the
+rollback test asserts the machine's persistent root count is unchanged after
+a rejected install; the Enter IR test counts one root-block load. "Full
+`tidepool-codegen` suite and the runtime prepared fixture suites pass" per
+the commit message (exact counts not recorded in the commit body).
+
+**F6 slice 1b (committed as `45e03537b`), "quiescence gate, program liveness
+mark and retirement".** `Quiescent` is the proof token minted only by
+`PreparedMachine::quiesce` (machine reusable, call depth zero, no temporary
+Rust roots, no live observation borrow of old space, heap present);
+`collect_major` consumes the token, re-checks, runs ordinary collection,
+then marks. The liveness mark is a non-moving worklist over value handles,
+every parked frame's cell, every pin, and the root blocks of programs
+already found live; `ObservationHeap::trace_step` classifies each word as a
+static-region reference or an owned object. `InstalledProgram` records what
+install minted (owned descriptor/callable headers, pinned byte storage);
+`retire` follows decision 7's order (block roots and remembered ranges,
+call/enter rows, owned descriptor rows and descriptor-space admission,
+stack-map registry, static region and literal pool, then the block, receipt
+entry and code). `RetirementReceipt` and `ResidencyCounts` report each root
+class separately. Tests executed:
+`repeated_installs_retire_and_keep_residency_flat` (installs, binds and
+drops programs in a loop, default 2000 iterations via
+`TIDEPOOL_RESIDENCY_ITERATIONS`, asserting every counter is flat after
+warm-up on every iteration) and
+`a_static_import_keeps_its_producer_live_until_the_consumer_retires` (a
+static import into a consumer keeps the producer live through the mark, and
+both retire together once the consumer is unreachable). "Full
+`tidepool-codegen` suite passes" per the commit message.
+
+**PreparedRuntime deletion (committed as `169430399`).** Deletes the
+duplicate `PreparedRuntime`, `run_prepared_once`, its wrapper types and
+`impl ActorRunTarget for PreparedRuntime`; `ResidentSession` is the only
+mounted `ActorRunTarget`. This is a refactor commit whose "tests" are the
+ported and retained suites, not new assertions: `prepared.rs` inline tests
+(bind/install/import-contract scenarios against `PreparedMachine` directly),
+`tests/prepared_execution.rs` (15 tests against `PreparedMachine` directly),
+`tests/prepared_resident_composite.rs` (`SingleSlot<PreparedMachine, ...>`
+through the checkout/settle protocol), and
+`tidepool-actor/tests/placement_retirement.rs` (new: two incarnations on one
+`ResidentSession` via `install_actor_execution`, retiring through
+`ActorRunTarget`, on both engines with real extractor turns — this is the
+test that records the `close_realm`/`parked_realm` known gap). Several
+`PreparedRuntime`-only unit tests (lease assertions, realm pre-checks) were
+deleted outright as duplicate bookkeeping rather than ported, per the commit
+message's accounting; no pass/fail counts are recorded in the commit body
+for the ported suites beyond their existence.

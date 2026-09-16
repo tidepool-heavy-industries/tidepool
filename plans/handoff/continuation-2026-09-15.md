@@ -5,8 +5,13 @@ session. `plans/stg-completion.md` remains the governing completion contract;
 `next-wave-2026-09-15b.md` supplies the F/S work breakdown. This map records
 current evidence and narrows the next assignments. It does not declare step 2
 or the cutover complete. Schema 10 landed as `cf54ed3a0`; the branch head also
-contains `3f330a41d` for the independent child-budget rendering cleanup, and
-`97df2d711` for F4 slice 1 (prepared suspensions park in the machine ledger).
+contains `3f330a41d` for the independent child-budget rendering cleanup,
+`97df2d711` for F4 slice 1 (prepared suspensions park in the machine ledger),
+`84064c0a2` and `540426a2f` for F5 (host-built Bool, data/Maybe and
+byte-backed Text/Integer/Natural answers), and `bef57ecb9`/`45e03537b` for F6
+slices 1a/1b (per-program root blocks, the quiescence gate, liveness mark and
+retirement). `169430399` deletes the duplicate `PreparedRuntime`;
+`ResidentSession` is now the one mounted `ActorRunTarget`.
 
 ## Recovered state
 
@@ -15,6 +20,23 @@ contains `3f330a41d` for the independent child-budget rendering cleanup, and
 - `97df2d711`: F4 slice 1, prepared suspensions park in the machine's
   `ResourceLedger` with per-engine frame evidence and a shared settlement
   routine.
+- `84064c0a2`: F5 first slice, host-built Bool answers resume a parked
+  prepared continuation through `PreparedMachine::build_answer` and
+  `ProgramFacts::lower_answer`.
+- `cd48b57f1`: F5 coverage extends host-answer validation to constructors
+  carrying fields (`Int`, `Maybe Int`) on both engines.
+- `540426a2f`: F5 second slice, byte-backed host answers (`Text`, `Integer`,
+  `Natural`) build through the machine's external ledger.
+- `bef57ecb9`: F6 slice 1a, per-program root blocks replace the shared
+  top-slot table; program ids are minted monotonically and never reused.
+- `45e03537b`: F6 slice 1b, the `Quiescent` proof token, the non-moving
+  liveness mark and program retirement (`RetirementReceipt`,
+  `ResidencyCounts`).
+- `169430399`: the duplicate `PreparedRuntime` is deleted; `ResidentSession`
+  is the only mounted `ActorRunTarget`. Records a known gap:
+  `ResidentSession::close_realm`/`parked_realm` resolve only the Core engine,
+  so a prepared placement's parked frame is not released on realm close yet
+  (`tidepool-actor/tests/placement_retirement.rs`).
 - `29602fe8c`: fake extractor emits the prepared artifact required by the cache
   property harness. The current continuation has not rerun that property suite.
 - `aad9f184b`: actor-exit publication owner, already committed before recovery.
@@ -58,12 +80,23 @@ Deferred to the next structural review/implementation wave:
   request forcing, and synthetic reply evidence must agree with the production
   effect generator. A Bool-only shortcut would leave ordinary handled replies
   without authoritative types.
-- **F5 answer construction:** allocation rollback and frame consumption order
-  need engine-invariant review before implementation; invalid answers must leave
-  the parked frame and resource counts intact.
-- **F6 residency:** program identities, per-program roots, quiescence, live-header
-  census, collection, and retirement are coupled ownership changes. Fixture
-  updates cannot establish bounded residency.
+- **F5 answer construction:** landed for Bool (`84064c0a2`), data/Maybe
+  constructors (`cd48b57f1`) and byte-backed Text/Integer/Natural payloads
+  (`540426a2f`). A failure at any step leaves the cursor, ledger and root
+  counts unchanged, verified by dedicated codegen tests. Remaining: handle
+  and framed answers (still refused as `NotYetSupported`), Either/list wires,
+  ordinary-effect reply sites (Print/file-read/KV have no dynamic
+  `typedSite`), and generated `settleEff` forcing.
+- **F6 residency:** slice 1a (`bef57ecb9`, per-program root blocks and
+  stable ids) and slice 1b (`45e03537b`, the quiescence gate, liveness mark
+  and retirement) are landed on the machine side; see
+  `designs/residency-slices.md`. Remaining: the runtime side of slice 1b —
+  drain the `RetirementReceipt` after each major collection (remove
+  `ProgramFacts`, release leases, re-home or drop site witnesses), call
+  `quiesce`/`collect_major` at the session's between-turn point, and surface
+  the counts in the session receipt; slice 1c, descriptor-arena compaction;
+  and the `close_realm`/`parked_realm` prepared-route gap recorded in
+  `tidepool-actor/tests/placement_retirement.rs` (`169430399`).
 
 These deferrals do not close step 2 or authorize prepared default routing.
 
@@ -115,22 +148,25 @@ Those limits must not disappear from the parity checklist when Bool works.
 | Gate | Concrete proof | Work that follows |
 |---|---|---|
 | F3: authoritative site evidence | **Done.** Real prepared Bool site, complete constructor closure, schema-9 refusal, codec/validator negatives, regenerated fixtures | F4 parking and shared settlement |
-| F4/F5 first slice | **Partially done.** Parking, abort and the shared settlement routine landed (`97df2d711`): a production `ResidentSession` turn parks on `runLLMTurn @Bool` through the machine ledger on both engines. Remaining: a valid answer completes and invalid answers preserve the same parked frame — the Bool answer through the validator/builder (F5) | General answer and delivery coverage |
+| F4/F5 first slice | **Done for parking, abort, and Bool/data/Maybe/byte-backed host answers.** `97df2d711` parks and aborts; `84064c0a2`, `cd48b57f1` and `540426a2f` complete the resume with a validated host-built answer on both engines, with rollback proofs for refused answers. Remaining: handle/framed answers, Either/list wires, ordinary-effect reply sites, generated `settleEff` forcing | General answer and delivery coverage |
 | Step 2 integration | Declare, retain/PAP, effect, sibling turn, resume, lookup; cancellation, committed-prefix failure, stale incarnation and sibling retirement through real owners | Wave A broad gate |
-| Step 3 residency | Quiescent retirement and full collection; escaped values remain callable; repeated turns beyond the old slot budget have bounded live counters | Default-routing eligibility |
+| Step 3 residency | **Machine side done for slice 1a/1b** (`bef57ecb9`, `45e03537b`): per-program root blocks, stable ids, the quiescence gate, liveness mark and program retirement, with a flat-residency loop proof. Remaining: the runtime's receipt drain and between-turn collection call (S4), descriptor-arena compaction (slice 1c), and the prepared-route `close_realm`/`parked_realm` gap | Default-routing eligibility |
 | Step 4 parity/default | Notebook dialect, production effect deliveries and answer forms pass; fresh production sessions use prepared execution | Delete Core and migration paths |
 | Step 5 deletion | One production engine and notebook route; obsolete adapters/tests/config removed and the final gate passes | STG complete |
 
 F3 is complete. Pure prepared notebook execution is implemented; production
-effect suspension now parks (`97df2d711`), but answers are refused until F5
-lands the validator and builder. Prepared execution must not be made the
-default while effect routing or bounded residency is incomplete.
+effect suspension parks (`97df2d711`) and a host-built answer resumes it for
+Bool, data/Maybe and byte-backed Text/Integer/Natural payloads (`84064c0a2`,
+`cd48b57f1`, `540426a2f`). Prepared execution must not be made the default
+while effect routing or bounded residency is incomplete.
 
-The Bool first slice does not satisfy all of step 2. Outstanding scope includes
-structured and byte-backed host answers, managed/framed answers, live reentry,
-exit-cell fill, terminal capture, and production authority/recovery behavior.
-The first residency slice similarly does not establish external-storage or
-parked-frame lifetime coverage by itself.
+The landed answer slices do not satisfy all of step 2. Outstanding scope
+includes handle/framed answers, managed reentry, exit-cell fill, terminal
+capture, and production authority/recovery behavior. F6 slices 1a/1b
+(`bef57ecb9`, `45e03537b`) establish per-program roots, the quiescence gate
+and retirement on the machine side; they do not by themselves give the
+runtime a receipt drain, compaction (slice 1c), or coverage of the
+`close_realm`/`parked_realm` prepared-route gap.
 
 ## Lead decisions for F4/F5
 
@@ -233,3 +269,69 @@ Wave A exit; solo-rerun timeouts before attributing them to load.
 - `nix develop --command bash -lc 'cd haskell && cabal --builddir=dist-newstyle-schema10 build tidepool-extract-bin && cabal --builddir=dist-newstyle-schema10 test execution-schema-encode'`: executable build succeeded; encoder test passed (1/1).
 - `nix develop --command bash -lc 'cd haskell && cabal --builddir=dist-newstyle-schema10 test prepared-stg-pipeline-test'`: passed (1/1). GHC emitted existing simplifiable-constraint warnings in generated test sources.
 - `git diff --check` passed after the producer changes.
+
+## F5: host-built answers resume parked continuations
+
+`84064c0a2` builds a Bool answer through the machine's descriptor interner
+(`PreparedMachine::build_answer`, `prepared_program/answer.rs`) after
+`ProgramFacts::lower_answer` validates a bridge `Value` against the frame's
+evidence-owner type graph; `resume_with_answer`/`resume_parked` share
+`settle_batch` with the initial run, and `ResidentSession::complete_prepared`
+is the one completion routine for both. `cd48b57f1` extends the same
+validator/builder path to constructors carrying fields (`I# 41` for `Int`,
+`Just (I# 4)` for `Maybe Int`), asserting a wrong-family or wrong-shape
+answer is refused (`AnswerConstructor`/`AnswerShape`) with parked/stowed/
+handle/root counts untouched, and that a settled hole cannot be resumed
+twice (`ResidentError::WrongContinuation`). `540426a2f` adds byte-backed
+answers (`Text`, `Integer`, `Natural`): `AnswerPlan::Bytes` lays out one
+wrapper object per byte array through the owning program's own `Bytes`
+descriptor, payloads are allocated in the machine's external ledger and
+released outright if a later field fails, and non-canonical payloads refuse
+with `AnswerShape` before the frame is touched.
+
+Not yet landed: handle and framed answers (still `NotYetSupported`),
+Either/list wires, ordinary-effect (Print/file-read/KV) reply sites, which
+have no dynamic `typedSite` and need the synthetic-site generator described
+under "Lead decisions for F4/F5" above, and generated `settleEff` forcing.
+
+## F6: bounded residency, slices 1a and 1b
+
+Per `designs/residency-slices.md`. `bef57ecb9` (slice 1a) gives every
+`CompiledProgram` a fixed-address root block instead of the shared top-slot
+table, and mints `ProgramId`s monotonically, never reused. `45e03537b`
+(slice 1b) adds the `Quiescent` proof token (minted only when the machine is
+reusable, at call depth zero, with no temporary Rust roots or live
+observation borrow), `collect_major(Quiescent)`, the non-moving liveness
+mark over value handles/parked frames/pins/live root blocks, program
+retirement in decision 7's order, and `RetirementReceipt`/`ResidencyCounts`
+reporting each root class separately. `repeated_installs_retire_and_keep_residency_flat`
+holds every counter flat across a 2000+ iteration install/bind/drop loop.
+
+Remaining, all on the runtime side (S4) unless noted: drain the
+`RetirementReceipt` synchronously after each major collection (remove
+`ProgramFacts`, release leases, re-home or drop site witnesses); call
+`quiesce`/`collect_major` at the session's between-turn point; surface the
+counts in the session receipt; slice 1c, descriptor-arena compaction
+(machine side, not yet started); and the `close_realm`/`parked_realm`
+prepared-route gap below.
+
+## PreparedRuntime deleted
+
+`169430399` deletes the duplicate `PreparedRuntime` (its bindings, `val_gen`,
+leases and realm bookkeeping duplicated `PreparedEngine`/`ResidentSession`
+and were dead in production), `run_prepared_once`, its wrapper types
+(`PreparedValue`, `PreparedValueResult`, `PreparedArgument`, `PreparedHole`,
+the local `PreparedOuter`, `PreparedRunResult`, `PreparedRetainedResult`,
+`RealmRetirement`), and `impl ActorRunTarget for PreparedRuntime`.
+`ResidentSession` is now the only mounted `ActorRunTarget`; `PreparedEngine`
+gains two thin forwards (`retain_top`, `top_identity`) for callers building a
+session-plane binding by hand. Surviving coverage moved to
+`tidepool-codegen`'s own `PreparedMachine` tests, `prepared_turn.rs`, and
+`tidepool-actor/tests/placement_retirement.rs`, which drives two incarnations
+on one `ResidentSession` on both engines and records a **known gap**:
+`ResidentSession::close_realm`/`parked_realm` (`session/resident.rs`) resolve
+only the Core engine — the Prepared branch that would forward to
+`PreparedEngine::close_realm`/`PreparedMachine::close_realm` does not exist
+yet, so on the Prepared route a placement's parked frame is not released by
+realm close or observed by `parked_realm`. This gap must close before the
+prepared route can carry production actor-placement retirement.

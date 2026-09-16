@@ -56,6 +56,15 @@ Scope retirement removes registrations and reports what it released. It does
 not compact `OldSpace` or reclaim its slot cells. Do not describe deregistration
 as immediate memory reclamation.
 
+The prepared machine reports these classes separately as `ResidencyCounts`:
+programs, block words, persistent roots, handles, parked frames, stack-map
+links, static regions, and descriptor/callable/enter rows. One leak must not
+be able to hide behind another counter staying flat. Program retirement
+happens only under the `Quiescent` token, minted by `PreparedMachine::quiesce`
+and consumed by `collect_major`: a non-moving liveness mark over every root
+class finds each program still reachable, and only an unreachable program's
+block, descriptor rows, call/enter rows, and code are retired.
+
 Every path that can allocate or force must install the full registry set used
 by collection: stack roots, run roots, persistent roots, stowed roots,
 remembered slots, and VM tail-call slots.

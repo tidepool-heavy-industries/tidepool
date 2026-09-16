@@ -104,7 +104,11 @@ continuation ledger, first slice `runLLMTurn @Bool` answered by JSON),
 the machine's `ResourceLedger` with per-engine frame evidence, alongside
 `prepared-resume-integration.md`), `lifetime-contract-v2.md` (per-program root
 blocks, mark phase, owner sets, stable program ids, quiescence token),
-`cell-compiles.md` (one compile per expression via two internal pauses: 39 →
+`residency-slices.md` (the F6 landing order for `lifetime-contract-v2.md`:
+slice 1a, per-program root blocks and stable ids, landed as `bef57ecb9`; slice
+1b, the quiescence gate, liveness mark and retirement, landed as `45e03537b`;
+slice 1c, descriptor-arena compaction, not yet landed), `cell-compiles.md`
+(one compile per expression via two internal pauses: 39 →
 21 compiles for a large cell), `actor-exit-contract.md` (decision memo),
 `corpus-driver.md`. The completion
 plan's step 2/3 sections still hold the v1 contracts plus review findings;
