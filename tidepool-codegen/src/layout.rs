@@ -24,8 +24,6 @@ pub const VMCTX_ALLOC_LIMIT_OFFSET: i32 = 8;
 pub const VMCTX_GC_TRIGGER_OFFSET: i32 = 16;
 pub const VMCTX_TAIL_CALLEE_OFFSET: i32 = 24;
 pub const VMCTX_TAIL_ARG_OFFSET: i32 = 32;
-pub const VMCTX_PREPARED_TOPS_OFFSET: i32 =
-    std::mem::offset_of!(crate::context::VMContext, prepared_tops) as i32;
 pub const VMCTX_PREPARED_STACK_LIMIT_OFFSET: i32 =
     std::mem::offset_of!(crate::context::VMContext, prepared_stack_limit) as i32;
 

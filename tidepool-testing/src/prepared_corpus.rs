@@ -5,9 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{atomic::AtomicBool, Arc};
 use tidepool_bridge::shapes::unbox_char;
 use tidepool_bridge::{FromCore, Value};
-use tidepool_codegen::prepared_program::{
-    admit_prepared, CompiledProgram, RunOptions, TopSlotBase,
-};
+use tidepool_codegen::prepared_program::{admit_prepared, CompiledProgram, RunOptions};
 use tidepool_repr::execution_schema::{
     link_program, parse_program, DecodeLimits, MachineImports, ProgramRequirements,
 };
@@ -399,7 +397,7 @@ where
         }
     };
     let entry = linked.prepared().entry();
-    let program = match CompiledProgram::compile(&linked, TopSlotBase::ZERO) {
+    let program = match CompiledProgram::compile(&linked) {
         Ok(program) => program,
         Err(error) => {
             record_stage(

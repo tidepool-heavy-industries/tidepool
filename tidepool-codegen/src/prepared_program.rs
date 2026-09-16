@@ -82,22 +82,6 @@ mod text_search;
 mod wide_words;
 pub use admission::{admit_prepared, admit_program, supports_operation};
 
-/// Absolute machine-wide top-table slot at which one compiled program's own
-/// top slots begin. Generated code addresses every top through
-/// [`crate::layout::VMCTX_PREPARED_TOPS_OFFSET`] using an immediate baked in
-/// at compile time (`slot * size_of::<usize>()`), so a program's base must be
-/// fixed before [`CompiledProgram::compile`] runs; nothing later can rebase
-/// already-emitted code. [`PreparedMachine::install_program`] validates that
-/// a program was compiled against the base it actually claims.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct TopSlotBase(pub u32);
-
-impl TopSlotBase {
-    /// The base every single-program caller (`PreparedMachine::new`,
-    /// `CompiledProgram::run_entry`) compiles against.
-    pub const ZERO: TopSlotBase = TopSlotBase(0);
-}
-
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Unsupported {
     #[error("closed execution target {0:?} does not match the pinned native host profile")]
@@ -145,6 +129,8 @@ pub enum CompileError {
     Descriptor(#[from] tidepool_heap::execution_descriptor::DescriptorConstructionError),
     #[error("checked program lacks representation for {0:?}")]
     MissingRepresentation(ValueId),
+    #[error("the program's root block could not be allocated")]
+    RootBlock,
     #[error("constructor host id {host_id:?} already names {existing:?}, not {identity:?}")]
     HostIdConflict {
         host_id: tidepool_repr::DataConId,
@@ -285,10 +271,16 @@ pub struct CompiledProgram {
     pub(crate) descriptors: Vec<Arc<ObjectDescriptor>>,
     pub(crate) descriptor_registry: BTreeMap<usize, DescriptorMetadata>,
     pub(crate) statics: StaticImage,
+    /// Block-local slot of every top; see `root_block`.
     pub(crate) top_slots: BTreeMap<ValueId, usize>,
     /// Admitted imports' slots -- see [`plan::ImportSlot`]. Indexed by
-    /// `GlobalId`, occupying the machine-wide range right after `top_slots`.
+    /// `GlobalId`, occupying the block range right after `top_slots`.
     pub(crate) import_slots: Vec<plan::ImportSlot>,
+    /// This program's fixed-address root block, one word per top and import
+    /// slot, whose address the generated code embeds. The installing machine
+    /// registers its heap-top and import words as persistent roots and the
+    /// collector rewrites them in place; the block is freed with the code.
+    pub(crate) root_block: roots::RootWords,
     /// This program's constructor declarations with the descriptors they
     /// compiled against, so an installing machine can absorb them into its
     /// [`DescriptorInterner`] and later programs share them.
@@ -331,8 +323,8 @@ impl CompiledProgram {
     /// first program of a machine (whose descriptors the machine absorbs at
     /// install). Later programs on a machine compile through
     /// `PreparedMachine::compile_for_install` so they share descriptors.
-    pub fn compile(linked: &LinkedProgram, base: TopSlotBase) -> Result<Self, CompileError> {
-        Self::compile_with(linked, base, &mut DescriptorInterner::default())
+    pub fn compile(linked: &LinkedProgram) -> Result<Self, CompileError> {
+        Self::compile_with(linked, &mut DescriptorInterner::default())
     }
 
     /// [`Self::compile`] against `interner`: constructor identities already
@@ -340,7 +332,6 @@ impl CompiledProgram {
     /// observation recognise objects an earlier program built.
     pub fn compile_with(
         linked: &LinkedProgram,
-        base: TopSlotBase,
         interner: &mut DescriptorInterner,
     ) -> Result<Self, CompileError> {
         let target = &linked.prepared().envelope().target;
@@ -359,7 +350,7 @@ impl CompiledProgram {
         use cranelift_codegen::isa::CallConv;
         use cranelift_module::Linkage;
         use tidepool_repr::execution_schema::{HeapRhs, RuntimeRep};
-        let plan = plan::ProgramPlan::new(linked.prepared(), base, interner)?;
+        let plan = plan::ProgramPlan::new(linked.prepared(), interner)?;
         let profile = NativeAbiProfile::new(plan.program.envelope().target.clone(), 0)?;
         let statics = image::build_static_image(&plan)?;
         let mut pipeline = CodegenPipeline::new(
@@ -831,6 +822,10 @@ impl CompiledProgram {
             }
             let key = (id, signature.results.clone());
             let abi = abis[&key].clone();
+            let slot_address = plan
+                .root_block
+                .slot_address(slot)
+                .ok_or(CompileError::MissingRepresentation(id))?;
             let adapter = adapter::emit_adapter(
                 &mut pipeline,
                 &format!("prepared_adapter_{}", id.0),
@@ -840,7 +835,7 @@ impl CompiledProgram {
                     functions[&key]
                 },
                 &abi,
-                slot,
+                slot_address,
             )?;
             entries.insert(
                 id,
@@ -973,6 +968,7 @@ impl CompiledProgram {
             statics,
             top_slots: plan.top_slots,
             import_slots: plan.import_slots,
+            root_block: plan.root_block,
             interned_constructors: plan.interned_constructors,
             byte_tops,
             bytes: plan.bytes,
@@ -989,13 +985,11 @@ impl CompiledProgram {
         self.force_adapter
     }
 
-    /// The number of machine-wide top-table slots this program claims when
-    /// installed -- its own tops plus every admitted import's slot. A caller
-    /// sizing a fresh [`PreparedMachine`]'s [`PreparedMachineOptions::top_slots`]
-    /// for exactly one program reads this after compiling, before installing.
+    /// The words of this program's root block: its tops plus every admitted
+    /// import's slot. Accounting class 3 for one installed program.
     #[must_use]
-    pub fn top_slot_count(&self) -> usize {
-        self.top_slots.len() + self.import_slots.len()
+    pub fn root_block_words(&self) -> usize {
+        self.root_block.len()
     }
 }
 

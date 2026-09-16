@@ -1,4 +1,4 @@
-use super::{CompiledProgram, ExecutionError, RunOptions, TopSlotBase};
+use super::{CompiledProgram, ExecutionError, RunOptions};
 use crate::host_fns::RuntimeError;
 use std::sync::{atomic::AtomicBool, Arc};
 use tidepool_repr::execution_schema::{self, testing, *};
@@ -38,7 +38,7 @@ fn compile_wire(wire: WireProgram) -> CompiledProgram {
     let linked =
         execution_schema::link_program(testing::prepare(wire).unwrap(), &MachineImports::default())
             .unwrap();
-    CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap()
+    CompiledProgram::compile(&linked).unwrap()
 }
 
 fn retained_parent_program(garbage: usize) -> CompiledProgram {

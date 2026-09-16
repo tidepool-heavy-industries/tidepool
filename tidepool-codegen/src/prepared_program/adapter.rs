@@ -71,7 +71,7 @@ pub(super) fn emit_adapter(
     name: &str,
     function: FuncId,
     abi: &EntryAbi,
-    top_slot: usize,
+    top_slot_address: *mut *mut u8,
 ) -> Result<FuncId, CompileError> {
     let mut context = Context::new();
     context.func.signature = ir::Signature::new(pipeline.isa.default_call_conv());
@@ -89,16 +89,10 @@ pub(super) fn emit_adapter(
     let vmctx = parameters[0];
     let result_area = parameters[1];
     let argument_area = parameters[2];
-    let tops = builder.ins().load(
-        types::I64,
-        MemFlags::trusted(),
-        vmctx,
-        crate::layout::VMCTX_PREPARED_TOPS_OFFSET,
-    );
-    let environment =
-        builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), tops, (top_slot * 8) as i32);
+    // The entry's environment is its own top, read through the program's
+    // root block slot whose address the code embeds (see `emit::root_slot_value`).
+    let slot = builder.ins().iconst(types::I64, top_slot_address as i64);
+    let environment = builder.ins().load(types::I64, MemFlags::trusted(), slot, 0);
     let mut arguments = vec![vmctx, environment];
     for (index, rep) in abi.physical_arguments().iter().enumerate() {
         let ty = scalar_type(*rep);

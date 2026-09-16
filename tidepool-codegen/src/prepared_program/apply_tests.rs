@@ -1,6 +1,6 @@
 //! End-to-end generated Tail-ABI application coverage.
 
-use super::{CompiledProgram, ExecutionError, ObservationFailure, RunOptions, TopSlotBase};
+use super::{CompiledProgram, ExecutionError, ObservationFailure, RunOptions};
 use crate::host_fns::RuntimeError;
 use crate::prepared_control::PreparedSafepoint;
 use std::sync::{atomic::AtomicBool, Arc};
@@ -29,7 +29,7 @@ fn constructor(index: u64) -> ConstructorDecl {
 fn compile(wire: WireProgram) -> CompiledProgram {
     let prepared = testing::prepare(wire).expect("apply fixture validates");
     let linked = link_program(prepared, &MachineImports::default()).expect("apply fixture links");
-    CompiledProgram::compile(&linked, TopSlotBase::ZERO).expect("apply fixture compiles")
+    CompiledProgram::compile(&linked).expect("apply fixture compiles")
 }
 
 fn ref_atom(id: u32) -> Atom {

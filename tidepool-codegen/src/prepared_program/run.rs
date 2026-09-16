@@ -1,6 +1,6 @@
 use super::machine::ProgramId;
 use super::plan::{HeapTopSpec, ImportSlot};
-use super::{CompiledProgram, ObservationFailure, TopSlotBase, Unsupported};
+use super::{CompiledProgram, ObservationFailure, Unsupported};
 use crate::host_fns::RuntimeError;
 use crate::machine_state::MachineFailure;
 use crate::machine_state::{MachineDisposition, MachineState};
@@ -87,15 +87,6 @@ pub enum ExecutionError {
     },
     #[error("constructor {identity:?} is declared differently from the descriptor this machine already shares for it")]
     DescriptorShape { identity: Box<SymbolIdentity> },
-    #[error("top table exhausted: program requests {requested} slots, {available} available")]
-    TopTableExhausted { requested: usize, available: usize },
-    #[error(
-        "program compiled against {found:?} cannot install where the machine next requires {expected:?}"
-    )]
-    TopSlotBaseMismatch {
-        expected: TopSlotBase,
-        found: TopSlotBase,
-    },
     #[error(transparent)]
     Unsupported(#[from] Unsupported),
     #[error("{cause}", cause = .0.cause)]
@@ -118,7 +109,6 @@ impl CompiledProgram {
             self,
             super::machine::PreparedMachineOptions {
                 nursery_bytes: options.nursery_bytes,
-                top_slots: self.top_slot_count(),
             },
         )?;
         machine.run_entry_with_raw_cancel(

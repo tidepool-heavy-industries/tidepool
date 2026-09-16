@@ -36,7 +36,6 @@ pub(super) struct PreparedInvocation<'code> {
     pub(super) machine: Rc<MachineState>,
     pub(super) vmctx: VMContext,
     pub(super) statics: Arc<StaticRegion>,
-    pub(super) top_table: RootWords,
     pub(super) results: RootWords,
     pub(super) result_contract: ResultContract,
     pub(super) result_layout: StorageLayout,
@@ -111,7 +110,9 @@ impl<'code> PreparedInvocation<'code> {
             .map_err(runtime_error_without_machine)?;
 
         let statics = Arc::new(program.statics.instantiate()?);
-        let top_table = super::run::try_root_words(program.top_slots.len())?;
+        // The program's own root block carries its tops for this invocation,
+        // exactly as it does when installed on a machine.
+        let top_table = &program.root_block;
         for (&id, &slot) in &program.top_slots {
             if program.heap_top_specs.iter().any(|spec| spec.id == id) {
                 continue;
@@ -164,7 +165,7 @@ impl<'code> PreparedInvocation<'code> {
             size,
             &program.heap_top_specs,
             &program.top_slots,
-            &top_table,
+            top_table,
             &statics,
             &program.byte_tops,
             &program.bytes,
@@ -182,7 +183,6 @@ impl<'code> PreparedInvocation<'code> {
         let mut vmctx = unsafe { VMContext::new(start, start.add(size), gc_trigger) };
         vmctx.alloc_ptr = unsafe { start.add(heap_used) };
         vmctx.machine_state = Rc::as_ptr(&machine).cast_mut();
-        vmctx.prepared_tops = top_table.as_mut_ptr().cast::<usize>().cast_const();
         vmctx.prepared_stack_limit = prepared_stack_limit;
 
         let mut invocation = Self {
@@ -190,7 +190,6 @@ impl<'code> PreparedInvocation<'code> {
             machine,
             vmctx,
             statics,
-            top_table,
             results,
             result_contract: compiled.abi.semantic_results().clone(),
             result_layout: compiled.abi.result_layout().clone(),
@@ -198,14 +197,12 @@ impl<'code> PreparedInvocation<'code> {
             old_space: Box::new(OldSpace::new()),
         };
         for spec in &invocation.program.heap_top_specs {
-            if let Some(&slot) = invocation.program.top_slots.get(&spec.id) {
-                let root = unsafe {
-                    invocation
-                        .top_table
-                        .as_mut_ptr()
-                        .add(slot)
-                        .cast::<*mut u8>()
-                };
+            if let Some(root) = invocation
+                .program
+                .top_slots
+                .get(&spec.id)
+                .and_then(|&slot| invocation.program.root_block.slot_address(slot))
+            {
                 invocation.machine.register_rust_root(root);
             }
         }
@@ -400,7 +397,6 @@ impl Drop for PreparedInvocation<'_> {
         self.machine.clear_stack_map_registry();
         self.machine.clear_cancel_flag();
         self.vmctx.machine_state = std::ptr::null_mut();
-        self.vmctx.prepared_tops = std::ptr::null();
     }
 }
 

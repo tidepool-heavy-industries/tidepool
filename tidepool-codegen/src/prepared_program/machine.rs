@@ -19,10 +19,10 @@
 //! required either way, and only sharing one heap gives identity (rung 2:
 //! "reads the same persistent heap", not a re-imported copy).
 //!
-//! Generated code addresses every top through `vmctx.prepared_tops` (the
-//! shared top table, a fixed-capacity `RootWords` sliced into disjoint
-//! per-program ranges by `TopSlotBase`) and every heap-managed value through
-//! the one shared nursery/`OldSpace` -- so a value handle produced by one
+//! Generated code addresses every top through its own program's root block
+//! (a fixed-address `RootWords` the code embeds the address of, owned by the
+//! `CompiledProgram`) and every heap-managed value through the one shared
+//! nursery/`OldSpace` -- so a value handle produced by one
 //! program's code is, structurally, just as usable as an argument to another
 //! program's entry as a handle produced by that program itself: there is no
 //! "owner" to check. `handle_owner` (a Wave-6A relic from the one-machine-
@@ -34,17 +34,17 @@
 //!
 //! Install order for the second and later program (the first program's
 //! install additionally creates the shared `MachineState`/nursery/`vmctx`/
-//! `OldSpace`, since nothing exists yet): claim the next top-slot range;
-//! instantiate the program's own statics; write its non-heap-top top-table
-//! cells; extend the shared descriptor space (layouts + static region) and
+//! `OldSpace`, since nothing exists yet): instantiate the program's own
+//! statics; write its non-heap-top root-block words; extend the shared
+//! descriptor space (layouts + static region) and
 //! the shared stack-map chain; run a real collection reserving room for this
 //! program's heap tops (`collect_on`, safe because no generated frames are
 //! live between installs); initialize this program's heap tops into the
 //! now-live shared nursery at the current `vmctx.alloc_ptr` (not nursery
 //! start -- the earlier program's objects are already there) and advance the
 //! cursor; register each as a persistent root; publish. Any failure before
-//! publish leaves every already-installed program's roots, top-table cells
-//! and running state untouched (T3).
+//! publish leaves every already-installed program's roots, root blocks and
+//! running state untouched (T3).
 
 use super::roots::{OldSpaceScope, RootWords};
 use super::run::{
@@ -55,8 +55,7 @@ use super::run::{
 };
 use super::safepoint::NativeStackBounds;
 use super::{
-    CompiledProgram, DescriptorMetadata, ExecutionError, ImportShapeFact, RunResult, TopSlotBase,
-    Unsupported,
+    CompiledProgram, DescriptorMetadata, ExecutionError, ImportShapeFact, RunResult, Unsupported,
 };
 use crate::context::VMContext;
 use crate::host_fns::{gc_trigger, prepared_gc_trigger, RuntimeError};
@@ -101,32 +100,25 @@ impl ProgramCustody<'_> {
 /// Identifies one program installed on a [`PreparedMachine`]. Returned by
 /// [`PreparedMachine::new`] and [`PreparedMachine::install_program`]; opaque
 /// outside this module so only a machine that actually installed a program
-/// can mint the id that later selects it.
+/// can mint the id that later selects it. Ids are issued monotonically per
+/// machine and never reused, so a retired program's id stays a typed
+/// `UnknownProgram` rather than aliasing a later install.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ProgramId(u32);
 
-impl ProgramId {
-    /// The program a machine is created with ([`PreparedMachine::new`]):
-    /// always the first installed, so always this id.
-    pub const FIRST: Self = Self(0);
-}
-
-/// One installed program's code custody. Its top-table range lives in the
-/// owning [`PreparedMachine`]'s shared `RootWords`; the range itself is
-/// recoverable from `program.get().top_slots` (its own compiled slot
-/// assignment), so it is not duplicated here. Its contribution to the shared
-/// heap (pinned descriptor layouts, instantiated static image, stack maps)
-/// was folded into the machine-wide sets at install time and is not kept
-/// here either -- see the module doc.
+/// One installed program's code custody, root block included (the block is
+/// a field of the `CompiledProgram`). Its contribution to the shared heap
+/// (pinned descriptor layouts, instantiated static image, stack maps) was
+/// folded into the machine-wide sets at install time and is not kept here
+/// either -- see the module doc.
 struct InstalledProgram<'code> {
     program: ProgramCustody<'code>,
 }
 
 pub struct PreparedMachine<'code> {
-    programs: Vec<InstalledProgram<'code>>,
-    top_table: RootWords,
-    top_capacity: usize,
-    claimed_slots: usize,
+    programs: BTreeMap<ProgramId, InstalledProgram<'code>>,
+    /// The next id [`Self::install`] mints; never decremented.
+    next_program: u32,
     nursery_bytes: usize,
     /// Value handles, parked continuations AND realm-scoped cancellation
     /// flags for this machine, shared exactly as `JitEffectMachine` shares
@@ -162,17 +154,11 @@ pub struct PreparedMachine<'code> {
     descriptor_registry: BTreeMap<usize, DescriptorMetadata>,
 }
 
-/// Immutable capacity selected when a prepared machine is installed.
+/// Immutable capacity selected when a prepared machine is created. Root
+/// storage needs no capacity here: every program brings its own block.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PreparedMachineOptions {
     pub nursery_bytes: usize,
-    /// Fixed machine-wide top-table capacity, shared by every program this
-    /// machine ever installs. Size generously: exhaustion
-    /// (`ExecutionError::TopTableExhausted`) is a typed error that leaves the
-    /// machine `Reusable`, but capacity itself never grows after
-    /// [`PreparedMachine::new`]/`from_borrowed` -- registered root addresses
-    /// must never move.
-    pub top_slots: usize,
 }
 
 /// Per-entry behavior that does not alter the resident machine's capacity.
@@ -256,9 +242,12 @@ impl Drop for TemporaryRoots<'_> {
 /// Candidate registrations are unpublished until install returns successfully.
 /// Undo only registration state: a completed collection may have moved live
 /// objects, whose updated roots and nursery cursor must survive rollback.
+/// `block` is the candidate program's root block, which the caller keeps
+/// alive until this transaction has dropped: every root registered into it
+/// is deregistered here before the block can be freed.
 struct InstallTransaction<'a, 'code> {
     machine: &'a mut PreparedMachine<'code>,
-    slots: std::ops::Range<usize>,
+    block: (*mut u64, usize),
     owners: Option<tidepool_heap::gc::raw::DescriptorOwners>,
     stack_maps: usize,
     committed: bool,
@@ -267,17 +256,13 @@ struct InstallTransaction<'a, 'code> {
 impl Drop for InstallTransaction<'_, '_> {
     fn drop(&mut self) {
         if !self.committed {
-            for slot in self.slots.clone() {
-                let root = unsafe {
-                    self.machine
-                        .top_table
-                        .as_mut_ptr()
-                        .add(slot)
-                        .cast::<*mut u8>()
-                };
+            let (block, words) = self.block;
+            for slot in 0..words {
+                // SAFETY: the caller holds the candidate `CompiledProgram`
+                // (and so its block) until this transaction has dropped.
+                let root = unsafe { block.add(slot) }.cast::<*mut u8>();
                 self.machine.machine.deregister_persistent_root(root);
-                // The range is bounded by the fixed top-table capacity.
-                let _ = self.machine.top_table.write(slot, 0);
+                unsafe { root.write(std::ptr::null_mut()) };
             }
             while self.machine.machine.stack_map_registries().len() > self.stack_maps {
                 self.machine.machine.pop_stack_map_registry();
@@ -327,12 +312,12 @@ impl<'code> PreparedMachine<'code> {
         Ok((machine, id))
     }
 
-    fn empty(options: PreparedMachineOptions) -> Result<Self, ExecutionError> {
+    /// A machine with no program: nursery, GC state and `vmctx` come into
+    /// being with the first install, whichever program that is.
+    pub fn empty(options: PreparedMachineOptions) -> Result<Self, ExecutionError> {
         Ok(Self {
-            programs: Vec::new(),
-            top_table: try_root_words(options.top_slots)?,
-            top_capacity: options.top_slots,
-            claimed_slots: 0,
+            programs: BTreeMap::new(),
+            next_program: 0,
             nursery_bytes: options.nursery_bytes,
             handles: ResourceLedger::default(),
             // No heap exists until the first program installs
@@ -349,41 +334,26 @@ impl<'code> PreparedMachine<'code> {
         })
     }
 
-    /// Compile a program to install next on this machine: against the next
-    /// top-slot base and this machine's descriptor interner, so every
-    /// constructor identity an installed program already declared resolves
-    /// to the same descriptor address the existing cells carry.
-    ///
-    /// The base is the compile's reservation. Programs compiled before any of
-    /// them installs hold the same reservation: the first install consumes
-    /// it, and every other is [`ExecutionError::TopSlotBaseMismatch`] before
-    /// any interner, table or root side effect, so a descriptor minted by a
-    /// stale compile never reaches generated dispatch. Recompile against the
-    /// machine as it is now.
+    /// Compile a program to install next on this machine: against this
+    /// machine's descriptor interner, so every constructor identity an
+    /// installed program already declared resolves to the same descriptor
+    /// address the existing cells carry. Each compile owns its root block, so
+    /// any number of compiles may be outstanding; a compile that minted a
+    /// descriptor another install has since minted differently is refused at
+    /// install by the interner's identity check, never by a slot reservation.
     pub fn compile_for_install(
         &mut self,
         linked: &tidepool_repr::execution_schema::LinkedProgram,
     ) -> Result<CompiledProgram, super::CompileError> {
-        let base = self.next_top_slot_base();
         let mut staged = self.interner.clone();
-        CompiledProgram::compile_with(linked, base, &mut staged)
+        CompiledProgram::compile_with(linked, &mut staged)
     }
 
-    /// The base a program must be compiled against
-    /// ([`CompiledProgram::compile`]) to install successfully next.
-    #[must_use]
-    pub fn next_top_slot_base(&self) -> TopSlotBase {
-        TopSlotBase(self.claimed_slots as u32)
-    }
-
-    /// Install one more program on this machine, claiming the next
-    /// contiguous range of the shared top table. `program` must have been
-    /// compiled against exactly [`Self::next_top_slot_base`] as observed
-    /// before this call; the machine-wide table capacity is fixed at
-    /// construction, so exhaustion is [`ExecutionError::TopTableExhausted`],
-    /// never a reallocation. A transaction removes candidate table cells,
-    /// roots and metadata on failure. Existing programs retain their live
-    /// state, including root updates from any completed collection.
+    /// Install one more program on this machine. Its tops live in its own
+    /// root block, so no machine-wide capacity is claimed. A transaction
+    /// removes candidate roots and metadata on failure. Existing programs
+    /// retain their live state, including root updates from any completed
+    /// collection.
     /// `imports` resolves every one of `program`'s declared globals by
     /// identity, one live [`PreparedHandle`] retained by THIS machine per
     /// import (an identity absent here is [`ExecutionError::UnknownPreparedHandle`]).
@@ -410,61 +380,36 @@ impl<'code> PreparedMachine<'code> {
         self.machine
             .begin_prepared_call()
             .map_err(ExecutionError::Runtime)?;
-        let compiled = program.get();
-        let slots = self.claimed_slots
-            ..self
-                .claimed_slots
-                .saturating_add(compiled.top_slots.len() + compiled.import_slots.len())
-                .min(self.top_capacity);
         let owners = self.machine.prepared_descriptor_owners();
         let stack_maps = self.machine.stack_map_registries().len();
+        let block = {
+            let block = &program.get().root_block;
+            (block.as_mut_ptr(), block.len())
+        };
         let mut transaction = InstallTransaction {
             machine: self,
-            slots,
+            block,
             owners,
             stack_maps,
             committed: false,
         };
-        let result = transaction.machine.install_staged(program, imports);
-        transaction.committed = result.is_ok();
-        result
+        let staged = transaction.machine.install_staged(program.get(), imports);
+        transaction.committed = staged.is_ok();
+        // Rollback (if any) deregisters the candidate block's roots while
+        // `program` still owns the block.
+        drop(transaction);
+        staged?;
+        let id = ProgramId(self.next_program);
+        self.next_program += 1;
+        self.programs.insert(id, InstalledProgram { program });
+        Ok(id)
     }
 
     fn install_staged(
         &mut self,
-        program: ProgramCustody<'code>,
+        compiled: &CompiledProgram,
         imports: &ImportBindings,
-    ) -> Result<ProgramId, ExecutionError> {
-        let compiled = program.get();
-        let slot_count = compiled.top_slots.len() + compiled.import_slots.len();
-        let base = self.claimed_slots;
-        let available = self.top_capacity.saturating_sub(self.claimed_slots);
-        if slot_count > available {
-            return Err(ExecutionError::TopTableExhausted {
-                requested: slot_count,
-                available,
-            });
-        }
-        if slot_count > 0 {
-            let mut claimed: Vec<usize> = compiled
-                .top_slots
-                .values()
-                .copied()
-                .chain(compiled.import_slots.iter().map(|slot| slot.slot))
-                .collect();
-            claimed.sort_unstable();
-            let contiguous_from_base = claimed
-                .iter()
-                .enumerate()
-                .all(|(offset, &slot)| slot == base + offset);
-            if !contiguous_from_base {
-                return Err(ExecutionError::TopSlotBaseMismatch {
-                    expected: TopSlotBase(base as u32),
-                    found: TopSlotBase(claimed[0] as u32),
-                });
-            }
-        }
-
+    ) -> Result<(), ExecutionError> {
         // A constructor identity this machine already shares must be
         // declared identically, with the same descriptor, by the incoming
         // program; otherwise nothing is absorbed and nothing else happens.
@@ -557,6 +502,7 @@ impl<'code> PreparedMachine<'code> {
         }
 
         let statics = Arc::new(compiled.statics.instantiate()?);
+        let block = &compiled.root_block;
         for (&id, &slot) in &compiled.top_slots {
             if compiled.heap_top_specs.iter().any(|spec| spec.id == id) {
                 continue;
@@ -570,7 +516,7 @@ impl<'code> PreparedMachine<'code> {
                         .map(|bytes| bytes.as_ptr() as usize)
                 })
                 .ok_or(ExecutionError::MissingEntry(id))?;
-            self.top_table.write(slot, value as u64)?;
+            block.write(slot, value as u64)?;
         }
 
         let heap_reserve = heap_top_extent(&compiled.heap_top_specs)?;
@@ -601,21 +547,21 @@ impl<'code> PreparedMachine<'code> {
             };
             // Publish every verified import before this program's own heap
             // tops initialize: a heap top's `ValueRef::Global` field can now
-            // only resolve by reading the import's slot in `self.top_table`
-            // (see `run::write_atoms`'s `Global` arm), so the slot must
+            // only resolve by reading the import's word in the program's
+            // root block (see `run::write_atoms`'s `Global` arm), so it must
             // already hold the import's live pointer by the time
             // `initialize_heap_tops` runs. `resolved_imports` is always
             // empty on this branch (the first program on a machine is
             // always installed with no imports -- see `PreparedMachine::new`/
             // `from_borrowed`), so this loop is a defensive no-op here, kept
             // symmetric with the second-program branch below.
-            self.publish_imports(&resolved_imports)?;
+            self.publish_imports(&resolved_imports, block)?;
             let heap_used = match initialize_heap_tops(
                 start,
                 size,
                 &compiled.heap_top_specs,
                 &compiled.top_slots,
-                &self.top_table,
+                block,
                 &statics,
                 &compiled.byte_tops,
                 &compiled.bytes,
@@ -629,7 +575,6 @@ impl<'code> PreparedMachine<'code> {
             self.vmctx.alloc_ptr = unsafe { start.add(heap_used) };
             self.vmctx.alloc_limit = unsafe { start.add(size) };
             self.vmctx.machine_state = Rc::as_ptr(&self.machine).cast_mut();
-            self.vmctx.prepared_tops = self.top_table.as_mut_ptr().cast::<usize>().cast_const();
         } else {
             // Second-and-later program: the shared heap is already live,
             // possibly holding an earlier program's persistent objects. Union
@@ -669,7 +614,7 @@ impl<'code> PreparedMachine<'code> {
             // against: it is a heap top's *own* pointer to the import, which
             // does not exist yet until `initialize_heap_tops` writes it, so
             // there is nothing of this program's to go stale.
-            self.publish_imports(&resolved_imports)?;
+            self.publish_imports(&resolved_imports, block)?;
             collect_on(
                 &self.machine,
                 &mut self.vmctx,
@@ -697,7 +642,7 @@ impl<'code> PreparedMachine<'code> {
                 remaining,
                 &compiled.heap_top_specs,
                 &compiled.top_slots,
-                &self.top_table,
+                block,
                 &statics,
                 &compiled.byte_tops,
                 &compiled.bytes,
@@ -714,8 +659,11 @@ impl<'code> PreparedMachine<'code> {
         // Heap tops persist with the machine. They must not share the
         // run-scoped registry that a call frame truncates on native unwind.
         for spec in &compiled.heap_top_specs {
-            if let Some(&slot) = compiled.top_slots.get(&spec.id) {
-                let root = unsafe { self.top_table.as_mut_ptr().add(slot).cast::<*mut u8>() };
+            if let Some(root) = compiled
+                .top_slots
+                .get(&spec.id)
+                .and_then(|&slot| block.slot_address(slot))
+            {
                 self.machine.register_persistent_root(root);
             }
         }
@@ -754,17 +702,17 @@ impl<'code> PreparedMachine<'code> {
         );
 
         self.interner = staged_interner;
-        self.programs.push(InstalledProgram { program });
-        self.claimed_slots = base + slot_count;
-        Ok(ProgramId((self.programs.len() - 1) as u32))
+        Ok(())
     }
 
-    /// Publish each verified import as a persistent root before collection or
-    /// heap-top initialization. The install transaction deregisters and zeros
-    /// the entire candidate slot range if any subsequent step fails.
+    /// Publish each verified import into the candidate's root block as a
+    /// persistent root before collection or heap-top initialization. The
+    /// install transaction deregisters and zeros the whole block if any
+    /// subsequent step fails.
     fn publish_imports(
         &self,
         resolved_imports: &[(usize, ValueHandle)],
+        block: &RootWords,
     ) -> Result<(), ExecutionError> {
         for &(slot, raw) in resolved_imports {
             let pointer = self
@@ -772,8 +720,10 @@ impl<'code> PreparedMachine<'code> {
                 .handle(raw)
                 .map(|entry| unsafe { entry.slot.current() } as u64)
                 .ok_or(ExecutionError::UnknownPreparedHandle)?;
-            self.top_table.write(slot, pointer)?;
-            let root = unsafe { self.top_table.as_mut_ptr().add(slot).cast::<*mut u8>() };
+            block.write(slot, pointer)?;
+            let root = block
+                .slot_address(slot)
+                .ok_or(ExecutionError::UnknownPreparedHandle)?;
             self.machine.register_persistent_root(root);
         }
         Ok(())
@@ -1194,32 +1144,24 @@ impl<'code> PreparedMachine<'code> {
 
     #[cfg(test)]
     pub(crate) fn persistent_roots_count(&self, id: ProgramId) -> usize {
-        let Some(program) = self.programs.get(id.0 as usize) else {
+        let Some(program) = self.programs.get(&id) else {
             return 0;
         };
-        let Some((low, high)) = program.program.get().top_slots.values().copied().fold(
-            None,
-            |range: Option<(usize, usize)>, slot| {
-                Some(range.map_or((slot, slot), |(l, h)| (l.min(slot), h.max(slot))))
-            },
-        ) else {
-            return 0;
-        };
-        // A program-scoped count: filter the machine's registered persistent
-        // roots to just this program's own claimed top-table cells, since
-        // every program now shares one registry. Proves the actual
+        // A program-scoped count: the machine's registered persistent roots
+        // that fall inside this program's own root block (its top words; the
+        // import words follow them in the same block). Proves the actual
         // registration happened (not merely that metadata implies it should
         // have) -- see `two_closed_programs_share_one_machine_across_a_forced_collection`.
-        let base = self.top_table.as_mut_ptr();
-        let range_start = unsafe { base.add(low) } as usize;
-        let range_end = unsafe { base.add(high + 1) } as usize;
+        let compiled = program.program.get();
+        let block = compiled.root_block.as_mut_ptr() as usize;
+        let range_end = block + compiled.top_slots.len() * std::mem::size_of::<u64>();
         let mut roots = Vec::new();
         self.machine.extend_persistent_roots(&mut roots);
         roots
             .into_iter()
             .filter(|&slot| {
                 let address = slot as usize;
-                address >= range_start && address < range_end
+                address >= block && address < range_end
             })
             .count()
     }
@@ -1240,41 +1182,33 @@ impl<'code> PreparedMachine<'code> {
         id: ProgramId,
         identity: &tidepool_repr::execution_schema::SymbolIdentity,
     ) -> bool {
-        let Some(program) = self.programs.get(id.0 as usize) else {
+        let Some(program) = self.programs.get(&id) else {
             return false;
         };
-        let Some(slot) = program
-            .program
-            .get()
+        let compiled = program.program.get();
+        let Some(address) = compiled
             .import_slots
             .iter()
             .find(|candidate| &candidate.identity == identity)
-            .map(|candidate| candidate.slot)
+            .and_then(|candidate| compiled.root_block.slot_address(candidate.slot))
         else {
             return false;
         };
-        let address = unsafe { self.top_table.as_mut_ptr().add(slot) } as usize;
         let mut roots = Vec::new();
         self.machine.extend_persistent_roots(&mut roots);
-        roots.into_iter().any(|root| root as usize == address)
+        roots.into_iter().any(|root| root == address)
     }
 
+    /// The program's top words (its block without the import words).
     #[cfg(test)]
     pub(crate) fn top_words(&self, id: ProgramId) -> Vec<u64> {
-        let Some(program) = self.programs.get(id.0 as usize) else {
+        let Some(program) = self.programs.get(&id) else {
             return Vec::new();
         };
-        let range = program.program.get().top_slots.values().copied().fold(
-            None,
-            |range: Option<(usize, usize)>, slot| {
-                Some(range.map_or((slot, slot), |(low, high)| (low.min(slot), high.max(slot))))
-            },
-        );
-        let Some((low, high)) = range else {
-            return Vec::new();
-        };
-        let snapshot = self.top_table.snapshot();
-        snapshot[low..=high].to_vec()
+        let compiled = program.program.get();
+        let mut snapshot = compiled.root_block.snapshot();
+        snapshot.truncate(compiled.top_slots.len());
+        snapshot
     }
 
     /// The live heap pointer a retained handle's root slot currently holds
@@ -1305,7 +1239,7 @@ impl<'code> PreparedMachine<'code> {
         self.ensure_handle_access()?;
         let compiled = self
             .programs
-            .get(id.0 as usize)
+            .get(&id)
             .ok_or(ExecutionError::UnknownProgram(id))?
             .program
             .get();
@@ -1316,7 +1250,10 @@ impl<'code> PreparedMachine<'code> {
             .top_slots
             .get(&value)
             .ok_or(ExecutionError::MissingEntry(value))?;
-        let word = self.top_table.snapshot()[slot];
+        let word = compiled
+            .root_block
+            .read(slot)
+            .map_err(|cause| runtime_error(&self.machine, cause))?;
         if word == 0 {
             return Err(ExecutionError::MissingEntry(value));
         }
@@ -1484,7 +1421,7 @@ impl<'code> PreparedMachine<'code> {
         let cancel = self.handles.cancel_flag(realm);
         let program = self
             .programs
-            .get(id.0 as usize)
+            .get(&id)
             .ok_or(ExecutionError::UnknownProgram(id))?
             .program
             .get();
@@ -1591,7 +1528,7 @@ impl<'code> PreparedMachine<'code> {
         let cancel = self.handles.cancel_flag(realm);
         let program = self
             .programs
-            .get(id.0 as usize)
+            .get(&id)
             .ok_or(ExecutionError::UnknownProgram(id))?;
         let result = program.run_entry_retained(
             entry,
@@ -1642,7 +1579,7 @@ impl<'code> PreparedMachine<'code> {
     ) -> Result<RunResult, ExecutionError> {
         let program = self
             .programs
-            .get(id.0 as usize)
+            .get(&id)
             .ok_or(ExecutionError::UnknownProgram(id))?;
         let result = program.run_entry(
             entry,
@@ -2046,7 +1983,6 @@ impl Drop for PreparedMachine<'_> {
         self.machine.clear_cancel_flag();
         self.machine.clear_prepared_entries();
         self.vmctx.machine_state = std::ptr::null_mut();
-        self.vmctx.prepared_tops = std::ptr::null();
     }
 }
 
@@ -2068,16 +2004,11 @@ mod tests {
         EXECUTION_ABI_VERSION, SCHEMA_VERSION,
     };
 
-    /// Every fixture in this module has at most a handful of top-level
-    /// bindings; this is generous headroom, not a tight fit.
-    const DEFAULT_TOP_SLOTS: usize = 64;
-
     fn machine() -> (PreparedMachine<'static>, ProgramId) {
         PreparedMachine::new(
             caf_program(0, false, UpdatePolicy::Memoize),
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots: DEFAULT_TOP_SLOTS,
             },
         )
         .expect("prepared machine")
@@ -2133,8 +2064,7 @@ mod tests {
         let linked =
             tidepool_repr::execution_schema::link_program(prepared, &MachineImports::default())
                 .expect("language failure fixture links");
-        CompiledProgram::compile(&linked, TopSlotBase::ZERO)
-            .expect("language failure fixture compiles")
+        CompiledProgram::compile(&linked).expect("language failure fixture compiles")
     }
 
     fn managed_roundtrip_program() -> CompiledProgram {
@@ -2213,7 +2143,7 @@ mod tests {
         let linked =
             tidepool_repr::execution_schema::link_program(prepared, &MachineImports::default())
                 .expect("roundtrip links");
-        CompiledProgram::compile(&linked, TopSlotBase::ZERO).expect("roundtrip compiles")
+        CompiledProgram::compile(&linked).expect("roundtrip compiles")
     }
 
     fn outer_with_function_field_program() -> CompiledProgram {
@@ -2323,8 +2253,7 @@ mod tests {
         let linked =
             tidepool_repr::execution_schema::link_program(prepared, &MachineImports::default())
                 .expect("prepared outer fixture links");
-        CompiledProgram::compile(&linked, TopSlotBase::ZERO)
-            .expect("prepared outer fixture compiles")
+        CompiledProgram::compile(&linked).expect("prepared outer fixture compiles")
     }
 
     fn freer_retention_program() -> (CompiledProgram, ValueId, DataConId) {
@@ -2358,8 +2287,7 @@ mod tests {
         let linked = link_program(prepared, &MachineImports::default())
             .expect("FreerRetention artifact links");
         (
-            CompiledProgram::compile(&linked, TopSlotBase::ZERO)
-                .expect("FreerRetention artifact compiles"),
+            CompiledProgram::compile(&linked).expect("FreerRetention artifact compiles"),
             entry,
             effect,
         )
@@ -2368,7 +2296,7 @@ mod tests {
     /// Minimal closed CAF program returning a distinct nullary constructor,
     /// compiled against an explicit base so two of these can install side by
     /// side on one machine.
-    fn base_program(base: TopSlotBase, host_id: u64) -> CompiledProgram {
+    fn base_program(host_id: u64) -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         // One identity per host id: two programs on one machine may not
@@ -2406,7 +2334,7 @@ mod tests {
         let prepared = testing::prepare(wire).expect("base_program fixture");
         let linked =
             link_program(prepared, &MachineImports::default()).expect("base_program fixture links");
-        CompiledProgram::compile(&linked, base).expect("base_program fixture compiles")
+        CompiledProgram::compile(&linked).expect("base_program fixture compiles")
     }
 
     #[test]
@@ -2495,7 +2423,6 @@ mod tests {
             language_failure_program(),
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots: DEFAULT_TOP_SLOTS,
             },
         )
         .expect("prepared machine");
@@ -2548,7 +2475,6 @@ mod tests {
             ),
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots: DEFAULT_TOP_SLOTS,
             },
         )
         .expect("prepared machine");
@@ -2653,7 +2579,6 @@ mod tests {
             language_failure_program(),
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots: DEFAULT_TOP_SLOTS,
             },
         )
         .expect("target machine");
@@ -2691,10 +2616,7 @@ mod tests {
     fn managed_input_stays_rooted_through_collection_in_the_callee() {
         let (mut machine, program) = PreparedMachine::new(
             managed_roundtrip_program(),
-            PreparedMachineOptions {
-                nursery_bytes: 64,
-                top_slots: DEFAULT_TOP_SLOTS,
-            },
+            PreparedMachineOptions { nursery_bytes: 64 },
         )
         .expect("roundtrip machine");
         let options = PreparedCallOptions {
@@ -2726,10 +2648,7 @@ mod tests {
 
     #[test]
     fn outer_inspection_retains_callable_fields_without_forcing_them() {
-        let options = PreparedMachineOptions {
-            nursery_bytes: 128,
-            top_slots: DEFAULT_TOP_SLOTS,
-        };
+        let options = PreparedMachineOptions { nursery_bytes: 128 };
         let (mut machine, program) =
             PreparedMachine::new(outer_with_function_field_program(), options)
                 .expect("prepared outer machine");
@@ -2831,7 +2750,6 @@ mod tests {
             program,
             PreparedMachineOptions {
                 nursery_bytes: 4096,
-                top_slots: DEFAULT_TOP_SLOTS,
             },
         )
         .expect("FreerRetention machine");
@@ -2890,17 +2808,14 @@ mod tests {
     #[test]
     fn two_closed_programs_share_one_machine_across_a_forced_collection() {
         let (mut machine, program_a) = PreparedMachine::new(
-            base_program(TopSlotBase::ZERO, 950),
+            base_program(950),
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots: 4,
             },
         )
         .expect("first program installs");
-        let base_b = machine.next_top_slot_base();
-        assert_eq!(base_b, TopSlotBase(1));
         let program_b = machine
-            .install_program(base_program(base_b, 951), ImportBindings::new())
+            .install_program(base_program(951), ImportBindings::new())
             .expect("second program installs alongside the first, on the same machine");
 
         let options = PreparedCallOptions {
@@ -2990,52 +2905,6 @@ mod tests {
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 
-    #[test]
-    fn install_program_exhaustion_is_typed_and_machine_stays_reusable() {
-        let (mut machine, program_a) = PreparedMachine::new(
-            base_program(TopSlotBase::ZERO, 952),
-            PreparedMachineOptions {
-                nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots: 1,
-            },
-        )
-        .expect("first program installs, claiming the machine's only top slot");
-
-        let base_b = machine.next_top_slot_base();
-        let error = machine
-            .install_program(base_program(base_b, 953), ImportBindings::new())
-            .expect_err("no capacity remains for a second program's one top slot");
-        assert!(matches!(
-            error,
-            ExecutionError::TopTableExhausted {
-                requested: 1,
-                available: 0,
-            }
-        ));
-        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
-
-        // Nothing partially written: A's already-claimed slot, its persistent
-        // root, and its entry are unaffected by the rejected install.
-        assert_eq!(machine.persistent_roots_count(program_a), 1);
-        let result = machine
-            .run_entry(
-                program_a,
-                ValueId(0),
-                &[],
-                PreparedCallOptions {
-                    observation_budget: RunOptions::default().observation_budget,
-                    collect_before_observation: false,
-                },
-                RealmId::ROOT,
-            )
-            .expect("program A still runs correctly after the rejected install");
-        assert!(matches!(
-            result.values.as_slice(),
-            [tidepool_bridge::Value::Con(id, fields)]
-                if *id == tidepool_repr::DataConId(952) && fields.is_empty()
-        ));
-    }
-
     // ---- S2 acceptance: T1, T2, T3 pass (T2 closed by X2, see its doc -----
     // ---- comment above); T4 is still not attempted -------------------------
     //
@@ -3050,7 +2919,7 @@ mod tests {
 
     /// A constructor with one scalar field, as a zero-argument CAF -- used as
     /// program A's producer for T1 (cross-program managed argument/result).
-    fn field_constructor_program(base: TopSlotBase, host_id: u64) -> CompiledProgram {
+    fn field_constructor_program(host_id: u64) -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors.push(ConstructorDecl {
@@ -3091,14 +2960,14 @@ mod tests {
         let prepared = testing::prepare(wire).expect("field_constructor_program fixture");
         let linked = link_program(prepared, &MachineImports::default())
             .expect("field_constructor_program fixture links");
-        CompiledProgram::compile(&linked, base).expect("field_constructor_program fixture compiles")
+        CompiledProgram::compile(&linked).expect("field_constructor_program fixture compiles")
     }
 
     /// A one-argument entry `consume :: LiftedRef -> LiftedRef` that
     /// allocates 32 throwaway constructors (forcing a collection in a tiny
     /// nursery) before returning its own managed argument unchanged -- used
     /// as program B for T1.
-    fn managed_argument_consumer_program(base: TopSlotBase) -> CompiledProgram {
+    fn managed_argument_consumer_program() -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![RuntimeRep::LiftedRef],
@@ -3148,26 +3017,19 @@ mod tests {
         let prepared = testing::prepare(wire).expect("managed_argument_consumer_program fixture");
         let linked = link_program(prepared, &MachineImports::default())
             .expect("managed_argument_consumer_program fixture links");
-        CompiledProgram::compile(&linked, base)
+        CompiledProgram::compile(&linked)
             .expect("managed_argument_consumer_program fixture compiles")
     }
 
     #[test]
     fn t1_managed_argument_crosses_installed_programs_with_identity_preserved() {
         let (mut machine, program_a) = PreparedMachine::new(
-            field_constructor_program(TopSlotBase::ZERO, 980),
-            PreparedMachineOptions {
-                nursery_bytes: 64,
-                top_slots: 8,
-            },
+            field_constructor_program(980),
+            PreparedMachineOptions { nursery_bytes: 64 },
         )
         .expect("A installs");
-        let base_b = machine.next_top_slot_base();
         let program_b = machine
-            .install_program(
-                managed_argument_consumer_program(base_b),
-                ImportBindings::new(),
-            )
+            .install_program(managed_argument_consumer_program(), ImportBindings::new())
             .expect("B (64-byte-class nursery pressure via 32 allocations) installs alongside A");
 
         let call = PreparedCallOptions {
@@ -3256,10 +3118,9 @@ mod tests {
         // without needing a multi-gigabyte test program.
         crate::host_fns::set_max_heap_bytes_for_test(8);
         let (mut machine, program_a) = PreparedMachine::new(
-            base_program(TopSlotBase::ZERO, 990),
+            base_program(990),
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots: 8,
             },
         )
         .expect("A installs");
@@ -3270,12 +3131,9 @@ mod tests {
         machine
             .run_entry(program_a, ValueId(0), &[], call, RealmId::ROOT)
             .expect("A runs once before B's install is attempted");
-
-        let base_before = machine.next_top_slot_base();
         let a_roots_before = machine.persistent_roots_count(program_a);
-
-        let base_b = machine.next_top_slot_base();
-        let candidate = base_program(base_b, 991);
+        let total_roots_before = machine.total_persistent_roots();
+        let candidate = base_program(991);
         let candidate_descriptor = Arc::downgrade(&candidate.interned_constructors[0].1);
         let error = machine
             .install_program(candidate, ImportBindings::new())
@@ -3292,18 +3150,21 @@ mod tests {
             candidate_descriptor.upgrade().is_none(),
             "failed install must release candidate descriptor ownership"
         );
-        assert_eq!(machine.next_top_slot_base(), base_before);
         assert_eq!(machine.persistent_roots_count(program_a), a_roots_before);
-        for slot in base_before.0 as usize..machine.top_capacity {
-            assert_eq!(unsafe { *machine.top_table.as_mut_ptr().add(slot) }, 0);
-        }
+        // The candidate's block roots were deregistered with the rollback,
+        // before the block itself dropped with the candidate.
+        assert_eq!(
+            machine.total_persistent_roots(),
+            total_roots_before,
+            "a rejected install leaves no root registered"
+        );
         let handle = machine
             .retain_top(program_a, ValueId(0))
             .expect("failed install leaves no pending collection failure");
         assert_eq!(machine.close_realm(RealmId::ROOT), (0, 0));
         assert!(machine.handle_root(handle).is_some());
         machine
-            .install_program(base_program(base_before, 992), ImportBindings::new())
+            .install_program(base_program(992), ImportBindings::new())
             .expect("a new install succeeds without running an entry first");
         assert!(machine.release(handle));
 
@@ -3335,7 +3196,7 @@ mod tests {
     /// throwaway constructors before constructing and returning a fresh,
     /// distinctly-tagged `MakeResult` value. Mirrors
     /// `outer_with_function_field_program`'s shape.
-    fn closure_producer_program(base: TopSlotBase) -> CompiledProgram {
+    fn closure_producer_program() -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.signatures.push(Signature {
@@ -3474,7 +3335,7 @@ mod tests {
         let prepared = testing::prepare(wire).expect("closure_producer_program fixture");
         let linked = link_program(prepared, &MachineImports::default())
             .expect("closure_producer_program fixture links");
-        CompiledProgram::compile(&linked, base).expect("closure_producer_program fixture compiles")
+        CompiledProgram::compile(&linked).expect("closure_producer_program fixture compiles")
     }
 
     /// Program B for T2: a one-argument entry `caller :: LiftedRef ->
@@ -3483,7 +3344,7 @@ mod tests {
     /// same-program top reference) and returns the call's own result in tail
     /// position (no separate `Return` needed -- `ExprFrame::Call` at body
     /// position already finishes the entry).
-    fn closure_caller_program(base: TopSlotBase) -> CompiledProgram {
+    fn closure_caller_program() -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![RuntimeRep::LiftedRef],
@@ -3510,7 +3371,7 @@ mod tests {
         let prepared = testing::prepare(wire).expect("closure_caller_program fixture");
         let linked = link_program(prepared, &MachineImports::default())
             .expect("closure_caller_program fixture links");
-        CompiledProgram::compile(&linked, base).expect("closure_caller_program fixture compiles")
+        CompiledProgram::compile(&linked).expect("closure_caller_program fixture compiles")
     }
 
     /// HISTORY: at S2 this test was a pinned `#[ignore]`d FINDING, not a
@@ -3539,16 +3400,12 @@ mod tests {
     #[test]
     fn t2_closure_crosses_programs_and_collects_inside_the_producing_program() {
         let (mut machine, program_a) = PreparedMachine::new(
-            closure_producer_program(TopSlotBase::ZERO),
-            PreparedMachineOptions {
-                nursery_bytes: 128,
-                top_slots: 16,
-            },
+            closure_producer_program(),
+            PreparedMachineOptions { nursery_bytes: 128 },
         )
         .expect("A installs");
-        let base_b = machine.next_top_slot_base();
         let program_b = machine
-            .install_program(closure_caller_program(base_b), ImportBindings::new())
+            .install_program(closure_caller_program(), ImportBindings::new())
             .expect(
                 "B installs alongside A, extending the shared descriptor space and stack-map chain",
             );
@@ -3616,7 +3473,7 @@ mod tests {
     /// second through a one-argument call site. A's `f` is a zero-argument
     /// function, so the call-site signature (argument reps and result
     /// contract) can never match A's exported one.
-    fn closure_miscaller_program(base: TopSlotBase) -> CompiledProgram {
+    fn closure_miscaller_program() -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![RuntimeRep::LiftedRef, RuntimeRep::LiftedRef],
@@ -3643,7 +3500,7 @@ mod tests {
         let prepared = testing::prepare(wire).expect("closure_miscaller_program fixture");
         let linked = link_program(prepared, &MachineImports::default())
             .expect("closure_miscaller_program fixture links");
-        CompiledProgram::compile(&linked, base).expect("closure_miscaller_program fixture compiles")
+        CompiledProgram::compile(&linked).expect("closure_miscaller_program fixture compiles")
     }
 
     /// X2: a foreign callee the machine knows but cannot serve at this call
@@ -3657,16 +3514,14 @@ mod tests {
     #[test]
     fn x2_foreign_callee_with_mismatching_signature_is_a_typed_reusable_failure() {
         let (mut machine, program_a) = PreparedMachine::new(
-            closure_producer_program(TopSlotBase::ZERO),
+            closure_producer_program(),
             PreparedMachineOptions {
                 nursery_bytes: 4096,
-                top_slots: 16,
             },
         )
         .expect("A installs");
-        let base_b = machine.next_top_slot_base();
         let program_b = machine
-            .install_program(closure_miscaller_program(base_b), ImportBindings::new())
+            .install_program(closure_miscaller_program(), ImportBindings::new())
             .expect("B' installs alongside A");
         let call = PreparedCallOptions {
             observation_budget: 0,
@@ -3743,7 +3598,7 @@ mod tests {
     /// A for the G0 scalar-return test: a zero-argument FUNCTION (not a
     /// thunk) top returning the raw `Int(64)` 7, retained as a value so B
     /// can apply it as a dynamic callee.
-    fn scalar_returning_function_program(base: TopSlotBase) -> CompiledProgram {
+    fn scalar_returning_function_program() -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.expressions.nodes[0] = ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::Int {
             bits: 64,
@@ -3752,7 +3607,7 @@ mod tests {
         let prepared = testing::prepare(wire).expect("scalar function fixture");
         let linked = link_program(prepared, &MachineImports::default())
             .expect("scalar function fixture links");
-        CompiledProgram::compile(&linked, base).expect("scalar function fixture compiles")
+        CompiledProgram::compile(&linked).expect("scalar function fixture compiles")
     }
 
     /// B for the G0 scalar-return test: entry `(LiftedRef) -> Int(64)`
@@ -3760,7 +3615,7 @@ mod tests {
     /// the demanded shape, so before G0 admission refused the whole program
     /// (`admission_admits_a_dynamic_callee_without_a_locally_shaped_function`
     /// pins the admission half; this fixture proves the runtime half).
-    fn scalar_dynamic_caller_program(base: TopSlotBase) -> CompiledProgram {
+    fn scalar_dynamic_caller_program() -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![RuntimeRep::LiftedRef],
@@ -3787,7 +3642,7 @@ mod tests {
         let prepared = testing::prepare(wire).expect("scalar dynamic caller fixture");
         let linked = link_program(prepared, &MachineImports::default())
             .expect("scalar dynamic caller fixture links");
-        CompiledProgram::compile(&linked, base).expect("scalar dynamic caller fixture compiles")
+        CompiledProgram::compile(&linked).expect("scalar dynamic caller fixture compiles")
     }
 
     /// G0: a dynamic callee whose demanded shape matches NO local function
@@ -3797,19 +3652,17 @@ mod tests {
     #[test]
     fn g0_dynamic_scalar_returning_call_resolves_a_foreign_function() {
         let (mut machine, program_a) = PreparedMachine::new(
-            scalar_returning_function_program(TopSlotBase::ZERO),
+            scalar_returning_function_program(),
             PreparedMachineOptions {
                 nursery_bytes: 4096,
-                top_slots: 16,
             },
         )
         .expect("A installs");
         let function = machine
             .retain_top(program_a, ValueId(0))
             .expect("A's function top is retained as a value");
-        let base_b = machine.next_top_slot_base();
         let program_b = machine
-            .install_program(scalar_dynamic_caller_program(base_b), ImportBindings::new())
+            .install_program(scalar_dynamic_caller_program(), ImportBindings::new())
             .expect("B installs: its dynamic call is admitted without a locally shaped function");
         let call = PreparedCallOptions {
             observation_budget: 0,
@@ -3839,7 +3692,7 @@ mod tests {
     /// CAPTURES `y`. Imported unforced, so a caller's dispatcher must enter
     /// it before applying the function it evaluates to -- and must apply
     /// that function with its OWN environment, not the thunk's.
-    fn thunk_to_closure_program(base: TopSlotBase) -> CompiledProgram {
+    fn thunk_to_closure_program() -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors.push(ConstructorDecl {
@@ -3901,17 +3754,14 @@ mod tests {
         let prepared = testing::prepare(wire).expect("thunk-to-closure fixture");
         let linked = link_program(prepared, &MachineImports::default())
             .expect("thunk-to-closure fixture links");
-        CompiledProgram::compile(&linked, base).expect("thunk-to-closure fixture compiles")
+        CompiledProgram::compile(&linked).expect("thunk-to-closure fixture compiles")
     }
 
     /// B for the forced-environment test: its entry calls the imported,
     /// still-unforced global DIRECTLY (`ValueRef::Global` callee) at
     /// `() -> LiftedRef`. B declares no function of that shape, so the call
     /// is served entirely by the dispatcher's enter-then-resolve fallback.
-    fn direct_import_caller_program(
-        base: TopSlotBase,
-        identity: SymbolIdentity,
-    ) -> CompiledProgram {
+    fn direct_import_caller_program(identity: SymbolIdentity) -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![],
@@ -3942,7 +3792,7 @@ mod tests {
             },
         );
         let linked = link_program(prepared, &imports).expect("direct import caller fixture links");
-        CompiledProgram::compile(&linked, base).expect("direct import caller fixture compiles")
+        CompiledProgram::compile(&linked).expect("direct import caller fixture compiles")
     }
 
     /// The foreign-resolution fallback applies the ENTERED callee. B calls
@@ -3954,22 +3804,20 @@ mod tests {
     #[test]
     fn foreign_resolution_applies_the_entered_closure_not_the_thunk() {
         let (mut machine, program_a) = PreparedMachine::new(
-            thunk_to_closure_program(TopSlotBase::ZERO),
+            thunk_to_closure_program(),
             PreparedMachineOptions {
                 nursery_bytes: 4096,
-                top_slots: 16,
             },
         )
         .expect("A installs");
         let thunk = machine
             .retain_top(program_a, ValueId(0))
             .expect("A's unforced CAF is retained without running it");
-        let base_b = machine.next_top_slot_base();
         let mut imports = ImportBindings::new();
         imports.insert(thunk_to_closure_identity(), thunk);
         let program_b = machine
             .install_program(
-                direct_import_caller_program(base_b, thunk_to_closure_identity()),
+                direct_import_caller_program(thunk_to_closure_identity()),
                 imports,
             )
             .expect("B installs, importing A's unforced CAF");
@@ -4007,7 +3855,7 @@ mod tests {
     /// fresh `Ready` value. This top is retained via
     /// [`PreparedMachine::retain_top`] WITHOUT running it, so the handle B
     /// imports really is still an unforced thunk.
-    fn x2b_thunk_producer_program(base: TopSlotBase) -> CompiledProgram {
+    fn x2b_thunk_producer_program() -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors.push(ConstructorDecl {
@@ -4073,7 +3921,7 @@ mod tests {
         let prepared = testing::prepare(wire).expect("x2b thunk producer fixture");
         let linked = link_program(prepared, &MachineImports::default())
             .expect("x2b thunk producer fixture links");
-        CompiledProgram::compile(&linked, base).expect("x2b thunk producer fixture compiles")
+        CompiledProgram::compile(&linked).expect("x2b thunk producer fixture compiles")
     }
 
     /// Program B for X2b: a zero-argument entry that does nothing but
@@ -4081,7 +3929,7 @@ mod tests {
     /// this program's own generated `prepared_enter` state machine, which
     /// recognizes nothing of its own and falls back to
     /// `prepared_resolve_enter` (X2's cross-program enter resolution).
-    fn x2b_enter_consumer_program(base: TopSlotBase, identity: SymbolIdentity) -> CompiledProgram {
+    fn x2b_enter_consumer_program(identity: SymbolIdentity) -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![],
@@ -4124,7 +3972,7 @@ mod tests {
             },
         );
         let linked = link_program(prepared, &imports).expect("x2b enter consumer fixture links");
-        CompiledProgram::compile(&linked, base).expect("x2b enter consumer fixture compiles")
+        CompiledProgram::compile(&linked).expect("x2b enter consumer fixture compiles")
     }
 
     /// X2b: forcing a foreign, still-UNEVALUATED thunk import through a
@@ -4139,24 +3987,19 @@ mod tests {
     #[test]
     fn x2_b_forces_a_thunk_import_through_the_owning_programs_enter() {
         let (mut machine, program_a) = PreparedMachine::new(
-            x2b_thunk_producer_program(TopSlotBase::ZERO),
-            PreparedMachineOptions {
-                nursery_bytes: 128,
-                top_slots: 16,
-            },
+            x2b_thunk_producer_program(),
+            PreparedMachineOptions { nursery_bytes: 128 },
         )
         .expect("A installs");
 
         let handle_a = machine
             .retain_top(program_a, ValueId(0))
             .expect("A's own unforced thunk top can be retained without running anything");
-
-        let base_b = machine.next_top_slot_base();
         let mut imports = ImportBindings::new();
         imports.insert(x2b_thunk_producer_identity(), handle_a);
         let program_b = machine
             .install_program(
-                x2b_enter_consumer_program(base_b, x2b_thunk_producer_identity()),
+                x2b_enter_consumer_program(x2b_thunk_producer_identity()),
                 imports,
             )
             .expect(
@@ -4251,7 +4094,7 @@ mod tests {
 
     /// A's producer for S3 tests (1) and (3): a memoized CAF returning
     /// `Field(99)`, one strict `Int(64)` field.
-    fn s3_field_producer_program(base: TopSlotBase) -> CompiledProgram {
+    fn s3_field_producer_program() -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors.push(ConstructorDecl {
@@ -4293,7 +4136,7 @@ mod tests {
         let prepared = testing::prepare(wire).expect("s3 field producer fixture");
         let linked = link_program(prepared, &MachineImports::default())
             .expect("s3 field producer fixture links");
-        CompiledProgram::compile(&linked, base).expect("s3 field producer fixture compiles")
+        CompiledProgram::compile(&linked).expect("s3 field producer fixture compiles")
     }
 
     /// B: declares one global of `identity`/`rep`/`required_evaluated` and
@@ -4304,7 +4147,6 @@ mod tests {
     /// `install_program` re-verification under test is a separate, later
     /// check against the REAL live handle).
     fn s3_import_consumer_program(
-        base: TopSlotBase,
         identity: SymbolIdentity,
         rep: RuntimeRep,
         required_evaluated: bool,
@@ -4345,17 +4187,16 @@ mod tests {
             },
         );
         let linked = link_program(prepared, &imports).expect("s3 import consumer fixture links");
-        CompiledProgram::compile(&linked, base).expect("s3 import consumer fixture compiles")
+        CompiledProgram::compile(&linked).expect("s3 import consumer fixture compiles")
     }
 
     #[test]
     fn s3_test1_imported_constructor_field_reads_correctly_before_and_after_collections_both_sides()
     {
         let (mut machine, program_a) = PreparedMachine::new(
-            s3_field_producer_program(TopSlotBase::ZERO),
+            s3_field_producer_program(),
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots: 16,
             },
         )
         .expect("A installs");
@@ -4369,14 +4210,11 @@ mod tests {
         let [PreparedResult::Managed(handle_a)] = produced.values.as_slice() else {
             panic!("A must return one managed constructor");
         };
-
-        let base_b = machine.next_top_slot_base();
         let mut imports = ImportBindings::new();
         imports.insert(s3_field_producer_identity(), *handle_a);
         let program_b = machine
             .install_program(
                 s3_import_consumer_program(
-                    base_b,
                     s3_field_producer_identity(),
                     RuntimeRep::LiftedRef,
                     true,
@@ -4502,10 +4340,9 @@ mod tests {
     #[test]
     fn x1_generated_case_reads_a_foreign_constructor_through_the_interned_descriptor() {
         let (mut machine, program_a) = PreparedMachine::new(
-            s3_field_producer_program(TopSlotBase::ZERO),
+            s3_field_producer_program(),
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots: 16,
             },
         )
         .expect("A installs");
@@ -4519,8 +4356,6 @@ mod tests {
         let [PreparedResult::Managed(handle_a)] = produced.values.as_slice() else {
             panic!("A must return one managed constructor");
         };
-
-        let base_b = machine.next_top_slot_base();
         let mut imports = ImportBindings::new();
         imports.insert(s3_field_producer_identity(), *handle_a);
 
@@ -4596,7 +4431,6 @@ mod tests {
         );
         let linked =
             link_program(prepared, &machine_imports).expect("case-dispatch consumer fixture links");
-        assert_eq!(base_b, machine.next_top_slot_base());
         let compiled = machine
             .compile_for_install(&linked)
             .expect("case-dispatch consumer fixture compiles against the machine's interner");
@@ -4622,10 +4456,9 @@ mod tests {
     #[test]
     fn x1_conflicting_constructor_declaration_is_a_typed_compile_error() {
         let (mut machine, _program_a) = PreparedMachine::new(
-            s3_field_producer_program(TopSlotBase::ZERO),
+            s3_field_producer_program(),
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots: 16,
             },
         )
         .expect("A installs");
@@ -4673,17 +4506,17 @@ mod tests {
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 
-    /// Two compiles outstanding at once mint separate descriptors for a
-    /// constructor identity new to the machine. Only one may install; the
-    /// other is a typed stale reservation, never a silently unshared
-    /// descriptor baked into generated dispatch.
+    /// Two compiles may be outstanding at once: each owns its root block, so
+    /// both install, as distinct programs. (A compile that minted a
+    /// descriptor another install has since minted differently is still
+    /// refused, by the interner's identity check at install, never by a slot
+    /// reservation.)
     #[test]
-    fn an_outstanding_compile_is_refused_after_another_consumes_its_reservation() {
+    fn two_outstanding_compiles_both_install_on_their_own_root_blocks() {
         let (mut machine, _program_a) = PreparedMachine::new(
-            s3_field_producer_program(TopSlotBase::ZERO),
+            s3_field_producer_program(),
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots: 16,
             },
         )
         .expect("A installs");
@@ -4722,24 +4555,19 @@ mod tests {
             let prepared = testing::prepare(wire).expect("reservation fixture");
             link_program(prepared, &MachineImports::default()).expect("reservation fixture links")
         };
-        let reserved = machine.next_top_slot_base();
         let first = machine
             .compile_for_install(&linked())
             .expect("first outstanding compile");
         let second = machine
             .compile_for_install(&linked())
             .expect("second outstanding compile");
-        machine
+        let first = machine
             .install_program(first, ImportBindings::new())
-            .expect("the first compile consumes the reservation");
-        match machine.install_program(second, ImportBindings::new()) {
-            Err(ExecutionError::TopSlotBaseMismatch { expected, found }) => {
-                assert_eq!(found, reserved);
-                assert_eq!(expected, machine.next_top_slot_base());
-            }
-            Err(other) => panic!("expected a stale reservation, got {other:?}"),
-            Ok(_) => panic!("a stale compile must not install"),
-        }
+            .expect("the first outstanding compile installs");
+        let second = machine
+            .install_program(second, ImportBindings::new())
+            .expect("the second outstanding compile installs on its own root block");
+        assert_ne!(first, second, "every install mints a fresh program id");
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 
@@ -4752,7 +4580,7 @@ mod tests {
     /// constructor). `f`'s own body is never reached by this test (S2's T2
     /// finding: no cross-program apply primitive exists this wave) so its
     /// exact contents do not matter; it stays trivial.
-    fn s3_closure_producer_program(base: TopSlotBase) -> CompiledProgram {
+    fn s3_closure_producer_program() -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.signatures.push(Signature {
@@ -4791,17 +4619,14 @@ mod tests {
         let prepared = testing::prepare(wire).expect("s3 closure producer fixture");
         let linked = link_program(prepared, &MachineImports::default())
             .expect("s3 closure producer fixture links");
-        CompiledProgram::compile(&linked, base).expect("s3 closure producer fixture compiles")
+        CompiledProgram::compile(&linked).expect("s3 closure producer fixture compiles")
     }
 
     /// B for S3 test (2): imports `identity` as a global it never enters or
     /// calls, allocating 32 throwaway constructors under a tiny nursery
     /// (forcing a real collection FROM WITHIN this same call, before the
     /// final read of the import slot) before reading and returning it.
-    fn s3_closure_import_holder_program(
-        base: TopSlotBase,
-        identity: SymbolIdentity,
-    ) -> CompiledProgram {
+    fn s3_closure_import_holder_program(identity: SymbolIdentity) -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![],
@@ -4869,7 +4694,7 @@ mod tests {
         );
         let linked =
             link_program(prepared, &imports).expect("s3 closure import holder fixture links");
-        CompiledProgram::compile(&linked, base).expect("s3 closure import holder fixture compiles")
+        CompiledProgram::compile(&linked).expect("s3 closure import holder fixture compiles")
     }
 
     /// S3 test (2): A produces a closure (function-shaped object, not data).
@@ -4885,11 +4710,8 @@ mod tests {
     #[test]
     fn s3_test2_imported_closure_held_live_never_entered_survives_collections_both_sides() {
         let (mut machine, program_a) = PreparedMachine::new(
-            s3_closure_producer_program(TopSlotBase::ZERO),
-            PreparedMachineOptions {
-                nursery_bytes: 64,
-                top_slots: 16,
-            },
+            s3_closure_producer_program(),
+            PreparedMachineOptions { nursery_bytes: 64 },
         )
         .expect("A installs");
         let call = PreparedCallOptions {
@@ -4902,13 +4724,11 @@ mod tests {
         let [PreparedResult::Managed(handle_f)] = produced.values.as_slice() else {
             panic!("A must return one managed closure");
         };
-
-        let base_b = machine.next_top_slot_base();
         let mut imports = ImportBindings::new();
         imports.insert(s3_closure_producer_identity(), *handle_f);
         let program_b = machine
             .install_program(
-                s3_closure_import_holder_program(base_b, s3_closure_producer_identity()),
+                s3_closure_import_holder_program(s3_closure_producer_identity()),
                 imports,
             )
             .expect("B installs, importing A's closure as a non-evaluated-required global");
@@ -5015,10 +4835,9 @@ mod tests {
     #[test]
     fn s3_test2b_imported_function_satisfies_required_evaluated() {
         let (mut machine, program_a) = PreparedMachine::new(
-            s3_closure_producer_program(TopSlotBase::ZERO),
+            s3_closure_producer_program(),
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots: 16,
             },
         )
         .expect("A installs");
@@ -5032,14 +4851,11 @@ mod tests {
         let [PreparedResult::Managed(handle_f)] = produced.values.as_slice() else {
             panic!("A must return one managed closure");
         };
-
-        let base_b = machine.next_top_slot_base();
         let mut imports = ImportBindings::new();
         imports.insert(s3_closure_producer_identity(), *handle_f);
         let program_b = machine
             .install_program(
                 s3_import_consumer_program(
-                    base_b,
                     s3_closure_producer_identity(),
                     RuntimeRep::LiftedRef,
                     true,
@@ -5070,10 +4886,9 @@ mod tests {
     #[test]
     fn s3_test3_rep_mismatch_is_a_typed_import_shape_error_no_slot_claimed() {
         let (mut machine, program_a) = PreparedMachine::new(
-            s3_field_producer_program(TopSlotBase::ZERO),
+            s3_field_producer_program(),
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots: 16,
             },
         )
         .expect("A installs");
@@ -5087,14 +4902,11 @@ mod tests {
         let [PreparedResult::Managed(handle_a)] = produced.values.as_slice() else {
             panic!("A must return one managed constructor");
         };
-
-        let base_before = machine.next_top_slot_base();
         let mut imports = ImportBindings::new();
         imports.insert(s3_field_producer_identity(), *handle_a);
         let error = machine
             .install_program(
                 s3_import_consumer_program(
-                    base_before,
                     s3_field_producer_identity(),
                     RuntimeRep::UnliftedRef,
                     false,
@@ -5112,11 +4924,6 @@ mod tests {
                 }
             ),
             "expected a typed rep-mismatch ImportShape error, got {error:?}"
-        );
-        assert_eq!(
-            machine.next_top_slot_base(),
-            base_before,
-            "no slot may be claimed by a rejected install"
         );
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 
@@ -5141,7 +4948,6 @@ mod tests {
             outer_with_function_field_program(),
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots: 16,
             },
         )
         .expect("A installs");
@@ -5162,14 +4968,12 @@ mod tests {
         else {
             panic!("Envelope's fields must both remain retained, opaque managed handles");
         };
-
-        let base_before = machine.next_top_slot_base();
         let identity = testing::identity("S3ImportMismatch", "unforced");
         let mut imports = ImportBindings::new();
         imports.insert(identity.clone(), *unforced);
         let error = machine
             .install_program(
-                s3_import_consumer_program(base_before, identity, RuntimeRep::LiftedRef, true),
+                s3_import_consumer_program(identity, RuntimeRep::LiftedRef, true),
                 imports,
             )
             .expect_err("an unforced, never-entered thunk must not satisfy required_evaluated");
@@ -5184,11 +4988,6 @@ mod tests {
             ),
             "expected a typed evaluatedness-mismatch ImportShape error, got {error:?}"
         );
-        assert_eq!(
-            machine.next_top_slot_base(),
-            base_before,
-            "no slot may be claimed by a rejected install"
-        );
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 
         assert!(machine.release(*outer));
@@ -5199,19 +4998,15 @@ mod tests {
     #[test]
     fn s3_test3_unknown_handle_is_typed_no_slot_claimed() {
         let (mut machine, _program_a) = PreparedMachine::new(
-            s3_field_producer_program(TopSlotBase::ZERO),
+            s3_field_producer_program(),
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots: 16,
             },
         )
         .expect("A installs");
-
-        let base_before = machine.next_top_slot_base();
         let error = machine
             .install_program(
                 s3_import_consumer_program(
-                    base_before,
                     s3_field_producer_identity(),
                     RuntimeRep::LiftedRef,
                     false,
@@ -5222,11 +5017,6 @@ mod tests {
         assert!(
             matches!(error, ExecutionError::UnknownPreparedHandle),
             "expected the typed UnknownPreparedHandle error, got {error:?}"
-        );
-        assert_eq!(
-            machine.next_top_slot_base(),
-            base_before,
-            "no slot may be claimed by a rejected install"
         );
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
@@ -5240,10 +5030,7 @@ mod tests {
     /// install time (never through generated code) and its import field must
     /// already resolve when `initialize_heap_tops` runs. The entry (this
     /// same top) simply returns it.
-    fn s3b_pair_import_holder_program(
-        base: TopSlotBase,
-        identity: SymbolIdentity,
-    ) -> CompiledProgram {
+    fn s3b_pair_import_holder_program(identity: SymbolIdentity) -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.globals = vec![GlobalDecl {
             identity: identity.clone(),
@@ -5311,7 +5098,7 @@ mod tests {
         );
         let linked =
             link_program(prepared, &imports).expect("s3b pair import holder fixture links");
-        CompiledProgram::compile(&linked, base).expect("s3b pair import holder fixture compiles")
+        CompiledProgram::compile(&linked).expect("s3b pair import holder fixture compiles")
     }
 
     /// S3b test (1): a top-level constructor binding -- not a `Thunk` or
@@ -5325,10 +5112,9 @@ mod tests {
     #[test]
     fn s3b_import_holding_top_is_a_heap_top_published_after_import_slots() {
         let (mut machine, program_a) = PreparedMachine::new(
-            s3_field_producer_program(TopSlotBase::ZERO),
+            s3_field_producer_program(),
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots: 16,
             },
         )
         .expect("A installs");
@@ -5342,13 +5128,11 @@ mod tests {
         let [PreparedResult::Managed(handle_a)] = produced.values.as_slice() else {
             panic!("A must return one managed constructor");
         };
-
-        let base_b = machine.next_top_slot_base();
         let mut imports = ImportBindings::new();
         imports.insert(s3_field_producer_identity(), *handle_a);
         let program_b = machine
             .install_program(
-                s3b_pair_import_holder_program(base_b, s3_field_producer_identity()),
+                s3b_pair_import_holder_program(s3_field_producer_identity()),
                 imports,
             )
             .expect(
@@ -5434,10 +5218,7 @@ mod tests {
     /// with A at all, only the import. Its entry does a default-only
     /// algebraic `Case` on the imported, required-evaluated constructor and
     /// returns a LOCAL scalar from the default branch.
-    fn s3b_default_only_case_consumer_program(
-        base: TopSlotBase,
-        identity: SymbolIdentity,
-    ) -> CompiledProgram {
+    fn s3b_default_only_case_consumer_program(identity: SymbolIdentity) -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0] = Signature {
             arguments: vec![],
@@ -5491,7 +5272,7 @@ mod tests {
         );
         let linked =
             link_program(prepared, &imports).expect("s3b default-only case consumer fixture links");
-        CompiledProgram::compile(&linked, base).expect(
+        CompiledProgram::compile(&linked).expect(
             "s3b default-only case consumer fixture compiles standalone, with no shared \
              interner",
         )
@@ -5508,10 +5289,9 @@ mod tests {
     #[test]
     fn s3b_default_only_case_on_an_import_skips_dispatch() {
         let (mut machine, program_a) = PreparedMachine::new(
-            s3_field_producer_program(TopSlotBase::ZERO),
+            s3_field_producer_program(),
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots: 16,
             },
         )
         .expect("A installs");
@@ -5525,13 +5305,11 @@ mod tests {
         let [PreparedResult::Managed(handle_a)] = produced.values.as_slice() else {
             panic!("A must return one managed constructor");
         };
-
-        let base_b = machine.next_top_slot_base();
         let mut imports = ImportBindings::new();
         imports.insert(s3_field_producer_identity(), *handle_a);
         let program_b = machine
             .install_program(
-                s3b_default_only_case_consumer_program(base_b, s3_field_producer_identity()),
+                s3b_default_only_case_consumer_program(s3_field_producer_identity()),
                 imports,
             )
             .expect(
@@ -5632,7 +5410,6 @@ mod tests {
     /// program's constructor identities from a second installed program's
     /// (two programs may not declare one identity differently).
     fn stack_map_chain_list_program(
-        base: TopSlotBase,
         family: &str,
         nil_host_id: u64,
         cons_host_id: u64,
@@ -5690,8 +5467,7 @@ mod tests {
         let prepared = testing::prepare(wire).expect("stack_map_chain_list_program fixture");
         let linked = link_program(prepared, &MachineImports::default())
             .expect("stack_map_chain_list_program fixture links");
-        CompiledProgram::compile(&linked, base)
-            .expect("stack_map_chain_list_program fixture compiles")
+        CompiledProgram::compile(&linked).expect("stack_map_chain_list_program fixture compiles")
     }
 
     /// The length-`n` `Cons` chain `program` returns, read back through
@@ -5763,17 +5539,13 @@ mod tests {
         // collection the test used to observe was result retention after B
         // had returned -- a window in which a truncated chain is harmless.)
         let (mut machine, program_a) = PreparedMachine::new(
-            base_program(TopSlotBase::ZERO, 995),
-            PreparedMachineOptions {
-                nursery_bytes: 256,
-                top_slots: 8,
-            },
+            base_program(995),
+            PreparedMachineOptions { nursery_bytes: 256 },
         )
         .expect("A installs first, occupying the chain's first stack-map slot");
-        let base_b = machine.next_top_slot_base();
         let program_b = machine
             .install_program(
-                stack_map_chain_list_program(base_b, "S2bChain", 920, 921, 40),
+                stack_map_chain_list_program("S2bChain", 920, 921, 40),
                 ImportBindings::new(),
             )
             .expect("B installs second, extending the shared stack-map chain");
@@ -5844,19 +5616,14 @@ mod tests {
     fn s2b_a_static_object_is_retained_through_b_via_the_shared_static_region_set() {
         let _poison_guard = PoisonGuard::enabled();
         let (mut machine, program_a) = PreparedMachine::new(
-            field_constructor_program(TopSlotBase::ZERO, 985),
+            field_constructor_program(985),
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots: 8,
             },
         )
         .expect("A installs first, occupying the chain's first static-region slot");
-        let base_b = machine.next_top_slot_base();
         let program_b = machine
-            .install_program(
-                managed_argument_consumer_program(base_b),
-                ImportBindings::new(),
-            )
+            .install_program(managed_argument_consumer_program(), ImportBindings::new())
             .expect("B installs second, extending the shared static-region set");
 
         let call = PreparedCallOptions {
@@ -6080,6 +5847,88 @@ mod tests {
             machine.observe_handle(program, handle, 100),
             Ok(Value::Con(id, ref fields)) if id == DataConId(900) && fields.is_empty()
         ));
+        assert!(machine.release(handle));
+        assert_eq!(machine.handle_count(), handles_before);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// A host answer for a constructor with a scalar field builds through the
+    /// interner and observes the field back as the declared representation;
+    /// a plan that nests an object where the field expects a scalar (a
+    /// representation-category mismatch `marshal_descriptor_object` catches
+    /// at the leaf) is refused with `AnswerBuildError::Field` and leaves the
+    /// allocation cursor, the handle ledger and the root counts untouched.
+    ///
+    /// (`AnswerPlan::Scalar::rep` is not itself cross-checked against the
+    /// constructor's declared field representation -- only `bits` reaches
+    /// the write path, and `Int`/`Word`/`Float` all marshal as raw bytes -- so
+    /// the genuine mismatch this test exercises is shape, not width.)
+    #[test]
+    fn a_host_answer_with_scalar_fields_builds_and_a_bad_field_rolls_back() {
+        use crate::prepared_program::{AnswerBuildError, AnswerPlan};
+        let (mut machine, program) = PreparedMachine::new(
+            field_constructor_program(910),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("prepared machine");
+        let realm = RealmId::fresh();
+        let handles_before = machine.handle_count();
+
+        let mut bits = [0u8; 16];
+        bits[..8].copy_from_slice(&42_i64.to_ne_bytes());
+        let good = AnswerPlan::Constructor {
+            host_id: DataConId(910),
+            fields: vec![AnswerPlan::Scalar {
+                rep: RuntimeRep::Int(64),
+                bits,
+            }],
+        };
+        let handle = machine
+            .build_answer(realm, &good)
+            .expect("the Field constructor builds with its Int(64) field");
+        assert_eq!(machine.handle_realm(handle), Some(realm));
+        assert_eq!(machine.handle_count(), handles_before + 1);
+        assert!(matches!(
+            machine.observe_handle(program, handle, 100),
+            Ok(Value::Con(id, ref fields))
+                if id == DataConId(910)
+                    && matches!(
+                        fields.as_slice(),
+                        [Value::Lit(tidepool_repr::Literal::LitInt(42))]
+                    )
+        ));
+
+        let cursor_after_good = machine.vmctx.alloc_ptr;
+        let handles_after_good = machine.handle_count();
+        let roots_after_good = machine.total_persistent_roots();
+
+        // The field expects a scalar; nesting an object there is a
+        // representation-category mismatch caught by the same leaf
+        // validation `marshal_descriptor_object` runs for every field.
+        let bad = AnswerPlan::Constructor {
+            host_id: DataConId(910),
+            fields: vec![AnswerPlan::Constructor {
+                host_id: DataConId(910),
+                fields: vec![AnswerPlan::Scalar {
+                    rep: RuntimeRep::Int(64),
+                    bits,
+                }],
+            }],
+        };
+        assert!(matches!(
+            machine.build_answer(realm, &bad),
+            Err(ExecutionError::Answer(AnswerBuildError::Field {
+                host_id: DataConId(910),
+                index: 0,
+                ..
+            }))
+        ));
+        assert_eq!(machine.vmctx.alloc_ptr, cursor_after_good);
+        assert_eq!(machine.handle_count(), handles_after_good);
+        assert_eq!(machine.total_persistent_roots(), roots_after_good);
+
         assert!(machine.release(handle));
         assert_eq!(machine.handle_count(), handles_before);
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);

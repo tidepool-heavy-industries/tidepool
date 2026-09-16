@@ -1,4 +1,4 @@
-use super::{CompileError, CompiledProgram, ExecutionError, RunOptions, TopSlotBase, Unsupported};
+use super::{CompileError, CompiledProgram, ExecutionError, RunOptions, Unsupported};
 use crate::host_fns::RuntimeError;
 use std::sync::{atomic::AtomicBool, Arc};
 use tidepool_repr::execution_schema::{self, *};
@@ -41,7 +41,7 @@ fn double2int_wire(entry_rep: RuntimeRep, operation_rep: RuntimeRep) -> WireProg
 fn compile(entry_rep: RuntimeRep, operation_rep: RuntimeRep) -> CompiledProgram {
     let prepared = testing::prepare(double2int_wire(entry_rep, operation_rep)).unwrap();
     let linked = execution_schema::link_program(prepared, &MachineImports::default()).unwrap();
-    CompiledProgram::compile(&linked, TopSlotBase::ZERO).expect("double2Int# fixture compiles")
+    CompiledProgram::compile(&linked).expect("double2Int# fixture compiles")
 }
 
 fn run(program: &CompiledProgram, value: f64) -> Result<super::RunResult, ExecutionError> {
@@ -123,7 +123,7 @@ fn double2int_rejects_wrong_signature_before_native_emission() {
     let wire = double2int_wire(RuntimeRep::Float(32), RuntimeRep::Float(32));
     let prepared = testing::prepare(wire).unwrap();
     let linked = execution_schema::link_program(prepared, &MachineImports::default()).unwrap();
-    let result = CompiledProgram::compile(&linked, TopSlotBase::ZERO);
+    let result = CompiledProgram::compile(&linked);
     assert!(matches!(
         result,
         Err(CompileError::Unsupported(Unsupported::Operation { .. }))

@@ -1,4 +1,4 @@
-use super::{CompileError, CompiledProgram, ExecutionError, RunOptions, TopSlotBase, Unsupported};
+use super::{CompileError, CompiledProgram, ExecutionError, RunOptions, Unsupported};
 use crate::host_fns::RuntimeError;
 use cranelift_codegen::ir::{InstructionData, Opcode};
 use std::sync::{atomic::AtomicBool, Arc};
@@ -6,7 +6,7 @@ use tidepool_repr::execution_schema::{testing, *};
 
 fn compile(wire: WireProgram) -> CompiledProgram {
     let linked = link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-    CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap()
+    CompiledProgram::compile(&linked).unwrap()
 }
 
 fn resize_wire(new_len: i64, use_old_alias: bool) -> WireProgram {
@@ -613,7 +613,6 @@ fn literal_addresses_observe_through_one_shot_and_other_installed_programs() {
         owner,
         PreparedMachineOptions {
             nursery_bytes: RunOptions::default().nursery_bytes,
-            top_slots: 8,
         },
     )
     .unwrap();
@@ -636,7 +635,7 @@ fn literal_addresses_observe_through_one_shot_and_other_installed_programs() {
         },
     })];
     let linked = link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-    let reader = CompiledProgram::compile(&linked, machine.next_top_slot_base()).unwrap();
+    let reader = CompiledProgram::compile(&linked).unwrap();
     let reader = machine
         .install_program(reader, ImportBindings::new())
         .unwrap();
@@ -667,7 +666,7 @@ fn literal_addresses_observe_through_one_shot_and_other_installed_programs() {
         &MachineImports::default(),
     )
     .unwrap();
-    let strlen = CompiledProgram::compile(&linked, machine.next_top_slot_base()).unwrap();
+    let strlen = CompiledProgram::compile(&linked).unwrap();
     let strlen = machine
         .install_program(strlen, ImportBindings::new())
         .unwrap();
@@ -1011,7 +1010,7 @@ fn c_string_len_requires_exact_intrinsic_identity_and_signature() {
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
         assert!(matches!(
-            CompiledProgram::compile(&linked, TopSlotBase::ZERO),
+            CompiledProgram::compile(&linked),
             Err(CompileError::Unsupported(Unsupported::Operation { .. }))
         ));
     }
@@ -1028,7 +1027,7 @@ fn c_string_len_requires_exact_intrinsic_identity_and_signature() {
         )
         .unwrap();
         assert!(matches!(
-            CompiledProgram::compile(&linked, TopSlotBase::ZERO),
+            CompiledProgram::compile(&linked),
             Err(CompileError::Unsupported(Unsupported::Operation { .. }))
         ));
     }
@@ -1254,7 +1253,7 @@ fn index_char_rejects_wrong_char_rep_before_native_emission() {
     )
     .unwrap();
     assert!(matches!(
-        CompiledProgram::compile(&linked, TopSlotBase::ZERO),
+        CompiledProgram::compile(&linked),
         Err(CompileError::Unsupported(Unsupported::Operation { .. }))
     ));
 }

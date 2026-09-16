@@ -1,7 +1,8 @@
 //! Checked binder and closure layout facts used by every emitter consumer.
 
+use super::roots::RootWords;
 use super::static_bytes::PinnedBytes;
-use super::{CompileError, TopSlotBase};
+use super::CompileError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tidepool_heap::execution_descriptor::{EntryMetadata, ObjectDescriptor, ObjectKind};
@@ -167,13 +168,19 @@ pub(super) struct ProgramPlan<'a> {
     /// identity. Hosts must authenticate this distinct descriptor before access.
     pub mut_var: Arc<ObjectDescriptor>,
     pub bytes_array: Arc<ObjectDescriptor>,
-    /// Compact slots, not ValueId-indexed allocation controlled by wire IDs.
+    /// Compact block-local slots, not ValueId-indexed allocation controlled
+    /// by wire IDs.
     pub top_slots: BTreeMap<ValueId, usize>,
     /// Admitted imports' slots, indexed by `GlobalId` (dense from 0, matching
     /// `program.globals()`'s own order) -- `emit.rs`'s `ValueRef::Global(id)`
-    /// lowering reads `import_slots[id.0]`. Occupies the machine-wide range
+    /// lowering reads `import_slots[id.0]`. Occupies the block range
     /// immediately after `top_slots`.
     pub import_slots: Vec<ImportSlot>,
+    /// This program's own fixed-address root block: one collector-updated
+    /// word per top and import slot. Generated code embeds its address, so
+    /// the block is allocated before emission and lives exactly as long as
+    /// the code that names it.
+    pub root_block: RootWords,
     /// Pinned literal payloads; emitters never embed a borrowed artifact buffer.
     pub bytes: Arc<PinnedBytes>,
     pub heap_tops: BTreeSet<ValueId>,
@@ -185,14 +192,10 @@ pub(super) struct ProgramPlan<'a> {
 }
 
 impl<'a> ProgramPlan<'a> {
-    /// `base` is the machine-wide top-table slot this program's own tops
-    /// begin at. A single-program caller always passes `TopSlotBase::ZERO`;
-    /// `PreparedMachine::install_program` chooses a nonzero base for every
-    /// program after the first so every installed program's slots occupy a
-    /// disjoint, contiguous range of one shared table.
+    /// Slots are block-local: every program owns its own root block, so no
+    /// machine-wide base exists and two programs never share a slot range.
     pub fn new(
         program: &'a PreparedProgram,
-        base: TopSlotBase,
         interner: &mut super::DescriptorInterner,
     ) -> Result<Self, CompileError> {
         // wave4:LAYOUT_PLAN — collect top/local RHS types, function and join
@@ -205,12 +208,11 @@ impl<'a> ProgramPlan<'a> {
         let mut top_bindings = BTreeMap::new();
         let mut top_slots = BTreeMap::new();
         let mut bytes = BTreeMap::new();
-        let base = base.0 as usize;
 
         for group in program.bindings() {
             for top in group_items(group) {
                 top_bindings.insert(top.binding.id, &top.binding);
-                let slot = base + top_slots.len();
+                let slot = top_slots.len();
                 top_slots.insert(top.binding.id, slot);
                 binding_rep(program, &top.binding, &mut values);
                 collect_binding_literals(&top.binding, &mut bytes);
@@ -400,11 +402,13 @@ impl<'a> ProgramPlan<'a> {
             .enumerate()
             .map(|(index, declaration)| ImportSlot {
                 identity: declaration.identity.clone(),
-                slot: base + top_slots.len() + index,
+                slot: top_slots.len() + index,
                 rep: declaration.rep,
                 required_evaluated: declaration.required_evaluated,
             })
             .collect::<Vec<_>>();
+        let root_block = RootWords::new(top_slots.len() + import_slots.len())
+            .map_err(|_| CompileError::RootBlock)?;
 
         let heap_tops = super::image::heap_top_partition(&top_bindings);
         let pap_layouts = super::apply::layouts(
@@ -469,6 +473,7 @@ impl<'a> ProgramPlan<'a> {
             )?),
             top_slots,
             import_slots,
+            root_block,
             interned_constructors,
             bytes: Arc::new(PinnedBytes::new(bytes)),
             heap_tops,

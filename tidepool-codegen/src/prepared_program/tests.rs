@@ -2,8 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::{atomic::AtomicBool, Arc};
 
 use super::{
-    CompileError, CompiledProgram, ExecutionError, ObservationFailure, RunOptions, TopSlotBase,
-    Unsupported,
+    CompileError, CompiledProgram, ExecutionError, ObservationFailure, RunOptions, Unsupported,
 };
 use crate::host_fns::RuntimeError;
 use cranelift_codegen::ir::{
@@ -737,7 +736,7 @@ fn linked_wire(bytes: Vec<u8>) -> tidepool_repr::execution_schema::LinkedProgram
 #[test]
 fn multivalue_managed_results_survive_collection_after_return() {
     let linked = linked_mixed_result_fixture();
-    let program = CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap();
+    let program = CompiledProgram::compile(&linked).unwrap();
     let result = program
         .run_entry(
             tidepool_repr::execution_schema::ValueId(0),
@@ -775,8 +774,7 @@ fn multivalue_managed_results_survive_collection_after_return() {
 
 #[test]
 fn returned_refs_survive_generated_collection_in_the_caller() {
-    let program =
-        CompiledProgram::compile(&linked_mixed_result_fixture(), TopSlotBase::ZERO).unwrap();
+    let program = CompiledProgram::compile(&linked_mixed_result_fixture()).unwrap();
     let result = program
         .run_entry(
             tidepool_repr::execution_schema::ValueId(0),
@@ -808,7 +806,7 @@ fn returned_refs_survive_generated_collection_in_the_caller() {
 fn connected_call_case_let_covers_every_admitted_case_classification() {
     for kind in 0..=3 {
         let linked = linked_wire(case_wire(kind));
-        let program = CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap();
+        let program = CompiledProgram::compile(&linked).unwrap();
         let result = program
             .run_entry(
                 tidepool_repr::execution_schema::ValueId(0),
@@ -852,11 +850,9 @@ fn connected_call_case_let_covers_every_admitted_case_classification() {
 #[test]
 fn primitive_case_checks_literals_after_a_default_in_source_order() {
     for (scrutinee, expected) in [(7, 7), (8, 11)] {
-        let program = CompiledProgram::compile(
-            &linked_wire(primitive_default_first_wire(scrutinee)),
-            TopSlotBase::ZERO,
-        )
-        .unwrap();
+        let program =
+            CompiledProgram::compile(&linked_wire(primitive_default_first_wire(scrutinee)))
+                .unwrap();
         let result = program
             .run_entry(
                 tidepool_repr::execution_schema::ValueId(0),
@@ -879,11 +875,9 @@ fn primitive_float_case_uses_native_equality_after_a_default_in_source_order() {
         ((-0.0_f64).to_bits(), 1.0_f64.to_bits()),
         (f64::NAN.to_bits(), 2.0_f64.to_bits()),
     ] {
-        let program = CompiledProgram::compile(
-            &linked_wire(primitive_float_default_first_wire(scrutinee)),
-            TopSlotBase::ZERO,
-        )
-        .unwrap();
+        let program =
+            CompiledProgram::compile(&linked_wire(primitive_float_default_first_wire(scrutinee)))
+                .unwrap();
         let result = program
             .run_entry(
                 tidepool_repr::execution_schema::ValueId(0),
@@ -902,7 +896,7 @@ fn primitive_float_case_uses_native_equality_after_a_default_in_source_order() {
 #[test]
 fn nested_function_rejection_reports_the_nested_expression_owner() {
     assert!(matches!(
-        CompiledProgram::compile(&linked_wire(nested_invalid_enter_wire()), TopSlotBase::ZERO),
+        CompiledProgram::compile(&linked_wire(nested_invalid_enter_wire())),
         Err(CompileError::Unsupported(Unsupported::Expression {
             binding: tidepool_repr::execution_schema::ValueId(1),
             node: 0,
@@ -912,7 +906,7 @@ fn nested_function_rejection_reports_the_nested_expression_owner() {
 
 #[test]
 fn connected_join_jump_returns_zero_effect_result() {
-    let program = CompiledProgram::compile(&linked_wire(join_wire()), TopSlotBase::ZERO).unwrap();
+    let program = CompiledProgram::compile(&linked_wire(join_wire())).unwrap();
     let result = program
         .run_entry(
             tidepool_repr::execution_schema::ValueId(0),
@@ -930,8 +924,7 @@ fn connected_join_jump_returns_zero_effect_result() {
 
 #[test]
 fn w5_a1_cancelled_generated_entry_records_cause() {
-    let program =
-        CompiledProgram::compile(&linked_wire(zero_result_wire()), TopSlotBase::ZERO).unwrap();
+    let program = CompiledProgram::compile(&linked_wire(zero_result_wire())).unwrap();
     let error = program
         .run_entry(
             tidepool_repr::execution_schema::ValueId(0),
@@ -948,7 +941,7 @@ fn w5_a1_cancelled_generated_entry_records_cause() {
 
 #[test]
 fn w5_a1_nonallocating_join_observes_cancel() {
-    let program = CompiledProgram::compile(&linked_wire(join_wire()), TopSlotBase::ZERO).unwrap();
+    let program = CompiledProgram::compile(&linked_wire(join_wire())).unwrap();
     let error = program
         .run_entry(
             tidepool_repr::execution_schema::ValueId(0),
@@ -965,8 +958,7 @@ fn w5_a1_nonallocating_join_observes_cancel() {
 
 #[test]
 fn zero_result_entry_returns_no_observable_payload() {
-    let program =
-        CompiledProgram::compile(&linked_wire(zero_result_wire()), TopSlotBase::ZERO).unwrap();
+    let program = CompiledProgram::compile(&linked_wire(zero_result_wire())).unwrap();
     let result = program
         .run_entry(
             tidepool_repr::execution_schema::ValueId(0),
@@ -980,8 +972,7 @@ fn zero_result_entry_returns_no_observable_payload() {
 
 #[test]
 fn observation_failure_does_not_expose_the_return_payload() {
-    let program =
-        CompiledProgram::compile(&linked_mixed_result_fixture(), TopSlotBase::ZERO).unwrap();
+    let program = CompiledProgram::compile(&linked_mixed_result_fixture()).unwrap();
     let error = program
         .run_entry(
             tidepool_repr::execution_schema::ValueId(0),
@@ -1001,9 +992,7 @@ fn observation_failure_does_not_expose_the_return_payload() {
 
 #[test]
 fn cyclic_static_top_terminates_with_typed_observation_budget_failure() {
-    let program =
-        CompiledProgram::compile(&linked_wire(cyclic_static_top_wire()), TopSlotBase::ZERO)
-            .unwrap();
+    let program = CompiledProgram::compile(&linked_wire(cyclic_static_top_wire())).unwrap();
     let error = program
         .run_entry(
             tidepool_repr::execution_schema::ValueId(0),
@@ -1023,11 +1012,8 @@ fn cyclic_static_top_terminates_with_typed_observation_budget_failure() {
 
 #[test]
 fn nursery_allocation_gc_preserves_static_child_for_observation() {
-    let program = CompiledProgram::compile(
-        &linked_wire(finite_static_child_nursery_wire()),
-        TopSlotBase::ZERO,
-    )
-    .unwrap();
+    let program =
+        CompiledProgram::compile(&linked_wire(finite_static_child_nursery_wire())).unwrap();
     let result = program
         .run_entry(
             tidepool_repr::execution_schema::ValueId(0),
@@ -1058,8 +1044,7 @@ fn nursery_allocation_gc_preserves_static_child_for_observation() {
 
 #[test]
 fn recursive_group_reserves_once_before_sibling_initialization() {
-    let program =
-        CompiledProgram::compile(&linked_mixed_result_fixture(), TopSlotBase::ZERO).unwrap();
+    let program = CompiledProgram::compile(&linked_mixed_result_fixture()).unwrap();
     let ir = program
         .pipeline
         .emitted_ir
@@ -1135,11 +1120,7 @@ fn recursive_group_reserves_once_before_sibling_initialization() {
 
 #[test]
 fn enter_uses_one_generated_state_machine_call_without_an_inline_header_chain() {
-    let program = CompiledProgram::compile(
-        &linked_wire(static_constructor_enter_wire()),
-        TopSlotBase::ZERO,
-    )
-    .unwrap();
+    let program = CompiledProgram::compile(&linked_wire(static_constructor_enter_wire())).unwrap();
     let ir = program
         .pipeline
         .emitted_ir
@@ -1166,7 +1147,7 @@ fn enter_uses_one_generated_state_machine_call_without_an_inline_header_chain() 
         .filter(|inst| function.dfg.insts[*inst].opcode() == Opcode::Load)
         .count();
     assert_eq!(
-        loads, 3,
-        "Enter performs top-table loads plus stack preflight"
+        loads, 2,
+        "Enter performs one root-block load for the top plus the stack preflight load"
     );
 }

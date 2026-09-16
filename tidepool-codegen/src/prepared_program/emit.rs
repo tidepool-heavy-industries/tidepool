@@ -380,7 +380,6 @@ fn emit_function_at(
                             &values,
                             arguments,
                             &target.signature.arguments,
-                            vmctx,
                             plan,
                             id,
                             node,
@@ -432,7 +431,6 @@ fn emit_function_at(
                             &values,
                             arguments,
                             &signature.arguments,
-                            vmctx,
                             plan,
                             id,
                             node,
@@ -515,7 +513,7 @@ fn emit_function_at(
                             continue;
                         };
                         let output =
-                            emit_atoms(&mut builder, &values, atoms, reps, vmctx, plan, id, node)?;
+                            emit_atoms(&mut builder, &values, atoms, reps, plan, id, node)?;
                         finish_returning(
                             &mut builder,
                             pipeline,
@@ -962,7 +960,7 @@ fn emit_let_group(
                         continue;
                     }
                     let field = &descriptor.payload().fields()[stored as usize];
-                    let value = atom_value(builder, vmctx, &values, plan, atom, *rep, owner, node)?;
+                    let value = atom_value(builder, &values, plan, atom, *rep, owner, node)?;
                     builder.ins().store(
                         flags,
                         value,
@@ -978,16 +976,8 @@ fn emit_let_group(
                     };
                     let field = &descriptor.payload().fields()[stored as usize];
                     let atom = Atom::Ref(capture.clone());
-                    let value = atom_value(
-                        builder,
-                        vmctx,
-                        &values,
-                        plan,
-                        &atom,
-                        field.rep(),
-                        owner,
-                        node,
-                    )?;
+                    let value =
+                        atom_value(builder, &values, plan, &atom, field.rep(), owner, node)?;
                     builder.ins().store(
                         flags,
                         value,
@@ -1003,16 +993,8 @@ fn emit_let_group(
                     };
                     let field = &descriptor.payload().fields()[stored as usize];
                     let atom = Atom::Ref(capture.clone());
-                    let value = atom_value(
-                        builder,
-                        vmctx,
-                        &values,
-                        plan,
-                        &atom,
-                        field.rep(),
-                        owner,
-                        node,
-                    )?;
+                    let value =
+                        atom_value(builder, &values, plan, &atom, field.rep(), owner, node)?;
                     builder.ins().store(
                         flags,
                         value,
@@ -1353,7 +1335,6 @@ fn emit_enter(
     // thunk must not be returned as though it were already the result.
     let callee = atom_value(
         builder,
-        vmctx,
         values,
         plan,
         callee,
@@ -1456,7 +1437,7 @@ fn emit_construct(
             continue;
         }
         let field = &descriptor.payload().fields()[stored as usize];
-        let value = atom_value(builder, vmctx, values, plan, atom, *rep, owner, node)?;
+        let value = atom_value(builder, values, plan, atom, *rep, owner, node)?;
         builder.ins().store(
             flags,
             value,
@@ -1500,7 +1481,6 @@ fn emit_exact_call(
     }
     let environment = atom_value(
         builder,
-        vmctx,
         values,
         plan,
         callee,
@@ -1532,7 +1512,6 @@ fn emit_exact_call(
         values,
         arguments,
         &signature.arguments,
-        vmctx,
         plan,
         owner,
         node,
@@ -1547,13 +1526,33 @@ fn emit_exact_call(
     )
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "atom emission carries independent borrowed environment, literal image, and node provenance"
-)]
+/// Load one word of this program's own root block: the block address is a
+/// compile-time immediate (the code and the block live and die together),
+/// and the slot is a block-local offset. The collector rewrites the block in
+/// place, so the load always observes the current pointer.
+fn root_slot_value(
+    builder: &mut FunctionBuilder<'_>,
+    plan: &ProgramPlan<'_>,
+    slot: usize,
+    expected: RuntimeRep,
+) -> Value {
+    let block = builder
+        .ins()
+        .iconst(types::I64, plan.root_block.as_mut_ptr() as i64);
+    let value = builder.ins().load(
+        types::I64,
+        MemFlags::trusted(),
+        block,
+        (slot * std::mem::size_of::<usize>()) as i32,
+    );
+    if matches!(expected, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
+        builder.declare_value_needs_stack_map(value);
+    }
+    value
+}
+
 fn atom_value(
     builder: &mut FunctionBuilder<'_>,
-    vmctx: Value,
     values: &BTreeMap<ValueId, Value>,
     plan: &ProgramPlan<'_>,
     atom: &Atom,
@@ -1581,59 +1580,24 @@ fn atom_value(
             let Some(slot) = plan.top_slots.get(id).copied() else {
                 return Err(unsupported(owner, node));
             };
-            let tops = builder.ins().load(
-                types::I64,
-                MemFlags::trusted(),
-                vmctx,
-                crate::layout::VMCTX_PREPARED_TOPS_OFFSET,
-            );
-            let value = builder.ins().load(
-                types::I64,
-                MemFlags::trusted(),
-                tops,
-                (slot * std::mem::size_of::<usize>()) as i32,
-            );
-            if matches!(expected, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
-                builder.declare_value_needs_stack_map(value);
-            }
-            Ok(value)
+            Ok(root_slot_value(builder, plan, slot, expected))
         }
         Atom::Ref(ValueRef::Global(id)) => {
             let Some(slot) = plan.import_slots.get(id.0 as usize) else {
                 return Err(unsupported(owner, node));
             };
-            let tops = builder.ins().load(
-                types::I64,
-                MemFlags::trusted(),
-                vmctx,
-                crate::layout::VMCTX_PREPARED_TOPS_OFFSET,
-            );
-            let value = builder.ins().load(
-                types::I64,
-                MemFlags::trusted(),
-                tops,
-                (slot.slot * std::mem::size_of::<usize>()) as i32,
-            );
-            if matches!(expected, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
-                builder.declare_value_needs_stack_map(value);
-            }
-            Ok(value)
+            Ok(root_slot_value(builder, plan, slot.slot, expected))
         }
         Atom::Scalar(scalar) => scalar_value(builder, scalar, expected, plan, owner, node),
         Atom::Void | Atom::Rubbish(_) => Err(unsupported(owner, node)),
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "atom-list emission carries independent borrowed environment, literal image, and node provenance"
-)]
 fn emit_atoms(
     builder: &mut FunctionBuilder<'_>,
     values: &BTreeMap<ValueId, Value>,
     atoms: &[Atom],
     reps: &[RuntimeRep],
-    vmctx: Value,
     plan: &ProgramPlan<'_>,
     owner: ValueId,
     node: usize,
@@ -1645,7 +1609,7 @@ fn emit_atoms(
         .iter()
         .zip(reps)
         .filter_map(|(atom, rep)| (*rep != RuntimeRep::Void).then_some((atom, *rep)))
-        .map(|(atom, rep)| atom_value(builder, vmctx, values, plan, atom, rep, owner, node))
+        .map(|(atom, rep)| atom_value(builder, values, plan, atom, rep, owner, node))
         .collect()
 }
 

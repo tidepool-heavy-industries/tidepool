@@ -1277,9 +1277,7 @@ mod tests {
         };
         let prepared = testing::prepare(wire).unwrap();
         let linked = link_program(prepared, &MachineImports::default()).unwrap();
-        let compiled =
-            super::super::CompiledProgram::compile(&linked, super::super::TopSlotBase::ZERO)
-                .unwrap();
+        let compiled = super::super::CompiledProgram::compile(&linked).unwrap();
         compiled
             .run_entry(
                 ValueId(0),
@@ -1318,9 +1316,7 @@ mod tests {
         };
         let prepared = testing::prepare(wire).unwrap();
         let linked = link_program(prepared, &MachineImports::default()).unwrap();
-        let compiled =
-            super::super::CompiledProgram::compile(&linked, super::super::TopSlotBase::ZERO)
-                .unwrap();
+        let compiled = super::super::CompiledProgram::compile(&linked).unwrap();
         compiled.run_entry(
             ValueId(0),
             &[],
@@ -1353,9 +1349,7 @@ mod tests {
         };
         let prepared = testing::prepare(wire).unwrap();
         let linked = link_program(prepared, &MachineImports::default()).unwrap();
-        let compiled =
-            super::super::CompiledProgram::compile(&linked, super::super::TopSlotBase::ZERO)
-                .unwrap();
+        let compiled = super::super::CompiledProgram::compile(&linked).unwrap();
         compiled
             .run_entry(
                 ValueId(0),
@@ -1596,9 +1590,7 @@ mod tests {
         fn run(wire: WireProgram) -> tidepool_bridge::Value {
             let prepared = testing::prepare(wire).unwrap();
             let linked = link_program(prepared, &MachineImports::default()).unwrap();
-            let compiled =
-                super::super::CompiledProgram::compile(&linked, super::super::TopSlotBase::ZERO)
-                    .unwrap();
+            let compiled = super::super::CompiledProgram::compile(&linked).unwrap();
             compiled
                 .run_entry(
                     ValueId(0),
@@ -1731,9 +1723,7 @@ mod tests {
 
         let prepared = testing::prepare(wire).unwrap();
         let linked = link_program(prepared, &MachineImports::default()).unwrap();
-        let compiled =
-            super::super::CompiledProgram::compile(&linked, super::super::TopSlotBase::ZERO)
-                .unwrap();
+        let compiled = super::super::CompiledProgram::compile(&linked).unwrap();
         let result = compiled
             .run_entry(
                 ValueId(0),
@@ -2627,9 +2617,7 @@ mod tests {
         };
         let prepared = testing::prepare(wire).unwrap();
         let linked = link_program(prepared, &MachineImports::default()).unwrap();
-        let compiled =
-            super::super::CompiledProgram::compile(&linked, super::super::TopSlotBase::ZERO)
-                .unwrap();
+        let compiled = super::super::CompiledProgram::compile(&linked).unwrap();
         let result = compiled
             .run_entry(
                 ValueId(0),

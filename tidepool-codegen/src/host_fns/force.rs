@@ -529,7 +529,6 @@ mod tests {
                 tail_callee: std::ptr::null_mut(),
                 tail_arg: std::ptr::null_mut(),
                 machine_state: std::ptr::null_mut(),
-                prepared_tops: std::ptr::null(),
                 prepared_stack_limit: std::ptr::null(),
             };
 
@@ -573,7 +572,6 @@ mod tests {
                 tail_callee: std::ptr::null_mut(),
                 tail_arg: std::ptr::null_mut(),
                 machine_state: std::ptr::null_mut(),
-                prepared_tops: std::ptr::null(),
                 prepared_stack_limit: std::ptr::null(),
             };
 
@@ -604,7 +602,6 @@ mod tests {
                 tail_callee: std::ptr::null_mut(),
                 tail_arg: std::ptr::null_mut(),
                 machine_state: std::ptr::null_mut(),
-                prepared_tops: std::ptr::null(),
                 prepared_stack_limit: std::ptr::null(),
             };
 
@@ -633,7 +630,6 @@ mod tests {
                 tail_callee: std::ptr::null_mut(),
                 tail_arg: std::ptr::null_mut(),
                 machine_state: std::ptr::null_mut(),
-                prepared_tops: std::ptr::null(),
                 prepared_stack_limit: std::ptr::null(),
             };
 
@@ -669,7 +665,6 @@ mod tests {
                 tail_callee: std::ptr::null_mut(),
                 tail_arg: std::ptr::null_mut(),
                 machine_state: std::ptr::null_mut(),
-                prepared_tops: std::ptr::null(),
                 prepared_stack_limit: std::ptr::null(),
             };
 
@@ -714,7 +709,6 @@ mod tests {
                 tail_callee: std::ptr::null_mut(),
                 tail_arg: std::ptr::null_mut(),
                 machine_state: std::ptr::null_mut(),
-                prepared_tops: std::ptr::null(),
                 prepared_stack_limit: std::ptr::null(),
             };
 
@@ -762,7 +756,6 @@ mod tests {
             tail_callee: std::ptr::null_mut(),
             tail_arg: std::ptr::null_mut(),
             machine_state: &ms as *const MachineState as *mut MachineState,
-            prepared_tops: std::ptr::null(),
             prepared_stack_limit: std::ptr::null(),
         };
         let vmctx_ptr = &mut vmctx as *mut VMContext;

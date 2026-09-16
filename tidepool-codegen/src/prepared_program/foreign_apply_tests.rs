@@ -23,13 +23,13 @@ fn top(id: u32, signature: u32, parameters: Vec<ValueId>, body: usize) -> Group<
     })
 }
 
-fn compile(wire: WireProgram, base: TopSlotBase) -> CompiledProgram {
+fn compile(wire: WireProgram) -> CompiledProgram {
     let linked = link_program(
         testing::prepare(wire).expect("valid fixture"),
         &MachineImports::default(),
     )
     .unwrap();
-    CompiledProgram::compile(&linked, base).expect("fixture compiles")
+    CompiledProgram::compile(&linked).expect("fixture compiles")
 }
 
 fn install_caller(machine: &mut PreparedMachine<'_>, demand: Signature) -> ProgramId {
@@ -67,7 +67,7 @@ fn install_caller(machine: &mut PreparedMachine<'_>, demand: Signature) -> Progr
             .collect(),
         0,
     )];
-    let program = compile(wire, machine.next_top_slot_base());
+    let program = compile(wire);
     machine
         .install_program(program, ImportBindings::new())
         .unwrap()
@@ -181,11 +181,8 @@ fn foreign_pap_partial_again_and_exact_results_survive_gc() {
     ] {
         let results = ResultContract::Returns(reps.clone());
         let (mut machine, a) = PreparedMachine::new(
-            compile(owner(results.clone()), TopSlotBase::ZERO),
-            PreparedMachineOptions {
-                nursery_bytes: 128,
-                top_slots: 32,
-            },
+            compile(owner(results.clone())),
+            PreparedMachineOptions { nursery_bytes: 128 },
         )
         .unwrap();
         let function = machine.retain_top(a, ValueId(0)).unwrap();
@@ -276,11 +273,8 @@ fn foreign_pap_partial_again_and_exact_results_survive_gc() {
 #[test]
 fn foreign_terminal_saturation_does_not_apply_excess_or_publish_results() {
     let (mut machine, a) = PreparedMachine::new(
-        compile(owner(ResultContract::NoSuccess), TopSlotBase::ZERO),
-        PreparedMachineOptions {
-            nursery_bytes: 128,
-            top_slots: 32,
-        },
+        compile(owner(ResultContract::NoSuccess)),
+        PreparedMachineOptions { nursery_bytes: 128 },
     )
     .unwrap();
     let function = machine.retain_top(a, ValueId(0)).unwrap();
@@ -415,14 +409,8 @@ fn excess_demand() -> Signature {
 #[test]
 fn foreign_excess_probe_misses_do_not_poison_a_later_hit() {
     let wire = closure_returning_owner();
-    let (mut machine, a) = PreparedMachine::new(
-        compile(wire, TopSlotBase::ZERO),
-        PreparedMachineOptions {
-            nursery_bytes: 128,
-            top_slots: 32,
-        },
-    )
-    .unwrap();
+    let (mut machine, a) =
+        PreparedMachine::new(compile(wire), PreparedMachineOptions { nursery_bytes: 128 }).unwrap();
     let function = machine.retain_top(a, ValueId(0)).unwrap();
     let token = machine.retain_top(a, ValueId(1)).unwrap();
     let b = install_caller(&mut machine, excess_demand());
@@ -461,14 +449,8 @@ fn foreign_excess_probe_misses_do_not_poison_a_later_hit() {
 #[test]
 fn foreign_signature_matching_preserves_void_positions_and_zero_application() {
     let (mut machine, a) = PreparedMachine::new(
-        compile(
-            owner(ResultContract::Returns(vec![RuntimeRep::Int(64)])),
-            TopSlotBase::ZERO,
-        ),
-        PreparedMachineOptions {
-            nursery_bytes: 128,
-            top_slots: 32,
-        },
+        compile(owner(ResultContract::Returns(vec![RuntimeRep::Int(64)]))),
+        PreparedMachineOptions { nursery_bytes: 128 },
     )
     .unwrap();
     let function = machine.retain_top(a, ValueId(0)).unwrap();
@@ -543,20 +525,14 @@ fn foreign_excess_can_continue_in_a_third_program() {
     identity.expressions.nodes = vec![ExprFrame::Return(vec![local(100)])];
     identity.bindings = vec![top(0, 0, vec![ValueId(100)], 0)];
     let (mut machine, a) = PreparedMachine::new(
-        compile(identity, TopSlotBase::ZERO),
-        PreparedMachineOptions {
-            nursery_bytes: 128,
-            top_slots: 32,
-        },
+        compile(identity),
+        PreparedMachineOptions { nursery_bytes: 128 },
     )
     .unwrap();
-    let third = compile(
-        owner(ResultContract::Returns(vec![
-            RuntimeRep::Int(64),
-            RuntimeRep::LiftedRef,
-        ])),
-        machine.next_top_slot_base(),
-    );
+    let third = compile(owner(ResultContract::Returns(vec![
+        RuntimeRep::Int(64),
+        RuntimeRep::LiftedRef,
+    ])));
     let c = machine
         .install_program(third, ImportBindings::new())
         .unwrap();
@@ -619,13 +595,9 @@ fn foreign_excess_can_continue_in_a_third_program() {
 #[test]
 fn foreign_application_of_an_owned_constructor_is_a_reusable_miss() {
     let (mut machine, a) = PreparedMachine::new(
-        compile(
-            owner(ResultContract::Returns(vec![RuntimeRep::Int(64)])),
-            TopSlotBase::ZERO,
-        ),
+        compile(owner(ResultContract::Returns(vec![RuntimeRep::Int(64)]))),
         PreparedMachineOptions {
             nursery_bytes: 4096,
-            top_slots: 32,
         },
     )
     .unwrap();
@@ -704,11 +676,8 @@ fn cancellation_at_every_poll_of_a_foreign_excess_call_is_reusable_and_retries()
         let mut completed = false;
         for occurrence in 1..=512 {
             let (mut machine, a) = PreparedMachine::new(
-                compile(closure_returning_owner(), TopSlotBase::ZERO),
-                PreparedMachineOptions {
-                    nursery_bytes: 128,
-                    top_slots: 32,
-                },
+                compile(closure_returning_owner()),
+                PreparedMachineOptions { nursery_bytes: 128 },
             )
             .unwrap();
             let function = machine.retain_top(a, ValueId(0)).unwrap();
@@ -809,7 +778,7 @@ fn foreign_dispatch_cost_on_freer_artifact() {
         .finish();
     tracing::subscriber::with_default(subscriber, || {
         let started = std::time::Instant::now();
-        let program = CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap();
+        let program = CompiledProgram::compile(&linked).unwrap();
         eprintln!(
             "{label}: {} callable offers, total compile {:?}",
             program.callables.len(),

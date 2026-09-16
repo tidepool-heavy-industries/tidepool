@@ -18,7 +18,7 @@ use tidepool_codegen::prepared_program::{
     AnswerPlan, CompileError, CompiledProgram, ExecutionError, ImportBindings, PreparedCallOptions,
     PreparedFrameEvidence, PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions,
     PreparedOuter as CodegenPreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
-    RunOptions, TopSlotBase, MAX_ANSWER_DEPTH,
+    RunOptions, MAX_ANSWER_DEPTH,
 };
 use tidepool_codegen::scope::ScopeId;
 // Re-exported: callers of this module's realm-scoped cancellation API
@@ -42,13 +42,6 @@ use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 
 use super::resident::SessionRunContext;
 use super::turn::PREPARED_RESUME_TARGET;
-
-/// Machine-wide top-table capacity a session machine reserves up front:
-/// every later `install` claims its tops and import slots from this fixed
-/// range, and registered root addresses must never move, so it is sized for
-/// a whole session rather than one program. Exhaustion is the typed
-/// `ExecutionError::TopTableExhausted`, never a reallocation.
-const SESSION_TOP_SLOTS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreparedFailureKind {
@@ -109,6 +102,14 @@ pub enum PreparedRuntimeError {
     /// consulted.
     #[error("the prepared route does not yet support {0}")]
     NotYetSupported(&'static str),
+    /// An operation that needs an installed machine ran before the first
+    /// program installed one.
+    #[error("no prepared program has been installed yet")]
+    NoMachine,
+    /// One artifact declares the same typed site twice with different
+    /// evidence: a projection defect, refused before anything installs.
+    #[error("the artifact declares typed site {site} twice with different evidence")]
+    DuplicateSite { site: u64 },
     /// A pattern bind's settled value did not carry one managed field per
     /// GHC binder. The extractor projects the binders as one tuple, so this
     /// is a stale or foreign artifact, never a user error.
@@ -177,6 +178,8 @@ impl PreparedRuntimeError {
             | Self::WrongEngine
             | Self::MissingProgram
             | Self::NotYetSupported(_)
+            | Self::NoMachine
+            | Self::DuplicateSite { .. }
             | Self::ProjectionShape { .. }
             | Self::SiteConflict { .. }
             | Self::UnknownSite { .. }
@@ -202,9 +205,7 @@ impl PreparedRuntimeError {
                 | ExecutionError::HostIdConflict { .. }
                 | ExecutionError::UnknownProgram(_)
                 | ExecutionError::UnknownContinuation(_)
-                | ExecutionError::Answer(_)
-                | ExecutionError::TopTableExhausted { .. }
-                | ExecutionError::TopSlotBaseMismatch { .. } => PreparedFailureKind::Rejected,
+                | ExecutionError::Answer(_) => PreparedFailureKind::Rejected,
                 ExecutionError::Runtime(failure) => {
                     if failure.disposition == MachineDisposition::Unavailable {
                         PreparedFailureKind::Integrity
@@ -1296,23 +1297,19 @@ impl PreparedRuntime {
         if let Some((_, program)) = &self.machine {
             return Ok(*program);
         }
-        let linked = self.pending.take().ok_or(PreparedRuntimeError::Run(
-            ExecutionError::UnknownProgram(ProgramId::FIRST),
-        ))?;
+        let linked = self.pending.take().ok_or(PreparedRuntimeError::NoMachine)?;
         let facts = ProgramFacts::of(linked.prepared());
-        let compiled = match CompiledProgram::compile(&linked, TopSlotBase::ZERO) {
+        let compiled = match CompiledProgram::compile(&linked) {
             Ok(compiled) => compiled,
             Err(error) => {
                 self.pending = Some(linked);
                 return Err(PreparedRuntimeError::Compile(error));
             }
         };
-        let top_slots = compiled.top_slot_count().max(SESSION_TOP_SLOTS);
         let installed = match PreparedMachine::new(
             compiled,
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots,
             },
         ) {
             Ok(installed) => installed,
@@ -1331,18 +1328,14 @@ impl PreparedRuntime {
         self.machine
             .as_mut()
             .map(|(machine, _)| machine)
-            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
-                ProgramId::FIRST,
-            )))
+            .ok_or(PreparedRuntimeError::NoMachine)
     }
 
     fn machine_ref(&self) -> Result<&PreparedMachine<'static>, PreparedRuntimeError> {
         self.machine
             .as_ref()
             .map(|(machine, _)| machine)
-            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
-                ProgramId::FIRST,
-            )))
+            .ok_or(PreparedRuntimeError::NoMachine)
     }
 
     /// `binding`, or the program's declared entry when `None`.
@@ -1533,14 +1526,11 @@ impl PreparedEngine {
     pub fn bootstrap(prepared: PreparedProgram) -> Result<(Self, ProgramId), PreparedRuntimeError> {
         let facts = ProgramFacts::of(&prepared);
         let linked = link_program(prepared, &MachineImports::default())?;
-        let compiled = CompiledProgram::compile(&linked, TopSlotBase::ZERO)
-            .map_err(PreparedRuntimeError::Compile)?;
-        let top_slots = compiled.top_slot_count().max(SESSION_TOP_SLOTS);
+        let compiled = CompiledProgram::compile(&linked).map_err(PreparedRuntimeError::Compile)?;
         let (machine, program) = PreparedMachine::new(
             compiled,
             PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-                top_slots,
             },
         )
         .map_err(PreparedRuntimeError::Run)?;
@@ -1582,11 +1572,12 @@ impl PreparedEngine {
                 continue;
             };
             if !sites_equivalent(owner_facts, owner_row, facts, site) {
-                return Err(PreparedRuntimeError::SiteConflict {
-                    site: site.site,
-                    // A duplicate within one artifact has no installed owner
-                    // yet; the program being installed is reported.
-                    owner: owner.unwrap_or(ProgramId::FIRST),
+                return Err(match owner {
+                    Some(owner) => PreparedRuntimeError::SiteConflict {
+                        site: site.site,
+                        owner,
+                    },
+                    None => PreparedRuntimeError::DuplicateSite { site: site.site },
                 });
             }
         }

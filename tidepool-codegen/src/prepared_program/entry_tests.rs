@@ -1,4 +1,4 @@
-use super::{CompiledProgram, RunOptions, TopSlotBase};
+use super::{CompiledProgram, RunOptions};
 use crate::host_fns::RuntimeError;
 use std::collections::BTreeMap;
 use std::sync::{atomic::AtomicBool, Arc};
@@ -73,7 +73,7 @@ fn w5_a4_observation_forces_constructor_child() {
         }),
     ];
     let linked = link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-    let compiled = CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap();
+    let compiled = CompiledProgram::compile(&linked).unwrap();
     let result = compiled
         .run_entry(
             ValueId(0),
@@ -161,7 +161,7 @@ pub(super) fn caf_program(
     };
     let prepared = testing::prepare(wire).unwrap();
     let linked = link_program(prepared, &MachineImports::default()).unwrap();
-    CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap()
+    CompiledProgram::compile(&linked).unwrap()
 }
 
 /// The real adapter must enter a heap CAF, allocate its value and settle it.
@@ -326,7 +326,7 @@ fn w5_a1_function_case_enters_captured_local_thunk_across_collection() {
         body,
     };
     let linked = link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-    let program = CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap();
+    let program = CompiledProgram::compile(&linked).unwrap();
     let result = program
         .run_entry(
             ValueId(0),
@@ -348,7 +348,7 @@ fn w5_a1_function_case_enters_captured_local_thunk_across_collection() {
 
 fn compile_wire(wire: WireProgram) -> CompiledProgram {
     let linked = link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-    CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap()
+    CompiledProgram::compile(&linked).unwrap()
 }
 
 fn constructor_decl(index: u64, fields: Vec<RuntimeRep>) -> ConstructorDecl {

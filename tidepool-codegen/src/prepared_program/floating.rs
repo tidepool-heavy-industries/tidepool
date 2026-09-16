@@ -346,7 +346,7 @@ mod tests {
         };
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        super::super::CompiledProgram::compile(&linked, super::super::TopSlotBase::ZERO)
+        super::super::CompiledProgram::compile(&linked)
             .unwrap()
             .run_entry(
                 ValueId(0),
@@ -406,11 +406,7 @@ mod tests {
                 let linked =
                     link_program(testing::prepare(wire).unwrap(), &MachineImports::default())
                         .unwrap();
-                let compiled = super::super::CompiledProgram::compile(
-                    &linked,
-                    super::super::TopSlotBase::ZERO,
-                )
-                .unwrap();
+                let compiled = super::super::CompiledProgram::compile(&linked).unwrap();
                 let result = compiled
                     .run_entry(
                         ValueId(0),

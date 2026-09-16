@@ -1273,11 +1273,7 @@ mod tests {
         }
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        crate::prepared_program::CompiledProgram::compile(
-            &linked,
-            crate::prepared_program::TopSlotBase::ZERO,
-        )
-        .unwrap()
+        crate::prepared_program::CompiledProgram::compile(&linked).unwrap()
     }
 
     fn copy_program(
@@ -1520,11 +1516,7 @@ mod tests {
         }
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        crate::prepared_program::CompiledProgram::compile(
-            &linked,
-            crate::prepared_program::TopSlotBase::ZERO,
-        )
-        .unwrap()
+        crate::prepared_program::CompiledProgram::compile(&linked).unwrap()
     }
 
     fn size_program(new_name: &str, size_name: &str) -> crate::prepared_program::CompiledProgram {
@@ -1606,11 +1598,7 @@ mod tests {
         }
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        crate::prepared_program::CompiledProgram::compile(
-            &linked,
-            crate::prepared_program::TopSlotBase::ZERO,
-        )
-        .unwrap()
+        crate::prepared_program::CompiledProgram::compile(&linked).unwrap()
     }
 
     fn frozen_shrink_program(index_tail: bool) -> crate::prepared_program::CompiledProgram {
@@ -1755,11 +1743,7 @@ mod tests {
         }
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        crate::prepared_program::CompiledProgram::compile(
-            &linked,
-            crate::prepared_program::TopSlotBase::ZERO,
-        )
-        .unwrap()
+        crate::prepared_program::CompiledProgram::compile(&linked).unwrap()
     }
 
     fn cas_program(name: &str, success: bool) -> crate::prepared_program::CompiledProgram {
@@ -1884,11 +1868,7 @@ mod tests {
         }
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        crate::prepared_program::CompiledProgram::compile(
-            &linked,
-            crate::prepared_program::TopSlotBase::ZERO,
-        )
-        .unwrap()
+        crate::prepared_program::CompiledProgram::compile(&linked).unwrap()
     }
 
     #[test]
@@ -1973,11 +1953,7 @@ mod tests {
             }
             let linked =
                 link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-            let program = crate::prepared_program::CompiledProgram::compile(
-                &linked,
-                crate::prepared_program::TopSlotBase::ZERO,
-            )
-            .unwrap();
+            let program = crate::prepared_program::CompiledProgram::compile(&linked).unwrap();
             let result = program.run_entry(
                 ValueId(0),
                 &[],

@@ -6,7 +6,7 @@ use tidepool_codegen::jit_machine::MachineDisposition;
 use tidepool_codegen::prepared_program::{
     CompiledProgram, ExecutionError, ObservationFailure, PreparedCallOptions, PreparedHandle,
     PreparedInput as CodegenPreparedInput, PreparedMachine, PreparedMachineOptions,
-    PreparedOuter as PreparedOuterCodegen, PreparedResult, ProgramId, TopSlotBase,
+    PreparedOuter as PreparedOuterCodegen, PreparedResult, ProgramId,
 };
 use tidepool_repr::execution_schema::{
     link_program, parse_program, Architecture, DecodeLimits, Endianness, ImportedValue, LinkError,
@@ -1188,14 +1188,11 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
 
     let linked = link_program(prepared, &MachineImports::default())
         .expect("freer-resume artifact is closed and admits with no imports");
-    let program = CompiledProgram::compile(&linked, TopSlotBase::ZERO)
-        .expect("freer-resume artifact compiles");
-    let top_slots = program.top_slot_count();
+    let program = CompiledProgram::compile(&linked).expect("freer-resume artifact compiles");
     let (mut machine, program_id) = PreparedMachine::new(
         program,
         PreparedMachineOptions {
             nursery_bytes: 4096,
-            top_slots,
         },
     )
     .expect("freer-resume program installs");
@@ -1497,14 +1494,11 @@ fn two_realms_share_one_machine_cancel_reset_close_independently_of_each_other()
     .expect("freer-resume artifact parses");
     let linked = link_program(prepared, &MachineImports::default())
         .expect("freer-resume artifact is closed and admits with no imports");
-    let program = CompiledProgram::compile(&linked, TopSlotBase::ZERO)
-        .expect("freer-resume artifact compiles");
-    let top_slots = program.top_slot_count();
+    let program = CompiledProgram::compile(&linked).expect("freer-resume artifact compiles");
     let (mut machine, program_id) = PreparedMachine::new(
         program,
         PreparedMachineOptions {
             nursery_bytes: 4096,
-            top_slots,
         },
     )
     .expect("freer-resume program installs");

@@ -7,9 +7,11 @@ use std::mem;
 /// `machine_state` at 40 is host-fn-only ambient state (see
 /// `crate::machine_state`) and MUST NEVER be loaded by JIT-emitted code —
 /// only passed through as the `vmctx` argument to a host-fn call.
-/// `prepared_tops` at 48 and `prepared_stack_limit` at 56 are connected
-/// prepared-program state. Generated prepared code may load the latter when
-/// performing its native stack preflight; legacy code must leave it unused.
+/// `prepared_stack_limit` at 48 is connected prepared-program state:
+/// generated prepared code may load it when performing its native stack
+/// preflight; legacy code must leave it unused. Prepared code reaches its
+/// tops through its own program's root block, whose address it embeds, not
+/// through this context.
 #[repr(C, align(16))]
 pub struct VMContext {
     /// Current bump-pointer allocation cursor.
@@ -31,9 +33,6 @@ pub struct VMContext {
     /// `JitEffectMachine::install_registries` (or wired directly onto a
     /// manually-constructed VMContext by a test).
     pub machine_state: *mut crate::machine_state::MachineState,
-    /// Invocation-owned compact top-binding table for connected prepared code.
-    /// Entries are immutable static managed values or pinned raw byte addresses.
-    pub prepared_tops: *const usize,
     /// Lowest permitted stack pointer for prepared native code. This is the
     /// native stack low bound plus the finalized-frame reserve; null disables
     /// the prepared stack preflight for legacy effect-machine entries.
@@ -55,7 +54,6 @@ impl VMContext {
             tail_callee: std::ptr::null_mut(),
             tail_arg: std::ptr::null_mut(),
             machine_state: std::ptr::null_mut(),
-            prepared_tops: std::ptr::null(),
             prepared_stack_limit: std::ptr::null(),
         }
     }

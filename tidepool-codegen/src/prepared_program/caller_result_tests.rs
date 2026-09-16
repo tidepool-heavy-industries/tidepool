@@ -1,6 +1,6 @@
 use super::{
     CompiledProgram, DescriptorMeaning, ExecutionError, ImportBindings, PreparedCallOptions,
-    PreparedMachine, PreparedMachineOptions, RunOptions, TopSlotBase,
+    PreparedMachine, PreparedMachineOptions, RunOptions,
 };
 use crate::entry_abi::{AbiError, EntryAbi, EnvironmentMode, NativeAbiProfile};
 use crate::host_fns::RuntimeError;
@@ -222,7 +222,7 @@ fn compile(wire: WireProgram) -> CompiledProgram {
         &MachineImports::default(),
     )
     .unwrap();
-    CompiledProgram::compile(&linked, TopSlotBase::ZERO).expect("CallerResult fixture compiles")
+    CompiledProgram::compile(&linked).expect("CallerResult fixture compiles")
 }
 
 fn assert_answer(values: &[Value], rep: RuntimeRep) {
@@ -351,7 +351,6 @@ fn cross_program_generic_calls_offer_concrete_results_and_missing_demand_is_reus
         compile(forwarder(false, false)),
         PreparedMachineOptions {
             nursery_bytes: 4096,
-            top_slots: 32,
         },
     )
     .unwrap();

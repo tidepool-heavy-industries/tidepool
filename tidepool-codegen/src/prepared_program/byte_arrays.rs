@@ -1118,11 +1118,7 @@ mod tests {
         }
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        crate::prepared_program::CompiledProgram::compile(
-            &linked,
-            crate::prepared_program::TopSlotBase::ZERO,
-        )
-        .unwrap()
+        crate::prepared_program::CompiledProgram::compile(&linked).unwrap()
     }
 
     fn index_address_program(length: i64, index: i64) -> crate::prepared_program::CompiledProgram {
@@ -1256,11 +1252,7 @@ mod tests {
         *body = 9;
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        crate::prepared_program::CompiledProgram::compile(
-            &linked,
-            crate::prepared_program::TopSlotBase::ZERO,
-        )
-        .unwrap()
+        crate::prepared_program::CompiledProgram::compile(&linked).unwrap()
     }
 
     fn aligned_contents_program(alignment: i64) -> crate::prepared_program::CompiledProgram {
@@ -1438,11 +1430,7 @@ mod tests {
         *body = aligned_case;
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        crate::prepared_program::CompiledProgram::compile(
-            &linked,
-            crate::prepared_program::TopSlotBase::ZERO,
-        )
-        .unwrap()
+        crate::prepared_program::CompiledProgram::compile(&linked).unwrap()
     }
 
     #[test]
@@ -1683,11 +1671,7 @@ mod tests {
         }
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        let program = crate::prepared_program::CompiledProgram::compile(
-            &linked,
-            crate::prepared_program::TopSlotBase::ZERO,
-        )
-        .unwrap();
+        let program = crate::prepared_program::CompiledProgram::compile(&linked).unwrap();
         let result = program
             .run_entry(
                 ValueId(0),
@@ -2359,11 +2343,7 @@ mod tests {
         }
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        crate::prepared_program::CompiledProgram::compile(
-            &linked,
-            crate::prepared_program::TopSlotBase::ZERO,
-        )
-        .unwrap()
+        crate::prepared_program::CompiledProgram::compile(&linked).unwrap()
     }
 
     #[test]

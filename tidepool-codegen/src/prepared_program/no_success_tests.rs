@@ -1,4 +1,4 @@
-use super::{CompiledProgram, DescriptorMeaning, ExecutionError, RunOptions, TopSlotBase};
+use super::{CompiledProgram, DescriptorMeaning, ExecutionError, RunOptions};
 use crate::host_fns::RuntimeError;
 use crate::machine_state::{MachineDisposition, MachineFailure};
 use std::sync::{atomic::AtomicBool, Arc};
@@ -28,7 +28,7 @@ fn raising_arithmetic_primops_return_typed_reusable_failure() {
         };
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        let program = CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap();
+        let program = CompiledProgram::compile(&linked).unwrap();
         assert!(matches!(
             program.run_entry(ValueId(0), &[], &RunOptions::default(), Arc::new(AtomicBool::new(false))),
             Err(ExecutionError::Runtime(MachineFailure {
@@ -368,7 +368,7 @@ fn bottoming_wire(call: BottomCall) -> WireProgram {
 fn compile(wire: WireProgram) -> CompiledProgram {
     let prepared = testing::prepare(wire).expect("NoSuccess fixture validates");
     let linked = link_program(prepared, &MachineImports::default()).expect("fixture links");
-    CompiledProgram::compile(&linked, TopSlotBase::ZERO).expect("fixture compiles")
+    CompiledProgram::compile(&linked).expect("fixture compiles")
 }
 
 fn assert_raised(program: &CompiledProgram) {
@@ -452,7 +452,7 @@ fn w5_no_success_raised_caf_uses_status_only_body_and_reusable_settlement() {
         &MachineImports::default(),
     )
     .unwrap();
-    let program = CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap();
+    let program = CompiledProgram::compile(&linked).unwrap();
     for _ in 0..2 {
         let result = program.run_entry(
             ValueId(0),
@@ -506,7 +506,7 @@ fn w5_no_success_raised_caf_retries_in_one_reusable_invocation() {
     .unwrap();
     let caf_slot = program.top_slots[&ValueId(0)];
     let exception_slot = program.top_slots[&ValueId(1)];
-    let original = untag(invocation.top_table.snapshot()[caf_slot] as usize);
+    let original = untag(invocation.program.root_block.snapshot()[caf_slot] as usize);
     invocation.collect(0).unwrap();
     let descriptor = program
         .descriptor_registry
@@ -520,7 +520,7 @@ fn w5_no_success_raised_caf_retries_in_one_reusable_invocation() {
         })
         .unwrap();
     let assert_live = |invocation: &super::invocation::PreparedInvocation<'_>| {
-        let tops = invocation.top_table.snapshot();
+        let tops = invocation.program.root_block.snapshot();
         let caf = untag(tops[caf_slot] as usize);
         assert_ne!(caf, original, "the rooted CAF must have relocated");
         assert_eq!(

@@ -14,7 +14,7 @@ pub(super) struct OldSpaceScope<'a> {
 }
 
 impl<'a> OldSpaceScope<'a> {
-    pub(super) fn new(
+    pub(crate) fn new(
         machine: &'a MachineState,
         owner: &'a OldSpace,
     ) -> Result<Self, ExecutionError> {
@@ -36,10 +36,10 @@ impl Drop for OldSpaceScope<'_> {
 }
 
 /// Fixed-address, collector-updated word slots.
-pub(super) struct RootWords(Vec<UnsafeCell<u64>>);
+pub(crate) struct RootWords(Vec<UnsafeCell<u64>>);
 
 impl RootWords {
-    pub(super) fn new(length: usize) -> Result<Self, ExecutionError> {
+    pub(crate) fn new(length: usize) -> Result<Self, ExecutionError> {
         let mut words = Vec::new();
         words
             .try_reserve_exact(length)
@@ -48,11 +48,21 @@ impl RootWords {
         Ok(Self(words))
     }
 
-    pub(super) fn as_mut_ptr(&self) -> *mut u64 {
+    pub(crate) fn as_mut_ptr(&self) -> *mut u64 {
         UnsafeCell::raw_get(self.0.as_ptr())
     }
 
-    pub(super) fn write(&self, index: usize, value: u64) -> Result<(), ExecutionError> {
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// The fixed address of slot `index`, as generated code and the root
+    /// registries name it. `None` past the end.
+    pub(crate) fn slot_address(&self, index: usize) -> Option<*mut *mut u8> {
+        (index < self.0.len()).then(|| unsafe { self.as_mut_ptr().add(index) }.cast::<*mut u8>())
+    }
+
+    pub(crate) fn write(&self, index: usize, value: u64) -> Result<(), ExecutionError> {
         let word = self
             .0
             .get(index)
@@ -65,12 +75,12 @@ impl RootWords {
     /// bounds-checking. Used to resolve an import slot's published pointer
     /// during heap-top initialization, where the caller already works in
     /// [`RuntimeError`] rather than [`ExecutionError`].
-    pub(super) fn read(&self, index: usize) -> Result<u64, RuntimeError> {
+    pub(crate) fn read(&self, index: usize) -> Result<u64, RuntimeError> {
         let word = self.0.get(index).ok_or(RuntimeError::BadPointer)?;
         Ok(unsafe { *word.get() })
     }
 
-    pub(super) fn snapshot(&self) -> Vec<u64> {
+    pub(crate) fn snapshot(&self) -> Vec<u64> {
         self.0.iter().map(|word| unsafe { *word.get() }).collect()
     }
 }

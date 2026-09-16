@@ -200,9 +200,7 @@ mod tests {
         };
         let linked =
             link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        let program =
-            super::super::CompiledProgram::compile(&linked, super::super::TopSlotBase::ZERO)
-                .unwrap();
+        let program = super::super::CompiledProgram::compile(&linked).unwrap();
         program
             .run_entry(
                 ValueId(0),

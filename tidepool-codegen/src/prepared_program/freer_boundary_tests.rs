@@ -28,7 +28,7 @@
 
 use super::{
     entry_tests::caf_program, safepoint::NativeStackBounds, CompiledProgram, DescriptorMeaning,
-    RunOptions, TopSlotBase,
+    RunOptions,
 };
 use crate::{
     context::VMContext,
@@ -142,7 +142,7 @@ fn effect_request_caf(policy: UpdatePolicy) -> CompiledProgram {
         },
     ])];
     let linked = link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-    CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap()
+    CompiledProgram::compile(&linked).unwrap()
 }
 
 /// The low-level `RawForce` harness below bypasses `run_entry`'s top-level
@@ -210,7 +210,7 @@ fn captured_effect_request_caf(policy: UpdatePolicy) -> CompiledProgram {
         },
     ])];
     let linked = link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-    CompiledProgram::compile(&linked, TopSlotBase::ZERO).unwrap()
+    CompiledProgram::compile(&linked).unwrap()
 }
 
 /// The `E`-shaped result of `run_entry`/observation reaches Rust as a real

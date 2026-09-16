@@ -527,8 +527,7 @@ mod tests {
         )
         .expect("linked fingerprint fixture");
         let program =
-            super::super::CompiledProgram::compile(&linked, super::super::TopSlotBase::ZERO)
-                .expect("compiled fingerprint fixture");
+            super::super::CompiledProgram::compile(&linked).expect("compiled fingerprint fixture");
         let result = program
             .run_entry(
                 ValueId(0),
