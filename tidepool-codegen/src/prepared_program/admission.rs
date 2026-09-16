@@ -427,6 +427,8 @@ mod tests {
             uint(0),
             array([]),
             array([]),
+            // `verb_sites` (schema 11's trailing field): none in a synthetic program.
+            array([]),
         ])
     }
     fn requirements() -> ProgramRequirements {

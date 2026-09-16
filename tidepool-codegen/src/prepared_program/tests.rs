@@ -331,6 +331,8 @@ fn wire_program_with_bindings(
         uint(u64::from(entry)),
         array([]),
         array([]),
+        // `verb_sites` (schema 11's trailing field): none in a synthetic program.
+        array([]),
     ])
 }
 
@@ -637,6 +639,8 @@ fn mixed_result_wire(binding_count: u8) -> Vec<u8> {
         array(bindings),
         uint(0),
         array([]),
+        array([]),
+        // `verb_sites` (schema 11's trailing field): none in a synthetic program.
         array([]),
     ])
 }
