@@ -19,6 +19,40 @@ pub unsafe trait DescriptorOldSpace {
     fn admit(&self, encoded: usize) -> Result<Option<usize>, DescriptorTraceError>;
 }
 
+/// Collector-borrowed SOURCE membership: the allocations one copy is
+/// evacuating objects out of.
+///
+/// [`DescriptorOldSpace::admit`] proves a *stable* target and therefore
+/// rejects a `Forwarded` header; a source space answers the opposite
+/// question ("is this an object I am moving?"), where a forwarded header is
+/// the expected in-progress state the copier itself wrote. Promotion's source
+/// is one contiguous nursery range; compaction's is a set of retiring arenas.
+/// Both drive the same Cheney loop.
+///
+/// # Safety
+/// Every reported start is an exact initialized allocation start readable for
+/// the returned extent, backed by stable writable storage with pinned
+/// descriptors for the complete collection and native unwind. The reported
+/// membership, storage bounds and byte total do not change during a copy.
+pub unsafe trait DescriptorSourceSpace {
+    /// `Ok(Some(available))` when `address` is an exact allocation start with
+    /// `available` readable bytes from it, `Ok(None)` when it lies outside
+    /// every source allocation, and `Err` when it points inside one without
+    /// being a start.
+    fn locate_start(&self, address: usize) -> Result<Option<usize>, DescriptorTraceError>;
+
+    /// Whether the pointer-sized slot at `address` overlaps source storage.
+    /// Root slots may not live in storage this copy is about to retire.
+    fn covers_slot(&self, address: usize) -> bool;
+
+    /// Whether `[start, end)` overlaps source storage, for the copier's
+    /// source/destination disjointness proof.
+    fn overlaps_range(&self, start: usize, end: usize) -> bool;
+
+    /// Sealed bytes this source holds; the destination's size requirement.
+    fn source_bytes(&self) -> usize;
+}
+
 pub struct DescriptorArena {
     words: Box<[UnsafeCell<u64>]>,
     used: usize,
@@ -112,6 +146,54 @@ impl DescriptorArena {
         Ok(())
     }
 
+    /// Exact-start membership for an evacuating copy, with the readable
+    /// extent bound. Deliberately header-free: an object this copy has
+    /// already forwarded is still one of its own source objects, so unlike
+    /// [`Self::admit`] a `Forwarded` state is not a failure here.
+    pub fn locate_start(&self, address: usize) -> Result<Option<usize>, DescriptorTraceError> {
+        let range = self.allocation_range();
+        if !range.contains(&address) {
+            return Ok(None);
+        }
+        let offset = address - range.start;
+        if offset >= self.used
+            || !offset.is_multiple_of(8)
+            || self.starts[offset / 8 / 64] & (1 << (offset / 8 % 64)) == 0
+        {
+            return Err(DescriptorTraceError::InvalidManagedPointer { address });
+        }
+        Ok(Some(self.used - offset))
+    }
+
+    /// Visit every sealed object in allocation order with its pinned
+    /// descriptor. [`Self::seal`] has already proven this walk; it allocates
+    /// nothing, so a caller may run it after a copy, where nothing may fail.
+    pub fn walk_sealed(
+        &self,
+        mut visit: impl FnMut(*mut u8, &ObjectDescriptor) -> Result<(), DescriptorTraceError>,
+    ) -> Result<(), DescriptorTraceError> {
+        let base = self.words.as_ptr().cast::<u8>().cast_mut();
+        let mut offset = 0;
+        while offset < self.used {
+            // SAFETY: `offset` stays inside the sealed prefix, whose object
+            // starts and extents `seal` validated against these descriptors.
+            let object = unsafe { base.add(offset) };
+            let header = unsafe { object.cast::<usize>().read() };
+            let descriptor = self.descriptors.get(&(header & !7)).ok_or(
+                DescriptorTraceError::UnknownDescriptor {
+                    address: header & !7,
+                },
+            )?;
+            let extent = descriptor.allocation_extent() as usize;
+            if extent < 16 || !extent.is_multiple_of(8) || extent > self.used - offset {
+                return Err(DescriptorTraceError::InvalidRange);
+            }
+            visit(object, descriptor)?;
+            offset += extent;
+        }
+        Ok(())
+    }
+
     /// Old objects may change Live/Evaluating/Updated state, but never extent
     /// or allocation start. Check the current header only after the bitmap.
     pub fn admit(&self, encoded: usize) -> Result<Option<usize>, DescriptorTraceError> {
@@ -150,6 +232,30 @@ impl DescriptorArena {
 unsafe impl DescriptorOldSpace for DescriptorArena {
     fn admit(&self, encoded: usize) -> Result<Option<usize>, DescriptorTraceError> {
         DescriptorArena::admit(self, encoded)
+    }
+}
+
+// SAFETY: an arena's allocation is stable for the duration of a collector
+// borrow, and its sealed starts/extents were proven by `seal`.
+unsafe impl DescriptorSourceSpace for DescriptorArena {
+    fn locate_start(&self, address: usize) -> Result<Option<usize>, DescriptorTraceError> {
+        DescriptorArena::locate_start(self, address)
+    }
+
+    fn covers_slot(&self, address: usize) -> bool {
+        self.overlaps_range(
+            address,
+            address.saturating_add(std::mem::size_of::<*mut u8>()),
+        )
+    }
+
+    fn overlaps_range(&self, start: usize, end: usize) -> bool {
+        let range = self.allocation_range();
+        start < range.end && range.start < end
+    }
+
+    fn source_bytes(&self) -> usize {
+        self.used
     }
 }
 

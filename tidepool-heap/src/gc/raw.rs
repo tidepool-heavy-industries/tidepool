@@ -1,5 +1,6 @@
 //! Cheney's semi-space copying GC for raw HeapObjects.
 
+use crate::descriptor_region::{DescriptorOldSpace, DescriptorSourceSpace};
 use crate::execution_descriptor::{
     DescriptorState, DescriptorTraceError, ObjectDescriptor, ObjectKind,
 };
@@ -218,6 +219,12 @@ impl DescriptorSpace {
             self.updated_visited.resize(visited_words, 0);
         }
         self.updated_visited[..visited_words].fill(0);
+        self.prepare_updated_path(used)
+    }
+
+    /// Reserve room for the longest updated-thunk chain a source of `used`
+    /// bytes can hold, so no path step allocates after forwarding begins.
+    fn prepare_updated_path(&mut self, used: usize) -> Result<(), DescriptorTraceError> {
         let max_objects = used / 16 + usize::from(!used.is_multiple_of(16));
         self.updated_path.clear();
         if max_objects > self.updated_path.capacity() {
@@ -252,14 +259,6 @@ impl DescriptorSpace {
         self.updated_visited[index / 64] &= !(1_u64 << (index % 64));
     }
 
-    fn clear_updated_path(&mut self) {
-        for index in 0..self.updated_path.len() {
-            let address = self.updated_path[index];
-            self.clear_updated(address);
-        }
-        self.updated_path.clear();
-    }
-
     fn static_reference(&self, encoded: usize) -> Result<Option<usize>, DescriptorTraceError> {
         for region in &self.static_regions {
             if let Some(reference) = region.admit(encoded)? {
@@ -289,6 +288,106 @@ impl DescriptorSpace {
             };
             address < range.end && range.start < end
         })
+    }
+}
+
+/// Where one copy's objects are evacuated FROM.
+///
+/// Ordinary collection and promotion evacuate a contiguous authenticated
+/// nursery range, whose exact starts live in [`DescriptorSpace`]'s reusable
+/// bitmap. Descriptor-arena compaction evacuates a set of sealed arenas at
+/// unrelated addresses, which carry their own starts. Membership, the
+/// readable-extent bound and the updated-chain visited set are the only
+/// places the two differ; the Cheney loop, the `Forwarded` header protocol
+/// and the exact-start destination admission are shared.
+pub(crate) enum CopySource<'a> {
+    Region { base: usize, end: usize },
+    Arenas(&'a dyn DescriptorSourceSpace),
+}
+
+impl CopySource<'_> {
+    /// `Ok(Some(available))` for an exact source start readable for
+    /// `available` bytes, `Ok(None)` outside this source entirely, `Err` for
+    /// a pointer inside source storage that is not an allocation start.
+    fn locate(
+        &self,
+        address: usize,
+        descriptors: &DescriptorSpace,
+    ) -> Result<Option<usize>, DescriptorTraceError> {
+        match *self {
+            CopySource::Region { base, end } => {
+                if address < base || address >= end || !(address - base).is_multiple_of(8) {
+                    return Ok(None);
+                }
+                if !descriptors.is_start(address - base) {
+                    return Err(DescriptorTraceError::InvalidManagedPointer { address });
+                }
+                Ok(Some(end - address))
+            }
+            CopySource::Arenas(owner) => owner.locate_start(address),
+        }
+    }
+
+    /// Whether the pointer-sized slot at `address` lives in source storage.
+    fn covers_slot(&self, address: usize) -> bool {
+        let end = match address.checked_add(std::mem::size_of::<*mut u8>()) {
+            Some(end) => end,
+            None => return true,
+        };
+        self.overlaps_range(address, end)
+    }
+
+    fn overlaps_range(&self, start: usize, end: usize) -> bool {
+        match *self {
+            CopySource::Region {
+                base,
+                end: source_end,
+            } => start < source_end && base < end,
+            CopySource::Arenas(owner) => owner.overlaps_range(start, end),
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        match *self {
+            CopySource::Region { base, end } => end - base,
+            CopySource::Arenas(owner) => owner.source_bytes(),
+        }
+    }
+
+    /// Record `address` on the updated-thunk path being resolved; `true` when
+    /// it is already on that path (a cycle). The reserved path capacity is
+    /// the bound: exceeding it is an integrity failure, never an allocation
+    /// after forwarding has begun.
+    fn enter_updated(
+        &self,
+        address: usize,
+        descriptors: &mut DescriptorSpace,
+    ) -> Result<bool, DescriptorTraceError> {
+        let repeat = match *self {
+            CopySource::Region { base, .. } => descriptors.mark_updated(address - base),
+            // Retiring arenas share no origin to key a bitmap on, so the
+            // path itself is the visited set. An updated chain is a short
+            // indirection run bounded by the reserved capacity.
+            CopySource::Arenas(_) => descriptors.updated_path.contains(&address),
+        };
+        if repeat {
+            return Ok(true);
+        }
+        if descriptors.updated_path.len() == descriptors.updated_path.capacity() {
+            return Err(DescriptorTraceError::MetadataIntegrity);
+        }
+        descriptors.updated_path.push(address);
+        Ok(false)
+    }
+
+    fn leave_updated_path(&self, descriptors: &mut DescriptorSpace) {
+        if let CopySource::Region { base, .. } = *self {
+            for index in 0..descriptors.updated_path.len() {
+                let address = descriptors.updated_path[index];
+                descriptors.clear_updated(address - base);
+            }
+        }
+        descriptors.updated_path.clear();
     }
 }
 
@@ -401,6 +500,65 @@ pub(crate) unsafe fn prepare_descriptor_copy(
     Ok(())
 }
 
+/// Reserve the scratch a copy out of a [`DescriptorSourceSpace`] needs, and
+/// authenticate its root slots, before the first source header is forwarded.
+///
+/// The source's own sealed metadata already proves its object starts and
+/// extents (`DescriptorArena::seal`), so this reserves only what the copy
+/// itself consumes: the root-slot list, the updated-chain path, and one
+/// external-payload entry per external object the source may expose.
+/// `external_handles` is the source's own count of external objects.
+pub(crate) unsafe fn prepare_descriptor_copy_from_space(
+    root_ptrs: &[*mut *mut u8],
+    source: &dyn DescriptorSourceSpace,
+    external_handles: usize,
+    tospace: &mut [u8],
+    descriptors: &mut DescriptorSpace,
+) -> Result<(), DescriptorTraceError> {
+    let source = CopySource::Arenas(source);
+    let source_bytes = source.bytes();
+    let to_base = tospace.as_mut_ptr() as usize;
+    let to_end = to_base
+        .checked_add(tospace.len())
+        .ok_or(DescriptorTraceError::InvalidRange)?;
+    if !to_base.is_multiple_of(8)
+        || !source_bytes.is_multiple_of(8)
+        || source.overlaps_range(to_base, to_end)
+    {
+        return Err(DescriptorTraceError::InvalidRange);
+    }
+    if tospace.len() < source_bytes {
+        return Err(DescriptorTraceError::InsufficientSpace {
+            required: source_bytes,
+            available: tospace.len(),
+        });
+    }
+
+    descriptors.prepare_roots(root_ptrs)?;
+    for index in 0..descriptors.root_slots.len() {
+        let address = descriptors.root_slots[index];
+        let end = address
+            .checked_add(std::mem::size_of::<*mut u8>())
+            .ok_or(DescriptorTraceError::InvalidRange)?;
+        // A root slot inside the retiring source would be freed under the
+        // rewritten root; a slot inside the destination has no owner yet.
+        if address == 0
+            || source.covers_slot(address)
+            || (address < to_end && to_base < end)
+            || descriptors.root_slot_overlaps_static(address)
+        {
+            return Err(DescriptorTraceError::InvalidRange);
+        }
+    }
+    descriptors.prepare_updated_path(source_bytes)?;
+    descriptors.external_payloads.clear();
+    descriptors
+        .external_payloads
+        .try_reserve(external_handles)
+        .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
+    Ok(())
+}
+
 /// Select a previously prepared root subset without reserving or allocating.
 unsafe fn select_prepared_roots(
     root_ptrs: &[*mut *mut u8],
@@ -451,27 +609,70 @@ pub(crate) unsafe fn copy_prevalidated_descriptor_graph_with_external(
     from_used: usize,
     tospace: &mut [u8],
     descriptors: &mut DescriptorSpace,
-    admitted: Option<&dyn crate::descriptor_region::DescriptorOldSpace>,
+    admitted: Option<&dyn DescriptorOldSpace>,
     external: Option<&dyn ExternalPayloadOwner>,
 ) -> Result<CopyResult, DescriptorTraceError> {
     let from_base = from_start as usize;
     let from_end = from_base
         .checked_add(from_used)
         .ok_or(DescriptorTraceError::InvalidRange)?;
+    if !from_base.is_multiple_of(8) || !from_used.is_multiple_of(8) {
+        return Err(DescriptorTraceError::InvalidRange);
+    }
+    copy_prevalidated_from_source(
+        root_ptrs,
+        &CopySource::Region {
+            base: from_base,
+            end: from_end,
+        },
+        tospace,
+        descriptors,
+        admitted,
+        external,
+    )
+}
+
+/// Copy out of a source space (the retiring descriptor arenas) after
+/// [`prepare_descriptor_copy_from_space`] has reserved this copy's scratch.
+/// Membership and the updated-chain visited set come from the source itself;
+/// everything else is the shared Cheney loop.
+pub(crate) unsafe fn copy_prevalidated_descriptor_graph_from_space(
+    root_ptrs: &[*mut *mut u8],
+    source: &dyn DescriptorSourceSpace,
+    tospace: &mut [u8],
+    descriptors: &mut DescriptorSpace,
+    admitted: Option<&dyn DescriptorOldSpace>,
+    external: Option<&dyn ExternalPayloadOwner>,
+) -> Result<CopyResult, DescriptorTraceError> {
+    copy_prevalidated_from_source(
+        root_ptrs,
+        &CopySource::Arenas(source),
+        tospace,
+        descriptors,
+        admitted,
+        external,
+    )
+}
+
+unsafe fn copy_prevalidated_from_source(
+    root_ptrs: &[*mut *mut u8],
+    source: &CopySource<'_>,
+    tospace: &mut [u8],
+    descriptors: &mut DescriptorSpace,
+    admitted: Option<&dyn DescriptorOldSpace>,
+    external: Option<&dyn ExternalPayloadOwner>,
+) -> Result<CopyResult, DescriptorTraceError> {
+    let source_bytes = source.bytes();
     let to_base = tospace.as_mut_ptr() as usize;
     let to_end = to_base
         .checked_add(tospace.len())
         .ok_or(DescriptorTraceError::InvalidRange)?;
-    if !from_base.is_multiple_of(8)
-        || !to_base.is_multiple_of(8)
-        || !from_used.is_multiple_of(8)
-        || (from_base < to_end && to_base < from_end)
-    {
+    if !to_base.is_multiple_of(8) || source.overlaps_range(to_base, to_end) {
         return Err(DescriptorTraceError::InvalidRange);
     }
-    if tospace.len() < from_used {
+    if tospace.len() < source_bytes {
         return Err(DescriptorTraceError::InsufficientSpace {
-            required: from_used,
+            required: source_bytes,
             available: tospace.len(),
         });
     }
@@ -487,8 +688,7 @@ pub(crate) unsafe fn copy_prevalidated_descriptor_graph_with_external(
         let value = std::ptr::read(slot).cast::<u8>() as usize;
         let relocated = evacuate_descriptor(
             value,
-            from_base,
-            from_end,
+            source,
             to_base,
             tospace.len(),
             &mut free,
@@ -526,8 +726,7 @@ pub(crate) unsafe fn copy_prevalidated_descriptor_graph_with_external(
                     let value = std::ptr::read(slot).cast::<u8>() as usize;
                     let relocated = evacuate_descriptor(
                         value,
-                        from_base,
-                        from_end,
+                        source,
                         to_base,
                         tospace.len(),
                         &mut free,
@@ -546,8 +745,7 @@ pub(crate) unsafe fn copy_prevalidated_descriptor_graph_with_external(
                 let value = std::ptr::read(slot).cast::<u8>() as usize;
                 match evacuate_descriptor(
                     value,
-                    from_base,
-                    from_end,
+                    source,
                     to_base,
                     tospace.len(),
                     &mut free,
@@ -669,13 +867,12 @@ pub unsafe fn cheney_copy_descriptors_with_external(
 )]
 unsafe fn evacuate_descriptor(
     encoded: usize,
-    from_base: usize,
-    from_end: usize,
+    source: &CopySource<'_>,
     to_base: usize,
     to_capacity: usize,
     free: &mut usize,
     descriptors: &mut DescriptorSpace,
-    admitted: Option<&dyn crate::descriptor_region::DescriptorOldSpace>,
+    admitted: Option<&dyn DescriptorOldSpace>,
 ) -> Result<usize, DescriptorTraceError> {
     if encoded == 0 {
         return Ok(0);
@@ -693,16 +890,12 @@ unsafe fn evacuate_descriptor(
             return Ok(reference);
         }
     }
-    if address < from_base || address >= from_end || !(address - from_base).is_multiple_of(8) {
-        return Err(DescriptorTraceError::InvalidManagedPointer { address });
-    }
-    let offset = address - from_base;
-    if !descriptors.is_start(offset) {
-        return Err(DescriptorTraceError::InvalidManagedPointer { address });
-    }
+    let available = source
+        .locate(address, descriptors)?
+        .ok_or(DescriptorTraceError::InvalidManagedPointer { address })?;
     let pointer = address as *mut u8;
     let descriptor = &*descriptor_at(pointer);
-    let state = descriptor.state(pointer, from_end - address)?;
+    let state = descriptor.state(pointer, available)?;
     if state == DescriptorState::Forwarded {
         if descriptor.kind() == ObjectKind::Thunk {
             if tag != 0 {
@@ -763,8 +956,7 @@ unsafe fn evacuate_descriptor(
         return resolve_updated(
             pointer,
             tag,
-            from_base,
-            from_end,
+            source,
             to_base,
             to_capacity,
             free,
@@ -838,24 +1030,23 @@ unsafe fn forwarded_target(
 unsafe fn resolve_updated(
     first: *mut u8,
     first_tag: u8,
-    from_base: usize,
-    from_end: usize,
+    source: &CopySource<'_>,
     to_base: usize,
     to_capacity: usize,
     free: &mut usize,
     descriptors: &mut DescriptorSpace,
-    admitted: Option<&dyn crate::descriptor_region::DescriptorOldSpace>,
+    admitted: Option<&dyn DescriptorOldSpace>,
 ) -> Result<usize, DescriptorTraceError> {
     descriptors.updated_path.clear();
     let mut current = first;
     let mut current_tag = first_tag;
     loop {
         let address = current as usize;
-        let offset = address
-            .checked_sub(from_base)
+        let available = source
+            .locate(address, descriptors)?
             .ok_or(DescriptorTraceError::InvalidManagedPointer { address })?;
         let descriptor = &*descriptor_at(current);
-        let actual_state = descriptor.state(current, from_end - address)?;
+        let actual_state = descriptor.state(current, available)?;
         if actual_state == DescriptorState::Forwarded {
             if descriptor.kind() != ObjectKind::Thunk {
                 if !tag_valid(
@@ -874,7 +1065,7 @@ unsafe fn resolve_updated(
                     if let Some(reference) =
                         owner.admit((stored_target & !7) | usize::from(current_tag))?
                     {
-                        forward_updated_path(descriptors, from_base, reference);
+                        forward_updated_path(source, descriptors, reference);
                         return Ok(reference);
                     }
                 }
@@ -902,7 +1093,7 @@ unsafe fn resolve_updated(
                     });
                 }
                 let relocated = target_address | usize::from(current_tag);
-                forward_updated_path(descriptors, from_base, relocated);
+                forward_updated_path(source, descriptors, relocated);
                 return Ok(relocated);
             }
             if current_tag != 0 {
@@ -913,12 +1104,12 @@ unsafe fn resolve_updated(
             }
             let stored_target = std::ptr::read(current.add(8).cast::<usize>());
             if let Some(reference) = descriptors.static_reference(stored_target)? {
-                forward_updated_path(descriptors, from_base, reference);
+                forward_updated_path(source, descriptors, reference);
                 return Ok(reference);
             }
             if let Some(owner) = admitted {
                 if let Some(reference) = owner.admit(stored_target)? {
-                    forward_updated_path(descriptors, from_base, reference);
+                    forward_updated_path(source, descriptors, reference);
                     return Ok(reference);
                 }
             }
@@ -945,7 +1136,7 @@ unsafe fn resolve_updated(
                     tag: target_tag,
                 });
             }
-            forward_updated_path(descriptors, from_base, target);
+            forward_updated_path(source, descriptors, target);
             return Ok(target);
         }
         if actual_state != DescriptorState::Updated {
@@ -966,7 +1157,7 @@ unsafe fn resolve_updated(
             let result =
                 copy_descriptor(current, current_tag, descriptor, to_base, to_capacity, free)? & !7;
             let relocated = result | usize::from(current_tag);
-            forward_updated_path(descriptors, from_base, relocated);
+            forward_updated_path(source, descriptors, relocated);
             return Ok(relocated);
         }
         if !tag_valid(
@@ -980,17 +1171,16 @@ unsafe fn resolve_updated(
                 tag: current_tag,
             });
         }
-        if descriptors.mark_updated(offset) {
+        if source.enter_updated(address, descriptors)? {
             return Err(DescriptorTraceError::UpdatedCycle { address });
         }
-        descriptors.updated_path.push(offset);
         let target = std::ptr::read(current.add(8).cast::<usize>());
         if target == 0 {
             return Err(DescriptorTraceError::InvalidUpdatedTarget);
         }
         let target_address = untag(target);
         if let Some(reference) = descriptors.static_reference(target)? {
-            forward_updated_path(descriptors, from_base, reference);
+            forward_updated_path(source, descriptors, reference);
             return Ok(reference);
         }
         if let Some(owner) = admitted {
@@ -998,16 +1188,11 @@ unsafe fn resolve_updated(
                 // Preserve the evaluated target's evidence exactly as stored
                 // by the update commit; the old owner has validated it at its
                 // exact allocation start.
-                forward_updated_path(descriptors, from_base, reference);
+                forward_updated_path(source, descriptors, reference);
                 return Ok(reference);
             }
         }
-        if target_address == 0
-            || target_address < from_base
-            || target_address >= from_end
-            || !(target_address - from_base).is_multiple_of(8)
-            || !descriptors.is_start(target_address - from_base)
-        {
+        if target_address == 0 || source.locate(target_address, descriptors)?.is_none() {
             return Err(DescriptorTraceError::InvalidManagedPointer {
                 address: target_address,
             });
@@ -1018,17 +1203,16 @@ unsafe fn resolve_updated(
 }
 
 unsafe fn forward_updated_path(
+    source: &CopySource<'_>,
     descriptors: &mut DescriptorSpace,
-    from_base: usize,
     relocated: usize,
 ) {
     for index in 0..descriptors.updated_path.len() {
-        let offset = descriptors.updated_path[index];
-        let thunk = from_base + offset;
+        let thunk = descriptors.updated_path[index];
         let descriptor = &*descriptor_at(thunk as *const u8);
         descriptor.install_forwarding_tagged(thunk as *mut u8, relocated);
     }
-    descriptors.clear_updated_path();
+    source.leave_updated_path(descriptors);
 }
 
 fn is_in_range(ptr: *const u8, start: *const u8, end: *const u8) -> bool {

@@ -4,9 +4,16 @@
 //! Preparation rejects preexisting Forwarded headers and reserves both copies'
 //! scratch before mutation. Copying reuses that authenticated source map; only
 //! this operation may introduce forwarding between promotion and sibling fixup.
+//!
+//! Arena compaction ([`compact_descriptor_arenas`]) is the same copy with its
+//! SOURCE generalized from one nursery range to a set of retiring arenas. It
+//! shares the Cheney loop, the `Forwarded` header protocol and this module's
+//! failure discipline: every fallible step precedes the first mutation, and a
+//! failure after copying began retires the invocation while retaining both
+//! spaces.
 
 use super::raw::{self, DescriptorSpace};
-use crate::descriptor_region::{DescriptorArena, DescriptorOldSpace};
+use crate::descriptor_region::{DescriptorArena, DescriptorOldSpace, DescriptorSourceSpace};
 use crate::execution_descriptor::DescriptorTraceError;
 use crate::external_storage::{ExternalPayloadOwner, ExternalStorageKind};
 
@@ -192,6 +199,73 @@ unsafe fn promote_and_fixup_inner(
         promoted_bytes: promoted.bytes_copied,
         nursery_bytes: nursery.bytes_copied,
         promoted_external_payloads,
+    })
+}
+
+#[derive(Debug)]
+pub struct CompactionResult {
+    /// Bytes of live descriptor objects now sealed in the destination arena.
+    pub bytes_copied: usize,
+    /// Payloads authenticated while copying the live graph.
+    pub compacted_external_payloads: Vec<(usize, ExternalStorageKind)>,
+}
+
+/// Evacuate every object reachable from `roots` out of `source` into one
+/// fresh arena, leaving `Forwarded` headers behind and rewriting every root
+/// slot in place.
+///
+/// `roots` must name every slot outside `source` that can reference a source
+/// object: the machine's complete root snapshot, each installed program's
+/// root-block words, and each nursery object's reference and external-payload
+/// slots. Slots INSIDE `source` are not roots -- they travel with the object
+/// that owns them and are rewritten by the Cheney scan of the copy.
+/// `admitted` is what stays put (the nursery); static regions are admitted by
+/// `descriptors` itself.
+///
+/// # Safety
+/// Source, destination and root slots are disjoint, initialized and owned
+/// through success, error and native unwind. No generated frame is live and
+/// no mutator runs. `external` must satisfy [`ExternalPayloadOwner`]'s
+/// authentication and exclusivity contract. On success the caller retires the
+/// source allocations without a fallible step; on `Incomplete` it must not
+/// execute, observe or discard either space.
+pub unsafe fn compact_descriptor_arenas(
+    roots: &[*mut *mut u8],
+    source: &dyn DescriptorSourceSpace,
+    external_handles: usize,
+    destination: &mut DescriptorArena,
+    descriptors: &mut DescriptorSpace,
+    admitted: Option<&dyn DescriptorOldSpace>,
+    external: &dyn ExternalPayloadOwner,
+) -> Result<CompactionResult, PromotionFailure> {
+    use PromotionFailure::{Incomplete, Preparation};
+    raw::prepare_descriptor_copy_from_space(
+        roots,
+        source,
+        external_handles,
+        destination.destination(),
+        descriptors,
+    )
+    .map_err(Preparation)?;
+    let copied = raw::copy_prevalidated_descriptor_graph_from_space(
+        roots,
+        source,
+        destination.destination(),
+        descriptors,
+        admitted,
+        Some(external),
+    )
+    .map_err(Incomplete)?;
+    let mut compacted_external_payloads = Vec::new();
+    let payload_count = descriptors.visited_external_payloads().count();
+    compacted_external_payloads
+        .try_reserve(payload_count)
+        .map_err(|_| Incomplete(DescriptorTraceError::MetadataAllocation))?;
+    compacted_external_payloads.extend(descriptors.visited_external_payloads());
+    destination.seal(copied.bytes_copied).map_err(Incomplete)?;
+    Ok(CompactionResult {
+        bytes_copied: copied.bytes_copied,
+        compacted_external_payloads,
     })
 }
 
@@ -418,6 +492,118 @@ mod tests {
         let old_value = unsafe { *old_field as usize };
         assert_eq!(untag(old_value), untag(source_root as usize));
         assert_ne!(untag(old_value), source_object as usize);
+    }
+
+    struct Arenas<'a>(&'a [DescriptorArena]);
+
+    // SAFETY: the test arenas stay borrowed and unmoved for the whole copy.
+    unsafe impl DescriptorSourceSpace for Arenas<'_> {
+        fn locate_start(&self, address: usize) -> Result<Option<usize>, DescriptorTraceError> {
+            for arena in self.0 {
+                if let Some(available) = arena.locate_start(address)? {
+                    return Ok(Some(available));
+                }
+            }
+            Ok(None)
+        }
+        fn covers_slot(&self, address: usize) -> bool {
+            self.0.iter().any(|arena| arena.covers_slot(address))
+        }
+        fn overlaps_range(&self, start: usize, end: usize) -> bool {
+            self.0.iter().any(|arena| arena.overlaps_range(start, end))
+        }
+        fn source_bytes(&self) -> usize {
+            self.0.iter().map(DescriptorArena::bytes_used).sum()
+        }
+    }
+
+    /// Two arenas, a cross-arena edge shared by two roots, one dead object:
+    /// compaction copies the live pair once, forwards both roots to it, and
+    /// leaves the dead object behind.
+    #[test]
+    fn arena_compaction_copies_a_shared_cross_arena_graph_once() {
+        let descriptor = descriptor();
+        let extent = descriptor.allocation_extent() as usize;
+        let mut first = DescriptorArena::reserve(extent * 2, [Arc::clone(&descriptor)]).unwrap();
+        let mut second = DescriptorArena::reserve(extent, [Arc::clone(&descriptor)]).unwrap();
+        let tag = usize::from(descriptor.tag());
+        let child = unsafe {
+            let child = write_node(
+                second.destination().as_mut_ptr(),
+                0,
+                &descriptor,
+                std::ptr::null_mut(),
+            );
+            let base = first.destination().as_mut_ptr();
+            write_node(base, 0, &descriptor, (child as usize | tag) as *mut u8);
+            write_node(base, extent, &descriptor, std::ptr::null_mut());
+            child
+        };
+        first.seal(extent * 2).unwrap();
+        second.seal(extent).unwrap();
+        let parent = first.destination().as_mut_ptr();
+        let arenas = [first, second];
+        let mut parent_root = (parent as usize | tag) as *mut u8;
+        let mut child_root = (child as usize | tag) as *mut u8;
+        let roots = [
+            &mut parent_root as *mut *mut u8,
+            &mut child_root as *mut *mut u8,
+        ];
+        let mut descriptors = DescriptorSpace::new([Arc::clone(&descriptor)]).unwrap();
+        let mut destination =
+            DescriptorArena::reserve(extent * 3, [Arc::clone(&descriptor)]).unwrap();
+        let result = unsafe {
+            compact_descriptor_arenas(
+                &roots,
+                &Arenas(&arenas),
+                0,
+                &mut destination,
+                &mut descriptors,
+                None,
+                &NoPayloads,
+            )
+        }
+        .unwrap();
+        assert_eq!(result.bytes_copied, extent * 2);
+        assert_eq!(destination.bytes_used(), extent * 2);
+        let range = destination.allocation_range();
+        assert!(range.contains(&untag(parent_root as usize)));
+        let field = unsafe {
+            std::ptr::read(
+                (untag(parent_root as usize) as *const u8)
+                    .add(descriptor.trace_offsets()[0] as usize)
+                    .cast::<usize>(),
+            )
+        };
+        assert_eq!(
+            field, child_root as usize,
+            "the shared child is copied once"
+        );
+        assert_eq!(tag_of(field), descriptor.tag());
+        assert_eq!(
+            unsafe { descriptor.state(child, extent) }.unwrap(),
+            DescriptorState::Forwarded
+        );
+        assert_eq!(
+            unsafe { descriptor.state(parent.add(extent), extent) }.unwrap(),
+            DescriptorState::Live,
+            "the dead object is never visited"
+        );
+    }
+
+    struct NoPayloads;
+
+    // SAFETY: owns no payloads; every lookup is refused.
+    unsafe impl ExternalPayloadOwner for NoPayloads {
+        fn slots(
+            &self,
+            published: *mut u8,
+            _kind: ExternalStorageKind,
+        ) -> Result<ExternalPointerSlots, ExternalStorageValidationError> {
+            Err(ExternalStorageValidationError::Untracked(
+                published as usize,
+            ))
+        }
     }
 
     #[test]

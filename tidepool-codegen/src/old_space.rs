@@ -78,6 +78,8 @@
 
 mod prepared;
 
+pub(crate) use prepared::PreparedCompactionStats;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use tidepool_heap::gc::raw::{cheney_copy, for_each_pointer_field};
 use tidepool_heap::layout::{

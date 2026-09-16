@@ -142,9 +142,14 @@ pub struct RetirementReceipt {
     /// Programs kept only because their byte storage may be addressed
     /// (edge (c), deferred): reported, never retired.
     pub pinned_by_bytes: Vec<ProgramId>,
-    /// Old-space bytes in use after the collection (reported; compaction of
-    /// descriptor arenas is a later slice).
+    /// Prepared old-space bytes in use after the collection: the live
+    /// descriptor objects, compacted into one arena. A retiring program's
+    /// objects are still rooted by its block when compaction commits (before
+    /// retirement, per the contract's order), so they leave on the next
+    /// collection.
     pub old_bytes: usize,
+    /// Prepared old-space bytes this collection's compaction reclaimed.
+    pub compacted_bytes: usize,
 }
 
 /// Machine residency counters, each reported separately so a leak in one
@@ -792,8 +797,22 @@ impl<'code> PreparedMachine<'code> {
         self.statics.push(Arc::clone(&statics));
         self.machine
             .register_prepared_byte_pool(Arc::clone(&compiled.bytes));
-        self.descriptors
-            .extend(compiled.descriptors.iter().cloned());
+        // Interned constructor layouts are shared by every program that
+        // declares them and are never retired, so union by header identity:
+        // a plain extend would grow this list by each install's shared
+        // layouts forever, and promotion and compaction walk all of it.
+        let known: HashSet<usize> = self
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.initial_header_word())
+            .collect();
+        self.descriptors.extend(
+            compiled
+                .descriptors
+                .iter()
+                .filter(|descriptor| !known.contains(&descriptor.initial_header_word()))
+                .cloned(),
+        );
         self.descriptor_registry.extend(
             compiled
                 .descriptor_registry
@@ -896,13 +915,15 @@ impl<'code> PreparedMachine<'code> {
     /// (lifetime contract decision 1). The mark is non-moving and forces
     /// nothing; ordinary collection runs first so it sees a compact nursery.
     /// Programs with byte storage are pinned and reported (edge (c) is a
-    /// later slice). Retirement follows decision 7's order; the receipt is
-    /// what the runtime drains.
+    /// later slice). The prepared descriptor arenas are then compacted into
+    /// one arena of live objects, before retirement as decision 7 orders.
+    /// Retirement follows decision 7's order; the receipt is what the
+    /// runtime drains.
     pub fn collect_major(&mut self, token: Quiescent) -> Result<RetirementReceipt, ExecutionError> {
         drop(token);
         // Re-check: the token proves the caller went through the gate, and
         // nothing may have changed between the two calls.
-        let _still_quiescent = self.quiesce()?;
+        let still_quiescent = self.quiesce()?;
         collect_on(&self.machine, &mut self.vmctx, &self.old_space, 0)?;
         let live = self.mark_live_programs()?;
         let retiring: Vec<ProgramId> = self
@@ -915,6 +936,10 @@ impl<'code> PreparedMachine<'code> {
             pinned_by_bytes: self.byte_pinned_programs().collect(),
             ..RetirementReceipt::default()
         };
+        // Compaction commits before retirement step 1 (contract decision 7):
+        // every descriptor a nursery or old object may carry is still
+        // installed, and every slot is rewritten before any is deregistered.
+        receipt.compacted_bytes = self.compact_old_space(&still_quiescent)?.reclaimed_bytes;
         for id in retiring {
             receipt.block_words += self.retire(id)?;
             receipt.programs.push(id);
@@ -922,6 +947,33 @@ impl<'code> PreparedMachine<'code> {
         receipt.old_bytes = self.old_space.prepared_bytes_used();
         self.assert_rooting_receipt();
         Ok(receipt)
+    }
+
+    /// Compact the prepared descriptor arenas into one arena holding exactly
+    /// the objects reachable from the machine's roots, every installed
+    /// program's root block, and the live nursery. Only a major collection
+    /// calls this, after ordinary collection, under its token.
+    fn compact_old_space(
+        &mut self,
+        _quiescent: &Quiescent,
+    ) -> Result<crate::old_space::PreparedCompactionStats, ExecutionError> {
+        let mut block_roots = Vec::new();
+        for installed in self.programs.values() {
+            let block = &installed.program.get().root_block;
+            block_roots.extend((0..block.len()).filter_map(|slot| block.slot_address(slot)));
+        }
+        // SAFETY: the token proves no generated frame, temporary root or
+        // observation borrow exists; machine, vmctx and old space are this
+        // machine's own, installed for the whole call.
+        unsafe {
+            self.old_space.compact_prepared(
+                &self.machine,
+                &mut self.vmctx,
+                &block_roots,
+                &self.descriptors,
+            )
+        }
+        .map_err(|cause| runtime_error(&self.machine, cause))
     }
 
     /// Programs held live by their byte storage (edge (c), deferred): never
@@ -6658,8 +6710,10 @@ mod tests {
     /// Bounded residency (lifetime contract, first slice): install a program
     /// per iteration, retain its top (a thunk: an owned header, so the handle
     /// keeps the program live), run it, release the previous iteration's
-    /// handle, quiesce and collect. Exactly the previous program retires each
-    /// time and every residency counter is flat after warm-up, so repeated
+    /// handle, retain one host-built heap value in place of the previous
+    /// one, quiesce and collect. Exactly the previous program retires each
+    /// time, every residency counter is flat, and the compacted prepared
+    /// old-space bytes are flat after one warm-up cycle, so repeated
     /// turns far beyond any fixed slot budget leave a bounded machine. The
     /// surviving handle still observes at the end.
     #[test]
@@ -6679,10 +6733,16 @@ mod tests {
             .retain_top(first, ValueId(0))
             .expect("retain the first top");
         let mut latest = first;
-        let mut baseline: Option<ResidencyCounts> = None;
-        // Reported, not yet flat: dead descriptor arenas wait for compaction
-        // (slice 1c), so the prepared old-space figure may only grow here.
-        let mut old_bytes = 0;
+        // Prepared old-space bytes join the flat check: each collection
+        // compacts the descriptor arenas down to the live objects, so the
+        // figure is the same after warm-up as every other counter.
+        let mut baseline: Option<(ResidencyCounts, usize)> = None;
+        let mut old_bytes: Option<usize> = None;
+        let unit_answer = crate::prepared_program::AnswerPlan::Constructor {
+            host_id: DataConId(900),
+            fields: Vec::new(),
+        };
+        let mut answer_handle: Option<PreparedHandle> = None;
         for iteration in 0..iterations {
             let compiled = machine
                 .compile_for_install(&unit_thunk_linked())
@@ -6698,6 +6758,14 @@ mod tests {
                 .expect("the new program runs");
             assert!(machine.release(previous));
             previous = handle;
+            // One heap value retained per turn, the previous turn's released:
+            // without compaction its promotion arena would accumulate.
+            let answer = machine
+                .build_answer(RealmId::ROOT, &unit_answer)
+                .expect("a Unit answer builds");
+            if let Some(stale) = answer_handle.replace(answer) {
+                assert!(machine.release(stale));
+            }
             let token = machine.quiesce().expect("quiescent between calls");
             let receipt = machine.collect_major(token).expect("major collection");
             assert_eq!(
@@ -6706,17 +6774,30 @@ mod tests {
                 "iteration {iteration}: exactly the released program retires"
             );
             assert!(receipt.pinned_by_bytes.is_empty());
-            assert!(
-                receipt.old_bytes >= old_bytes,
-                "iteration {iteration}: prepared old-space bytes went backwards"
-            );
-            old_bytes = receipt.old_bytes;
+            assert!(machine.old_space.prepared_arenas.len() <= 1);
             latest = program;
             let counts = machine.residency();
             assert_eq!(counts.programs, 1);
             match baseline {
-                None => baseline = Some(counts),
-                Some(baseline) => assert_eq!(counts, baseline, "iteration {iteration}"),
+                None => baseline = Some((counts, machine.descriptors.len())),
+                Some(baseline) => assert_eq!(
+                    (counts, machine.descriptors.len()),
+                    baseline,
+                    "iteration {iteration}"
+                ),
+            }
+            // Compaction commits before retirement, so a retiring program's
+            // objects leave one collection later: bytes are flat from the
+            // second cycle on.
+            match (iteration, old_bytes) {
+                (0, _) => {}
+                (_, None) => {
+                    assert!(receipt.old_bytes > 0, "the latest answer stays retained");
+                    old_bytes = Some(receipt.old_bytes);
+                }
+                (_, Some(old_bytes)) => {
+                    assert_eq!(receipt.old_bytes, old_bytes, "iteration {iteration}");
+                }
             }
         }
         assert!(matches!(
@@ -6724,6 +6805,320 @@ mod tests {
             Ok(Value::Con(id, ref fields)) if id == DataConId(900) && fields.is_empty()
         ));
         assert!(machine.release(previous));
+        assert!(machine.release(answer_handle.expect("the loop ran")));
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// A program declaring a nullary `Unit` (its CAF's result) and a
+    /// one-field `Box a`, so a host answer can build a nested value graph.
+    fn boxed_shape_program(unit_id: u64, box_id: u64) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("MachineCompaction", "Unit"),
+            family: testing::identity("MachineCompaction", "Unit"),
+            host_id: DataConId(unit_id),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        });
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("MachineCompaction", "Box"),
+            family: testing::identity("MachineCompaction", "Box"),
+            host_id: DataConId(box_id),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![RuntimeRep::LiftedRef],
+            strict_fields: vec![false],
+            layout: CheckedLayout {
+                fields: vec![FieldLayout {
+                    rep: RuntimeRep::LiftedRef,
+                    offset: 0,
+                }],
+                alignment: 8,
+                payload_size: 8,
+                root_mask: vec![true],
+            },
+        });
+        wire.expressions.nodes[0] = ExprFrame::Construct {
+            constructor: ConstructorId(0),
+            fields: vec![],
+        };
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Thunk {
+            signature: SignatureId(0),
+            update: UpdatePolicy::Memoize,
+            captures: vec![],
+            body: 0,
+        };
+        let prepared = testing::prepare(wire).expect("boxed_shape_program fixture");
+        let linked = link_program(prepared, &MachineImports::default())
+            .expect("boxed_shape_program fixture links");
+        CompiledProgram::compile(&linked).expect("boxed_shape_program fixture compiles")
+    }
+
+    fn boxed(depth: usize, unit_id: u64, box_id: u64) -> crate::prepared_program::AnswerPlan {
+        use crate::prepared_program::AnswerPlan;
+        (0..depth).fold(
+            AnswerPlan::Constructor {
+                host_id: DataConId(unit_id),
+                fields: Vec::new(),
+            },
+            |inner, _| AnswerPlan::Constructor {
+                host_id: DataConId(box_id),
+                fields: vec![inner],
+            },
+        )
+    }
+
+    /// The nesting depth of an observed `boxed` value, `None` for any other
+    /// shape.
+    fn boxed_depth(value: &Value, unit_id: u64, box_id: u64) -> Option<usize> {
+        match value {
+            Value::Con(id, fields) if *id == DataConId(unit_id) && fields.is_empty() => Some(0),
+            Value::Con(id, fields) if *id == DataConId(box_id) => match fields.as_slice() {
+                [inner] => boxed_depth(inner, unit_id, box_id).map(|depth| depth + 1),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Slice 1c: a value graph reached from two handles (the outer value and
+    /// a handle to its field) compacts to ONE copy. The released graph
+    /// beside it is reclaimed, `old_bytes` is exactly the surviving graph's
+    /// extent, both handles observe their values, and the field handle still
+    /// aliases the outer value's field.
+    #[test]
+    fn a_value_graph_shared_by_two_handles_compacts_to_one_copy() {
+        let (mut machine, program) = PreparedMachine::new(
+            boxed_shape_program(930, 931),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("prepared machine");
+        // Interned constructors own no program; the pin keeps the program
+        // the observations below force through.
+        machine.pin(program).expect("installed");
+        let realm = RealmId::fresh();
+        let outer = machine
+            .build_answer(realm, &boxed(3, 930, 931))
+            .expect("the shared graph builds");
+        let one_copy = machine.old_space.prepared_bytes_used();
+        assert!(one_copy > 0, "the built graph is retained in old space");
+        let garbage = machine
+            .build_answer(realm, &boxed(2, 930, 931))
+            .expect("the discarded graph builds");
+        assert!(machine.release(garbage));
+        let PreparedOuter::Constructor { fields, .. } = machine
+            .inspect_outer(outer, realm)
+            .expect("the outer box inspects");
+        let [PreparedResult::Managed(inner)] = fields.as_slice() else {
+            panic!("a box has one managed field");
+        };
+        let inner = *inner;
+        let arenas_before = machine.old_space.prepared_arenas.len();
+        assert!(arenas_before >= 2, "one arena per retention promotion");
+        let bytes_before = machine.old_space.prepared_bytes_used();
+        assert!(bytes_before > one_copy);
+
+        let token = machine.quiesce().expect("quiescent");
+        let receipt = machine.collect_major(token).expect("major collection");
+        assert!(
+            receipt.programs.is_empty(),
+            "the program is pinned: {receipt:?}"
+        );
+        assert_eq!(receipt.old_bytes, one_copy);
+        assert_eq!(receipt.compacted_bytes, bytes_before - one_copy);
+        assert_eq!(machine.old_space.prepared_arenas.len(), 1);
+        let arena = machine.old_space.prepared_arenas[0].allocation_range();
+        let address = |machine: &PreparedMachine<'_>, handle| {
+            tidepool_heap::managed_reference::untag(unsafe {
+                machine.handle_root(handle).expect("live handle").current()
+            } as usize)
+        };
+        assert!(arena.contains(&address(&machine, outer)));
+        assert!(arena.contains(&address(&machine, inner)));
+
+        // The field handle still names the outer value's own field object.
+        let PreparedOuter::Constructor { fields, .. } = machine
+            .inspect_outer(outer, realm)
+            .expect("the compacted outer box inspects");
+        let [PreparedResult::Managed(field_again)] = fields.as_slice() else {
+            panic!("a box has one managed field");
+        };
+        assert_eq!(
+            address(&machine, *field_again),
+            address(&machine, inner),
+            "sharing survives: one copy, two handles"
+        );
+        assert!(machine.release(*field_again));
+        let observed = machine
+            .observe_handle(program, outer, 100)
+            .expect("outer observes");
+        assert_eq!(boxed_depth(&observed, 930, 931), Some(3), "{observed:?}");
+        let observed = machine
+            .observe_handle(program, inner, 100)
+            .expect("inner observes");
+        assert_eq!(boxed_depth(&observed, 930, 931), Some(2), "{observed:?}");
+
+        // Nothing new is garbage: a second collection is a fixed point.
+        let token = machine.quiesce().expect("quiescent");
+        let receipt = machine
+            .collect_major(token)
+            .expect("second major collection");
+        assert_eq!((receipt.old_bytes, receipt.compacted_bytes), (one_copy, 0));
+        assert!(machine.release(outer));
+        assert!(machine.release(inner));
+        let token = machine.quiesce().expect("quiescent");
+        let receipt = machine
+            .collect_major(token)
+            .expect("third major collection");
+        assert_eq!((receipt.old_bytes, receipt.compacted_bytes), (0, one_copy));
+        assert!(machine.old_space.prepared_arenas.is_empty());
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// Slice 1c: a parked frame's continuation -- a heap closure capturing a
+    /// constructor -- is moved by compaction (its stowed cell is a
+    /// compaction root, its captured environment an edge of the copy), and
+    /// the taken continuation is then entered by generated code at its new
+    /// address and returns its captured value from the moved environment.
+    #[test]
+    fn a_parked_continuation_survives_compaction_and_resumes() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            thunk_to_closure_program(),
+            PreparedMachineOptions {
+                nursery_bytes: 4096,
+            },
+        )
+        .expect("A installs");
+        let program_b = install_linked(
+            &mut machine,
+            &closure_caller_program(),
+            ImportBindings::new(),
+        )
+        .expect("B installs");
+        let realm = RealmId::fresh();
+        let call = PreparedCallOptions {
+            observation_budget: 0,
+            collect_before_observation: false,
+        };
+        let produced = machine
+            .run_entry_retained(program_a, ValueId(0), &[], call, realm)
+            .expect("A evaluates its CAF to the closure f");
+        let [PreparedResult::Managed(f)] = produced.values.as_slice() else {
+            panic!("A's CAF returns one managed closure");
+        };
+        let f = *f;
+        // A released host value is old-space garbage for compaction.
+        let garbage = machine
+            .build_answer(
+                realm,
+                &crate::prepared_program::AnswerPlan::Constructor {
+                    host_id: DataConId(1_301),
+                    fields: Vec::new(),
+                },
+            )
+            .expect("a Ready answer builds");
+        assert!(machine.release(garbage));
+        let address = |machine: &PreparedMachine<'_>, handle| {
+            tidepool_heap::managed_reference::untag(unsafe {
+                machine.handle_root(handle).expect("live handle").current()
+            } as usize)
+        };
+        let before = address(&machine, f);
+        let ranges_before: Vec<_> = machine
+            .old_space
+            .prepared_arenas
+            .iter()
+            .map(|arena| arena.allocation_range())
+            .collect();
+        assert!(
+            ranges_before.iter().any(|range| range.contains(&before)),
+            "f is a retained heap closure in old space"
+        );
+        let bytes_before = machine.old_space.prepared_bytes_used();
+
+        let evidence = PreparedFrameEvidence {
+            owner: program_a,
+            site: 1,
+            runner: program_b,
+            resume_entry: ValueId(0),
+            continuation_rep: RuntimeRep::LiftedRef,
+        };
+        let id = machine
+            .park(
+                f,
+                realm,
+                PrincipalId::SYSTEM,
+                EffectRunPolicy::SuspendAll,
+                LivePayloadPolicy::None,
+                evidence,
+            )
+            .expect("f parks");
+
+        let token = machine
+            .quiesce()
+            .expect("parked frames do not block quiescence");
+        let receipt = machine.collect_major(token).expect("major collection");
+        assert!(
+            receipt.programs.is_empty(),
+            "the frame keeps A and B: {receipt:?}"
+        );
+        assert!(
+            receipt.compacted_bytes > 0,
+            "the released value is reclaimed"
+        );
+        assert_eq!(receipt.old_bytes, bytes_before - receipt.compacted_bytes);
+        assert_eq!(machine.old_space.prepared_arenas.len(), 1);
+        let arena = machine.old_space.prepared_arenas[0].allocation_range();
+        assert!(ranges_before.iter().all(|range| *range != arena));
+        assert_eq!(machine.parked_count(), 1);
+
+        let (taken, taken_evidence) = machine.take_parked(id).expect("the frame is taken");
+        assert_eq!(taken_evidence, evidence);
+        let moved = address(&machine, taken);
+        assert_ne!(moved, before);
+        assert!(
+            arena.contains(&moved),
+            "the continuation lives in the compacted arena"
+        );
+        let resumed = machine
+            .run_entry_retained(
+                taken_evidence.runner,
+                taken_evidence.resume_entry,
+                &[PreparedInput::Managed(taken)],
+                call,
+                realm,
+            )
+            .expect("the moved continuation is entered");
+        let [PreparedResult::Managed(value)] = resumed.values.as_slice() else {
+            panic!("the resumed call retains one managed result");
+        };
+        assert!(
+            arena.contains(&address(&machine, *value)),
+            "the captured Ready was read from the moved environment"
+        );
+        let PreparedOuter::Constructor { identity, .. } = machine
+            .inspect_outer(*value, realm)
+            .expect("the resumed result inspects");
+        assert_eq!(identity, DataConId(1_301));
+        assert!(machine.release(*value));
+        assert!(machine.release(taken));
+        assert_eq!(machine.handle_count(), 0);
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 
