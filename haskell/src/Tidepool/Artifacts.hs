@@ -145,10 +145,10 @@ mergePoisonedTables tables =
 -- program. Metadata unions constructor and diagnostic information across all
 -- targets; @has_io@ is true when any target carries IO.
 writeClosedTargets
-  :: Bool -> FilePath -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text]
+  :: Bool -> FilePath -> [CoreBind] -> [TyCon] -> [DataCon] -> Maybe Text -> [Text]
   -> [(String, String, ClosedModule)]  -- ^ (targetName, outFileBase, closed)
   -> IO [(String, [YieldSite])]   -- ^ outFileBase -> typed suspension sites
-writeClosedTargets timing outDir binds typeUniverse mCapturedTy warnTexts targets = do
+writeClosedTargets timing outDir binds typeUniverse preparedConstructors mCapturedTy warnTexts targets = do
   -- Child-local mutation testing targets the final metadata table, after all
   -- legitimate collectors have contributed. Read per invocation so a resident
   -- worker never caches fault state across requests.
@@ -179,15 +179,17 @@ writeClosedTargets timing outDir binds typeUniverse mCapturedTy warnTexts target
 
   -- Metadata is limited to runtime-observable roots: the wired-in floor,
   -- constructors recorded by translation (closed over sibling constructors),
-  -- and constructors reachable through boundary types. The validation below
+  -- constructors admitted by prepared projection, and constructors reachable
+  -- through boundary types. The validation below
   -- makes this narrower set safe without rerunning translation.
   let allReachBinds  = concatMap twReachBinds writes
-      allUsedDCs     = concatMap twUsedDCs writes
+      allUsedDCs     = preparedConstructors ++ concatMap twUsedDCs writes
       siblingMeta    = siblingCloseDCons allUsedDCs
       transitiveMeta = collectTransitiveDCons typeUniverse allReachBinds
       wiredInMeta    = wiredInDataCons
       mergedMeta = mergeMetaPreserving
-                  [ wiredInMeta, concatMap twUsedMeta writes, siblingMeta, transitiveMeta ]
+                  [ wiredInMeta, concatMap twUsedMeta writes, map dcToMeta preparedConstructors
+                  , siblingMeta, transitiveMeta ]
       allMeta = filter (\meta -> Just (T.unpack (dcmQualName meta)) /= dropConstructor) mergedMeta
       hasIO       = or (map twHasIO writes)
       allVarNames = concatMap twVarNames writes
@@ -195,7 +197,8 @@ writeClosedTargets timing outDir binds typeUniverse mCapturedTy warnTexts target
 
   -- Validate every target against the shared metadata before writing.
   forM_ targets $ \(tn, _, closed) ->
-    assertMetaCoversEmitted tn (cmNodes closed) (cmReachBinds closed) allMeta
+    assertMetaCoversEmitted tn (cmNodes closed) (cmReachBinds closed)
+      preparedConstructors allMeta
 
   (metaCbor, metaMs) <- timeSection (evaluate (encodeMetadata allMeta hasIO mCapturedTy allVarNames warnTexts allPoisoned))
   emitPhase timing "cbor_encode" (encodeMsTotal + metaMs)
@@ -226,18 +229,21 @@ writeClosedTargets timing outDir binds typeUniverse mCapturedTy warnTexts target
 
 -- | Enforce the artifact metadata contract before writing.
 --
--- Every constructor id present in the emitted IR must have metadata; a miss
--- is fatal. An independent Core visitor also reports broader reachability
--- differences, but those are diagnostic because translation intentionally
--- elides some Core constructs.
-assertMetaCoversEmitted :: String -> Seq.Seq FlatNode -> [CoreBind] -> [DCMeta] -> IO ()
-assertMetaCoversEmitted targetName nodes reachBinds allMeta = do
+-- Every constructor admitted by prepared projection or present in emitted IR
+-- must have metadata; a miss is fatal. An independent Core visitor also
+-- reports broader reachability differences, but those are diagnostic because
+-- translation intentionally elides some Core constructs.
+assertMetaCoversEmitted
+  :: String -> Seq.Seq FlatNode -> [CoreBind] -> [DataCon] -> [DCMeta] -> IO ()
+assertMetaCoversEmitted targetName nodes reachBinds preparedConstructors allMeta = do
   let allMetaIds = Set.fromList (map dcmId allMeta)
       reachableMeta = map dcToMeta (collectReachableConDCs reachBinds)
+      preparedMeta = map dcToMeta preparedConstructors
       -- Use the raw collector for names so diagnostic-only exclusions cannot
       -- hide the identity of an emitted constructor.
       nameById = Map.fromList
-        [ (dcmId m, dcmQualName m) | m <- map dcToMeta (collectReachableConDCsRaw reachBinds) ]
+        [ (dcmId m, dcmQualName m)
+        | m <- preparedMeta <> map dcToMeta (collectReachableConDCsRaw reachBinds) ]
       nameOf vid = maybe "<name unresolvable>" T.unpack (Map.lookup vid nameById)
       missingEmitted = Set.toList (emittedConIds nodes `Set.difference` allMetaIds)
   when (not (null missingEmitted)) $ error $
@@ -247,6 +253,14 @@ assertMetaCoversEmitted targetName nodes reachBinds allMeta = do
     ++ "missing from meta.cbor -- the runtime would receive a constructor it "
     ++ "cannot describe:\n"
     ++ unlines [ "  0x" ++ showHex vid "" ++ " " ++ nameOf vid | vid <- missingEmitted ]
+  let missingPrepared = filter (\m -> not (dcmId m `Set.member` allMetaIds)) preparedMeta
+  when (not (null missingPrepared)) $ error $
+       "artifact metadata contract failed for binder " ++ targetName ++ ": "
+    ++ show (length missingPrepared)
+    ++ " constructor id(s) admitted by prepared projection are missing from meta.cbor "
+    ++ "-- the prepared program could produce a constructor the runtime cannot describe:\n"
+    ++ unlines [ "  0x" ++ showHex (dcmId m) "" ++ " " ++ T.unpack (dcmQualName m)
+               | m <- missingPrepared ]
   let missingReachable = filter (\m -> not (dcmId m `Set.member` allMetaIds)) reachableMeta
   when (not (null missingReachable)) $ hPutStrLn stderr $
        "artifact metadata reachability diagnostic for binder " ++ targetName ++ ": "
@@ -260,10 +274,10 @@ assertMetaCoversEmitted targetName nodes reachBinds allMeta = do
 -- | Translate and emit one target. The compiler binding name and output file
 -- base are separate because session scaffolds use a reserved binding while
 -- callers still consume @result.cbor@.
-writeWholeModuleClosed :: Bool -> FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text] -> String -> String -> IO [YieldSite]
-writeWholeModuleClosed timing outDir hscEnv binds typeUniverse mCapturedTy warnTexts targetName outFileBase = do
+writeWholeModuleClosed :: Bool -> FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> [DataCon] -> Maybe Text -> [Text] -> String -> String -> IO [YieldSite]
+writeWholeModuleClosed timing outDir hscEnv binds typeUniverse preparedConstructors mCapturedTy warnTexts targetName outFileBase = do
   closed <- translateTargetClosed timing hscEnv binds targetName
-  results <- writeClosedTargets timing outDir binds typeUniverse mCapturedTy warnTexts [(targetName, outFileBase, closed)]
+  results <- writeClosedTargets timing outDir binds typeUniverse preparedConstructors mCapturedTy warnTexts [(targetName, outFileBase, closed)]
   case results of
     [(_, sites)] -> return sites
     _ -> error "writeWholeModuleClosed: writeClosedTargets returned an unexpected result shape"
@@ -271,12 +285,12 @@ writeWholeModuleClosed timing outDir hscEnv binds typeUniverse mCapturedTy warnT
 -- | Translate and emit several required targets against one compiler result.
 -- Any target failure aborts the operation; best-effort fixture sweeps use the
 -- lower-level 'writeClosedTargets' after selecting their survivors.
-runMultiTargetClosed :: Bool -> FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text] -> [String] -> IO ()
-runMultiTargetClosed timing outDir hscEnv binds typeUniverse mCapturedTy warnTexts targetNames = do
+runMultiTargetClosed :: Bool -> FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> [DataCon] -> Maybe Text -> [Text] -> [String] -> IO ()
+runMultiTargetClosed timing outDir hscEnv binds typeUniverse preparedConstructors mCapturedTy warnTexts targetNames = do
   closedTargets <- forM targetNames $ \name -> do
     closed <- translateTargetClosed timing hscEnv binds name
     return (name, name, closed)
-  _ <- writeClosedTargets timing outDir binds typeUniverse mCapturedTy warnTexts closedTargets
+  _ <- writeClosedTargets timing outDir binds typeUniverse preparedConstructors mCapturedTy warnTexts closedTargets
   return ()
 
 -- | Encode the ask sites associated with one emitted target.

@@ -138,7 +138,11 @@ Normalization before keying (all in `TypePolicy`, next to
    as `"recursive newtype"`. Do not reject merely repeated TyCons: nested
    `Identity (Identity Int)` terminates. Limit one normalization path to 256
    steps and return `"type expansion limit"` on exhaustion, also bounding
-   recursive newtypes whose arguments grow at every step.
+   recursive newtypes whose arguments grow at every step. Return a typed
+   refusal directly, never a residual expanded type for later rendering or
+   hashing. Bound structural traversal before equality, indexing and rendering;
+   a step budget alone does not bound exponentially growing arguments. Apply
+   trailing newtype arguments with GHC's smart `mkAppTys` constructor.
 3. Hash-cons the normalized `Type` in `GHC.Core.Map.Type.TypeMap TypeNodeId`.
    Allocate its node id before visiting arguments or fields, so ordinary
    recursive types (`[a]`, `Tree`) form cycles. An existing node returns
@@ -160,8 +164,9 @@ Classification of a normalized type `ty`:
   special leaves bypass ordinary field-graph expansion, not closure emission.
 - `TyConApp tc args` with `isAlgTyCon tc && not (isPrimTyCon tc)` and every
   data constructor free of existentials and constraint/dictionary arguments
-  (`dataConExTyCoVars con == []`, empty `dataConTheta` and empty
-  `dataConEqSpec`) → `DataG tc argumentNodes rows`, with all instantiated
+  (GHC's `isVanillaDataCon`, including absence of GADT equality constraints;
+  pinned GHC exposes these through the third component of `dataConFullSig`,
+  not a public `dataConEqSpec` accessor) → `DataG tc argumentNodes rows`, with all instantiated
   arguments recorded in order, including phantom and kind arguments. Each
   row's source field nodes come from `dataConInstOrigArgTys con args`; a constructor
   with `dataConUnivTyVars` arity mismatching `args` is a projection defect, not

@@ -1,7 +1,7 @@
 use ciborium::value::Value as Cbor;
 use tidepool_repr::execution_schema::{
     parse_program, Architecture, DecodeLimits, Endianness, ParseError, ProgramRequirements,
-    TargetDescriptor, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
+    SiteDelivery, TargetDescriptor, TypeNode, TypeNodeId, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
 };
 
 fn int(value: u64) -> Cbor {
@@ -30,6 +30,8 @@ fn root(signatures: Cbor) -> Cbor {
         Cbor::Array(vec![]),
         Cbor::Array(vec![]),
         int(0),
+        Cbor::Array(vec![]),
+        Cbor::Array(vec![]),
     ])
 }
 
@@ -95,15 +97,16 @@ fn valid_closed_shape_reaches_semantic_validation() {
 }
 
 #[test]
-fn codec_rejects_schema_v8_after_caller_result_bump() {
+fn codec_rejects_schema_9_shape_before_enforcing_schema_10_length() {
     let mut old = root(Cbor::Array(vec![]));
     let Cbor::Array(fields) = &mut old else {
         unreachable!()
     };
-    fields[1] = int(8);
+    fields[1] = int(9);
+    fields.truncate(13);
     assert!(matches!(
         parse_program(&bytes(&old), &requirements(), DecodeLimits::default()),
-        Err(ParseError::UnsupportedVersion(8))
+        Err(ParseError::UnsupportedVersion(9))
     ));
 }
 
@@ -408,6 +411,43 @@ fn codec_enforces_byte_and_table_limits() {
         parse_program(&one_table_entry, &requirements(), table_limits),
         Err(ParseError::LimitExceeded("table entries"))
     ));
+
+    let mut schema_tables = scalar_program(Cbor::Array(vec![int(4), int(64)]));
+    let Cbor::Array(fields) = &mut schema_tables else {
+        unreachable!()
+    };
+    fields[13] = Cbor::Array(vec![Cbor::Array(vec![int(1)])]);
+    fields[14] = Cbor::Array(vec![Cbor::Array(vec![
+        int(1),
+        Cbor::Text("site".into()),
+        int(0),
+        int(0),
+        int(0),
+        Cbor::Array(vec![]),
+    ])]);
+    let encoded = bytes(&schema_tables);
+    assert_eq!(
+        parse_program(
+            &encoded,
+            &requirements(),
+            DecodeLimits {
+                max_type_nodes: 0,
+                ..DecodeLimits::default()
+            }
+        ),
+        Err(ParseError::LimitExceeded("type nodes"))
+    );
+    assert_eq!(
+        parse_program(
+            &encoded,
+            &requirements(),
+            DecodeLimits {
+                max_sites: 0,
+                ..DecodeLimits::default()
+            }
+        ),
+        Err(ParseError::LimitExceeded("sites"))
+    );
 }
 
 fn scalar_program(result_rep: Cbor) -> Cbor {
@@ -441,6 +481,112 @@ fn scalar_program(result_rep: Cbor) -> Cbor {
 }
 
 #[test]
+fn codec_decodes_type_graph_and_site_rows() {
+    let mut program = scalar_program(Cbor::Array(vec![int(4), int(64)]));
+    let Cbor::Array(fields) = &mut program else {
+        unreachable!()
+    };
+    let family = Cbor::Array(vec![
+        Cbor::Text("fixture".into()),
+        Cbor::Text("Types".into()),
+        Cbor::Text("type".into()),
+        Cbor::Text("Phantom".into()),
+        Cbor::Array(vec![int(0)]),
+    ]);
+    let constructor_identity = Cbor::Array(vec![
+        Cbor::Text("fixture".into()),
+        Cbor::Text("Types".into()),
+        Cbor::Text("value".into()),
+        Cbor::Text("Recursive".into()),
+        Cbor::Array(vec![int(0)]),
+    ]);
+    fields[8] = Cbor::Array(vec![Cbor::Array(vec![
+        constructor_identity,
+        family.clone(),
+        Cbor::Array(vec![Cbor::Array(vec![int(1)])]),
+        Cbor::Array(vec![Cbor::Bool(false)]),
+        Cbor::Array(vec![
+            Cbor::Array(vec![Cbor::Array(vec![Cbor::Array(vec![int(1)]), int(0)])]),
+            int(8),
+            int(8),
+            Cbor::Array(vec![Cbor::Bool(true)]),
+        ]),
+        Cbor::Array(vec![int(1)]),
+        int(1),
+        int(1),
+        int(9001),
+    ])]);
+    fields[13] = Cbor::Array(vec![
+        Cbor::Array(vec![int(4), Cbor::Array(vec![int(4), int(64)])]),
+        Cbor::Array(vec![
+            int(0),
+            family,
+            Cbor::Array(vec![int(0)]),
+            Cbor::Array(vec![Cbor::Array(vec![int(0), Cbor::Array(vec![int(1)])])]),
+        ]),
+    ]);
+    fields[14] = Cbor::Array(
+        (0..4)
+            .map(|delivery| {
+                Cbor::Array(vec![
+                    int(41 + delivery),
+                    Cbor::Text("Types.hs:1".into()),
+                    int(delivery),
+                    int(delivery),
+                    int(1),
+                    Cbor::Array(vec![int(0)]),
+                ])
+            })
+            .collect(),
+    );
+
+    let prepared =
+        parse_program(&bytes(&program), &requirements(), DecodeLimits::default()).unwrap();
+    assert!(matches!(
+        prepared.type_node(TypeNodeId(0)),
+        Some(TypeNode::Scalar(
+            tidepool_repr::execution_schema::RuntimeRep::Int(64)
+        ))
+    ));
+    let TypeNode::Data { arguments, .. } = &prepared.types()[1] else {
+        panic!("expected data type node")
+    };
+    assert_eq!(arguments, &[TypeNodeId(0)]);
+    let site = prepared.site(41).unwrap();
+    assert_eq!(site.delivery, SiteDelivery::HostAnswer);
+    assert_eq!(site.wire, TypeNodeId(1));
+    assert_eq!(site.inputs, vec![TypeNodeId(0)]);
+    assert_eq!(
+        prepared
+            .sites()
+            .iter()
+            .map(|site| site.delivery)
+            .collect::<Vec<_>>(),
+        vec![
+            SiteDelivery::HostAnswer,
+            SiteDelivery::LiveReentry,
+            SiteDelivery::ExitCellFill,
+            SiteDelivery::TerminalCapture,
+        ]
+    );
+
+    let Cbor::Array(fields) = &mut program else {
+        unreachable!()
+    };
+    let Cbor::Array(sites) = &mut fields[14] else {
+        unreachable!()
+    };
+    let Cbor::Array(site) = &mut sites[0] else {
+        unreachable!()
+    };
+    site[5] = Cbor::Array(vec![int(99)]);
+    assert!(matches!(
+        parse_program(&bytes(&program), &requirements(), DecodeLimits::default()),
+        Err(ParseError::InvalidReference(detail)) if detail.contains("type node")
+    ));
+}
+
+#[test]
 fn public_parse_rejects_wrong_declared_result_representation() {
     let program = scalar_program(Cbor::Array(vec![int(1)]));
     assert!(matches!(
@@ -460,6 +606,8 @@ fn valid_artifact_truncations_and_single_bit_mutations_never_panic() {
         max_table_entries: 128,
         max_string_bytes: 1024,
         max_work: 4096,
+        max_type_nodes: 128,
+        max_sites: 128,
     };
     parse_program(&encoded, &requirements(), limits).expect("mutation seed is valid");
     let decoded: Cbor = ciborium::de::from_reader(encoded.as_slice()).unwrap();

@@ -230,6 +230,16 @@ mod tests {
         assert!(interner.absorb(&entries).is_err());
         assert_eq!(interner.constructors.len(), 1);
         assert!(!interner.constructors.contains_key(&new.identity));
+        assert!(interner.by_host(DataConId(2)).is_none());
+        assert_eq!(
+            interner
+                .by_host(DataConId(1))
+                .unwrap()
+                .0
+                .identity
+                .occurrence,
+            "First"
+        );
     }
 
     #[test]
@@ -275,5 +285,6 @@ mod tests {
             .absorb(&[(first, descriptor.clone()), (second, descriptor)])
             .is_err());
         assert!(interner.constructors.is_empty());
+        assert!(interner.by_host.is_empty());
     }
 }

@@ -425,6 +425,8 @@ mod tests {
             array(expressions),
             array(bindings),
             uint(0),
+            array([]),
+            array([]),
         ])
     }
     fn requirements() -> ProgramRequirements {

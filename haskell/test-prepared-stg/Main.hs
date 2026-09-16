@@ -26,13 +26,16 @@ import Tidepool.PreparedStg (PreparedModule(..))
 import qualified Data.Map.Strict as Map
 import qualified Tidepool.ExecutionProjection as Projection
 import qualified Tidepool.ExecutionSchema as Schema
-import Tidepool.EffectSchema (SiteType(..), YieldSite(..), sitedVerbs, vsName)
+import Tidepool.EffectSchema
+  ( SiteDelivery(..), SiteType(..), SiteWireSource(..), YieldSite(..)
+  , sitedVerbs, vsDelivery, vsName, vsWireSource )
 import Tidepool.ExecutionIR
   ( LiteralInventory(..), PreparedFact(..), PreparedInventory(..), PreparedSupport(..), inventoryPreparedModule
   , renderPreparedInventory )
 import Tidepool.PreparedSites (buildYieldSite, lookupPreparedVerb, resolvePreparedSiblings)
 import Tidepool.Translate (collectUsedDataCons, lowerModule, LoweredModule(..))
 import RetainedPluginTest (verifyCompilerReuse)
+import TypeEvidenceChecks (runTypeEvidenceChecks)
 
 assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
@@ -105,6 +108,20 @@ assertProjects label outcome = case outcome of
   Right _ -> pure ()
   Left failure -> ioError (userError (label ++ ": projection failed: " ++ show failure))
 
+assertWireSite :: String -> Schema.SiteDelivery -> String
+  -> Either Projection.ProjectionError Schema.WireProgram -> IO ()
+assertWireSite label delivery family outcome = case outcome of
+  Left failure -> ioError (userError (label ++ ": projection failed: " ++ show failure))
+  Right program -> case Schema.programSites program of
+    [site]
+      | Schema.siteDelivery site == delivery
+      , Schema.TypeNodeId raw <- Schema.siteWire site
+      , node : _ <- drop (fromIntegral raw) (Schema.programTypes program)
+      , Schema.TypeData identity _ _ <- node
+      , Schema.symbolOccurrence identity == fromString family -> pure ()
+    sites -> ioError (userError (label ++ ": unexpected site evidence " ++ show sites
+      ++ " in " ++ show (Schema.programTypes program)))
+
 expectFailure :: String -> IO result -> IO ()
 expectFailure label action = do
   outcome <- try (action >> pure ()) :: IO (Either SomeException ())
@@ -122,6 +139,21 @@ expectFailureContaining label needle action = do
 
 main :: IO ()
 main = do
+  let expectedSites =
+        [ ("runLLMTurnFork", DeliverHostAnswer, InvocationAnswer)
+        , ("runLLMTurnFanout", DeliverHostAnswer, InvocationAnswers)
+        , ("forkCata", DeliverHostAnswer, ListAnswer)
+        , ("serve", DeliverLiveReentry, SelectedAnswer)
+        , ("requestWithProgress", DeliverExitCellFill, ResponseResultEvidence)
+        , ("finalize", DeliverTerminalCapture, SelectedAnswer)
+        ]
+      actualSites =
+        [ (vsName spec, vsDelivery spec, vsWireSource spec)
+        | spec <- sitedVerbs
+        , vsName spec `elem` map (\(name, _, _) -> name) expectedSites
+        ]
+  assert (sort actualSites == sort expectedSites)
+    ("prepared delivery strategy drift: " ++ show actualSites)
   let normalized = stripNospecSpine
         (Var nospecId, [Type boolTy, Var nospecId, Type boolTy])
   assert (case normalized of
@@ -139,6 +171,8 @@ main = do
           effects = effectsDir </> "Core.hs"
           unfoldDir = dir </> "Tidepool" </> "Actors"
           unfold = unfoldDir </> "Unfold.hs"
+          replyDir = dir </> "Tidepool" </> "Agent" </> "Reply"
+          replyInternal = replyDir </> "Internal.hs"
           siteTarget = dir </> "SiteExpr.hs"
           partialChildTarget = dir </> "PartialChildExpr.hs"
           polySiteTarget = dir </> "PolySiteExpr.hs"
@@ -154,6 +188,7 @@ main = do
             ]
       createDirectoryIfMissing True effectsDir
       createDirectoryIfMissing True unfoldDir
+      createDirectoryIfMissing True replyDir
       let originalDep = unlines
             [ "module Dep where"
             , "helper :: Int -> Int"
@@ -164,11 +199,20 @@ main = do
         [ "{-# LANGUAGE ExplicitForAll #-}"
         , "{-# LANGUAGE TypeApplications #-}"
         , "module Tidepool.Effects.Core where"
+        , "data InvocationExit = InvocationExit"
         , "{-# OPAQUE runLLMTurn #-}"
         , "runLLMTurn :: forall a. String -> Maybe a"
         , "runLLMTurn _ = Nothing"
         , "runLLMTurnSited :: forall a. Int -> String -> Maybe a"
         , "runLLMTurnSited _ _ = Nothing"
+        , "runLLMTurnFork :: forall a. String -> Maybe (Either InvocationExit a)"
+        , "runLLMTurnFork _ = Nothing"
+        , "runLLMTurnForkSited :: forall a. Int -> String -> Maybe (Either InvocationExit a)"
+        , "runLLMTurnForkSited _ _ = Nothing"
+        , "runLLMTurnFanout :: forall a. [String] -> Maybe [Either InvocationExit a]"
+        , "runLLMTurnFanout _ = Nothing"
+        , "runLLMTurnFanoutSited :: forall a. Int -> [String] -> Maybe [Either InvocationExit a]"
+        , "runLLMTurnFanoutSited _ _ = Nothing"
         , "forkAllSited :: forall a. Int -> String -> Maybe [a]"
         , "forkAllSited _ _ = Nothing"
         , "keepForkAllSited :: Maybe [Bool]"
@@ -178,6 +222,9 @@ main = do
         [ "{-# LANGUAGE ExplicitForAll #-}"
         , "module Tidepool.Actors.Unfold where"
         , "import Data.Kind (Type)"
+        , "import Tidepool.Agent.Reply.Internal (ResponseResult)"
+        , "keepResponseResultAuthority :: Maybe (ResponseResult Bool)"
+        , "keepResponseResultAuthority = Nothing"
         , "{-# OPAQUE child #-}"
         , "child :: forall result (child :: Type) input (parent :: Type). input -> Maybe result"
         , "child _ = Nothing"
@@ -185,6 +232,12 @@ main = do
         , "childSited :: forall result (child :: Type) input (parent :: Type). Int -> input -> Maybe result"
         , "childSited _ _ = Nothing"
         ])
+      writeFile replyInternal (unlines
+        [ "module Tidepool.Agent.Reply.Internal where"
+        , "data ResponseResult a = ResponseResult a"
+        ])
+      runTypeEvidenceChecks dir
+        (\result entry -> projectEntry result "TypeEvidence" entry mempty)
       writeFile target validTarget
       writeFile siteTarget (unlines
         [ "{-# LANGUAGE TypeApplications #-}"
@@ -192,6 +245,10 @@ main = do
         , "import Tidepool.Effects.Core"
         , "typedSite :: Maybe Bool"
         , "typedSite = runLLMTurn @Bool \"prepared\""
+        , "forkedSite :: Maybe (Either InvocationExit Bool)"
+        , "forkedSite = runLLMTurnFork @Bool \"prepared\""
+        , "fanoutSite :: Maybe [Either InvocationExit Bool]"
+        , "fanoutSite = runLLMTurnFanout @Bool [\"prepared\"]"
         ])
       writeFile polySiteTarget (unlines
         [ "{-# LANGUAGE RankNTypes #-}"
@@ -237,13 +294,17 @@ main = do
         ("direct prepared modules lost context: " ++ show directShape)
       siteDirect <- runPipelineSelected PreparedStg siteTarget [dir]
       let (siteInventory, directSites) = preparedEvidence "SiteExpr" siteDirect
-      assert (case directSites of
+      assert (case filter ((== "SiteExpr.typedSite") . ysOrigin) directSites of
                 [site] -> "runLLMTurnSited" `isInfixOf` siteInventory
                   && show (ysSite site) `isInfixOf` siteInventory
                 _ -> False)
         "typed site was not elaborated before preparation"
+      assertWireSite "forked answer wrapper" Schema.HostAnswer "Either"
+        (projectEntry siteDirect "SiteExpr" "forkedSite" mempty)
+      assertWireSite "fanout answer wrapper" Schema.HostAnswer "List"
+        (projectEntry siteDirect "SiteExpr" "fanoutSite" mempty)
       partialChildDirect <- runPipelineSelected PreparedStg partialChildTarget [dir]
-      assertProjects "direct value-partial child site"
+      assertWireSite "direct value-partial child site" Schema.ExitCellFill "ResponseResult"
         (projectEntry partialChildDirect "PartialChildExpr" "partialChild" mempty)
       assert (case snd (preparedEvidence "PartialChildExpr" partialChildDirect) of
         [site] -> stType (ysAnswer site) == "Bool" && map stType (ysInputs site) == ["Char"]

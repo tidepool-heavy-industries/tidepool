@@ -25,6 +25,7 @@ import GHC (moduleName, moduleNameString, moduleUnit)
 import GHC.Driver.Env (HscEnv)
 import GHC.Unit.Types (unitString)
 import GHC.Core (Bind(..))
+import GHC.Core.DataCon (DataCon)
 import GHC.Types.Name (nameOccName, nameModule_maybe)
 import GHC.Types.Id (idName)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -47,7 +48,7 @@ import Tidepool.GhcPipeline
   , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..), dumpCore
   , withResidentPipelineSelected, CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances )
 import Tidepool.ExecutionEncode (encodeWireProgram)
-import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), projectPreparedTarget, resolveTextPackageUnit)
+import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), projectPreparedTargetWithConstructors, resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..) )
@@ -302,12 +303,19 @@ processFile compiler timing args path = do
           Nothing  -> takeDirectory path </> takeBaseName path ++ "_cbor"
     createDirectoryIfMissing True outDir
 
+    let preparedTargets = case requestTargets args of
+          targets@(_ : _) -> targets
+          [] -> maybe [] pure mTarget
+    preparedArtifacts <- prepareArtifacts path hscEnv (pprModules prepared) preparedTargets
+      (requestRetainedGenerations args)
+    let preparedConstructors = concatMap paConstructors preparedArtifacts
+
     if not (null (requestTargets args))
       -- Explicit multi-target mode (--targets a,b): takes priority over
       -- --target/--all-closed, which stay untouched below for every other
       -- caller. One runPipeline invocation (already run, above), several
       -- named targets, one merged meta.cbor — see 'runMultiTargetClosed'.
-      then runMultiTargetClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts (requestTargets args)
+      then runMultiTargetClosed timing outDir hscEnv binds tycons preparedConstructors mCapturedTy warnTexts (requestTargets args)
       else case (mTarget, requestAllClosed args) of
       (_, True) -> do
         -- All-closed mode: translate each binding independently via translateModuleClosed
@@ -366,7 +374,7 @@ processFile compiler timing args path = do
             Right (Just closed) -> return (acc ++ [(name, name, closed)])
           ) [] uniqueNames
         -- Validate and emit all surviving fixtures through the shared writer.
-        void $ writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts closedTargets
+        void $ writeClosedTargets timing outDir binds tycons preparedConstructors mCapturedTy warnTexts closedTargets
         pruneAllClosedArtifacts outDir (map (\(_, outFileBase, _) -> outFileBase) closedTargets)
 
       (Just targetName, False) ->
@@ -378,7 +386,7 @@ processFile compiler timing args path = do
         -- (tidepool-harness/src/compile.rs passes --target, never
         -- --all-closed), so it's the one carrying translate/cbor_encode/write
         -- timing.
-        void $ writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName targetName
+        void $ writeWholeModuleClosed timing outDir hscEnv binds tycons preparedConstructors mCapturedTy warnTexts targetName targetName
 
       (Nothing, False) -> do
         -- Per-binding mode (original behavior). NOT unified with
@@ -427,11 +435,7 @@ processFile compiler timing args path = do
         writeFile asksFile (renderAsksJson [])
         hPutStrLn stderr $ "  Wrote: " ++ asksFile ++ " (0 sites)"
 
-    let preparedTargets = case requestTargets args of
-          targets@(_ : _) -> targets
-          [] -> maybe [] pure mTarget
-    writePreparedArtifacts outDir path hscEnv (pprModules prepared) preparedTargets
-      (requestRetainedGenerations args)
+    writePreparedArtifacts outDir preparedArtifacts
 
   reportDiags res
 
@@ -444,9 +448,18 @@ trySynchronous action = do
       Nothing -> pure (Left exception)
     Right value -> pure (Right value)
 
-writePreparedArtifacts :: FilePath -> FilePath -> HscEnv -> [PreparedModule] -> [String]
-  -> Map.Map SymbolIdentity Word64 -> IO ()
-writePreparedArtifacts outDir input hscEnv modules targets retainedGenerations = do
+data PreparedArtifact = PreparedArtifact
+  { paTarget :: String
+  , paBytes :: BS.ByteString
+  , paConstructors :: [DataCon]
+  }
+
+-- Project before writing either engine's artifacts so the shared constructor
+-- table includes exactly the GHC constructors admitted by prepared execution.
+prepareArtifacts :: FilePath -> HscEnv -> [PreparedModule] -> [String]
+  -> Map.Map SymbolIdentity Word64 -> IO [PreparedArtifact]
+prepareArtifacts _ _ _ [] _ = pure []
+prepareArtifacts input hscEnv modules targets retainedGenerations = do
   formattingAuthority <- resolveFormattingAuthority hscEnv
   textAuthority <- resolveTextPackageUnit hscEnv
   source <- readFile input
@@ -460,7 +473,7 @@ writePreparedArtifacts outDir input hscEnv modules targets retainedGenerations =
     "x86_64" -> pure (X86_64, "sysv64")
     "aarch64" -> pure (Aarch64, "aapcs64")
     other -> ioError (userError ("prepared execution is not configured for " ++ other))
-  forM_ targets $ \target -> do
+  forM targets $ \target -> do
     let entry = SymbolIdentity
           (T.pack (unitString (moduleUnit (pmModule preparedModule))))
           (T.pack targetModule) "value" (T.pack target) Nothing
@@ -475,14 +488,19 @@ writePreparedArtifacts outDir input hscEnv modules targets retainedGenerations =
           }
     recovered <- recoverPreparedClosure hscEnv context modules
     reportRecoveryResiduals target (closureFailures recovered)
-    program <- case projectPreparedTarget context (closureModules recovered) of
+    (program, constructors) <- case projectPreparedTargetWithConstructors context (closureModules recovered) of
       -- A reachable polymorphic typed site is the author's source error.
       Left (RejectedTypedSite message) -> throwIO (SourceRejection (T.unpack message))
       Left failure -> ioError (userError ("prepared projection failed: " <> show failure))
       Right projected -> pure projected
-    let output = outDir </> target ++ ".prepared.cbor"
-    BS.writeFile output (encodeWireProgram program)
-    hPutStrLn stderr $ "  Wrote: " ++ output ++ " (prepared execution)"
+    bytes <- evaluate (encodeWireProgram program)
+    pure (PreparedArtifact target bytes constructors)
+
+writePreparedArtifacts :: FilePath -> [PreparedArtifact] -> IO ()
+writePreparedArtifacts outDir artifacts = forM_ artifacts $ \artifact -> do
+  let output = outDir </> paTarget artifact ++ ".prepared.cbor"
+  BS.writeFile output (paBytes artifact)
+  hPutStrLn stderr $ "  Wrote: " ++ output ++ " (prepared execution)"
 
 reportRecoveryResiduals :: String -> [RecoveryFailure] -> IO ()
 reportRecoveryResiduals _ [] = pure ()
@@ -603,14 +621,16 @@ runTurnMode compiler args path = do
         -- The output file base
         -- stays "result" regardless — every Rust caller reads result.cbor.
         let targetName = fromMaybe scaffoldTargetName (requestTarget args)
-        asksSites <- writeWholeModuleClosed timing outDir hscEnv binds (prTyCons result) mCapturedTy warnTexts targetName scaffoldOutputBase
-        -- The prepared artifact's entry is the SETTLED scaffold, never the
-        -- Core target: the host reads completion or suspension from its one
-        -- constructor layer (see 'preparedScaffoldTargetName').
-        if requestPreparedTurn args
-          then writePreparedArtifacts outDir compiledPath hscEnv preparedModules
+        -- Projection remains outside compileVariants: a prepared rejection
+        -- cannot select a Core template fallback. Its entry is the settled
+        -- scaffold, and its constructors join the shared metadata before write.
+        preparedArtifacts <- if requestPreparedTurn args
+          then prepareArtifacts compiledPath hscEnv preparedModules
                  [preparedScaffoldTargetName] (requestRetainedGenerations args)
-          else pure ()
+          else pure []
+        asksSites <- writeWholeModuleClosed timing outDir hscEnv binds (prTyCons result)
+          (concatMap paConstructors preparedArtifacts) mCapturedTy warnTexts targetName scaffoldOutputBase
+        writePreparedArtifacts outDir preparedArtifacts
         let wrapped = T.pack spliced
         case selector of
           SBind -> do

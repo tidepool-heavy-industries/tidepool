@@ -4,7 +4,8 @@ use super::{
     Alternative, AlternativePattern, Atom, CaseKind, CheckedLayout, ConstructorId, DecodeLimits,
     Expr, ExprFrame, GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationId,
     ParseError, ProgramRequirements, ResultContract, RuntimeRep, ScalarLiteral, SignatureId,
-    SymbolIdentity, ValueId, ValueRef, WireProgram, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
+    SymbolIdentity, TypeNode, TypeNodeId, ValueId, ValueRef, WireProgram, EXECUTION_ABI_VERSION,
+    SCHEMA_VERSION,
 };
 use recursion::{try_expand_and_collapse, MappableFrame, PartiallyApplied};
 use std::{cell::RefCell, rc::Rc};
@@ -1267,6 +1268,12 @@ impl<'a> Validator<'a> {
         self.check_table_len(self.wire.constructors.len())?;
         self.check_table_len(self.wire.operations.len())?;
         self.check_table_len(self.wire.bindings.len())?;
+        if self.wire.types.len() > self.limits.max_type_nodes {
+            return Err(ParseError::LimitExceeded("type nodes"));
+        }
+        if self.wire.sites.len() > self.limits.max_sites {
+            return Err(ParseError::LimitExceeded("sites"));
+        }
 
         for signature in &self.wire.signatures {
             self.bump_work(
@@ -1321,7 +1328,7 @@ impl<'a> Validator<'a> {
                 ));
             }
             if family_sizes
-                .insert(&constructor.family, constructor.family_size)
+                .insert(constructor.family.clone(), constructor.family_size)
                 .is_some_and(|size| size != constructor.family_size)
             {
                 return Err(ParseError::InvalidLayout(
@@ -1362,6 +1369,9 @@ impl<'a> Validator<'a> {
             }
             self.check_layout(&constructor.field_reps, &constructor.layout)?;
         }
+
+        self.check_type_nodes(&family_sizes)?;
+        self.check_sites()?;
 
         let mut operation_contracts = BTreeSet::new();
         for operation in &self.wire.operations {
@@ -1624,6 +1634,191 @@ impl<'a> Validator<'a> {
         Ok(())
     }
 
+    fn check_type_nodes(
+        &mut self,
+        family_sizes: &BTreeMap<SymbolIdentity, u32>,
+    ) -> Result<(), ParseError> {
+        for index in 0..self.wire.types.len() {
+            let work = match &self.wire.types[index] {
+                TypeNode::Data {
+                    family,
+                    arguments,
+                    rows,
+                } => arguments
+                    .len()
+                    .checked_add(rows.len())
+                    .and_then(|work| {
+                        rows.iter()
+                            .try_fold(work, |work, row| work.checked_add(row.fields.len()))
+                    })
+                    .and_then(|work| {
+                        Self::symbol_text_len(family).and_then(|text| work.checked_add(text))
+                    }),
+                TypeNode::Unconstructible { reason, rendered } => {
+                    reason.len().checked_add(rendered.len())
+                }
+                TypeNode::Text | TypeNode::Integer | TypeNode::Natural | TypeNode::Scalar(_) => {
+                    Some(0)
+                }
+            }
+            .and_then(|work| work.checked_add(1))
+            .ok_or(ParseError::LimitExceeded("work"))?;
+            self.bump_work(work)?;
+            match &self.wire.types[index] {
+                TypeNode::Data {
+                    family,
+                    arguments,
+                    rows,
+                } => {
+                    self.check_symbol_shape(family)?;
+                    for argument in arguments {
+                        self.type_node(*argument)?;
+                    }
+                    if rows.is_empty() {
+                        if family_sizes.contains_key(family) {
+                            return Err(ParseError::InvalidLayout(
+                                "type node constructor family size".into(),
+                            ));
+                        }
+                        continue;
+                    }
+                    let family_size = self.constructor(rows[0].constructor)?.family_size;
+                    if rows.len() != family_size as usize {
+                        return Err(ParseError::InvalidLayout(
+                            "type node constructor family size".into(),
+                        ));
+                    }
+                    for (row_index, row) in rows.iter().enumerate() {
+                        let constructor = self.constructor(row.constructor)?;
+                        let expected_tag = u32::try_from(row_index + 1)
+                            .map_err(|_| ParseError::LimitExceeded("type nodes"))?;
+                        if &constructor.family != family
+                            || constructor.family_size != family_size
+                            || constructor.tag != expected_tag
+                        {
+                            return Err(ParseError::InvalidLayout(
+                                "type node constructor family".into(),
+                            ));
+                        }
+                        if constructor.result_rep != RuntimeRep::LiftedRef {
+                            return Err(ParseError::InvalidLayout(
+                                "type node constructor representation".into(),
+                            ));
+                        }
+                        if row.fields.len() != constructor.field_reps.len() {
+                            return Err(ParseError::InvalidLayout(
+                                "type node field representation".into(),
+                            ));
+                        }
+                        for (field, expected_rep) in row.fields.iter().zip(&constructor.field_reps)
+                        {
+                            match self.type_node(*field)? {
+                                TypeNode::Scalar(rep) if rep == expected_rep => {}
+                                TypeNode::Data { .. }
+                                | TypeNode::Text
+                                | TypeNode::Integer
+                                | TypeNode::Natural
+                                    if *expected_rep == RuntimeRep::LiftedRef => {}
+                                TypeNode::Unconstructible { .. } => {}
+                                _ => {
+                                    return Err(ParseError::InvalidLayout(
+                                        "type node field representation".into(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                TypeNode::Scalar(rep) => {
+                    self.check_rep(*rep)?;
+                    if !matches!(
+                        rep,
+                        RuntimeRep::Int(_) | RuntimeRep::Word(_) | RuntimeRep::Float(_)
+                    ) {
+                        return Err(ParseError::InvalidLayout(
+                            "type scalar representation".into(),
+                        ));
+                    }
+                }
+                TypeNode::Unconstructible { reason, rendered } => {
+                    if reason.is_empty() {
+                        return Err(ParseError::Malformed("empty unconstructible reason".into()));
+                    }
+                    self.check_text_shape(reason, true)?;
+                    self.check_text_shape(rendered, true)?;
+                }
+                TypeNode::Text | TypeNode::Integer | TypeNode::Natural => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn check_sites(&mut self) -> Result<(), ParseError> {
+        let mut ids = BTreeSet::new();
+        for index in 0..self.wire.sites.len() {
+            let work = self.wire.sites[index]
+                .inputs
+                .len()
+                .checked_add(self.wire.sites[index].origin.len())
+                .and_then(|work| work.checked_add(1))
+                .ok_or(ParseError::LimitExceeded("work"))?;
+            self.bump_work(work)?;
+            let site = &self.wire.sites[index];
+            if site.site == 0 {
+                return Err(ParseError::InvalidReference("site 0".into()));
+            }
+            if !ids.insert(site.site) {
+                return Err(ParseError::DuplicateDefinition("site".into()));
+            }
+            self.check_text_shape(&site.origin, true)?;
+            self.type_node(site.wire)?;
+            for input in &site.inputs {
+                self.type_node(*input)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn type_node(&self, id: TypeNodeId) -> Result<&TypeNode, ParseError> {
+        self.wire
+            .types
+            .get(id.0 as usize)
+            .ok_or_else(|| ParseError::InvalidReference(format!("type node {:?}", id)))
+    }
+
+    fn check_text_shape(&self, text: &str, allow_empty: bool) -> Result<(), ParseError> {
+        if !allow_empty && text.is_empty() {
+            return Err(ParseError::Malformed("empty identity text".into()));
+        }
+        if text.len() > self.limits.max_string_bytes {
+            return Err(ParseError::LimitExceeded("string bytes"));
+        }
+        Ok(())
+    }
+
+    fn check_symbol_shape(&self, symbol: &SymbolIdentity) -> Result<(), ParseError> {
+        self.check_text_shape(&symbol.unit, false)?;
+        self.check_text_shape(&symbol.module, false)?;
+        self.check_text_shape(&symbol.namespace, false)?;
+        self.check_text_shape(&symbol.occurrence, false)?;
+        if let Some(parent) = &symbol.record_parent {
+            self.check_text_shape(parent, false)?;
+        }
+        Ok(())
+    }
+
+    fn symbol_text_len(symbol: &SymbolIdentity) -> Option<usize> {
+        [
+            symbol.unit.len(),
+            symbol.module.len(),
+            symbol.namespace.len(),
+            symbol.occurrence.len(),
+            symbol.record_parent.as_ref().map_or(0, String::len),
+        ]
+        .into_iter()
+        .try_fold(0, usize::checked_add)
+    }
+
     fn check_rep(&self, rep: RuntimeRep) -> Result<(), ParseError> {
         let valid = match rep {
             RuntimeRep::Void
@@ -1794,9 +1989,9 @@ impl<'a> Validator<'a> {
 mod tests {
     use super::*;
     use crate::execution_schema::{
-        Architecture, ConstructorDecl, Endianness, FieldLayout, HeapBinding, HeapRhs,
-        OperationDecl, ProgramEnvelope, Signature, TargetDescriptor, TopBinding, UpdatePolicy,
-        EXECUTION_ABI_VERSION, SCHEMA_VERSION,
+        Architecture, ConstructorDecl, CtorRow, Endianness, FieldLayout, HeapBinding, HeapRhs,
+        OperationDecl, ProgramEnvelope, Signature, SiteDelivery, SiteRow, TargetDescriptor,
+        TopBinding, TypeNode, TypeNodeId, UpdatePolicy, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
     };
 
     fn symbol(name: &str) -> SymbolIdentity {
@@ -1865,6 +2060,8 @@ mod tests {
                 },
             })],
             entry: ValueId(0),
+            types: vec![],
+            sites: vec![],
         }
     }
 
@@ -1963,6 +2160,278 @@ mod tests {
             validate_program(&program, &requirements(), DecodeLimits::default()),
             Err(ParseError::DuplicateDefinition(message)) if message.contains("host id")
         ));
+    }
+
+    #[test]
+    fn type_graph_keeps_phantom_arguments_distinct_and_allows_cycles() {
+        let mut program = valid_program();
+        let family = symbol("PhantomFamily");
+        program.types = vec![
+            TypeNode::Scalar(RuntimeRep::Int(64)),
+            TypeNode::Scalar(RuntimeRep::Word(64)),
+            TypeNode::Data {
+                family: family.clone(),
+                arguments: vec![TypeNodeId(0)],
+                rows: vec![],
+            },
+            TypeNode::Data {
+                family,
+                arguments: vec![TypeNodeId(1)],
+                rows: vec![],
+            },
+        ];
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+        assert_ne!(program.types[2], program.types[3]);
+
+        let mut recursive = empty_constructor("Recursive", 1, 1);
+        recursive.family = symbol("RecursiveFamily");
+        recursive.field_reps = vec![RuntimeRep::LiftedRef];
+        recursive.strict_fields = vec![false];
+        recursive.layout = CheckedLayout {
+            fields: vec![FieldLayout {
+                rep: RuntimeRep::LiftedRef,
+                offset: 0,
+            }],
+            alignment: 8,
+            payload_size: 8,
+            root_mask: vec![true],
+        };
+        program.constructors = vec![recursive];
+        program.types = vec![TypeNode::Data {
+            family: symbol("RecursiveFamily"),
+            arguments: vec![],
+            rows: vec![CtorRow {
+                constructor: ConstructorId(0),
+                fields: vec![TypeNodeId(0)],
+            }],
+        }];
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+    }
+
+    #[test]
+    fn type_graph_rejects_bad_references_and_field_layouts() {
+        let mut program = valid_program();
+        program.types = vec![TypeNode::Data {
+            family: symbol("Family"),
+            arguments: vec![TypeNodeId(1)],
+            rows: vec![],
+        }];
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidReference(detail)) if detail.contains("type node")
+        ));
+
+        let mut constructor = empty_constructor("Scalar", 1, 1);
+        constructor.field_reps = vec![RuntimeRep::Int(64)];
+        constructor.strict_fields = vec![false];
+        constructor.layout = CheckedLayout {
+            fields: vec![FieldLayout {
+                rep: RuntimeRep::Int(64),
+                offset: 0,
+            }],
+            alignment: 8,
+            payload_size: 8,
+            root_mask: vec![false],
+        };
+        program.constructors = vec![constructor];
+        program.types = vec![
+            TypeNode::Scalar(RuntimeRep::Word(64)),
+            TypeNode::Data {
+                family: symbol("Family"),
+                arguments: vec![],
+                rows: vec![CtorRow {
+                    constructor: ConstructorId(0),
+                    fields: vec![TypeNodeId(0)],
+                }],
+            },
+        ];
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidLayout(detail))
+                if detail == "type node field representation"
+        ));
+
+        let TypeNode::Data { rows, .. } = &mut program.types[1] else {
+            unreachable!()
+        };
+        rows[0].fields[0] = TypeNodeId(99);
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidReference(detail)) if detail.contains("type node")
+        ));
+    }
+
+    #[test]
+    fn site_rows_require_unique_nonzero_ids_and_valid_type_roots() {
+        let mut program = valid_program();
+        program.types = vec![TypeNode::Text];
+        let site = SiteRow {
+            site: 7,
+            origin: "Fixture.hs:1".into(),
+            ordinal: 0,
+            delivery: SiteDelivery::HostAnswer,
+            wire: TypeNodeId(0),
+            inputs: vec![TypeNodeId(0)],
+        };
+        program.sites = vec![site.clone()];
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+
+        program.sites.push(site);
+        assert_eq!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::DuplicateDefinition("site".into()))
+        );
+        program.sites.truncate(1);
+        program.sites[0].site = 0;
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidReference(_))
+        ));
+        program.sites[0].site = 7;
+        program.sites[0].wire = TypeNodeId(1);
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidReference(detail)) if detail.contains("type node")
+        ));
+    }
+
+    #[test]
+    fn data_type_rows_cover_the_family_in_tag_order() {
+        let mut program = valid_program();
+        program.constructors = vec![
+            empty_constructor("First", 1, 2),
+            empty_constructor("Second", 2, 2),
+        ];
+        program.types = vec![TypeNode::Data {
+            family: symbol("Family"),
+            arguments: vec![],
+            rows: vec![
+                CtorRow {
+                    constructor: ConstructorId(0),
+                    fields: vec![],
+                },
+                CtorRow {
+                    constructor: ConstructorId(1),
+                    fields: vec![],
+                },
+            ],
+        }];
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+
+        program.constructors[0].result_rep = RuntimeRep::UnliftedRef;
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidLayout(detail))
+                if detail == "type node constructor representation"
+        ));
+        program.constructors[0].result_rep = RuntimeRep::LiftedRef;
+
+        match &mut program.types[0] {
+            TypeNode::Data { rows, .. } => rows.swap(0, 1),
+            _ => unreachable!(),
+        }
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidLayout(_))
+        ));
+        match &mut program.types[0] {
+            TypeNode::Data { rows, .. } => {
+                rows.swap(0, 1);
+                rows.remove(1);
+            }
+            _ => unreachable!(),
+        }
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidLayout(_))
+        ));
+        match &mut program.types[0] {
+            TypeNode::Data { rows, .. } => rows.clear(),
+            _ => unreachable!(),
+        }
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidLayout(_))
+        ));
+    }
+
+    #[test]
+    fn type_nodes_reject_non_scalar_representations_and_empty_refusal_reasons() {
+        let mut program = valid_program();
+        program.types = vec![TypeNode::Scalar(RuntimeRep::LiftedRef)];
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidLayout(_))
+        ));
+        program.types = vec![TypeNode::Unconstructible {
+            reason: String::new(),
+            rendered: "Opaque".into(),
+        }];
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn type_and_site_tables_have_independent_semantic_limits() {
+        let mut program = valid_program();
+        program.types = vec![TypeNode::Text];
+        assert_eq!(
+            validate_program(
+                &program,
+                &requirements(),
+                DecodeLimits {
+                    max_type_nodes: 0,
+                    ..DecodeLimits::default()
+                }
+            ),
+            Err(ParseError::LimitExceeded("type nodes"))
+        );
+        program.sites = vec![SiteRow {
+            site: 1,
+            origin: String::new(),
+            ordinal: 0,
+            delivery: SiteDelivery::TerminalCapture,
+            wire: TypeNodeId(0),
+            inputs: vec![],
+        }];
+        assert_eq!(
+            validate_program(
+                &program,
+                &requirements(),
+                DecodeLimits {
+                    max_sites: 0,
+                    ..DecodeLimits::default()
+                }
+            ),
+            Err(ParseError::LimitExceeded("sites"))
+        );
+    }
+
+    #[test]
+    fn many_empty_data_nodes_use_the_constructor_family_index() {
+        let mut program = valid_program();
+        for index in 0..4096_u32 {
+            let mut constructor = empty_constructor(&format!("Constructor{index}"), 1, 1);
+            constructor.host_id = crate::DataConId(u64::from(index) + 1);
+            constructor.family = symbol(&format!("DeclaredFamily{index}"));
+            program.constructors.push(constructor);
+            program.types.push(TypeNode::Data {
+                family: symbol(&format!("EmptyFamily{index}")),
+                arguments: vec![],
+                rows: vec![],
+            });
+        }
+        validate_program(
+            &program,
+            &requirements(),
+            DecodeLimits {
+                max_work: 1 << 20,
+                ..DecodeLimits::default()
+            },
+        )
+        .unwrap();
     }
 
     #[test]

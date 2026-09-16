@@ -114,7 +114,8 @@ import Tidepool.Timing
   ( readTimingEnabled, timeSection, emitPhase, monotonicTime, elapsedMs
   , emitCompileSummary, emitModuleTiming )
 import Tidepool.PreparedStg (PreparedElaboration(..), PreparedModule(..), prepareModule)
-import Tidepool.PreparedSites (elaboratePreparedSites, resolvePreparedSiblings)
+import Tidepool.PreparedSites
+  ( elaboratePreparedSites, resolvePreparedSiblings, resolveSiteAuthority )
 import Tidepool.ExecutionSchema (SymbolIdentity)
 import Tidepool.RetainedUnfoldings (installRetainedUnfoldingsPlugin)
 import Tidepool.TurnSource (extractModuleName)
@@ -774,13 +775,16 @@ runCompileCycle preparation mCache mMemoRef retained timing sessionT0 variant pa
             siblings <- liftIO $ atomicModifyIORef' preparedSiblingsRef $ \known ->
               let known' = Map.union (resolvePreparedSiblings (cg_binds cgGuts)) known
               in (known', known')
-            (elaboratedBindings, yieldSites, rejections) <- liftIO $
-              elaboratePreparedSites siblings (cg_binds cgGuts)
+            siteAuthority <- liftIO (resolveSiteAuthority (mfHscEnv mf))
+            (elaboratedBindings, yieldSites, preparedSites, typeGraph, rejections) <- liftIO $
+              elaboratePreparedSites siteAuthority siblings (cg_binds cgGuts)
             let elaboration = PreparedElaboration
                   { peGuts = cgGuts
                   , peBindings = elaboratedBindings
                   , peSitedSiblings = siblings
                   , peYieldSites = yieldSites
+                  , pePreparedSites = preparedSites
+                  , peTypeGraph = typeGraph
                   , peSiteRejections = rejections
                   }
             Just <$> liftIO (prepareModule (mfHscEnv mf) (mfSummary mf) elaboration)

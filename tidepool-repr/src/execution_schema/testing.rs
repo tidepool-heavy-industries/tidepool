@@ -74,6 +74,8 @@ pub fn wire_program() -> WireProgram {
             },
         })],
         entry: ValueId(0),
+        types: vec![],
+        sites: vec![],
     }
 }
 

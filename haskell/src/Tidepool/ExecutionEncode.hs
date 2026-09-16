@@ -29,6 +29,8 @@ encodeWireProgram program = toStrictByteString $ array
   , encodeListLen (fromIntegral (Seq.length frames)) <> fold frames
   , list id bindings
   , encodeValueId (programEntry program)
+  , list encodeTypeNode (programTypes program)
+  , list encodeSiteRow (programSites program)
   ]
  where
   envelope = programEnvelope program
@@ -129,6 +131,40 @@ encodeOperation operation = array
       CapabilityIdentity name -> tagged 2 [encodeString name]
       WiredInErrorIdentity kind -> tagged 3 [encodeWord (fromIntegral (fromEnum kind))]
   , encodeSignatureId (operationSignature operation)
+  ]
+
+encodeTypeNode :: TypeNode -> Encoding
+encodeTypeNode node = case node of
+  TypeData family arguments rows -> tagged 0
+    [ encodeSymbol family
+    , list encodeTypeNodeId arguments
+    , list encodeCtorRow rows
+    ]
+  TypeText -> tag 1
+  TypeInteger -> tag 2
+  TypeNatural -> tag 3
+  TypeScalar rep -> tagged 4 [encodeRep rep]
+  TypeUnconstructible reason rendered -> tagged 5
+    [encodeString reason, encodeString rendered]
+
+encodeCtorRow :: CtorRow -> Encoding
+encodeCtorRow row = array
+  [ encodeConstructorId (rowConstructor row)
+  , list encodeTypeNodeId (rowFields row)
+  ]
+
+encodeSiteRow :: SiteRow -> Encoding
+encodeSiteRow site = array
+  [ encodeWord64 (siteId site)
+  , encodeString (siteOrigin site)
+  , encodeWord64 (siteOrdinal site)
+  , encodeWord $ case siteDelivery site of
+      HostAnswer -> 0
+      LiveReentry -> 1
+      ExitCellFill -> 2
+      TerminalCapture -> 3
+  , encodeTypeNodeId (siteWire site)
+  , list encodeTypeNodeId (siteInputs site)
   ]
 
 encodeValueRef :: ValueRef -> Encoding
@@ -354,3 +390,6 @@ encodeOperationId (OperationId value) = encodeWord32 value
 
 encodeSignatureId :: SignatureId -> Encoding
 encodeSignatureId (SignatureId value) = encodeWord32 value
+
+encodeTypeNodeId :: TypeNodeId -> Encoding
+encodeTypeNodeId (TypeNodeId value) = encodeWord32 value

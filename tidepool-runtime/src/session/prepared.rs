@@ -1552,6 +1552,8 @@ mod tests {
             array([expression]),
             array([binding_group]),
             uint(0),
+            array([]),
+            array([]),
         ])
     }
 

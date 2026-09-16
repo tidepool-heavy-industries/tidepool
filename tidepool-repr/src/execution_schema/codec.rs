@@ -4,10 +4,11 @@ use ciborium::value::Value;
 
 use super::{
     Alternative, AlternativePattern, Architecture, Atom, CaseKind, CheckedLayout, ConstructorDecl,
-    ConstructorId, DecodeLimits, Endianness, Expr, ExprFrame, FieldLayout, GlobalDecl, GlobalId,
-    Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationDecl, OperationId, ParseError,
-    ProgramEnvelope, RuntimeRep, ScalarLiteral, Signature, SignatureId, SymbolIdentity,
-    TargetDescriptor, TopBinding, UpdatePolicy, ValueId, ValueRef, WireProgram,
+    ConstructorId, CtorRow, DecodeLimits, Endianness, Expr, ExprFrame, FieldLayout, GlobalDecl,
+    GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationDecl, OperationId,
+    ParseError, ProgramEnvelope, RuntimeRep, ScalarLiteral, Signature, SignatureId, SiteDelivery,
+    SiteRow, SymbolIdentity, TargetDescriptor, TopBinding, TypeNode, TypeNodeId, UpdatePolicy,
+    ValueId, ValueRef, WireProgram,
 };
 
 // Flat schema records have bounded container nesting regardless of program
@@ -188,16 +189,22 @@ impl Decoder {
     }
 
     fn program(&mut self, value: &Value) -> Result<WireProgram, ParseError> {
-        let fields = array(value, 13, "program")?;
-        if text_raw(&fields[0], "program magic")? != "TPSTG" {
+        let Value::Array(header) = value else {
+            return Err(malformed("program", "array"));
+        };
+        if header.len() < 2 {
+            return Err(ParseError::Malformed("wrong program field count".into()));
+        }
+        if text_raw(&header[0], "program magic")? != "TPSTG" {
             return Err(ParseError::Malformed(
                 "invalid prepared program magic".into(),
             ));
         }
-        let schema_version = unsigned(&fields[1], "schema version")?;
+        let schema_version = unsigned(&header[1], "schema version")?;
         if schema_version != super::SCHEMA_VERSION {
             return Err(ParseError::UnsupportedVersion(schema_version));
         }
+        let fields = array(value, 15, "program")?;
         let target = self.target(&fields[5])?;
         let signatures = self.list(&fields[6], true, |this, value| this.signature(value))?;
         let globals = self.list(&fields[7], true, |this, value| this.global(value))?;
@@ -205,6 +212,8 @@ impl Decoder {
         let operations = self.list(&fields[9], true, |this, value| this.operation(value))?;
         let expressions = self.expr(&fields[10])?;
         let bindings = self.list(&fields[11], true, |this, value| this.top_group(value))?;
+        let types = self.type_nodes(&fields[13])?;
+        let sites = self.sites(&fields[14])?;
         Ok(WireProgram {
             envelope: ProgramEnvelope {
                 schema_version,
@@ -220,7 +229,29 @@ impl Decoder {
             expressions,
             bindings,
             entry: ValueId(u32_value(&fields[12], "entry value ID")?),
+            types,
+            sites,
         })
+    }
+
+    fn type_nodes(&mut self, value: &Value) -> Result<Vec<TypeNode>, ParseError> {
+        let Value::Array(values) = value else {
+            return Err(malformed("type node table", "array"));
+        };
+        if values.len() > self.limits.max_type_nodes {
+            return Err(ParseError::LimitExceeded("type nodes"));
+        }
+        self.list(value, false, |this, value| this.type_node(value))
+    }
+
+    fn sites(&mut self, value: &Value) -> Result<Vec<SiteRow>, ParseError> {
+        let Value::Array(values) = value else {
+            return Err(malformed("site table", "array"));
+        };
+        if values.len() > self.limits.max_sites {
+            return Err(ParseError::LimitExceeded("sites"));
+        }
+        self.list(value, false, |this, value| this.site_row(value))
     }
 
     fn target(&mut self, value: &Value) -> Result<TargetDescriptor, ParseError> {
@@ -388,6 +419,61 @@ impl Decoder {
             result_rep: self.rep(&fields[5])?,
             tag: u32_value(&fields[6], "constructor tag")?,
             family_size: u32_value(&fields[7], "constructor family size")?,
+        })
+    }
+
+    fn type_node(&mut self, value: &Value) -> Result<TypeNode, ParseError> {
+        let fields = tagged(value, "type node")?;
+        let tag = unsigned(&fields[0], "type node tag")?;
+        match (tag, fields.len()) {
+            (0, 4) => Ok(TypeNode::Data {
+                family: self.symbol(&fields[1])?,
+                arguments: self.list(&fields[2], false, |_, value| {
+                    Ok(TypeNodeId(u32_value(value, "type argument node ID")?))
+                })?,
+                rows: self.list(&fields[3], false, |this, value| this.ctor_row(value))?,
+            }),
+            (1, 1) => Ok(TypeNode::Text),
+            (2, 1) => Ok(TypeNode::Integer),
+            (3, 1) => Ok(TypeNode::Natural),
+            (4, 2) => Ok(TypeNode::Scalar(self.rep(&fields[1])?)),
+            (5, 3) => Ok(TypeNode::Unconstructible {
+                reason: self.text(&fields[1], "unconstructible reason")?,
+                rendered: self.text(&fields[2], "unconstructible type")?,
+            }),
+            (0..=5, _) => Err(ParseError::Malformed("wrong type node field count".into())),
+            _ => Err(ParseError::InvalidTag(tag)),
+        }
+    }
+
+    fn ctor_row(&mut self, value: &Value) -> Result<CtorRow, ParseError> {
+        let fields = array(value, 2, "type constructor row")?;
+        Ok(CtorRow {
+            constructor: ConstructorId(u32_value(&fields[0], "type constructor ID")?),
+            fields: self.list(&fields[1], false, |_, value| {
+                Ok(TypeNodeId(u32_value(value, "type field node ID")?))
+            })?,
+        })
+    }
+
+    fn site_row(&mut self, value: &Value) -> Result<SiteRow, ParseError> {
+        let fields = array(value, 6, "site row")?;
+        let delivery = match unsigned(&fields[3], "site delivery")? {
+            0 => SiteDelivery::HostAnswer,
+            1 => SiteDelivery::LiveReentry,
+            2 => SiteDelivery::ExitCellFill,
+            3 => SiteDelivery::TerminalCapture,
+            tag => return Err(ParseError::InvalidTag(tag)),
+        };
+        Ok(SiteRow {
+            site: unsigned(&fields[0], "site ID")?,
+            origin: self.text(&fields[1], "site origin")?,
+            ordinal: unsigned(&fields[2], "site ordinal")?,
+            delivery,
+            wire: TypeNodeId(u32_value(&fields[4], "site wire node ID")?),
+            inputs: self.list(&fields[5], false, |_, value| {
+                Ok(TypeNodeId(u32_value(value, "site input node ID")?))
+            })?,
         })
     }
 
@@ -886,6 +972,8 @@ mod tests {
                 ]),
             ])]),
             n(0),
+            array(vec![]),
+            array(vec![]),
         ]);
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&wire, &mut bytes).unwrap();

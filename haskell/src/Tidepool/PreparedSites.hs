@@ -1,5 +1,8 @@
 module Tidepool.PreparedSites
   ( buildYieldSite
+  , PreparedSite(..)
+  , SiteAuthority
+  , resolveSiteAuthority
   , SiteRejection(..)
   , elaboratePreparedSites
   , lookupPreparedVerb
@@ -18,33 +21,86 @@ import GHC.Core.Subst (cloneBndrs, mkEmptySubst, substExpr)
 import GHC.Core.FVs (exprFreeVars)
 import GHC.Types.Var.Env (mkInScopeSet)
 import GHC.Core.Make (mkCoreConApps)
-import GHC.Builtin.Types (intDataCon)
+import GHC.Builtin.Types (intDataCon, mkListTy)
 import GHC.Core.TyCo.Rep (Type, Scaled(..))
 import GHC.Data.FastString (fsLit)
 import GHC.Types.Unique.Supply (UniqSupply, initUs, mkSplitUniqSupply, takeUniqFromSupply)
-import GHC.Core.Type (splitTyConApp_maybe)
+import GHC.Core.Type (mkTyConApp, mkTyConTy, splitTyConApp_maybe)
+import GHC.Core.TyCon (TyCon)
+import GHC.Driver.Env (HscEnv, lookupType)
 import GHC.Types.TyThing.Ppr (pprTyThingInContext)
 import GHC.Types.TyThing (TyThing (..))
 import GHC.Iface.Type (ShowForAllFlag (..), ShowHowMuch (..), ShowSub (..))
 import GHC.Types.Literal (LitNumType (..), Literal (..))
 import GHC.Types.Name (isSystemName, nameModule_maybe, nameOccName)
-import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Types.Name.Occurrence (mkTcOcc, occNameString)
 import GHC.Types.Id (Id, idName, mkSysLocal)
 import GHC.Utils.Fingerprint (Fingerprint (..), fingerprintString)
 import GHC.Utils.Outputable (defaultSDocContext, ppr, renderWithContext)
-import GHC.Unit.Module (moduleName, moduleNameString)
+import GHC.Data.Maybe (MaybeErr(Succeeded, Failed))
+import GHC.Types.PkgQual (PkgQual(NoPkgQual))
+import GHC.Iface.Env (lookupOrig)
+import GHC.Iface.Load (importDecl)
+import GHC.Unit.Finder (FindResult(Found), findImportedModule)
+import GHC.Unit.Module (mkModuleName, moduleName, moduleNameString)
+import GHC.Tc.Utils.Monad (initIfaceLoad)
 import Tidepool.SiteClassifier
 import Tidepool.EffectSchema
 import Tidepool.Identity (binderQualName)
 import Tidepool.TypePolicy
-  ( modulesOfType
+  ( TypeGraph, TypeGraphBuilder, TypeNodeId, emptyTypeGraphBuilder
+  , finishTypeGraph, internType, modulesOfType
   , nominalHeadsOfType
   )
+
+data SiteAuthority = SiteAuthority
+  { eitherTyCon :: Maybe TyCon
+  , invocationExitTyCon :: Maybe TyCon
+  , responseResultTyCon :: Maybe TyCon
+  }
+
+-- | Resolve wrapper authority from each type's defining module. The real GHC
+-- TyCon crosses into evidence; rendered spelling never carries authority.
+resolveSiteAuthority :: HscEnv -> IO SiteAuthority
+resolveSiteAuthority env = SiteAuthority
+  <$> exactTyCon "GHC.Internal.Data.Either" "Either"
+  <*> exactTyCon "Tidepool.Effects.Core" "InvocationExit"
+  <*> exactTyCon "Tidepool.Agent.Reply.Internal" "ResponseResult"
+ where
+  -- Resolve the defining module's interface and ask its declaration loader
+  -- for the real TyCon. This follows neither re-export spellings nor names
+  -- declared by the cell.
+  exactTyCon moduleName occurrence = do
+    found <- findImportedModule env (mkModuleName moduleName) NoPkgQual
+    case found of
+      Found _ owner -> do
+        name <- initIfaceLoad env (lookupOrig owner (mkTcOcc occurrence))
+        loaded <- lookupType env name
+        case loaded of
+          Just (ATyCon tycon) -> pure (Just tycon)
+          Just _ -> pure Nothing
+          Nothing -> do
+            thing <- initIfaceLoad env (importDecl name)
+            pure $ case thing of
+              Succeeded (ATyCon tycon) -> Just tycon
+              Succeeded _ -> Nothing
+              Failed _ -> Nothing
+      _ -> pure Nothing
+
+data PreparedSite = PreparedSite
+  { psOwner :: Id
+  , psSite :: YieldSite
+  , psDelivery :: SiteDelivery
+  , psWireNode :: TypeNodeId
+  , psInputNodes :: [TypeNodeId]
+  }
 
 data ElaborationState = ElaborationState
   { esUniques :: UniqSupply
   , esCounters :: !(Map T.Text Word64)
   , esSites :: ![YieldSite]
+  , esPreparedSites :: ![PreparedSite]
+  , esTypeGraph :: !TypeGraphBuilder
   , esRejections :: ![SiteRejection]
   }
 
@@ -73,13 +129,17 @@ data SiteRejection = SiteRejection
 -- cast or tick) with none, which leaves its result type open. No verb reference leaves
 -- elaboration without either a rewrite or a recorded rejection; projection
 -- then raises only the rejections its executable closure reaches.
-elaboratePreparedSites :: Map String Id -> [CoreBind]
-  -> IO ([CoreBind], [YieldSite], [SiteRejection])
-elaboratePreparedSites siblings bindings = do
+elaboratePreparedSites :: SiteAuthority -> Map String Id -> [CoreBind]
+  -> IO ([CoreBind], [YieldSite], [PreparedSite], TypeGraph, [SiteRejection])
+elaboratePreparedSites authority siblings bindings = do
   uniques <- mkSplitUniqSupply 's'
   let (bindings', final) = runState (traverse rewriteBind bindings)
-        (ElaborationState uniques mempty [] [])
-  pure (bindings', reverse (esSites final), reverse (esRejections final))
+        (ElaborationState uniques mempty [] [] emptyTypeGraphBuilder [])
+  pure ( bindings'
+       , reverse (esSites final)
+       , reverse (esPreparedSites final)
+       , finishTypeGraph (esTypeGraph final)
+       , reverse (esRejections final))
   where
     rewriteBind (NonRec binder rhs) =
       NonRec binder <$> rewriteExpr (binder, binderQualName binder) rhs
@@ -120,20 +180,37 @@ elaboratePreparedSites siblings bindings = do
                   (renderSiteFailure (T.unpack originName) spec failure) : esRejections current})
               pure (mkApps headExpr rewrittenArguments)
             Right plan -> do
-              missing <- traverse freshEvidence (spMissingEvidence plan)
-              ordinal <- nextOrdinal originName
-              let site = buildYieldSite spec originName ordinal (spAnswer plan) (spInputs plan)
-                  literal = mkCoreConApps intDataCon
-                    [Lit (LitNumber LitNumInt (fromIntegral (ysSite site)))]
-              modify' (\current -> current {esSites = site : esSites current})
-              current <- get
-              let body = mkLams missing (mkApps (Var (spSibling plan))
-                    (map Type (spTypeArgs plan) ++ spEvidence plan ++ map Var missing ++ literal : spRest plan))
-                  initialSubst = mkEmptySubst (mkInScopeSet (exprFreeVars body))
-                  ((substitution, typeBinders), remainingUniques) = initUs (esUniques current)
-                    (cloneBndrs initialSubst (spMissingTypes plan))
-              put current {esUniques = remainingUniques}
-              pure (mkLams typeBinders (substExpr substitution body))
+              case siteWireType authority spec (spAnswer plan) of
+                Left detail -> do
+                  modify' (\current -> current
+                    { esRejections = SiteRejection topBinder
+                        (vsName spec ++ " site in " ++ T.unpack originName ++ ": " ++ detail)
+                        : esRejections current })
+                  pure (mkApps headExpr rewrittenArguments)
+                Right wireType -> do
+                  missing <- traverse freshEvidence (spMissingEvidence plan)
+                  ordinal <- nextOrdinal originName
+                  let site = buildYieldSite spec originName ordinal (spAnswer plan) (spInputs plan)
+                      literal = mkCoreConApps intDataCon
+                        [Lit (LitNumber LitNumInt (fromIntegral (ysSite site)))]
+                  current <- get
+                  let (wireNode, graph1) = runState (internType wireType) (esTypeGraph current)
+                      (inputNodes, graph2) = runState (traverse internType (spInputs plan)) graph1
+                      preparedSite = PreparedSite topBinder site (vsDelivery spec)
+                        wireNode inputNodes
+                  put current
+                    { esSites = site : esSites current
+                    , esPreparedSites = preparedSite : esPreparedSites current
+                    , esTypeGraph = graph2
+                    }
+                  current' <- get
+                  let body = mkLams missing (mkApps (Var (spSibling plan))
+                        (map Type (spTypeArgs plan) ++ spEvidence plan ++ map Var missing ++ literal : spRest plan))
+                      initialSubst = mkEmptySubst (mkInScopeSet (exprFreeVars body))
+                      ((substitution, typeBinders), remainingUniques) = initUs (esUniques current')
+                        (cloneBndrs initialSubst (spMissingTypes plan))
+                  put current' {esUniques = remainingUniques}
+                  pure (mkLams typeBinders (substExpr substitution body))
         _ -> do
           rewrittenHead <- rewriteExpr origin headExpr
           pure (mkApps rewrittenHead rewrittenArguments)
@@ -149,6 +226,23 @@ elaboratePreparedSites siblings bindings = do
       let ordinal = Map.findWithDefault 0 origin (esCounters current)
       put current {esCounters = Map.insert origin (ordinal + 1) (esCounters current)}
       pure ordinal
+
+siteWireType :: SiteAuthority -> VerbSpec -> Type -> Either String Type
+siteWireType authority spec answer = case vsWireSource spec of
+  SelectedAnswer -> Right answer
+  ListAnswer -> Right (mkListTy answer)
+  InvocationAnswer -> do
+    eitherType <- maybe (Left "missing Either type authority") Right
+      (eitherTyCon authority)
+    invocation <- maybe (Left "missing InvocationExit type authority") Right
+      (invocationExitTyCon authority)
+    Right (mkTyConApp eitherType [mkTyConTy invocation, answer])
+  InvocationAnswers -> mkListTy <$> siteWireType authority
+    (spec { vsWireSource = InvocationAnswer }) answer
+  ResponseResultEvidence -> do
+    response <- maybe (Left "missing ResponseResult type authority") Right
+      (responseResultTyCon authority)
+    Right (mkTyConApp response [answer])
 
 -- | Exact generated siblings present in one tidied home module. Merging these
 -- maps in dependency order gives later modules the real imported Ids without

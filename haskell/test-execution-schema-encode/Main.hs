@@ -18,10 +18,29 @@ main = do
   let first = encodeWireProgram representative
       second = encodeWireProgram representative
   assert (first == second) "prepared execution encoding is not deterministic"
-  assert (BS.take 7 first == BS.pack [0x8d, 0x65, 0x54, 0x50, 0x53, 0x54, 0x47])
+  assert (BS.take 7 first == BS.pack [0x8f, 0x65, 0x54, 0x50, 0x53, 0x54, 0x47])
     "prepared execution root does not start with [\"TPSTG\", ...]"
   assert (termNumber (termList (decode first) !! 1) == fromIntegral schemaVersion)
-    "prepared execution schema is not v9"
+    "prepared execution schema version differs from the producer contract"
+  let evidenceFields = termList (decode (encodeWireProgram evidenceRepresentative))
+      familyTerm = TList
+        [ TString "m3-fixture", TString "Fixture", TString "type"
+        , TString "Recursive", TList [TInt 0] ]
+  assert (length evidenceFields == 15) "schema 10 requires fifteen program fields"
+  assert (evidenceFields !! 13 == TList
+      [ TList [TInt 0, familyTerm, TList [TInt 2, TInt 1]
+          , TList [TList [TInt 0, TList [TInt 0, TInt 1]]]]
+      , TList [TInt 4, TList [TInt 4, TInt 64]]
+      , TList [TInt 1]
+      , TList [TInt 2]
+      , TList [TInt 3]
+      , TList [TInt 5, TString "function", TString "Int -> Int"]
+      ]) "type evidence lost ordered arguments, recursive fields, or stable node tags"
+  assert (evidenceFields !! 14 == TList
+      [ TList [TInt (41 + ordinal), TString "Fixture.entry", TInt ordinal
+          , TInt ordinal, TInt 0, TList [TInt 2, TInt 1]]
+      | ordinal <- [0 .. 3]
+      ]) "site evidence fields or delivery tags differ from the schema 10 contract"
   let callerProgram = representative
         { programSignatures = [Signature [LiftedRefRep] CallerResult] }
       callerSignatures = termList (termList (decode (encodeWireProgram callerProgram)) !! 6)
@@ -152,7 +171,8 @@ representative = representativeWith result
   result = Return [Scalar (IntLiteral 64 (BS.pack [0,0,0,0,0,0,0,42]))]
 
 representativeWith :: Expr -> WireProgram
-representativeWith body = WireProgram envelope signatures globals constructors operations bindings (ValueId 0)
+representativeWith body = WireProgram envelope signatures globals constructors operations bindings
+  (ValueId 0) [] []
  where
   exact modul occurrence = SymbolIdentity "m3-fixture" modul "value" occurrence Nothing
   target = TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []
@@ -198,3 +218,25 @@ identityRepresentative = representative
         ]
   , programSignatures = programSignatures representative <> [Signature [AddressRep] NoSuccess]
   }
+
+evidenceRepresentative :: WireProgram
+evidenceRepresentative = representative
+  { programConstructors =
+      [ ConstructorDecl
+          (SymbolIdentity "m3-fixture" "Fixture" "value" "Recursive" Nothing)
+          family LiftedRefRep [LiftedRefRep, IntRep 64] [False, True]
+          (CheckedLayout [FieldLayout LiftedRefRep 0, FieldLayout (IntRep 64) 8]
+            8 16 [True, False]) 1 1 0 ]
+  , programTypes =
+      [ TypeData family [TypeNodeId 2, TypeNodeId 1]
+          [CtorRow (ConstructorId 0) [TypeNodeId 0, TypeNodeId 1]]
+      , TypeScalar (IntRep 64), TypeText, TypeInteger, TypeNatural
+      , TypeUnconstructible "function" "Int -> Int" ]
+  , programSites =
+      [ SiteRow (41 + ordinal) "Fixture.entry" ordinal delivery
+          (TypeNodeId 0) [TypeNodeId 2, TypeNodeId 1]
+      | (ordinal, delivery) <- zip [0 ..]
+          [HostAnswer, LiveReentry, ExitCellFill, TerminalCapture] ]
+  }
+ where
+  family = SymbolIdentity "m3-fixture" "Fixture" "type" "Recursive" Nothing

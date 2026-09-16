@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tidepool_repr::Generation;
+use tidepool_repr::{execution_schema::TypeNode, Generation};
 use tidepool_runtime::session::{
     resident_workbench_templates, run_turn, BoundBinder, EngineKind, ResidentOutcome,
     ResidentSession, TurnRequest, TurnResult, TurnTemplate, ValueTier,
@@ -234,4 +234,66 @@ fn notebook_turns_run_on_core() {
 #[test]
 fn notebook_turns_run_on_prepared_stg() {
     notebook_turns(EngineKind::Prepared);
+}
+
+#[test]
+fn prepared_turn_includes_the_complete_site_answer_family_in_shared_metadata() {
+    let mut notebook = Notebook::new(EngineKind::Prepared);
+    notebook.preamble.push('\n');
+    notebook.preamble.push_str(include_str!(
+        "fixtures/prepared/SiteOnlyConstructorCoverage.hs"
+    ));
+
+    let TurnResult::Expr { compiled, .. } = notebook.compile("siteOnlyConstructorCoverage") else {
+        panic!("site-only constructor coverage helper did not classify as an expression");
+    };
+    let prepared = compiled
+        .prepared
+        .as_ref()
+        .expect("prepared request returned no prepared program");
+
+    let site = prepared
+        .sites()
+        .iter()
+        .find(|site| {
+            matches!(
+                prepared.type_node(site.wire),
+                Some(TypeNode::Data { family, .. })
+                    if family.occurrence == "SiteOnlyAnswer"
+            )
+        })
+        .expect("runLLMTurn site has no SiteOnlyAnswer root");
+    let TypeNode::Data { family, rows, .. } = prepared
+        .type_node(site.wire)
+        .expect("validated site root must resolve")
+    else {
+        unreachable!("the selected site root is known to be Data");
+    };
+    assert_eq!(family.occurrence, "SiteOnlyAnswer");
+
+    let constructor_names: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            prepared.constructors()[row.constructor.0 as usize]
+                .identity
+                .occurrence
+                .as_str()
+        })
+        .collect();
+    assert_eq!(
+        constructor_names,
+        ["SiteOnlyChosen", "SiteOnlyNeverMatched"],
+        "the site root must carry the complete answer family"
+    );
+
+    let missing: Vec<_> = prepared
+        .constructors()
+        .iter()
+        .filter(|constructor| compiled.table.get(constructor.host_id).is_none())
+        .map(|constructor| constructor.identity.clone())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "prepared constructors absent from the shared DataConTable: {missing:?}"
+    );
 }

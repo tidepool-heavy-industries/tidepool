@@ -53,7 +53,8 @@ import GHC.Unit.Module.ModSummary (ModSummary(..))
 import GHC.Types.TypeEnv (typeEnvTyCons)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe, text)
 import Tidepool.EffectSchema (YieldSite)
-import Tidepool.PreparedSites (SiteRejection)
+import Tidepool.PreparedSites (PreparedSite, SiteRejection)
+import Tidepool.TypePolicy (TypeGraph(..))
 import Tidepool.FatIface (ExactInterfaceFailure(..), readExactInterface)
 import Tidepool.PreparedFacts (PreparedFacts, extractPreparedFacts)
 
@@ -68,6 +69,8 @@ data PreparedElaboration = PreparedElaboration
   , peBindings :: [CoreBind]
   , peSitedSiblings :: Map String Id
   , peYieldSites :: [YieldSite]
+  , pePreparedSites :: [PreparedSite]
+  , peTypeGraph :: TypeGraph
   , peSiteRejections :: [SiteRejection]
   }
 
@@ -80,6 +83,8 @@ unelaboratedModule guts = PreparedElaboration
   , peBindings = cg_binds guts
   , peSitedSiblings = mempty
   , peYieldSites = []
+  , pePreparedSites = []
+  , peTypeGraph = TypeGraph []
   , peSiteRejections = []
   }
 
@@ -111,6 +116,8 @@ data PreparedModule = PreparedModule
   , pmTagSigs :: StgCgInfos
   , pmSitedSiblings :: Map String Id
   , pmYieldSites :: [YieldSite]
+  , pmPreparedSites :: [PreparedSite]
+  , pmTypeGraph :: TypeGraph
   -- | Typed sites that failed elaboration, raised only if projection
   -- reaches their top binder. Empty for recovered package bodies.
   , pmSiteRejections :: [SiteRejection]
@@ -126,7 +133,11 @@ prepareModule hscEnv summary elaboration = do
   prepared <- prepareBindings hscEnv (cg_module guts) (ms_location summary)
     (cg_tycons guts) (peBindings elaboration)
     (peSitedSiblings elaboration) (peYieldSites elaboration)
-  pure prepared { pmSiteRejections = peSiteRejections elaboration }
+  pure prepared
+    { pmPreparedSites = pePreparedSites elaboration
+    , pmTypeGraph = peTypeGraph elaboration
+    , pmSiteRejections = peSiteRejections elaboration
+    }
 
 -- | Exact optimized bindings retain their defining module and interface
 -- context. No fabricated ModSummary or cross-module Core grouping is needed:
@@ -272,6 +283,8 @@ prepareBindingsWithScope subsetScope hscEnv thisModule location tycons optimized
     , pmTagSigs = tagSigs
     , pmSitedSiblings = siblings
     , pmYieldSites = yieldSites
+    , pmPreparedSites = []
+    , pmTypeGraph = TypeGraph []
     , pmSiteRejections = []
     , pmFacts = extractPreparedFacts thisModule tagSigs (map fst preparedBindings)
     }

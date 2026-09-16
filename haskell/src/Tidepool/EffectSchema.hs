@@ -1,6 +1,8 @@
 module Tidepool.EffectSchema
   ( VerbSpec(..)
   , SiteAnswerSource(..)
+  , SiteDelivery(..)
+  , SiteWireSource(..)
   , NominalHead(..)
   , SiteType(..)
   , YieldSite(..)
@@ -60,6 +62,8 @@ data VerbSpec = VerbSpec
   , vsListAnswer :: Bool
   , vsInputTypeArgs :: [Int]
   , vsAnswerSource :: SiteAnswerSource
+  , vsDelivery :: SiteDelivery
+  , vsWireSource :: SiteWireSource
   }
   deriving (Eq, Show)
 
@@ -71,6 +75,21 @@ data SiteAnswerSource
   | TypeArgument Int
   deriving (Eq, Show)
 
+data SiteDelivery
+  = DeliverHostAnswer
+  | DeliverLiveReentry
+  | DeliverExitCellFill
+  | DeliverTerminalCapture
+  deriving (Eq, Ord, Show)
+
+data SiteWireSource
+  = SelectedAnswer
+  | ListAnswer
+  | InvocationAnswer
+  | InvocationAnswers
+  | ResponseResultEvidence
+  deriving (Eq, Ord, Show)
+
 -- | The complete typed-suspension vocabulary understood by the extractor.
 -- Adding a verb is one row here; recognition and sibling resolution both
 -- consume this table.
@@ -78,29 +97,41 @@ sitedVerbs :: [VerbSpec]
 sitedVerbs =
   [ verb "runLLMTurn" "Tidepool.Effects.Core"
       "runLLMTurnSited" "Tidepool.Effects.Core" False []
+      DeliverHostAnswer SelectedAnswer
   , verb "runLLMTurnFork" "Tidepool.Effects.Core"
       "runLLMTurnForkSited" "Tidepool.Effects.Core" False []
+      DeliverHostAnswer InvocationAnswer
   , verb "runLLMTurnFanout" "Tidepool.Effects.Core"
       "runLLMTurnFanoutSited" "Tidepool.Effects.Core" True []
+      DeliverHostAnswer InvocationAnswers
   , verb "finalize" "Tidepool.Effects.Core"
       "finalizeSited" "Tidepool.Effects.Core" False []
+      DeliverTerminalCapture SelectedAnswer
   , verb "fork" "Tidepool.Answerer.Fork"
       "forkSited" "Tidepool.Effects.Core" False []
+      DeliverHostAnswer SelectedAnswer
   , verb "forkAll" "Tidepool.Answerer.Fork"
       "forkAllSited" "Tidepool.Effects.Core" True []
+      DeliverHostAnswer ListAnswer
   , verb "forkMap" "Tidepool.Answerer.Fork"
       "forkMapSited" "Tidepool.Answerer.Fork" True []
+      DeliverHostAnswer ListAnswer
   , verb "forkCata" "Tidepool.Answerer.Fork"
       "forkCataSited" "Tidepool.Answerer.Fork" True []
+      DeliverHostAnswer ListAnswer
   , verb "request" "Tidepool.Actors.Internal.Agent"
       "requestSited" "Tidepool.Actors.Internal.Agent" False [1]
+      DeliverExitCellFill ResponseResultEvidence
   , verb "requestWith" "Tidepool.Actors.Internal.Agent"
       "requestWithSited" "Tidepool.Actors.Internal.Agent" False [1]
+      DeliverExitCellFill ResponseResultEvidence
   , (verb "requestWithProgress" "Tidepool.Actors.Internal.Agent"
-      "requestWithProgressSited" "Tidepool.Actors.Internal.Agent" False [2, 0])
+      "requestWithProgressSited" "Tidepool.Actors.Internal.Agent" False [2, 0]
+      DeliverExitCellFill ResponseResultEvidence)
       { vsAnswerSource = TypeArgument 1 }
   , (verb "requestWithProgressInto" "Tidepool.Actors.Internal.Agent"
-      "requestWithProgressIntoSited" "Tidepool.Actors.Internal.Agent" False [2, 0])
+      "requestWithProgressIntoSited" "Tidepool.Actors.Internal.Agent" False [2, 0]
+      DeliverExitCellFill ResponseResultEvidence)
       { vsAnswerSource = TypeArgument 1 }
   , VerbSpec
       { vsName = "child"
@@ -110,15 +141,19 @@ sitedVerbs =
       , vsListAnswer = False
       , vsInputTypeArgs = [2]
       , vsAnswerSource = TypeArgument 0
+      , vsDelivery = DeliverExitCellFill
+      , vsWireSource = ResponseResultEvidence
       }
   , (verb "childWithProgress" "Tidepool.Actors.Unfold"
-      "childWithProgressSited" "Tidepool.Actors.Unfold" False [3, 0])
+      "childWithProgressSited" "Tidepool.Actors.Unfold" False [3, 0]
+      DeliverExitCellFill ResponseResultEvidence)
       { vsAnswerSource = TypeArgument 1 }
   , verb "receive" "Tidepool.Actor"
-      "receiveSited" "Tidepool.Actor" False []
+      "receiveSited" "Tidepool.Actor" False [] DeliverLiveReentry SelectedAnswer
   , verb "serve" "Tidepool.Actor"
-      "serveSited" "Tidepool.Actor" False []
+      "serveSited" "Tidepool.Actor" False [] DeliverLiveReentry SelectedAnswer
   ]
   where
-    verb name source sibling siblingSource listAnswer inputs =
+    verb name source sibling siblingSource listAnswer inputs delivery wireSource =
       VerbSpec name source sibling siblingSource listAnswer inputs FirstTypeArgument
+        delivery wireSource

@@ -1264,6 +1264,8 @@ mod tests {
             array([return_frame]),
             array([group_nonrecursive]),
             uint(0),
+            array([]),
+            array([]),
         ])
     }
 

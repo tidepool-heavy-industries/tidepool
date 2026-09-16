@@ -3,6 +3,7 @@ module Tidepool.ExecutionProjection
   , ProjectionError(..)
   , projectPrepared
   , projectPreparedTarget
+  , projectPreparedTargetWithConstructors
   , preparedTopIdentities
   , preparedTargetReferences
   , projectLiteralAtomForTest
@@ -15,6 +16,7 @@ import Control.Monad (foldM, forM, unless)
 import Control.Monad.State.Strict
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
+import Data.IntMap.Strict qualified as IntMap
 import Data.List (find)
 import Data.Maybe (isJust, isNothing, listToMaybe)
 import Tidepool.PreparedBuiltins
@@ -30,8 +32,9 @@ import GHC.Builtin.PrimOps (PrimOp(..), PrimCall(..), primOpOcc)
 import GHC.Builtin.Types (doubleDataCon, intDataCon)
 import GHC.Core (AltCon(..))
 import GHC.Core.DataCon
-  ( DataCon, dataConName, dataConRepArgTys, dataConRepArity, dataConWorkId
-  , dataConTag, dataConTyCon, dataConOrigResTy, isMarkedStrict, isUnboxedTupleDataCon )
+  ( DataCon, dataConName, dataConInstOrigArgTys, dataConRepArgTys, dataConRepArity, dataConWorkId
+  , dataConTag, dataConTyCon, dataConOrigResTy, dataConImplBangs, HsImplBang(..)
+  , isMarkedStrict, isUnboxedTupleDataCon )
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
 import GHC.Core.Type (splitTyConApp_maybe)
 import GHC.Core.TyCon qualified as GHC
@@ -71,6 +74,9 @@ import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.Identity (varId)
 import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
 import Tidepool.PreparedSites (SiteRejection(..))
+import Tidepool.PreparedSites (PreparedSite(..))
+import Tidepool.EffectSchema qualified as Effect
+import Tidepool.TypePolicy qualified as TypePolicy
 import Tidepool.PreparedFormatting
   (FormattingAuthority, FormattingSpec(..), FormattingIntrinsic(..), classifyFormatting)
 
@@ -161,7 +167,7 @@ projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom liter
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
 projectPrepared context modules =
-  projectPreparedWithTopSymbols context modules (buildTopIdentityMap modules)
+  fst <$> projectPreparedWithTopSymbols context modules (buildTopIdentityMap modules)
 
 -- | Corpus tooling enumerates the same identities that projection resolves,
 -- before any target filtering. Preserve module/binding emission order and never
@@ -180,7 +186,7 @@ preparedTopIdentities modules = traverse identityOf
       Right (lookupVarEnv identities binder)
 
 projectPreparedWithTopSymbols :: ProjectionContext -> [PreparedModule]
-  -> VarEnv SymbolIdentity -> Either ProjectionError WireProgram
+  -> VarEnv SymbolIdentity -> Either ProjectionError (WireProgram, [DataCon])
 projectPreparedWithTopSymbols context modules topIdentityMap = do
   let initial = PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv topIdentityMap Map.empty [] Map.empty
         emptyVarEnv [] [] [] [] [] [] (projectionTarget context)
@@ -194,8 +200,11 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
       -- module set (so a same-name internal identity cannot borrow home-module
       -- standing from the retained one), but nothing here recovers its body.
       projectable = map (dropRetainedTops context) modules
-  (bindingGroups, final) <- runStateT
-    (preallocate projectable >> concat <$> mapM projectModule projectable) initial
+  ((bindingGroups, programTypes, programSites), final) <- runStateT
+    (do preallocate projectable
+        groups <- concat <$> mapM projectModule projectable
+        (types, sites) <- lowerPreparedEvidence projectable
+        pure (groups, types, sites)) initial
   entryTop <- maybe (Left (MissingPreparedEntry (projectionEntry context)))
     pure (findTop bindingGroups)
   let entry = topValue entryTop
@@ -206,16 +215,19 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
           | (contract, identity) <- signatures final] == Just CallerResult ->
           Left (InvalidPreparedRepresentation "program entry requires a concrete result contract")
     _ -> pure ()
-  pure WireProgram
-    { programEnvelope = ProgramEnvelope schemaVersion (projectionProfile context)
-        (projectionToolchain context) executionAbiVersion (projectionTarget context)
-    , programSignatures = map fst (signatures final)
-    , programGlobals = globalDecls final
-    , programConstructors = constructorDecls final
-    , programOperations = operationDecls final
-    , programBindings = map NonRecursive (reverse (implicitTops final)) ++ bindingGroups
-    , programEntry = entry
-    }
+  let program = WireProgram
+        { programEnvelope = ProgramEnvelope schemaVersion (projectionProfile context)
+            (projectionToolchain context) executionAbiVersion (projectionTarget context)
+        , programSignatures = map fst (signatures final)
+        , programGlobals = globalDecls final
+        , programConstructors = constructorDecls final
+        , programOperations = operationDecls final
+        , programBindings = map NonRecursive (reverse (implicitTops final)) ++ bindingGroups
+        , programEntry = entry
+        , programTypes = programTypes
+        , programSites = programSites
+        }
+  pure (program, map fst (constructors final))
   where
     topValue (TopBinding _ binding) = heapBindingId binding
     findTop = foldr findGroup Nothing
@@ -232,8 +244,16 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
 -- avoids rejecting unrelated polymorphic bindings while retaining every
 -- supplied top-level dependency of the entry.
 projectPreparedTarget :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
-projectPreparedTarget _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
 projectPreparedTarget context modules =
+  fst <$> projectPreparedTargetWithConstructors context modules
+
+-- | The shared artifact writer needs the exact GHC constructors admitted by
+-- projection, including site-only evidence and generated settlement values.
+-- Return them from the same transaction that produced the wire declarations.
+projectPreparedTargetWithConstructors :: ProjectionContext -> [PreparedModule]
+  -> Either ProjectionError (WireProgram, [DataCon])
+projectPreparedTargetWithConstructors _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
+projectPreparedTargetWithConstructors context modules =
   let (identities, selected) = selectPreparedTarget context modules
       reachable = mkUniqSet [ varUnique binder | prepared <- selected
         , (binding, _) <- pmBindings prepared, binder <- topBinders binding ]
@@ -477,6 +497,146 @@ preallocate modules = do
 
 projectModule :: PreparedModule -> P [Group TopBinding]
 projectModule = mapM (projectTop . fst) . pmBindings
+
+-- | Lower only evidence owned by the executable tops retained in each module.
+-- Graph ids are module-local during elaboration; this pass compacts reachable
+-- nodes in module/original order and rebases every edge into one program table.
+lowerPreparedEvidence :: [PreparedModule] -> P ([TypeNode], [SiteRow])
+lowerPreparedEvidence modules = do
+  (nodes, sites) <- foldM lowerOne ([], []) modules
+  let duplicates = Map.keys (Map.filter (> (1 :: Int))
+        (Map.fromListWith (+) [(siteId site, 1) | site <- sites]))
+  case duplicates of
+    duplicate : _ -> failShape
+      ("duplicate selected prepared site id " <> Text.pack (show duplicate))
+    [] -> pure (nodes, sites)
+ where
+  lowerOne (priorNodes, priorSites) prepared = do
+    let owners = mkUniqSet
+          [ varUnique binder
+          | (binding, _) <- pmBindings prepared
+          , binder <- topBinders binding
+          ]
+        selected = filter
+          (\site -> elementOfUniqSet (varUnique (psOwner site)) owners)
+          (pmPreparedSites prepared)
+        roots = concat
+          [ psWireNode site : psInputNodes site | site <- selected ]
+        graphNodes = IntMap.fromAscList (zip [0 :: Int ..]
+          (TypePolicy.tgNodes (pmTypeGraph prepared)))
+    reachable <- lift (reachableTypeNodes graphNodes roots)
+    let ordered = [ TypePolicy.TypeNodeId (fromIntegral index)
+                  | index <- IntMap.keys graphNodes, Set.member index reachable ]
+        base = length priorNodes
+        mapping = Map.fromList
+          [ (old, TypeNodeId (fromIntegral (base + offset)))
+          | (offset, old) <- zip [0 :: Int ..] ordered ]
+        rebase node = maybe
+          (failShape "prepared type graph reachability omitted a referenced node")
+          pure (Map.lookup node mapping)
+    lowered <- traverse (lowerTypeNode graphNodes rebase) ordered
+    rows <- traverse (\site -> do
+          wire <- rebase (psWireNode site)
+          inputs <- traverse rebase (psInputNodes site)
+          pure SiteRow
+              { siteId = Effect.ysSite (psSite site)
+              , siteOrigin = Effect.ysOrigin (psSite site)
+              , siteOrdinal = Effect.ysOrdinal (psSite site)
+              , siteDelivery = lowerDelivery (psDelivery site)
+              , siteWire = wire
+              , siteInputs = inputs
+              }) selected
+    pure (priorNodes <> lowered, priorSites <> rows)
+
+reachableTypeNodes :: IntMap.IntMap TypePolicy.TypeNodeG -> [TypePolicy.TypeNodeId]
+  -> Either ProjectionError (Set Int)
+reachableTypeNodes nodes = go Set.empty
+ where
+  go visited [] = Right visited
+  go visited (TypePolicy.TypeNodeId raw : pending)
+    | index `Set.member` visited = go visited pending
+    | otherwise = case IntMap.lookup index nodes of
+        Just current -> go (Set.insert index visited) (typeNodeEdges current <> pending)
+        Nothing -> Left (UnsupportedPreparedShape
+          "prepared type graph contains an out-of-range node")
+    where index = fromIntegral raw
+  typeNodeEdges graphNode = case graphNode of
+    TypePolicy.DataG _ _ arguments rows -> arguments <> concatMap snd rows
+    _ -> []
+
+lowerTypeNode
+  :: IntMap.IntMap TypePolicy.TypeNodeG
+  -> (TypePolicy.TypeNodeId -> P TypeNodeId)
+  -> TypePolicy.TypeNodeId
+  -> P TypeNode
+lowerTypeNode nodes rebase (TypePolicy.TypeNodeId raw) = case IntMap.lookup (fromIntegral raw) nodes of
+  Nothing -> failShape "prepared type graph contains an out-of-range node"
+  Just node -> case node of
+    TypePolicy.DataG ty tc arguments rows -> do
+      attempted <- tryRepresentation (lowerDataNode ty tc arguments rows)
+      case attempted of
+        Right lowered -> pure lowered
+        Left (InvalidPreparedLayout _) -> pure (refused "layout" ty)
+        Left (InvalidPreparedRepresentation _) -> pure (refused "representation" ty)
+        Left failure -> lift (Left failure)
+    TypePolicy.TextG ty constructors -> lowerLeaf ty TypeText constructors
+    TypePolicy.IntegerG ty constructors -> lowerLeaf ty TypeInteger constructors
+    TypePolicy.NaturalG ty constructors -> lowerLeaf ty TypeNatural constructors
+    TypePolicy.ScalarG _ rep -> TypeScalar <$> projectRep rep
+    TypePolicy.UnconstructibleG reason rendered ->
+      pure (TypeUnconstructible reason rendered)
+    TypePolicy.ProjectionDefectG detail -> failRepresentation detail
+ where
+  refused reason ty = TypeUnconstructible reason (Text.pack (showSDocUnsafe (ppr ty)))
+  lowerLeaf ty leaf constructors = do
+    attempted <- tryRepresentation (mapM_ internConstructor constructors)
+    case attempted of
+      Right () -> pure leaf
+      Left (InvalidPreparedRepresentation _) -> pure (refused "representation" ty)
+      Left (InvalidPreparedLayout _) -> pure (refused "layout" ty)
+      Left failure -> lift (Left failure)
+  lowerDataNode ty tc arguments rows = do
+    loweredRows <- traverse lowerRow rows
+    loweredArguments <- traverse rebase arguments
+    pure (TypeData (nameSymbol "type" (GHC.tyConName tc))
+      loweredArguments loweredRows)
+    where
+      lowerRow (constructor, fields) = do
+        verifySourceLayout constructor
+        identity <- internConstructor constructor
+        CtorRow identity <$> traverse rebase fields
+      verifySourceLayout constructor = do
+        let sourceFields = case splitTyConApp_maybe ty of
+              Just (_, args) -> dataConInstOrigArgTys constructor args
+              Nothing -> []
+            unpacked = any isUnpacked (dataConImplBangs constructor)
+        sourceReps <- traverse oneSourceRep sourceFields
+        runtimeReps <- concat <$> traverse (\(Scaled _ fieldType) -> repsForType fieldType)
+          (dataConRepArgTys constructor)
+        resultReps <- repsForType (dataConOrigResTy constructor)
+        unless (not unpacked && sourceReps == runtimeReps
+          && length sourceFields == length runtimeReps
+          && resultReps == [LiftedRefRep])
+          (failLayout "prepared type constructor source/runtime layout is not one-to-one")
+      oneSourceRep (Scaled _ fieldType) = do
+        reps <- repsForType fieldType
+        case reps of
+          [rep] -> pure rep
+          _ -> failLayout "prepared type source field is void, flattened, or split"
+      isUnpacked HsUnpack{} = True
+      isUnpacked _ = False
+
+tryRepresentation :: P a -> P (Either ProjectionError a)
+tryRepresentation action = StateT $ \machineState -> case runStateT action machineState of
+  Left failure -> Right (Left failure, machineState)
+  Right (value, next) -> Right (Right value, next)
+
+lowerDelivery :: Effect.SiteDelivery -> SiteDelivery
+lowerDelivery delivery = case delivery of
+  Effect.DeliverHostAnswer -> HostAnswer
+  Effect.DeliverLiveReentry -> LiveReentry
+  Effect.DeliverExitCellFill -> ExitCellFill
+  Effect.DeliverTerminalCapture -> TerminalCapture
 
 registerBindingArities :: CgStgTopBinding -> P ()
 registerBindingArities (StgTopStringLit _ _) = pure ()

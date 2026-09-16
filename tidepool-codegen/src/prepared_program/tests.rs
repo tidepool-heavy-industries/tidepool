@@ -330,6 +330,8 @@ fn wire_program_with_bindings(
         array(expressions),
         array(bindings),
         uint(u64::from(entry)),
+        array([]),
+        array([]),
     ])
 }
 
@@ -635,6 +637,8 @@ fn mixed_result_wire(binding_count: u8) -> Vec<u8> {
         array(expressions),
         array(bindings),
         uint(0),
+        array([]),
+        array([]),
     ])
 }
 

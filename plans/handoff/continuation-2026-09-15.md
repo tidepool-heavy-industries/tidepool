@@ -31,6 +31,33 @@ Preserve the pre-existing untracked `examples/guess/` and
 
 ## Work ownership
 
+### Current wave boundary
+
+The user requested an economical Terra implementation/orchestration wave before
+switching subscriptions. Finish already-decided schema-10 changes, focused
+verification, fixture regeneration, and the handoff. Do not resolve new
+structural questions by extending the design during this wave. Record the
+source evidence, blocked acceptance criterion, and reason review is needed;
+continue independent work.
+
+Deferred to the next structural review/implementation wave:
+
+- **F4 frame and site ownership:** evidence owner and runner can be different
+  programs. The proposed contract is in `designs/prepared-resume-integration.md`;
+  choosing the final API affects roots, installation rollback, and retirement.
+- **F4 generated settlement and ordinary replies:** auxiliary executable roots,
+  request forcing, and synthetic reply evidence must agree with the production
+  effect generator. A Bool-only shortcut would leave ordinary handled replies
+  without authoritative types.
+- **F5 answer construction:** allocation rollback and frame consumption order
+  need engine-invariant review before implementation; invalid answers must leave
+  the parked frame and resource counts intact.
+- **F6 residency:** program identities, per-program roots, quiescence, live-header
+  census, collection, and retirement are coupled ownership changes. Fixture
+  updates cannot establish bounded residency.
+
+These deferrals do not close step 2 or authorize prepared default routing.
+
 The lead owns structural decisions, producer/consumer agreement, integration,
 and acceptance against the production owners. Execution agents get bounded
 file ownership, a fixed shared contract, exact tests, and a stop/report rule
@@ -153,3 +180,44 @@ These checks ran before schema-10 mutation began:
 
 No new broad gate has run. The next broad `just verify` follows the integrated
 Wave A exit; solo-rerun timeouts before attributing them to load.
+
+## Schema-10 fixture wave
+
+- `nix develop --command bash -lc 'cd haskell && cabal test
+  execution-schema-encode --builddir=dist-newstyle-schema10
+  --test-options="--write-schema6-fixture
+  test-execution-schema-encode/fixtures/schema6-intrinsic.cbor"
+  --test-show-details=direct'` passed (one test) and regenerated the encoded
+  schema fixture. The focused prepared-STG pipeline then passed; the M3,
+  Freer retention/resume, and three import artifacts were regenerated from
+  their documented generators, with the Freer manifest identities checked
+  before copying.
+- `nix develop --command bash -lc 'env RUSTC_WRAPPER= cargo test -p
+  tidepool-repr --test execution_schema_contract'` passed (7 tests), and the
+  prepared-turn complete-site-family metadata test passed (1 test).
+- `just fixtures-update`, native-oracle reseal through
+  `nix develop --command scripts/prepared-corpus-oracle.sh update <manifest>`,
+  and `just fixtures-check` passed. The final prepared-corpus Suite run is at
+  `target/prepared-corpus/run.sCjaiw`: 812 projected/validated/admitted/
+  compiled, 702 executed with zero failures, and 234 comparisons with zero
+  mismatches.
+
+### Producer integration and metadata invariant
+
+- Prepared projection returns the final constructor table with the wire
+  program. `Main` prepares selected artifacts before the shared Core metadata
+  write; `Artifacts` merges those constructors and their siblings into
+  `meta.cbor`.
+- The pre-write metadata contract now also checks every constructor admitted by
+  prepared projection. `TIDEPOOL_TEST_DROP_DC` therefore fails before writing
+  if it removes either a Core-emitted or prepared-admitted constructor.
+- Type-evidence graph lowering indexes each module graph once with `IntMap`.
+  Reachability and lowering use indexed lookups, and invalid graph references
+  return the existing `UnsupportedPreparedShape` error through projection
+  rather than raising a pure exception.
+
+### Focused producer checks
+
+- `nix develop --command bash -lc 'cd haskell && cabal --builddir=dist-newstyle-schema10 build tidepool-extract-bin && cabal --builddir=dist-newstyle-schema10 test execution-schema-encode'`: executable build succeeded; encoder test passed (1/1).
+- `nix develop --command bash -lc 'cd haskell && cabal --builddir=dist-newstyle-schema10 test prepared-stg-pipeline-test'`: passed (1/1). GHC emitted existing simplifiable-constraint warnings in generated test sources.
+- `git diff --check` passed after the producer changes.

@@ -188,6 +188,8 @@ fn strict_artifact() -> Vec<u8> {
         array([expression]),
         array([binding_group]),
         uint(0),
+        array([]),
+        array([]),
     ])
 }
 

@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u64 = 9;
+pub const SCHEMA_VERSION: u64 = 10;
 pub const EXECUTION_ABI_VERSION: u64 = 5;
 
 macro_rules! dense_id {
@@ -22,6 +22,7 @@ dense_id!(GlobalId);
 dense_id!(ConstructorId);
 dense_id!(OperationId);
 dense_id!(SignatureId);
+dense_id!(TypeNodeId);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Architecture {
@@ -298,6 +299,47 @@ pub struct ConstructorDecl {
     pub tag: u32,
     /// Authoritative family cardinality, not the number of declarations in this artifact.
     pub family_size: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CtorRow {
+    pub constructor: ConstructorId,
+    pub fields: Vec<TypeNodeId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TypeNode {
+    Data {
+        family: SymbolIdentity,
+        arguments: Vec<TypeNodeId>,
+        rows: Vec<CtorRow>,
+    },
+    Text,
+    Integer,
+    Natural,
+    Scalar(RuntimeRep),
+    Unconstructible {
+        reason: String,
+        rendered: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SiteDelivery {
+    HostAnswer,
+    LiveReentry,
+    ExitCellFill,
+    TerminalCapture,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SiteRow {
+    pub site: u64,
+    pub origin: String,
+    pub ordinal: u64,
+    pub delivery: SiteDelivery,
+    pub wire: TypeNodeId,
+    pub inputs: Vec<TypeNodeId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -687,6 +729,8 @@ pub struct WireProgram {
     pub expressions: Expr,
     pub bindings: Vec<Group<TopBinding>>,
     pub entry: ValueId,
+    pub types: Vec<TypeNode>,
+    pub sites: Vec<SiteRow>,
 }
 
 /// Validated but not yet linked program. Its fields remain private so every
@@ -720,6 +764,18 @@ impl PreparedProgram {
     }
     pub fn globals(&self) -> &[GlobalDecl] {
         &self.wire.globals
+    }
+    pub fn types(&self) -> &[TypeNode] {
+        &self.wire.types
+    }
+    pub fn sites(&self) -> &[SiteRow] {
+        &self.wire.sites
+    }
+    pub fn site(&self, site: u64) -> Option<&SiteRow> {
+        self.wire.sites.iter().find(|row| row.site == site)
+    }
+    pub fn type_node(&self, id: TypeNodeId) -> Option<&TypeNode> {
+        self.wire.types.get(id.0 as usize)
     }
 }
 
@@ -775,6 +831,8 @@ pub struct DecodeLimits {
     pub max_table_entries: usize,
     pub max_string_bytes: usize,
     pub max_work: usize,
+    pub max_type_nodes: usize,
+    pub max_sites: usize,
 }
 
 impl Default for DecodeLimits {
@@ -785,6 +843,8 @@ impl Default for DecodeLimits {
             max_table_entries: 1 << 18,
             max_string_bytes: 1 << 20,
             max_work: 1 << 24,
+            max_type_nodes: 1 << 18,
+            max_sites: 1 << 18,
         }
     }
 }

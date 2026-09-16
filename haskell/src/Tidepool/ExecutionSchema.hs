@@ -13,6 +13,7 @@ module Tidepool.ExecutionSchema
   , CheckedLayout(..), ConstructorDecl(..), GlobalDecl(..), OperationDecl(..)
   , OperationIdentity(..), WiredInErrorKind(..), ForeignConvention(..)
   , TopBinding(..), WireProgram(..), schemaVersion, executionAbiVersion
+  , TypeNodeId(..), CtorRow(..), TypeNode(..), SiteDelivery(..), SiteRow(..)
   ) where
 
 import Data.ByteString (ByteString)
@@ -21,7 +22,7 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 
 schemaVersion, executionAbiVersion :: Word64
-schemaVersion = 9
+schemaVersion = 10
 executionAbiVersion = 5
 
 newtype ValueId = ValueId Word32 deriving stock (Eq, Ord, Show, Generic)
@@ -30,6 +31,7 @@ newtype GlobalId = GlobalId Word32 deriving stock (Eq, Ord, Show, Generic)
 newtype ConstructorId = ConstructorId Word32 deriving stock (Eq, Ord, Show, Generic)
 newtype OperationId = OperationId Word32 deriving stock (Eq, Ord, Show, Generic)
 newtype SignatureId = SignatureId Word32 deriving stock (Eq, Ord, Show, Generic)
+newtype TypeNodeId = TypeNodeId Word32 deriving stock (Eq, Ord, Show, Generic)
 
 data Architecture = X86_64 | Aarch64 deriving stock (Eq, Ord, Show, Generic)
 data Endianness = LittleEndian | BigEndian deriving stock (Eq, Ord, Show, Generic)
@@ -141,9 +143,31 @@ data Expr = Return [Atom] | Enter Atom SignatureId | Call Atom SignatureId [Atom
   | Jump JoinId [Atom]
   deriving stock (Eq, Show, Generic)
 data TopBinding = TopBinding SymbolIdentity HeapBinding deriving stock (Eq, Show, Generic)
+data CtorRow = CtorRow
+  { rowConstructor :: ConstructorId
+  , rowFields :: [TypeNodeId]
+  } deriving stock (Eq, Show, Generic)
+data TypeNode
+  = TypeData SymbolIdentity [TypeNodeId] [CtorRow]
+  | TypeText
+  | TypeInteger
+  | TypeNatural
+  | TypeScalar RuntimeRep
+  | TypeUnconstructible Text Text
+  deriving stock (Eq, Show, Generic)
+data SiteDelivery = HostAnswer | LiveReentry | ExitCellFill | TerminalCapture
+  deriving stock (Eq, Ord, Show, Generic)
+data SiteRow = SiteRow
+  { siteId :: Word64
+  , siteOrigin :: Text
+  , siteOrdinal :: Word64
+  , siteDelivery :: SiteDelivery
+  , siteWire :: TypeNodeId
+  , siteInputs :: [TypeNodeId]
+  } deriving stock (Eq, Show, Generic)
 data WireProgram = WireProgram
   { programEnvelope :: ProgramEnvelope, programSignatures :: [Signature]
   , programGlobals :: [GlobalDecl], programConstructors :: [ConstructorDecl]
   , programOperations :: [OperationDecl], programBindings :: [Group TopBinding]
-  , programEntry :: ValueId
+  , programEntry :: ValueId, programTypes :: [TypeNode], programSites :: [SiteRow]
   } deriving stock (Eq, Show, Generic)

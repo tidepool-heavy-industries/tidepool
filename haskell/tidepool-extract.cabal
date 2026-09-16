@@ -283,7 +283,9 @@ test-suite prepared-stg-pipeline-test
   type:             exitcode-stdio-1.0
   main-is:          Main.hs
   hs-source-dirs:   test-prepared-stg
-  other-modules:    RetainedPluginTest
+  other-modules:
+    RetainedPluginTest
+    TypeEvidenceChecks
   build-depends:
     base         >= 4.20 && < 5,
     ghc          >= 9.12 && < 9.13,
