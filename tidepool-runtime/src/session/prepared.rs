@@ -909,6 +909,13 @@ impl PreparedEngine {
         let rows = engine.plan_sites(&facts)?;
         engine.programs.insert(program, facts);
         engine.publish_sites(program, rows);
+        // Held live across the install-to-first-run gap; the turn's
+        // bind/complete path (`resident.rs`) unpins it once the run's
+        // outcome is bound, released or parked.
+        engine
+            .machine
+            .pin(program)
+            .map_err(PreparedRuntimeError::Run)?;
         Ok((engine, program))
     }
 
@@ -1020,6 +1027,12 @@ impl PreparedEngine {
             .map_err(PreparedRuntimeError::Run)?;
         self.programs.insert(program, facts);
         self.publish_sites(program, rows);
+        // Held live across the install-to-first-run gap; the turn's
+        // bind/complete path (`resident.rs`) unpins it once the run's
+        // outcome is bound, released or parked.
+        self.machine
+            .pin(program)
+            .map_err(PreparedRuntimeError::Run)?;
         Ok(program)
     }
 
@@ -1528,6 +1541,85 @@ impl PreparedEngine {
     #[must_use]
     pub fn parked_count(&self) -> usize {
         self.machine.parked_count()
+    }
+
+    /// The machine's residency counters at this point (only meaningful
+    /// right after [`Self::quiesce_and_collect`] has run; otherwise an
+    /// ordinary live snapshot).
+    #[must_use]
+    pub fn residency(&self) -> tidepool_codegen::prepared_program::ResidencyCounts {
+        self.machine.residency()
+    }
+
+    /// Release a pin taken at install time ([`Self::install`],
+    /// [`Self::bootstrap`]). `false` if it was not held (already unpinned,
+    /// or an unknown program).
+    pub fn unpin(&mut self, program: ProgramId) -> bool {
+        self.machine.unpin(program)
+    }
+
+    /// The between-turn quiescent point: prove the machine is quiescent
+    /// (`PreparedMachine::quiesce`) and, if so, run a major collection and
+    /// drain its retirement receipt -- removing each retired program's
+    /// [`ProgramFacts`] and re-homing or dropping the site witnesses it
+    /// canonically owned ([`Self::retire_site_witnesses`]). A `quiesce`
+    /// refusal (the machine is mid-call, holds temporary roots, or an
+    /// observation borrows old space) is not reported: the caller is simply
+    /// not at a quiescent point yet, and the next one drains instead. The
+    /// prepared route currently leases nothing per program, so there are no
+    /// leases to release here (see the S4/G2 test module doc below).
+    pub fn quiesce_and_collect(&mut self) {
+        let Ok(token) = self.machine.quiesce() else {
+            return;
+        };
+        let Ok(receipt) = self.machine.collect_major(token) else {
+            return;
+        };
+        for program in &receipt.programs {
+            if let Some(facts) = self.programs.remove(program) {
+                self.retire_site_witnesses(*program, &facts);
+            }
+        }
+    }
+
+    /// Site witnesses `retired` canonically owned: each moves to a still-
+    /// installed program that declares a structurally equivalent row for the
+    /// same site id ([`sites_equivalent`]), or is dropped if none remains --
+    /// a later install can re-claim the id fresh.
+    fn retire_site_witnesses(&mut self, retired: ProgramId, facts: &ProgramFacts) {
+        let owned: Vec<u64> = self
+            .sites
+            .iter()
+            .filter(|(_, witness)| witness.owner == retired)
+            .map(|(site, _)| *site)
+            .collect();
+        for site in owned {
+            let Some(row) = facts.sites.iter().find(|row| row.site == site) else {
+                self.sites.remove(&site);
+                continue;
+            };
+            let successor = self
+                .programs
+                .iter()
+                .find_map(|(candidate, candidate_facts)| {
+                    candidate_facts
+                        .sites
+                        .iter()
+                        .position(|candidate_row| {
+                            candidate_row.site == site
+                                && sites_equivalent(facts, row, candidate_facts, candidate_row)
+                        })
+                        .map(|row_index| (*candidate, row_index))
+                });
+            match successor {
+                Some((owner, row)) => {
+                    self.sites.insert(site, SiteWitness { owner, row });
+                }
+                None => {
+                    self.sites.remove(&site);
+                }
+            }
+        }
     }
 
     /// The unit every home module of `program` was compiled in -- what a

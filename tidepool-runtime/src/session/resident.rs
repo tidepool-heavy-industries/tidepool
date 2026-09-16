@@ -1218,7 +1218,7 @@ where
             .parked
             .iter()
             .find(|(name, _)| name == hole.cont_id())?;
-        self.core.machine()?.parked_realm(id)
+        self.core.parked_realm(id)
     }
 
     #[must_use]
@@ -1303,15 +1303,19 @@ where
     /// nothing (idempotent).
     pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
         self.settle_dropped_custody();
-        let Some(machine) = self.core.machine_mut() else {
-            return (0, 0);
-        };
-        let counts = machine.close_realm(realm);
-        let survivors = machine.parked_ids();
+        let counts = self.core.close_realm(realm);
+        let survivors = self.core.parked_ids();
         self.parked.retain(|(_, id)| survivors.contains(id));
         self.parked_provenance
             .retain(|id, _| survivors.contains(id));
         counts
+    }
+
+    /// Prepared-machine residency counters, or `None` on the Core route or
+    /// before the machine has bootstrapped.
+    #[must_use]
+    pub fn residency(&self) -> Option<tidepool_codegen::prepared_program::ResidencyCounts> {
+        self.core.residency()
     }
 
     /// Mint a [`ValueHandle`] over the declared live payload of the frame
@@ -2135,6 +2139,14 @@ where
             run_exec_started.elapsed(),
             0,
         );
+        // The install-to-first-run gap this turn's `install_prepared` pinned
+        // against is closed here, whatever `ran` turned out to be: a
+        // completed or parked outcome is protected from here on by the
+        // session's persistent roots or the parked frame's own evidence, and
+        // a failed run has nothing left to protect.
+        if let Some(engine) = self.core.prepared_mut() {
+            engine.unpin(program);
+        }
         self.complete_prepared(ran?, mode, program, lexical_scope, provenance, None)
     }
 
@@ -2153,8 +2165,49 @@ where
         resumed: Option<&str>,
     ) -> Result<ResidentOutcome, ResidentError> {
         let seed = hole_seed_of(&mode, lexical_scope);
-        let (handle, value) = match run {
-            PreparedRun::Done { handle, value } => (handle, value),
+        let outcome = match run {
+            PreparedRun::Done { handle, value } => {
+                let engine = self.core.require_prepared()?;
+                match mode {
+                    PreparedTurnMode::Value => {
+                        engine.release(handle);
+                    }
+                    PreparedTurnMode::Binding {
+                        binder,
+                        generation,
+                        observation,
+                    } => {
+                        self.bind_prepared(
+                            program,
+                            lexical_scope,
+                            generation,
+                            &[(binder, handle)],
+                        )?;
+                        self.binding_provenance
+                            .insert(binder.var_id, Arc::clone(&provenance));
+                        if let Some(dependencies) = observation {
+                            self.finish_observation(binder, &dependencies);
+                        }
+                    }
+                    PreparedTurnMode::Projected { .. } => {
+                        // The eval thread splits a projected tuple
+                        // (`SettlePlan::Project`); a whole value here is a
+                        // settlement mismatch.
+                        engine.release(handle);
+                        return Err(PreparedRuntimeError::UnsettledEntry {
+                            program,
+                            detail: "a whole-value settlement for a pattern turn",
+                        }
+                        .into());
+                    }
+                }
+                self.classify_parked(
+                    ParkedRun::CompletedValue { value, bound: None },
+                    resumed,
+                    seed,
+                    provenance,
+                )
+            }
             PreparedRun::Projected { fields } => {
                 let PreparedTurnMode::Projected {
                     binders,
@@ -2177,61 +2230,39 @@ where
                     self.binding_provenance
                         .insert(binder.var_id, Arc::clone(&provenance));
                 }
-                return Ok(self.classify_parked(
+                self.classify_parked(
                     ParkedRun::CompletedProject {
                         projected: Vec::new(),
                     },
                     resumed,
                     seed,
                     provenance,
-                ));
+                )
             }
             PreparedRun::Suspended { id, request } => {
                 // The frame is parked in the machine's ledger; the hole
                 // carries the turn's completion obligation forward exactly
                 // as a Core suspension does.
-                return Ok(self.classify_parked(
+                self.classify_parked(
                     ParkedRun::Suspended { id, request },
                     resumed,
                     seed,
                     provenance,
-                ));
+                )
             }
         };
-        let engine = self.core.require_prepared()?;
-        match mode {
-            PreparedTurnMode::Value => {
-                engine.release(handle);
-            }
-            PreparedTurnMode::Binding {
-                binder,
-                generation,
-                observation,
-            } => {
-                self.bind_prepared(program, lexical_scope, generation, &[(binder, handle)])?;
-                self.binding_provenance
-                    .insert(binder.var_id, Arc::clone(&provenance));
-                if let Some(dependencies) = observation {
-                    self.finish_observation(binder, &dependencies);
-                }
-            }
-            PreparedTurnMode::Projected { .. } => {
-                // The eval thread splits a projected tuple (`SettlePlan::
-                // Project`); a whole value here is a settlement mismatch.
-                engine.release(handle);
-                return Err(PreparedRuntimeError::UnsettledEntry {
-                    program,
-                    detail: "a whole-value settlement for a pattern turn",
-                }
-                .into());
+        // The between-turn quiescent point: a fresh or resumed turn that
+        // settled or parked just released whatever it retired-in-place, so
+        // this is where a major collection (if the machine happens to be
+        // quiescent) drains its retirement receipt. Not reached on an
+        // error path above -- an aborted/failed turn leaves nothing settled
+        // to quiesce over, and the next successful turn drains instead.
+        if let Some(engine) = self.core.prepared_mut() {
+            if engine.disposition() == tidepool_codegen::jit_machine::MachineDisposition::Reusable {
+                engine.quiesce_and_collect();
             }
         }
-        Ok(self.classify_parked(
-            ParkedRun::CompletedValue { value, bound: None },
-            resumed,
-            seed,
-            provenance,
-        ))
+        Ok(outcome)
     }
 
     /// Bind retained prepared handles into the value plane at `scope`, one

@@ -3,43 +3,25 @@
 //! `tidepool-actor`'s own `ActorRunTarget::retire_placement` seam against a
 //! real `ResidentSession` on both engines.
 //!
-//! KNOWN GAP (Prepared engine only): `ResidentSession::close_realm`
-//! (`tidepool-runtime/src/session/resident.rs`, `pub fn close_realm` around
-//! line 1319) reads the machine only through `PersistentSession::machine_mut`
-//! (`tidepool-runtime/src/session/persistent.rs` around line 426), which
-//! resolves via `ResidentEngine::core_mut` and is `None` whenever the
-//! session's engine is `ResidentEngine::Prepared` (the Prepared engine's own
-//! accessor is the DIFFERENT method `PersistentSession::prepared_mut`,
-//! `persistent.rs` around line 430, which `close_realm` never calls). So on
-//! the Prepared route, `close_realm` hits its early `None` branch and returns
-//! `(0, 0)` unconditionally -- `tidepool_codegen::prepared_program::
-//! PreparedMachine::close_realm` (which DOES correctly release a realm's
-//! parked frames and handles, see `prepared.rs`'s `PreparedEngine::close_realm`
-//! at line 1248, itself forwarding to the codegen machine) is never invoked.
-//! `PlacementRetirement::frames`/`handles` are therefore always `0` on the
-//! Prepared route today, whatever a placement's resource realm actually held,
-//! and a placement's parked hole is NOT actually released by retirement on
-//! that route. This file demonstrates and documents that gap on the Prepared
-//! engine rather than hiding it behind a weakened assertion with no
-//! explanation, and shows the Core route (unaffected -- `close_realm`'s
-//! `machine_mut()` call DOES resolve for `ResidentEngine::Core`) behaving to
-//! the originally intended contract.
+//! Both engines assert the same contract: `ResidentSession::close_realm`
+//! and `parked_realm` (`tidepool-runtime/src/session/resident.rs`) route
+//! through `PersistentSession::close_realm`/`parked_realm`
+//! (`tidepool-runtime/src/session/persistent.rs`), which dispatch on
+//! `ResidentEngine` (`Core` or `Prepared`) rather than reading the Core
+//! machine only, so `PreparedEngine::close_realm`/
+//! `PreparedMachine::close_realm` (`prepared.rs`, itself forwarding to the
+//! codegen machine) is reached on the Prepared route exactly as
+//! `JitEffectMachine::close_realm` is reached on Core. (Previously this file
+//! documented a KNOWN GAP here: `close_realm`/`parked_realm` read the
+//! machine only through `PersistentSession::machine_mut`/`machine`, which
+//! resolve via `ResidentEngine::core_mut`/`core` and were `None` whenever
+//! the session ran the Prepared engine, so `PlacementRetirement::frames`/
+//! `handles` always read `0` there and a placement's parked hole was not
+//! actually released by retirement on that route. Fixed by routing both
+//! methods through engine-neutral `ResidentEngine`/`PersistentSession`
+//! accessors instead.)
 //!
-//! ADDITIONAL FINDING, same shape, different symptom:
-//! `ResidentSession::parked_realm` reads `PersistentSession::machine()`
-//! (`persistent.rs` around line 422), the read-only sibling of the
-//! `machine_mut()` behind the gap above -- also Core-only, also
-//! unconditionally `None` on the Prepared route. So this file never uses
-//! `parked_realm` to observe a Prepared-route hole's liveness; it uses
-//! `ResidentSession::parked_holes()` (session-level bookkeeping the engine
-//! gap does not touch) as its engine-agnostic "is this hole still parked"
-//! observable instead. `suspend_ask_as` below checks realm attribution via
-//! `parked_realm` on Core only, documenting why.
-//!
-//! This file does NOT touch `tidepool-runtime/src/session/resident.rs` (out
-//! of this task's scope) -- it only documents the gap through an honest test
-//! on the Prepared route, and exercises the parts of the acceptance ladder
-//! that remain true on both routes regardless of the gap:
+//! This file exercises the full acceptance ladder on both engines:
 //!
 //! - two placements (their own resource realm + lexical scope) can be set up
 //!   on one shared `ResidentSession`, each parking its own suspension via a
@@ -48,19 +30,21 @@
 //!   `tidepool_testing::eval_harness::require_extract()`, exactly as that
 //!   file does);
 //! - `session.parked_realm(&hole)` attributes each hole to its OWN realm
-//!   before either retirement;
+//!   before either retirement, on both engines;
 //! - `retirement.leases` is `0` on both engines (hardcoded in
 //!   `impl ActorRunTarget for ResidentSession` -- never wired to a real
-//!   leasing mechanism on either route, so this is not part of the gap);
+//!   leasing mechanism on either route);
 //! - `retirement.scope_roots` (from `retire_scope`, a value-plane mechanism
 //!   entirely independent of `close_realm`'s realm-plane mechanism) is
 //!   correct on BOTH engines: retiring incarnation 1's placement releases
 //!   exactly the one persistent root incarnation 1's own bind installed,
 //!   and incarnation 2's own bound value is untouched;
+//! - retiring incarnation 1's placement releases its one parked frame and
+//!   its parked continuation, on BOTH engines;
 //! - the session remains usable (a further turn still runs) after
-//!   `retire_placement`, even on the Prepared route where it under-released;
+//!   `retire_placement`, on both engines;
 //! - incarnation 2's still-parked hole resumes to completion regardless of
-//!   incarnation 1's retirement (this never depended on the gap).
+//!   incarnation 1's retirement, on both engines.
 //!
 //! The request-layer half of rung 5 ("a stale incarnation is refused") is
 //! NOT exercised here: `tidepool-actor::request::RequestRegistry` and its
@@ -99,7 +83,6 @@ struct Harness {
     root: tempfile::TempDir,
     generation: u64,
     last_table: Option<tidepool_repr::DataConTable>,
-    engine: EngineKind,
 }
 
 impl Harness {
@@ -126,7 +109,6 @@ impl Harness {
             root: tempfile::tempdir().expect("session root"),
             generation: 0,
             last_table: None,
-            engine,
         }
     }
 
@@ -281,24 +263,15 @@ impl Harness {
             self.session.parked_holes().contains(&hole.cont_id()),
             "the {binder_name} ask must leave its hole in the session's parked set"
         );
-        // ADDITIONAL FINDING (not this file's headline gap, but the same
-        // shape): `ResidentSession::parked_realm` reads
-        // `PersistentSession::machine()`, which -- exactly like the
-        // `machine_mut()` this file's module doc traces through
-        // `close_realm` -- resolves only for `ResidentEngine::Core` and is
-        // unconditionally `None` on the Prepared route, whatever the hole's
-        // actual realm. So realm-attribution is checked here only on Core;
-        // `parked_holes()` membership (checked above, and engine-agnostic
-        // since it reads the session's own bookkeeping rather than the
-        // per-engine machine) is this file's cross-engine observable for
-        // "is this hole still parked".
-        if self.engine == EngineKind::Core {
-            assert_eq!(
-                self.session.parked_realm(&hole),
-                Some(placement.resource_scope),
-                "the {binder_name} ask's hole must be attributed to its own placement's realm"
-            );
-        }
+        // `ResidentSession::parked_realm` now routes through
+        // `PersistentSession::parked_realm`, which dispatches on
+        // `ResidentEngine` rather than reading the Core machine only, so
+        // realm attribution is checked here on both engines.
+        assert_eq!(
+            self.session.parked_realm(&hole),
+            Some(placement.resource_scope),
+            "the {binder_name} ask's hole must be attributed to its own placement's realm"
+        );
         (binder.clone(), hole)
     }
 }
@@ -363,8 +336,8 @@ fn two_placements_one_retired(engine: EngineKind) {
     );
 
     // Incarnation 1: one bound value (source of a nonzero `scope_roots` at
-    // retirement) plus one parked ask (source of the frame/handle counts the
-    // gap concerns).
+    // retirement) plus one parked ask (source of the frame/handle counts
+    // below).
     let roots_before_bind = harness.session.persistent_roots_count();
     harness.bind_as(incarnation_1, placement_1, "x <- pure (1 :: Int)");
     let roots_after_bind = harness.session.persistent_roots_count();
@@ -395,72 +368,45 @@ fn two_placements_one_retired(engine: EngineKind) {
 
     // `leases` is hardcoded 0 in `impl ActorRunTarget for ResidentSession`
     // for BOTH engines -- never wired to a real leasing mechanism on either
-    // route, so this is not part of the `close_realm` gap.
+    // route.
     assert_eq!(retirement.leases, 0, "{engine:?}");
 
     // `scope_roots` is `retire_scope`'s own receipt -- a value-plane
-    // mechanism entirely independent of `close_realm`'s realm-plane one, and
-    // NOT affected by the gap on either engine: incarnation 1's own `x`
-    // binding is released.
+    // mechanism entirely independent of `close_realm`'s realm-plane one:
+    // incarnation 1's own `x` binding is released, on both engines.
     assert_eq!(
         retirement.scope_roots, 1,
         "{engine:?}: retiring placement 1 must release exactly x's one root"
     );
 
-    match engine {
-        EngineKind::Core => {
-            // Core is NOT affected by the gap: `close_realm`'s
-            // `self.core.machine_mut()` call resolves to `Some` for
-            // `ResidentEngine::Core`, so `PlacementRetirement` reports the
-            // originally intended contract.
-            assert_eq!(
-                retirement.frames, 1,
-                "{engine:?}: retiring placement 1 must release its one parked frame"
-            );
-            assert_eq!(retirement.handles, 0, "{engine:?}");
-            assert!(
-                !harness.session.parked_holes().contains(&hole_1.cont_id()),
-                "{engine:?}: retiring placement 1 released its parked continuation"
-            );
-        }
-        EngineKind::Prepared => {
-            // KNOWN GAP: see the module doc and
-            // `tidepool-runtime/src/session/resident.rs`'s `close_realm`
-            // (around line 1319) / `tidepool-runtime/src/session/
-            // persistent.rs`'s `machine_mut` (around line 426). On this
-            // route `close_realm` never reaches
-            // `PreparedEngine::close_realm`/`PreparedMachine::close_realm`
-            // at all, so `frames`/`handles` read 0 here rather than
-            // reflecting anything actually released, and hole_1 is NOT
-            // actually released.
-            assert_eq!(
-                retirement.frames, 0,
-                "{engine:?}: KNOWN GAP -- close_realm does not forward to the Prepared engine, \
-                 so this reads 0 rather than reflecting anything actually released"
-            );
-            assert_eq!(
-                retirement.handles, 0,
-                "{engine:?}: KNOWN GAP -- same as above; the prepared engine's parked \
-                 continuation was never released because close_realm never forwarded the call"
-            );
-            assert!(
-                harness.session.parked_holes().contains(&hole_1.cont_id()),
-                "{engine:?}: KNOWN GAP -- retire_placement did NOT release hole_1's parked \
-                 continuation on the Prepared route; a reader must not mistake this for the \
-                 intended contract"
-            );
-        }
-    }
+    // Both engines now assert the originally intended contract:
+    // `ResidentSession::close_realm`/`parked_realm` route through
+    // `PersistentSession::close_realm`/`parked_realm`, which dispatch on
+    // `ResidentEngine` (`Core` or `Prepared`) rather than reading the Core
+    // machine only, so `PreparedEngine::close_realm`/
+    // `PreparedMachine::close_realm` (`prepared.rs`) is reached on the
+    // Prepared route exactly as `JitEffectMachine::close_realm` is reached
+    // on Core -- see `tidepool-runtime/src/session/resident.rs`'s
+    // `close_realm` and `tidepool-runtime/src/session/persistent.rs`'s
+    // `ResidentEngine`/`PersistentSession` `close_realm`/`parked_realm`.
+    assert_eq!(
+        retirement.frames, 1,
+        "{engine:?}: retiring placement 1 must release its one parked frame"
+    );
+    assert_eq!(retirement.handles, 0, "{engine:?}");
+    assert!(
+        !harness.session.parked_holes().contains(&hole_1.cont_id()),
+        "{engine:?}: retiring placement 1 released its parked continuation"
+    );
 
     // Incarnation 2's placement is untouched by incarnation 1's retirement,
-    // on EITHER engine (this half of rung 5 does not depend on the gap).
+    // on both engines.
     assert!(
         harness.session.parked_holes().contains(&hole_2.cont_id()),
         "{engine:?}: incarnation 2's placement is untouched by incarnation 1's retirement"
     );
 
-    // The session remains usable after `retire_placement`, even on the
-    // Prepared route where it under-released.
+    // The session remains usable after `retire_placement`, on both engines.
     let rendered = harness
         .expression(SessionRunContext::ROOT, "41 + 1")
         .to_string();
@@ -470,7 +416,7 @@ fn two_placements_one_retired(engine: EngineKind) {
     );
 
     // Incarnation 2's own still-parked hole resumes to completion regardless
-    // of incarnation 1's retirement -- this never depended on the gap.
+    // of incarnation 1's retirement, on both engines.
     ActorRunTarget::install_actor_execution(
         &mut harness.session,
         SessionRunContext::new(
@@ -494,16 +440,18 @@ fn two_placements_one_retired(engine: EngineKind) {
     );
 
     // Retire incarnation 1's placement AGAIN and incarnation 2's placement,
-    // to leave the session clean. On Core, incarnation 1's frame/handle are
-    // already gone (released above), so this second call is the documented
-    // idempotent no-op. On Prepared, this is the gap again: hole_1 is STILL
-    // parked, so a real teardown of this session would still leak it -- not
-    // asserted further here, since that is exactly the gap already
-    // documented above, not a new fact about incarnation 2.
-    let _ = ActorRunTarget::retire_placement(
+    // to leave the session clean. Incarnation 1's frame/handle are already
+    // gone (released above) on both engines, so this second call is a true
+    // idempotent no-op on both.
+    let retirement_1_again = ActorRunTarget::retire_placement(
         &mut harness.session,
         placement_1.resource_scope,
         placement_1.lexical_scope,
+    );
+    assert_eq!(
+        (retirement_1_again.frames, retirement_1_again.handles),
+        (0, 0),
+        "{engine:?}: retiring placement 1 a second time is an idempotent no-op"
     );
     let retirement_2 = ActorRunTarget::retire_placement(
         &mut harness.session,

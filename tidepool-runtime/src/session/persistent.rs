@@ -37,6 +37,7 @@ use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BindingTipId};
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{CancelHandle, FuncId, JitEffectMachine, MachineDisposition};
 use tidepool_codegen::old_space::RootSlot;
+use tidepool_codegen::prepared_program::ResidencyCounts;
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
 use tidepool_codegen::suspension::{
     ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput, Suspendable, SuspendableOutcome,
@@ -206,6 +207,33 @@ impl ResidentEngine {
         match self {
             Self::Core(machine) => machine.parked_count(),
             Self::Prepared(engine) => engine.parked_count(),
+        }
+    }
+
+    /// The runtime resource scope owning the frame parked under `id`.
+    #[must_use]
+    pub fn parked_realm(&self, id: ContinuationId) -> Option<RealmId> {
+        match self {
+            Self::Core(machine) => machine.parked_realm(id),
+            Self::Prepared(engine) => engine.parked_realm(id),
+        }
+    }
+
+    /// Close a runtime resource scope: `(frames, handles_released)`.
+    pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
+        match self {
+            Self::Core(machine) => machine.close_realm(realm),
+            Self::Prepared(engine) => engine.close_realm(realm),
+        }
+    }
+
+    /// Prepared-machine residency counters; `None` on the Core route (Core
+    /// has no bounded-residency accounting to report).
+    #[must_use]
+    pub fn residency(&self) -> Option<ResidencyCounts> {
+        match self {
+            Self::Core(_) => None,
+            Self::Prepared(engine) => Some(engine.residency()),
         }
     }
 }
@@ -497,6 +525,30 @@ impl PersistentSession {
     /// Cancellation handle for this capacity-one registry realm.
     pub fn cancel_handle(&mut self) -> Option<CancelHandle> {
         self.machine.as_mut().map(ResidentEngine::cancel_handle)
+    }
+
+    /// The runtime resource scope owning the frame parked under `id`,
+    /// whichever engine this session runs. `None` before the machine exists
+    /// or if `id` names no live frame.
+    #[must_use]
+    pub fn parked_realm(&self, id: ContinuationId) -> Option<RealmId> {
+        self.machine.as_ref()?.parked_realm(id)
+    }
+
+    /// Close a runtime resource scope on the resident machine, whichever
+    /// engine it runs: `(frames, handles_released)`. `(0, 0)` when the
+    /// machine is not yet booted or the realm owns nothing (idempotent).
+    pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
+        self.machine
+            .as_mut()
+            .map_or((0, 0), |engine| engine.close_realm(realm))
+    }
+
+    /// Prepared-machine residency counters; `None` on the Core route or
+    /// before the machine has bootstrapped.
+    #[must_use]
+    pub fn residency(&self) -> Option<ResidencyCounts> {
+        self.machine.as_ref()?.residency()
     }
 
     // -- table accumulation ------------------------------------------------
