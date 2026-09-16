@@ -650,6 +650,43 @@ struct ParkPolicy {
     live_payload: LivePayloadPolicy,
 }
 
+/// The hole a suspension of a turn run in `mode` mints: the same completion
+/// obligation Core's turn paths seed, carried forward across resumes.
+fn hole_seed_of(mode: &PreparedTurnMode<'_>, lexical_scope: ScopeId) -> HoleSeed {
+    match mode {
+        PreparedTurnMode::Value => HoleSeed::Plain,
+        PreparedTurnMode::Binding {
+            binder,
+            generation,
+            observation,
+        } => HoleSeed::Binding {
+            binder: (*binder).clone(),
+            generation: *generation,
+            observation: observation.clone(),
+            lexical_scope,
+        },
+        PreparedTurnMode::Projected {
+            binders,
+            generation,
+        } => HoleSeed::ProjectedBinding {
+            binders: binders.to_vec(),
+            generation: *generation,
+            lexical_scope,
+        },
+    }
+}
+
+/// The eval-thread preparation plan for a turn run in `mode`.
+fn settle_plan_of(mode: &PreparedTurnMode<'_>) -> SettlePlan {
+    match mode {
+        PreparedTurnMode::Value => SettlePlan::Observe,
+        PreparedTurnMode::Binding { binder, .. } => SettlePlan::Bind(binder.tier),
+        PreparedTurnMode::Projected { binders, .. } => {
+            SettlePlan::Project(binders.iter().map(|binder| binder.tier).collect())
+        }
+    }
+}
+
 /// What the eval thread does with a completed prepared value: the same
 /// preparation policy Core applies per binder tier. Tier-0 data is deep-forced
 /// (a forcing observation) before it is tenured; a Tier-1 closure is tenured
@@ -2096,13 +2133,7 @@ where
         let program = self.core.install_prepared(prepared.clone())?;
         let realm = self.run_context.resource_scope;
         let lexical_scope = self.run_context.lexical_scope;
-        let plan = match &mode {
-            PreparedTurnMode::Value => SettlePlan::Observe,
-            PreparedTurnMode::Binding { binder, .. } => SettlePlan::Bind(binder.tier),
-            PreparedTurnMode::Projected { binders, .. } => {
-                SettlePlan::Project(binders.iter().map(|binder| binder.tier).collect())
-            }
-        };
+        let plan = settle_plan_of(&mode);
         let park = ParkPolicy {
             principal: self.run_context.principal,
             effect_policy: self.core.effect_policy(),
@@ -2119,7 +2150,25 @@ where
             run_exec_started.elapsed(),
             0,
         );
-        let (handle, value) = match ran? {
+        self.complete_prepared(ran?, mode, program, lexical_scope, provenance, None)
+    }
+
+    /// Finish one prepared run on the session thread, whichever entry
+    /// produced it: bind or return a completed value per `mode`, or classify a
+    /// parked suspension. `resumed` names the hole this run answered (a
+    /// resume) and is retired on a real outcome, exactly as Core's
+    /// `classify_parked` does; `None` for a fresh turn.
+    fn complete_prepared(
+        &mut self,
+        run: PreparedRun,
+        mode: PreparedTurnMode<'_>,
+        program: ProgramId,
+        lexical_scope: ScopeId,
+        provenance: Arc<ProgramProvenance>,
+        resumed: Option<&str>,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        let seed = hole_seed_of(&mode, lexical_scope);
+        let (handle, value) = match run {
             PreparedRun::Done { handle, value } => (handle, value),
             PreparedRun::Projected { fields } => {
                 let PreparedTurnMode::Projected {
@@ -2145,38 +2194,22 @@ where
                     self.binding_provenance
                         .insert(binder.var_id, Arc::clone(&provenance));
                 }
-                return Ok(ResidentOutcome::BindingsCommitted {
-                    output: self.captured.drain(),
-                });
+                return Ok(self.classify_parked(
+                    ParkedRun::CompletedProject {
+                        projected: Vec::new(),
+                    },
+                    resumed,
+                    seed,
+                    provenance,
+                ));
             }
             PreparedRun::Suspended { id, request } => {
                 // The frame is parked in the machine's ledger; the hole
                 // carries the turn's completion obligation forward exactly
                 // as a Core suspension does.
-                let seed = match mode {
-                    PreparedTurnMode::Value => HoleSeed::Plain,
-                    PreparedTurnMode::Binding {
-                        binder,
-                        generation,
-                        observation,
-                    } => HoleSeed::Binding {
-                        binder: binder.clone(),
-                        generation,
-                        observation,
-                        lexical_scope,
-                    },
-                    PreparedTurnMode::Projected {
-                        binders,
-                        generation,
-                    } => HoleSeed::ProjectedBinding {
-                        binders: binders.to_vec(),
-                        generation,
-                        lexical_scope,
-                    },
-                };
                 return Ok(self.classify_parked(
                     ParkedRun::Suspended { id, request },
-                    None,
+                    resumed,
                     seed,
                     provenance,
                 ));
@@ -2196,7 +2229,8 @@ where
                 observation,
             } => {
                 self.bind_prepared(program, lexical_scope, generation, &[(binder, handle)])?;
-                self.binding_provenance.insert(binder.var_id, provenance);
+                self.binding_provenance
+                    .insert(binder.var_id, Arc::clone(&provenance));
                 if let Some(dependencies) = observation {
                     self.finish_observation(binder, &dependencies);
                 }
@@ -2212,11 +2246,12 @@ where
                 .into());
             }
         }
-        let output = self.captured.drain();
-        Ok(ResidentOutcome::Completed {
-            output,
-            result: EvalResult::new(value, self.core.session_table().clone(), Vec::new()),
-        })
+        Ok(self.classify_parked(
+            ParkedRun::CompletedValue { value, bound: None },
+            resumed,
+            seed,
+            provenance,
+        ))
     }
 
     /// Bind retained prepared handles into the value plane at `scope`, one
@@ -3142,33 +3177,22 @@ where
         // re-declaration here (`bind` is only used for materialization
         // below). Completion handles likewise belong to the frame's retained
         // realm, which must be captured before resume consumes that frame.
-        let outcome = match self.engine_kind() {
-            EngineKind::Core => self.on_eval_thread(move |engine, _table, handlers, captured| {
-                let machine = engine.require_core()?;
-                let realm = machine
-                    .parked_realm(frame_id)
-                    .ok_or(JitError::UnknownContinuation(frame_id))?;
-                machine
-                    .resume_continuation(frame_id, handlers, captured, input)
-                    .and_then(|o| project_parked(machine, o, realm))
-            }),
-            EngineKind::Prepared => self.reenter_prepared(frame_id, input),
-        };
+        if self.engine_kind() == EngineKind::Prepared {
+            return self.reenter_prepared(cont_id, frame_id, input, seed, provenance);
+        }
+        let outcome = self.on_eval_thread(move |engine, _table, handlers, captured| {
+            let machine = engine.require_core()?;
+            let realm = machine
+                .parked_realm(frame_id)
+                .ok_or(JitError::UnknownContinuation(frame_id))?;
+            machine
+                .resume_continuation(frame_id, handlers, captured, input)
+                .and_then(|o| project_parked(machine, o, realm))
+        });
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(e) => {
-                // Reconcile against the machine's ground truth BY IDENTITY:
-                // if the frame is gone from the registry, it WAS consumed
-                // before this run failed (a genuine mid-run error, or an
-                // abort) — the hole is spent. If it is still parked, this was
-                // a retryable rejection (e.g. A5's NF-force) — the hole stays,
-                // untouched. A boolean "is the machine suspended" cannot
-                // answer this with N frames parked; membership can.
-                let still_parked = self.core.parked_ids().contains(&frame_id);
-                if !still_parked {
-                    self.parked_provenance.remove(&frame_id);
-                    self.parked.retain(|(h, _)| h != cont_id);
-                }
+                self.reconcile_failed_reentry(cont_id, frame_id);
                 return Err(e);
             }
         };
@@ -3548,35 +3572,132 @@ where
         }
     }
 
-    /// The prepared arm of [`Self::reenter`]. `Abort` consumes the frame
-    /// without entering it and fails the ask with the same error Core's
+    /// After a failed re-entry, reconcile the hole against the machine's
+    /// ground truth BY IDENTITY: if the frame is gone from the registry, it
+    /// WAS consumed before the failure (a genuine mid-run error, or an abort)
+    /// and the hole is spent. If it is still parked, this was a retryable
+    /// rejection (Core's NF-force, the prepared validator) and the hole stays
+    /// untouched. A boolean "is the machine suspended" cannot answer this
+    /// with N frames parked; membership can.
+    fn reconcile_failed_reentry(&mut self, cont_id: &str, frame_id: ContinuationId) {
+        let still_parked = self.core.parked_ids().contains(&frame_id);
+        if !still_parked {
+            self.parked_provenance.remove(&frame_id);
+            self.parked.retain(|(h, _)| h != cont_id);
+        }
+    }
+
+    /// The prepared arm of [`Self::reenter`]. A host-built `Answer` is
+    /// validated against the frame's site evidence and built before the frame
+    /// is taken, then the runner's resume entry re-enters the continuation
+    /// and the settled layer finishes through the same routine as the initial
+    /// run ([`finish_prepared`], [`Self::complete_prepared`]); a refused
+    /// answer leaves the frame parked and the hole open. `Abort` consumes the
+    /// frame without entering it and fails the ask with the same error Core's
     /// stowed-abort path reports, so the frontends see one abort contract.
-    /// A host-built or handle answer is refused before the frame is touched
-    /// until the answer builder validates and constructs it: the frame stays
-    /// parked and rooted, and the hole stays open.
+    /// Handle delivery is a later slice and is refused before the frame is
+    /// touched.
     fn reenter_prepared(
         &mut self,
+        cont_id: &str,
         frame_id: ContinuationId,
         input: ResumeInput,
-    ) -> Result<ParkedRun, ResidentError> {
-        let ResumeInput::Abort(reason) = input else {
-            return Err(PreparedRuntimeError::NotYetSupported(
-                "host-built and handle answers on the prepared route (the answer builder lands them)",
-            )
-            .into());
+        seed: HoleSeed,
+        provenance: Arc<ProgramProvenance>,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        let value = match input {
+            ResumeInput::Answer(value) => value,
+            ResumeInput::Abort(reason) => {
+                let aborted = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
+                    let engine = engine
+                        .prepared_mut()
+                        .ok_or(JitError::InvalidSuspensionState(
+                            "this session runs prepared STG but holds no prepared engine",
+                        ))?;
+                    Ok(engine.abort_parked(frame_id))
+                });
+                self.reconcile_failed_reentry(cont_id, frame_id);
+                aborted??;
+                return Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
+                    EffectError::Handler(format!("ask aborted by caller: {reason}")),
+                ))));
+            }
+            ResumeInput::Handle(_) | ResumeInput::FramedHandle { .. } => {
+                return Err(PreparedRuntimeError::NotYetSupported(
+                    "handle answers on the prepared route (handle delivery lands them)",
+                )
+                .into());
+            }
         };
-        let aborted = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
+        // The hole's own obligation says how the resumed run completes; the
+        // frame carries the runner whose entry re-enters the continuation.
+        let (lexical_scope, mode) = match &seed {
+            HoleSeed::Plain => (self.run_context.lexical_scope, PreparedTurnMode::Value),
+            HoleSeed::Binding {
+                binder,
+                generation,
+                observation,
+                lexical_scope,
+            } => (
+                *lexical_scope,
+                PreparedTurnMode::Binding {
+                    binder,
+                    generation: *generation,
+                    observation: observation.clone(),
+                },
+            ),
+            HoleSeed::ProjectedBinding {
+                binders,
+                generation,
+                lexical_scope,
+            } => (
+                *lexical_scope,
+                PreparedTurnMode::Projected {
+                    binders,
+                    generation: *generation,
+                },
+            ),
+        };
+        let plan = settle_plan_of(&mode);
+        let park = ParkPolicy {
+            principal: self.run_context.principal,
+            effect_policy: self.core.effect_policy(),
+            live_payload: self.core.live_payload_policy(),
+        };
+        let resumed = self.on_eval_thread(move |engine, table, _handlers, _captured| {
             let engine = engine
                 .prepared_mut()
                 .ok_or(JitError::InvalidSuspensionState(
                     "this session runs prepared STG but holds no prepared engine",
                 ))?;
-            Ok(engine.abort_parked(frame_id))
-        })?;
-        aborted?;
-        Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
-            EffectError::Handler(format!("ask aborted by caller: {reason}")),
-        ))))
+            Ok(engine
+                .resume_with_answer(frame_id, &value)
+                .and_then(|resumed| {
+                    let runner = resumed.runner;
+                    finish_prepared(
+                        engine,
+                        runner,
+                        resumed.realm,
+                        plan,
+                        park,
+                        table,
+                        resumed.settlement,
+                    )
+                    .map(|run| (runner, run))
+                }))
+        });
+        let (runner, run) = match resumed {
+            Ok(Ok(resumed)) => resumed,
+            Ok(Err(error)) => {
+                self.reconcile_failed_reentry(cont_id, frame_id);
+                return Err(error.into());
+            }
+            Err(error) => {
+                self.reconcile_failed_reentry(cont_id, frame_id);
+                return Err(error);
+            }
+        };
+        self.complete_prepared(run, mode, runner, lexical_scope, provenance, Some(cont_id))
     }
 
     fn retire_resumed(&mut self, resumed: Option<&str>) {

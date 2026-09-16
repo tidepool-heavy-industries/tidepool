@@ -1359,6 +1359,84 @@ impl<'code> PreparedMachine<'code> {
         })
     }
 
+    /// Build a host answer from a validated plan and retain it under `realm`.
+    ///
+    /// Every constructor resolves through the machine interner, so the built
+    /// cells carry exactly the descriptors installed code dispatches on. The
+    /// whole tree is sized first; the nursery is collected once only when it
+    /// cannot hold it; the objects are then written children-first into the
+    /// span beyond the allocation cursor with no allocating call in between,
+    /// and only after every write succeeds does the cursor advance and the
+    /// root get promoted and rooted as a handle. A failure at any step leaves
+    /// the cursor, the ledger and every root count unchanged.
+    pub fn build_answer(
+        &mut self,
+        realm: RealmId,
+        plan: &super::answer::AnswerPlan,
+    ) -> Result<PreparedHandle, ExecutionError> {
+        self.ensure_handle_access()?;
+        let flattened = super::answer::FlattenedAnswer::resolve(plan, &|id| {
+            self.interner.by_host(id).map(|(_, descriptor)| descriptor)
+        })?;
+        let free = |vmctx: &VMContext| {
+            (vmctx.alloc_limit as usize).saturating_sub(vmctx.alloc_ptr as usize)
+        };
+        if free(&self.vmctx) < flattened.extent {
+            collect_on(
+                &self.machine,
+                &mut self.vmctx,
+                &self.old_space,
+                flattened.extent,
+            )?;
+            if free(&self.vmctx) < flattened.extent {
+                return Err(super::answer::AnswerBuildError::TooLarge(flattened.extent).into());
+            }
+        }
+        self.handles
+            .try_reserve_handles(1)
+            .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
+        if unsafe { self.machine.prepared_old_space() }.is_some() {
+            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+        }
+        let span = self.vmctx.alloc_ptr;
+        // SAFETY: `span..span + extent` lies inside the live nursery beyond
+        // the allocation cursor (checked above), so nothing reaches it until
+        // the cursor advances below.
+        let root = unsafe { flattened.write(span) }?;
+        self.vmctx.alloc_ptr = unsafe { span.add(flattened.extent) };
+        let words = RootWords::new(1)?;
+        words.write(0, root as u64)?;
+        let source = words.as_mut_ptr().cast::<*mut u8>();
+        let mark = self.machine.rust_roots_len();
+        self.machine.register_rust_root(source);
+        let _roots = TemporaryRoots {
+            machine: &self.machine,
+            mark,
+        };
+        unsafe { self.machine.install_prepared_old_space(&self.old_space) };
+        let retained = unsafe {
+            self.old_space.retain_prepared(
+                &self.machine,
+                &mut self.vmctx,
+                &[source],
+                &self.descriptors,
+            )
+        };
+        self.machine.clear_prepared_old_space();
+        let mut roots = retained.map_err(|cause| runtime_error(&self.machine, cause))?;
+        let Some(root) = roots.pop().filter(|_| roots.is_empty()) else {
+            for root in roots {
+                self.machine.deregister_persistent_root(root.addr());
+            }
+            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+        };
+        let raw = self.handles.insert_handle(root, realm);
+        Ok(PreparedHandle {
+            raw,
+            rep: RuntimeRep::LiftedRef,
+        })
+    }
+
     /// The persistent root slot behind a retained handle, for an owner that
     /// records roots by slot (the session `BindingTable`). The slot stays
     /// registered until [`Self::release`] takes the handle; a caller holding
@@ -5927,6 +6005,83 @@ mod tests {
         assert_eq!(machine.parked_count(), 0);
         assert!(machine.parked_realm(again).is_none());
         assert_eq!(machine.handle_count(), handles_before - 1);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// A host answer builds through the interner into a realm-owned handle
+    /// that observes to the planned value; a plan naming an undeclared
+    /// constructor is refused with the allocation cursor, the handle ledger
+    /// and the root counts untouched.
+    #[test]
+    fn a_host_answer_builds_through_the_interner_or_leaves_the_heap_untouched() {
+        use crate::prepared_program::{AnswerBuildError, AnswerPlan};
+        let (mut machine, program) = machine();
+        let realm = RealmId::fresh();
+        let handles_before = machine.handle_count();
+        let roots_before = machine.total_persistent_roots();
+        let cursor_before = machine.vmctx.alloc_ptr;
+
+        let unknown = AnswerPlan::Constructor {
+            host_id: DataConId(4242),
+            fields: Vec::new(),
+        };
+        assert!(matches!(
+            machine.build_answer(realm, &unknown),
+            Err(ExecutionError::Answer(
+                AnswerBuildError::UnknownConstructor(DataConId(4242))
+            ))
+        ));
+        let wrong_arity = AnswerPlan::Constructor {
+            host_id: DataConId(900),
+            fields: vec![AnswerPlan::Scalar {
+                rep: RuntimeRep::Int(64),
+                bits: [0; 16],
+            }],
+        };
+        assert!(matches!(
+            machine.build_answer(realm, &wrong_arity),
+            Err(ExecutionError::Answer(AnswerBuildError::FieldCount {
+                expected: 0,
+                actual: 1,
+                ..
+            }))
+        ));
+        assert_eq!(machine.vmctx.alloc_ptr, cursor_before);
+        assert_eq!(machine.handle_count(), handles_before);
+        assert_eq!(machine.total_persistent_roots(), roots_before);
+
+        let unit = AnswerPlan::Constructor {
+            host_id: DataConId(900),
+            fields: Vec::new(),
+        };
+        let handle = machine
+            .build_answer(realm, &unit)
+            .expect("the CAF program's Unit constructor builds");
+        assert_eq!(machine.handle_realm(handle), Some(realm));
+        assert_eq!(machine.handle_count(), handles_before + 1);
+        assert!(matches!(
+            machine.observe_handle(program, handle, 100),
+            Ok(Value::Con(id, ref fields)) if id == DataConId(900) && fields.is_empty()
+        ));
+        // The built value survives a collection like any retained value.
+        machine
+            .run_entry(
+                program,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 100,
+                    collect_before_observation: true,
+                },
+                realm,
+            )
+            .expect("an unrelated call collects");
+        assert!(matches!(
+            machine.observe_handle(program, handle, 100),
+            Ok(Value::Con(id, ref fields)) if id == DataConId(900) && fields.is_empty()
+        ));
+        assert!(machine.release(handle));
+        assert_eq!(machine.handle_count(), handles_before);
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 }

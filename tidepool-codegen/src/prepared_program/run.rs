@@ -76,6 +76,9 @@ pub enum ExecutionError {
     /// already taken by a resume or abort, or dropped with its realm.
     #[error("continuation {0:?} is not parked on this machine")]
     UnknownContinuation(crate::suspension::ContinuationId),
+    /// A host answer could not be built; nothing was allocated or published.
+    #[error("host answer: {0}")]
+    Answer(#[from] super::answer::AnswerBuildError),
     #[error("constructor host id {host_id:?} already names {existing:?}, not {identity:?}")]
     HostIdConflict {
         host_id: tidepool_repr::DataConId,

@@ -35,6 +35,9 @@ struct Notebook {
     /// workbench's compile view does.
     injected: Vec<String>,
     generation: u64,
+    /// The session constructor table as of the last expression turn, for
+    /// naming constructors in host-built answers.
+    last_table: Option<tidepool_repr::DataConTable>,
 }
 
 impl Notebook {
@@ -61,7 +64,18 @@ impl Notebook {
             root: tempfile::tempdir().expect("session root"),
             injected: Vec::new(),
             generation: 0,
+            last_table: None,
         }
+    }
+
+    /// A constructor's bridge id from the session table the last expression
+    /// turn left behind.
+    fn constructor(&self, name: &str) -> tidepool_repr::DataConId {
+        self.last_table
+            .as_ref()
+            .expect("an expression turn ran")
+            .get_by_name(name)
+            .unwrap_or_else(|| panic!("constructor {name} is not in the session table"))
     }
 
     fn templates(&self) -> Vec<TurnTemplate> {
@@ -112,7 +126,77 @@ impl Notebook {
         let ResidentOutcome::Completed { result, .. } = outcome else {
             panic!("{text:?} did not complete: {outcome:?}");
         };
+        self.last_table = Some(result.table().clone());
         tidepool_runtime::value_to_json(result.value(), result.table(), 0)
+    }
+
+    /// Run the ask turn `b <- runLLMTurn @Bool "q"` to its suspension and
+    /// return the binder and hole, checking that the request names one of the
+    /// turn's declared sites and, on the prepared route, that the artifact
+    /// admits the resume entry.
+    fn suspend_ask(
+        &mut self,
+        engine: EngineKind,
+    ) -> (BoundBinder, tidepool_runtime::session::ResidentHole) {
+        let TurnResult::Bind {
+            bound, compiled, ..
+        } = self.compile("b <- (runLLMTurn @Bool \"q\" :: M Bool)")
+        else {
+            panic!("{engine:?}: the ask did not classify as a bind");
+        };
+        let [binder] = bound.as_slice() else {
+            panic!("{engine:?}: the ask bound {} names", bound.len());
+        };
+        assert_eq!(binder.name, "b");
+        let code = compiled.code();
+        let declared_sites: Vec<u64> = match engine {
+            EngineKind::Prepared => {
+                let prepared = compiled
+                    .prepared
+                    .as_ref()
+                    .expect("prepared request returned no prepared program");
+                // The artifact admits the resume entry beside the settled
+                // scaffold: the host checks the artifact, not the template text.
+                let admits_resume = prepared
+                    .bindings()
+                    .iter()
+                    .flat_map(|group| match group {
+                        Group::NonRecursive(top) => std::slice::from_ref(top),
+                        Group::Recursive(tops) => tops.as_slice(),
+                    })
+                    .any(|top| top.identity.occurrence == "__resume");
+                assert!(admits_resume, "the turn artifact admits no __resume top");
+                prepared.sites().iter().map(|row| row.site).collect()
+            }
+            EngineKind::Core => code.sites.iter().map(|site| site.site).collect(),
+        };
+        assert!(
+            !declared_sites.is_empty(),
+            "{engine:?}: the ask declares no site"
+        );
+        let outcome = self
+            .session
+            .run_bind_with_sites(
+                "notebook_ask",
+                compiled.code(),
+                binder,
+                Generation(self.generation),
+            )
+            .unwrap_or_else(|error| panic!("{engine:?}: the ask failed to run: {error}"));
+        let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
+            panic!("{engine:?}: the ask did not suspend: {outcome:?}");
+        };
+        let request = tidepool_runtime::value_to_json(&request, code.table, 0);
+        let site = typed_site_of(&request)
+            .unwrap_or_else(|| panic!("{engine:?}: the request names no typedSite: {request}"));
+        assert!(
+            declared_sites.contains(&site),
+            "{engine:?}: site {site} is not one of the turn's {declared_sites:?}"
+        );
+        assert_eq!(self.session.parked_holes(), vec![hole.cont_id()]);
+        assert_eq!(self.session.parked_count(), 1);
+        assert_eq!(self.session.stowed_roots_count(), 1);
+        (binder.clone(), hole)
     }
 
     /// Run a single-binder bind turn; later turns see the binder's module.
@@ -255,80 +339,34 @@ fn typed_site_of(json: &serde_json::Value) -> Option<u64> {
 
 /// A typed effect request parks the turn on either engine: the suspension
 /// reports the request naming one of the turn's declared sites, the frame is
-/// rooted while an unrelated turn runs, and `abort` retires the hole with the
-/// same error on both routes, leaving the session's resource counts where the
-/// turn found them. On the prepared route a host answer is refused with the
-/// frame intact until the answer builder lands.
+/// rooted while an unrelated turn runs, a host-built `True` completes the
+/// bind on both routes (the prepared route validates the answer against the
+/// site's type evidence first, refusing a literal and a wrong-family
+/// constructor with the frame intact), and `abort` retires a second ask's
+/// hole with the same error on both routes, leaving the session's resource
+/// counts where the turn found them.
 fn notebook_suspension(engine: EngineKind) {
+    use tidepool_bridge::Value;
+    use tidepool_repr::Literal;
+
     let mut notebook = Notebook::new(engine);
     let rendered = notebook.expression("41 + 1").to_string();
     assert!(
         rendered.contains("42"),
         "{engine:?}: warm-up rendered {rendered}"
     );
+    // Brings `True`/`False` into the session table beside `I#`.
+    let rendered = notebook.expression("not False").to_string();
+    assert!(
+        rendered.contains("true"),
+        "{engine:?}: not False rendered as {rendered}"
+    );
+    let true_id = notebook.constructor("True");
+    let boxed_int = notebook.constructor("I#");
     let handles_before = notebook.session.value_handle_count();
-    let roots_before = notebook.session.persistent_roots_count();
     assert_eq!(notebook.session.parked_count(), 0);
 
-    let TurnResult::Bind {
-        bound, compiled, ..
-    } = notebook.compile("b <- (runLLMTurn @Bool \"q\" :: M Bool)")
-    else {
-        panic!("{engine:?}: the ask did not classify as a bind");
-    };
-    let [binder] = bound.as_slice() else {
-        panic!("{engine:?}: the ask bound {} names", bound.len());
-    };
-    assert_eq!(binder.name, "b");
-    let code = compiled.code();
-    let declared_sites: Vec<u64> = match engine {
-        EngineKind::Prepared => {
-            let prepared = compiled
-                .prepared
-                .as_ref()
-                .expect("prepared request returned no prepared program");
-            // The artifact admits the resume entry beside the settled
-            // scaffold: the host checks the artifact, not the template text.
-            let admits_resume = prepared
-                .bindings()
-                .iter()
-                .flat_map(|group| match group {
-                    Group::NonRecursive(top) => std::slice::from_ref(top),
-                    Group::Recursive(tops) => tops.as_slice(),
-                })
-                .any(|top| top.identity.occurrence == "__resume");
-            assert!(admits_resume, "the turn artifact admits no __resume top");
-            prepared.sites().iter().map(|row| row.site).collect()
-        }
-        EngineKind::Core => code.sites.iter().map(|site| site.site).collect(),
-    };
-    assert!(
-        !declared_sites.is_empty(),
-        "{engine:?}: the ask declares no site"
-    );
-
-    let outcome = notebook
-        .session
-        .run_bind_with_sites(
-            "notebook_ask",
-            compiled.code(),
-            binder,
-            Generation(notebook.generation),
-        )
-        .unwrap_or_else(|error| panic!("{engine:?}: the ask failed to run: {error}"));
-    let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
-        panic!("{engine:?}: the ask did not suspend: {outcome:?}");
-    };
-    let request = tidepool_runtime::value_to_json(&request, code.table, 0);
-    let site = typed_site_of(&request)
-        .unwrap_or_else(|| panic!("{engine:?}: the request names no typedSite: {request}"));
-    assert!(
-        declared_sites.contains(&site),
-        "{engine:?}: site {site} is not one of the turn's {declared_sites:?}"
-    );
-    assert_eq!(notebook.session.parked_holes(), vec![hole.cont_id()]);
-    assert_eq!(notebook.session.parked_count(), 1);
-    assert_eq!(notebook.session.stowed_roots_count(), 1);
+    let (binder, hole) = notebook.suspend_ask(engine);
 
     // The frame stays parked and rooted while an unrelated turn runs.
     let rendered = notebook.expression("40 + 2").to_string();
@@ -340,22 +378,81 @@ fn notebook_suspension(engine: EngineKind) {
     assert_eq!(notebook.session.stowed_roots_count(), 1);
 
     if engine == EngineKind::Prepared {
-        // A host answer is refused before the frame is touched.
-        let answer = tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(1));
-        let refused = notebook
+        // The validator refuses an answer that does not fit the site's type
+        // evidence before the frame is touched: a bare literal for a Bool
+        // site, and a constructor from another family. Core has no validator
+        // of its own (the harness checks answers upstream), so these probes
+        // are the prepared route's.
+        let handles_parked = notebook.session.value_handle_count();
+        let roots_parked = notebook.session.persistent_roots_count();
+        let literal = notebook
             .session
-            .resume(hole.clone(), answer)
-            .expect_err("a host answer is not accepted on the prepared route yet");
+            .resume(hole.clone(), Value::Lit(Literal::LitInt(1)))
+            .expect_err("a literal is not a Bool");
         assert!(
             matches!(
-                refused,
-                ResidentError::Prepared(PreparedRuntimeError::NotYetSupported(_))
+                literal,
+                ResidentError::Prepared(PreparedRuntimeError::AnswerShape { .. })
             ),
-            "unexpected refusal: {refused}"
+            "unexpected refusal: {literal}"
+        );
+        let wrong_family = notebook
+            .session
+            .resume(
+                hole.clone(),
+                Value::Con(boxed_int, vec![Value::Lit(Literal::LitInt(1))]),
+            )
+            .expect_err("an Int constructor is not a Bool");
+        assert!(
+            matches!(
+                wrong_family,
+                ResidentError::Prepared(PreparedRuntimeError::AnswerConstructor { .. })
+            ),
+            "unexpected refusal: {wrong_family}"
         );
         assert_eq!(notebook.session.parked_holes(), vec![hole.cont_id()]);
         assert_eq!(notebook.session.parked_count(), 1);
+        assert_eq!(notebook.session.stowed_roots_count(), 1);
+        assert_eq!(notebook.session.value_handle_count(), handles_parked);
+        assert_eq!(notebook.session.persistent_roots_count(), roots_parked);
     }
+
+    // The host-built answer completes the bind through the frame's resume
+    // entry; the bound value is the answer.
+    let outcome = notebook
+        .session
+        .resume(hole.clone(), Value::Con(true_id, Vec::new()))
+        .unwrap_or_else(|error| panic!("{engine:?}: resuming with True failed: {error}"));
+    assert!(
+        matches!(outcome, ResidentOutcome::Completed { .. }),
+        "{engine:?}: the resumed bind did not complete: {outcome:?}"
+    );
+    assert!(notebook.session.parked_holes().is_empty(), "{engine:?}");
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    assert_eq!(notebook.session.stowed_roots_count(), 0, "{engine:?}");
+    // A prepared binding keeps its value as a ROOT-realm ledger handle
+    // (`BoundValue::Prepared`); Core moves the tenured root out of the handle
+    // registry into the binding table. Either way, nothing else is left.
+    let bound_handles = match engine {
+        EngineKind::Prepared => 1,
+        EngineKind::Core => 0,
+    };
+    assert_eq!(
+        notebook.session.value_handle_count(),
+        handles_before + bound_handles,
+        "{engine:?}: the resumed turn leaked a value handle"
+    );
+    notebook.injected.push(binder.module.clone());
+    let rendered = notebook.expression("not b").to_string();
+    assert!(
+        rendered.contains("false"),
+        "{engine:?}: not b rendered as {rendered}"
+    );
+
+    // A second ask, this time aborted.
+    let handles_before = notebook.session.value_handle_count();
+    let roots_before = notebook.session.persistent_roots_count();
+    let (_, hole) = notebook.suspend_ask(engine);
 
     // On the prepared route every installed program's heap tops stay rooted
     // until program retirement lands (the residency wave), so the abort is

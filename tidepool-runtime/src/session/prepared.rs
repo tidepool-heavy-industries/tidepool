@@ -15,10 +15,10 @@ use tidepool_codegen::binding_table::{
 };
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
-    CompileError, CompiledProgram, ExecutionError, ImportBindings, PreparedCallOptions,
+    AnswerPlan, CompileError, CompiledProgram, ExecutionError, ImportBindings, PreparedCallOptions,
     PreparedFrameEvidence, PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions,
     PreparedOuter as CodegenPreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
-    RunOptions, TopSlotBase,
+    RunOptions, TopSlotBase, MAX_ANSWER_DEPTH,
 };
 use tidepool_codegen::scope::ScopeId;
 // Re-exported: callers of this module's realm-scoped cancellation API
@@ -30,12 +30,12 @@ use tidepool_codegen::suspension::ContinuationId;
 pub use tidepool_codegen::suspension::RealmId;
 use tidepool_repr::execution_schema::{
     link_program, parse_program, DecodeLimits, Group, HeapRhs, ImportedValue, LinkError,
-    LinkedProgram, MachineImports, ParseError, PreparedProgram, ProgramRequirements, Signature,
-    SiteRow, SymbolIdentity, TypeNode, TypeNodeId, ValueId,
+    LinkedProgram, MachineImports, ParseError, PreparedProgram, ProgramRequirements, RuntimeRep,
+    Signature, SiteDelivery, SiteRow, SymbolIdentity, TypeNode, TypeNodeId, ValueId,
 };
 use tidepool_repr::{
-    BindingName, DataConTable, Generation, MonotonicIdIssuer, PrincipalId, SessionModule,
-    SessionVarId, VarId,
+    BindingName, DataConId, DataConTable, Generation, Literal, MonotonicIdIssuer, PrincipalId,
+    SessionModule, SessionVarId, VarId,
 };
 
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
@@ -143,6 +143,25 @@ pub enum PreparedRuntimeError {
         program: ProgramId,
         entry: &'static str,
     },
+    /// A host-built answer was offered to a site whose delivery is not a host
+    /// answer (a live re-entry, an exit-cell fill or a terminal capture).
+    /// The frame stays parked.
+    #[error("typed site {site} is delivered by {delivery:?}, not by a host-built answer")]
+    AnswerDelivery { site: u64, delivery: SiteDelivery },
+    /// The answer names a constructor outside the site's declared family
+    /// closure (the wrong family, or a constructor the type's rows do not
+    /// admit). The frame stays parked.
+    #[error("typed site {site} does not admit constructor {host_id:?} in its answer")]
+    AnswerConstructor { site: u64, host_id: DataConId },
+    /// The answer's shape does not match the site's type evidence (a literal
+    /// where a constructor is required, a field count or scalar width
+    /// mismatch, a byte array, or excessive nesting). The frame stays parked.
+    #[error("typed site {site} rejects the answer: {detail}")]
+    AnswerShape { site: u64, detail: &'static str },
+    /// The answer reaches a type the host cannot construct. The frame stays
+    /// parked.
+    #[error("typed site {site} has an unconstructible answer type: {reason}")]
+    AnswerUnconstructible { site: u64, reason: String },
 }
 
 impl PreparedRuntimeError {
@@ -164,6 +183,10 @@ impl PreparedRuntimeError {
             | Self::UntypedRequest
             | Self::UnhandledRequest
             | Self::NoResumeEntry { .. }
+            | Self::AnswerDelivery { .. }
+            | Self::AnswerConstructor { .. }
+            | Self::AnswerShape { .. }
+            | Self::AnswerUnconstructible { .. }
             | Self::CrossRealmArgument { .. } => PreparedFailureKind::Rejected,
             Self::Cancelled => PreparedFailureKind::Cancelled,
             Self::Unavailable(_) => PreparedFailureKind::Integrity,
@@ -179,6 +202,7 @@ impl PreparedRuntimeError {
                 | ExecutionError::HostIdConflict { .. }
                 | ExecutionError::UnknownProgram(_)
                 | ExecutionError::UnknownContinuation(_)
+                | ExecutionError::Answer(_)
                 | ExecutionError::TopTableExhausted { .. }
                 | ExecutionError::TopSlotBaseMismatch { .. } => PreparedFailureKind::Rejected,
                 ExecutionError::Runtime(failure) => {
@@ -288,9 +312,11 @@ struct ProgramFacts {
     /// the machine has taken the program's code.
     sites: Vec<SiteRow>,
     types: Vec<TypeNode>,
-    /// Constructor identities by this program's local `ConstructorId`, so two
-    /// programs' type graphs compare by identity rather than local index.
-    constructors: Vec<SymbolIdentity>,
+    /// Constructor identities and bridge ids by this program's local
+    /// `ConstructorId`, so two programs' type graphs compare by identity
+    /// rather than local index, and a bridge `Value`'s constructor resolves
+    /// to the row that admits it.
+    constructors: Vec<(SymbolIdentity, DataConId)>,
 }
 
 /// Which installed program's site table is authoritative for one site id.
@@ -368,7 +394,7 @@ impl ProgramFacts {
             constructors: prepared
                 .constructors()
                 .iter()
-                .map(|declaration| declaration.identity.clone())
+                .map(|declaration| (declaration.identity.clone(), declaration.host_id))
                 .collect(),
         }
     }
@@ -376,6 +402,117 @@ impl ProgramFacts {
     fn type_node(&self, id: TypeNodeId) -> Option<&TypeNode> {
         self.types.get(id.0 as usize)
     }
+
+    fn constructor_identity(
+        &self,
+        id: tidepool_repr::execution_schema::ConstructorId,
+    ) -> Option<&SymbolIdentity> {
+        self.constructors
+            .get(id.0 as usize)
+            .map(|(identity, _)| identity)
+    }
+
+    /// Lower a bridge `Value` offered as the answer at `site` against the type
+    /// node `node` of this (evidence-owning) program: every constructor must
+    /// be one of the node's rows, every field count must match, every scalar
+    /// must fit its declared representation. Text, Integer and Natural leaves
+    /// are a later slice; an unconstructible node refuses. Nothing here
+    /// touches the machine, so a refusal leaves the frame exactly as parked.
+    fn lower_answer(
+        &self,
+        site: u64,
+        node: TypeNodeId,
+        value: &Value,
+        depth: usize,
+    ) -> Result<AnswerPlan, PreparedRuntimeError> {
+        if depth > MAX_ANSWER_DEPTH {
+            return Err(PreparedRuntimeError::AnswerShape {
+                site,
+                detail: "the answer nests deeper than the builder admits",
+            });
+        }
+        let shape = |detail| PreparedRuntimeError::AnswerShape { site, detail };
+        match self.type_node(node) {
+            None => Err(shape("the site's type evidence names an undeclared node")),
+            Some(TypeNode::Data { rows, .. }) => {
+                let Value::Con(host_id, fields) = value else {
+                    return Err(shape("a constructor of the site's answer type is required"));
+                };
+                let row = rows
+                    .iter()
+                    .find(|row| {
+                        self.constructors
+                            .get(row.constructor.0 as usize)
+                            .is_some_and(|(_, declared)| declared == host_id)
+                    })
+                    .ok_or(PreparedRuntimeError::AnswerConstructor {
+                        site,
+                        host_id: *host_id,
+                    })?;
+                if row.fields.len() != fields.len() {
+                    return Err(shape(
+                        "the constructor's field count does not match its declaration",
+                    ));
+                }
+                let mut planned = Vec::with_capacity(fields.len());
+                for (field_node, field) in row.fields.iter().zip(fields) {
+                    planned.push(self.lower_answer(site, *field_node, field, depth + 1)?);
+                }
+                Ok(AnswerPlan::Constructor {
+                    host_id: *host_id,
+                    fields: planned,
+                })
+            }
+            Some(TypeNode::Scalar(rep)) => {
+                let Value::Lit(literal) = value else {
+                    return Err(shape("a scalar field requires a literal"));
+                };
+                let bits = scalar_bits(*rep, literal).ok_or_else(|| {
+                    shape("the literal does not fit the field's scalar representation")
+                })?;
+                Ok(AnswerPlan::Scalar { rep: *rep, bits })
+            }
+            Some(TypeNode::Text | TypeNode::Integer | TypeNode::Natural) => {
+                Err(PreparedRuntimeError::NotYetSupported(
+                    "Text, Integer and Natural host answers (byte-backed construction lands them)",
+                ))
+            }
+            Some(TypeNode::Unconstructible { reason, .. }) => {
+                Err(PreparedRuntimeError::AnswerUnconstructible {
+                    site,
+                    reason: reason.clone(),
+                })
+            }
+        }
+    }
+}
+
+/// Target-encode `literal` for a field of representation `rep`: the value's
+/// native bytes, of which the builder writes only the field's declared width.
+/// `None` when the literal's kind does not match the representation.
+fn scalar_bits(rep: RuntimeRep, literal: &Literal) -> Option<[u8; 16]> {
+    let word: u128 = match (rep, literal) {
+        (RuntimeRep::Int(bits), Literal::LitInt(value)) => {
+            // Refuse a value the field cannot hold rather than truncating.
+            if bits < 64 && (*value < -(1_i64 << (bits - 1)) || *value >= (1_i64 << (bits - 1))) {
+                return None;
+            }
+            *value as u128
+        }
+        (RuntimeRep::Word(bits), Literal::LitWord(value)) => {
+            if bits < 64 && *value >= (1_u64 << bits) {
+                return None;
+            }
+            u128::from(*value)
+        }
+        (RuntimeRep::Word(bits), Literal::LitChar(value)) if bits >= 32 => {
+            u128::from(*value as u32)
+        }
+        (RuntimeRep::Float(64), Literal::LitDouble(bits))
+        | (RuntimeRep::Float(32), Literal::LitFloat(bits)) => u128::from(*bits),
+        _ => return None,
+    };
+    Some(word.to_ne_bytes())
 }
 
 /// Whether two site rows from two programs carry the same evidence: the same
@@ -427,8 +564,7 @@ fn type_nodes_equivalent(
                     .zip(b_arguments)
                     .all(|(x, y)| type_nodes_equivalent(a, *x, b, *y, visited))
                 && a_rows.iter().zip(b_rows).all(|(x, y)| {
-                    a.constructors.get(x.constructor.0 as usize)
-                        == b.constructors.get(y.constructor.0 as usize)
+                    a.constructor_identity(x.constructor) == b.constructor_identity(y.constructor)
                         && x.fields.len() == y.fields.len()
                         && x.fields
                             .iter()
@@ -1324,6 +1460,14 @@ pub struct PreparedEngine {
     sites: BTreeMap<u64, SiteWitness>,
 }
 
+/// How a settled entry (the scaffold or a resume) is called: nothing is
+/// observed by the call itself, and no collection is forced before the
+/// layer is read.
+const SETTLE_CALL: PreparedCallOptions = PreparedCallOptions {
+    observation_budget: 0,
+    collect_before_observation: false,
+};
+
 /// One suspension parked by [`PreparedEngine::park_suspension`]: the frame's
 /// id and the observed request, as Core reports a suspension.
 pub struct PreparedParked {
@@ -1406,61 +1550,60 @@ impl PreparedEngine {
             sites: BTreeMap::new(),
         };
         // The first program can conflict only with itself.
-        let plan = engine.plan_sites(program, &facts)?;
+        let rows = engine.plan_sites(&facts)?;
         engine.programs.insert(program, facts);
-        engine.sites.extend(plan);
+        engine.publish_sites(program, rows);
         Ok((engine, program))
     }
 
-    /// The site-index entries installing `program` would add: every site the
-    /// program declares that no installed program declares yet. A site
-    /// already installed is accepted only when the two rows carry the same
-    /// evidence ([`sites_equivalent`]); the existing owner stays canonical and
-    /// nothing is added for it. A conflicting duplicate is
-    /// [`PreparedRuntimeError::SiteConflict`] and the caller installs nothing.
-    fn plan_sites(
-        &self,
-        program: ProgramId,
-        facts: &ProgramFacts,
-    ) -> Result<Vec<(u64, SiteWitness)>, PreparedRuntimeError> {
-        let mut planned: Vec<(u64, SiteWitness)> = Vec::new();
+    /// The rows of `facts` that installing it would make canonical: every
+    /// site no installed program declares yet. A site already installed (by
+    /// an earlier program, or earlier in `facts` itself) is accepted only when
+    /// the two rows carry the same evidence ([`sites_equivalent`]); the
+    /// existing owner stays canonical and nothing is added for it. A
+    /// conflicting duplicate is [`PreparedRuntimeError::SiteConflict`] and the
+    /// caller installs nothing.
+    fn plan_sites(&self, facts: &ProgramFacts) -> Result<Vec<(u64, usize)>, PreparedRuntimeError> {
+        let mut planned: Vec<(u64, usize)> = Vec::new();
         for (row, site) in facts.sites.iter().enumerate() {
-            let existing = self.sites.get(&site.site).copied().or_else(|| {
-                planned
-                    .iter()
-                    .find(|(id, _)| *id == site.site)
-                    .map(|(_, witness)| *witness)
-            });
-            match existing {
-                None => planned.push((
-                    site.site,
-                    SiteWitness {
-                        owner: program,
-                        row,
-                    },
-                )),
-                Some(witness) => {
-                    let (owner_facts, owner_row) = if witness.owner == program {
-                        (facts, &facts.sites[witness.row])
-                    } else {
-                        let owner =
-                            self.programs
-                                .get(&witness.owner)
-                                .ok_or(PreparedRuntimeError::Run(
-                                    ExecutionError::UnknownProgram(witness.owner),
-                                ))?;
-                        (owner, &owner.sites[witness.row])
-                    };
-                    if !sites_equivalent(owner_facts, owner_row, facts, site) {
-                        return Err(PreparedRuntimeError::SiteConflict {
-                            site: site.site,
-                            owner: witness.owner,
-                        });
-                    }
-                }
+            let (owner, owner_facts, owner_row) = if let Some(witness) = self.sites.get(&site.site)
+            {
+                let owner = self
+                    .programs
+                    .get(&witness.owner)
+                    .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                        witness.owner,
+                    )))?;
+                (Some(witness.owner), owner, &owner.sites[witness.row])
+            } else if let Some((_, earlier)) = planned.iter().find(|(id, _)| *id == site.site) {
+                (None, facts, &facts.sites[*earlier])
+            } else {
+                planned.push((site.site, row));
+                continue;
+            };
+            if !sites_equivalent(owner_facts, owner_row, facts, site) {
+                return Err(PreparedRuntimeError::SiteConflict {
+                    site: site.site,
+                    // A duplicate within one artifact has no installed owner
+                    // yet; the program being installed is reported.
+                    owner: owner.unwrap_or(ProgramId::FIRST),
+                });
             }
         }
         Ok(planned)
+    }
+
+    /// Make `program` the canonical owner of the planned rows.
+    fn publish_sites(&mut self, program: ProgramId, rows: Vec<(u64, usize)>) {
+        self.sites.extend(rows.into_iter().map(|(site, row)| {
+            (
+                site,
+                SiteWitness {
+                    owner: program,
+                    row,
+                },
+            )
+        }));
     }
 
     /// Install a later turn's program. Every global it declares is resolved
@@ -1507,9 +1650,8 @@ impl PreparedEngine {
         let facts = ProgramFacts::of(&prepared);
         // Site evidence is checked before anything is compiled or published:
         // a conflicting duplicate leaves the machine, its programs and the
-        // site index exactly as they were. The program id is not known until
-        // install, so the plan is keyed against a placeholder and rehomed.
-        let planned = self.plan_sites(ProgramId::FIRST, &facts)?;
+        // site index exactly as they were.
+        let rows = self.plan_sites(&facts)?;
         let linked = link_program(prepared, &values)?;
         let compiled = self
             .machine
@@ -1520,16 +1662,7 @@ impl PreparedEngine {
             .install_program(compiled, imports)
             .map_err(PreparedRuntimeError::Run)?;
         self.programs.insert(program, facts);
-        self.sites
-            .extend(planned.into_iter().map(|(site, witness)| {
-                (
-                    site,
-                    SiteWitness {
-                        owner: program,
-                        ..witness
-                    },
-                )
-            }));
+        self.publish_sites(program, rows);
         Ok(program)
     }
 
@@ -1561,17 +1694,20 @@ impl PreparedEngine {
         }
         let batch = self
             .machine
-            .run_entry_retained(
-                program,
-                entry,
-                &[],
-                PreparedCallOptions {
-                    observation_budget: 0,
-                    collect_before_observation: false,
-                },
-                realm,
-            )
+            .run_entry_retained(program, entry, &[], SETTLE_CALL, realm)
             .map_err(PreparedRuntimeError::Run)?;
+        self.settle_batch(program, realm, batch)
+    }
+
+    /// Read the settled layer an entry of `program` returned: the batch's one
+    /// managed value is the `Settled` constructor (any other managed value is
+    /// released), decoded through the shared decoder.
+    fn settle_batch(
+        &mut self,
+        program: ProgramId,
+        realm: RealmId,
+        batch: PreparedResultBatch,
+    ) -> Result<PreparedSettlement, PreparedRuntimeError> {
         let mut outer = None;
         for value in batch.values {
             match (value, outer) {
@@ -1671,80 +1807,97 @@ impl PreparedEngine {
         continuation: PreparedHandle,
         table: &DataConTable,
     ) -> Result<PreparedParked, PreparedRuntimeError> {
-        let resume_entry = match self.programs.get(&program) {
-            Some(facts) => match facts.resume {
-                Some(entry) => Ok(entry),
-                None => Err(PreparedRuntimeError::NoResumeEntry {
-                    program,
-                    entry: PREPARED_RESUME_TARGET,
-                }),
-            },
-            None => Err(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+        // Every handle this park holds is released here on any refusal;
+        // `try_park_suspension` hands them over as it consumes them.
+        let mut temporaries = vec![request, continuation];
+        let parked = self.try_park_suspension(
+            program,
+            realm,
+            principal,
+            effect_policy,
+            live_payload,
+            table,
+            &mut temporaries,
+        );
+        for handle in temporaries {
+            self.machine.release(handle);
+        }
+        parked
+    }
+
+    /// [`Self::park_suspension`]'s body. `temporaries` holds the request
+    /// and continuation on entry; a handle is removed as it is consumed
+    /// (released here, or parked), so whatever remains on any exit is what the
+    /// caller must release.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the park's policy arguments plus the temporaries it consumes"
+    )]
+    fn try_park_suspension(
+        &mut self,
+        program: ProgramId,
+        realm: RealmId,
+        principal: PrincipalId,
+        effect_policy: EffectRunPolicy,
+        live_payload: LivePayloadPolicy,
+        table: &DataConTable,
+        temporaries: &mut Vec<PreparedHandle>,
+    ) -> Result<PreparedParked, PreparedRuntimeError> {
+        let [request, continuation] = *temporaries.as_slice() else {
+            return Err(PreparedRuntimeError::UnsettledEntry {
                 program,
-            ))),
+                detail: "a park needs exactly the request and continuation handles",
+            });
         };
-        let resume_entry = match resume_entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                self.machine.release(request);
-                self.machine.release(continuation);
-                return Err(error);
-            }
-        };
+        let facts = self
+            .programs
+            .get(&program)
+            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                program,
+            )))?;
+        let resume_entry = facts.resume.ok_or(PreparedRuntimeError::NoResumeEntry {
+            program,
+            entry: PREPARED_RESUME_TARGET,
+        })?;
         if effect_policy == EffectRunPolicy::HandleOrError {
-            self.machine.release(request);
-            self.machine.release(continuation);
             return Err(PreparedRuntimeError::UnhandledRequest);
         }
         // The `Union` layer: an unpacked tag word and the lazy payload.
-        let layer = self.machine.inspect_outer(request, realm);
+        let CodegenPreparedOuter::Constructor { fields, .. } = self
+            .machine
+            .inspect_outer(request, realm)
+            .map_err(PreparedRuntimeError::Run)?;
+        temporaries.retain(|handle| *handle != request);
         self.machine.release(request);
         let mut payload = None;
-        match layer {
-            Ok(CodegenPreparedOuter::Constructor { fields, .. }) => {
-                for field in fields {
-                    match (field, payload) {
-                        (PreparedResult::Managed(handle), None) => payload = Some(handle),
-                        (PreparedResult::Managed(handle), Some(_)) => {
-                            self.machine.release(handle);
-                        }
-                        (PreparedResult::Void | PreparedResult::Scalar(_), _) => {}
-                    }
+        for field in fields {
+            match (field, payload) {
+                (PreparedResult::Managed(handle), None) => payload = Some(handle),
+                (PreparedResult::Managed(handle), Some(_)) => {
+                    self.machine.release(handle);
                 }
-            }
-            Err(error) => {
-                self.machine.release(continuation);
-                return Err(PreparedRuntimeError::Run(error));
+                (PreparedResult::Void | PreparedResult::Scalar(_), _) => {}
             }
         }
-        let Some(payload) = payload else {
-            self.machine.release(continuation);
-            return Err(PreparedRuntimeError::UnsettledEntry {
-                program,
-                detail: "the suspended Union carried no managed payload",
-            });
-        };
+        let payload = payload.ok_or(PreparedRuntimeError::UnsettledEntry {
+            program,
+            detail: "the suspended Union carried no managed payload",
+        })?;
+        temporaries.push(payload);
         // The request is observed (forced) through the existing observe
         // path, exactly the value Core reports for a suspension.
-        let observed =
-            self.machine
-                .observe_handle(program, payload, RunOptions::default().observation_budget);
+        let request = self
+            .machine
+            .observe_handle(program, payload, RunOptions::default().observation_budget)
+            .map_err(PreparedRuntimeError::Run)?;
+        temporaries.retain(|handle| *handle != payload);
         self.machine.release(payload);
-        let request = match observed {
-            Ok(value) => value,
-            Err(error) => {
-                self.machine.release(continuation);
-                return Err(PreparedRuntimeError::Run(error));
-            }
-        };
-        let Some(site) = typed_site_of(&request, table) else {
-            self.machine.release(continuation);
-            return Err(PreparedRuntimeError::UntypedRequest);
-        };
-        let Some(witness) = self.sites.get(&site).copied() else {
-            self.machine.release(continuation);
-            return Err(PreparedRuntimeError::UnknownSite { site });
-        };
+        let site = typed_site_of(&request, table).ok_or(PreparedRuntimeError::UntypedRequest)?;
+        let witness = self
+            .sites
+            .get(&site)
+            .copied()
+            .ok_or(PreparedRuntimeError::UnknownSite { site })?;
         let evidence = PreparedFrameEvidence {
             owner: witness.owner,
             site,
@@ -1752,20 +1905,18 @@ impl PreparedEngine {
             resume_entry,
             continuation_rep: continuation.rep(),
         };
-        let id = match self.machine.park(
-            continuation,
-            realm,
-            principal,
-            effect_policy,
-            live_payload,
-            evidence,
-        ) {
-            Ok(id) => id,
-            Err(error) => {
-                self.machine.release(continuation);
-                return Err(PreparedRuntimeError::Run(error));
-            }
-        };
+        let id = self
+            .machine
+            .park(
+                continuation,
+                realm,
+                principal,
+                effect_policy,
+                live_payload,
+                evidence,
+            )
+            .map_err(PreparedRuntimeError::Run)?;
+        temporaries.retain(|handle| *handle != continuation);
         Ok(PreparedParked { id, request })
     }
 
@@ -1792,16 +1943,52 @@ impl PreparedEngine {
     /// Re-enter the frame parked under `id` with `answer`, a handle the
     /// caller has already validated against the frame's site evidence and
     /// retained under the frame's realm: take the frame, enter the runner's
-    /// resume entry with the continuation and the answer, release both, and
-    /// decode the settled layer through the shared decoder. Every failure
-    /// before the take (unknown id, an answer from another realm,
-    /// cancellation) leaves the frame parked and rooted; the caller still owns
-    /// `answer` then. A failure after the take is a run failure, as on Core.
+    /// resume entry with the continuation and the answer, and read the
+    /// settled layer through the shared decoder. `answer` is consumed on
+    /// every path. Every failure before the take (unknown id, an answer from
+    /// another realm, cancellation) leaves the frame parked and rooted; a
+    /// failure after the take is a run failure, as on Core.
     pub fn resume_parked(
         &mut self,
         id: ContinuationId,
         answer: PreparedHandle,
     ) -> Result<PreparedResumed, PreparedRuntimeError> {
+        let taken = self.take_for_resume(id, answer);
+        let (continuation, evidence, realm) = match taken {
+            Ok(taken) => taken,
+            Err(error) => {
+                self.machine.release(answer);
+                return Err(error);
+            }
+        };
+        let batch = self.machine.run_entry_retained(
+            evidence.runner,
+            evidence.resume_entry,
+            &[
+                PreparedInput::Managed(continuation),
+                PreparedInput::Managed(answer),
+            ],
+            SETTLE_CALL,
+            realm,
+        );
+        self.machine.release(continuation);
+        self.machine.release(answer);
+        let batch = batch.map_err(PreparedRuntimeError::Run)?;
+        let settlement = self.settle_batch(evidence.runner, realm, batch)?;
+        Ok(PreparedResumed {
+            settlement,
+            realm,
+            runner: evidence.runner,
+        })
+    }
+
+    /// The pre-take checks of a resume, then the take: the frame exists,
+    /// `answer` is live under its realm, the realm is not cancelled.
+    fn take_for_resume(
+        &mut self,
+        id: ContinuationId,
+        answer: PreparedHandle,
+    ) -> Result<(PreparedHandle, PreparedFrameEvidence, RealmId), PreparedRuntimeError> {
         let (realm, _) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
             ExecutionError::UnknownContinuation(id),
         ))?;
@@ -1815,42 +2002,66 @@ impl PreparedEngine {
             .machine
             .take_parked(id)
             .map_err(PreparedRuntimeError::Run)?;
-        let batch = self.machine.run_entry_retained(
-            evidence.runner,
-            evidence.resume_entry,
-            &[
-                PreparedInput::Managed(continuation),
-                PreparedInput::Managed(answer),
-            ],
-            PreparedCallOptions {
-                observation_budget: 0,
-                collect_before_observation: false,
-            },
-            realm,
-        );
-        self.machine.release(continuation);
-        self.machine.release(answer);
-        let batch = batch.map_err(PreparedRuntimeError::Run)?;
-        let mut outer = None;
-        for value in batch.values {
-            match (value, outer) {
-                (PreparedResult::Managed(handle), None) => outer = Some(handle),
-                (PreparedResult::Managed(handle), Some(_)) => {
-                    self.machine.release(handle);
-                }
-                _ => {}
-            }
+        Ok((continuation, evidence, realm))
+    }
+
+    /// Validate `value` as the host-built answer for the frame parked under
+    /// `id` and lower it to a build plan: the frame's site row must be
+    /// delivered by a host answer, and the value must fit the site's wire
+    /// type evidence in the evidence owner's tables. Nothing here touches the
+    /// machine; every refusal leaves the frame exactly as parked.
+    fn answer_plan(
+        &self,
+        id: ContinuationId,
+        value: &Value,
+    ) -> Result<AnswerPlan, PreparedRuntimeError> {
+        let (_, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
+            ExecutionError::UnknownContinuation(id),
+        ))?;
+        let owner = self
+            .programs
+            .get(&evidence.owner)
+            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                evidence.owner,
+            )))?;
+        let row = owner
+            .sites
+            .iter()
+            .find(|row| row.site == evidence.site)
+            .ok_or(PreparedRuntimeError::UnknownSite {
+                site: evidence.site,
+            })?;
+        if row.delivery != SiteDelivery::HostAnswer {
+            return Err(PreparedRuntimeError::AnswerDelivery {
+                site: row.site,
+                delivery: row.delivery,
+            });
         }
-        let outer = outer.ok_or(PreparedRuntimeError::UnsettledEntry {
-            program: evidence.runner,
-            detail: "the resume entry returned no managed settled value",
-        })?;
-        let settlement = self.decode_settled(evidence.runner, outer, realm)?;
-        Ok(PreparedResumed {
-            settlement,
-            realm,
-            runner: evidence.runner,
-        })
+        owner.lower_answer(row.site, row.wire, value, 0)
+    }
+
+    /// Re-enter the frame parked under `id` with a host-built answer: peek,
+    /// validate and lower `value` against the site evidence, build it into a
+    /// realm-owned handle, then take the frame and enter the resume entry
+    /// ([`Self::resume_parked`]). Every failure before the take leaves the
+    /// frame parked with the handle and root counts unchanged.
+    pub fn resume_with_answer(
+        &mut self,
+        id: ContinuationId,
+        value: &Value,
+    ) -> Result<PreparedResumed, PreparedRuntimeError> {
+        let plan = self.answer_plan(id, value)?;
+        let (realm, _) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
+            ExecutionError::UnknownContinuation(id),
+        ))?;
+        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+            return Err(PreparedRuntimeError::Cancelled);
+        }
+        let answer = self
+            .machine
+            .build_answer(realm, &plan)
+            .map_err(PreparedRuntimeError::Run)?;
+        self.resume_parked(id, answer)
     }
 
     /// Consume the frame parked under `id` without entering it: the

@@ -45,8 +45,10 @@ mod roots;
 pub use observe::{AddressOrigin, ObservationFailure};
 mod interner;
 pub use interner::DescriptorInterner;
+mod answer;
 mod run;
 pub use crate::resource_ledger::PreparedFrameEvidence;
+pub use answer::{AnswerBuildError, AnswerPlan, MAX_ANSWER_DEPTH};
 pub use machine::{
     ImportBindings, PreparedCallOptions, PreparedHandle, PreparedInput, PreparedMachine,
     PreparedMachineOptions, PreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
