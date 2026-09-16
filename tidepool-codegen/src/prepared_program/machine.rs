@@ -74,6 +74,7 @@ use std::sync::Arc;
 use tidepool_bridge::Value;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
+use tidepool_heap::external_storage::ExternalStorageKind;
 use tidepool_heap::static_region::StaticRegion;
 use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, SymbolIdentity, ValueId};
 use tidepool_repr::{DataConId, PrincipalId};
@@ -1619,15 +1620,33 @@ impl<'code> PreparedMachine<'code> {
     /// and only after every write succeeds does the cursor advance and the
     /// root get promoted and rooted as a handle. A failure at any step leaves
     /// the cursor, the ledger and every root count unchanged.
+    ///
+    /// Byte arrays in the plan are allocated in the machine's external
+    /// ledger before any object is written and revoked again if anything
+    /// later fails; their wrapper objects use `owner`'s `ByteArray#`
+    /// descriptor, so the built value keeps `owner` live as any object that
+    /// program allocates would.
     pub fn build_answer(
         &mut self,
         realm: RealmId,
         plan: &super::answer::AnswerPlan,
+        owner: ProgramId,
     ) -> Result<PreparedHandle, ExecutionError> {
         self.ensure_handle_access()?;
-        let flattened = super::answer::FlattenedAnswer::resolve(plan, &|id| {
-            self.interner.by_host(id).map(|(_, descriptor)| descriptor)
-        })?;
+        let bytes_descriptor = Arc::clone(
+            &self
+                .programs
+                .get(&owner)
+                .ok_or(ExecutionError::UnknownProgram(owner))?
+                .program
+                .get()
+                .bytes_array,
+        );
+        let flattened = super::answer::FlattenedAnswer::resolve(
+            plan,
+            &|id| self.interner.by_host(id).map(|(_, descriptor)| descriptor),
+            &bytes_descriptor,
+        )?;
         let free = |vmctx: &VMContext| {
             (vmctx.alloc_limit as usize).saturating_sub(vmctx.alloc_ptr as usize)
         };
@@ -1648,11 +1667,48 @@ impl<'code> PreparedMachine<'code> {
         if unsafe { self.machine.prepared_old_space() }.is_some() {
             return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
         }
+        // Byte payloads first: ledger allocations that touch neither the
+        // nursery nor any root, so a failure here or below unwinds to exactly
+        // the ledger the caller saw.
+        let mut payloads: Vec<*mut u8> = Vec::new();
+        // No wrapper naming a payload is ever published on a failed build, so
+        // the payload is released outright rather than revoked for a sweep.
+        let revoke = |machine: &MachineState, payloads: &[*mut u8]| {
+            for &payload in payloads {
+                if !machine.release_external_storage(payload) {
+                    return Err(runtime_error(machine, RuntimeError::BadPointer));
+                }
+            }
+            Ok(())
+        };
+        for bytes in flattened.byte_arrays() {
+            let allocated = self
+                .machine
+                .allocate_external_storage(ExternalStorageKind::Bytes, bytes.len())
+                .and_then(|payload| {
+                    self.machine
+                        .store_external_bytes(payload, 0, bytes)
+                        .map(|()| payload)
+                });
+            match allocated {
+                Ok(payload) => payloads.push(payload),
+                Err(error) => {
+                    revoke(&self.machine, &payloads)?;
+                    return Err(super::answer::AnswerBuildError::Storage(error).into());
+                }
+            }
+        }
         let span = self.vmctx.alloc_ptr;
         // SAFETY: `span..span + extent` lies inside the live nursery beyond
         // the allocation cursor (checked above), so nothing reaches it until
         // the cursor advances below.
-        let root = unsafe { flattened.write(span) }?;
+        let root = match unsafe { flattened.write(span, &payloads) } {
+            Ok(root) => root,
+            Err(error) => {
+                revoke(&self.machine, &payloads)?;
+                return Err(error.into());
+            }
+        };
         self.vmctx.alloc_ptr = unsafe { span.add(flattened.extent) };
         let words = RootWords::new(1)?;
         words.write(0, root as u64)?;
@@ -6106,7 +6162,7 @@ mod tests {
             fields: Vec::new(),
         };
         assert!(matches!(
-            machine.build_answer(realm, &unknown),
+            machine.build_answer(realm, &unknown, program),
             Err(ExecutionError::Answer(
                 AnswerBuildError::UnknownConstructor(DataConId(4242))
             ))
@@ -6119,7 +6175,7 @@ mod tests {
             }],
         };
         assert!(matches!(
-            machine.build_answer(realm, &wrong_arity),
+            machine.build_answer(realm, &wrong_arity, program),
             Err(ExecutionError::Answer(AnswerBuildError::FieldCount {
                 expected: 0,
                 actual: 1,
@@ -6135,7 +6191,7 @@ mod tests {
             fields: Vec::new(),
         };
         let handle = machine
-            .build_answer(realm, &unit)
+            .build_answer(realm, &unit, program)
             .expect("the CAF program's Unit constructor builds");
         assert_eq!(machine.handle_realm(handle), Some(realm));
         assert_eq!(machine.handle_count(), handles_before + 1);
@@ -6199,7 +6255,7 @@ mod tests {
             }],
         };
         let handle = machine
-            .build_answer(realm, &good)
+            .build_answer(realm, &good, program)
             .expect("the Field constructor builds with its Int(64) field");
         assert_eq!(machine.handle_realm(handle), Some(realm));
         assert_eq!(machine.handle_count(), handles_before + 1);
@@ -6231,7 +6287,7 @@ mod tests {
             }],
         };
         assert!(matches!(
-            machine.build_answer(realm, &bad),
+            machine.build_answer(realm, &bad, program),
             Err(ExecutionError::Answer(AnswerBuildError::Field {
                 host_id: DataConId(910),
                 index: 0,
@@ -6241,6 +6297,198 @@ mod tests {
         assert_eq!(machine.vmctx.alloc_ptr, cursor_after_good);
         assert_eq!(machine.handle_count(), handles_after_good);
         assert_eq!(machine.total_persistent_roots(), roots_after_good);
+
+        assert!(machine.release(handle));
+        assert_eq!(machine.handle_count(), handles_before);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// A program declaring a `Text`-shaped constructor (`ByteArray#`, `Int#`
+    /// offset, `Int#` length) beside a nullary `Unit` its CAF returns, so a
+    /// host answer can exercise the byte-backed leaf without the program ever
+    /// constructing one itself.
+    fn text_shaped_program(unit_id: u64, text_id: u64) -> CompiledProgram {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("MachineImports", "Unit"),
+            family: testing::identity("MachineImports", "Unit"),
+            host_id: tidepool_repr::DataConId(unit_id),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![],
+            strict_fields: vec![],
+            layout: CheckedLayout {
+                fields: vec![],
+                alignment: 1,
+                payload_size: 0,
+                root_mask: vec![],
+            },
+        });
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("Data.Text.Internal", "Text"),
+            family: testing::identity("Data.Text.Internal", "Text"),
+            host_id: tidepool_repr::DataConId(text_id),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![
+                RuntimeRep::UnliftedRef,
+                RuntimeRep::Int(64),
+                RuntimeRep::Int(64),
+            ],
+            strict_fields: vec![true, true, true],
+            layout: CheckedLayout {
+                fields: vec![
+                    FieldLayout {
+                        rep: RuntimeRep::UnliftedRef,
+                        offset: 0,
+                    },
+                    FieldLayout {
+                        rep: RuntimeRep::Int(64),
+                        offset: 8,
+                    },
+                    FieldLayout {
+                        rep: RuntimeRep::Int(64),
+                        offset: 16,
+                    },
+                ],
+                alignment: 8,
+                payload_size: 24,
+                root_mask: vec![true, false, false],
+            },
+        });
+        wire.expressions.nodes[0] = ExprFrame::Construct {
+            constructor: ConstructorId(0),
+            fields: vec![],
+        };
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Thunk {
+            signature: SignatureId(0),
+            update: UpdatePolicy::Memoize,
+            captures: vec![],
+            body: 0,
+        };
+        let prepared = testing::prepare(wire).expect("text_shaped_program fixture");
+        let linked = link_program(prepared, &MachineImports::default())
+            .expect("text_shaped_program fixture links");
+        CompiledProgram::compile(&linked).expect("text_shaped_program fixture compiles")
+    }
+
+    /// A byte-backed host answer (the `Text` shape) allocates its payload in
+    /// the external ledger, wraps it with the owner's `ByteArray#` descriptor
+    /// and observes back as the bytes it was given, surviving a collection;
+    /// a plan whose later field fails releases the payload again, leaving the
+    /// ledger, the cursor and every count exactly as before.
+    #[test]
+    fn a_byte_backed_host_answer_builds_or_releases_its_payload() {
+        use crate::prepared_program::{AnswerBuildError, AnswerPlan};
+        let (mut machine, program) = PreparedMachine::new(
+            text_shaped_program(920, 921),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("prepared machine");
+        let realm = RealmId::fresh();
+        let handles_before = machine.handle_count();
+        let roots_before = machine.total_persistent_roots();
+        let ledger_before = machine.machine.external_storage_stats();
+        let cursor_before = machine.vmctx.alloc_ptr;
+        let text = "héllo, wörld".as_bytes().to_vec();
+        let int_bits = |value: i64| {
+            let mut bits = [0u8; 16];
+            bits[..8].copy_from_slice(&value.to_ne_bytes());
+            bits
+        };
+        let scalar = |value: i64| AnswerPlan::Scalar {
+            rep: RuntimeRep::Int(64),
+            bits: int_bits(value),
+        };
+
+        // A failing later field: the payload allocated for field 0 is
+        // released again, not left revoked in the ledger.
+        let bad = AnswerPlan::Constructor {
+            host_id: DataConId(921),
+            fields: vec![
+                AnswerPlan::Bytes(text.clone()),
+                scalar(0),
+                AnswerPlan::Constructor {
+                    host_id: DataConId(920),
+                    fields: vec![],
+                },
+            ],
+        };
+        assert!(matches!(
+            machine.build_answer(realm, &bad, program),
+            Err(ExecutionError::Answer(AnswerBuildError::Field {
+                host_id: DataConId(921),
+                index: 2,
+                ..
+            }))
+        ));
+        assert_eq!(
+            machine.machine.external_storage_stats().live_objects,
+            ledger_before.live_objects
+        );
+        assert_eq!(machine.vmctx.alloc_ptr, cursor_before);
+        assert_eq!(machine.handle_count(), handles_before);
+        assert_eq!(machine.total_persistent_roots(), roots_before);
+
+        let good = AnswerPlan::Constructor {
+            host_id: DataConId(921),
+            fields: vec![
+                AnswerPlan::Bytes(text.clone()),
+                scalar(0),
+                scalar(text.len() as i64),
+            ],
+        };
+        let handle = machine
+            .build_answer(realm, &good, program)
+            .expect("the Text-shaped constructor builds over its byte array");
+        assert_eq!(
+            machine.machine.external_storage_stats().live_objects,
+            ledger_before.live_objects + 1
+        );
+        assert_eq!(machine.handle_count(), handles_before + 1);
+        let observed = |machine: &mut PreparedMachine<'_>| {
+            matches!(
+                machine.observe_handle(program, handle, 1_000),
+                Ok(Value::Con(id, ref fields))
+                    if id == DataConId(921)
+                        && matches!(
+                            fields.as_slice(),
+                            [
+                                Value::Lit(tidepool_repr::Literal::LitByteArray(bytes)),
+                                Value::Lit(tidepool_repr::Literal::LitInt(0)),
+                                Value::Lit(tidepool_repr::Literal::LitInt(len)),
+                            ] if *bytes == text && *len == text.len() as i64
+                        )
+            )
+        };
+        assert!(
+            observed(&mut machine),
+            "the built Text observes as its bytes"
+        );
+        machine
+            .run_entry(
+                program,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 100,
+                    collect_before_observation: true,
+                },
+                realm,
+            )
+            .expect("an unrelated call collects");
+        assert!(
+            observed(&mut machine),
+            "the built Text survives a collection"
+        );
 
         assert!(machine.release(handle));
         assert_eq!(machine.handle_count(), handles_before);

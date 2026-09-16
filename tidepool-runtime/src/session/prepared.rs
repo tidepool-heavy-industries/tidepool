@@ -393,11 +393,9 @@ impl ProgramFacts {
                 })?;
                 Ok(AnswerPlan::Scalar { rep: *rep, bits })
             }
-            Some(TypeNode::Text | TypeNode::Integer | TypeNode::Natural) => {
-                Err(PreparedRuntimeError::NotYetSupported(
-                    "Text, Integer and Natural host answers (byte-backed construction lands them)",
-                ))
-            }
+            Some(TypeNode::Text) => self.lower_text(site, value),
+            Some(TypeNode::Integer) => self.lower_integer(site, value),
+            Some(TypeNode::Natural) => self.lower_natural(site, value),
             Some(TypeNode::Unconstructible { reason, .. }) => {
                 Err(PreparedRuntimeError::AnswerUnconstructible {
                     site,
@@ -405,6 +403,204 @@ impl ProgramFacts {
                 })
             }
         }
+    }
+
+    /// The bridge id of a declared constructor, by qualified identity.
+    fn constructor_named(&self, module: &str, occurrence: &str) -> Option<DataConId> {
+        self.constructors
+            .iter()
+            .find(|(identity, _)| identity.module == module && identity.occurrence == occurrence)
+            .map(|(_, host_id)| *host_id)
+    }
+
+    /// One byte-backed leaf: the constructor `module.occurrence` over a
+    /// `ByteArray#` field followed by `scalars`.
+    fn bytes_plan(
+        &self,
+        site: u64,
+        module: &str,
+        occurrence: &str,
+        bytes: Vec<u8>,
+        scalars: impl IntoIterator<Item = AnswerPlan>,
+    ) -> Result<AnswerPlan, PreparedRuntimeError> {
+        let host_id = self.constructor_named(module, occurrence).ok_or(
+            PreparedRuntimeError::AnswerShape {
+                site,
+                detail:
+                    "the site's program declares no constructor for its byte-backed answer type",
+            },
+        )?;
+        let mut fields = vec![AnswerPlan::Bytes(bytes)];
+        fields.extend(scalars);
+        Ok(AnswerPlan::Constructor { host_id, fields })
+    }
+
+    /// `Text`: the bridge's `Text backing off len` (as `String::to_value`
+    /// builds it) or a bare string literal; the slice must be in bounds and
+    /// valid UTF-8. Built as `Text bytes 0 len` over a fresh byte array.
+    fn lower_text(&self, site: u64, value: &Value) -> Result<AnswerPlan, PreparedRuntimeError> {
+        let shape = |detail| PreparedRuntimeError::AnswerShape { site, detail };
+        let text = self.constructor_named(TEXT_MODULE, "Text");
+        let bytes = match value {
+            Value::Lit(Literal::LitString(bytes)) => bytes.clone(),
+            Value::Con(id, fields) if Some(*id) == text && fields.len() == 3 => {
+                let backing = byte_backing(&fields[0])
+                    .ok_or(shape("a Text answer's backing must be a byte array"))?;
+                let (Value::Lit(Literal::LitInt(off)), Value::Lit(Literal::LitInt(len))) =
+                    (&fields[1], &fields[2])
+                else {
+                    return Err(shape(
+                        "a Text answer's offset and length must be Int literals",
+                    ));
+                };
+                usize::try_from(*off)
+                    .ok()
+                    .zip(usize::try_from(*len).ok())
+                    .and_then(|(off, len)| backing.get(off..off.checked_add(len)?))
+                    .ok_or(shape("a Text answer's slice is out of bounds"))?
+                    .to_vec()
+            }
+            _ => return Err(shape("a Text answer requires Text or a string literal")),
+        };
+        if std::str::from_utf8(&bytes).is_err() {
+            return Err(shape("a Text answer must be valid UTF-8"));
+        }
+        let len = bytes.len() as i64;
+        self.bytes_plan(
+            site,
+            TEXT_MODULE,
+            "Text",
+            bytes,
+            [
+                scalar_plan(RuntimeRep::Int(64), 0),
+                scalar_plan(RuntimeRep::Int(64), len as u128),
+            ],
+        )
+    }
+
+    /// `Integer`: `IS Int#`, or `IP`/`IN` over canonical little-endian
+    /// 64-bit limbs whose magnitude does not fit `IS` (GHC's invariant, which
+    /// generated comparisons and conversions rely on). A bare `Int` literal
+    /// is an `IS`.
+    fn lower_integer(&self, site: u64, value: &Value) -> Result<AnswerPlan, PreparedRuntimeError> {
+        let shape = |detail| PreparedRuntimeError::AnswerShape { site, detail };
+        let named = |occurrence: &str| self.constructor_named(INTEGER_MODULE, occurrence);
+        let small = |host_id: DataConId, value: i64| AnswerPlan::Constructor {
+            host_id,
+            fields: vec![scalar_plan(RuntimeRep::Int(64), value as u128)],
+        };
+        match value {
+            Value::Lit(Literal::LitInt(value)) => {
+                let is =
+                    named("IS").ok_or(shape("the site's program declares no IS constructor"))?;
+                Ok(small(is, *value))
+            }
+            Value::Con(id, fields) if Some(*id) == named("IS") => match fields.as_slice() {
+                [Value::Lit(Literal::LitInt(value))] => Ok(small(*id, *value)),
+                _ => Err(shape("IS takes one Int literal")),
+            },
+            Value::Con(id, fields) if Some(*id) == named("IP") || Some(*id) == named("IN") => {
+                let positive = Some(*id) == named("IP");
+                let limbs = bignat_limbs(fields).ok_or(shape(
+                    "IP and IN take one canonical BigNat# payload of whole limbs",
+                ))?;
+                // Beyond the `IS` range: `IP` above i64::MAX, `IN` below i64::MIN.
+                let fits_small = <[u8; 8]>::try_from(limbs.as_slice()).is_ok_and(|limb| {
+                    let limb = u64::from_le_bytes(limb);
+                    if positive {
+                        limb <= i64::MAX as u64
+                    } else {
+                        limb <= 1_u64 << 63
+                    }
+                });
+                if fits_small {
+                    return Err(shape("a BigNat# payload must lie beyond the IS range"));
+                }
+                self.bytes_plan(
+                    site,
+                    INTEGER_MODULE,
+                    if positive { "IP" } else { "IN" },
+                    limbs,
+                    [],
+                )
+            }
+            _ => Err(shape(
+                "an Integer answer requires IS, IP, IN or an Int literal",
+            )),
+        }
+    }
+
+    /// `Natural`: `NS Word#`, or `NB` over canonical limbs above `u64::MAX`.
+    /// A bare word literal, or a non-negative `Int` literal, is an `NS`.
+    fn lower_natural(&self, site: u64, value: &Value) -> Result<AnswerPlan, PreparedRuntimeError> {
+        let shape = |detail| PreparedRuntimeError::AnswerShape { site, detail };
+        let named = |occurrence: &str| self.constructor_named(NATURAL_MODULE, occurrence);
+        let small = |host_id: DataConId, value: u64| AnswerPlan::Constructor {
+            host_id,
+            fields: vec![scalar_plan(RuntimeRep::Word(64), u128::from(value))],
+        };
+        let ns = || named("NS").ok_or(shape("the site's program declares no NS constructor"));
+        match value {
+            Value::Lit(Literal::LitWord(value)) => Ok(small(ns()?, *value)),
+            Value::Lit(Literal::LitInt(value)) => {
+                let value = u64::try_from(*value)
+                    .map_err(|_| shape("a Natural answer cannot be negative"))?;
+                Ok(small(ns()?, value))
+            }
+            Value::Con(id, fields) if Some(*id) == named("NS") => match fields.as_slice() {
+                [Value::Lit(Literal::LitWord(value))] => Ok(small(*id, *value)),
+                _ => Err(shape("NS takes one Word literal")),
+            },
+            Value::Con(id, fields) if Some(*id) == named("NB") => {
+                let limbs = bignat_limbs(fields).ok_or(shape(
+                    "NB takes one canonical BigNat# payload of whole limbs",
+                ))?;
+                if limbs.len() < 16 {
+                    return Err(shape("a BigNat# payload must lie beyond the NS range"));
+                }
+                self.bytes_plan(site, NATURAL_MODULE, "NB", limbs, [])
+            }
+            _ => Err(shape("a Natural answer requires NS, NB or a word literal")),
+        }
+    }
+}
+
+const TEXT_MODULE: &str = "Data.Text.Internal";
+const INTEGER_MODULE: &str = "GHC.Num.Integer";
+const NATURAL_MODULE: &str = "GHC.Num.Natural";
+
+/// The raw bytes behind a bridge byte-array value, in any of the forms the
+/// bridge emits for a `ByteArray#` backing.
+fn byte_backing(value: &Value) -> Option<Vec<u8>> {
+    match value {
+        Value::ByteArray(bytes) => Some(
+            bytes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        ),
+        Value::Lit(Literal::LitByteArray(bytes) | Literal::LitString(bytes)) => Some(bytes.clone()),
+        _ => None,
+    }
+}
+
+/// The one `BigNat#` payload of an `IP`/`IN`/`NB` constructor as canonical
+/// little-endian limbs: whole 64-bit words, at least one, top limb nonzero.
+fn bignat_limbs(fields: &[Value]) -> Option<Vec<u8>> {
+    let [payload] = fields else {
+        return None;
+    };
+    let limbs = byte_backing(payload)?;
+    let canonical = !limbs.is_empty()
+        && limbs.len() % 8 == 0
+        && limbs[limbs.len() - 8..].iter().any(|byte| *byte != 0);
+    canonical.then_some(limbs)
+}
+
+fn scalar_plan(rep: RuntimeRep, word: u128) -> AnswerPlan {
+    AnswerPlan::Scalar {
+        rep,
+        bits: word.to_ne_bytes(),
     }
 }
 

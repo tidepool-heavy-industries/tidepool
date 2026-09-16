@@ -294,6 +294,10 @@ pub struct CompiledProgram {
     /// with no top-level Bytes binding. Keys are logical bytes; values are the
     /// exact allocations whose addresses the emitter used.
     pub(crate) bytes: Arc<static_bytes::PinnedBytes>,
+    /// The external `ByteArray#` wrapper descriptor this program's code
+    /// allocates with (also in `descriptors`); host-built answers for this
+    /// program write their byte arrays through the same one.
+    pub(crate) bytes_array: Arc<ObjectDescriptor>,
     pub(crate) heap_top_specs: Vec<plan::HeapTopSpec>,
     /// Platform C-ABI adapter `(vmctx, result_out, managed_ref) -> status`.
     /// The target is generated code which calls Tail `prepared_enter`.
@@ -973,6 +977,7 @@ impl CompiledProgram {
             interned_constructors: plan.interned_constructors,
             byte_tops,
             bytes: plan.bytes,
+            bytes_array: plan.bytes_array,
             heap_top_specs: plan.heap_top_specs,
             force_adapter,
             callables,

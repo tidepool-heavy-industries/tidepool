@@ -9,12 +9,16 @@
 //! cursor and publishes the root as a realm-owned handle. A failure at any
 //! point leaves the cursor where it was: nothing built becomes reachable.
 //!
-//! Byte-backed leaves (`Text`, `Integer`, `Natural`) and handle delivery are
-//! later slices; a plan carries only constructors and scalars.
+//! A byte-backed leaf (`ByteArray#`: the backing of `Text` and of a
+//! multi-limb `Integer`/`Natural`) is one external payload plus its managed
+//! wrapper object. The payloads are allocated in the machine ledger before any
+//! object is written and revoked again if anything later fails, so a refused
+//! answer leaves the ledger as it found it. Handle delivery is a later slice.
 
 use std::sync::Arc;
 
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
+use tidepool_heap::external_storage::ExternalStorageValidationError;
 use tidepool_repr::execution_schema::RuntimeRep;
 use tidepool_repr::DataConId;
 
@@ -33,11 +37,19 @@ pub enum AnswerPlan {
     /// A scalar field, target-encoded; only the field's declared width is
     /// written.
     Scalar { rep: RuntimeRep, bits: [u8; 16] },
+    /// An unlifted `ByteArray#` field holding exactly these bytes.
+    Bytes(Vec<u8>),
 }
 
 /// Why a plan could not be built. Every variant leaves the heap untouched.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AnswerBuildError {
+    #[error("byte storage for the answer could not be allocated: {0:?}")]
+    Storage(ExternalStorageValidationError),
+    /// The program's own `ByteArray#` wrapper descriptor refused its single
+    /// address field: an integrity failure, not an answer-shape one.
+    #[error("byte-array wrapper: {0}")]
+    Wrapper(DescriptorMarshalError),
     #[error("constructor {0:?} is not declared by any installed program")]
     UnknownConstructor(DataConId),
     #[error("constructor {host_id:?} takes {expected} fields, the answer supplies {actual}")]
@@ -80,12 +92,26 @@ enum PlannedField {
     /// Index into the flattened object list.
     Object(usize),
     Scalar([u8; 16]),
+    /// Index into the flattened byte-array list.
+    Bytes(usize),
+}
+
+/// One `ByteArray#` wrapper of a flattened plan: the wrapper object lives in
+/// the reserved span at `offset`; its payload is allocated in the ledger
+/// separately and handed to [`FlattenedAnswer::write`].
+struct PlannedBytes {
+    data: Vec<u8>,
+    offset: usize,
 }
 
 /// A plan flattened against the machine's descriptors: every constructor
 /// resolved, every field count checked, every object given its offset.
 pub(super) struct FlattenedAnswer {
     objects: Vec<PlannedObject>,
+    byte_arrays: Vec<PlannedBytes>,
+    /// The external `Bytes` wrapper descriptor every byte array is written
+    /// with, from the program the answer is built for.
+    bytes_descriptor: Arc<ObjectDescriptor>,
     /// Total bytes the build writes, alignment padding included.
     pub(super) extent: usize,
 }
@@ -104,13 +130,31 @@ impl FlattenedAnswer {
     pub(super) fn resolve<'a>(
         plan: &AnswerPlan,
         resolve: &impl Fn(DataConId) -> Option<&'a Arc<ObjectDescriptor>>,
+        bytes_descriptor: &Arc<ObjectDescriptor>,
     ) -> Result<Self, AnswerBuildError> {
         let mut flattened = Self {
             objects: Vec::new(),
+            byte_arrays: Vec::new(),
+            bytes_descriptor: Arc::clone(bytes_descriptor),
             extent: 0,
         };
         flattened.visit(plan, resolve, 0)?;
         Ok(flattened)
+    }
+
+    /// The byte arrays the build needs payloads for, in the order
+    /// [`Self::write`] expects them.
+    pub(super) fn byte_arrays(&self) -> impl Iterator<Item = &[u8]> + '_ {
+        self.byte_arrays.iter().map(|bytes| bytes.data.as_slice())
+    }
+
+    /// Lay one object of `descriptor` out at the next word-aligned offset.
+    fn place(&mut self, descriptor: &ObjectDescriptor) -> Result<usize, AnswerBuildError> {
+        let offset = align_up(self.extent);
+        self.extent = offset
+            .checked_add(align_up(descriptor.allocation_extent() as usize))
+            .ok_or(AnswerBuildError::TooLarge(usize::MAX))?;
+        Ok(offset)
     }
 
     fn visit<'a>(
@@ -124,6 +168,15 @@ impl FlattenedAnswer {
         }
         match plan {
             AnswerPlan::Scalar { bits, .. } => Ok(PlannedField::Scalar(*bits)),
+            AnswerPlan::Bytes(data) => {
+                let descriptor = Arc::clone(&self.bytes_descriptor);
+                let offset = self.place(&descriptor)?;
+                self.byte_arrays.push(PlannedBytes {
+                    data: data.clone(),
+                    offset,
+                });
+                Ok(PlannedField::Bytes(self.byte_arrays.len() - 1))
+            }
             AnswerPlan::Constructor { host_id, fields } => {
                 let descriptor =
                     resolve(*host_id).ok_or(AnswerBuildError::UnknownConstructor(*host_id))?;
@@ -145,11 +198,7 @@ impl FlattenedAnswer {
                 for field in fields {
                     planned.push(self.visit(field, resolve, depth + 1)?);
                 }
-                let offset = align_up(self.extent);
-                let end = offset
-                    .checked_add(align_up(descriptor.allocation_extent() as usize))
-                    .ok_or(AnswerBuildError::TooLarge(usize::MAX))?;
-                self.extent = end;
+                let offset = self.place(descriptor)?;
                 self.objects.push(PlannedObject {
                     host_id: *host_id,
                     descriptor: Arc::clone(descriptor),
@@ -162,14 +211,39 @@ impl FlattenedAnswer {
     }
 
     /// Write every object into `span` (at least `self.extent` writable bytes
-    /// that nothing else reaches), children before parents, and return the
-    /// tagged root reference. A failure leaves `span` unpublished garbage.
+    /// that nothing else reaches), byte-array wrappers first, then
+    /// constructors children before parents, and return the tagged root
+    /// reference. `payloads` are the published ledger identities for
+    /// [`Self::byte_arrays`], in order, already holding their bytes. A failure
+    /// leaves `span` unpublished garbage; the caller revokes the payloads.
     ///
     /// # Safety
     /// `span` must name `self.extent` writable bytes inside the live nursery,
     /// beyond the allocation cursor, so no collection or generated code can
     /// observe them until the caller advances the cursor.
-    pub(super) unsafe fn write(&self, span: *mut u8) -> Result<usize, AnswerBuildError> {
+    pub(super) unsafe fn write(
+        &self,
+        span: *mut u8,
+        payloads: &[*mut u8],
+    ) -> Result<usize, AnswerBuildError> {
+        debug_assert_eq!(payloads.len(), self.byte_arrays.len());
+        let tagged = |pointer: *mut u8, descriptor: &ObjectDescriptor| {
+            // Reference words carry the descriptor's tag, as generated code
+            // tags every reference it constructs.
+            pointer as usize | usize::from(descriptor.tag())
+        };
+        let mut wrappers = Vec::with_capacity(self.byte_arrays.len());
+        for (bytes, payload) in self.byte_arrays.iter().zip(payloads) {
+            let pointer = span.add(bytes.offset);
+            marshal_descriptor_object(
+                pointer,
+                self.bytes_descriptor.allocation_extent() as usize,
+                &self.bytes_descriptor,
+                &[DescriptorValue::Address(payload.cast_const())],
+            )
+            .map_err(AnswerBuildError::Wrapper)?;
+            wrappers.push(tagged(pointer, &self.bytes_descriptor));
+        }
         let mut words = Vec::with_capacity(self.objects.len());
         for object in &self.objects {
             let pointer = span.add(object.offset);
@@ -179,6 +253,9 @@ impl FlattenedAnswer {
                     PlannedField::Scalar(bits) => DescriptorValue::Bits(*bits),
                     PlannedField::Object(index) => {
                         DescriptorValue::Managed(words[*index] as *mut u8)
+                    }
+                    PlannedField::Bytes(index) => {
+                        DescriptorValue::Managed(wrappers[*index] as *mut u8)
                     }
                 });
             }
@@ -197,9 +274,7 @@ impl FlattenedAnswer {
                 },
                 error,
             })?;
-            // Reference words carry the constructor's tag, as generated code
-            // tags every reference it constructs.
-            words.push(pointer as usize | usize::from(object.descriptor.tag()));
+            words.push(tagged(pointer, &object.descriptor));
         }
         words.last().copied().ok_or(AnswerBuildError::TooLarge(0))
     }
