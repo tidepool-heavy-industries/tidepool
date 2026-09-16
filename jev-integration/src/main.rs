@@ -1,3 +1,4 @@
+mod frontier;
 mod interpret;
 mod probes;
 mod scenarios;
@@ -30,6 +31,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run adversarial Jev-shaped boundary cases; no external actions execute.
+    Frontier {
+        #[arg(long)]
+        output_dir: PathBuf,
+        #[arg(long, default_value = "jev-latest")]
+        model: String,
+    },
     /// Run a bounded synthetic notebook decision chain; no shell commands execute.
     Simulate {
         #[arg(value_enum)]
@@ -84,6 +92,7 @@ fn harness_hash() -> String {
     let mut hash = blake3::Hasher::new();
     for source in [
         include_str!("main.rs"),
+        include_str!("frontier.rs"),
         include_str!("probes.rs"),
         include_str!("scenarios.rs"),
         include_str!("simulations.rs"),
@@ -149,6 +158,9 @@ async fn main() -> ExitCode {
 
 async fn execute(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let (endpoint, probe, request, key, output, timeout) = match cli.command {
+        Command::Frontier { output_dir, model } => {
+            return frontier::run(output_dir, &model).await;
+        }
         Command::Simulate {
             scenario,
             output_dir,

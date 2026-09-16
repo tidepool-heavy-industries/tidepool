@@ -34,6 +34,12 @@ shell commands execute. The initial four are documented in
 [linked simulation results](NOTEBOOK-SIMULATIONS.md). Ten Bash/LSP scenarios with
 paired absence cases are documented in [Bash/LSP experiments](BASH-LSP-EXPERIMENTS.md).
 
+`frontier --output-dir <new-directory>` probes Jev's useful decision boundary:
+wide conjunctive selection, semantic graph paths, temporal exceptions,
+overlapping judgments, and exact pointer traversal. The observed result is a
+sharp distinction between strong semantic width and unreliable deterministic
+depth; see [frontier experiments](FRONTIER-EXPERIMENTS.md).
+
 ## Live experiments
 
 Supply `TYPESAFE_API_KEY` through the process environment, not a CLI argument or

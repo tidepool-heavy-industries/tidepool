@@ -48,6 +48,18 @@ and the proposed record DSL. They assume the effect exists and are not compiled.
 with five potential LSP-assisted notebook workflows: symptom tracing, focused
 verification, implementation reuse, migration archaeology, and reproducer selection.
 
+[Decision-frontier experiments](../jev-integration/FRONTIER-EXPERIMENTS.md) now
+bound the architectural split with live calls. Jev handled 255-way six-field
+selection, explicit absence, seven-edge semantic path validation, temporal
+exceptions, and overlapping judgments. Exact opaque pointer traversal degraded
+at depth four, was unstable at eight, and failed consistently at 16–64. This
+supports a strong division: Haskell performs exact traversal, joins, and state
+transitions; Jev receives the deterministically computed semantic frontier and
+selects or judges a continuation. Wide requests also intermittently returned
+rounded probability maps that failed the provisional sum check despite choosing
+the expected key, so response-contract validity and action policy must remain
+separate from selected-answer identity.
+
 The user wants TypeSafe's Jev available as a fluent, expressive Haskell effect for
 resident LLM-authored programs. Previously considered FunctionGemma, Haiku, and
 Luna for this role. The motivating workloads are small semantic decisions embedded
