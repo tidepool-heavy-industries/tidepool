@@ -655,8 +655,17 @@ lowerTypeNode nodes rebase (TypePolicy.TypeNodeId raw) = case IntMap.lookup (fro
       loweredArguments loweredRows)
     where
       lowerRow (constructor, fields) = do
-        verifySourceLayout constructor
-        identity <- internConstructor constructor
+        sourceReps <- verifySourceLayout constructor
+        identity@(ConstructorId index) <- internConstructor constructor
+        -- The row is checked against the declaration it will name, not only
+        -- the type graph's DataCon: the declaration interned first (from the
+        -- program's own STG) is authoritative for the runtime layout, and a
+        -- type reached through another DataCon object for the same
+        -- constructor must not borrow it with a different field shape.
+        declared <- gets (fmap constructorFieldReps . listToMaybe
+          . drop (fromIntegral index) . constructorDecls)
+        unless (declared == Just sourceReps)
+          (failLayout "prepared type constructor declaration differs from its source fields")
         CtorRow identity <$> traverse rebase fields
       verifySourceLayout constructor = do
         let sourceFields = case splitTyConApp_maybe ty of
@@ -671,6 +680,7 @@ lowerTypeNode nodes rebase (TypePolicy.TypeNodeId raw) = case IntMap.lookup (fro
           && length sourceFields == length runtimeReps
           && resultReps == [LiftedRefRep])
           (failLayout "prepared type constructor source/runtime layout is not one-to-one")
+        pure sourceReps
       oneSourceRep (Scaled _ fieldType) = do
         reps <- repsForType fieldType
         case reps of
