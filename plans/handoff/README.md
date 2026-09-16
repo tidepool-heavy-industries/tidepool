@@ -199,6 +199,17 @@ Unverified: whether later parts of the test pass once the notice is drained.
   first; heap custody for retained imports is not settled (avoid GC across
   turns); asks and Core `result.cbor` are still written in parallel.
 
+**Superseded by F1/F2** (`b8d25637f` and the commit after it; see
+`next-wave-2026-09-15b.md` Part 3/4 and `implementation-2026-09-15.md`'s
+"Wave A, step 2" section). Current file map, in place of the above:
+`tidepool-runtime/src/session/prepared_turn.rs` is deleted; its role is now
+`PreparedEngine` in `tidepool-runtime/src/session/prepared.rs`, driven by
+`ResidentSession` in `session/resident.rs` and `session/persistent.rs`, with
+coverage in `tidepool-runtime/tests/prepared_turn.rs`.
+`haskell/lib/Tidepool/Internal/Resume.hs` (`Settled`, `settle`, `resumeLifted`)
+is new. `tidepool-actor/tests/prepared_render_probe.rs` is new and temporary —
+it is folded into `prepared_turn.rs` at F3.
+
 ### Corrected stale-fixture patches (`patches/stale-fixtures/v2/`, not compiled)
 Supersede 03, 04e and 04f:
 - 03 `hosted_lookup_and_status_use_actor_owned_views`: nothing replaced

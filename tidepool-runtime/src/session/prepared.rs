@@ -106,6 +106,11 @@ pub enum PreparedRuntimeError {
     /// consulted.
     #[error("the prepared route does not yet support {0}")]
     NotYetSupported(&'static str),
+    /// A pattern bind's settled value did not carry one managed field per
+    /// GHC binder. The extractor projects the binders as one tuple, so this
+    /// is a stale or foreign artifact, never a user error.
+    #[error("pattern bind produced {fields} fields for {binders} GHC binders")]
+    ProjectionShape { binders: usize, fields: usize },
 }
 
 impl PreparedRuntimeError {
@@ -121,6 +126,7 @@ impl PreparedRuntimeError {
             | Self::WrongEngine
             | Self::MissingProgram
             | Self::NotYetSupported(_)
+            | Self::ProjectionShape { .. }
             | Self::CrossRealmArgument { .. } => PreparedFailureKind::Rejected,
             Self::Cancelled => PreparedFailureKind::Cancelled,
             Self::Unavailable(_) => PreparedFailureKind::Integrity,
@@ -1343,6 +1349,42 @@ impl PreparedEngine {
         self.machine
             .observe_handle(program, handle, RunOptions::default().observation_budget)
             .map_err(PreparedRuntimeError::Run)
+    }
+
+    /// The managed fields of one constructor layer of a retained value,
+    /// each retained as its own handle under `realm`, without forcing. The
+    /// pattern-bind lane reads a settled tuple this way: the extractor
+    /// projects `(x, y) <- ...` as one tuple entry, so the tuple's fields ARE
+    /// the binders, in order. `handle` itself stays retained; the caller
+    /// releases it.
+    pub fn fields(
+        &mut self,
+        handle: PreparedHandle,
+        realm: RealmId,
+        binders: usize,
+    ) -> Result<Vec<PreparedHandle>, PreparedRuntimeError> {
+        let CodegenPreparedOuter::Constructor { fields, .. } = self
+            .machine
+            .inspect_outer(handle, realm)
+            .map_err(PreparedRuntimeError::Run)?;
+        let produced = fields.len();
+        let managed: Vec<PreparedHandle> = fields
+            .into_iter()
+            .filter_map(|field| match field {
+                PreparedResult::Managed(handle) => Some(handle),
+                PreparedResult::Void | PreparedResult::Scalar(_) => None,
+            })
+            .collect();
+        if managed.len() != binders || produced != binders {
+            for handle in managed {
+                self.machine.release(handle);
+            }
+            return Err(PreparedRuntimeError::ProjectionShape {
+                binders,
+                fields: produced,
+            });
+        }
+        Ok(managed)
     }
 
     /// Hand a run result to the session value plane: the handle moves into

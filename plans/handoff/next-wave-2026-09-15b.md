@@ -148,6 +148,10 @@ clippy `-D warnings`. No broad battery until the Wave A exit.
 
 ### F0. A2 probe (first action after approval; nothing else starts before its result)
 
+**Status: done**, folded into `b8d25637f` (`tidepool-actor/tests/prepared_render_probe.rs`).
+All three cases (render bind, dialect expression, opaque fallback) project;
+outcome (a) did not fail, so F1 proceeded as planned.
+
 One temporary extractor-gated test beside `tidepool-runtime/tests/run_llm_turn_sidecar.rs`
 (it already assembles a real preamble via `tidepool_mcp::build_preamble`/
 `ensure_effects_module`), running `run_turn` with `prepared: Some(PreparedTurn
@@ -168,6 +172,10 @@ deleted at F3, its assertions folded into `tests/prepared_turn.rs`.
 
 ### F1. Engine seam (Part 3), Expr + single Bind + Decl, no effects
 
+**Status: done, committed as `b8d25637f`** ("the engine route is a field of
+the resident session"). Evidence in `implementation-2026-09-15.md`'s "Wave A,
+step 2" section.
+
 Owners: `session/persistent.rs`, `session/resident.rs`, `session/prepared.rs`
 (shrink), `session/mod.rs` re-exports, the four construction sites, the two
 production `TurnRequest` sites. Test: `tests/prepared_turn.rs` rewritten on
@@ -179,6 +187,10 @@ with `EngineKind::Core` passes unchanged (dual-run, one test body). Registered
 in `tests/suites/session.rs`, gated by `require_extract()`.
 
 ### F2. Multi-binder bind + cell render on the prepared route
+
+**Status: implemented, landing in the commit after `b8d25637f`; test evidence
+pending the gate run.** Evidence in `implementation-2026-09-15.md`'s "Wave A,
+step 2" section.
 
 `(x, y) <- …` two-name bind bound from tuple fields with minted identities,
 then a turn importing `y`; `render_cell_observation` on `EngineKind::Prepared`

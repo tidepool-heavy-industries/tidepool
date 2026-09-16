@@ -138,6 +138,33 @@ impl Notebook {
         self.injected.push(binder.module.clone());
         binder.clone()
     }
+
+    /// Run a pattern bind (`(x, y) <- ...`): every GHC binder is bound from
+    /// the projected tuple in one atomic step.
+    fn bind_pattern(&mut self, text: &str) -> Vec<BoundBinder> {
+        let TurnResult::Bind {
+            bound, compiled, ..
+        } = self.compile(text)
+        else {
+            panic!("{text:?} did not classify as a bind");
+        };
+        assert!(bound.len() > 1, "{text:?} bound {} names", bound.len());
+        let outcome = self
+            .session
+            .run_projected_bind_with_sites(
+                "notebook_pattern_bind",
+                compiled.code(),
+                &bound,
+                Generation(self.generation),
+            )
+            .unwrap_or_else(|error| panic!("{text:?} failed to run: {error}"));
+        assert!(
+            matches!(outcome, ResidentOutcome::BindingsCommitted { .. }),
+            "{text:?} did not commit its bindings: {outcome:?}"
+        );
+        self.injected.push(bound[0].module.clone());
+        bound
+    }
 }
 
 fn notebook_turns(engine: EngineKind) {
@@ -176,6 +203,26 @@ fn notebook_turns(engine: EngineKind) {
     assert!(
         rendered.contains("42"),
         "{engine:?}: x + 22 rendered as {rendered}"
+    );
+
+    // A pattern bind: the extractor projects the binders as one tuple and
+    // the session binds its fields, each importable by its own name.
+    let bound = notebook.bind_pattern("(lo, hi) <- pure (x - 19, x + 80)");
+    let names: Vec<&str> = bound.iter().map(|binder| binder.name.as_str()).collect();
+    assert_eq!(names, ["lo", "hi"], "{engine:?}");
+    for name in ["lo", "hi"] {
+        assert!(
+            notebook
+                .session
+                .current_binding_in(tidepool_codegen::scope::ScopeId::ROOT, name)
+                .is_some(),
+            "{engine:?}: {name} is not bound"
+        );
+    }
+    let rendered = notebook.expression("hi - lo").to_string();
+    assert!(
+        rendered.contains("99"),
+        "{engine:?}: hi - lo rendered as {rendered}"
     );
 }
 

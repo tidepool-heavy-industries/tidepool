@@ -256,3 +256,55 @@ successfully before starting tests.
   the evidence, not proof that it shared the notification test's cause.
 - The integrated broad gate is in progress. Its final outcome and the full
   corrected corpus result remain unverified at this snapshot.
+
+## Wave A, step 2: the engine seam (F1, F2)
+
+Per `next-wave-2026-09-15b.md` Part 3/4, following the F0 probe
+(`tidepool-actor/tests/prepared_render_probe.rs`).
+
+**F1 (committed as `b8d25637f`), "the engine route is a field of the resident
+session".** `PersistentSession` holds a `ResidentEngine {Core(JitEffectMachine),
+Prepared(PreparedEngine)}` behind an `EngineKind` fixed at construction
+(`ResidentSession::unbootstrapped_on`); the composition roots read
+`TIDEPOOL_ENGINE=prepared` once per session. The run methods take a `TurnCode`
+(Core expr + table + sites + optional prepared program) rather than
+`(expr, table)`. Every template now defines `__prepared = TidepoolResume.settle
+__result` beside `__result`; the worker projects that entry
+(`preparedScaffoldTargetName`) and the host reads one
+`Tidepool.Internal.Resume.Settled` layer (`Done`/`Suspended`) instead of
+walking freer data. A completed value is observed through
+`PreparedMachine::observe_handle`, adopted into the machine's ROOT scope via
+`adopt_handle`, and bound as `BoundValue::Prepared` with identity `{unit,
+module: Val.G<g>, namespace: "value", occurrence: name}`. `PreparedEngine`
+(bootstrap/install/run_settled/observe/adopt/release) replaces the deleted
+`SessionTurns`/`TurnForm`/`prepared_turn_module`/`session/prepared_turn.rs`;
+`PreparedRuntime` stays for the composite tests until a later wave removes it.
+Tests: `tidepool-runtime/tests/prepared_turn.rs` dual-run
+(`notebook_turns_run_on_core`, `notebook_turns_run_on_prepared_stg`,
+registered in `tests/suites/session.rs`); `tidepool-actor/tests/prepared_render_probe.rs`
+(the F0 gate: render bind, dialect expression, and opaque fallback all
+project; shared constructors agree on id — the prepared closure is not a
+subset of the Core table, it declares more).
+
+**F2 (landing in the next commit after `b8d25637f`), "multi-binder bind and
+cell render on the prepared route".** `run_projected_bind_with_sites` on the
+Prepared route runs the settled scaffold, reads the projected tuple's fields
+with `PreparedEngine::fields` (one retained handle per field via
+`inspect_outer`, count checked against the GHC binders, otherwise
+`PreparedRuntimeError::ProjectionShape`), releases the tuple, and binds every
+field through one `bind_prepared` routine (scope validated before any
+adoption; failure releases every unbound handle) — outcome is
+`ResidentOutcome::BindingsCommitted` as on Core. `publish_captured_alias_in`
+re-mints a prepared alias's import identity to the alias's own module/name
+(shared root and handle; `release_binding_roots`'s aliased-root guard covers
+lifetime). The actor workbench (`start_fragment_settlement`) reports a
+prepared-route Haskell failure (`PreparedFailureKind::Language`) as the same
+`<cell item N>: runtime error: …` rejection Core reports for
+`ResidentError::Run`; integrity/infrastructure failures stay infrastructure
+errors. Tests (pending the gate run): `prepared_turn.rs` gains a pattern-bind
+turn (`(lo, hi) <- pure (x - 19, x + 80)` then `hi - lo`);
+`tidepool-actor/src/resident_workbench.rs` unit tests
+`notebook_cells_run_on_core` / `notebook_cells_run_on_prepared_stg` drive
+`begin_fragment` on a bare session: pattern bind, expression cell rendered
+through `render_cell_observation`/`cellDisplay`, a failing pattern bind
+rejected with the prefix intact, and a later cell importing the prefix.

@@ -618,6 +618,12 @@ enum PreparedTurnMode<'a> {
         generation: Generation,
         observation: Option<Vec<tidepool_repr::VarId>>,
     },
+    /// The value is the tuple the extractor projected a pattern bind's
+    /// binders into: bind its fields, in order, as `binders`.
+    Projected {
+        binders: &'a [BoundBinder],
+        generation: Generation,
+    },
 }
 
 /// The `Send` projection of one prepared run that crosses the eval thread:
@@ -627,41 +633,91 @@ enum PreparedRun {
         handle: PreparedHandle,
         value: Value,
     },
+    /// A projected tuple split into one retained handle per binder.
+    Projected { fields: Vec<PreparedHandle> },
     Suspended {
         request: PreparedHandle,
         continuation: PreparedHandle,
     },
 }
 
-/// Run `program`'s settled scaffold on the eval thread and observe a
-/// completed value there, while the invocation's realm cancel flag governs
-/// both the run and the forcing observation.
+/// What the eval thread does with a completed prepared value: the same
+/// preparation policy Core applies per binder tier. Tier-0 data is deep-forced
+/// (a forcing observation) before it is tenured; a Tier-1 closure is tenured
+/// as-is, since a function cannot be observed without applying it.
+#[derive(Clone)]
+enum SettlePlan {
+    /// Observe the value and return it as the turn's result.
+    Observe,
+    /// One binder at this tier.
+    Bind(ValueTier),
+    /// A projected tuple: one binder per field, each at its tier.
+    Project(Vec<ValueTier>),
+}
+
+/// Run `program`'s settled scaffold on the eval thread and prepare a
+/// completed value there under `plan`, while the invocation's realm cancel
+/// flag governs both the run and any forcing observation.
 fn settle_prepared(
     engine: &mut ResidentEngine,
     program: ProgramId,
     realm: RealmId,
+    plan: SettlePlan,
 ) -> Result<PreparedRun, PreparedRuntimeError> {
     let engine = engine
         .prepared_mut()
         .ok_or(PreparedRuntimeError::WrongEngine)?;
-    match engine.run_settled(program, realm)? {
-        PreparedSettlement::Done { value: handle } => {
-            let value = match engine.observe(program, handle) {
-                Ok(value) => value,
-                Err(error) => {
-                    engine.release(handle);
-                    return Err(error);
-                }
-            };
-            Ok(PreparedRun::Done { handle, value })
-        }
+    let handle = match engine.run_settled(program, realm)? {
+        PreparedSettlement::Done { value } => value,
         PreparedSettlement::Suspended {
             request,
             continuation,
-        } => Ok(PreparedRun::Suspended {
-            request,
-            continuation,
+        } => {
+            return Ok(PreparedRun::Suspended {
+                request,
+                continuation,
+            })
+        }
+    };
+    let observe =
+        |engine: &mut super::prepared::PreparedEngine, handle: PreparedHandle| match engine
+            .observe(program, handle)
+        {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                engine.release(handle);
+                Err(error)
+            }
+        };
+    match plan {
+        SettlePlan::Observe | SettlePlan::Bind(ValueTier::Tier0Data) => {
+            let value = observe(engine, handle)?;
+            Ok(PreparedRun::Done { handle, value })
+        }
+        SettlePlan::Bind(ValueTier::Tier1Closure) => Ok(PreparedRun::Done {
+            handle,
+            value: Value::Con(tidepool_codegen::heap_bridge::CLOSURE_SENTINEL, Vec::new()),
         }),
+        SettlePlan::Project(tiers) => {
+            let fields = engine.fields(handle, realm, tiers.len());
+            engine.release(handle);
+            let fields = fields?;
+            for (index, (field, tier)) in fields.iter().zip(&tiers).enumerate() {
+                if *tier != ValueTier::Tier0Data {
+                    continue;
+                }
+                if let Err(error) = observe(engine, *field) {
+                    // `observe` released the failing field; release the rest.
+                    for (other, field) in fields.iter().enumerate() {
+                        if other != index {
+                            engine.release(*field);
+                        }
+                    }
+                    return Err(error);
+                }
+            }
+            Ok(PreparedRun::Projected { fields })
+        }
     }
 }
 
@@ -973,7 +1029,18 @@ where
             }
             .into());
         }
-        let value = source_entry.value.clone();
+        let mut value = source_entry.value.clone();
+        // A prepared alias shares the source's root and handle, but a later
+        // turn imports it by ITS OWN thin value module and name, so the
+        // recorded identity is re-minted for the alias.
+        if let BoundValue::Prepared {
+            origin: Some(origin),
+            ..
+        } = &mut value
+        {
+            origin.identity.module = alias.module.clone();
+            origin.identity.occurrence = alias.name.clone();
+        }
         let id = SessionVarId::from_extract(alias.var_id);
         if self.core.bindings().get(id).is_some() {
             return Err(BindingAliasError::IdentityInUse(id).into());
@@ -1984,7 +2051,9 @@ where
         self.core
             .merge_table(code.table)
             .map_err(ResidentError::TableCollision)?;
-        if let PreparedTurnMode::Binding { generation, .. } = &mode {
+        if let PreparedTurnMode::Binding { generation, .. }
+        | PreparedTurnMode::Projected { generation, .. } = &mode
+        {
             // Claim the value-module identity before the turn runs, as the
             // Core bind path does.
             self.core.set_val_gen(*generation);
@@ -1992,9 +2061,16 @@ where
         let program = self.core.install_prepared(prepared.clone())?;
         let realm = self.run_context.resource_scope;
         let lexical_scope = self.run_context.lexical_scope;
+        let plan = match &mode {
+            PreparedTurnMode::Value => SettlePlan::Observe,
+            PreparedTurnMode::Binding { binder, .. } => SettlePlan::Bind(binder.tier),
+            PreparedTurnMode::Projected { binders, .. } => {
+                SettlePlan::Project(binders.iter().map(|binder| binder.tier).collect())
+            }
+        };
         let run_exec_started = std::time::Instant::now();
         let ran = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
-            Ok(settle_prepared(engine, program, realm))
+            Ok(settle_prepared(engine, program, realm, plan))
         })?;
         timing::record_stage(
             timing::NO_NODE,
@@ -2005,6 +2081,34 @@ where
         );
         let (handle, value) = match ran? {
             PreparedRun::Done { handle, value } => (handle, value),
+            PreparedRun::Projected { fields } => {
+                let PreparedTurnMode::Projected {
+                    binders,
+                    generation,
+                } = mode
+                else {
+                    if let Some(engine) = self.core.prepared_mut() {
+                        for field in fields {
+                            engine.release(field);
+                        }
+                    }
+                    return Err(PreparedRuntimeError::UnsettledEntry {
+                        program,
+                        detail: "a projected settlement for a non-pattern turn",
+                    }
+                    .into());
+                };
+                let bound: Vec<(&BoundBinder, PreparedHandle)> =
+                    binders.iter().zip(fields).collect();
+                self.bind_prepared(program, lexical_scope, generation, &bound)?;
+                for binder in binders {
+                    self.binding_provenance
+                        .insert(binder.var_id, Arc::clone(&provenance));
+                }
+                return Ok(ResidentOutcome::BindingsCommitted {
+                    output: self.captured.drain(),
+                });
+            }
             PreparedRun::Suspended {
                 request,
                 continuation,
@@ -2032,53 +2136,21 @@ where
                 generation,
                 observation,
             } => {
-                let unit = engine.entry_unit(program).unwrap_or_default();
-                let root = engine.adopt(handle).ok_or(PreparedRuntimeError::Run(
-                    tidepool_codegen::prepared_program::ExecutionError::UnknownPreparedHandle,
-                ))?;
-                if !self.core.scope_tree().is_live(lexical_scope) {
-                    if let Some(engine) = self.core.prepared_mut() {
-                        engine.release(handle);
-                    }
-                    return Err(SessionError::DeadScope(lexical_scope).into());
-                }
-                // The identity a later turn's `GlobalDecl` names when it
-                // imports this binder: its thin value module and name.
-                let identity = SymbolIdentity {
-                    unit,
-                    module: binder.module.clone(),
-                    namespace: "value".into(),
-                    occurrence: binder.name.clone(),
-                    record_parent: None,
-                };
-                let entry = BindingEntry {
-                    name: BindingName(binder.name.clone()),
-                    id: SessionVarId::from_extract(binder.var_id),
-                    module: SessionModule::val(generation),
-                    value: BoundValue::Prepared {
-                        root,
-                        handle,
-                        origin: Some(PreparedOrigin {
-                            identity,
-                            export: None,
-                            top: None,
-                        }),
-                    },
-                    type_display: Some(binder.type_display.clone()),
-                    defining_expr: None,
-                    scope: lexical_scope,
-                };
-                if let Err(error) = self.core.bind_replacing_decl_in(lexical_scope, entry) {
-                    if let Some(engine) = self.core.prepared_mut() {
-                        engine.release(handle);
-                    }
-                    return Err(error.into());
-                }
-                self.core.set_val_gen(generation);
+                self.bind_prepared(program, lexical_scope, generation, &[(binder, handle)])?;
                 self.binding_provenance.insert(binder.var_id, provenance);
                 if let Some(dependencies) = observation {
                     self.finish_observation(binder, &dependencies);
                 }
+            }
+            PreparedTurnMode::Projected { .. } => {
+                // The eval thread splits a projected tuple (`SettlePlan::
+                // Project`); a whole value here is a settlement mismatch.
+                engine.release(handle);
+                return Err(PreparedRuntimeError::UnsettledEntry {
+                    program,
+                    detail: "a whole-value settlement for a pattern turn",
+                }
+                .into());
             }
         }
         let output = self.captured.drain();
@@ -2086,6 +2158,87 @@ where
             output,
             result: EvalResult::new(value, self.core.session_table().clone(), Vec::new()),
         })
+    }
+
+    /// Bind retained prepared handles into the value plane at `scope`, one
+    /// entry per `(binder, handle)`, all at `generation`. Every handle is
+    /// adopted into the machine's ROOT scope first (no realm close releases
+    /// it), so the binding owns its lifetime and scope retirement releases
+    /// it. The lexical scope is validated before any handle is adopted; a
+    /// failure releases every handle not yet bound, so nothing is left rooted
+    /// outside both the realm ledger and the binding table.
+    fn bind_prepared(
+        &mut self,
+        program: ProgramId,
+        scope: ScopeId,
+        generation: Generation,
+        bound: &[(&BoundBinder, PreparedHandle)],
+    ) -> Result<(), ResidentError> {
+        let scope_is_live = self.core.scope_tree().is_live(scope);
+        let engine = self
+            .core
+            .prepared_mut()
+            .ok_or(PreparedRuntimeError::WrongEngine)?;
+        if !scope_is_live {
+            for (_, handle) in bound {
+                engine.release(*handle);
+            }
+            return Err(SessionError::DeadScope(scope).into());
+        }
+        let unit = engine.entry_unit(program).unwrap_or_default();
+        let mut roots = Vec::with_capacity(bound.len());
+        for (_, handle) in bound {
+            match engine.adopt(*handle) {
+                Some(root) => roots.push(root),
+                None => {
+                    for (_, handle) in bound {
+                        engine.release(*handle);
+                    }
+                    return Err(PreparedRuntimeError::Run(
+                        tidepool_codegen::prepared_program::ExecutionError::UnknownPreparedHandle,
+                    )
+                    .into());
+                }
+            }
+        }
+        for (index, ((binder, handle), root)) in bound.iter().zip(roots).enumerate() {
+            // The identity a later turn's `GlobalDecl` names when it imports
+            // this binder: its thin value module and name.
+            let identity = SymbolIdentity {
+                unit: unit.clone(),
+                module: binder.module.clone(),
+                namespace: "value".into(),
+                occurrence: binder.name.clone(),
+                record_parent: None,
+            };
+            let entry = BindingEntry {
+                name: BindingName(binder.name.clone()),
+                id: SessionVarId::from_extract(binder.var_id),
+                module: SessionModule::val(generation),
+                value: BoundValue::Prepared {
+                    root,
+                    handle: *handle,
+                    origin: Some(PreparedOrigin {
+                        identity,
+                        export: None,
+                        top: None,
+                    }),
+                },
+                type_display: Some(binder.type_display.clone()),
+                defining_expr: None,
+                scope,
+            };
+            if let Err(error) = self.core.bind_replacing_decl_in(scope, entry) {
+                if let Some(engine) = self.core.prepared_mut() {
+                    for (_, handle) in &bound[index..] {
+                        engine.release(*handle);
+                    }
+                }
+                return Err(error.into());
+            }
+        }
+        self.core.set_val_gen(generation);
+        Ok(())
     }
 
     fn run_transient_with_sites(
@@ -2340,10 +2493,20 @@ where
         gen: Generation,
     ) -> Result<ResidentOutcome, ResidentError> {
         if self.engine_kind() == EngineKind::Prepared {
-            return Err(PreparedRuntimeError::NotYetSupported(
-                "pattern binds (the multi-binder slice lands them)",
-            )
-            .into());
+            if binders.is_empty() {
+                return Err(PreparedRuntimeError::ProjectionShape {
+                    binders: 0,
+                    fields: 0,
+                }
+                .into());
+            }
+            return self.run_prepared(
+                code,
+                PreparedTurnMode::Projected {
+                    binders,
+                    generation: gen,
+                },
+            );
         }
         let TurnCode {
             expr, table, sites, ..

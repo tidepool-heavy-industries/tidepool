@@ -2509,6 +2509,16 @@ where
         Err(ResidentError::Run(error)) => Ok(ResidentWorkbenchStep::Rejected(
             render_runtime_rejection(input_ordinal, &error),
         )),
+        // A prepared-route Haskell failure is the same user-level rejection Core
+        // reports as `ResidentError::Run`; integrity and infrastructure failures
+        // stay infrastructure errors.
+        Err(ResidentError::Prepared(error))
+            if error.kind() == tidepool_runtime::session::PreparedFailureKind::Language =>
+        {
+            Ok(ResidentWorkbenchStep::Rejected(format!(
+                "<cell item {input_ordinal}>: runtime error: {error}"
+            )))
+        }
         Err(error) => Err(ResidentActorWorkbenchError::Resident(error)),
     }
 }
@@ -6613,5 +6623,172 @@ mod request_tests {
                 ..
             })
         ));
+    }
+
+    fn describe_step(step: &ResidentWorkbenchStep) -> String {
+        match step {
+            ResidentWorkbenchStep::Committed { output, .. } => format!("Committed({output})"),
+            ResidentWorkbenchStep::Rejected(text) => format!("Rejected({text})"),
+            ResidentWorkbenchStep::CommandBackgrounded { .. } => "CommandBackgrounded".into(),
+            ResidentWorkbenchStep::Running { .. } => "Running".into(),
+            ResidentWorkbenchStep::Replied { .. } => "Replied".into(),
+            ResidentWorkbenchStep::CancellationAcknowledged { .. } => {
+                "CancellationAcknowledged".into()
+            }
+        }
+    }
+
+    /// One notebook, two engines, through the production cell path
+    /// (`begin_fragment`): a pattern bind projected from its tuple, an
+    /// expression cell rendered through `render_cell_observation`
+    /// (`cellDisplay`), a failing cell reported as a rejection with the
+    /// committed prefix intact, and a later cell importing the prefix.
+    fn notebook_cells_on(engine: tidepool_runtime::session::EngineKind) {
+        use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+        use tidepool_runtime::session::{ModuleEnv, SessionLib};
+
+        tidepool_testing::eval_harness::require_extract();
+        // effects/preamble exactly as resident_local_actor.rs does but with the
+        // smaller declaration set:
+        let declarations = [tidepool_mcp::notifications_decl()];
+        let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
+        let mut include = effects.include_paths().to_vec();
+        include.push(tidepool_testing::eval_harness::prelude_path());
+        include.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../haskell/actors"));
+        // The effect row is a concrete row literal, as `ActorRole::
+        // haskell_effects_type` renders it: a turn-module alias would be
+        // persisted into the display page's thin interface and dangle.
+        let preamble = insert_preamble_imports(
+            &tidepool_mcp::build_preamble(&declarations, false),
+            "qualified Tidepool.Actors.Shoal as Shoal",
+        );
+        let effects_alias = "'[Shoal.Notifications]";
+        let engine_discriminant: u64 =
+            matches!(engine, tidepool_runtime::session::EngineKind::Prepared) as u64;
+        let session_id = tidepool_repr::SessionId(
+            (u64::from(std::process::id()) << 16) | 4_242 | engine_discriminant,
+        );
+        let session_root = tempfile::tempdir().expect("session root");
+        let lib = SessionLib::open(
+            session_id,
+            session_root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .expect("declaration plane")
+        .with_validation_include(include.clone());
+        let mut session = ResidentSession::unbootstrapped_on(
+            engine,
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput::new(),
+            include.clone(),
+            tidepool_runtime::DEFAULT_NURSERY_SIZE,
+            Some(lib),
+        );
+        let lexical_scope = session.mint_isolated_scope();
+        let resource_scope = RealmId::fresh();
+        session
+            .set_actor_execution(
+                tidepool_runtime::session::SessionRunContext {
+                    lexical_scope,
+                    resource_scope,
+                    ..tidepool_runtime::session::SessionRunContext::ROOT
+                },
+                EffectRunPolicy::HandleOrSuspend,
+                LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            )
+            .expect("actor execution context");
+        let context = crate::ActorSessionContext {
+            actor: crate::ActorRef::first(crate::ActorId(1)),
+            placement: crate::ActorPlacement {
+                session: session_id,
+                resource_scope,
+                lexical_scope,
+            },
+            effect_policy: EffectRunPolicy::HandleOrSuspend,
+            live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            source_imports: crate::ActorSourceImports::default(),
+            haskell_effects_alias: effects_alias.into(),
+        };
+        let source = ActorWorkbenchSource::new(preamble, include);
+        let mut ordinal = 0usize;
+        let mut run = |text: &str| -> ResidentWorkbenchStep {
+            ordinal += 1;
+            begin_fragment(
+                &mut session,
+                &context,
+                &source,
+                RequestWorkbenchScope {
+                    response: None,
+                    request: None,
+                    type_modules: &[],
+                },
+                ParsedBlock {
+                    ordinal,
+                    total: 1,
+                    source: text.into(),
+                },
+                None,
+            )
+            .unwrap_or_else(|error| panic!("{engine:?}: {text:?}: {error}"))
+        };
+
+        // 1. pattern bind: both names bound from the projected tuple
+        match run("(x, y) <- pure (20 :: Int, 22 :: Int)") {
+            ResidentWorkbenchStep::Committed {
+                output,
+                installed_bindings,
+                ..
+            } => {
+                assert_eq!(installed_bindings, vec!["x".to_string(), "y".to_string()]);
+                assert!(output.contains("x, y"), "{engine:?}: {output}");
+            }
+            other => panic!(
+                "{engine:?}: expected Committed, got {}",
+                describe_step(&other)
+            ),
+        }
+
+        // 2. expression cell: rendered through the cell display
+        match run("x + y") {
+            ResidentWorkbenchStep::Committed { output, .. } => {
+                assert!(output.contains("42"), "{engine:?}: {output}");
+            }
+            other => panic!(
+                "{engine:?}: expected Committed, got {}",
+                describe_step(&other)
+            ),
+        }
+
+        // 3. a failing cell is a rejection, not an infrastructure error
+        match run("Just impossible <- pure (Nothing :: Maybe Int)") {
+            ResidentWorkbenchStep::Rejected(text) => {
+                assert!(text.contains("runtime error"), "{engine:?}: {text}");
+            }
+            other => panic!(
+                "{engine:?}: expected Rejected, got {}",
+                describe_step(&other)
+            ),
+        }
+
+        // 4. the committed prefix survives the failure
+        match run("y - x") {
+            ResidentWorkbenchStep::Committed { output, .. } => {
+                assert!(output.contains('2'), "{engine:?}: {output}");
+            }
+            other => panic!(
+                "{engine:?}: expected Committed, got {}",
+                describe_step(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn notebook_cells_run_on_core() {
+        notebook_cells_on(tidepool_runtime::session::EngineKind::Core);
+    }
+
+    #[test]
+    fn notebook_cells_run_on_prepared_stg() {
+        notebook_cells_on(tidepool_runtime::session::EngineKind::Prepared);
     }
 }
