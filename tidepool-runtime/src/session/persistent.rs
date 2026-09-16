@@ -248,6 +248,16 @@ impl ResidentEngine {
             Self::Prepared(engine) => Some(engine.old_bytes()),
         }
     }
+
+    /// Read-only heap/GC snapshot, whichever engine this session runs -- see
+    /// [`PreparedEngine::heap_stats`] for the prepared route's field mapping.
+    #[must_use]
+    pub fn heap_stats(&self) -> tidepool_codegen::jit_machine::HeapStats {
+        match self {
+            Self::Core(machine) => machine.heap_stats(),
+            Self::Prepared(engine) => engine.heap_stats(),
+        }
+    }
 }
 
 /// Cross-thread custody for one completed bind root. The root never moves
@@ -578,6 +588,13 @@ impl PersistentSession {
     #[must_use]
     pub fn old_bytes(&self) -> Option<usize> {
         self.machine.as_ref()?.old_bytes()
+    }
+
+    /// Read-only heap/GC snapshot of this session's live machine, whichever
+    /// engine it runs; `None` before the machine has bootstrapped.
+    #[must_use]
+    pub fn heap_stats(&self) -> Option<tidepool_codegen::jit_machine::HeapStats> {
+        self.machine.as_ref().map(ResidentEngine::heap_stats)
     }
 
     // -- table accumulation ------------------------------------------------

@@ -2798,31 +2798,6 @@ impl Harness {
         }
         let hole = pending.hole;
         let mut co = self.checkout_resume_waiting(node, &hole).await?;
-        // `ResidentSession::live_payload_handle` reaches the live payload only
-        // through `PersistentSession::machine_mut`'s Core-only accessor — on
-        // the prepared route it returns `None` indistinguishably from "this
-        // frame holds no untaken payload", which would surface here as the
-        // wrong diagnostic (implying the closure was never there, rather than
-        // that the prepared route has no seam to fetch it yet). Name the real
-        // seam instead of letting a closure-valued finalize silently fail as
-        // if the value never existed.
-        if co.machine().engine_kind() == EngineKind::Prepared {
-            let holes: Vec<HoleId> = co
-                .machine()
-                .parked_holes()
-                .into_iter()
-                .map(|h| HoleId(h.to_string()))
-                .collect();
-            co.restore_suspended(holes);
-            return Err(HarnessError::Resident(
-                "take_live_payload_handle_keep_open: the prepared engine has no \
-                 live-payload handle accessor yet (tidepool_runtime::session::\
-                 ResidentSession::live_payload_handle reaches the payload only via \
-                 PersistentSession::machine_mut, which is Core-only) — a closure-valued \
-                 finalize cannot be taken on the prepared route until that seam exists"
-                    .into(),
-            ));
-        }
         let handle = co.machine().live_payload_handle(&hole.0)?;
         let handle = match handle {
             Some(h) => h,

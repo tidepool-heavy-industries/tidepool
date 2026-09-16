@@ -1342,13 +1342,18 @@ where
             return Ok(None);
         };
         let provenance = self.parked_provenance.get(&id).cloned().unwrap_or_default();
-        let Some(machine) = self.core.machine_mut() else {
+        // Whichever engine this session runs: Core reaches the payload
+        // through `machine_mut`, prepared through `prepared_mut` — mirrors
+        // Core's `handle_from_live_payload` on the prepared route (see
+        // `PreparedEngine::live_payload_handle`).
+        let handle = if let Some(machine) = self.core.machine_mut() {
+            machine.handle_from_live_payload(id).map_err(resident_jit)?
+        } else if let Some(engine) = self.core.prepared_mut() {
+            engine.live_payload_handle(id)?
+        } else {
             return Ok(None);
         };
-        Ok(machine
-            .handle_from_live_payload(id)
-            .map_err(resident_jit)?
-            .map(|handle| RootCustody::new(handle, Arc::clone(&self.custody_cleanup), provenance)))
+        Ok(handle.map(|handle| RootCustody::new(handle, Arc::clone(&self.custody_cleanup), provenance)))
     }
 
     /// [`Self::live_payload_handle`]'s sibling for a result that must outlive
@@ -1822,7 +1827,7 @@ where
     }
 
     pub fn heap_stats(&self) -> Option<tidepool_codegen::jit_machine::HeapStats> {
-        self.core.machine().map(|m| m.heap_stats())
+        self.core.heap_stats()
     }
 
     /// Test/debug-only passthrough to
@@ -2952,21 +2957,24 @@ where
         let Some(entry) = entry.handle else {
             unreachable!("live custody contains its handle");
         };
-        let slot = self
-            .core
-            .machine_mut()
-            .map(|m| m.handle_slot(entry))
-            .transpose()
-            .map_err(resident_jit)?
-            .flatten()
-            .ok_or_else(|| {
-                ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
-                    format!(
-                        "run_rooted_entry: handle {entry:?} is not live (never minted, or its \
-                         realm was already closed)"
-                    ),
-                ))))
-            })?;
+        // Whichever engine this session runs: Core's `handle_slot` and
+        // `PreparedEngine::handle_slot` both take the bare cross-engine
+        // `ValueHandle` a `RootCustody` carries.
+        let slot = if let Some(machine) = self.core.machine_mut() {
+            machine.handle_slot(entry).map_err(resident_jit)?
+        } else if let Some(engine) = self.core.prepared_mut() {
+            engine.handle_slot(entry)
+        } else {
+            None
+        };
+        let slot = slot.ok_or_else(|| {
+            ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
+                format!(
+                    "run_rooted_entry: handle {entry:?} is not live (never minted, or its \
+                     realm was already closed)"
+                ),
+            ))))
+        })?;
         // `App(Var(ROOTED_ENTRY_VAR), argument)`. Same shape and reasoning as
         // `apply_finalized`: the Var-miss arm keys the external override on
         // ExternalEnv MEMBERSHIP, and the argument rides as a bare `Lit` whose
@@ -3534,9 +3542,17 @@ where
         let binding_count = self.core.release_binding_roots(released);
         let handles = self.custody_cleanup.take_all();
         let count = handles.len();
+        // Whichever engine this session runs: a dropped `RootCustody` only
+        // ever carries the bare cross-engine `ValueHandle` id, so both sides
+        // release by that id (`PreparedEngine::discard_handle` mirrors
+        // `JitEffectMachine::discard_handle`).
         if let Some(machine) = self.core.machine_mut() {
             for handle in handles {
                 machine.discard_handle(handle);
+            }
+        } else if let Some(engine) = self.core.prepared_mut() {
+            for handle in handles {
+                engine.discard_handle(handle);
             }
         }
         count + binding_count

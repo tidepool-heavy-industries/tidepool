@@ -15,10 +15,10 @@ use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
 use super::binding_table::BindingIndex;
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
-    AnswerPlan, CompileError, CompiledProgram, ExecutionError, ImportBindings, PreparedCallOptions,
-    PreparedFrameEvidence, PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions,
-    PreparedOuter as CodegenPreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
-    RunOptions, MAX_ANSWER_DEPTH,
+    AnswerPlan, CompileError, CompiledProgram, ExecutionError, ImportBindings, ParkRequest,
+    PreparedCallOptions, PreparedFrameEvidence, PreparedHandle, PreparedInput, PreparedMachine,
+    PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter, PreparedResult,
+    PreparedResultBatch, ProgramId, RunOptions, MAX_ANSWER_DEPTH,
 };
 // Re-exported: callers of this module's realm-scoped cancellation API
 // (`open_realm`/`cancel_handle`/`close_realm`) need both types without a
@@ -919,6 +919,11 @@ pub struct PreparedEngine {
     /// collection has run, which disables the growth trigger until there is
     /// a real baseline to grow from (see [`Self::major_collection_due`]).
     old_bytes_at_last_major: usize,
+    /// Count of major collections [`Self::quiesce_and_collect_now`] has
+    /// actually run (incremented only on success, never on a `NotQuiescent`
+    /// refusal). The prepared route's analogue of
+    /// `JitEffectMachine::heap_stats`'s `gc_count` -- see [`Self::heap_stats`].
+    major_collections: u64,
 }
 
 /// How many programs may install between major collections before one runs
@@ -1027,6 +1032,7 @@ impl PreparedEngine {
             old_bytes: 0,
             installs_since_major: 0,
             old_bytes_at_last_major: 0,
+            major_collections: 0,
         };
         // The first program can conflict only with itself.
         let plan = engine.plan_evidence(&facts)?;
@@ -1411,14 +1417,30 @@ impl PreparedEngine {
         let observed =
             self.machine
                 .observe_handle(program, payload, RunOptions::default().observation_budget);
-        self.machine.release(payload);
         let request = match observed {
             Ok(request) => request,
             Err(error) => {
+                self.machine.release(payload);
                 self.machine.release(continuation);
                 return Err(PreparedRuntimeError::Run(error));
             }
         };
+        // A live-payload policy names one field of THIS request Con (the
+        // convention's field 1) as the value crossing the runtime boundary
+        // by reference; mirror it into a persistent root BEFORE releasing
+        // `payload`, exactly as `JitEffectMachine::run_suspendable_shared`
+        // tenures the field's raw pointer on Core -- see
+        // `Self::tenure_live_payload`.
+        let live_payload_root = match self.tenure_live_payload(payload, realm, park.live_payload, &request)
+        {
+            Ok(root) => root,
+            Err(error) => {
+                self.machine.release(payload);
+                self.machine.release(continuation);
+                return Err(PreparedRuntimeError::Run(error));
+            }
+        };
+        self.machine.release(payload);
         // A request carrying a dynamic site names it; an ordinary effect
         // request is classified by its outer constructor through the verb
         // index, which names the synthetic row answering it.
@@ -1459,13 +1481,74 @@ impl PreparedEngine {
             .park(
                 continuation,
                 realm,
-                park.principal,
-                park.effect_policy,
-                park.live_payload,
-                evidence,
+                live_payload_root,
+                ParkRequest {
+                    principal: park.principal,
+                    effect_policy: park.effect_policy,
+                    live_payload: park.live_payload,
+                    evidence,
+                },
             )
             .map_err(PreparedRuntimeError::Run)?;
         Ok(PreparedParked { id, request })
+    }
+
+    /// Retain one field of `payload` (the request Con `park_suspension` just
+    /// observed) as a persistent root, per `policy` -- the prepared route's
+    /// analogue of `JitEffectMachine`'s `tenure_live_payload`, built from the
+    /// primitives this layer actually has above the JIT boundary:
+    /// `payload`'s OWN fields are read through `PreparedMachine::inspect_outer`
+    /// (which mints a fresh handle per managed field), the policy's chosen
+    /// field's handle is adopted into a bare root via
+    /// [`PreparedMachine::take_handle_root`], and every other minted field
+    /// handle is released immediately (`inspect_outer` is non-consuming and
+    /// re-mints on every call, so nothing here is `payload`'s own retained
+    /// registration).
+    ///
+    /// `LivePayloadPolicy::ValueField(field)` retains `field` whenever the
+    /// bridged `request` has that many fields, whatever its shape;
+    /// `ClosureField(field)` retains it only when the bridge found the
+    /// closure sentinel there -- both read `request`, exactly as
+    /// `JitEffectMachine`'s own `request_has_field`/
+    /// `request_field_carries_closure_sentinel` do for Core. `None` when the
+    /// policy names no field, the constructor doesn't have it, or (rare: a
+    /// nullary/scalar-only request) the field is not itself managed.
+    fn tenure_live_payload(
+        &mut self,
+        payload: PreparedHandle,
+        realm: RealmId,
+        policy: LivePayloadPolicy,
+        request: &Value,
+    ) -> Result<Option<tidepool_codegen::old_space::RootSlot>, ExecutionError> {
+        let field = match policy {
+            LivePayloadPolicy::None => None,
+            LivePayloadPolicy::ClosureField(field) => {
+                matches!(request, Value::Con(_, fields)
+                    if fields.get(field).is_some_and(tidepool_codegen::heap_bridge::contains_closure_sentinel))
+                .then_some(field)
+            }
+            LivePayloadPolicy::ValueField(field) => {
+                matches!(request, Value::Con(_, fields) if field < fields.len()).then_some(field)
+            }
+        };
+        let Some(field) = field else {
+            return Ok(None);
+        };
+        let CodegenPreparedOuter::Constructor { fields, .. } =
+            self.machine.inspect_outer(payload, realm)?;
+        let mut root = None;
+        for (index, value) in fields.into_iter().enumerate() {
+            match value {
+                PreparedResult::Managed(handle) if index == field => {
+                    root = self.machine.take_handle_root(handle)?;
+                }
+                PreparedResult::Managed(handle) => {
+                    self.machine.release(handle);
+                }
+                PreparedResult::Void | PreparedResult::Scalar(_) => {}
+            }
+        }
+        Ok(root)
     }
 
     /// Peek at a parked frame's evidence and realm without consuming it.
@@ -1486,6 +1569,20 @@ impl PreparedEngine {
     #[must_use]
     pub fn parked_ids(&self) -> Vec<ContinuationId> {
         self.machine.parked_ids()
+    }
+
+    /// Mint a [`ValueHandle`] over the declared live payload of the frame
+    /// parked under `id`, mirroring `JitEffectMachine::handle_from_live_payload`
+    /// on the Core route (`PreparedMachine::take_live_payload_handle`). The
+    /// frame stays parked; `None` when `id` is not parked or its frame holds
+    /// no untaken live payload.
+    pub fn live_payload_handle(
+        &mut self,
+        id: ContinuationId,
+    ) -> Result<Option<ValueHandle>, PreparedRuntimeError> {
+        self.machine
+            .take_live_payload_handle(id)
+            .map_err(PreparedRuntimeError::Run)
     }
 
     /// Re-enter the frame parked under `id` with `answer`, a handle the
@@ -2001,6 +2098,23 @@ impl PreparedEngine {
         self.machine.release(handle)
     }
 
+    /// [`Self::release`] by the bare cross-engine [`ValueHandle`] id --
+    /// `ResidentSession::settle_dropped_custody`'s deferred-cleanup path,
+    /// which only ever recovers a dropped [`crate::session::RootCustody`]'s
+    /// raw id (see `PreparedMachine::discard_handle`'s doc).
+    pub fn discard_handle(&mut self, handle: ValueHandle) -> bool {
+        self.machine.discard_handle(handle)
+    }
+
+    /// The persistent root slot behind a retained handle, by its bare
+    /// cross-engine [`ValueHandle`] id -- `ResidentSession::run_rooted_entry`'s
+    /// slot lookup, which only ever holds a `RootCustody`'s raw id (see
+    /// [`Self::discard_handle`]'s doc for the same shape).
+    #[must_use]
+    pub fn handle_slot(&self, handle: ValueHandle) -> Option<tidepool_codegen::old_space::RootSlot> {
+        self.machine.handle_slot(handle)
+    }
+
     /// Release every handle in `handles`.
     pub fn release_all(&mut self, handles: impl IntoIterator<Item = PreparedHandle>) {
         for handle in handles {
@@ -2175,7 +2289,36 @@ impl PreparedEngine {
         }
         self.installs_since_major = 0;
         self.old_bytes_at_last_major = self.machine.old_bytes_live();
+        self.major_collections += 1;
         Ok(())
+    }
+
+    /// Read-only heap/GC snapshot mirroring `JitEffectMachine::heap_stats` on
+    /// the Core route. Field mapping onto the prepared machine's own
+    /// accounting (`docs/GLOSSARY.md`'s vocabulary does not yet cover this
+    /// route, so the mapping is documented here instead):
+    ///
+    /// - `fragments` ↔ installed programs ([`Self::residency`]'s
+    ///   `programs`) -- BOUNDED by [`Self::quiesce_and_collect_now`]'s
+    ///   retirement, unlike Core's monotonic compiled-function count, so the
+    ///   harness's fragment-ceiling rotation is a no-op on this engine by
+    ///   design: this count can fall as programs retire, and never needs the
+    ///   rotation Core relies on to bound it;
+    /// - `live_bytes` ↔ prepared old-space bytes as of the last successful
+    ///   major collection ([`Self::old_bytes`]);
+    /// - `gc_count` ↔ major collections actually run
+    ///   ([`Self::major_collections`]) -- there is no nursery-collection
+    ///   counter exposed at this boundary;
+    /// - `nursery_bytes` ↔ `0`: `PreparedMachine` does not expose its
+    ///   nursery capacity today, and no consumer of this snapshot reads it.
+    #[must_use]
+    pub fn heap_stats(&self) -> tidepool_codegen::jit_machine::HeapStats {
+        tidepool_codegen::jit_machine::HeapStats {
+            nursery_bytes: 0,
+            live_bytes: self.old_bytes,
+            gc_count: self.major_collections,
+            fragments: self.residency().programs as u64,
+        }
     }
 
     /// Prepared old-space bytes as of the last successful

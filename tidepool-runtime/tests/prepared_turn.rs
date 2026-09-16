@@ -1941,6 +1941,109 @@ fn notebook_handle_delivery_on_prepared_stg() {
     notebook_handle_delivery(EngineKind::Prepared);
 }
 
+/// A parked frame's OWN declared request payload -- not a bound value's
+/// later binding handle (`notebook_handle_delivery`'s
+/// `prepared_binding_handle`), the SAME stow-at-park mechanism
+/// `finalize`/`AsyncSpawnWith` rely on to move a live heap value between
+/// continuations (`ResidentSession::live_payload_handle`). This session's
+/// default `LivePayloadPolicy::HASKELL_EFFECT_VALUE` (`ValueField(1)`)
+/// retains field 1 of every suspended request as its own live root
+/// regardless of whether it is a closure (unlike `ClosureField`'s
+/// closure-only fallback), so a plain `runLLMTurn` ask already carries one --
+/// no green-thread/closure plumbing is needed to exercise the accessor.
+/// Taking the handle must leave the frame parked and rooted (payload and
+/// continuation are independent roots), mint exactly one handle, refuse a
+/// second take on the same frame, and the frame must still resume normally
+/// afterward.
+fn notebook_live_payload(engine: EngineKind) {
+    use tidepool_bridge::Value;
+
+    let mut notebook = Notebook::new(engine);
+    let rendered = notebook.expression("41 + 1").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: warm-up rendered {rendered}"
+    );
+    if engine == EngineKind::Prepared {
+        assert!(
+            notebook.session.heap_stats().is_some(),
+            "{engine:?}: heap_stats is None on a booted prepared session"
+        );
+    }
+    // Brings `True` into the session table beside `I#`.
+    let rendered = notebook.expression("not False").to_string();
+    assert!(
+        rendered.contains("true"),
+        "{engine:?}: not False rendered as {rendered}"
+    );
+    let true_id = notebook.constructor("True");
+
+    let handles_before = notebook.session.value_handle_count();
+    let (binder, hole) = notebook.suspend_ask(engine, "b", "(runLLMTurn @Bool \"q\" :: M Bool)");
+    assert_eq!(notebook.session.parked_count(), 1, "{engine:?}");
+
+    let custody = notebook
+        .session
+        .live_payload_handle(hole.cont_id())
+        .unwrap_or_else(|error| panic!("{engine:?}: live_payload_handle failed: {error}"))
+        .unwrap_or_else(|| panic!("{engine:?}: the ask's own request carries no live payload"));
+
+    // Taking the handle does not disturb the frame: it stays parked and
+    // rooted.
+    assert_eq!(
+        notebook.session.parked_count(),
+        1,
+        "{engine:?}: taking the handle unparked the frame"
+    );
+    assert!(
+        notebook.session.parked_holes().contains(&hole.cont_id()),
+        "{engine:?}: the hole is no longer among the parked set"
+    );
+    assert_eq!(
+        notebook.session.value_handle_count(),
+        handles_before + 1,
+        "{engine:?}: live_payload_handle did not mint exactly one handle"
+    );
+
+    // A second take on the same frame finds no untaken payload.
+    let second = notebook
+        .session
+        .live_payload_handle(hole.cont_id())
+        .unwrap_or_else(|error| panic!("{engine:?}: second live_payload_handle failed: {error}"));
+    assert!(
+        second.is_none(),
+        "{engine:?}: a second take found an already-taken payload"
+    );
+
+    drop(custody);
+    assert_eq!(
+        notebook.session.value_handle_count(),
+        handles_before,
+        "{engine:?}: dropping custody did not release the handle"
+    );
+
+    // The frame still resumes normally afterward -- payload and
+    // continuation are independent roots.
+    notebook.resume_bind(hole, &binder, Value::Con(true_id, Vec::new()));
+    assert!(notebook.session.parked_holes().is_empty(), "{engine:?}");
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    let rendered = notebook.expression("not b").to_string();
+    assert!(
+        rendered.contains("false"),
+        "{engine:?}: not b rendered as {rendered}"
+    );
+}
+
+#[test]
+fn notebook_live_payload_on_core() {
+    notebook_live_payload(EngineKind::Core);
+}
+
+#[test]
+fn notebook_live_payload_on_prepared_stg() {
+    notebook_live_payload(EngineKind::Prepared);
+}
+
 /// `eitherDecode`'s two engine bodies must render the same `Value` for the
 /// same input: the Core route intercepts `eitherDecodeValue` and lowers it
 /// to the `JsonDecode` primop (Rust `serde_json`); the prepared-STG route

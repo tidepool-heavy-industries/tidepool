@@ -268,6 +268,18 @@ impl PreparedHandle {
 /// [`ExecutionError::UnknownPreparedHandle`], never a silently-skipped slot.
 pub type ImportBindings = BTreeMap<SymbolIdentity, PreparedHandle>;
 
+/// [`PreparedMachine::park`]'s policy/evidence bundle -- grouped so the
+/// method stays under clippy's argument-count lint alongside the two
+/// identity/root parameters (`continuation`, `realm`) and the payload root
+/// `park` itself never derives.
+#[derive(Clone, Copy)]
+pub struct ParkRequest {
+    pub principal: PrincipalId,
+    pub effect_policy: EffectRunPolicy,
+    pub live_payload: LivePayloadPolicy,
+    pub evidence: PreparedFrameEvidence,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreparedInput {
     Scalar(u64),
@@ -1296,6 +1308,24 @@ impl<'code> PreparedMachine<'code> {
         true
     }
 
+    /// [`Self::release`], but by the bare cross-engine [`ValueHandle`] id
+    /// rather than a rep-carrying [`PreparedHandle`] -- `take_handle` never
+    /// needed the rep (see [`Self::release`]'s body), so a caller holding
+    /// only the raw id (a dropped [`crate::suspension::RootCustody`]'s
+    /// deferred cleanup, the one case that crosses the runtime session
+    /// boundary without its `PreparedHandle` wrapper) can still release it.
+    /// Mirrors `JitEffectMachine::discard_handle` minus that machine's
+    /// immediate `collect_retired_storage` call: the prepared route reclaims
+    /// retired storage only at its own quiescent boundary
+    /// (`PreparedEngine::quiesce_and_collect`), never inline on release.
+    pub fn discard_handle(&mut self, handle: ValueHandle) -> bool {
+        let Some(entry) = self.handles.take_handle(handle) else {
+            return false;
+        };
+        self.machine.deregister_persistent_root(entry.slot.addr());
+        true
+    }
+
     /// Obtain a clone-able cancellation handle scoped to ONE runtime
     /// resource scope, lazily minting that scope's flag on first request.
     /// Cancelling this handle aborts only runs/calls made with `realm` --
@@ -1375,15 +1405,25 @@ impl<'code> PreparedMachine<'code> {
     /// handle is [`ExecutionError::UnknownPreparedHandle`] with nothing
     /// changed. The minted [`ContinuationId`] is the only token that names
     /// the frame afterwards; no [`PreparedHandle`] ever is.
+    ///
+    /// `live_payload_root` is the frame's already-tenured live payload, if
+    /// any -- callers compute it (`PreparedEngine::tenure_live_payload`
+    /// mirrors `JitEffectMachine`'s own pre-park tenure) since minting it
+    /// needs a handle inspection this method has no reason to also know how
+    /// to do; `park` only stows what it is given.
     pub fn park(
         &mut self,
         continuation: PreparedHandle,
         realm: RealmId,
-        principal: PrincipalId,
-        effect_policy: EffectRunPolicy,
-        live_payload: LivePayloadPolicy,
-        evidence: PreparedFrameEvidence,
+        live_payload_root: Option<crate::old_space::RootSlot>,
+        request: ParkRequest,
     ) -> Result<ContinuationId, ExecutionError> {
+        let ParkRequest {
+            principal,
+            effect_policy,
+            live_payload,
+            evidence,
+        } = request;
         self.ensure_handle_access()?;
         let owned_here = self
             .handles
@@ -1409,7 +1449,7 @@ impl<'code> PreparedMachine<'code> {
             principal,
             effect_policy,
             kind: ParkKind::Plain,
-            live_payload_root: None,
+            live_payload_root,
             live_payload,
             cancel_flag,
             evidence: FrameEvidence::Prepared(evidence),
@@ -1504,6 +1544,33 @@ impl<'code> PreparedMachine<'code> {
             },
             evidence,
         ))
+    }
+
+    /// Take the frame parked under `id`'s stowed live payload root and mint
+    /// a [`ValueHandle`] over it under the frame's realm, mirroring
+    /// `JitEffectMachine::handle_from_live_payload` on the Core route. The
+    /// frame itself stays parked and rooted -- only the payload's root moves
+    /// from the frame's own stash into the handle ledger, which now owns its
+    /// liveness (it was already a persistent root; [`Self::park`] never
+    /// touches `live_payload_root`, so this is the same registration
+    /// `take_parked`'s untaken-payload branch would otherwise release at
+    /// resume). `None` when `id` is not parked or its live payload was
+    /// already taken.
+    pub fn take_live_payload_handle(
+        &mut self,
+        id: ContinuationId,
+    ) -> Result<Option<ValueHandle>, ExecutionError> {
+        self.ensure_handle_access()?;
+        let Some(frame) = self.handles.continuation_mut(id) else {
+            return Ok(None);
+        };
+        let realm = frame.realm;
+        let Some(root) = frame.live_payload_root.take() else {
+            return Ok(None);
+        };
+        let handle = self.handles.insert_handle(root, realm, RuntimeRep::LiftedRef);
+        self.assert_rooting_receipt();
+        Ok(Some(handle))
     }
 
     fn ensure_handle_access(&self) -> Result<(), ExecutionError> {
@@ -2006,6 +2073,33 @@ impl<'code> PreparedMachine<'code> {
     #[must_use]
     pub fn handle_root(&self, handle: PreparedHandle) -> Option<crate::old_space::RootSlot> {
         self.handles.handle(handle.raw).map(|entry| entry.slot)
+    }
+
+    /// [`Self::handle_root`] by the bare cross-engine [`ValueHandle`] id --
+    /// a caller holding only a runtime session `RootCustody`'s raw id (the
+    /// runtime session's `run_rooted_entry`, which crosses the eval-thread
+    /// boundary as the bare id; see [`Self::discard_handle`]'s doc for the
+    /// same shape). `None` for an unknown or already-released handle,
+    /// exactly as `handle_root`.
+    #[must_use]
+    pub fn handle_slot(&self, handle: ValueHandle) -> Option<crate::old_space::RootSlot> {
+        self.handles.handle(handle).map(|entry| entry.slot)
+    }
+
+    /// Adopt a handle's rooted slot into another ownership discipline: the
+    /// handle is removed from this machine's ledger atomically and its
+    /// persistent-root registration remains active. Mirrors
+    /// `JitEffectMachine::take_handle_root`; the caller must install the
+    /// returned slot in a root-owning structure (a parked frame's own
+    /// `live_payload_root` stash, at present -- see
+    /// `PreparedEngine::tenure_live_payload`). Unknown or already-released
+    /// handles return `Ok(None)`.
+    pub fn take_handle_root(
+        &mut self,
+        handle: PreparedHandle,
+    ) -> Result<Option<crate::old_space::RootSlot>, ExecutionError> {
+        self.ensure_handle_access()?;
+        Ok(self.handles.take_handle(handle.raw).map(|entry| entry.slot))
     }
 
     /// Move a retained handle into the machine's own ROOT scope, so closing
@@ -6416,10 +6510,13 @@ mod tests {
             machine.park(
                 continuation,
                 other,
-                PrincipalId::SYSTEM,
-                EffectRunPolicy::SuspendAll,
-                LivePayloadPolicy::None,
-                evidence
+                None,
+                ParkRequest {
+                    principal: PrincipalId::SYSTEM,
+                    effect_policy: EffectRunPolicy::SuspendAll,
+                    live_payload: LivePayloadPolicy::None,
+                    evidence,
+                },
             ),
             Err(ExecutionError::UnknownPreparedHandle)
         ));
@@ -6430,10 +6527,13 @@ mod tests {
             .park(
                 continuation,
                 realm,
-                PrincipalId::SYSTEM,
-                EffectRunPolicy::SuspendAll,
-                LivePayloadPolicy::None,
-                evidence,
+                None,
+                ParkRequest {
+                    principal: PrincipalId::SYSTEM,
+                    effect_policy: EffectRunPolicy::SuspendAll,
+                    live_payload: LivePayloadPolicy::None,
+                    evidence,
+                },
             )
             .expect("a realm-owned handle parks");
         assert_eq!(machine.parked_count(), 1);
@@ -6471,10 +6571,13 @@ mod tests {
             .park(
                 taken,
                 realm,
-                PrincipalId::SYSTEM,
-                EffectRunPolicy::SuspendAll,
-                LivePayloadPolicy::None,
-                evidence,
+                None,
+                ParkRequest {
+                    principal: PrincipalId::SYSTEM,
+                    effect_policy: EffectRunPolicy::SuspendAll,
+                    live_payload: LivePayloadPolicy::None,
+                    evidence,
+                },
             )
             .expect("the taken handle parks again");
         assert_eq!(machine.close_realm(realm), (1, 0));
@@ -7586,10 +7689,13 @@ mod tests {
             .park(
                 f,
                 realm,
-                PrincipalId::SYSTEM,
-                EffectRunPolicy::SuspendAll,
-                LivePayloadPolicy::None,
-                evidence,
+                None,
+                ParkRequest {
+                    principal: PrincipalId::SYSTEM,
+                    effect_policy: EffectRunPolicy::SuspendAll,
+                    live_payload: LivePayloadPolicy::None,
+                    evidence,
+                },
             )
             .expect("f parks");
 
