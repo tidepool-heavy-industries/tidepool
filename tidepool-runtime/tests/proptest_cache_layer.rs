@@ -36,6 +36,7 @@ use tempfile::TempDir;
 use tidepool_repr::serial::{read_cbor, write_cbor, write_metadata};
 use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, Literal, RecursiveTree};
 use tidepool_runtime::{compile_haskell, CompileResult};
+use tidepool_toolchain::prepared_artifact::prepared_artifact_name;
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -226,6 +227,21 @@ printf '\000\000\000\000\062\000\000\000%s\000\000\000\000' "$report"
     }
 }
 
+/// A real, GHC-produced prepared-STG artifact, valid under
+/// `production_requirements()` (pinned by
+/// `tidepool_toolchain::prepared_artifact`'s own
+/// `exact_artifact_parses_and_links_atomically` test). The property suite
+/// doesn't exercise prepared-program content — only that the cache layer's
+/// "both halves or nothing" contract (`extract_and_read`,
+/// `tidepool-toolchain/src/artifacts.rs`) is satisfied — so one fixed fixture
+/// reused per target is sufficient; it isn't linked or evaluated here. Any
+/// `host_id` it declares resolves against `empty_meta_bytes()`'s empty
+/// `DataConTable` to `None`, which `check_constructor_identity_agreement`
+/// treats as "not covered," not a mismatch — see that function's doc.
+fn fake_prepared_bytes() -> &'static [u8] {
+    include_bytes!("../../haskell/test-prepared-stg/fixtures/m3-vertical.cbor")
+}
+
 /// Child-process entry point used by [`Harness`]. A normal test invocation has
 /// no request environment and returns immediately; the endpoint stub above
 /// invokes this exact test with the framed request in a temporary file.
@@ -244,6 +260,11 @@ fn fake_extract_worker() {
     let meta = PathBuf::from(std::env::var_os("TIDEPOOL_FAKE_EXTRACT_META").unwrap());
     for target in request.target_names() {
         fs::copy(&expr, output_dir.join(format!("{target}.cbor"))).unwrap();
+        fs::write(
+            output_dir.join(prepared_artifact_name(&target)),
+            fake_prepared_bytes(),
+        )
+        .unwrap();
     }
     fs::copy(meta, output_dir.join("meta.cbor")).unwrap();
     fs::write(output_dir.join("asks.json"), b"[]").unwrap();
