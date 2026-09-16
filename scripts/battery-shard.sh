@@ -63,7 +63,7 @@ on_signal() {
 trap on_signal INT TERM
 start_battery_daemon
 
-echo "==> shard: -p ${crate} (--ignore-default-filter, TIDEPOOL_EXPENSIVE_TESTS=${TIDEPOOL_EXPENSIVE_TESTS:-unset})"
+echo "==> shard: -p ${crate} (TIDEPOOL_CORE_TESTS=${TIDEPOOL_CORE_TESTS:-unset}, TIDEPOOL_EXPENSIVE_TESTS=${TIDEPOOL_EXPENSIVE_TESTS:-unset})"
 
 # `exec` here would replace this shell before any check could run — so a run
 # that SELECTS ZERO TESTS (a typo'd -E filter, a crate/filter combination with
@@ -76,7 +76,8 @@ echo "==> shard: -p ${crate} (--ignore-default-filter, TIDEPOOL_EXPENSIVE_TESTS=
 # process substitution so a caller piping/redirecting stderr still sees the
 # identical live stream.
 set +e
-cargo nextest run --ignore-default-filter --no-fail-fast \
+battery_selection_args
+cargo nextest run "${BATTERY_SELECTION[@]}" --no-fail-fast \
   --status-level fail --final-status-level fail \
   -p "$crate" "$@" 2> >(tee "$tmp_log" >&2) &
 nextest_pid=$!

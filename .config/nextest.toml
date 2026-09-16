@@ -12,8 +12,21 @@ slow-timeout = { period = "60s", terminate-after = 30 }
 # Default tier omits extractor-heavy packages, integration targets, and
 # selected actor-host campaigns. It still includes mixed tidepool targets;
 # ghc-heavy bounds their compiler concurrency independently. Package selection
-# intersects this filter; scripts/battery.sh uses --ignore-default-filter.
-default-filter = 'not (package(tidepool-runtime) | package(tidepool-handlers) | (package(tidepool-testing) & kind(test)) | (package(tidepool-harness) & kind(test) & !binary(provider_behavior)) | (package(tidepool-actor) & kind(test)) | (package(tidepool) & (binary(crash_recovery) | (test(typed_reply_settles_response_and_wakes_registered_watch) | test(progress_retains_closures_and_watch_snapshots_across_calls) | test(actor_host::documentation_tests)))))'
+# intersects this filter.
+#
+# Core-engine tests are excluded from every tier: the Core JIT is being
+# replaced by prepared STG and its tests only cost time. The Core set is the
+# Core-JIT codegen suites (codegen, gc, resident, properties), the Core-only
+# codegen library modules, the Core optimizer, and every `_on_core` dual-run
+# variant. The same expression is the whole default filter of the `battery`
+# profile below; keep the two copies identical. `TIDEPOOL_CORE_TESTS=1` makes
+# the battery scripts run everything instead.
+default-filter = 'not (package(tidepool-runtime) | package(tidepool-handlers) | (package(tidepool-testing) & kind(test)) | (package(tidepool-harness) & kind(test) & !binary(provider_behavior)) | (package(tidepool-actor) & kind(test)) | (package(tidepool) & (binary(crash_recovery) | (test(typed_reply_settles_response_and_wakes_registered_watch) | test(progress_retains_closures_and_watch_snapshots_across_calls) | test(actor_host::documentation_tests))))) & not ((package(tidepool-codegen) & (binary(codegen) | binary(gc) | binary(resident) | binary(properties) | (kind(lib) & test(/^(jit_machine|emit|lower|nursery|datacon_env|heap_bridge|effect_machine|host_fns::errors|host_fns::primops)::/)))) | package(tidepool-optimize) | test(/_on_core$/))'
+
+# The battery scripts (`just verify`, `just test-target`, `just suite`) run
+# every tier except Core-engine tests.
+[profile.battery]
+default-filter = 'not ((package(tidepool-codegen) & (binary(codegen) | binary(gc) | binary(resident) | binary(properties) | (kind(lib) & test(/^(jit_machine|emit|lower|nursery|datacon_env|heap_bridge|effect_machine|host_fns::errors|host_fns::primops)::/)))) | package(tidepool-optimize) | test(/_on_core$/))'
 
 # GHC-heavy tests run below full core count so concurrent extractor requests do
 # not oversubscribe CPU and memory. This is a per-run limit; callers running
