@@ -909,28 +909,37 @@ impl MachineState {
         Ok(())
     }
 
-    pub(crate) fn prepared_descriptor_owners(
+    /// Open the descriptor space's registration undo log (see
+    /// [`tidepool_heap::gc::raw::OwnersMark`]); `None` when no prepared heap
+    /// exists yet.
+    pub(crate) fn mark_prepared_descriptor_owners(
         &self,
-    ) -> Option<tidepool_heap::gc::raw::DescriptorOwners> {
+    ) -> Option<tidepool_heap::gc::raw::OwnersMark> {
         self.gc_state
-            .borrow()
-            .as_ref()?
+            .borrow_mut()
+            .as_mut()?
             .prepared
-            .as_ref()
-            .map(|prepared| prepared.space.snapshot_owners())
+            .as_mut()
+            .map(|prepared| prepared.space.mark_owners())
     }
 
-    pub(crate) fn restore_prepared_descriptor_owners(
+    /// Close `mark`, keeping (`commit`) or removing everything registered
+    /// since it was opened.
+    pub(crate) fn finish_prepared_descriptor_owners(
         &self,
-        owners: tidepool_heap::gc::raw::DescriptorOwners,
+        mark: tidepool_heap::gc::raw::OwnersMark,
+        commit: bool,
     ) {
-        if let Some(prepared) = self
-            .gc_state
-            .borrow_mut()
-            .as_mut()
-            .and_then(|state| state.prepared.as_mut())
-        {
-            prepared.space.restore_owners(owners);
+        let mut active = self.gc_state.borrow_mut();
+        // A failed install may already have torn the space down; there is
+        // then nothing left to undo.
+        let Some(prepared) = active.as_mut().and_then(|state| state.prepared.as_mut()) else {
+            return;
+        };
+        if commit {
+            prepared.space.commit_owners(mark);
+        } else {
+            prepared.space.rollback_owners(mark);
         }
     }
 

@@ -323,7 +323,7 @@ impl Drop for TemporaryRoots<'_> {
 struct InstallTransaction<'a, 'code> {
     machine: &'a mut PreparedMachine<'code>,
     block: (*mut u64, usize),
-    owners: Option<tidepool_heap::gc::raw::DescriptorOwners>,
+    owners: Option<tidepool_heap::gc::raw::OwnersMark>,
     stack_maps: usize,
     committed: bool,
 }
@@ -343,16 +343,20 @@ impl Drop for InstallTransaction<'_, '_> {
             for root in roots {
                 unsafe { root.write(std::ptr::null_mut()) };
             }
-            while self.machine.machine.stack_map_registries().len() > self.stack_maps {
+            while self.machine.machine.stack_map_link_count() > self.stack_maps {
                 self.machine.machine.pop_stack_map_registry();
             }
             if let Some(owners) = self.owners.take() {
                 self.machine
                     .machine
-                    .restore_prepared_descriptor_owners(owners);
+                    .finish_prepared_descriptor_owners(owners, false);
             } else {
                 self.machine.machine.clear_gc_state();
             }
+        } else if let Some(owners) = self.owners.take() {
+            self.machine
+                .machine
+                .finish_prepared_descriptor_owners(owners, true);
         }
         self.machine.machine.end_prepared_call();
     }
@@ -467,8 +471,8 @@ impl<'code> PreparedMachine<'code> {
         self.machine
             .begin_prepared_call()
             .map_err(ExecutionError::Runtime)?;
-        let owners = self.machine.prepared_descriptor_owners();
-        let stack_maps = self.machine.stack_map_registries().len();
+        let owners = self.machine.mark_prepared_descriptor_owners();
+        let stack_maps = self.machine.stack_map_link_count();
         let block = {
             let block = &program.get().root_block;
             (block.as_mut_ptr(), block.len())

@@ -34,26 +34,50 @@ pub struct DescriptorSpace {
     updated_visited: Vec<u64>,
     updated_path: Vec<usize>,
     external_payloads: HashMap<usize, ExternalStorageKind>,
+    /// Header keys inserted since the open [`OwnersMark`], if any.
+    owner_log: Option<Vec<usize>>,
 }
 
-/// Registration checkpoint for a prepared-program install. Collection scratch
-/// and relocated object addresses deliberately do not belong to this snapshot.
-pub struct DescriptorOwners {
-    static_regions: Vec<Arc<crate::static_region::StaticRegion>>,
-    descriptors: HashMap<usize, Arc<ObjectDescriptor>>,
+/// Registration checkpoint for a prepared-program install, opened by
+/// [`DescriptorSpace::mark_owners`]. While it is open the space logs exactly
+/// the header keys it inserts; rollback removes those keys and truncates the
+/// static regions pushed since the mark, so an install's undo cost is
+/// proportional to what that install added, not to the whole space.
+/// Collection scratch and relocated object addresses deliberately do not
+/// belong to this checkpoint.
+#[must_use = "an owner mark must be committed or rolled back"]
+pub struct OwnersMark {
+    static_regions: usize,
 }
 
 impl DescriptorSpace {
-    pub fn snapshot_owners(&self) -> DescriptorOwners {
-        DescriptorOwners {
-            static_regions: self.static_regions.clone(),
-            descriptors: self.descriptors.clone(),
+    /// Open an undo log for registrations. Only one mark is open at a time;
+    /// opening a new one discards any stale log.
+    pub fn mark_owners(&mut self) -> OwnersMark {
+        debug_assert!(
+            self.owner_log.is_none(),
+            "descriptor owner mark already open"
+        );
+        self.owner_log = Some(Vec::new());
+        OwnersMark {
+            static_regions: self.static_regions.len(),
         }
     }
 
-    pub fn restore_owners(&mut self, owners: DescriptorOwners) {
-        self.static_regions = owners.static_regions;
-        self.descriptors = owners.descriptors;
+    /// Keep every registration made since `mark` and close the log.
+    pub fn commit_owners(&mut self, mark: OwnersMark) {
+        let _ = mark;
+        self.owner_log = None;
+    }
+
+    /// Remove exactly the header keys and static regions registered since
+    /// `mark`, and close the log.
+    pub fn rollback_owners(&mut self, mark: OwnersMark) {
+        for key in self.owner_log.take().unwrap_or_default() {
+            self.descriptors.remove(&key);
+        }
+        debug_assert!(self.static_regions.len() >= mark.static_regions);
+        self.static_regions.truncate(mark.static_regions);
     }
 
     /// Resolve a live header through this space's pinned descriptor owner.
@@ -82,6 +106,7 @@ impl DescriptorSpace {
             updated_visited: Vec::new(),
             updated_path: Vec::new(),
             external_payloads: HashMap::new(),
+            owner_log: None,
         })
     }
 
@@ -100,6 +125,11 @@ impl DescriptorSpace {
             self.descriptors
                 .try_reserve(1)
                 .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
+            if let Some(log) = &mut self.owner_log {
+                log.try_reserve(1)
+                    .map_err(|_| DescriptorTraceError::MetadataAllocation)?;
+                log.push(key);
+            }
             self.descriptors.insert(key, descriptor);
         }
         Ok(())
@@ -2534,6 +2564,28 @@ mod descriptor_copy_tests {
             assert_eq!(root, to.as_mut_ptr().cast());
             assert_eq!(space.visited_external_payloads().count(), 1);
         }
+    }
+
+    #[test]
+    fn owner_rollback_removes_only_marked_registrations() {
+        let kept = descriptor(ObjectKind::Constructor, &[RuntimeRep::LiftedRef]);
+        let added = descriptor(ObjectKind::Constructor, &[RuntimeRep::LiftedRef]);
+        let mut space = DescriptorSpace::new([Arc::clone(&kept)]).unwrap();
+        let mark = space.mark_owners();
+        space
+            .extend_descriptors([Arc::clone(&kept), Arc::clone(&added)])
+            .unwrap();
+        space.extend_static_region(static_cycle()).unwrap();
+        space.rollback_owners(mark);
+        assert!(space.live_descriptor(kept.initial_header_word()).is_some());
+        assert!(space.live_descriptor(added.initial_header_word()).is_none());
+        assert!(space.static_regions.is_empty());
+
+        let mark = space.mark_owners();
+        space.extend_descriptors([Arc::clone(&added)]).unwrap();
+        space.commit_owners(mark);
+        assert!(space.owner_log.is_none());
+        assert!(space.live_descriptor(added.initial_header_word()).is_some());
     }
 
     #[test]
