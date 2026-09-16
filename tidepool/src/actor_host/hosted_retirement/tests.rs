@@ -997,12 +997,7 @@ async fn hosted_authored_failed_child_cleanup_retains_http_uncertainty() {
         LivePayloadPolicy::HASKELL_EFFECT_VALUE,
     );
     let outcome = machine
-        .run_with_sites(
-            "failed_child_host",
-            &compiled.expr,
-            &compiled.table,
-            &compiled.asks,
-        )
+        .run_with_sites("failed_child_host", compiled.code())
         .unwrap();
     let descriptor = tidepool_actor::ActorDescriptor::new(
         "host-failed-child",

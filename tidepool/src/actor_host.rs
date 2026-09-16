@@ -1760,12 +1760,7 @@ fn compile_root(
         EffectRunPolicy::HandleOrSuspend,
         LivePayloadPolicy::HASKELL_EFFECT_VALUE,
     )?;
-    let outcome = machine.run_with_sites(
-        "shoal_root_driver",
-        &compiled.expr,
-        &compiled.table,
-        &compiled.asks,
-    )?;
+    let outcome = machine.run_with_sites("shoal_root_driver", compiled.code())?;
     let resource_scope = match &outcome {
         tidepool_runtime::session::ResidentOutcome::Suspended { hole, .. } => machine
             .parked_realm(hole)

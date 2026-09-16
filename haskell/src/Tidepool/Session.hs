@@ -68,6 +68,7 @@ module Tidepool.Session
   , sessionBinderName
     -- * Reserved scaffold binders
   , scaffoldTargetName
+  , preparedScaffoldTargetName
   , scaffoldOutputBase
   , evalUserBinder
   ) where
@@ -335,6 +336,15 @@ injectSessionScope scope hsc =
 -- ran (see the resident-turn compiler path).
 scaffoldTargetName :: String
 scaffoldTargetName = "__result"
+
+-- | The scaffold-reserved binder a prepared turn PROJECTS: the turn's effect
+-- computation settled to its first constructor layer
+-- (@Tidepool.Internal.Resume.settle scaffoldTargetName@), so the host reads
+-- completion or suspension from one constructor without walking freer data.
+-- Every turn template defines it beside 'scaffoldTargetName'; only a
+-- prepared turn writes its artifact.
+preparedScaffoldTargetName :: String
+preparedScaffoldTargetName = "__prepared"
 
 -- | Base name of the CBOR file(s) every Rust caller reads for the scaffold
 -- target (@result.cbor@), and the Haskell binder name the ONE-SHOT eval

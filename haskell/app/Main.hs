@@ -62,7 +62,7 @@ import Tidepool.ExtractUtil (capitalize)
 import Tidepool.ExtractRequest (InspectionRequest(..), WorkerRequest(..), workerRequestFromArgv)
 import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
 import Tidepool.Session
-  ( SessionScope(..), scaffoldTargetName, scaffoldOutputBase )
+  ( SessionScope(..), scaffoldTargetName, preparedScaffoldTargetName, scaffoldOutputBase )
 import Tidepool.SessionArtifacts
   ( mkBoundBinders, parseValModule )
 import Tidepool.Translate
@@ -604,9 +604,12 @@ runTurnMode compiler args path = do
         -- stays "result" regardless — every Rust caller reads result.cbor.
         let targetName = fromMaybe scaffoldTargetName (requestTarget args)
         asksSites <- writeWholeModuleClosed timing outDir hscEnv binds (prTyCons result) mCapturedTy warnTexts targetName scaffoldOutputBase
+        -- The prepared artifact's entry is the SETTLED scaffold, never the
+        -- Core target: the host reads completion or suspension from its one
+        -- constructor layer (see 'preparedScaffoldTargetName').
         if requestPreparedTurn args
-          then writePreparedArtifacts outDir compiledPath hscEnv preparedModules [targetName]
-                 (requestRetainedGenerations args)
+          then writePreparedArtifacts outDir compiledPath hscEnv preparedModules
+                 [preparedScaffoldTargetName] (requestRetainedGenerations args)
           else pure ()
         let wrapped = T.pack spliced
         case selector of

@@ -1,6 +1,6 @@
 //! `ResidentSession` — the `Retention::Persistent` end-state.
 //!
-//! The stow engine's oneshot path (`SessionEngine`) drives one turn and DROPS
+//! The stow engine's oneshot path (`ResidentEngine`) drives one turn and DROPS
 //! its machine when the turn completes (the `FnOnce` body owns the machine
 //! and consumes it). A RESIDENT session keeps the machine across turns: a
 //! completed turn returns the `JitEffectMachine` to its session slot so the
@@ -60,9 +60,15 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use tidepool_bridge::Value;
-use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
+use tidepool_codegen::binding_table::{BindingEntry, BoundValue, PreparedOrigin};
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{FuncId, JitEffectMachine};
+use tidepool_codegen::prepared_program::{PreparedHandle, ProgramId};
+use tidepool_repr::execution_schema::SymbolIdentity;
+
+use super::persistent::{EngineKind, ResidentEngine};
+use super::prepared::{PreparedRuntimeError, PreparedSettlement};
+use super::turn::{PreparedTurn, TurnCode};
 use tidepool_codegen::suspension::{
     ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput, SuspensionRun, ValueHandle,
 };
@@ -592,10 +598,71 @@ pub enum ResidentError {
     /// cross-plane shadow retract (a value bind evicting a same-name decl head).
     #[error(transparent)]
     Session(#[from] SessionError),
+    /// The prepared engine refused or failed the turn. Never a Core fallback:
+    /// a prepared-route session reports this and stays on its route.
+    #[error("prepared engine: {0}")]
+    Prepared(#[from] PreparedRuntimeError),
 }
 
 fn resident_jit(error: JitError) -> ResidentError {
     ResidentError::Run(RuntimeError::Jit(error))
+}
+
+/// What the prepared arm of a resident turn does with its settled value.
+enum PreparedTurnMode<'a> {
+    /// Observe the value and return it as the turn's result.
+    Value,
+    /// Observe the value and bind it into the value plane as `binder`.
+    Binding {
+        binder: &'a BoundBinder,
+        generation: Generation,
+        observation: Option<Vec<tidepool_repr::VarId>>,
+    },
+}
+
+/// The `Send` projection of one prepared run that crosses the eval thread:
+/// handles are ids, the observed value is an owned tree.
+enum PreparedRun {
+    Done {
+        handle: PreparedHandle,
+        value: Value,
+    },
+    Suspended {
+        request: PreparedHandle,
+        continuation: PreparedHandle,
+    },
+}
+
+/// Run `program`'s settled scaffold on the eval thread and observe a
+/// completed value there, while the invocation's realm cancel flag governs
+/// both the run and the forcing observation.
+fn settle_prepared(
+    engine: &mut ResidentEngine,
+    program: ProgramId,
+    realm: RealmId,
+) -> Result<PreparedRun, PreparedRuntimeError> {
+    let engine = engine
+        .prepared_mut()
+        .ok_or(PreparedRuntimeError::WrongEngine)?;
+    match engine.run_settled(program, realm)? {
+        PreparedSettlement::Done { value: handle } => {
+            let value = match engine.observe(program, handle) {
+                Ok(value) => value,
+                Err(error) => {
+                    engine.release(handle);
+                    return Err(error);
+                }
+            };
+            Ok(PreparedRun::Done { handle, value })
+        }
+        PreparedSettlement::Suspended {
+            request,
+            continuation,
+        } => Ok(PreparedRun::Suspended {
+            request,
+            continuation,
+        }),
+    }
 }
 
 /// A resident JIT session: one long-lived [`JitEffectMachine`] whose heap and
@@ -603,7 +670,7 @@ fn resident_jit(error: JitError) -> ResidentError {
 ///
 /// Generic over the effect handler stack `H` and the output sink `O` so it
 /// stays below the server crate that owns the concrete buffer, exactly like
-/// [`super::SessionEngine`]. The registry (`tidepool-harness`) instantiates
+/// [`super::ResidentEngine`]. The registry (`tidepool-harness`) instantiates
 /// `Slot<ResidentSession<H, O>>`.
 pub struct ResidentSession<H, O> {
     /// The shared persistent-session core (machine + accumulated table + the two
@@ -680,7 +747,7 @@ where
         nursery_size: usize,
         lib: Option<SessionLib>,
     ) -> Result<Self, JitError> {
-        let mut core = PersistentSession::new(lib, nursery_size);
+        let mut core = PersistentSession::new(lib, nursery_size, EngineKind::Core);
         core.bootstrap_if_needed(expr, &table)?;
         core.seed_session_table(table);
         Ok(ResidentSession {
@@ -713,7 +780,30 @@ where
         nursery_size: usize,
         lib: Option<SessionLib>,
     ) -> Self {
-        let core = PersistentSession::new(lib, nursery_size);
+        Self::unbootstrapped_on(
+            EngineKind::Core,
+            handlers,
+            captured,
+            include,
+            nursery_size,
+            lib,
+        )
+    }
+
+    /// [`Self::unbootstrapped`] on an explicit engine route. The route is
+    /// fixed for the session's life: a prepared-route session compiles every
+    /// turn with its prepared program ([`Self::prepared_turn_request`]) and
+    /// never runs Core, whatever a turn's outcome.
+    #[allow(clippy::too_many_arguments)]
+    pub fn unbootstrapped_on(
+        engine: EngineKind,
+        handlers: H,
+        captured: O,
+        include: Vec<PathBuf>,
+        nursery_size: usize,
+        lib: Option<SessionLib>,
+    ) -> Self {
+        let core = PersistentSession::new(lib, nursery_size, engine);
         ResidentSession {
             core,
             handlers,
@@ -1828,21 +1918,19 @@ where
         expr: &CoreExpr,
         table: &DataConTable,
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.run_with_sites(name_hint, expr, table, &[])
+        self.run_with_sites(name_hint, TurnCode::core(expr, table, &[]))
     }
 
     pub fn run_with_sites(
         &mut self,
         name_hint: &str,
-        expr: &CoreExpr,
-        table: &DataConTable,
-        sites: &[YieldSite],
+        code: TurnCode<'_>,
     ) -> Result<ResidentOutcome, ResidentError> {
         // Even a discarded result can export closures through an effect.
         self.core
             .bindings_mut()
-            .preserve_observations(&tidepool_repr::free_vars::free_vars(expr));
-        self.run_transient_with_sites(name_hint, expr, table, sites)
+            .preserve_observations(&tidepool_repr::free_vars::free_vars(code.expr));
+        self.run_transient_with_sites(name_hint, code)
     }
 
     /// Evaluate a compiler-checked pure inspection of retained values without
@@ -1850,20 +1938,167 @@ where
     /// into Eff, so this run cannot export slot-dependent closures via effects.
     pub fn run_inspection_with_sites(
         &mut self,
-        expr: &CoreExpr,
-        table: &DataConTable,
-        sites: &[YieldSite],
+        code: TurnCode<'_>,
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.run_transient_with_sites("actor_observation_preview", expr, table, sites)
+        self.run_transient_with_sites("actor_observation_preview", code)
+    }
+
+    /// The route this session runs on.
+    #[must_use]
+    pub fn engine_kind(&self) -> EngineKind {
+        self.core.engine_kind()
+    }
+
+    /// The live prepared bindings a later turn compiles against
+    /// ([`PersistentSession::prepared_retained`]); pair with
+    /// [`Self::prepared_turn_request`].
+    #[must_use]
+    pub fn prepared_retained(&self) -> Vec<(SymbolIdentity, u64)> {
+        self.core.prepared_retained()
+    }
+
+    /// The prepared half a [`super::TurnRequest`] carries on this session's
+    /// route: `None` on Core, and on the prepared route the request for the
+    /// turn's program linked against `retained`
+    /// ([`Self::prepared_retained`], which outlives the request).
+    #[must_use]
+    pub fn prepared_turn_request<'a>(
+        &self,
+        retained: &'a [(SymbolIdentity, u64)],
+    ) -> Option<PreparedTurn<'a>> {
+        (self.engine_kind() == EngineKind::Prepared).then_some(PreparedTurn { retained })
+    }
+
+    /// The prepared arm of every resident turn: install the turn's program
+    /// against the session's live prepared bindings, run its settled scaffold
+    /// on the eval thread, and either return the observed value or bind it
+    /// into the value plane. Suspension is refused until the resume contract
+    /// lands; Core is never consulted.
+    fn run_prepared(
+        &mut self,
+        code: TurnCode<'_>,
+        mode: PreparedTurnMode<'_>,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        let prepared = code.prepared.ok_or(PreparedRuntimeError::MissingProgram)?;
+        let provenance = self.provenance_for(code.expr, code.sites)?;
+        self.core
+            .merge_table(code.table)
+            .map_err(ResidentError::TableCollision)?;
+        if let PreparedTurnMode::Binding { generation, .. } = &mode {
+            // Claim the value-module identity before the turn runs, as the
+            // Core bind path does.
+            self.core.set_val_gen(*generation);
+        }
+        let program = self.core.install_prepared(prepared.clone())?;
+        let realm = self.run_context.resource_scope;
+        let lexical_scope = self.run_context.lexical_scope;
+        let run_exec_started = std::time::Instant::now();
+        let ran = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
+            Ok(settle_prepared(engine, program, realm))
+        })?;
+        timing::record_stage(
+            timing::NO_NODE,
+            timing::NO_ROUND,
+            timing::STAGE_RUN_EXEC,
+            run_exec_started.elapsed(),
+            0,
+        );
+        let (handle, value) = match ran? {
+            PreparedRun::Done { handle, value } => (handle, value),
+            PreparedRun::Suspended {
+                request,
+                continuation,
+            } => {
+                if let Some(engine) = self.core.prepared_mut() {
+                    engine.release(request);
+                    engine.release(continuation);
+                }
+                return Err(PreparedRuntimeError::NotYetSupported(
+                    "effect suspension (the resume contract lands it)",
+                )
+                .into());
+            }
+        };
+        let engine = self
+            .core
+            .prepared_mut()
+            .ok_or(PreparedRuntimeError::WrongEngine)?;
+        match mode {
+            PreparedTurnMode::Value => {
+                engine.release(handle);
+            }
+            PreparedTurnMode::Binding {
+                binder,
+                generation,
+                observation,
+            } => {
+                let unit = engine.entry_unit(program).unwrap_or_default();
+                let root = engine.adopt(handle).ok_or(PreparedRuntimeError::Run(
+                    tidepool_codegen::prepared_program::ExecutionError::UnknownPreparedHandle,
+                ))?;
+                if !self.core.scope_tree().is_live(lexical_scope) {
+                    if let Some(engine) = self.core.prepared_mut() {
+                        engine.release(handle);
+                    }
+                    return Err(SessionError::DeadScope(lexical_scope).into());
+                }
+                // The identity a later turn's `GlobalDecl` names when it
+                // imports this binder: its thin value module and name.
+                let identity = SymbolIdentity {
+                    unit,
+                    module: binder.module.clone(),
+                    namespace: "value".into(),
+                    occurrence: binder.name.clone(),
+                    record_parent: None,
+                };
+                let entry = BindingEntry {
+                    name: BindingName(binder.name.clone()),
+                    id: SessionVarId::from_extract(binder.var_id),
+                    module: SessionModule::val(generation),
+                    value: BoundValue::Prepared {
+                        root,
+                        handle,
+                        origin: Some(PreparedOrigin {
+                            identity,
+                            export: None,
+                            top: None,
+                        }),
+                    },
+                    type_display: Some(binder.type_display.clone()),
+                    defining_expr: None,
+                    scope: lexical_scope,
+                };
+                if let Err(error) = self.core.bind_replacing_decl_in(lexical_scope, entry) {
+                    if let Some(engine) = self.core.prepared_mut() {
+                        engine.release(handle);
+                    }
+                    return Err(error.into());
+                }
+                self.core.set_val_gen(generation);
+                self.binding_provenance.insert(binder.var_id, provenance);
+                if let Some(dependencies) = observation {
+                    self.finish_observation(binder, &dependencies);
+                }
+            }
+        }
+        let output = self.captured.drain();
+        Ok(ResidentOutcome::Completed {
+            output,
+            result: EvalResult::new(value, self.core.session_table().clone(), Vec::new()),
+        })
     }
 
     fn run_transient_with_sites(
         &mut self,
         name_hint: &str,
-        expr: &CoreExpr,
-        table: &DataConTable,
-        sites: &[YieldSite],
+        code: TurnCode<'_>,
     ) -> Result<ResidentOutcome, ResidentError> {
+        if self.engine_kind() == EngineKind::Prepared {
+            return self.run_prepared(code, PreparedTurnMode::Value);
+        }
+        let TurnCode {
+            expr, table, sites, ..
+        } = code;
         let provenance = self.provenance_for(expr, sites)?;
         // No reject-while-suspended: on the parked path, a new turn over
         // parked frames is ordinary (the machine is never slot-suspended).
@@ -1902,7 +2137,8 @@ where
         let realm = self.run_context.resource_scope;
         let principal = self.run_context.principal;
         let run_exec_started = std::time::Instant::now();
-        let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
+        let outcome = self.on_eval_thread(move |engine, table, handlers, captured| {
+            let machine = engine.require_core()?;
             let run =
                 SuspensionRun::fragment(func_id, table, effect_policy, realm, ParkKind::Plain)
                     .with_live_payload(live_payload)
@@ -1937,19 +2173,17 @@ where
         binder: &BoundBinder,
         gen: Generation,
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.run_bind_with_sites(name_hint, expr, table, binder, gen, &[])
+        self.run_bind_with_sites(name_hint, TurnCode::core(expr, table, &[]), binder, gen)
     }
 
     pub fn run_bind_with_sites(
         &mut self,
         name_hint: &str,
-        expr: &CoreExpr,
-        table: &DataConTable,
+        code: TurnCode<'_>,
         binder: &BoundBinder,
         gen: Generation,
-        sites: &[YieldSite],
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.run_binding_with_sites(name_hint, expr, table, binder, gen, sites, None)
+        self.run_binding_with_sites(name_hint, code, binder, gen, None)
     }
 
     /// Capture an automatic workbench observation using the same suspendable
@@ -1957,44 +2191,41 @@ where
     /// so their dependencies acquire the ordinary persistent lifetime first.
     pub fn run_observation_with_sites(
         &mut self,
-        expr: &CoreExpr,
-        table: &DataConTable,
+        code: TurnCode<'_>,
         binder: &BoundBinder,
         gen: Generation,
-        sites: &[YieldSite],
         effectful: bool,
     ) -> Result<ResidentOutcome, ResidentError> {
-        let dependencies = tidepool_repr::free_vars::free_vars(expr);
+        let dependencies = tidepool_repr::free_vars::free_vars(code.expr);
         if effectful {
             self.core
                 .bindings_mut()
                 .preserve_observations(&dependencies);
         }
-        self.run_binding_with_sites(
-            "actor_observation",
-            expr,
-            table,
-            binder,
-            gen,
-            sites,
-            Some(dependencies),
-        )
+        self.run_binding_with_sites("actor_observation", code, binder, gen, Some(dependencies))
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "shared binding path owns retention metadata as well as compilation inputs"
-    )]
     fn run_binding_with_sites(
         &mut self,
         name_hint: &str,
-        expr: &CoreExpr,
-        table: &DataConTable,
+        code: TurnCode<'_>,
         binder: &BoundBinder,
         gen: Generation,
-        sites: &[YieldSite],
         observation: Option<Vec<tidepool_repr::VarId>>,
     ) -> Result<ResidentOutcome, ResidentError> {
+        if self.engine_kind() == EngineKind::Prepared {
+            return self.run_prepared(
+                code,
+                PreparedTurnMode::Binding {
+                    binder,
+                    generation: gen,
+                    observation,
+                },
+            );
+        }
+        let TurnCode {
+            expr, table, sites, ..
+        } = code;
         if observation.is_none() {
             self.core
                 .bindings_mut()
@@ -2037,7 +2268,8 @@ where
         let lexical_scope = self.run_context.lexical_scope;
         let principal = self.run_context.principal;
         let run_exec_started = std::time::Instant::now();
-        let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
+        let outcome = self.on_eval_thread(move |engine, table, handlers, captured| {
+            let machine = engine.require_core()?;
             let run = SuspensionRun::fragment(
                 func_id,
                 table,
@@ -2103,12 +2335,19 @@ where
     pub fn run_projected_bind_with_sites(
         &mut self,
         name_hint: &str,
-        expr: &CoreExpr,
-        table: &DataConTable,
+        code: TurnCode<'_>,
         binders: &[BoundBinder],
         gen: Generation,
-        sites: &[YieldSite],
     ) -> Result<ResidentOutcome, ResidentError> {
+        if self.engine_kind() == EngineKind::Prepared {
+            return Err(PreparedRuntimeError::NotYetSupported(
+                "pattern binds (the multi-binder slice lands them)",
+            )
+            .into());
+        }
+        let TurnCode {
+            expr, table, sites, ..
+        } = code;
         self.core
             .bindings_mut()
             .preserve_observations(&tidepool_repr::free_vars::free_vars(expr));
@@ -2135,7 +2374,8 @@ where
         let realm = self.run_context.resource_scope;
         let lexical_scope = self.run_context.lexical_scope;
         let principal = self.run_context.principal;
-        let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
+        let outcome = self.on_eval_thread(move |engine, table, handlers, captured| {
+            let machine = engine.require_core()?;
             let run = SuspensionRun::fragment(
                 function,
                 table,
@@ -2198,7 +2438,8 @@ where
         let principal = self.run_context.principal;
         let effect_policy = self.core.effect_policy();
         let live_payload = self.core.live_payload_policy();
-        let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
+        let outcome = self.on_eval_thread(move |engine, table, handlers, captured| {
+            let machine = engine.require_core()?;
             let run = SuspensionRun::fragment(
                 func_id,
                 table,
@@ -2246,7 +2487,8 @@ where
         external_env: &ExternalEnv,
     ) -> Result<EvalResult, ResidentError> {
         let func_id = self.prepare_child_fragment(name_hint, expr, table, external_env)?;
-        let value = self.on_eval_thread(move |machine, _table, _handlers, _captured| {
+        let value = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
+            let machine = engine.require_core()?;
             // Plain pure entry: on the parked path the machine is never
             // slot-suspended, so the L7-guarded plain entries serve child
             // fragments directly (the realm suites run fragments over parked
@@ -2588,7 +2830,8 @@ where
         // shorter-lived turn realm that happened to produce them.
         let owning_realm = self.run_context.resource_scope;
         let principal = self.run_context.principal;
-        self.on_eval_thread(move |machine, table, handlers, captured| {
+        self.on_eval_thread(move |engine, table, handlers, captured| {
+            let machine = engine.require_core()?;
             let run =
                 SuspensionRun::fragment(function, table, effect_policy, realm, ParkKind::Plain)
                     .with_live_payload(live_payload)
@@ -2677,7 +2920,8 @@ where
         // re-declaration here (`bind` is only used for materialization
         // below). Completion handles likewise belong to the frame's retained
         // realm, which must be captured before resume consumes that frame.
-        let outcome = self.on_eval_thread(move |machine, _table, handlers, captured| {
+        let outcome = self.on_eval_thread(move |engine, _table, handlers, captured| {
+            let machine = engine.require_core()?;
             let realm = machine
                 .parked_realm(frame_id)
                 .ok_or(JitError::UnknownContinuation(frame_id))?;
@@ -2954,7 +3198,7 @@ where
     fn on_eval_thread<F, T>(&mut self, body: F) -> Result<T, ResidentError>
     where
         T: Send,
-        F: FnOnce(&mut JitEffectMachine, &DataConTable, &mut H, &O) -> Result<T, JitError> + Send,
+        F: FnOnce(&mut ResidentEngine, &DataConTable, &mut H, &O) -> Result<T, JitError> + Send,
     {
         self.on_eval_thread_with_stack(EVAL_STACK_SIZE, body)
     }
@@ -2971,7 +3215,7 @@ where
     ) -> Result<T, ResidentError>
     where
         T: Send,
-        F: FnOnce(&mut JitEffectMachine, &DataConTable, &mut H, &O) -> Result<T, JitError> + Send,
+        F: FnOnce(&mut ResidentEngine, &DataConTable, &mut H, &O) -> Result<T, JitError> + Send,
     {
         self.settle_dropped_custody();
         let mut lease = self.core.lease_machine();

@@ -129,12 +129,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
         LivePayloadPolicy::HASKELL_EFFECT_VALUE,
     );
     let outcome = machine
-        .run_with_sites(
-            "resident_local_policy",
-            &compiled.expr,
-            &compiled.table,
-            &compiled.asks,
-        )
+        .run_with_sites("resident_local_policy", compiled.code())
         .expect("first policy boundary");
     let descriptor = ActorDescriptor::new(
         "resident-local-policy",
@@ -158,12 +153,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
         )
         .expect("independent root scope");
     let sibling_outcome = machine
-        .run_with_sites(
-            "resident_sibling_policy",
-            &compiled.expr,
-            &compiled.table,
-            &compiled.asks,
-        )
+        .run_with_sites("resident_sibling_policy", compiled.code())
         .expect("sibling policy boundary");
     let sibling_descriptor = ActorDescriptor::new(
         "sibling",

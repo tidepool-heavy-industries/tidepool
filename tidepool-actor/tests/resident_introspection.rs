@@ -114,12 +114,7 @@ async fn resident_eff_structured_introspection_is_reentrant_and_read_only() {
         LivePayloadPolicy::HASKELL_EFFECT_VALUE,
     );
     let outcome = machine
-        .run_with_sites(
-            "resident_introspection_policy",
-            &compiled.expr,
-            &compiled.table,
-            &compiled.asks,
-        )
+        .run_with_sites("resident_introspection_policy", compiled.code())
         .expect("policy boundary");
     let descriptor = ActorDescriptor::new(
         "resident-introspection",

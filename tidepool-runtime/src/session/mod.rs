@@ -23,7 +23,6 @@ pub mod inspection;
 pub mod kernel;
 pub mod persistent;
 pub mod prepared;
-pub mod prepared_turn;
 mod recovery;
 pub mod registry;
 pub mod render;
@@ -44,17 +43,15 @@ pub use inspection::{
 pub use kernel::{admit_checkout, Aged, SuspendableSession};
 
 pub use persistent::{
-    DeclarationPlaneCommit, MachineLease, MaterializationSetCommit, PersistentSession,
-    ScopeRetirement, ValuePlaneCommit,
+    DeclarationPlaneCommit, EngineKind, MachineLease, MaterializationSetCommit, PersistentSession,
+    ResidentEngine, ScopeRetirement, ValuePlaneCommit,
 };
 
 pub use prepared::{
-    run_prepared_once, CancelHandle, PreparedArgument, PreparedFailureKind, PreparedOuter,
-    PreparedRetainedResult, PreparedRunResult, PreparedRuntime, PreparedRuntimeError,
-    PreparedValue, PreparedValueResult, RealmId,
+    run_prepared_once, CancelHandle, PreparedArgument, PreparedEngine, PreparedFailureKind,
+    PreparedOuter, PreparedRetainedResult, PreparedRunResult, PreparedRuntime,
+    PreparedRuntimeError, PreparedSettlement, PreparedValue, PreparedValueResult, RealmId,
 };
-
-pub use prepared_turn::{PreparedTurnError, SessionTurns, TurnForm};
 
 pub use recovery::{DeclarationRecoveryReport, LostDeclaration, ReplayedDeclaration};
 
@@ -100,9 +97,9 @@ pub use turn::{
     run_turn_pinned, turn_user_code_line_range, turn_user_code_offset, BoundBinder,
     CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellCheckFailure, CellCheckRequest,
     CellSourceSpan, CheckedBinderPin, CompiledTurn, DeclarationReceipt, DeclarationSource,
-    ExpressionLift, LocatedImport, LocatedPragma, PragmaKind, SourcePrologue, TemplateSelector,
-    TurnClassification, TurnFailure, TurnKind, TurnRequest, TurnResult, TurnTemplate, ValueTier,
-    DECL_TEMPLATE_SOURCE,
+    ExpressionLift, LocatedImport, LocatedPragma, PragmaKind, PreparedTurn, SourcePrologue,
+    TemplateSelector, TurnClassification, TurnCode, TurnFailure, TurnKind, TurnRequest, TurnResult,
+    TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE, PREPARED_SCAFFOLD_TARGET,
 };
 
 /// Host-visible reentry state for one resident session.

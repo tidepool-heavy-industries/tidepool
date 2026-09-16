@@ -10,7 +10,9 @@
 use std::collections::BTreeMap;
 
 use tidepool_bridge::Value;
-use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue, PreparedOrigin};
+use tidepool_codegen::binding_table::{
+    BindingEntry, BindingTable, BoundValue, PreparedOrigin, PreparedTop,
+};
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
     CompileError, CompiledProgram, ExecutionError, ImportBindings, PreparedCallOptions,
@@ -80,6 +82,30 @@ pub enum PreparedRuntimeError {
          different runtime resource scope (or already released)"
     )]
     CrossRealmArgument { realm: RealmId },
+    /// A turn program whose entry is not the settled scaffold
+    /// (`Tidepool.Internal.Resume.Settled`), or whose settled layer did not
+    /// have the declared shape. Every turn template defines `__prepared`,
+    /// so this is a stale or foreign artifact, never a user error.
+    #[error("prepared program {program:?} has no settled entry layer: {detail}")]
+    UnsettledEntry {
+        program: ProgramId,
+        detail: &'static str,
+    },
+    /// A prepared-route operation on a session constructed for the Core
+    /// engine (or the reverse). Routes are fixed at construction; nothing
+    /// falls back.
+    #[error("the session does not run on the prepared route")]
+    WrongEngine,
+    /// A turn reached the prepared route without its prepared program: the
+    /// request was compiled Core-only. Never a fallback; the turn fails.
+    #[error("the turn was compiled without its prepared program")]
+    MissingProgram,
+    /// A turn shape the prepared route does not carry yet (the cutover lands
+    /// them in order: effect suspension with the resume contract, pattern
+    /// binds with the multi-binder slice). The turn fails; Core is never
+    /// consulted.
+    #[error("the prepared route does not yet support {0}")]
+    NotYetSupported(&'static str),
 }
 
 impl PreparedRuntimeError {
@@ -91,6 +117,10 @@ impl PreparedRuntimeError {
             | Self::UnknownBinding(_)
             | Self::GenerationNotStarted
             | Self::BindingLeased { .. }
+            | Self::UnsettledEntry { .. }
+            | Self::WrongEngine
+            | Self::MissingProgram
+            | Self::NotYetSupported(_)
             | Self::CrossRealmArgument { .. } => PreparedFailureKind::Rejected,
             Self::Cancelled => PreparedFailureKind::Cancelled,
             Self::Unavailable(_) => PreparedFailureKind::Integrity,
@@ -201,6 +231,38 @@ pub enum PreparedOuter {
 struct ProgramFacts {
     entry: ValueId,
     tops: BTreeMap<ValueId, (SymbolIdentity, Option<Signature>)>,
+    /// The `Tidepool.Internal.Resume.Settled` constructors this program
+    /// declares, when its entry is a turn's settled scaffold.
+    settled: Option<SettledIds>,
+}
+
+/// The two constructors a turn's settled layer is read by, as this program's
+/// own declarations name them (`host_id` is the bridge `DataConId`).
+#[derive(Clone, Copy, Debug)]
+struct SettledIds {
+    done: tidepool_repr::DataConId,
+    suspended: tidepool_repr::DataConId,
+}
+
+impl SettledIds {
+    const MODULE: &'static str = "Tidepool.Internal.Resume";
+
+    fn of(prepared: &PreparedProgram) -> Option<Self> {
+        let host_id = |occurrence: &str| {
+            prepared
+                .constructors()
+                .iter()
+                .find(|declaration| {
+                    declaration.identity.module == Self::MODULE
+                        && declaration.identity.occurrence == occurrence
+                })
+                .map(|declaration| declaration.host_id)
+        };
+        Some(Self {
+            done: host_id("Done")?,
+            suspended: host_id("Suspended")?,
+        })
+    }
 }
 
 impl ProgramFacts {
@@ -225,6 +287,7 @@ impl ProgramFacts {
         Self {
             entry: prepared.entry(),
             tops,
+            settled: SettledIds::of(prepared),
         }
     }
 }
@@ -422,10 +485,9 @@ impl PreparedRuntime {
                 root,
                 handle,
                 origin: Some(PreparedOrigin {
-                    program,
-                    value,
                     identity,
                     export,
+                    top: Some(PreparedTop { program, value }),
                 }),
             },
             type_display: None,
@@ -1048,6 +1110,301 @@ pub fn run_prepared_once(
     })
 }
 
+// ---------------------------------------------------------------------------
+// PreparedEngine — the prepared half of a resident session's engine
+// ---------------------------------------------------------------------------
+
+/// The prepared-STG half of a resident session's engine: one machine shared
+/// by every program the session's turns install, plus what the session keeps
+/// about each program once the machine owns its code. Bindings, generations,
+/// scopes and leases stay in `PersistentSession` (the same value plane the
+/// Core engine binds into); this owns only code and heap.
+///
+/// A session on the prepared route bootstraps its machine from its first
+/// turn's program ([`Self::bootstrap`]) and installs every later one against
+/// the session's live prepared bindings ([`Self::install`]). A turn runs as
+/// its settled scaffold ([`Self::run_settled`]): the host reads completion or
+/// suspension from one constructor layer and never walks freer data.
+pub struct PreparedEngine {
+    machine: PreparedMachine<'static>,
+    programs: BTreeMap<ProgramId, ProgramFacts>,
+}
+
+// SAFETY: identical to `PreparedRuntime`'s justification above -- the machine
+// is the only non-auto-`Send` field, and `PersistentSession` moves the engine
+// between exactly one owning thread at a time (stowed XOR running).
+unsafe impl Send for PreparedEngine {}
+
+static_assertions::assert_impl_all!(PreparedEngine: Send);
+
+/// One turn's settled computation, read from the `Settled` layer its
+/// `__prepared` scaffold produced. Every handle is retained under the run's
+/// realm until the caller adopts or releases it.
+#[derive(Debug)]
+pub enum PreparedSettlement {
+    /// The computation completed; `value` is in weak head normal form.
+    Done { value: PreparedHandle },
+    /// The computation requested an effect and retained its continuation.
+    Suspended {
+        request: PreparedHandle,
+        continuation: PreparedHandle,
+    },
+}
+
+/// The live binding an artifact's declared import resolves to by identity:
+/// the newest prepared binding whose recorded identity is `identity`, or the
+/// one at `generation` when the artifact pins one.
+fn resolve_prepared_import<'a>(
+    bindings: &'a BindingTable,
+    identity: &SymbolIdentity,
+    generation: Option<u64>,
+) -> Option<&'a BindingEntry> {
+    bindings
+        .iter_live()
+        .filter(|entry| {
+            matches!(
+                &entry.value,
+                BoundValue::Prepared { origin: Some(origin), .. } if &origin.identity == identity
+            )
+        })
+        .filter(|entry| generation.is_none_or(|generation| entry.module.gen().0 == generation))
+        .max_by_key(|entry| entry.module.gen())
+}
+
+impl PreparedEngine {
+    /// Create the session's machine from its first turn's program and
+    /// install that program. The first turn can import nothing: no prepared
+    /// binding exists before the machine does.
+    pub fn bootstrap(prepared: PreparedProgram) -> Result<(Self, ProgramId), PreparedRuntimeError> {
+        let facts = ProgramFacts::of(&prepared);
+        let linked = link_program(prepared, &MachineImports::default())?;
+        let compiled = CompiledProgram::compile(&linked, TopSlotBase::ZERO)
+            .map_err(PreparedRuntimeError::Compile)?;
+        let top_slots = compiled.top_slot_count().max(SESSION_TOP_SLOTS);
+        let (machine, program) = PreparedMachine::new(
+            compiled,
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+                top_slots,
+            },
+        )
+        .map_err(PreparedRuntimeError::Run)?;
+        let mut programs = BTreeMap::new();
+        programs.insert(program, facts);
+        Ok((Self { machine, programs }, program))
+    }
+
+    /// Install a later turn's program. Every global it declares is resolved
+    /// to a live prepared binding in `bindings` by the identity recorded at
+    /// bind time (at the declared `required_generation`, or the newest), and
+    /// the artifact is linked against those bindings' live shape before
+    /// anything is compiled, so a stale generation or an unresolvable
+    /// identity is a typed link error with no machine side effect.
+    pub fn install(
+        &mut self,
+        prepared: PreparedProgram,
+        bindings: &BindingTable,
+    ) -> Result<ProgramId, PreparedRuntimeError> {
+        let mut values = MachineImports::default();
+        let mut imports = ImportBindings::new();
+        for declaration in prepared.globals() {
+            let identity = &declaration.identity;
+            let Some(entry) =
+                resolve_prepared_import(bindings, identity, declaration.required_generation)
+            else {
+                // Left absent: `link_program` reports the typed `MissingImport`.
+                continue;
+            };
+            let BoundValue::Prepared { handle, origin, .. } = &entry.value else {
+                return Err(PreparedRuntimeError::UnknownBinding(entry.id));
+            };
+            let handle = *handle;
+            let evaluated = self
+                .machine
+                .handle_is_evaluated(handle)
+                .map_err(PreparedRuntimeError::Run)?;
+            values.values.insert(
+                identity.clone(),
+                ImportedValue {
+                    identity: identity.clone(),
+                    rep: handle.rep(),
+                    entry_signature: origin.as_ref().and_then(|origin| origin.export.clone()),
+                    evaluated,
+                    generation: entry.module.gen().0,
+                },
+            );
+            imports.insert(identity.clone(), handle);
+        }
+        let facts = ProgramFacts::of(&prepared);
+        let linked = link_program(prepared, &values)?;
+        let compiled = self
+            .machine
+            .compile_for_install(&linked)
+            .map_err(PreparedRuntimeError::Compile)?;
+        let program = self
+            .machine
+            .install_program(compiled, imports)
+            .map_err(PreparedRuntimeError::Run)?;
+        self.programs.insert(program, facts);
+        Ok(program)
+    }
+
+    /// Run `program`'s settled scaffold under `realm` and read its one
+    /// constructor layer. The scaffold value itself is released here; the
+    /// layer's fields come back as retained handles.
+    pub fn run_settled(
+        &mut self,
+        program: ProgramId,
+        realm: RealmId,
+    ) -> Result<PreparedSettlement, PreparedRuntimeError> {
+        let facts = self
+            .programs
+            .get(&program)
+            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                program,
+            )))?;
+        let entry = facts.entry;
+        let settled = facts.settled.ok_or(PreparedRuntimeError::UnsettledEntry {
+            program,
+            detail: "the program declares no Tidepool.Internal.Resume.Settled constructors",
+        })?;
+        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+            return Err(PreparedRuntimeError::Cancelled);
+        }
+        let batch = self
+            .machine
+            .run_entry_retained(
+                program,
+                entry,
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 0,
+                    collect_before_observation: false,
+                },
+                realm,
+            )
+            .map_err(PreparedRuntimeError::Run)?;
+        let mut outer = None;
+        for value in batch.values {
+            match (value, outer) {
+                (PreparedResult::Managed(handle), None) => outer = Some(handle),
+                (PreparedResult::Managed(handle), Some(_)) => {
+                    self.machine.release(handle);
+                }
+                _ => {}
+            }
+        }
+        let outer = outer.ok_or(PreparedRuntimeError::UnsettledEntry {
+            program,
+            detail: "the entry returned no managed settled value",
+        })?;
+        let layer = self.machine.inspect_outer(outer, realm);
+        self.machine.release(outer);
+        let CodegenPreparedOuter::Constructor { identity, fields } =
+            layer.map_err(PreparedRuntimeError::Run)?;
+        let managed: Vec<PreparedHandle> = fields
+            .into_iter()
+            .filter_map(|field| match field {
+                PreparedResult::Managed(handle) => Some(handle),
+                PreparedResult::Void | PreparedResult::Scalar(_) => None,
+            })
+            .collect();
+        let mut shape = |detail| {
+            for handle in &managed {
+                self.machine.release(*handle);
+            }
+            Err(PreparedRuntimeError::UnsettledEntry { program, detail })
+        };
+        if identity == settled.done {
+            match managed.as_slice() {
+                [value] => Ok(PreparedSettlement::Done { value: *value }),
+                _ => shape("Done carried other than one managed field"),
+            }
+        } else if identity == settled.suspended {
+            match managed.as_slice() {
+                [request, continuation] => Ok(PreparedSettlement::Suspended {
+                    request: *request,
+                    continuation: *continuation,
+                }),
+                _ => shape("Suspended carried other than two managed fields"),
+            }
+        } else {
+            shape("the settled layer is neither Done nor Suspended")
+        }
+    }
+
+    /// Materialize a retained value as a bridge `Value`, forcing its lazy
+    /// fields through `program`'s force adapter. The handle stays retained.
+    pub fn observe(
+        &mut self,
+        program: ProgramId,
+        handle: PreparedHandle,
+    ) -> Result<Value, PreparedRuntimeError> {
+        self.machine
+            .observe_handle(program, handle, RunOptions::default().observation_budget)
+            .map_err(PreparedRuntimeError::Run)
+    }
+
+    /// Hand a run result to the session value plane: the handle moves into
+    /// the machine's ROOT scope (no realm close releases it) and its
+    /// persistent root slot is returned for the binding to load through.
+    pub fn adopt(
+        &mut self,
+        handle: PreparedHandle,
+    ) -> Option<tidepool_codegen::old_space::RootSlot> {
+        self.machine
+            .adopt_handle(handle)
+            .then(|| self.machine.handle_root(handle))
+            .flatten()
+    }
+
+    /// Release one retained handle and deregister its root.
+    pub fn release(&mut self, handle: PreparedHandle) -> bool {
+        self.machine.release(handle)
+    }
+
+    /// Close a runtime resource scope: `(frames, handles_released)`.
+    pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
+        self.machine.close_realm(realm)
+    }
+
+    pub fn cancel_handle(&mut self, realm: RealmId) -> CancelHandle {
+        self.machine.realm_cancel_handle(realm)
+    }
+
+    #[must_use]
+    pub fn disposition(&self) -> MachineDisposition {
+        self.machine.disposition()
+    }
+
+    #[must_use]
+    pub fn failure(&self) -> Option<MachineFailure> {
+        self.machine.failure()
+    }
+
+    #[must_use]
+    pub fn handle_count(&self) -> usize {
+        self.machine.handle_count()
+    }
+
+    #[must_use]
+    pub fn persistent_roots_count(&self) -> usize {
+        self.machine.total_persistent_roots()
+    }
+
+    /// The unit every home module of `program` was compiled in -- what a
+    /// later program's import identity for one of this turn's session
+    /// binders names.
+    #[must_use]
+    pub fn entry_unit(&self, program: ProgramId) -> Option<String> {
+        let facts = self.programs.get(&program)?;
+        facts
+            .tops
+            .get(&facts.entry)
+            .map(|(identity, _)| identity.unit.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1578,8 +1935,9 @@ mod tests {
             panic!("a bound top records its origin");
         };
         assert_eq!(origin.identity, producer_identity());
-        assert_eq!(origin.program, first);
-        assert_eq!(origin.value, ValueId(0));
+        let top = origin.top.expect("a bound top records which top");
+        assert_eq!(top.program, first);
+        assert_eq!(top.value, ValueId(0));
         assert_eq!(
             origin.export,
             Some(Signature {

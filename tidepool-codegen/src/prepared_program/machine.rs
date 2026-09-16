@@ -70,6 +70,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use tidepool_bridge::Value;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_heap::static_region::StaticRegion;
 use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, SymbolIdentity, ValueId};
@@ -1196,6 +1197,97 @@ impl<'code> PreparedMachine<'code> {
     #[must_use]
     pub fn handle_root(&self, handle: PreparedHandle) -> Option<crate::old_space::RootSlot> {
         self.handles.handle(handle.raw).map(|entry| entry.slot)
+    }
+
+    /// Move a retained handle into the machine's own ROOT scope, so closing
+    /// the realm it was minted under no longer releases it. The session value
+    /// plane calls this when it binds a run's result: from then on the
+    /// binding owns the value's lifetime and ends it through [`Self::release`].
+    /// `false` for an unknown or already released handle.
+    pub fn adopt_handle(&mut self, handle: PreparedHandle) -> bool {
+        self.handles.rehome_handle(handle.raw, RealmId::ROOT)
+    }
+
+    /// Every persistent root this machine has registered, whatever program
+    /// owns it -- the ledger a session's scope-retirement receipt is checked
+    /// against, as `JitEffectMachine::persistent_roots_count` is for Core.
+    #[must_use]
+    pub fn total_persistent_roots(&self) -> usize {
+        self.machine.persistent_roots_count()
+    }
+
+    /// Materialize a retained value as a bridge `Value`, forcing its lazy
+    /// fields through program `id`'s force adapter under the value's own
+    /// realm cancel flag. The handle stays retained: forcing may evaluate and
+    /// move the graph it roots, and the handle's root slot follows the move.
+    /// `budget` bounds observed nodes and copied payload bytes together.
+    pub fn observe_handle(
+        &mut self,
+        id: ProgramId,
+        handle: PreparedHandle,
+        budget: usize,
+    ) -> Result<Value, ExecutionError> {
+        self.ensure_handle_access()?;
+        let (word, realm) = self
+            .handles
+            .handle(handle.raw)
+            .map(|entry| (unsafe { entry.slot.current() } as usize, entry.realm))
+            .filter(|(word, _)| *word != 0)
+            .ok_or(ExecutionError::UnknownPreparedHandle)?;
+        let cancel = self.handles.cancel_flag(realm);
+        let program = self
+            .programs
+            .get(id.0 as usize)
+            .ok_or(ExecutionError::UnknownProgram(id))?
+            .program
+            .get();
+        let max_native_frame = program.pipeline.native_frame_maximum();
+        let reserve = max_native_frame
+            .checked_mul(2)
+            .ok_or_else(|| runtime_error_without_machine(RuntimeError::StackOverflow))?;
+        let bounds = NativeStackBounds::current().map_err(runtime_error_without_machine)?;
+        bounds
+            .ensure_current_frame_reserve(reserve)
+            .map_err(runtime_error_without_machine)?;
+        self.vmctx.prepared_stack_limit = bounds
+            .limit_with_frame_reserve(max_native_frame)
+            .map_err(runtime_error_without_machine)?;
+        self.machine
+            .begin_prepared_call()
+            .map_err(ExecutionError::Runtime)?;
+        self.machine.set_cancel_flag(cancel);
+        let observed = {
+            let _cancel = CancelScope(&self.machine);
+            let _scope = OldSpaceScope::new(&self.machine, &self.old_space)?;
+            super::forcing::observe_results(
+                &self.machine,
+                program,
+                &mut self.vmctx,
+                &self.statics,
+                &self.descriptor_registry,
+                &self.old_space,
+                &[super::observe::ObservationSeed {
+                    word,
+                    rep: handle.rep,
+                }],
+                budget,
+            )
+        };
+        self.machine.end_prepared_call();
+        let mut values = match observed {
+            Ok(values) => values,
+            Err(ExecutionError::Observation(error @ super::ObservationFailure::Integrity(_))) => {
+                self.machine.set_first_cause(RuntimeError::BadPointer);
+                return Err(runtime_error_from_machine_or_observation(
+                    &self.machine,
+                    error,
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        values
+            .pop()
+            .ok_or_else(|| runtime_error(&self.machine, RuntimeError::BadPointer))
     }
 
     /// The runtime resource scope `handle` is currently live under, or

@@ -373,28 +373,6 @@ pub struct TurnTemplate {
 /// silently parsing session-decl code in a different dialect than eval does.
 pub const DECL_TEMPLATE_SOURCE: &str = "{-# LANGUAGE GADTs, OverloadedStrings, TypeOperators, DataKinds, KindSignatures, ScopedTypeVariables, BangPatterns, ViewPatterns, TupleSections, MultiWayIf, LambdaCase, RecordWildCards, NamedFieldPuns, DeriveFunctor, DeriveFoldable, DeriveTraversable, TypeApplications, QuasiQuotes, OverloadedLabels #-}\nmodule SessionDecls where\n{{TURN}}\n";
 
-/// The one module a prepared-STG session turn compiles as
-/// ([`super::prepared_turn::SessionTurns`]): `module_name` is the turn's
-/// value module (`SessionModule::val(g).module_name()`), `imports` are
-/// earlier turns' modules as `(module, names)` pairs, and `body` is the
-/// single top-level declaration the turn introduces. Kept beside the Core
-/// turn templates so the two turn paths share one owner for module text.
-#[must_use]
-pub fn prepared_turn_module(
-    module_name: &str,
-    imports: &[(String, Vec<String>)],
-    body: &str,
-) -> String {
-    let mut source = format!("module {module_name} where\n\n");
-    for (module, names) in imports {
-        source.push_str(&format!("import {module} ({})\n", names.join(", ")));
-    }
-    source.push('\n');
-    source.push_str(body);
-    source.push('\n');
-    source
-}
-
 /// One `run_turn` request: the raw turn text, the wrapper templates it may
 /// need, the session context, the bind generation, and an optional
 /// caller-supplied verdict.
@@ -462,9 +440,31 @@ fn extract_identity(identity: &SymbolIdentity) -> tidepool_extract_cmd::SymbolId
     }
 }
 
-/// The turn target whose artifacts the worker writes when a template does not
-/// name its own: the extract's scaffold-reserved binding.
-const SCAFFOLD_TARGET: &str = "__result";
+/// The binder a prepared turn PROJECTS: the turn's `__result` effect
+/// computation settled to one constructor layer by
+/// `Tidepool.Internal.Resume.settle`, so the host reads completion or
+/// suspension without walking freer data. Every template assembled here
+/// defines it (`Tidepool.Session.preparedScaffoldTargetName` on the worker
+/// side); only a prepared turn writes `__prepared.prepared.cbor`.
+pub const PREPARED_SCAFFOLD_TARGET: &str = "__prepared";
+
+/// The qualified alias every template imports `Tidepool.Internal.Resume` under.
+const RESUME_ALIAS: &str = "TidepoolResume";
+
+/// The one line every executable template ends with: the settled scaffold the
+/// prepared route projects. Unreachable from `__result`, so the Core closure
+/// never sees it.
+fn prepared_scaffold_binding(target: &str) -> String {
+    format!("{PREPARED_SCAFFOLD_TARGET} = {RESUME_ALIAS}.settle {target}\n")
+}
+
+/// The preamble with the settle module in scope for [`prepared_scaffold_binding`].
+fn with_resume_import(preamble_with_imports: &str) -> String {
+    insert_preamble_imports(
+        preamble_with_imports,
+        &format!("qualified Tidepool.Internal.Resume as {RESUME_ALIAS}"),
+    )
+}
 
 /// Failure from the shared resident-turn boundary.
 ///
@@ -632,6 +632,47 @@ pub struct CompiledTurn {
     pub prepared: Option<PreparedProgram>,
 }
 
+impl CompiledTurn {
+    /// Borrow the halves a resident session runs.
+    #[must_use]
+    pub fn code(&self) -> TurnCode<'_> {
+        TurnCode {
+            expr: &self.expr,
+            table: &self.table,
+            sites: &self.asks,
+            prepared: self.prepared.as_ref(),
+        }
+    }
+}
+
+/// The compiled halves of one turn a resident session may run. The Core
+/// half (`expr`) is what every turn compiles today; `prepared` is the program
+/// a prepared-route turn adds. The session's engine, fixed at construction,
+/// runs its own half and never the other; `table` and `sites` describe both
+/// (one constructor table serves both engines).
+#[derive(Clone, Copy)]
+pub struct TurnCode<'a> {
+    pub expr: &'a CoreExpr,
+    pub table: &'a DataConTable,
+    pub sites: &'a [YieldSite],
+    pub prepared: Option<&'a PreparedProgram>,
+}
+
+impl<'a> TurnCode<'a> {
+    /// A Core-only turn: what a caller without a [`CompiledTurn`] (a hand-built
+    /// fragment, a fixture) runs. On the prepared route it is refused, never
+    /// run on Core.
+    #[must_use]
+    pub fn core(expr: &'a CoreExpr, table: &'a DataConTable, sites: &'a [YieldSite]) -> Self {
+        Self {
+            expr,
+            table,
+            sites,
+            prepared: None,
+        }
+    }
+}
+
 /// The result of [`run_turn`] — one variant per verdict, each carrying only
 /// its own kind's payload. A caller cannot read a field its verdict does not
 /// have.
@@ -772,7 +813,7 @@ pub fn assemble_bind_module(
     tail: &str,
     delegate_wrap: bool,
 ) -> String {
-    let mut out = preamble_with_imports.to_string();
+    let mut out = with_resume_import(preamble_with_imports);
     out.push_str("-- [user]\n");
     out.push_str(extra);
     if delegate_wrap {
@@ -794,6 +835,7 @@ pub fn assemble_bind_module(
             " ; _ <- (pure () :: Eff {effect_stack} ())\n ; pure {tail}\n }}\n"
         ));
     }
+    out.push_str(&prepared_scaffold_binding(target));
     out
 }
 
@@ -846,11 +888,11 @@ fn assemble_expression_module_with_result(
 ) -> String {
     let mut out = if matches!(lift, ExpressionLift::Pure) {
         insert_preamble_imports(
-            preamble_with_imports,
+            &with_resume_import(preamble_with_imports),
             "qualified GHC.TypeError as TidepoolWorkbenchTypeError",
         )
     } else {
-        preamble_with_imports.to_string()
+        with_resume_import(preamble_with_imports)
     };
     out.push_str(&format!(
         "__tidepoolInEffectRow :: Eff {effect_stack} value -> Eff {effect_stack} value\n\
@@ -907,6 +949,7 @@ fn assemble_expression_module_with_result(
     out.push_str(" = __tidepoolInEffectRow $ ");
     out.push_str(body);
     out.push('\n');
+    out.push_str(&prepared_scaffold_binding(target));
     out
 }
 
@@ -1286,20 +1329,13 @@ fn run_turn_with_pin(req: TurnRequest<'_>, pin: Option<&str>) -> Result<TurnResu
         });
     }
 
-    let prepared_target = req
-        .prepared
-        .as_ref()
-        .map(|_| req.target.unwrap_or(SCAFFOLD_TARGET));
-    decode_turn_output_dir(temp.path(), prepared_target).map_err(Into::into)
+    decode_turn_output_dir(temp.path(), req.prepared.is_some()).map_err(Into::into)
 }
 
 /// Decode one item's full output directory into a [`TurnResult`]: the
 /// `TurnOut` CBOR sidecar (`turn.cbor`) plus, for a `Bind`/`Expr` verdict,
 /// `result.cbor`/`meta.cbor` off the SAME directory.
-fn decode_turn_output_dir(
-    dir: &Path,
-    prepared_target: Option<&str>,
-) -> Result<TurnResult, CompileError> {
+fn decode_turn_output_dir(dir: &Path, prepared: bool) -> Result<TurnResult, CompileError> {
     let turn_out_path = dir.join("turn.cbor");
     if !turn_out_path.exists() {
         return Err(CompileError::MissingOutput(turn_out_path));
@@ -1324,7 +1360,7 @@ fn decode_turn_output_dir(
             asks,
             wrapped_source,
         } => {
-            let compiled = read_compiled_turn(dir, asks, prepared_target)?;
+            let compiled = read_compiled_turn(dir, asks, prepared)?;
             Ok(TurnResult::Bind {
                 binders,
                 bound,
@@ -1338,7 +1374,7 @@ fn decode_turn_output_dir(
             asks,
             wrapped_source,
         } => {
-            let compiled = read_compiled_turn(dir, asks, prepared_target)?;
+            let compiled = read_compiled_turn(dir, asks, prepared)?;
             Ok(TurnResult::Expr {
                 variant,
                 compiled,
@@ -1353,7 +1389,7 @@ fn decode_turn_output_dir(
 fn read_compiled_turn(
     output_dir: &Path,
     asks: Vec<YieldSite>,
-    prepared_target: Option<&str>,
+    prepared: bool,
 ) -> Result<CompiledTurn, CompileError> {
     let expr_path = output_dir.join("result.cbor");
     let meta_path = output_dir.join("meta.cbor");
@@ -1389,8 +1425,8 @@ fn read_compiled_turn(
     tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
     tidepool_codegen::host_fns::register_poisoned_externals(&warnings.poisoned);
 
-    let prepared = prepared_target
-        .map(|target| read_prepared_program(output_dir, target))
+    let prepared = prepared
+        .then(|| read_prepared_program(output_dir))
         .transpose()?;
 
     Ok(CompiledTurn {
@@ -1405,8 +1441,8 @@ fn read_compiled_turn(
 /// Read the prepared-STG program the worker wrote beside this turn's Core
 /// artifacts. A requested program that is absent is a missing output, never a
 /// silent Core-only turn.
-fn read_prepared_program(output_dir: &Path, target: &str) -> Result<PreparedProgram, CompileError> {
-    let path = output_dir.join(format!("{target}.prepared.cbor"));
+fn read_prepared_program(output_dir: &Path) -> Result<PreparedProgram, CompileError> {
+    let path = output_dir.join(format!("{PREPARED_SCAFFOLD_TARGET}.prepared.cbor"));
     if !path.exists() {
         return Err(CompileError::MissingOutput(path));
     }
@@ -2695,7 +2731,11 @@ mod tests {
         let session_root = TempDir::new().unwrap();
         let templates = [TurnTemplate {
             kind: TemplateSelector::Expr,
-            source: "module Expr where\n__result :: Int\n__result = {{TURN}}\n".to_string(),
+            // A hand-written template still defines the settled scaffold the
+            // prepared route projects; here the turn is pure, so it IS the value.
+            source:
+                "module Expr where\n__result :: Int\n__result = {{TURN}}\n__prepared = __result\n"
+                    .to_string(),
         }];
         let request = |prepared| TurnRequest {
             turn_text: "41 + 1",

@@ -84,9 +84,9 @@ pub enum BoundValue {
     /// A value retained by a prepared-STG `PreparedMachine`: tenured as-is
     /// (never deep-forced, so its preparation policy is Tier-1's), rooted by
     /// `root` for the machine's life. `handle` is the machine's own custody of
-    /// that same root (what a later program's `ImportBindings` names), and
-    /// `origin` says which installed program's top-level binding it was
-    /// retained from, when it is a top rather than an entry result.
+    /// that same root (what a later program's `ImportBindings` names), held
+    /// under the machine's ROOT scope so no realm close releases it; `origin`
+    /// is what a later program links against when it imports this binding.
     Prepared {
         root: RootSlot,
         handle: crate::prepared_program::PreparedHandle,
@@ -94,20 +94,30 @@ pub enum BoundValue {
     },
 }
 
-/// Where a [`BoundValue::Prepared`] top came from, recorded at bind time
-/// from the producing artifact's own `TopBinding` -- the facts an importer
-/// links against, kept ON the binding so no caller ever reconstructs them.
+/// What an importer links against when it names a [`BoundValue::Prepared`]
+/// binding, recorded at bind time -- from the producing artifact's own
+/// `TopBinding` for a retained top, or minted from the session binder for a
+/// value bound from a turn's settled result -- so no caller reconstructs it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedOrigin {
+    /// Exactly what a later program's `GlobalDecl::identity` names when it
+    /// imports this binding (`Tidepool.Session.Val.G<g>.x` for a bound
+    /// session value).
+    pub identity: tidepool_repr::execution_schema::SymbolIdentity,
+    /// The exporting entry signature (a function's or thunk's) an importer's
+    /// declared `entry_signature` must equal at link time; `None` for a
+    /// constructor or byte top, and for a value bound from a settled result.
+    pub export: Option<tidepool_repr::execution_schema::Signature>,
+    /// The installed top this binding was retained from, when it is a top
+    /// rather than a run's settled result.
+    pub top: Option<PreparedTop>,
+}
+
+/// An installed program's top-level binding, by program and value id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedTop {
     pub program: crate::prepared_program::ProgramId,
     pub value: tidepool_repr::execution_schema::ValueId,
-    /// The top's declared identity: exactly what a later program's
-    /// `GlobalDecl::identity` names when it imports this binding.
-    pub identity: tidepool_repr::execution_schema::SymbolIdentity,
-    /// The top's entry signature (a function's or thunk's), `None` for a
-    /// constructor or byte top -- what an importer's declared
-    /// `entry_signature` must equal at link time.
-    pub export: Option<tidepool_repr::execution_schema::Signature>,
 }
 
 impl BoundValue {

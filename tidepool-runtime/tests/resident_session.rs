@@ -29,6 +29,7 @@ use tidepool_effect::dispatch::{request_constructor, DispatchEffect, EffectConte
 use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy, Response};
 use tidepool_repr::{Generation, Literal, PrincipalId, SessionModule};
+use tidepool_runtime::session::TurnCode;
 use tidepool_runtime::session::{
     BoundBinder, ResidentError, ResidentOutcome, ResidentSession, SessionError, SessionRunContext,
     ValueTier,
@@ -584,7 +585,12 @@ fn resumed_projected_bind_keeps_its_originating_lexical_scope() {
         "result :: M (Int, Int)\nresult = do\n  _ <- send (Ask \"project\")\n  pure (41 :: Int, 42 :: Int)",
     );
     let hole = match session
-        .run_projected_bind_with_sites("scoped_project", &expr, &table, &binders, generation, &[])
+        .run_projected_bind_with_sites(
+            "scoped_project",
+            TurnCode::core(&expr, &table, &[]),
+            &binders,
+            generation,
+        )
         .expect("projected bind parks")
     {
         ResidentOutcome::Suspended { hole, .. } => hole,

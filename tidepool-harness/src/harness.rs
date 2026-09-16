@@ -51,6 +51,7 @@ use tidepool_runtime::session::{
     DECL_TEMPLATE_SOURCE,
 };
 use tidepool_runtime::session::{run_block_sequence, BlockExecution, BlockSequenceOutcome};
+use tidepool_runtime::session::{EngineKind, TurnCode};
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 
 use crate::effect_trace::{EffectRecord, EffectTrace, TracingDispatcher};
@@ -929,7 +930,10 @@ impl Harness {
         let lib = self.node_decl_plane(node);
         let mut include = self.cfg.include.clone();
         include.extend(extra_include);
-        let session = ResidentSession::unbootstrapped(
+        // The engine route is read once per session at this composition root
+        // (`TIDEPOOL_ENGINE=prepared`), never inside a turn.
+        let session = ResidentSession::unbootstrapped_on(
+            EngineKind::from_env(),
             stack,
             CapturedOutput::new(),
             include,
@@ -1794,7 +1798,8 @@ impl Harness {
                 let run_table = table.clone();
                 let run_outcome = self
                     .run_checked_out(node, checkout, move |mut session| {
-                        let out = session.run_with_sites("turn", &expr, &run_table, &sites);
+                        let out = session
+                            .run_with_sites("turn", TurnCode::core(&expr, &run_table, &sites));
                         (session, out)
                     })
                     .await?;
@@ -2194,7 +2199,8 @@ impl Harness {
                     let run_table = table.clone();
                     let run_outcome = self
                         .run_checked_out(node, checkout, move |mut session| {
-                            let out = session.run_with_sites("turn", &expr, &run_table, &sites);
+                            let out = session
+                                .run_with_sites("turn", TurnCode::core(&expr, &run_table, &sites));
                             (session, out)
                         })
                         .await?;
@@ -2391,11 +2397,9 @@ impl Harness {
             .run_checked_out(node, checkout, move |mut session| {
                 let out = session.run_bind_with_sites(
                     "bind",
-                    &expr,
-                    &run_table,
+                    TurnCode::core(&expr, &run_table, &sites),
                     &binder_for_run,
                     gen,
-                    &sites,
                 );
                 (session, out)
             })

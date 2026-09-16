@@ -226,7 +226,11 @@ fn a_sibling_define_between_mint_and_first_use_does_not_leak() {
     // Driven through `PersistentSession` on purpose: `mint_scope`'s seeding IS
     // the code under test, and it lives here because this is the only type
     // that owns the `ScopeTree` and therefore knows a scope's parent.
-    let mut core = PersistentSession::new(Some(lib), NURSERY);
+    let mut core = PersistentSession::new(
+        Some(lib),
+        NURSERY,
+        tidepool_runtime::session::EngineKind::Core,
+    );
 
     // ---- (1) ROOT defines the name both children will shadow. ----
     let g_root = core
@@ -355,7 +359,11 @@ fn isolated_scope_has_an_empty_independent_declaration_chain() {
     )
     .expect("open session")
     .with_validation_include(vec![lib_dir.clone()]);
-    let mut core = PersistentSession::new(Some(lib), NURSERY);
+    let mut core = PersistentSession::new(
+        Some(lib),
+        NURSERY,
+        tidepool_runtime::session::EngineKind::Core,
+    );
 
     let root_generation = core
         .define_scoped(&["rootOnly = 41 :: Int"])
@@ -414,7 +422,11 @@ fn define_and_retract_scoped_in_reject_a_dead_scope_without_touching_the_log() {
         ModuleEnv::standalone_default(),
     )
     .expect("open session");
-    let mut core = PersistentSession::new(Some(lib), NURSERY);
+    let mut core = PersistentSession::new(
+        Some(lib),
+        NURSERY,
+        tidepool_runtime::session::EngineKind::Core,
+    );
 
     let child = core.mint_scope(ScopeId::ROOT).expect("ROOT is live");
     core.retire_scope(child);

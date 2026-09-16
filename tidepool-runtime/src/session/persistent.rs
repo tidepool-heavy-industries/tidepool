@@ -48,12 +48,119 @@ use tidepool_repr::{
     CoreExpr, DataCon, DataConTable, Generation, SessionModule, SessionVarId, VarId,
 };
 
+use tidepool_codegen::binding_table::BoundValue;
+use tidepool_repr::execution_schema::{PreparedProgram, SymbolIdentity};
+
 use super::engine::OutputSink;
+use super::prepared::{PreparedEngine, PreparedRuntimeError};
 use super::{
     ExactExportError, ExactExportSurface, SessionCompileView, SessionError, SessionLib,
     SourceImports,
 };
 use crate::JitError;
+
+/// Which execution engine a resident session runs its turns on. Chosen once
+/// at construction and never switched: a session on the prepared route never
+/// falls back to Core after a turn starts or fails.
+///
+/// This selector is the cutover's temporary explicit migration route
+/// (`plans/stg-completion.md`, step 2); step 5 deletes it with the Core engine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineKind {
+    /// The Core JIT machine every session ran on before the cutover.
+    Core,
+    /// The prepared-STG machine: turns compile through `--prepared-turn` and
+    /// run as settled scaffolds.
+    Prepared,
+}
+
+impl EngineKind {
+    /// The environment variable the composition roots read once per session.
+    pub const ENV: &'static str = "TIDEPOOL_ENGINE";
+
+    /// The route named by `TIDEPOOL_ENGINE` (`prepared` selects the prepared
+    /// machine; anything else, or unset, is Core). Read once at session
+    /// construction by the composition roots, never inside a turn.
+    #[must_use]
+    pub fn from_env() -> Self {
+        match std::env::var(Self::ENV) {
+            Ok(value) if value.eq_ignore_ascii_case("prepared") => Self::Prepared,
+            _ => Self::Core,
+        }
+    }
+}
+
+/// The session's live execution engine, once its first turn has bootstrapped
+/// it. Exactly one variant ever exists for a session ([`EngineKind`]).
+// One value per session, moved once per turn onto the eval thread; the size
+// difference between the two machines is not a cost worth an indirection.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one value per session, moved once per turn"
+)]
+pub enum ResidentEngine {
+    Core(JitEffectMachine),
+    Prepared(PreparedEngine),
+}
+
+impl ResidentEngine {
+    #[must_use]
+    pub fn core(&self) -> Option<&JitEffectMachine> {
+        match self {
+            Self::Core(machine) => Some(machine),
+            Self::Prepared(_) => None,
+        }
+    }
+
+    pub fn core_mut(&mut self) -> Option<&mut JitEffectMachine> {
+        match self {
+            Self::Core(machine) => Some(machine),
+            Self::Prepared(_) => None,
+        }
+    }
+
+    pub fn prepared_mut(&mut self) -> Option<&mut PreparedEngine> {
+        match self {
+            Self::Core(_) => None,
+            Self::Prepared(engine) => Some(engine),
+        }
+    }
+
+    /// The Core machine, or the typed refusal a Core-only turn path reports
+    /// on the prepared route. No path ever falls back across engines.
+    pub fn require_core(&mut self) -> Result<&mut JitEffectMachine, JitError> {
+        self.core_mut().ok_or(JitError::InvalidSuspensionState(
+            "this turn path runs only on the Core engine; the session runs prepared STG",
+        ))
+    }
+
+    #[must_use]
+    pub fn disposition(&self) -> MachineDisposition {
+        match self {
+            Self::Core(machine) => machine.disposition(),
+            Self::Prepared(engine) => engine.disposition(),
+        }
+    }
+
+    fn ensure_reusable(&self) -> Result<(), JitError> {
+        match self {
+            Self::Core(machine) => machine.ensure_reusable(),
+            Self::Prepared(engine) => match engine.disposition() {
+                MachineDisposition::Reusable => Ok(()),
+                MachineDisposition::Unavailable => Err(JitError::InvalidSuspensionState(
+                    "prepared machine is unavailable after an integrity failure",
+                )),
+            },
+        }
+    }
+
+    fn persistent_roots_count(&self) -> usize {
+        match self {
+            Self::Core(machine) => machine.persistent_roots_count(),
+            Self::Prepared(engine) => engine.persistent_roots_count(),
+        }
+    }
+}
 
 /// Cross-thread custody for one completed bind root. The root never moves
 /// independently: it remains inside the session while that session is stowed,
@@ -80,8 +187,12 @@ unsafe impl Send for LinearRootStash {}
 pub struct PersistentSession {
     /// The resident machine — `None` before the first turn bootstraps it,
     /// `Some` when idle/suspended, and moved out onto the eval thread for a
-    /// turn's duration (stowed-XOR-running).
-    machine: Option<JitEffectMachine>,
+    /// turn's duration (stowed-XOR-running). Its variant is fixed by
+    /// `engine_kind` for the session's life.
+    machine: Option<ResidentEngine>,
+    /// The route this session was constructed on; the only engine `machine`
+    /// will ever hold.
+    engine_kind: EngineKind,
     /// The constructor metadata unioned across turns (`insert_checked`, monotone:
     /// later turns are a subset), so an ADT value bound earlier renders with real
     /// con names later.
@@ -150,9 +261,10 @@ impl PersistentSession {
     /// Build an idle session core. `lib` is the decl plane (`Some` for the repl
     /// and the accumulating harness; `None` for a value-plane-only session). The
     /// machine is not bootstrapped until the first turn.
-    pub fn new(lib: Option<SessionLib>, nursery_size: usize) -> Self {
+    pub fn new(lib: Option<SessionLib>, nursery_size: usize, engine_kind: EngineKind) -> Self {
         PersistentSession {
             machine: None,
+            engine_kind,
             session_table: DataConTable::new(),
             lib,
             bindings: BindingTable::new(),
@@ -210,14 +322,26 @@ impl PersistentSession {
                 .bindings
                 .iter_live()
                 .any(|entry| std::ptr::eq(entry.value.root().addr(), slot.addr()));
-            let Some(machine) = self.machine.as_mut() else {
+            if aliased || released.contains(&slot.addr()) {
                 continue;
-            };
-            let held = machine.handle_holds_root(slot);
-            debug_assert!(!held, "retiring binding root still owned by a handle");
-            if !aliased && !held && !released.contains(&slot.addr()) {
-                machine.retire_scope_root(slot);
-                released.push(slot.addr());
+            }
+            match (&entry.value, self.machine.as_mut()) {
+                // A prepared binding's root IS its adopted handle: releasing
+                // the handle deregisters the root.
+                (BoundValue::Prepared { handle, .. }, Some(ResidentEngine::Prepared(engine))) => {
+                    if engine.release(*handle) {
+                        released.push(slot.addr());
+                    }
+                }
+                (_, Some(ResidentEngine::Core(machine))) => {
+                    let held = machine.handle_holds_root(slot);
+                    debug_assert!(!held, "retiring binding root still owned by a handle");
+                    if !held {
+                        machine.retire_scope_root(slot);
+                        released.push(slot.addr());
+                    }
+                }
+                _ => {}
             }
         }
         released.len()
@@ -265,13 +389,25 @@ impl PersistentSession {
     pub fn is_bootstrapped(&self) -> bool {
         self.machine.is_some()
     }
-    /// The resident machine, if bootstrapped (read — e.g. `heap_stats`).
-    pub fn machine(&self) -> Option<&JitEffectMachine> {
-        self.machine.as_ref()
+    /// The route this session runs on.
+    #[must_use]
+    pub fn engine_kind(&self) -> EngineKind {
+        self.engine_kind
     }
-    /// The resident machine, if bootstrapped (mutate).
+    /// The resident Core machine, if bootstrapped (read — e.g. `heap_stats`).
+    /// `None` on the prepared route, whose paths reach the engine through
+    /// [`Self::prepared_mut`] instead; a Core-only path finding `None` here
+    /// reports its typed refusal rather than falling back.
+    pub fn machine(&self) -> Option<&JitEffectMachine> {
+        self.machine.as_ref().and_then(ResidentEngine::core)
+    }
+    /// The resident Core machine, if bootstrapped (mutate).
     pub fn machine_mut(&mut self) -> Option<&mut JitEffectMachine> {
-        self.machine.as_mut()
+        self.machine.as_mut().and_then(ResidentEngine::core_mut)
+    }
+    /// The prepared engine, once the first prepared turn has installed it.
+    pub fn prepared_mut(&mut self) -> Option<&mut PreparedEngine> {
+        self.machine.as_mut().and_then(ResidentEngine::prepared_mut)
     }
 
     /// Whether the resident machine can safely accept another entry.
@@ -284,20 +420,21 @@ impl PersistentSession {
     /// declaration-plane report and never changes this decision.
     #[must_use]
     pub fn machine_disposition(&self) -> Option<MachineDisposition> {
-        self.machine.as_ref().map(JitEffectMachine::disposition)
+        self.machine.as_ref().map(ResidentEngine::disposition)
     }
 
     fn ensure_machine_reusable(&self) -> Result<(), JitError> {
         self.machine
             .as_ref()
-            .map_or(Ok(()), JitEffectMachine::ensure_reusable)
+            .map_or(Ok(()), ResidentEngine::ensure_reusable)
     }
 
     /// Cancellation handle for this capacity-one registry realm.
     pub fn cancel_handle(&mut self) -> Option<CancelHandle> {
-        self.machine
-            .as_mut()
-            .map(|m| m.realm_cancel_handle(RealmId::ROOT))
+        self.machine.as_mut().map(|engine| match engine {
+            ResidentEngine::Core(machine) => machine.realm_cancel_handle(RealmId::ROOT),
+            ResidentEngine::Prepared(engine) => engine.cancel_handle(RealmId::ROOT),
+        })
     }
 
     // -- table accumulation ------------------------------------------------
@@ -338,7 +475,7 @@ impl PersistentSession {
             .extend_checked(incoming)
             .map_err(|e| format!("session DataConTable collision: {e}"))?;
         if advances_constructor_vocabulary {
-            if let Some(machine) = self.machine.as_mut() {
+            if let Some(ResidentEngine::Core(machine)) = self.machine.as_mut() {
                 machine.refresh_parked_continuation_tables(&self.session_table);
             }
         }
@@ -371,14 +508,60 @@ impl PersistentSession {
         table: &DataConTable,
     ) -> Result<(), JitError> {
         self.ensure_machine_reusable()?;
+        if self.engine_kind != EngineKind::Core {
+            return Err(JitError::InvalidSuspensionState(
+                "a prepared-route session bootstraps from its first turn's prepared program, not Core",
+            ));
+        }
         if self.machine.is_none() {
-            self.machine = Some(JitEffectMachine::compile_session(
+            self.machine = Some(ResidentEngine::Core(JitEffectMachine::compile_session(
                 expr,
                 table,
                 self.nursery_size,
-            )?);
+            )?));
         }
         Ok(())
+    }
+
+    /// Install a prepared turn's program on the prepared route, bootstrapping
+    /// the machine from it when this is the session's first turn. Every
+    /// global the program declares resolves to a live prepared binding by
+    /// the identity recorded when that binding was made.
+    pub fn install_prepared(
+        &mut self,
+        prepared: PreparedProgram,
+    ) -> Result<tidepool_codegen::prepared_program::ProgramId, PreparedRuntimeError> {
+        match self.machine.as_mut() {
+            None if self.engine_kind == EngineKind::Prepared => {
+                let (engine, program) = PreparedEngine::bootstrap(prepared)?;
+                self.machine = Some(ResidentEngine::Prepared(engine));
+                Ok(program)
+            }
+            Some(ResidentEngine::Prepared(engine)) => engine.install(prepared, &self.bindings),
+            _ => Err(PreparedRuntimeError::WrongEngine),
+        }
+    }
+
+    /// The live prepared bindings a later turn compiles against: each one's
+    /// import identity and the generation it was bound at, declared to the
+    /// extractor as retained generations so the projection links against the
+    /// binding instead of recompiling a body it does not have.
+    #[must_use]
+    pub fn prepared_retained(&self) -> Vec<(SymbolIdentity, u64)> {
+        let mut retained: Vec<(SymbolIdentity, u64)> = self
+            .bindings
+            .iter_live()
+            .filter_map(|entry| match &entry.value {
+                BoundValue::Prepared {
+                    origin: Some(origin),
+                    ..
+                } => Some((origin.identity.clone(), entry.module.gen().0)),
+                _ => None,
+            })
+            .collect();
+        retained.sort();
+        retained.dedup();
+        retained
     }
 
     /// Move the resident machine out onto a [`MachineLease`] (to run a turn on
@@ -436,6 +619,7 @@ impl PersistentSession {
         )]
         let machine = machine
             .as_mut()
+            .and_then(ResidentEngine::core_mut)
             .expect("machine bootstrapped before add_fragment_session");
         machine.add_function(&frag_name, expr, session_table, env)
     }
@@ -462,6 +646,7 @@ impl PersistentSession {
         )]
         let machine = machine
             .as_mut()
+            .and_then(ResidentEngine::core_mut)
             .expect("machine bootstrapped before add_child_fragment_session");
         machine.add_function(&frag_name, expr, session_table, env)
     }
@@ -486,6 +671,7 @@ impl PersistentSession {
         let machine = self
             .machine
             .as_mut()
+            .and_then(ResidentEngine::core_mut)
             .expect("machine bootstrapped before add_fragment_with_table");
         machine.add_function(&frag_name, expr, run_table, env)
     }
@@ -596,6 +782,7 @@ impl PersistentSession {
         let machine = self
             .machine
             .as_mut()
+            .and_then(ResidentEngine::core_mut)
             .ok_or(JitError::InvalidSuspensionState(
                 "resident machine is absent during resume",
             ))?;
@@ -637,6 +824,7 @@ impl PersistentSession {
         let machine = self
             .machine
             .as_mut()
+            .and_then(ResidentEngine::core_mut)
             .expect("machine bootstrapped before run_entry");
         let run = SuspensionRun::main(run_table, effect_policy, RealmId::ROOT)
             .with_live_payload(live_payload);
@@ -672,6 +860,7 @@ impl PersistentSession {
         let machine = self
             .machine
             .as_mut()
+            .and_then(ResidentEngine::core_mut)
             .expect("machine bootstrapped before run_funcid_with_table");
         let run = SuspensionRun::fragment(
             func_id,
@@ -735,6 +924,7 @@ impl PersistentSession {
         )]
         let machine = machine
             .as_mut()
+            .and_then(ResidentEngine::core_mut)
             .expect("machine bootstrapped before run_funcid_session");
         let run = SuspensionRun::fragment(
             func_id,
@@ -777,6 +967,7 @@ impl PersistentSession {
         let machine = self
             .machine
             .as_mut()
+            .and_then(ResidentEngine::core_mut)
             .expect("machine bootstrapped before run_funcid_pure");
         machine.run_fragment_pure(func_id)
     }
@@ -816,6 +1007,7 @@ impl PersistentSession {
         )]
         let machine = machine
             .as_mut()
+            .and_then(ResidentEngine::core_mut)
             .expect("machine bootstrapped before bind_funcid");
         let run = SuspensionRun::fragment(
             func_id,
@@ -884,6 +1076,7 @@ impl PersistentSession {
         )]
         let machine = machine
             .as_mut()
+            .and_then(ResidentEngine::core_mut)
             .expect("machine bootstrapped before bind_funcid_projected");
         let run = SuspensionRun::fragment(
             func_id,
@@ -949,6 +1142,7 @@ impl PersistentSession {
         )]
         let machine = machine
             .as_mut()
+            .and_then(ResidentEngine::core_mut)
             .expect("machine bootstrapped before bind_funcid_render");
         let run = SuspensionRun::fragment(
             func_id,
@@ -1508,7 +1702,16 @@ impl PersistentSession {
     /// not ordinary Rust-owned allocations, so dropping `RootSlot` alone would
     /// leak them until session teardown.
     fn discard_unbound_entries(&mut self, entries: Vec<BindingEntry>) {
-        let Some(machine) = self.machine.as_mut() else {
+        if let Some(ResidentEngine::Prepared(engine)) = self.machine.as_mut() {
+            // A prepared entry's root is its adopted handle.
+            for entry in entries {
+                if let BoundValue::Prepared { handle, .. } = entry.value {
+                    engine.release(handle);
+                }
+            }
+            return;
+        }
+        let Some(machine) = self.machine.as_mut().and_then(ResidentEngine::core_mut) else {
             // Unit-level bookkeeping fixtures can carry synthetic slots before
             // a machine exists; there is no root ledger to release there.
             return;
@@ -1676,7 +1879,7 @@ impl PersistentSession {
     pub fn persistent_roots_count(&self) -> usize {
         self.machine
             .as_ref()
-            .map_or(0, |m| m.persistent_roots_count())
+            .map_or(0, ResidentEngine::persistent_roots_count)
     }
 
     /// Retire `scope` and its whole subtree: drop each scope's value-plane
@@ -1750,7 +1953,7 @@ impl PersistentSession {
 /// call, by construction rather than by convention.
 pub struct MachineLease<'a> {
     session: &'a mut PersistentSession,
-    machine: Option<JitEffectMachine>,
+    machine: Option<ResidentEngine>,
 }
 
 // The exclusive-borrow guarantee this type exists for ("the session's machine
@@ -1768,7 +1971,7 @@ impl MachineLease<'_> {
     /// the lease's machine has somehow already been consumed — unreachable
     /// through this type's own API, kept as a `debug_assert`-strength backstop
     /// rather than an `unwrap` a reviewer has to re-verify by hand.
-    pub fn parts(&mut self) -> (&mut JitEffectMachine, &DataConTable) {
+    pub fn parts(&mut self) -> (&mut ResidentEngine, &DataConTable) {
         #[allow(
             clippy::expect_used,
             reason = "lease holds its machine for its whole lifetime"
@@ -1943,7 +2146,7 @@ mod tests {
         });
         let expr = builder.build();
         let table = effect_table();
-        let mut session = PersistentSession::new(None, 4096);
+        let mut session = PersistentSession::new(None, 4096, EngineKind::Core);
         session.bootstrap_if_needed(&expr, &table).unwrap();
 
         let failure = match session.run_entry(&table, &mut NoDispatch, &TestSink) {
@@ -1972,7 +2175,7 @@ mod tests {
         builder.push(CoreFrame::Var(VarId(0xfeed)));
         let expr = builder.build();
         let table = effect_table();
-        let mut session = PersistentSession::new(None, 4096);
+        let mut session = PersistentSession::new(None, 4096, EngineKind::Core);
         session.bootstrap_if_needed(&expr, &table).unwrap();
 
         let first = match session.run_entry(&table, &mut NoDispatch, &TestSink) {
@@ -2002,7 +2205,7 @@ mod tests {
     fn persistent_session_cancels_suspended_work_without_poisoning_reuse() {
         let expr = suspending_expr();
         let table = effect_table();
-        let mut session = PersistentSession::new(None, 4096);
+        let mut session = PersistentSession::new(None, 4096, EngineKind::Core);
         session.bootstrap_if_needed(&expr, &table).unwrap();
         let mut dispatch = RespondAfterSuspend { calls: 0 };
 
