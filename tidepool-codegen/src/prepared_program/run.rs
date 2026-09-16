@@ -72,6 +72,10 @@ pub enum ExecutionError {
     },
     #[error("program {0:?} is not installed on this machine")]
     UnknownProgram(ProgramId),
+    /// No frame is parked under this id on this machine: never parked here,
+    /// already taken by a resume or abort, or dropped with its realm.
+    #[error("continuation {0:?} is not parked on this machine")]
+    UnknownContinuation(crate::suspension::ContinuationId),
     #[error("constructor host id {host_id:?} already names {existing:?}, not {identity:?}")]
     HostIdConflict {
         host_id: tidepool_repr::DataConId,

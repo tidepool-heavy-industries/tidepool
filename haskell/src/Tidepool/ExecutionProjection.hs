@@ -86,6 +86,10 @@ data ProjectionContext = ProjectionContext
   , projectionTarget :: TargetDescriptor
   , projectionRetainedGenerations :: Map SymbolIdentity Word64
   , projectionEntry :: SymbolIdentity
+  -- | Additional tops seeded into reachability beside 'projectionEntry'
+  -- (a turn's resume entry). Optional: an absent root is not an error;
+  -- the consumer checks the artifact for the entries it needs.
+  , projectionAuxiliaryRoots :: [SymbolIdentity]
   , projectionFormattingAuthority :: Maybe FormattingAuthority
   -- | Missing authority rejects text's kernel, not unrelated projection.
   , projectionTextUnit :: Maybe TextUnitAuthority
@@ -347,12 +351,13 @@ selectPreparedTarget context modules =
       , binder <- topBinders binding
       ]
     entry = projectionEntry context
+    auxiliaryRoots = projectionAuxiliaryRoots context
     seedSymbols =
       [ symbol
       | (_, binding) <- allBindings
       , binder <- topBinders binding
       , let symbol = mappedTopIdentity binder
-      , symbol == entry
+      , symbol == entry || symbol `elem` auxiliaryRoots
       ]
     -- A top whose body is never recovered -- a registered replacement or a
     -- retained-generation import -- is a closure boundary: its own

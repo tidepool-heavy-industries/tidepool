@@ -72,6 +72,7 @@ main = do
               (Text.pack "sysv64") []
           , projectionRetainedGenerations = mempty
           , projectionEntry = entry
+          , projectionAuxiliaryRoots = []
           , projectionFormattingAuthority = Nothing
           , projectionTextUnit = Nothing
           }

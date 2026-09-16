@@ -59,6 +59,7 @@ verifyCallerResultProjection = do
       , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []
       , projectionRetainedGenerations = retained
       , projectionEntry = SymbolIdentity "main" (Text.pack modul) "value" (Text.pack entry) Nothing
+      , projectionAuxiliaryRoots = []
       , projectionFormattingAuthority = Nothing
       , projectionTextUnit = Nothing
       }

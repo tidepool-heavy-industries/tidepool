@@ -569,9 +569,12 @@ fn a2_live_payload_requires_an_explicit_run_policy() {
         let mut machine =
             JitEffectMachine::compile_session(&build_suspending_finalize(10, 100), &table, 1 << 16)
                 .expect("compile_session");
+        // A closable realm: ROOT is the machine's own scope and its closure
+        // releases nothing, so the `(1, 0)` receipt below needs a real one.
+        let realm = RealmId::fresh();
         let outcome = machine
             .run_until_suspension(
-                SuspensionRun::main(&table, EffectRunPolicy::HandleOrSuspend, RealmId(0)),
+                SuspensionRun::main(&table, EffectRunPolicy::HandleOrSuspend, realm),
                 &mut NoDispatch,
                 &(),
             )
@@ -594,7 +597,7 @@ fn a2_live_payload_requires_an_explicit_run_policy() {
                 .is_none(),
             "a closure sentinel alone must not authorize rooting a request field"
         );
-        assert_eq!(machine.close_realm(RealmId(0)), (1, 0));
+        assert_eq!(machine.close_realm(realm), (1, 0));
         disarm_gc_hazards();
     });
 }

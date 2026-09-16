@@ -224,7 +224,7 @@ signatureAt program (SignatureId index) =
   programSignatures program !! fromIntegral index
 
 fixtureContext :: String -> ProjectionContext
-fixtureContext occurrence = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = Map.empty, projectionEntry = (SymbolIdentity "main" "DeferredFunctionProjection" "value" (Text.pack occurrence) Nothing), projectionFormattingAuthority = Nothing, projectionTextUnit = Nothing }
+fixtureContext occurrence = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = Map.empty, projectionEntry = (SymbolIdentity "main" "DeferredFunctionProjection" "value" (Text.pack occurrence) Nothing), projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTextUnit = Nothing }
 
 matches :: Expected -> Id -> Bool
 matches expected binder = case nameModule_maybe (varName binder) of

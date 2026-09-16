@@ -91,6 +91,7 @@ projectEntry result modul entry retained = Projection.projectPreparedTarget cont
           Schema.TargetDescriptor Schema.X86_64 Schema.LittleEndian 64 64 "sysv64" []
       , Projection.projectionRetainedGenerations = Map.map fromIntegral retained
       , Projection.projectionEntry = Schema.SymbolIdentity "main" (fromString modul) "value" (fromString entry) Nothing
+      , Projection.projectionAuxiliaryRoots = []
       , Projection.projectionFormattingAuthority = Nothing
       , Projection.projectionTextUnit = Nothing
       }

@@ -63,7 +63,8 @@ import Tidepool.ExtractUtil (capitalize)
 import Tidepool.ExtractRequest (InspectionRequest(..), WorkerRequest(..), workerRequestFromArgv)
 import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
 import Tidepool.Session
-  ( SessionScope(..), scaffoldTargetName, preparedScaffoldTargetName, scaffoldOutputBase )
+  ( SessionScope(..), scaffoldTargetName, preparedScaffoldTargetName, preparedResumeTargetName
+  , scaffoldOutputBase )
 import Tidepool.SessionArtifacts
   ( mkBoundBinders, parseValModule )
 import Tidepool.Translate
@@ -306,7 +307,7 @@ processFile compiler timing args path = do
     let preparedTargets = case requestTargets args of
           targets@(_ : _) -> targets
           [] -> maybe [] pure mTarget
-    preparedArtifacts <- prepareArtifacts path hscEnv (pprModules prepared) preparedTargets
+    preparedArtifacts <- prepareArtifacts path hscEnv (pprModules prepared) preparedTargets []
       (requestRetainedGenerations args)
     let preparedConstructors = concatMap paConstructors preparedArtifacts
 
@@ -456,10 +457,10 @@ data PreparedArtifact = PreparedArtifact
 
 -- Project before writing either engine's artifacts so the shared constructor
 -- table includes exactly the GHC constructors admitted by prepared execution.
-prepareArtifacts :: FilePath -> HscEnv -> [PreparedModule] -> [String]
+prepareArtifacts :: FilePath -> HscEnv -> [PreparedModule] -> [String] -> [String]
   -> Map.Map SymbolIdentity Word64 -> IO [PreparedArtifact]
-prepareArtifacts _ _ _ [] _ = pure []
-prepareArtifacts input hscEnv modules targets retainedGenerations = do
+prepareArtifacts _ _ _ [] _ _ = pure []
+prepareArtifacts input hscEnv modules targets auxiliaryRoots retainedGenerations = do
   formattingAuthority <- resolveFormattingAuthority hscEnv
   textAuthority <- resolveTextPackageUnit hscEnv
   source <- readFile input
@@ -483,6 +484,10 @@ prepareArtifacts input hscEnv modules targets retainedGenerations = do
           , projectionTarget = TargetDescriptor architecture LittleEndian 64 64 abi []
           , projectionRetainedGenerations = retainedGenerations
           , projectionEntry = entry
+          , projectionAuxiliaryRoots =
+              [ SymbolIdentity (T.pack (unitString (moduleUnit (pmModule preparedModule))))
+                  (T.pack targetModule) "value" (T.pack root) Nothing
+              | root <- auxiliaryRoots ]
           , projectionFormattingAuthority = formattingAuthority
           , projectionTextUnit = textAuthority
           }
@@ -626,7 +631,7 @@ runTurnMode compiler args path = do
         -- scaffold, and its constructors join the shared metadata before write.
         preparedArtifacts <- if requestPreparedTurn args
           then prepareArtifacts compiledPath hscEnv preparedModules
-                 [preparedScaffoldTargetName] (requestRetainedGenerations args)
+                 [preparedScaffoldTargetName] [preparedResumeTargetName] (requestRetainedGenerations args)
           else pure []
         asksSites <- writeWholeModuleClosed timing outDir hscEnv binds (prTyCons result)
           (concatMap paConstructors preparedArtifacts) mCapturedTy warnTexts targetName scaffoldOutputBase

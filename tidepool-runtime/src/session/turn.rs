@@ -448,14 +448,27 @@ fn extract_identity(identity: &SymbolIdentity) -> tidepool_extract_cmd::SymbolId
 /// side); only a prepared turn writes `__prepared.prepared.cbor`.
 pub const PREPARED_SCAFFOLD_TARGET: &str = "__prepared";
 
+/// The resume entry every prepared turn admits beside
+/// [`PREPARED_SCAFFOLD_TARGET`] (`Tidepool.Session.preparedResumeTargetName`
+/// on the worker side): `__resume q x = settle (resumeLifted q x)` re-enters
+/// a parked continuation with a lifted answer and settles the result through
+/// the same layer the initial run did. The extractor projects it as an
+/// auxiliary root; the session refuses to park a suspension of a program
+/// that lacks it.
+pub const PREPARED_RESUME_TARGET: &str = "__resume";
+
 /// The qualified alias every template imports `Tidepool.Internal.Resume` under.
 const RESUME_ALIAS: &str = "TidepoolResume";
 
-/// The one line every executable template ends with: the settled scaffold the
-/// prepared route projects. Unreachable from `__result`, so the Core closure
-/// never sees it.
+/// The two lines every executable template ends with: the settled scaffold
+/// the prepared route projects and the resume entry it re-enters parked
+/// continuations through. Both are unreachable from `__result`, so the Core
+/// closure never sees them.
 fn prepared_scaffold_binding(target: &str) -> String {
-    format!("{PREPARED_SCAFFOLD_TARGET} = {RESUME_ALIAS}.settle {target}\n")
+    format!(
+        "{PREPARED_SCAFFOLD_TARGET} = {RESUME_ALIAS}.settle {target}\n\
+         {PREPARED_RESUME_TARGET} q x = {RESUME_ALIAS}.settle ({RESUME_ALIAS}.resumeLifted q x)\n"
+    )
 }
 
 /// The preamble with the settle module in scope for [`prepared_scaffold_binding`].

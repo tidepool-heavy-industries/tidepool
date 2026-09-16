@@ -22,12 +22,17 @@ import Control.Monad.Freer.Internal (Arrs, Eff (..), qApp)
 import Data.OpenUnion (Union)
 import Prelude
 
--- | One settled layer of an effect computation.
+-- | One settled layer of an effect computation. Both request and value are
+-- strict so the host reads a constructor in each position: @send@ builds the
+-- request as an unevaluated @inj x@, and a lazy field would hand the host a
+-- thunk it must not force itself. The request's payload stays lazy; the host
+-- forces it through the machine's observation path. The continuation is
+-- never forced by the host.
 data Settled effs a
   = -- | The computation completed; the value is in weak head normal form.
     Done !a
   | -- | The computation requested an effect and retained its continuation.
-    forall b. Suspended (Union effs b) (Arrs effs b a)
+    forall b. Suspended {-# NOUNPACK #-} !(Union effs b) (Arrs effs b a)
 
 -- | Settle an effect computation to its first constructor layer.
 settle :: Eff effs a -> Settled effs a

@@ -64,17 +64,20 @@ use crate::jit_machine::CancelHandle;
 use crate::machine_state::{MachineDisposition, MachineFailure, MachineState};
 use crate::old_space::OldSpace;
 use crate::prepared_control::CallStatus;
-use crate::resource_ledger::ResourceLedger;
-use crate::suspension::{RealmId, ValueHandle};
+use crate::resource_ledger::{
+    ContinuationFrame, FrameCell, FrameEvidence, PreparedFrameEvidence, ResourceLedger,
+};
+use crate::suspension::{ContinuationId, ParkKind, RealmId, ValueHandle};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tidepool_bridge::Value;
+use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_heap::static_region::StaticRegion;
 use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, SymbolIdentity, ValueId};
-use tidepool_repr::DataConId;
+use tidepool_repr::{DataConId, PrincipalId};
 
 /// A compiled program and its custody. Deliberately !Send: code custody, its
 /// VM context, and every live heap root stay on the thread that enters
@@ -125,11 +128,13 @@ pub struct PreparedMachine<'code> {
     top_capacity: usize,
     claimed_slots: usize,
     nursery_bytes: usize,
-    /// Value handles AND realm-scoped cancellation flags for this machine,
-    /// shared exactly as `JitEffectMachine` shares its own
-    /// [`ResourceLedger`]. Continuations stay empty for the prepared engine
-    /// (`counts().parked_continuations == 0` always) -- this machine has no
-    /// parked-continuation registry, only run/inspect calls scoped by realm.
+    /// Value handles, parked continuations AND realm-scoped cancellation
+    /// flags for this machine, shared exactly as `JitEffectMachine` shares
+    /// its own [`ResourceLedger`]. A parked frame ([`Self::park`]) owns its
+    /// continuation's root slot as a stowed root until [`Self::take_parked`]
+    /// or [`Self::close_realm`]; the rooting receipt
+    /// (`stowed_roots_count() == parked_continuations`) holds at every
+    /// quiescent point, as on the Core machine.
     handles: ResourceLedger,
     /// The one heap shared by every installed program -- see the module doc.
     machine: Rc<MachineState>,
@@ -826,41 +831,192 @@ impl<'code> PreparedMachine<'code> {
         CancelHandle::from_flag(self.handles.cancel_flag(realm))
     }
 
-    /// SCOPE EXIT: close `realm`, releasing every value handle it owns.
-    /// Mirrors `JitEffectMachine::close_realm`'s contract, minus parked
-    /// continuations -- the prepared engine never parks one (continuations
-    /// stay empty for this machine; see the `handles` field doc):
+    /// SCOPE EXIT: close `realm`, releasing every parked frame and value
+    /// handle it owns. Mirrors `JitEffectMachine::close_realm`'s contract:
     ///
+    /// - every frame parked under `realm` ([`Self::park`]) is removed and
+    ///   its continuation's stowed root deregistered;
     /// - every [`PreparedHandle`] minted under `realm` (by
     ///   [`Self::inspect_outer`] or a call's retained results) has its
     ///   persistent-root registration deregistered (the slot cell stays
     ///   with `OldSpace` for the machine's life; the VALUE it pinned becomes
     ///   collectable once nothing else reaches it);
     /// - the realm's cancel flag entry is dropped;
-    /// - sibling realms and their handles are untouched;
+    /// - sibling realms and their frames/handles are untouched;
     /// - `RealmId::ROOT`-tagged handles ([`Self::retain_top`]'s session-level
     ///   bindings) are never affected by any `close_realm` call -- they are
     ///   not part of any realm a caller can close this way.
     ///
-    /// Returns `(0, handles_released)` (frames are always 0 for this
-    /// engine). Closing a realm that owns nothing is a no-op `(0, 0)` --
-    /// idempotent by construction, so a retirement path that can race a
-    /// wholesale teardown stays safe.
+    /// Returns `(frames_dropped, handles_released)`. Closing a realm that
+    /// owns nothing is a no-op `(0, 0)` -- idempotent by construction, so a
+    /// retirement path that can race a wholesale teardown stays safe.
     pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
         if realm == RealmId::ROOT {
             return (0, 0);
         }
         let closed = self.handles.close_realm(realm);
-        debug_assert!(
-            closed.frames.is_empty(),
-            "PreparedMachine never parks a continuation; ResourceLedger::close_realm \
-             must not report any for this engine"
-        );
+        let frames_dropped = closed.frames.len();
         let handles_released = closed.handles.len();
+        for mut frame in closed.frames {
+            self.machine.deregister_stowed_root(frame.cell.slot());
+            if let Some(root) = frame.live_payload_root.take() {
+                self.machine.deregister_persistent_root(root.addr());
+            }
+        }
         for entry in closed.handles {
             self.machine.deregister_persistent_root(entry.slot.addr());
         }
-        (0, handles_released)
+        self.assert_rooting_receipt();
+        (frames_dropped, handles_released)
+    }
+
+    /// The rooting receipt: every parked continuation is a registered stowed
+    /// root for its whole parked lifetime, so the two counts agree at every
+    /// quiescent point. `debug_assert` as on the Core machine: a violation is
+    /// a soundness bug worth a debug crash, not a release-mode cost.
+    fn assert_rooting_receipt(&self) {
+        debug_assert_eq!(
+            self.machine.stowed_roots_count(),
+            self.handles.counts().parked_continuations,
+            "rooting receipt violated: stowed_roots_count() must equal the parked \
+             continuation count at every quiescent point"
+        );
+    }
+
+    // --- parked continuations ---------------------------------------------
+
+    /// Park a retained continuation under `realm`. The handle leaves the
+    /// handle ledger and its root slot moves from the persistent-root list to
+    /// the stowed-root list: the frame now owns the value's liveness, and
+    /// only [`Self::take_parked`] or [`Self::close_realm`] ends it. The
+    /// handle must be live under `realm`; a foreign, released or other-realm
+    /// handle is [`ExecutionError::UnknownPreparedHandle`] with nothing
+    /// changed. The minted [`ContinuationId`] is the only token that names
+    /// the frame afterwards; no [`PreparedHandle`] ever is.
+    pub fn park(
+        &mut self,
+        continuation: PreparedHandle,
+        realm: RealmId,
+        principal: PrincipalId,
+        effect_policy: EffectRunPolicy,
+        live_payload: LivePayloadPolicy,
+        evidence: PreparedFrameEvidence,
+    ) -> Result<ContinuationId, ExecutionError> {
+        self.ensure_handle_access()?;
+        let owned_here = self
+            .handles
+            .handle(continuation.raw)
+            .is_some_and(|entry| entry.realm == realm);
+        if !owned_here {
+            return Err(ExecutionError::UnknownPreparedHandle);
+        }
+        let entry = self
+            .handles
+            .take_handle(continuation.raw)
+            .ok_or(ExecutionError::UnknownPreparedHandle)?;
+        let slot = entry.slot;
+        // Nothing allocates between these two registrations, so the value is
+        // rooted throughout: it leaves one list and enters the other before
+        // any collection can run.
+        self.machine.deregister_persistent_root(slot.addr());
+        self.machine.register_stowed_root(slot.addr());
+        let cancel_flag = self.handles.cancel_flag(realm);
+        let id = self.handles.park(ContinuationFrame {
+            cell: FrameCell::Slot(slot),
+            realm,
+            principal,
+            effect_policy,
+            kind: ParkKind::Plain,
+            live_payload_root: None,
+            live_payload,
+            cancel_flag,
+            evidence: FrameEvidence::Prepared(evidence),
+        });
+        self.assert_rooting_receipt();
+        Ok(id)
+    }
+
+    /// Peek at a parked frame without consuming it: its realm and the
+    /// evidence a resume validates against. `None` for an unknown id.
+    #[must_use]
+    pub fn parked(&self, id: ContinuationId) -> Option<(RealmId, &PreparedFrameEvidence)> {
+        let frame = self.handles.continuation(id)?;
+        match &frame.evidence {
+            FrameEvidence::Prepared(evidence) => Some((frame.realm, evidence)),
+            FrameEvidence::Core(_) => None,
+        }
+    }
+
+    /// The runtime resource scope owning the frame parked under `id`, if any.
+    #[must_use]
+    pub fn parked_realm(&self, id: ContinuationId) -> Option<RealmId> {
+        self.handles.continuation(id).map(|frame| frame.realm)
+    }
+
+    /// The ids currently parked, ascending.
+    #[must_use]
+    pub fn parked_ids(&self) -> Vec<ContinuationId> {
+        self.handles.parked_ids()
+    }
+
+    /// Number of frames currently parked on this machine.
+    #[must_use]
+    pub fn parked_count(&self) -> usize {
+        self.handles.counts().parked_continuations
+    }
+
+    /// Number of stowed roots registered on this machine: the rooting
+    /// receipt's other half, equal to [`Self::parked_count`] at quiescence.
+    #[must_use]
+    pub fn stowed_roots_count(&self) -> usize {
+        self.machine.stowed_roots_count()
+    }
+
+    /// Consume the frame parked under `id`: its continuation returns to the
+    /// handle ledger under the frame's realm (the root slot moves back to the
+    /// persistent-root list) so it can be passed to the runner's resume entry
+    /// as a `Managed` argument, alongside the frame's evidence. Every failure
+    /// leaves the frame parked and rooted. The frame's realm cancel flag is
+    /// the same flag the resumed call installs, since both come from this
+    /// ledger.
+    pub fn take_parked(
+        &mut self,
+        id: ContinuationId,
+    ) -> Result<(PreparedHandle, PreparedFrameEvidence), ExecutionError> {
+        self.ensure_handle_access()?;
+        let frame = self
+            .handles
+            .continuation(id)
+            .ok_or(ExecutionError::UnknownContinuation(id))?;
+        let (FrameEvidence::Prepared(evidence), FrameCell::Slot(slot)) =
+            (&frame.evidence, &frame.cell)
+        else {
+            // Only `park` above inserts frames here, and it inserts exactly
+            // this shape; a Core-shaped frame on a prepared machine is a
+            // registry integrity failure, not a caller error.
+            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+        };
+        let (evidence, slot, realm) = (*evidence, *slot, frame.realm);
+        let mut frame = self
+            .handles
+            .take_continuation(id)
+            .ok_or(ExecutionError::UnknownContinuation(id))?;
+        self.machine.deregister_stowed_root(slot.addr());
+        self.machine.register_persistent_root(slot.addr());
+        if let Some(root) = frame.live_payload_root.take() {
+            // A live payload not claimed before resume is no longer
+            // externally reachable, as on Core.
+            self.machine.deregister_persistent_root(root.addr());
+        }
+        let raw = self.handles.insert_handle(slot, realm);
+        self.assert_rooting_receipt();
+        Ok((
+            PreparedHandle {
+                raw,
+                rep: evidence.continuation_rep,
+            },
+            evidence,
+        ))
     }
 
     fn ensure_handle_access(&self) -> Result<(), ExecutionError> {
@@ -1797,6 +1953,11 @@ impl Drop for PreparedMachine<'_> {
     fn drop(&mut self) {
         // Clear every registry and root before `self.programs` (and their
         // compiled pipelines, whose stack maps the chain points into) drop.
+        // Parked frames first, so the "registered from park until take, and
+        // no longer" invariant holds on every drop path.
+        for mut frame in self.handles.drain_continuations() {
+            self.machine.deregister_stowed_root(frame.cell.slot());
+        }
         self.machine.clear_prepared_old_space();
         self.machine.clear_rust_roots();
         for (start, end) in self.machine.old_space_arena_ranges() {
@@ -5660,6 +5821,112 @@ mod tests {
         assert!(machine.release(*handle));
         assert!(machine.release(*returned));
         assert_eq!(machine.handle_count(), 0);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// A parked frame owns its continuation's root for the whole park: the
+    /// handle leaves the ledger and the persistent-root class, the value
+    /// survives a forced collection while parked, `take_parked` hands it back
+    /// as a realm-owned handle that observes to the same value, a taken id
+    /// is unknown afterwards, and closing the realm drops a parked frame and
+    /// its stowed root. The rooting receipt holds at every step.
+    #[test]
+    fn a_parked_frame_roots_its_continuation_until_taken_or_its_realm_closes() {
+        let (mut machine, program) = machine();
+        let realm = RealmId::fresh();
+        let call = PreparedCallOptions {
+            observation_budget: 100,
+            collect_before_observation: true,
+        };
+        let evidence = PreparedFrameEvidence {
+            owner: program,
+            site: 7,
+            runner: program,
+            resume_entry: ValueId(0),
+            continuation_rep: RuntimeRep::LiftedRef,
+        };
+
+        let batch = machine
+            .run_entry_retained(program, ValueId(0), &[], call, realm)
+            .expect("the CAF entry runs and retains its constructor");
+        let [PreparedResult::Managed(continuation)] = batch.values.as_slice() else {
+            panic!("the CAF entry returns one managed value");
+        };
+        let continuation = *continuation;
+        let handles_before = machine.handle_count();
+        let roots_before = machine.total_persistent_roots();
+
+        // A handle from another realm is refused with nothing changed.
+        let other = RealmId::fresh();
+        assert!(matches!(
+            machine.park(
+                continuation,
+                other,
+                PrincipalId::SYSTEM,
+                EffectRunPolicy::SuspendAll,
+                LivePayloadPolicy::None,
+                evidence
+            ),
+            Err(ExecutionError::UnknownPreparedHandle)
+        ));
+        assert_eq!(machine.parked_count(), 0);
+        assert_eq!(machine.handle_count(), handles_before);
+
+        let id = machine
+            .park(
+                continuation,
+                realm,
+                PrincipalId::SYSTEM,
+                EffectRunPolicy::SuspendAll,
+                LivePayloadPolicy::None,
+                evidence,
+            )
+            .expect("a realm-owned handle parks");
+        assert_eq!(machine.parked_count(), 1);
+        assert_eq!(machine.handle_count(), handles_before - 1);
+        assert_eq!(machine.total_persistent_roots(), roots_before - 1);
+        assert_eq!(machine.parked_realm(id), Some(realm));
+        assert_eq!(machine.parked(id).map(|(_, e)| *e), Some(evidence));
+        assert!(
+            !machine.release(continuation),
+            "the parked continuation is no longer a handle"
+        );
+
+        // A collection while parked: the frame is the value's only root.
+        machine
+            .run_entry(program, ValueId(0), &[], call, realm)
+            .expect("an unrelated call collects while the frame is parked");
+        assert_eq!(machine.parked_count(), 1);
+
+        let (taken, taken_evidence) = machine.take_parked(id).expect("the frame is taken once");
+        assert_eq!(taken_evidence, evidence);
+        assert_eq!(machine.parked_count(), 0);
+        assert_eq!(machine.handle_count(), handles_before);
+        assert_eq!(machine.total_persistent_roots(), roots_before);
+        assert_eq!(machine.handle_realm(taken), Some(realm));
+        assert!(matches!(
+            machine.observe_handle(program, taken, 100),
+            Ok(Value::Con(id, ref fields)) if id == DataConId(900) && fields.is_empty()
+        ));
+        assert!(matches!(
+            machine.take_parked(id),
+            Err(ExecutionError::UnknownContinuation(taken_id)) if taken_id == id
+        ));
+
+        let again = machine
+            .park(
+                taken,
+                realm,
+                PrincipalId::SYSTEM,
+                EffectRunPolicy::SuspendAll,
+                LivePayloadPolicy::None,
+                evidence,
+            )
+            .expect("the taken handle parks again");
+        assert_eq!(machine.close_realm(realm), (1, 0));
+        assert_eq!(machine.parked_count(), 0);
+        assert!(machine.parked_realm(again).is_none());
+        assert_eq!(machine.handle_count(), handles_before - 1);
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 }

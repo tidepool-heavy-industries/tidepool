@@ -78,6 +78,7 @@ main = do
               (Text.pack "sysv64") []
           , projectionRetainedGenerations = mempty
           , projectionEntry = entry
+          , projectionAuxiliaryRoots = []
           , projectionFormattingAuthority = Nothing
           , projectionTextUnit = Nothing
           }
@@ -202,6 +203,7 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
         , projectionEntry = SymbolIdentity
             (Text.pack "main") (Text.pack "RecoveredBody") (Text.pack "value")
             (Text.pack "foldableCaller") Nothing
+        , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
         , projectionTextUnit = Nothing
         }
@@ -300,6 +302,7 @@ assertRecoveredKindRep root = do
             (Text.pack "sysv64") []
         , projectionRetainedGenerations = mempty
         , projectionEntry = entry
+        , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
         , projectionTextUnit = Nothing
         }
@@ -342,6 +345,7 @@ assertPatErrorBody root = do
             (Text.pack "sysv64") []
         , projectionRetainedGenerations = mempty
         , projectionEntry = entry
+        , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
         , projectionTextUnit = Nothing
         }
@@ -432,6 +436,7 @@ assertRaiseContracts root = do
             (Text.pack "sysv64") []
         , projectionRetainedGenerations = mempty
         , projectionEntry = entry
+        , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
         , projectionTextUnit = Nothing
         }
@@ -520,6 +525,7 @@ assertBottomingApplications root = do
             , projectionEntry = SymbolIdentity (Text.pack "main")
                 (Text.pack "RaiseContract") (Text.pack "value")
                 (Text.pack occurrence) Nothing
+            , projectionAuxiliaryRoots = []
             , projectionFormattingAuthority = Nothing
             , projectionTextUnit = Nothing
             }

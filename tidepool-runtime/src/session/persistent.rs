@@ -160,6 +160,27 @@ impl ResidentEngine {
             Self::Prepared(engine) => engine.persistent_roots_count(),
         }
     }
+
+    fn value_handle_count(&self) -> usize {
+        match self {
+            Self::Core(machine) => machine.value_handle_count(),
+            Self::Prepared(engine) => engine.handle_count(),
+        }
+    }
+
+    fn stowed_roots_count(&self) -> usize {
+        match self {
+            Self::Core(machine) => machine.stowed_roots_count(),
+            Self::Prepared(engine) => engine.stowed_roots_count(),
+        }
+    }
+
+    fn parked_count(&self) -> usize {
+        match self {
+            Self::Core(machine) => machine.parked_count(),
+            Self::Prepared(engine) => engine.parked_count(),
+        }
+    }
 }
 
 /// Cross-thread custody for one completed bind root. The root never moves
@@ -408,6 +429,18 @@ impl PersistentSession {
     /// The prepared engine, once the first prepared turn has installed it.
     pub fn prepared_mut(&mut self) -> Option<&mut PreparedEngine> {
         self.machine.as_mut().and_then(ResidentEngine::prepared_mut)
+    }
+
+    /// The continuation ids parked on this session's machine, whichever
+    /// engine it runs: the ground truth a hole is reconciled against after a
+    /// failed resume. Empty before the machine exists.
+    #[must_use]
+    pub fn parked_ids(&self) -> Vec<ContinuationId> {
+        match self.machine.as_ref() {
+            Some(ResidentEngine::Core(machine)) => machine.parked_ids(),
+            Some(ResidentEngine::Prepared(engine)) => engine.parked_ids(),
+            None => Vec::new(),
+        }
     }
 
     /// Whether the resident machine can safely accept another entry.
@@ -1880,6 +1913,33 @@ impl PersistentSession {
         self.machine
             .as_ref()
             .map_or(0, ResidentEngine::persistent_roots_count)
+    }
+
+    /// Accounting class 2 — live value handles on the resident machine,
+    /// whichever engine it runs. 0 before the machine bootstraps.
+    #[must_use]
+    pub fn value_handle_count(&self) -> usize {
+        self.machine
+            .as_ref()
+            .map_or(0, ResidentEngine::value_handle_count)
+    }
+
+    /// Accounting class 1, root half — the stowed roots of parked frames,
+    /// whichever engine. 0 before the machine bootstraps.
+    #[must_use]
+    pub fn stowed_roots_count(&self) -> usize {
+        self.machine
+            .as_ref()
+            .map_or(0, ResidentEngine::stowed_roots_count)
+    }
+
+    /// Accounting class 1, frame half — the parked continuations, whichever
+    /// engine. Always equal to [`Self::stowed_roots_count`] at quiescence.
+    #[must_use]
+    pub fn parked_count(&self) -> usize {
+        self.machine
+            .as_ref()
+            .map_or(0, ResidentEngine::parked_count)
     }
 
     /// Retire `scope` and its whole subtree: drop each scope's value-plane

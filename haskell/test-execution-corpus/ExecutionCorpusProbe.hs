@@ -347,6 +347,7 @@ projectionContext formattingAuthority textAuthority identity =
     , projectionTarget = targetDescriptor
     , projectionRetainedGenerations = mempty
     , projectionEntry = identity
+    , projectionAuxiliaryRoots = []
     , projectionFormattingAuthority = formattingAuthority
     , projectionTextUnit = textAuthority
     }

@@ -635,10 +635,19 @@ enum PreparedRun {
     },
     /// A projected tuple split into one retained handle per binder.
     Projected { fields: Vec<PreparedHandle> },
-    Suspended {
-        request: PreparedHandle,
-        continuation: PreparedHandle,
-    },
+    /// The turn requested a typed effect: its continuation is parked under
+    /// `id` in the machine's ledger and `request` is the observed request,
+    /// exactly what Core's `ParkedRun::Suspended` carries.
+    Suspended { id: ContinuationId, request: Value },
+}
+
+/// The run's parking policy, carried onto the eval thread beside the settle
+/// plan: what a suspension is parked with.
+#[derive(Clone, Copy)]
+struct ParkPolicy {
+    principal: PrincipalId,
+    effect_policy: EffectRunPolicy,
+    live_payload: LivePayloadPolicy,
 }
 
 /// What the eval thread does with a completed prepared value: the same
@@ -655,28 +664,58 @@ enum SettlePlan {
     Project(Vec<ValueTier>),
 }
 
-/// Run `program`'s settled scaffold on the eval thread and prepare a
-/// completed value there under `plan`, while the invocation's realm cancel
-/// flag governs both the run and any forcing observation.
+/// Run `program`'s settled scaffold on the eval thread and finish it there:
+/// a completed value is prepared under `plan`, a suspension is parked under
+/// `park`. The invocation's realm cancel flag governs the run and any forcing
+/// observation.
 fn settle_prepared(
     engine: &mut ResidentEngine,
     program: ProgramId,
     realm: RealmId,
     plan: SettlePlan,
+    park: ParkPolicy,
+    table: &DataConTable,
 ) -> Result<PreparedRun, PreparedRuntimeError> {
     let engine = engine
         .prepared_mut()
         .ok_or(PreparedRuntimeError::WrongEngine)?;
-    let handle = match engine.run_settled(program, realm)? {
+    let settlement = engine.run_settled(program, realm)?;
+    finish_prepared(engine, program, realm, plan, park, table, settlement)
+}
+
+/// The one completion routine for a settled layer, whichever entry produced
+/// it (the initial scaffold or a resume): a suspension is parked with the
+/// run's policy and reported as Core reports one; a completed value is
+/// prepared per binder tier.
+fn finish_prepared(
+    engine: &mut super::prepared::PreparedEngine,
+    program: ProgramId,
+    realm: RealmId,
+    plan: SettlePlan,
+    park: ParkPolicy,
+    table: &DataConTable,
+    settlement: PreparedSettlement,
+) -> Result<PreparedRun, PreparedRuntimeError> {
+    let handle = match settlement {
         PreparedSettlement::Done { value } => value,
         PreparedSettlement::Suspended {
             request,
             continuation,
         } => {
-            return Ok(PreparedRun::Suspended {
+            let parked = engine.park_suspension(
+                program,
+                realm,
+                park.principal,
+                park.effect_policy,
+                park.live_payload,
                 request,
                 continuation,
-            })
+                table,
+            )?;
+            return Ok(PreparedRun::Suspended {
+                id: parked.id,
+                request: parked.request,
+            });
         }
     };
     let observe =
@@ -1738,7 +1777,7 @@ where
     /// (or an ordinary bind completion / realm close) releases it.
     pub fn value_handle_count(&mut self) -> usize {
         self.settle_dropped_custody();
-        self.core.machine().map_or(0, |m| m.value_handle_count())
+        self.core.value_handle_count()
     }
 
     /// Whether the resident compiler has an incomplete, unusable module.
@@ -1916,17 +1955,13 @@ where
     /// a realm's, not a scope's, and folding the two classes together is how a
     /// leak becomes invisible.
     pub fn stowed_roots_count(&self) -> usize {
-        self.core
-            .machine()
-            .map_or(0, JitEffectMachine::stowed_roots_count)
+        self.core.stowed_roots_count()
     }
 
     /// The parked-frame half of accounting class 1 — see
     /// [`Self::stowed_roots_count`].
     pub fn parked_count(&self) -> usize {
-        self.core
-            .machine()
-            .map_or(0, JitEffectMachine::parked_count)
+        self.core.parked_count()
     }
 
     /// Retire `scope` and its subtree: drop their value-plane frames and
@@ -2038,9 +2073,9 @@ where
 
     /// The prepared arm of every resident turn: install the turn's program
     /// against the session's live prepared bindings, run its settled scaffold
-    /// on the eval thread, and either return the observed value or bind it
-    /// into the value plane. Suspension is refused until the resume contract
-    /// lands; Core is never consulted.
+    /// on the eval thread, and either return the observed value, bind it
+    /// into the value plane, or report the suspension whose frame the machine
+    /// parked. Core is never consulted.
     fn run_prepared(
         &mut self,
         code: TurnCode<'_>,
@@ -2068,9 +2103,14 @@ where
                 SettlePlan::Project(binders.iter().map(|binder| binder.tier).collect())
             }
         };
+        let park = ParkPolicy {
+            principal: self.run_context.principal,
+            effect_policy: self.core.effect_policy(),
+            live_payload: self.core.live_payload_policy(),
+        };
         let run_exec_started = std::time::Instant::now();
-        let ran = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
-            Ok(settle_prepared(engine, program, realm, plan))
+        let ran = self.on_eval_thread(move |engine, table, _handlers, _captured| {
+            Ok(settle_prepared(engine, program, realm, plan, park, table))
         })?;
         timing::record_stage(
             timing::NO_NODE,
@@ -2109,18 +2149,37 @@ where
                     output: self.captured.drain(),
                 });
             }
-            PreparedRun::Suspended {
-                request,
-                continuation,
-            } => {
-                if let Some(engine) = self.core.prepared_mut() {
-                    engine.release(request);
-                    engine.release(continuation);
-                }
-                return Err(PreparedRuntimeError::NotYetSupported(
-                    "effect suspension (the resume contract lands it)",
-                )
-                .into());
+            PreparedRun::Suspended { id, request } => {
+                // The frame is parked in the machine's ledger; the hole
+                // carries the turn's completion obligation forward exactly
+                // as a Core suspension does.
+                let seed = match mode {
+                    PreparedTurnMode::Value => HoleSeed::Plain,
+                    PreparedTurnMode::Binding {
+                        binder,
+                        generation,
+                        observation,
+                    } => HoleSeed::Binding {
+                        binder: binder.clone(),
+                        generation,
+                        observation,
+                        lexical_scope,
+                    },
+                    PreparedTurnMode::Projected {
+                        binders,
+                        generation,
+                    } => HoleSeed::ProjectedBinding {
+                        binders: binders.to_vec(),
+                        generation,
+                        lexical_scope,
+                    },
+                };
+                return Ok(self.classify_parked(
+                    ParkedRun::Suspended { id, request },
+                    None,
+                    seed,
+                    provenance,
+                ));
             }
         };
         let engine = self
@@ -3083,15 +3142,18 @@ where
         // re-declaration here (`bind` is only used for materialization
         // below). Completion handles likewise belong to the frame's retained
         // realm, which must be captured before resume consumes that frame.
-        let outcome = self.on_eval_thread(move |engine, _table, handlers, captured| {
-            let machine = engine.require_core()?;
-            let realm = machine
-                .parked_realm(frame_id)
-                .ok_or(JitError::UnknownContinuation(frame_id))?;
-            machine
-                .resume_continuation(frame_id, handlers, captured, input)
-                .and_then(|o| project_parked(machine, o, realm))
-        });
+        let outcome = match self.engine_kind() {
+            EngineKind::Core => self.on_eval_thread(move |engine, _table, handlers, captured| {
+                let machine = engine.require_core()?;
+                let realm = machine
+                    .parked_realm(frame_id)
+                    .ok_or(JitError::UnknownContinuation(frame_id))?;
+                machine
+                    .resume_continuation(frame_id, handlers, captured, input)
+                    .and_then(|o| project_parked(machine, o, realm))
+            }),
+            EngineKind::Prepared => self.reenter_prepared(frame_id, input),
+        };
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(e) => {
@@ -3102,11 +3164,7 @@ where
                 // a retryable rejection (e.g. A5's NF-force) — the hole stays,
                 // untouched. A boolean "is the machine suspended" cannot
                 // answer this with N frames parked; membership can.
-                let still_parked = self
-                    .core
-                    .machine_mut()
-                    .map(|m| m.parked_ids().contains(&frame_id))
-                    .unwrap_or(false);
+                let still_parked = self.core.parked_ids().contains(&frame_id);
                 if !still_parked {
                     self.parked_provenance.remove(&frame_id);
                     self.parked.retain(|(h, _)| h != cont_id);
@@ -3488,6 +3546,37 @@ where
                 }
             }
         }
+    }
+
+    /// The prepared arm of [`Self::reenter`]. `Abort` consumes the frame
+    /// without entering it and fails the ask with the same error Core's
+    /// stowed-abort path reports, so the frontends see one abort contract.
+    /// A host-built or handle answer is refused before the frame is touched
+    /// until the answer builder validates and constructs it: the frame stays
+    /// parked and rooted, and the hole stays open.
+    fn reenter_prepared(
+        &mut self,
+        frame_id: ContinuationId,
+        input: ResumeInput,
+    ) -> Result<ParkedRun, ResidentError> {
+        let ResumeInput::Abort(reason) = input else {
+            return Err(PreparedRuntimeError::NotYetSupported(
+                "host-built and handle answers on the prepared route (the answer builder lands them)",
+            )
+            .into());
+        };
+        let aborted = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
+            let engine = engine
+                .prepared_mut()
+                .ok_or(JitError::InvalidSuspensionState(
+                    "this session runs prepared STG but holds no prepared engine",
+                ))?;
+            Ok(engine.abort_parked(frame_id))
+        })?;
+        aborted?;
+        Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
+            EffectError::Handler(format!("ask aborted by caller: {reason}")),
+        ))))
     }
 
     fn retire_resumed(&mut self, resumed: Option<&str>) {

@@ -15,11 +15,63 @@ use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::{DataConTable, PrincipalId};
 
 use crate::old_space::RootSlot;
+use crate::prepared_program::ProgramId;
 use crate::suspension::{ContinuationId, ParkKind, RealmId, ValueHandle};
+use tidepool_repr::execution_schema::{RuntimeRep, ValueId};
+
+/// The GC-tracked cell holding a parked continuation's heap pointer. Both
+/// shapes are registered as stowed roots for the frame's whole parked
+/// lifetime; the collector rewrites the cell in place on every collection.
+pub(crate) enum FrameCell {
+    /// Core: a heap-stable `Box` cell minted at park time.
+    Boxed(Box<*mut u8>),
+    /// Prepared: the continuation handle's own `OldSpace` root slot, moved
+    /// from the machine's persistent-root list to its stowed-root list for
+    /// the park. The slot cell stays with `OldSpace` for the machine's life;
+    /// only its registration moves.
+    Slot(RootSlot),
+}
+
+impl FrameCell {
+    /// The slot address the collector reads and rewrites.
+    pub(crate) fn slot(&mut self) -> *mut *mut u8 {
+        match self {
+            Self::Boxed(cell) => &mut **cell,
+            Self::Slot(slot) => slot.addr(),
+        }
+    }
+}
+
+/// What a resume needs to interpret the answer and re-enter a prepared
+/// continuation. The evidence owner and the runner can be different
+/// programs: a retained closure from an earlier turn may reach a site that
+/// turn declared, while the turn that invoked it owns the resume entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedFrameEvidence {
+    /// The installed program whose site and type tables describe `site`.
+    pub owner: ProgramId,
+    /// The typed site the suspended request named.
+    pub site: u64,
+    /// The program whose admitted resume entry re-enters the continuation.
+    pub runner: ProgramId,
+    /// `runner`'s `__resume` top: `\q x -> settle (resumeLifted q x)`.
+    pub resume_entry: ValueId,
+    /// The representation the continuation was retained with.
+    pub continuation_rep: RuntimeRep,
+}
+
+/// Per-engine evidence a parked frame carries for its eventual resume.
+pub(crate) enum FrameEvidence {
+    /// Core decodes answers and requests through the session's constructor
+    /// snapshot, refreshed as later fragments extend the vocabulary.
+    Core(Arc<DataConTable>),
+    /// Prepared validates answers against installed site evidence.
+    Prepared(PreparedFrameEvidence),
+}
 
 /// One parked continuation and all policy needed to resume it.
 pub(crate) struct ContinuationFrame {
-    pub(crate) cell: Box<*mut u8>,
+    pub(crate) cell: FrameCell,
     pub(crate) realm: RealmId,
     pub(crate) principal: PrincipalId,
     pub(crate) effect_policy: EffectRunPolicy,
@@ -27,7 +79,7 @@ pub(crate) struct ContinuationFrame {
     pub(crate) live_payload_root: Option<RootSlot>,
     pub(crate) live_payload: LivePayloadPolicy,
     pub(crate) cancel_flag: Arc<AtomicBool>,
-    pub(crate) table: Arc<DataConTable>,
+    pub(crate) evidence: FrameEvidence,
 }
 
 /// One live handle's rooted slot and cleanup owner.
@@ -167,16 +219,19 @@ impl ResourceLedger {
         ids
     }
 
-    /// Replace every parked frame's constructor view with one already
+    /// Replace every parked Core frame's constructor view with one already
     /// validated, monotone session-table snapshot.
     ///
     /// A live closure compiled by a later resident turn can be delivered into
     /// an older continuation. That continuation must then interpret effect
     /// responses using the whole session's constructor vocabulary, not only
-    /// the vocabulary present when the frame first parked.
+    /// the vocabulary present when the frame first parked. Prepared frames
+    /// carry installed site evidence instead and are left untouched.
     pub(crate) fn refresh_continuation_tables(&mut self, table: Arc<DataConTable>) {
         for frame in self.continuations.values_mut() {
-            frame.table = Arc::clone(&table);
+            if let FrameEvidence::Core(current) = &mut frame.evidence {
+                *current = Arc::clone(&table);
+            }
         }
     }
 
@@ -280,7 +335,7 @@ mod tests {
         let original = Arc::new(DataConTable::new());
         for value in [std::ptr::null_mut(), std::ptr::dangling_mut()] {
             ledger.park(ContinuationFrame {
-                cell: Box::new(value),
+                cell: FrameCell::Boxed(Box::new(value)),
                 realm,
                 principal: tidepool_repr::PrincipalId::SYSTEM,
                 effect_policy: EffectRunPolicy::SuspendAll,
@@ -288,7 +343,7 @@ mod tests {
                 live_payload_root: None,
                 live_payload: LivePayloadPolicy::None,
                 cancel_flag: Arc::new(AtomicBool::new(false)),
-                table: Arc::clone(&original),
+                evidence: FrameEvidence::Core(Arc::clone(&original)),
             });
         }
 
@@ -296,10 +351,12 @@ mod tests {
         ledger.refresh_continuation_tables(Arc::clone(&current));
 
         for id in ledger.parked_ids() {
-            assert!(Arc::ptr_eq(
-                &ledger.continuation(id).expect("parked frame").table,
-                &current
-            ));
+            let FrameEvidence::Core(table) =
+                &ledger.continuation(id).expect("parked frame").evidence
+            else {
+                panic!("a Core frame keeps Core evidence");
+            };
+            assert!(Arc::ptr_eq(table, &current));
         }
     }
 }

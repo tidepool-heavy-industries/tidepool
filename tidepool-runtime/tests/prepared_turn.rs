@@ -10,10 +10,14 @@
 
 use std::path::{Path, PathBuf};
 
-use tidepool_repr::{execution_schema::TypeNode, Generation};
+use tidepool_repr::{
+    execution_schema::{Group, TypeNode},
+    Generation,
+};
 use tidepool_runtime::session::{
-    resident_workbench_templates, run_turn, BoundBinder, EngineKind, ResidentOutcome,
-    ResidentSession, TurnRequest, TurnResult, TurnTemplate, ValueTier,
+    resident_workbench_templates, run_turn, BoundBinder, EngineKind, PreparedRuntimeError,
+    ResidentError, ResidentOutcome, ResidentSession, TurnRequest, TurnResult, TurnTemplate,
+    ValueTier,
 };
 use tidepool_testing::eval_harness;
 
@@ -234,6 +238,185 @@ fn notebook_turns_run_on_core() {
 #[test]
 fn notebook_turns_run_on_prepared_stg() {
     notebook_turns(EngineKind::Prepared);
+}
+
+/// The `typedSite` a suspended request names, read from its rendered JSON the
+/// way the harness classifies a suspension.
+fn typed_site_of(json: &serde_json::Value) -> Option<u64> {
+    match json {
+        serde_json::Value::Object(object) => object
+            .get("typedSite")
+            .and_then(serde_json::Value::as_u64)
+            .or_else(|| object.values().find_map(typed_site_of)),
+        serde_json::Value::Array(items) => items.iter().find_map(typed_site_of),
+        _ => None,
+    }
+}
+
+/// A typed effect request parks the turn on either engine: the suspension
+/// reports the request naming one of the turn's declared sites, the frame is
+/// rooted while an unrelated turn runs, and `abort` retires the hole with the
+/// same error on both routes, leaving the session's resource counts where the
+/// turn found them. On the prepared route a host answer is refused with the
+/// frame intact until the answer builder lands.
+fn notebook_suspension(engine: EngineKind) {
+    let mut notebook = Notebook::new(engine);
+    let rendered = notebook.expression("41 + 1").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: warm-up rendered {rendered}"
+    );
+    let handles_before = notebook.session.value_handle_count();
+    let roots_before = notebook.session.persistent_roots_count();
+    assert_eq!(notebook.session.parked_count(), 0);
+
+    let TurnResult::Bind {
+        bound, compiled, ..
+    } = notebook.compile("b <- (runLLMTurn @Bool \"q\" :: M Bool)")
+    else {
+        panic!("{engine:?}: the ask did not classify as a bind");
+    };
+    let [binder] = bound.as_slice() else {
+        panic!("{engine:?}: the ask bound {} names", bound.len());
+    };
+    assert_eq!(binder.name, "b");
+    let code = compiled.code();
+    let declared_sites: Vec<u64> = match engine {
+        EngineKind::Prepared => {
+            let prepared = compiled
+                .prepared
+                .as_ref()
+                .expect("prepared request returned no prepared program");
+            // The artifact admits the resume entry beside the settled
+            // scaffold: the host checks the artifact, not the template text.
+            let admits_resume = prepared
+                .bindings()
+                .iter()
+                .flat_map(|group| match group {
+                    Group::NonRecursive(top) => std::slice::from_ref(top),
+                    Group::Recursive(tops) => tops.as_slice(),
+                })
+                .any(|top| top.identity.occurrence == "__resume");
+            assert!(admits_resume, "the turn artifact admits no __resume top");
+            prepared.sites().iter().map(|row| row.site).collect()
+        }
+        EngineKind::Core => code.sites.iter().map(|site| site.site).collect(),
+    };
+    assert!(
+        !declared_sites.is_empty(),
+        "{engine:?}: the ask declares no site"
+    );
+
+    let outcome = notebook
+        .session
+        .run_bind_with_sites(
+            "notebook_ask",
+            compiled.code(),
+            binder,
+            Generation(notebook.generation),
+        )
+        .unwrap_or_else(|error| panic!("{engine:?}: the ask failed to run: {error}"));
+    let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
+        panic!("{engine:?}: the ask did not suspend: {outcome:?}");
+    };
+    let request = tidepool_runtime::value_to_json(&request, code.table, 0);
+    let site = typed_site_of(&request)
+        .unwrap_or_else(|| panic!("{engine:?}: the request names no typedSite: {request}"));
+    assert!(
+        declared_sites.contains(&site),
+        "{engine:?}: site {site} is not one of the turn's {declared_sites:?}"
+    );
+    assert_eq!(notebook.session.parked_holes(), vec![hole.cont_id()]);
+    assert_eq!(notebook.session.parked_count(), 1);
+    assert_eq!(notebook.session.stowed_roots_count(), 1);
+
+    // The frame stays parked and rooted while an unrelated turn runs.
+    let rendered = notebook.expression("40 + 2").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: 40 + 2 rendered as {rendered}"
+    );
+    assert_eq!(notebook.session.parked_count(), 1);
+    assert_eq!(notebook.session.stowed_roots_count(), 1);
+
+    if engine == EngineKind::Prepared {
+        // A host answer is refused before the frame is touched.
+        let answer = tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(1));
+        let refused = notebook
+            .session
+            .resume(hole.clone(), answer)
+            .expect_err("a host answer is not accepted on the prepared route yet");
+        assert!(
+            matches!(
+                refused,
+                ResidentError::Prepared(PreparedRuntimeError::NotYetSupported(_))
+            ),
+            "unexpected refusal: {refused}"
+        );
+        assert_eq!(notebook.session.parked_holes(), vec![hole.cont_id()]);
+        assert_eq!(notebook.session.parked_count(), 1);
+    }
+
+    // On the prepared route every installed program's heap tops stay rooted
+    // until program retirement lands (the residency wave), so the abort is
+    // measured against the roots present just before it: it must release
+    // exactly what the frame owned and nothing else. Core, which retires no
+    // programs, returns to the pre-turn count.
+    let roots_before_abort = notebook.session.persistent_roots_count();
+    let aborted = notebook
+        .session
+        .abort(hole.cont_id(), "test abort".into())
+        .expect_err("abort fails the ask");
+    assert!(
+        aborted
+            .to_string()
+            .contains("ask aborted by caller: test abort"),
+        "{engine:?}: abort reported {aborted}"
+    );
+    assert!(notebook.session.parked_holes().is_empty(), "{engine:?}");
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    assert_eq!(notebook.session.stowed_roots_count(), 0, "{engine:?}");
+    assert_eq!(
+        notebook.session.value_handle_count(),
+        handles_before,
+        "{engine:?}: the aborted turn leaked a value handle"
+    );
+    let expected_roots = match engine {
+        // The frame's live payload root is released with the frame.
+        EngineKind::Core => {
+            assert_eq!(
+                roots_before_abort,
+                roots_before + 1,
+                "Core parks one payload root"
+            );
+            roots_before
+        }
+        // The parked continuation's slot returns to the persistent list at
+        // take and is released with the handle: net zero.
+        EngineKind::Prepared => roots_before_abort,
+    };
+    assert_eq!(
+        notebook.session.persistent_roots_count(),
+        expected_roots,
+        "{engine:?}: the aborted turn leaked a persistent root"
+    );
+
+    // The session stays usable after the abort.
+    let rendered = notebook.expression("40 + 2").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: 40 + 2 rendered as {rendered}"
+    );
+}
+
+#[test]
+fn notebook_ask_parks_and_aborts_on_core() {
+    notebook_suspension(EngineKind::Core);
+}
+
+#[test]
+fn notebook_ask_parks_and_aborts_on_prepared_stg() {
+    notebook_suspension(EngineKind::Prepared);
 }
 
 #[test]

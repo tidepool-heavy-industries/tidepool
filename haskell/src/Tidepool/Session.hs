@@ -69,6 +69,7 @@ module Tidepool.Session
     -- * Reserved scaffold binders
   , scaffoldTargetName
   , preparedScaffoldTargetName
+  , preparedResumeTargetName
   , scaffoldOutputBase
   , evalUserBinder
   ) where
@@ -345,6 +346,14 @@ scaffoldTargetName = "__result"
 -- prepared turn writes its artifact.
 preparedScaffoldTargetName :: String
 preparedScaffoldTargetName = "__prepared"
+
+-- | The scaffold-reserved resume entry a prepared turn admits beside
+-- 'preparedScaffoldTargetName': @__resume q x = settle (resumeLifted q x)@,
+-- the one entry that re-enters a parked continuation with a lifted answer.
+-- Projected as an auxiliary root; a template that omits it yields an
+-- artifact whose suspensions the host refuses to park.
+preparedResumeTargetName :: String
+preparedResumeTargetName = "__resume"
 
 -- | Base name of the CBOR file(s) every Rust caller reads for the scaffold
 -- target (@result.cbor@), and the Haskell binder name the ONE-SHOT eval

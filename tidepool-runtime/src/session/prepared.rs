@@ -7,7 +7,7 @@
 //! and retained-program reuse cross this boundary in that order. The legacy
 //! `CoreExpr` machine is not a fallback for any operation in this module.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tidepool_bridge::Value;
 use tidepool_codegen::binding_table::{
@@ -16,7 +16,7 @@ use tidepool_codegen::binding_table::{
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
     CompileError, CompiledProgram, ExecutionError, ImportBindings, PreparedCallOptions,
-    PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions,
+    PreparedFrameEvidence, PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions,
     PreparedOuter as CodegenPreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
     RunOptions, TopSlotBase,
 };
@@ -26,19 +26,22 @@ use tidepool_codegen::scope::ScopeId;
 // separate `tidepool_codegen` dependency of their own.
 pub use tidepool_codegen::jit_machine::CancelHandle;
 pub use tidepool_codegen::jit_machine::MachineDisposition;
+use tidepool_codegen::suspension::ContinuationId;
 pub use tidepool_codegen::suspension::RealmId;
 use tidepool_repr::execution_schema::{
     link_program, parse_program, DecodeLimits, Group, HeapRhs, ImportedValue, LinkError,
     LinkedProgram, MachineImports, ParseError, PreparedProgram, ProgramRequirements, Signature,
-    SymbolIdentity, ValueId,
+    SiteRow, SymbolIdentity, TypeNode, TypeNodeId, ValueId,
 };
 use tidepool_repr::{
-    BindingName, Generation, MonotonicIdIssuer, SessionModule, SessionVarId, VarId,
+    BindingName, DataConTable, Generation, MonotonicIdIssuer, PrincipalId, SessionModule,
+    SessionVarId, VarId,
 };
 
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 
 use super::resident::SessionRunContext;
+use super::turn::PREPARED_RESUME_TARGET;
 
 /// Machine-wide top-table capacity a session machine reserves up front:
 /// every later `install` claims its tops and import slots from this fixed
@@ -111,6 +114,35 @@ pub enum PreparedRuntimeError {
     /// is a stale or foreign artifact, never a user error.
     #[error("pattern bind produced {fields} fields for {binders} GHC binders")]
     ProjectionShape { binders: usize, fields: usize },
+    /// A program being installed declares a typed site another installed
+    /// program already declares with different evidence (delivery, wire or
+    /// input types). Installation is refused before anything is published;
+    /// the existing owner stays canonical.
+    #[error("typed site {site} is already installed by program {owner:?} with different evidence")]
+    SiteConflict { site: u64, owner: ProgramId },
+    /// A suspended request named a typed site no installed program declares.
+    /// The request and continuation were released; nothing was parked.
+    #[error("the suspended request names typed site {site}, which no installed program declares")]
+    UnknownSite { site: u64 },
+    /// A suspended request carries no typed site: an ordinary handled effect
+    /// (Print, a file read), which the prepared route does not answer yet.
+    /// The request and continuation were released; nothing was parked.
+    #[error(
+        "the prepared route does not yet answer ordinary handled effects (the request carries no typed site)"
+    )]
+    UntypedRequest,
+    /// The turn suspended under `HandleOrError`, and the prepared route
+    /// handles no effect yet, so every request is unhandled.
+    #[error("the turn requested an effect under HandleOrError; the prepared route handles no effects yet")]
+    UnhandledRequest,
+    /// The program that produced a suspension admits no resume entry, so its
+    /// continuation could never be re-entered. Every turn template defines
+    /// the entry; this is a stale or foreign artifact, never a user error.
+    #[error("program {program:?} admits no `{entry}` entry, so its suspension cannot be parked")]
+    NoResumeEntry {
+        program: ProgramId,
+        entry: &'static str,
+    },
 }
 
 impl PreparedRuntimeError {
@@ -127,6 +159,11 @@ impl PreparedRuntimeError {
             | Self::MissingProgram
             | Self::NotYetSupported(_)
             | Self::ProjectionShape { .. }
+            | Self::SiteConflict { .. }
+            | Self::UnknownSite { .. }
+            | Self::UntypedRequest
+            | Self::UnhandledRequest
+            | Self::NoResumeEntry { .. }
             | Self::CrossRealmArgument { .. } => PreparedFailureKind::Rejected,
             Self::Cancelled => PreparedFailureKind::Cancelled,
             Self::Unavailable(_) => PreparedFailureKind::Integrity,
@@ -141,6 +178,7 @@ impl PreparedRuntimeError {
                 | ExecutionError::DescriptorShape { .. }
                 | ExecutionError::HostIdConflict { .. }
                 | ExecutionError::UnknownProgram(_)
+                | ExecutionError::UnknownContinuation(_)
                 | ExecutionError::TopTableExhausted { .. }
                 | ExecutionError::TopSlotBaseMismatch { .. } => PreparedFailureKind::Rejected,
                 ExecutionError::Runtime(failure) => {
@@ -212,9 +250,9 @@ pub struct PreparedRetainedResult {
 }
 
 /// What closing a realm actually released, from [`PreparedRuntime::close_realm_report`].
-/// `frames` is always `0`: this engine never parks a continuation (see
-/// [`PreparedMachine::close_realm`]'s doc), so the field exists only to mirror
-/// the JIT machine's own scope-retirement receipt shape.
+/// `frames` counts the parked continuations the realm owned (see
+/// [`PreparedMachine::close_realm`]); this test-compatibility runtime never
+/// parks one itself, so it reports `0` here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RealmRetirement {
     pub frames: usize,
@@ -241,6 +279,25 @@ struct ProgramFacts {
     /// The `Tidepool.Internal.Resume.Settled` constructors this program
     /// declares, when its entry is a turn's settled scaffold.
     settled: Option<SettledIds>,
+    /// The turn's admitted resume entry (`__resume q x = settle (resumeLifted
+    /// q x)`, beside the entry in its module), when the artifact retained it.
+    /// A suspension of a program without one is refused before parking.
+    resume: Option<ValueId>,
+    /// The typed sites this program declares and the type graph they point
+    /// into, kept for site-evidence resolution and answer validation after
+    /// the machine has taken the program's code.
+    sites: Vec<SiteRow>,
+    types: Vec<TypeNode>,
+    /// Constructor identities by this program's local `ConstructorId`, so two
+    /// programs' type graphs compare by identity rather than local index.
+    constructors: Vec<SymbolIdentity>,
+}
+
+/// Which installed program's site table is authoritative for one site id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SiteWitness {
+    owner: ProgramId,
+    row: usize,
 }
 
 /// The two constructors a turn's settled layer is read by, as this program's
@@ -274,7 +331,7 @@ impl SettledIds {
 
 impl ProgramFacts {
     fn of(prepared: &PreparedProgram) -> Self {
-        let tops = prepared
+        let tops: BTreeMap<ValueId, (SymbolIdentity, Option<Signature>)> = prepared
             .bindings()
             .iter()
             .flat_map(|group| match group {
@@ -291,12 +348,137 @@ impl ProgramFacts {
                 (top.binding.id, (top.identity.clone(), export))
             })
             .collect();
+        let entry = prepared.entry();
+        let resume = tops
+            .get(&entry)
+            .map(|(identity, _)| identity.module.clone())
+            .and_then(|module| {
+                tops.iter().find_map(|(id, (identity, _))| {
+                    (identity.module == module && identity.occurrence == PREPARED_RESUME_TARGET)
+                        .then_some(*id)
+                })
+            });
         Self {
-            entry: prepared.entry(),
+            entry,
             tops,
             settled: SettledIds::of(prepared),
+            resume,
+            sites: prepared.sites().to_vec(),
+            types: prepared.types().to_vec(),
+            constructors: prepared
+                .constructors()
+                .iter()
+                .map(|declaration| declaration.identity.clone())
+                .collect(),
         }
     }
+
+    fn type_node(&self, id: TypeNodeId) -> Option<&TypeNode> {
+        self.types.get(id.0 as usize)
+    }
+}
+
+/// Whether two site rows from two programs carry the same evidence: the same
+/// delivery mode and structurally equal wire and input type graphs, compared
+/// by family and constructor identity with ordered arguments, never by local
+/// node or constructor numbers. Cycles (recursive types) are compared
+/// coinductively: a node pair already under comparison is taken as equal.
+fn sites_equivalent(a: &ProgramFacts, a_row: &SiteRow, b: &ProgramFacts, b_row: &SiteRow) -> bool {
+    if a_row.delivery != b_row.delivery || a_row.inputs.len() != b_row.inputs.len() {
+        return false;
+    }
+    let mut visited = BTreeSet::new();
+    type_nodes_equivalent(a, a_row.wire, b, b_row.wire, &mut visited)
+        && a_row
+            .inputs
+            .iter()
+            .zip(&b_row.inputs)
+            .all(|(x, y)| type_nodes_equivalent(a, *x, b, *y, &mut visited))
+}
+
+fn type_nodes_equivalent(
+    a: &ProgramFacts,
+    a_id: TypeNodeId,
+    b: &ProgramFacts,
+    b_id: TypeNodeId,
+    visited: &mut BTreeSet<(u32, u32)>,
+) -> bool {
+    if !visited.insert((a_id.0, b_id.0)) {
+        return true;
+    }
+    match (a.type_node(a_id), b.type_node(b_id)) {
+        (
+            Some(TypeNode::Data {
+                family: a_family,
+                arguments: a_arguments,
+                rows: a_rows,
+            }),
+            Some(TypeNode::Data {
+                family: b_family,
+                arguments: b_arguments,
+                rows: b_rows,
+            }),
+        ) => {
+            a_family == b_family
+                && a_arguments.len() == b_arguments.len()
+                && a_rows.len() == b_rows.len()
+                && a_arguments
+                    .iter()
+                    .zip(b_arguments)
+                    .all(|(x, y)| type_nodes_equivalent(a, *x, b, *y, visited))
+                && a_rows.iter().zip(b_rows).all(|(x, y)| {
+                    a.constructors.get(x.constructor.0 as usize)
+                        == b.constructors.get(y.constructor.0 as usize)
+                        && x.fields.len() == y.fields.len()
+                        && x.fields
+                            .iter()
+                            .zip(&y.fields)
+                            .all(|(f, g)| type_nodes_equivalent(a, *f, b, *g, visited))
+                })
+        }
+        (Some(TypeNode::Text), Some(TypeNode::Text))
+        | (Some(TypeNode::Integer), Some(TypeNode::Integer))
+        | (Some(TypeNode::Natural), Some(TypeNode::Natural)) => true,
+        (Some(TypeNode::Scalar(x)), Some(TypeNode::Scalar(y))) => x == y,
+        (
+            Some(TypeNode::Unconstructible {
+                reason: a_reason,
+                rendered: a_rendered,
+            }),
+            Some(TypeNode::Unconstructible {
+                reason: b_reason,
+                rendered: b_rendered,
+            }),
+        ) => a_reason == b_reason && a_rendered == b_rendered,
+        _ => false,
+    }
+}
+
+/// The typed site a suspended request names, read from the request's
+/// rendered payload: the protocol's sited helpers place the site id under the
+/// `typedSite` key of the request's JSON payload object
+/// (`tidepool-protocol`'s `ObjectValue::Site`), the same field the harness
+/// classifies a Core suspension by. `None` for a request that carries no such
+/// field: an ordinary handled effect.
+fn typed_site_of(request: &Value, table: &DataConTable) -> Option<u64> {
+    fn find(json: &serde_json::Value, depth: usize) -> Option<u64> {
+        if depth > 4 {
+            return None;
+        }
+        match json {
+            serde_json::Value::Object(object) => {
+                if let Some(site) = object.get("typedSite").and_then(serde_json::Value::as_u64) {
+                    return Some(site);
+                }
+                object.values().find_map(|value| find(value, depth + 1))
+            }
+            serde_json::Value::Array(items) => {
+                items.iter().find_map(|value| find(value, depth + 1))
+            }
+            _ => None,
+        }
+    }
+    find(&crate::render::value_to_json(request, table, 0), 0)
 }
 
 /// One prepared session: a lazily installed machine shared by every program
@@ -1135,6 +1317,28 @@ pub fn run_prepared_once(
 pub struct PreparedEngine {
     machine: PreparedMachine<'static>,
     programs: BTreeMap<ProgramId, ProgramFacts>,
+    /// The machine-owned site index: which installed program's site table is
+    /// authoritative for each typed site id. Extended in the install
+    /// transaction before any code is compiled; a conflicting duplicate
+    /// refuses the install (see [`Self::install`]).
+    sites: BTreeMap<u64, SiteWitness>,
+}
+
+/// One suspension parked by [`PreparedEngine::park_suspension`]: the frame's
+/// id and the observed request, as Core reports a suspension.
+pub struct PreparedParked {
+    pub id: ContinuationId,
+    pub request: Value,
+}
+
+/// A parked frame re-entered by [`PreparedEngine::resume_parked`]: the
+/// settled layer the resume produced, under the frame's realm, by the runner
+/// program whose entry re-entered it (the program a further suspension is
+/// parked against).
+pub struct PreparedResumed {
+    pub settlement: PreparedSettlement,
+    pub realm: RealmId,
+    pub runner: ProgramId,
 }
 
 // SAFETY: identical to `PreparedRuntime`'s justification above -- the machine
@@ -1196,9 +1400,67 @@ impl PreparedEngine {
             },
         )
         .map_err(PreparedRuntimeError::Run)?;
-        let mut programs = BTreeMap::new();
-        programs.insert(program, facts);
-        Ok((Self { machine, programs }, program))
+        let mut engine = Self {
+            machine,
+            programs: BTreeMap::new(),
+            sites: BTreeMap::new(),
+        };
+        // The first program can conflict only with itself.
+        let plan = engine.plan_sites(program, &facts)?;
+        engine.programs.insert(program, facts);
+        engine.sites.extend(plan);
+        Ok((engine, program))
+    }
+
+    /// The site-index entries installing `program` would add: every site the
+    /// program declares that no installed program declares yet. A site
+    /// already installed is accepted only when the two rows carry the same
+    /// evidence ([`sites_equivalent`]); the existing owner stays canonical and
+    /// nothing is added for it. A conflicting duplicate is
+    /// [`PreparedRuntimeError::SiteConflict`] and the caller installs nothing.
+    fn plan_sites(
+        &self,
+        program: ProgramId,
+        facts: &ProgramFacts,
+    ) -> Result<Vec<(u64, SiteWitness)>, PreparedRuntimeError> {
+        let mut planned: Vec<(u64, SiteWitness)> = Vec::new();
+        for (row, site) in facts.sites.iter().enumerate() {
+            let existing = self.sites.get(&site.site).copied().or_else(|| {
+                planned
+                    .iter()
+                    .find(|(id, _)| *id == site.site)
+                    .map(|(_, witness)| *witness)
+            });
+            match existing {
+                None => planned.push((
+                    site.site,
+                    SiteWitness {
+                        owner: program,
+                        row,
+                    },
+                )),
+                Some(witness) => {
+                    let (owner_facts, owner_row) = if witness.owner == program {
+                        (facts, &facts.sites[witness.row])
+                    } else {
+                        let owner =
+                            self.programs
+                                .get(&witness.owner)
+                                .ok_or(PreparedRuntimeError::Run(
+                                    ExecutionError::UnknownProgram(witness.owner),
+                                ))?;
+                        (owner, &owner.sites[witness.row])
+                    };
+                    if !sites_equivalent(owner_facts, owner_row, facts, site) {
+                        return Err(PreparedRuntimeError::SiteConflict {
+                            site: site.site,
+                            owner: witness.owner,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(planned)
     }
 
     /// Install a later turn's program. Every global it declares is resolved
@@ -1243,6 +1505,11 @@ impl PreparedEngine {
             imports.insert(identity.clone(), handle);
         }
         let facts = ProgramFacts::of(&prepared);
+        // Site evidence is checked before anything is compiled or published:
+        // a conflicting duplicate leaves the machine, its programs and the
+        // site index exactly as they were. The program id is not known until
+        // install, so the plan is keyed against a placeholder and rehomed.
+        let planned = self.plan_sites(ProgramId::FIRST, &facts)?;
         let linked = link_program(prepared, &values)?;
         let compiled = self
             .machine
@@ -1253,6 +1520,16 @@ impl PreparedEngine {
             .install_program(compiled, imports)
             .map_err(PreparedRuntimeError::Run)?;
         self.programs.insert(program, facts);
+        self.sites
+            .extend(planned.into_iter().map(|(site, witness)| {
+                (
+                    site,
+                    SiteWitness {
+                        owner: program,
+                        ..witness
+                    },
+                )
+            }));
         Ok(program)
     }
 
@@ -1271,10 +1548,14 @@ impl PreparedEngine {
                 program,
             )))?;
         let entry = facts.entry;
-        let settled = facts.settled.ok_or(PreparedRuntimeError::UnsettledEntry {
-            program,
-            detail: "the program declares no Tidepool.Internal.Resume.Settled constructors",
-        })?;
+        // The decoder needs the settled constructors; refuse before running
+        // an entry whose layer could never be read.
+        if facts.settled.is_none() {
+            return Err(PreparedRuntimeError::UnsettledEntry {
+                program,
+                detail: "the program declares no Tidepool.Internal.Resume.Settled constructors",
+            });
+        }
         if self.machine.realm_cancel_handle(realm).is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
@@ -1305,6 +1586,31 @@ impl PreparedEngine {
             program,
             detail: "the entry returned no managed settled value",
         })?;
+        self.decode_settled(program, outer, realm)
+    }
+
+    /// The one settled-layer decoder: read `outer` (a `Settled` value some
+    /// entry of `program` returned) as `Done`/`Suspended`, releasing `outer`
+    /// and retaining its fields under `realm`. Initial runs
+    /// ([`Self::run_settled`]) and resumed runs ([`Self::resume_parked`]) both
+    /// pass through here.
+    fn decode_settled(
+        &mut self,
+        program: ProgramId,
+        outer: PreparedHandle,
+        realm: RealmId,
+    ) -> Result<PreparedSettlement, PreparedRuntimeError> {
+        let settled = self
+            .programs
+            .get(&program)
+            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                program,
+            )))?
+            .settled
+            .ok_or(PreparedRuntimeError::UnsettledEntry {
+                program,
+                detail: "the program declares no Tidepool.Internal.Resume.Settled constructors",
+            })?;
         let layer = self.machine.inspect_outer(outer, realm);
         self.machine.release(outer);
         let CodegenPreparedOuter::Constructor { identity, fields } =
@@ -1338,6 +1644,225 @@ impl PreparedEngine {
         } else {
             shape("the settled layer is neither Done nor Suspended")
         }
+    }
+
+    /// Park a suspension `program`'s settled layer produced under `realm`:
+    /// read the `Union` layer of `request`, observe its payload through the
+    /// machine observe path (the request the host reports, as on Core), read
+    /// the typed site it names, resolve that site through the machine-owned
+    /// index to its evidence owner, and park `continuation` with that
+    /// evidence and `program`'s admitted resume entry. Every refusal releases
+    /// both handles and parks nothing: a runner without a resume entry, a
+    /// suspension under `HandleOrError` (nothing is handled on this route
+    /// yet), a request without a typed site (an ordinary handled effect, not
+    /// yet answered on this route), or a site no installed program declares.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one park carries the run's realm, principal and both effect policies beside the two settled-layer handles, as the Core park does"
+    )]
+    pub fn park_suspension(
+        &mut self,
+        program: ProgramId,
+        realm: RealmId,
+        principal: PrincipalId,
+        effect_policy: EffectRunPolicy,
+        live_payload: LivePayloadPolicy,
+        request: PreparedHandle,
+        continuation: PreparedHandle,
+        table: &DataConTable,
+    ) -> Result<PreparedParked, PreparedRuntimeError> {
+        let resume_entry = match self.programs.get(&program) {
+            Some(facts) => match facts.resume {
+                Some(entry) => Ok(entry),
+                None => Err(PreparedRuntimeError::NoResumeEntry {
+                    program,
+                    entry: PREPARED_RESUME_TARGET,
+                }),
+            },
+            None => Err(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                program,
+            ))),
+        };
+        let resume_entry = match resume_entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                self.machine.release(request);
+                self.machine.release(continuation);
+                return Err(error);
+            }
+        };
+        if effect_policy == EffectRunPolicy::HandleOrError {
+            self.machine.release(request);
+            self.machine.release(continuation);
+            return Err(PreparedRuntimeError::UnhandledRequest);
+        }
+        // The `Union` layer: an unpacked tag word and the lazy payload.
+        let layer = self.machine.inspect_outer(request, realm);
+        self.machine.release(request);
+        let mut payload = None;
+        match layer {
+            Ok(CodegenPreparedOuter::Constructor { fields, .. }) => {
+                for field in fields {
+                    match (field, payload) {
+                        (PreparedResult::Managed(handle), None) => payload = Some(handle),
+                        (PreparedResult::Managed(handle), Some(_)) => {
+                            self.machine.release(handle);
+                        }
+                        (PreparedResult::Void | PreparedResult::Scalar(_), _) => {}
+                    }
+                }
+            }
+            Err(error) => {
+                self.machine.release(continuation);
+                return Err(PreparedRuntimeError::Run(error));
+            }
+        }
+        let Some(payload) = payload else {
+            self.machine.release(continuation);
+            return Err(PreparedRuntimeError::UnsettledEntry {
+                program,
+                detail: "the suspended Union carried no managed payload",
+            });
+        };
+        // The request is observed (forced) through the existing observe
+        // path, exactly the value Core reports for a suspension.
+        let observed =
+            self.machine
+                .observe_handle(program, payload, RunOptions::default().observation_budget);
+        self.machine.release(payload);
+        let request = match observed {
+            Ok(value) => value,
+            Err(error) => {
+                self.machine.release(continuation);
+                return Err(PreparedRuntimeError::Run(error));
+            }
+        };
+        let Some(site) = typed_site_of(&request, table) else {
+            self.machine.release(continuation);
+            return Err(PreparedRuntimeError::UntypedRequest);
+        };
+        let Some(witness) = self.sites.get(&site).copied() else {
+            self.machine.release(continuation);
+            return Err(PreparedRuntimeError::UnknownSite { site });
+        };
+        let evidence = PreparedFrameEvidence {
+            owner: witness.owner,
+            site,
+            runner: program,
+            resume_entry,
+            continuation_rep: continuation.rep(),
+        };
+        let id = match self.machine.park(
+            continuation,
+            realm,
+            principal,
+            effect_policy,
+            live_payload,
+            evidence,
+        ) {
+            Ok(id) => id,
+            Err(error) => {
+                self.machine.release(continuation);
+                return Err(PreparedRuntimeError::Run(error));
+            }
+        };
+        Ok(PreparedParked { id, request })
+    }
+
+    /// Peek at a parked frame's evidence and realm without consuming it.
+    #[must_use]
+    pub fn parked(&self, id: ContinuationId) -> Option<(RealmId, PreparedFrameEvidence)> {
+        self.machine
+            .parked(id)
+            .map(|(realm, evidence)| (realm, *evidence))
+    }
+
+    /// The runtime resource scope owning the frame parked under `id`.
+    #[must_use]
+    pub fn parked_realm(&self, id: ContinuationId) -> Option<RealmId> {
+        self.machine.parked_realm(id)
+    }
+
+    /// The ids currently parked on this engine's machine, ascending.
+    #[must_use]
+    pub fn parked_ids(&self) -> Vec<ContinuationId> {
+        self.machine.parked_ids()
+    }
+
+    /// Re-enter the frame parked under `id` with `answer`, a handle the
+    /// caller has already validated against the frame's site evidence and
+    /// retained under the frame's realm: take the frame, enter the runner's
+    /// resume entry with the continuation and the answer, release both, and
+    /// decode the settled layer through the shared decoder. Every failure
+    /// before the take (unknown id, an answer from another realm,
+    /// cancellation) leaves the frame parked and rooted; the caller still owns
+    /// `answer` then. A failure after the take is a run failure, as on Core.
+    pub fn resume_parked(
+        &mut self,
+        id: ContinuationId,
+        answer: PreparedHandle,
+    ) -> Result<PreparedResumed, PreparedRuntimeError> {
+        let (realm, _) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
+            ExecutionError::UnknownContinuation(id),
+        ))?;
+        if self.machine.handle_realm(answer) != Some(realm) {
+            return Err(PreparedRuntimeError::CrossRealmArgument { realm });
+        }
+        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+            return Err(PreparedRuntimeError::Cancelled);
+        }
+        let (continuation, evidence) = self
+            .machine
+            .take_parked(id)
+            .map_err(PreparedRuntimeError::Run)?;
+        let batch = self.machine.run_entry_retained(
+            evidence.runner,
+            evidence.resume_entry,
+            &[
+                PreparedInput::Managed(continuation),
+                PreparedInput::Managed(answer),
+            ],
+            PreparedCallOptions {
+                observation_budget: 0,
+                collect_before_observation: false,
+            },
+            realm,
+        );
+        self.machine.release(continuation);
+        self.machine.release(answer);
+        let batch = batch.map_err(PreparedRuntimeError::Run)?;
+        let mut outer = None;
+        for value in batch.values {
+            match (value, outer) {
+                (PreparedResult::Managed(handle), None) => outer = Some(handle),
+                (PreparedResult::Managed(handle), Some(_)) => {
+                    self.machine.release(handle);
+                }
+                _ => {}
+            }
+        }
+        let outer = outer.ok_or(PreparedRuntimeError::UnsettledEntry {
+            program: evidence.runner,
+            detail: "the resume entry returned no managed settled value",
+        })?;
+        let settlement = self.decode_settled(evidence.runner, outer, realm)?;
+        Ok(PreparedResumed {
+            settlement,
+            realm,
+            runner: evidence.runner,
+        })
+    }
+
+    /// Consume the frame parked under `id` without entering it: the
+    /// continuation is released and nothing runs. An unknown id is a typed
+    /// error with nothing changed.
+    pub fn abort_parked(&mut self, id: ContinuationId) -> Result<(), PreparedRuntimeError> {
+        let (continuation, _) = self
+            .machine
+            .take_parked(id)
+            .map_err(PreparedRuntimeError::Run)?;
+        self.machine.release(continuation);
+        Ok(())
     }
 
     /// Materialize a retained value as a bridge `Value`, forcing its lazy
@@ -1433,6 +1958,18 @@ impl PreparedEngine {
     #[must_use]
     pub fn persistent_roots_count(&self) -> usize {
         self.machine.total_persistent_roots()
+    }
+
+    /// The stowed roots of parked frames (accounting class 1, root half).
+    #[must_use]
+    pub fn stowed_roots_count(&self) -> usize {
+        self.machine.stowed_roots_count()
+    }
+
+    /// The parked continuations (accounting class 1, frame half).
+    #[must_use]
+    pub fn parked_count(&self) -> usize {
+        self.machine.parked_count()
     }
 
     /// The unit every home module of `program` was compiled in -- what a

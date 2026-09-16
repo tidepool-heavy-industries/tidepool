@@ -35,7 +35,7 @@ use crate::machine_state::{machine_state, MachineFailure, MachineState};
 use crate::nursery::Nursery;
 use crate::pipeline::CodegenPipeline;
 pub use crate::resource_ledger::ResourceCounts;
-use crate::resource_ledger::{ContinuationFrame, ResourceLedger};
+use crate::resource_ledger::{ContinuationFrame, FrameCell, FrameEvidence, ResourceLedger};
 use crate::suspension::{
     ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput, SuspensionEntry, SuspensionRun,
     ValueHandle,
@@ -2527,7 +2527,7 @@ impl JitEffectMachine {
         // in place on every collection until then.
         self.machine_state.register_stowed_root(slot);
         let id = self.resources.park(ContinuationFrame {
-            cell,
+            cell: FrameCell::Boxed(cell),
             realm,
             principal,
             effect_policy,
@@ -2535,7 +2535,7 @@ impl JitEffectMachine {
             live_payload_root,
             live_payload,
             cancel_flag,
-            table,
+            evidence: FrameEvidence::Core(table),
         });
         self.assert_rooting_receipt();
         id
@@ -2644,20 +2644,31 @@ impl JitEffectMachine {
             .resources
             .take_continuation(id)
             .expect("frame present (peeked above, &mut self held throughout)");
-        let slot: *mut *mut u8 = &mut *frame.cell;
+        let slot: *mut *mut u8 = frame.cell.slot();
         self.machine_state.deregister_stowed_root(slot);
         self.assert_rooting_receipt();
         // Read the GC-CURRENT pointer out of the cell: collections since the
         // park rewrote it in place through the registered slot.
-        let continuation = *frame.cell;
+        // SAFETY: the slot was registered as a stowed root until the line
+        // above and the frame still owns the cell.
+        let continuation = unsafe { *slot };
         // Cancellation and the session-validated constructor snapshot belong
         // to the frame; resume neither re-derives them nor accepts substitutes
-        // from the caller.
+        // from the caller. A Core machine parks only Core frames.
         let cancel_flag = frame.cancel_flag.clone();
-        let table = frame.table.clone();
-        // A live payload not claimed before resume is no longer
-        // externally reachable, so discard the frame's root with the frame.
-        let _ = frame.live_payload_root.take();
+        let FrameEvidence::Core(table) = &frame.evidence else {
+            return Err(JitError::InvalidSuspensionState(
+                "a Core machine cannot resume a prepared-evidence frame",
+            ));
+        };
+        let table = Arc::clone(table);
+        // A live payload not claimed before resume is no longer externally
+        // reachable: release its persistent root with the frame, as
+        // `close_realm` does. Dropping the slot without deregistering it
+        // leaked one persistent root per resumed or aborted frame.
+        if let Some(root) = frame.live_payload_root.take() {
+            self.machine_state.deregister_persistent_root(root.addr());
+        }
         drop(frame);
         self.resume_applied(
             continuation,
@@ -2918,7 +2929,7 @@ impl JitEffectMachine {
         let frames_dropped = closed.frames.len();
         let handles_released = closed.handles.len();
         for mut frame in closed.frames {
-            let slot: *mut *mut u8 = &mut *frame.cell;
+            let slot: *mut *mut u8 = frame.cell.slot();
             self.machine_state.deregister_stowed_root(slot);
             if let Some(root) = frame.live_payload_root.take() {
                 self.machine_state.deregister_persistent_root(root.addr());
@@ -3020,7 +3031,7 @@ impl Drop for JitEffectMachine {
         // "registered from park until resume, and no longer" invariant hold on
         // every drop path.
         for mut frame in self.resources.drain_continuations() {
-            let slot: *mut *mut u8 = &mut *frame.cell;
+            let slot: *mut *mut u8 = frame.cell.slot();
             self.machine_state.deregister_stowed_root(slot);
         }
         self.assert_rooting_receipt();
