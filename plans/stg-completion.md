@@ -1,9 +1,12 @@
 # Finish the STG engine
 
-Implementation status: the [2026-09-15 safety/compiler milestone](handoff/implementation-2026-09-15.md)
-records completed prerequisite fixes, accepted policy decisions and current
-verification. Production notebook routing, typed resume, binding authority,
-retirement/collection, default routing and Core removal remain unfinished.
+Implementation status: the [current execution map](handoff/continuation-2026-09-15.md)
+records recovered work, active assignments and completion gates. F1/F2 connect
+pure prepared notebook turns, pattern binds and cell display through the resident
+session. Schema-10 site evidence is in progress. Production effect suspension,
+general typed resume, bounded retirement/collection, default routing and Core
+removal remain unfinished. Earlier evidence is retained in the
+[2026-09-15 implementation record](handoff/implementation-2026-09-15.md).
 
 Review baseline: `344ecd59a` (2026-09-14). This is a proposed execution plan,
 not an implementation or a fresh gate result. It supersedes the routing

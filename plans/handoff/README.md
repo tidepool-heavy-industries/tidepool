@@ -1,12 +1,13 @@
 # STG cutover handoff (2026-09-15)
 
-For the next LLM session taking over `engine/stg-production-cutover`. Read
-the [next wave, revision b](next-wave-2026-09-15b.md) first (current executable
-plan; it supersedes the A2–A7 shape of [revision a](next-wave-2026-09-15.md)),
-then the
-[implementation update](implementation-2026-09-15.md) and its
-[review](review-2026-09-15.md), then this historical investigation log and `plans/stg-completion.md` (the governing
-cutover plan). Contributor guidance lives in `AGENTS.md`.
+For the next session taking over `engine/stg-production-cutover`, read the
+[current execution map](continuation-2026-09-15.md), then the
+[next wave, revision b](next-wave-2026-09-15b.md) and the reviewed
+[schema-10 contract](designs/schema-10.md). The governing completion contract is
+`plans/stg-completion.md`. The [implementation update](implementation-2026-09-15.md)
+and [review](review-2026-09-15.md) retain earlier evidence; the remainder of
+this file is the historical investigation log. Contributor guidance lives in
+`AGENTS.md`.
 
 ## State
 
