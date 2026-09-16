@@ -22,7 +22,7 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 
 schemaVersion, executionAbiVersion :: Word64
-schemaVersion = 10
+schemaVersion = 11
 executionAbiVersion = 5
 
 newtype ValueId = ValueId Word32 deriving stock (Eq, Ord, Show, Generic)
@@ -170,4 +170,8 @@ data WireProgram = WireProgram
   , programGlobals :: [GlobalDecl], programConstructors :: [ConstructorDecl]
   , programOperations :: [OperationDecl], programBindings :: [Group TopBinding]
   , programEntry :: ValueId, programTypes :: [TypeNode], programSites :: [SiteRow]
+  -- | Request constructors whose reply is answered by a synthetic row in
+  -- 'programSites': an ordinary effect request carries no dynamic site, so
+  -- the host classifies it by its outer constructor.
+  , programVerbSites :: [(ConstructorId, Word64)]
   } deriving stock (Eq, Show, Generic)

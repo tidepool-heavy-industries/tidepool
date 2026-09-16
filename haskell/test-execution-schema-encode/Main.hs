@@ -5,6 +5,7 @@ import Codec.CBOR.Term (Term(..), decodeTerm)
 import Control.Monad (unless)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
+import Data.Word (Word64)
 import System.Environment (getArgs)
 import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionSchema
@@ -18,7 +19,7 @@ main = do
   let first = encodeWireProgram representative
       second = encodeWireProgram representative
   assert (first == second) "prepared execution encoding is not deterministic"
-  assert (BS.take 7 first == BS.pack [0x8f, 0x65, 0x54, 0x50, 0x53, 0x54, 0x47])
+  assert (BS.take 7 first == BS.pack [0x90, 0x65, 0x54, 0x50, 0x53, 0x54, 0x47])
     "prepared execution root does not start with [\"TPSTG\", ...]"
   assert (termNumber (termList (decode first) !! 1) == fromIntegral schemaVersion)
     "prepared execution schema version differs from the producer contract"
@@ -26,7 +27,7 @@ main = do
       familyTerm = TList
         [ TString "m3-fixture", TString "Fixture", TString "type"
         , TString "Recursive", TList [TInt 0] ]
-  assert (length evidenceFields == 15) "schema 10 requires fifteen program fields"
+  assert (length evidenceFields == 16) "schema 11 requires sixteen program fields"
   assert (evidenceFields !! 13 == TList
       [ TList [TInt 0, familyTerm, TList [TInt 2, TInt 1]
           , TList [TList [TInt 0, TList [TInt 0, TInt 1]]]]
@@ -41,6 +42,9 @@ main = do
           , TInt ordinal, TInt 0, TList [TInt 2, TInt 1]]
       | ordinal <- [0 .. 3]
       ]) "site evidence fields or delivery tags differ from the schema 10 contract"
+  assert (evidenceFields !! 15 == TList
+      [TList [TInt 0, TInteger (fromIntegral syntheticSite)]])
+    "verb-site table must pair a constructor id with its synthetic site id"
   let callerProgram = representative
         { programSignatures = [Signature [LiftedRefRep] CallerResult] }
       callerSignatures = termList (termList (decode (encodeWireProgram callerProgram)) !! 6)
@@ -172,7 +176,7 @@ representative = representativeWith result
 
 representativeWith :: Expr -> WireProgram
 representativeWith body = WireProgram envelope signatures globals constructors operations bindings
-  (ValueId 0) [] []
+  (ValueId 0) [] [] []
  where
   exact modul occurrence = SymbolIdentity "m3-fixture" modul "value" occurrence Nothing
   target = TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []
@@ -237,6 +241,12 @@ evidenceRepresentative = representative
           (TypeNodeId 0) [TypeNodeId 2, TypeNodeId 1]
       | (ordinal, delivery) <- zip [0 ..]
           [HostAnswer, LiveReentry, ExitCellFill, TerminalCapture] ]
+  , programVerbSites = [(ConstructorId 0, syntheticSite)]
   }
+
  where
   family = SymbolIdentity "m3-fixture" "Fixture" "type" "Recursive" Nothing
+
+-- | A synthetic reply site id: high bit set, beyond the CBOR int64 range.
+syntheticSite :: Word64
+syntheticSite = 0x8000000000000029

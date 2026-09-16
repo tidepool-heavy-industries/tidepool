@@ -74,7 +74,7 @@ import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.Identity (varId)
 import Tidepool.PreparedStg (PreparedModule(..), PreparedCoverage(..))
 import Tidepool.PreparedSites (SiteRejection(..))
-import Tidepool.PreparedSites (PreparedSite(..))
+import Tidepool.PreparedSites (PreparedSite(..), requestReplyIndex, syntheticSiteId)
 import Tidepool.EffectSchema qualified as Effect
 import Tidepool.TypePolicy qualified as TypePolicy
 import Tidepool.PreparedFormatting
@@ -204,11 +204,11 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
       -- module set (so a same-name internal identity cannot borrow home-module
       -- standing from the retained one), but nothing here recovers its body.
       projectable = map (dropRetainedTops context) modules
-  ((bindingGroups, programTypes, programSites), final) <- runStateT
+  ((bindingGroups, programTypes, programSites, programVerbSites), final) <- runStateT
     (do preallocate projectable
         groups <- concat <$> mapM projectModule projectable
-        (types, sites) <- lowerPreparedEvidence projectable
-        pure (groups, types, sites)) initial
+        (types, sites, verbSites) <- lowerPreparedEvidence projectable
+        pure (groups, types, sites, verbSites)) initial
   entryTop <- maybe (Left (MissingPreparedEntry (projectionEntry context)))
     pure (findTop bindingGroups)
   let entry = topValue entryTop
@@ -230,6 +230,7 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
         , programEntry = entry
         , programTypes = programTypes
         , programSites = programSites
+        , programVerbSites = programVerbSites
         }
   pure (program, map fst (constructors final))
   where
@@ -506,15 +507,20 @@ projectModule = mapM (projectTop . fst) . pmBindings
 -- | Lower only evidence owned by the executable tops retained in each module.
 -- Graph ids are module-local during elaboration; this pass compacts reachable
 -- nodes in module/original order and rebases every edge into one program table.
-lowerPreparedEvidence :: [PreparedModule] -> P ([TypeNode], [SiteRow])
+-- Synthetic reply sites for the program's request constructors follow the
+-- module evidence ('lowerVerbEvidence').
+lowerPreparedEvidence :: [PreparedModule]
+  -> P ([TypeNode], [SiteRow], [(ConstructorId, Word64)])
 lowerPreparedEvidence modules = do
-  (nodes, sites) <- foldM lowerOne ([], []) modules
-  let duplicates = Map.keys (Map.filter (> (1 :: Int))
+  (moduleNodes, moduleSites) <- foldM lowerOne ([], []) modules
+  (verbNodes, verbRows, verbSites) <- lowerVerbEvidence (length moduleNodes)
+  let sites = moduleSites <> verbRows
+      duplicates = Map.keys (Map.filter (> (1 :: Int))
         (Map.fromListWith (+) [(siteId site, 1) | site <- sites]))
   case duplicates of
     duplicate : _ -> failShape
       ("duplicate selected prepared site id " <> Text.pack (show duplicate))
-    [] -> pure (nodes, sites)
+    [] -> pure (moduleNodes <> verbNodes, sites, verbSites)
  where
   lowerOne (priorNodes, priorSites) prepared = do
     let owners = mkUniqSet
@@ -527,19 +533,8 @@ lowerPreparedEvidence modules = do
           (pmPreparedSites prepared)
         roots = concat
           [ psWireNode site : psInputNodes site | site <- selected ]
-        graphNodes = IntMap.fromAscList (zip [0 :: Int ..]
-          (TypePolicy.tgNodes (pmTypeGraph prepared)))
-    reachable <- lift (reachableTypeNodes graphNodes roots)
-    let ordered = [ TypePolicy.TypeNodeId (fromIntegral index)
-                  | index <- IntMap.keys graphNodes, Set.member index reachable ]
-        base = length priorNodes
-        mapping = Map.fromList
-          [ (old, TypeNodeId (fromIntegral (base + offset)))
-          | (offset, old) <- zip [0 :: Int ..] ordered ]
-        rebase node = maybe
-          (failShape "prepared type graph reachability omitted a referenced node")
-          pure (Map.lookup node mapping)
-    lowered <- traverse (lowerTypeNode graphNodes rebase) ordered
+    (lowered, rebase) <- lowerTypeGraph (length priorNodes)
+      (TypePolicy.tgNodes (pmTypeGraph prepared)) roots
     rows <- traverse (\site -> do
           wire <- rebase (psWireNode site)
           inputs <- traverse rebase (psInputNodes site)
@@ -552,6 +547,59 @@ lowerPreparedEvidence modules = do
               , siteInputs = inputs
               }) selected
     pure (priorNodes <> lowered, priorSites <> rows)
+
+-- | One synthetic 'HostAnswer' row per interned constructor with a closed
+-- reply index ('requestReplyIndex'), and the table naming it. Only the index
+-- is interned; the row has no inputs, since the host answer is built from the
+-- wire type alone. Membership in an effect row is deliberately not tested:
+-- an unused row is inert, a missing one would refuse the request.
+lowerVerbEvidence :: Int -> P ([TypeNode], [SiteRow], [(ConstructorId, Word64)])
+lowerVerbEvidence base = do
+  known <- gets constructors
+  let candidates =
+        [ (identity, qualified, index)
+        | (constructor, identity) <- known
+        , Just index <- [requestReplyIndex constructor]
+        , let symbol = nameSymbol "constructor" (dataConName constructor)
+              qualified = symbolModule symbol <> "." <> symbolOccurrence symbol
+        ]
+      (roots, builder) = runState
+        (traverse (\(_, _, index) -> TypePolicy.internType index) candidates)
+        TypePolicy.emptyTypeGraphBuilder
+  (lowered, rebase) <- lowerTypeGraph base
+    (TypePolicy.tgNodes (TypePolicy.finishTypeGraph builder)) roots
+  entries <- traverse (\((identity, qualified, _), root) -> do
+      wire <- rebase root
+      let site = syntheticSiteId qualified
+      pure ( SiteRow
+               { siteId = site
+               , siteOrigin = qualified
+               , siteOrdinal = 0
+               , siteDelivery = HostAnswer
+               , siteWire = wire
+               , siteInputs = []
+               }
+           , (identity, site) ))
+    (zip candidates roots)
+  pure (lowered, map fst entries, map snd entries)
+
+-- | Lower the nodes of one elaboration-local graph reachable from @roots@,
+-- in original order, as program nodes starting at @base@.
+lowerTypeGraph :: Int -> [TypePolicy.TypeNodeG] -> [TypePolicy.TypeNodeId]
+  -> P ([TypeNode], TypePolicy.TypeNodeId -> P TypeNodeId)
+lowerTypeGraph base nodes roots = do
+  let graphNodes = IntMap.fromAscList (zip [0 :: Int ..] nodes)
+  reachable <- lift (reachableTypeNodes graphNodes roots)
+  let ordered = [ TypePolicy.TypeNodeId (fromIntegral index)
+                | index <- IntMap.keys graphNodes, Set.member index reachable ]
+      mapping = Map.fromList
+        [ (old, TypeNodeId (fromIntegral (base + offset)))
+        | (offset, old) <- zip [0 :: Int ..] ordered ]
+      rebase node = maybe
+        (failShape "prepared type graph reachability omitted a referenced node")
+        pure (Map.lookup node mapping)
+  lowered <- traverse (lowerTypeNode graphNodes rebase) ordered
+  pure (lowered, rebase)
 
 reachableTypeNodes :: IntMap.IntMap TypePolicy.TypeNodeG -> [TypePolicy.TypeNodeId]
   -> Either ProjectionError (Set Int)

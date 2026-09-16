@@ -291,6 +291,7 @@ test-suite prepared-stg-pipeline-test
     ghc          >= 9.12 && < 9.13,
     containers,
     mtl,
+    text,
     tidepool-extract-internal,
     directory,
     filepath

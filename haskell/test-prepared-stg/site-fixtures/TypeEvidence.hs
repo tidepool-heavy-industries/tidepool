@@ -1,4 +1,5 @@
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -O1 #-}
 module TypeEvidence where
@@ -62,6 +63,22 @@ naturalAnswer = runLLMTurn @Natural "natural"
 
 packedAnswer :: Maybe Packed
 packedAnswer = runLLMTurn @Packed "packed"
+
+-- An ordinary effect GADT: requests carry no dynamic site, so the projector
+-- emits a synthetic reply row for each constructor with a closed reply index.
+data Console a where
+  Print :: Text -> Console ()
+  Fetch :: Text -> Console (Either Bool Text)
+  Echo :: a -> Console a
+
+printRequest :: Console ()
+printRequest = Print "hi"
+
+fetchRequest :: Console (Either Bool Text)
+fetchRequest = Fetch "path"
+
+echoRequest :: Console Int
+echoRequest = Echo 1
 
 unrelated :: Int
 unrelated = 42

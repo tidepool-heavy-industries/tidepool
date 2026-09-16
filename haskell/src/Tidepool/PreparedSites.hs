@@ -7,10 +7,13 @@ module Tidepool.PreparedSites
   , elaboratePreparedSites
   , lookupPreparedVerb
   , resolvePreparedSiblings
+  , syntheticSiteId
+  , syntheticSiteBit
+  , requestReplyIndex
   ) where
 
 import Control.Monad.State.Strict
-import Data.Bits ((.&.), xor)
+import Data.Bits ((.&.), (.|.), xor)
 import Data.List (find)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -26,7 +29,9 @@ import GHC.Core.TyCo.Rep (Type, Scaled(..))
 import GHC.Data.FastString (fsLit)
 import GHC.Types.Unique.Supply (UniqSupply, initUs, mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Core.Type (mkTyConApp, mkTyConTy, splitTyConApp_maybe)
-import GHC.Core.TyCon (TyCon)
+import GHC.Core.TyCon (TyCon, tyConArity)
+import GHC.Core.DataCon (DataCon, dataConOrigResTy)
+import GHC.Core.TyCo.FVs (noFreeVarsOfType)
 import GHC.Driver.Env (HscEnv, lookupType)
 import GHC.Types.TyThing.Ppr (pprTyThingInContext)
 import GHC.Types.TyThing (TyThing (..))
@@ -300,3 +305,29 @@ siteIdentity spec origin ordinal answer inputs =
         (T.unpack origin ++ "#" ++ show ordinal ++ "#" ++ vsName spec
           ++ "#" ++ show answer ++ "#" ++ show inputs)
   in max 1 ((high `xor` low) .&. 0x7fffffffffffffff)
+
+-- | The high bit distinguishes a synthetic reply site from every dynamic one:
+-- 'siteIdentity' masks it off, so the two ranges cannot collide.
+syntheticSiteBit :: Word64
+syntheticSiteBit = 0x8000000000000000
+
+-- | The reply site of an ordinary effect request, derived from the request
+-- constructor's qualified identity alone. Every program compiling the same
+-- constructor agrees on it, and it is nonzero by construction.
+syntheticSiteId :: T.Text -> Word64
+syntheticSiteId identity =
+  let Fingerprint high low = fingerprintString (T.unpack identity)
+  in syntheticSiteBit .|. ((high `xor` low) .&. 0x7fffffffffffffff)
+
+-- | The reply index of a request constructor: the closed last argument of its
+-- saturated original result type (@Print :: Text -> Console ()@ gives @()@).
+-- An open index (@Finalize v a@) or a nullary result type has none. Only the
+-- index is ever interned; the request type itself is a GADT the type policy
+-- refuses.
+requestReplyIndex :: DataCon -> Maybe Type
+requestReplyIndex constructor = case splitTyConApp_maybe (dataConOrigResTy constructor) of
+  Just (family, arguments)
+    | length arguments == tyConArity family
+    , index : _ <- reverse arguments
+    , noFreeVarsOfType index -> Just index
+  _ -> Nothing

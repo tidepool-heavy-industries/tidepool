@@ -12,6 +12,7 @@ import Data.Foldable (fold)
 import Data.List (mapAccumL)
 import Data.Sequence (Seq, (|>))
 import Data.Sequence qualified as Seq
+import Data.Word (Word64)
 import Tidepool.ExecutionSchema
 
 encodeWireProgram :: WireProgram -> ByteString
@@ -31,6 +32,7 @@ encodeWireProgram program = toStrictByteString $ array
   , encodeValueId (programEntry program)
   , list encodeTypeNode (programTypes program)
   , list encodeSiteRow (programSites program)
+  , list encodeVerbSite (programVerbSites program)
   ]
  where
   envelope = programEnvelope program
@@ -166,6 +168,10 @@ encodeSiteRow site = array
   , encodeTypeNodeId (siteWire site)
   , list encodeTypeNodeId (siteInputs site)
   ]
+
+encodeVerbSite :: (ConstructorId, Word64) -> Encoding
+encodeVerbSite (constructor, site) =
+  array [encodeConstructorId constructor, encodeWord64 site]
 
 encodeValueRef :: ValueRef -> Encoding
 encodeValueRef ref = case ref of
