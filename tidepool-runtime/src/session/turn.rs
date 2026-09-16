@@ -528,12 +528,18 @@ pub fn prepared_scaffold_binding_named(scaffold_target: &str, target: &str) -> S
 /// `tidepool-harness::engine`) emits this ONCE for the whole module, not
 /// once per target the way [`prepared_scaffold_binding_named`]'s settled
 /// line must be.
+///
+/// Both bindings name their parameters on purpose: a point-free
+/// `__decodeValue = eitherDecodeValue` compiles to an arity-0 value, and the
+/// runtime enters the root with one managed argument, which the entry then
+/// refuses ("expected 0 physical scalar slots"). Eta-expanded, the root is a
+/// one-argument function with the signature the runtime enters.
 #[must_use]
 pub fn prepared_resume_decode_binding() -> String {
     format!(
         "{PREPARED_RESUME_TARGET} q x = {RESUME_ALIAS}.settle ({RESUME_ALIAS}.resumeLifted q x)\n\
          {PREPARED_DECODE_TARGET} :: {TEXT_ALIAS}.Text -> Either {TEXT_ALIAS}.Text {AESON_VALUE_ALIAS}.Value\n\
-         {PREPARED_DECODE_TARGET} = {AESON_VALUE_ALIAS}.eitherDecodeValue\n"
+         {PREPARED_DECODE_TARGET} t = {AESON_VALUE_ALIAS}.eitherDecodeValue t\n"
     )
 }
 
