@@ -555,9 +555,11 @@ impl<'code> PreparedMachine<'code> {
         self.interner
             .check_absorb(&compiled.interned_constructors)
             .map_err(|conflict| match conflict {
-                super::interner::AbsorbConflict::Identity(identity) => {
+                super::interner::AbsorbConflict::Identity { existing, incoming } => {
                     ExecutionError::DescriptorShape {
-                        identity: Box::new(identity),
+                        identity: Box::new(incoming.identity.clone()),
+                        existing_field_reps: existing.field_reps.clone(),
+                        incoming_field_reps: incoming.field_reps.clone(),
                     }
                 }
                 super::interner::AbsorbConflict::HostId {
@@ -949,6 +951,18 @@ impl<'code> PreparedMachine<'code> {
             callable_rows,
             enter_rows,
         }
+    }
+
+    /// Live prepared old-space bytes right now -- the same figure
+    /// [`Self::collect_major`] reads into `RetirementReceipt::old_bytes`,
+    /// but callable at any point rather than only right after a completed
+    /// collection. `residency().block_words` only grows with installs (root
+    /// blocks are never shrunk in place), so it cannot see promotion that
+    /// happens between installs; this reads the old space's own live byte
+    /// count instead.
+    #[must_use]
+    pub fn old_bytes_live(&self) -> usize {
+        self.old_space.prepared_bytes_used()
     }
 
     /// Mark the live programs and retire the rest.
@@ -5145,7 +5159,7 @@ mod tests {
         let linked =
             link_program(prepared, &MachineImports::default()).expect("conflicting fixture links");
         match machine.compile_for_install(&linked) {
-            Err(super::super::CompileError::DescriptorShape { identity })
+            Err(super::super::CompileError::DescriptorShape { identity, .. })
                 if *identity == testing::identity("S3Import", "Field") => {}
             Err(other) => panic!("expected DescriptorShape, got {other:?}"),
             Ok(_) => panic!("a differently-declared Field must not compile against A's interner"),
@@ -7290,6 +7304,56 @@ mod tests {
             },
             _ => None,
         }
+    }
+
+    /// `old_bytes_live` reads live promoted bytes without needing a major
+    /// collection first: `build_answer` retains its result straight into old
+    /// space, so the accessor grows between two builds with no
+    /// `collect_major` in between -- the property `PreparedEngine`'s
+    /// amortization trigger (`tidepool-runtime/src/session/prepared.rs`,
+    /// `major_collection_due`) depends on to see promotion between installs,
+    /// not only at collection boundaries. It also matches the exact figure
+    /// `collect_major` later reports as `RetirementReceipt::old_bytes` for
+    /// the same still-reachable graph.
+    #[test]
+    fn old_bytes_live_grows_with_each_retained_build_before_any_collection() {
+        let (mut machine, program) = PreparedMachine::new(
+            boxed_shape_program(930, 931),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("prepared machine");
+        machine.pin(program).expect("installed");
+        assert_eq!(machine.old_bytes_live(), 0, "nothing retained yet");
+
+        let realm = RealmId::fresh();
+        let small = machine
+            .build_answer(realm, &boxed(1, 930, 931))
+            .expect("small graph builds");
+        let after_small = machine.old_bytes_live();
+        assert!(after_small > 0, "the retained graph is live old-space");
+        assert_eq!(after_small, machine.old_space.prepared_bytes_used());
+
+        let large = machine
+            .build_answer(realm, &boxed(5, 930, 931))
+            .expect("larger graph builds");
+        let after_large = machine.old_bytes_live();
+        assert!(
+            after_large > after_small,
+            "a second retained build grows the live figure with no collection yet: \
+             {after_small} then {after_large}"
+        );
+
+        let token = machine.quiesce().expect("quiescent");
+        let receipt = machine.collect_major(token).expect("major collection");
+        assert_eq!(
+            receipt.old_bytes,
+            machine.old_bytes_live(),
+            "the live accessor agrees with the collection's own reported figure"
+        );
+        assert!(machine.release(small));
+        assert!(machine.release(large));
     }
 
     /// Slice 1c: a value graph reached from two handles (the outer value and

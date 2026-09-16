@@ -297,3 +297,50 @@ fn prepared_session_residency_stays_bounded_across_many_turns() {
         "expected at least two post-bind collection boundaries in {POST_BIND} turns at N={N}"
     );
 }
+
+/// A large promotion trips `PreparedEngine::major_collection_due`'s live
+/// old-space growth check (`tidepool-runtime/src/session/prepared.rs`)
+/// well before the install-count window (`N`) would close on its own.
+///
+/// The growth check is disabled until a real baseline exists (the very
+/// first major collection is always gated by the install count alone --
+/// see that function's doc), so this first runs exactly `N` tiny turns to
+/// land on a collection boundary and establish a nonzero `old_bytes`
+/// baseline. Binding a 200,000-element list then promotes well past the
+/// 1 MiB / 50% growth threshold; a following turn or two should fold that
+/// promotion into `old_bytes` even though only one or two programs have
+/// installed since the baseline -- far short of `N`.
+#[test]
+fn prepared_session_large_promotion_triggers_an_early_major_collection() {
+    let mut notebook = Notebook::new(EngineKind::Prepared);
+
+    for i in 0..N {
+        notebook.expression(&format!("1 + {i}"));
+    }
+    let old_bytes_before = notebook
+        .session
+        .old_bytes()
+        .expect("the prepared route reports old-space bytes");
+
+    notebook.bind("xs <- pure [1..200000 :: Int]");
+
+    let mut collected_within = None;
+    for i in 0..2 {
+        notebook.expression(&format!("2 + {i}"));
+        let old_bytes_now = notebook
+            .session
+            .old_bytes()
+            .expect("the prepared route reports old-space bytes");
+        if old_bytes_now >= old_bytes_before + 1024 * 1024 {
+            collected_within = Some(i + 1);
+            break;
+        }
+    }
+    assert!(
+        collected_within.is_some(),
+        "expected a major collection to fold the large list's promoted bytes into `old_bytes` \
+         within 2 turns of binding it (stayed at {old_bytes_before}); the live old-space growth \
+         trigger in `PreparedEngine::major_collection_due` should fire well before the next \
+         install-count boundary at N={N}"
+    );
+}

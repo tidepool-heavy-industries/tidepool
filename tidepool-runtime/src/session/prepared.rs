@@ -912,14 +912,13 @@ pub struct PreparedEngine {
     /// `NotQuiescent` refusal leaves it untouched so the next eligible turn
     /// retries with the same count. Read by [`Self::major_collection_due`].
     installs_since_major: usize,
-    /// [`ResidencyCounts::block_words`] as of the last successful major
-    /// collection -- the cheapest live proxy for old-space growth this crate
-    /// can read without a cross-crate byte accessor (`residency()` is
-    /// callable at any time, not only right after a collection). `0` before
-    /// any collection has run, which disables the growth trigger until
-    /// there is a real baseline to grow from (see
-    /// [`Self::major_collection_due`]).
-    block_words_at_last_major: usize,
+    /// [`PreparedMachine::old_bytes_live`] as of the last successful major
+    /// collection -- a live read of promoted bytes, not the install-count
+    /// proxy `residency().block_words` (which only grows with installs and
+    /// so cannot see promotion happening between them). `0` before any
+    /// collection has run, which disables the growth trigger until there is
+    /// a real baseline to grow from (see [`Self::major_collection_due`]).
+    old_bytes_at_last_major: usize,
 }
 
 /// How many programs may install between major collections before one runs
@@ -927,15 +926,11 @@ pub struct PreparedEngine {
 /// `programs <= live_bindings + 1 + MAJOR_COLLECTION_INSTALL_INTERVAL`.
 const MAJOR_COLLECTION_INSTALL_INTERVAL: usize = 4;
 
-/// Root-block growth since the last major collection, in bytes, that forces
-/// one early even inside the install-count window -- whichever this or the
-/// 50% relative threshold in [`PreparedEngine::major_collection_due`]
+/// Live old-space growth since the last major collection, in bytes, that
+/// forces one early even inside the install-count window -- whichever this
+/// or the 50% relative threshold in [`PreparedEngine::major_collection_due`]
 /// reaches first.
 const MAJOR_COLLECTION_GROWTH_BYTES: usize = 1024 * 1024;
-
-/// Word width [`ResidencyCounts::block_words`] is counted in, for turning it
-/// into a byte figure comparable against `MAJOR_COLLECTION_GROWTH_BYTES`.
-const ROOT_WORD_BYTES: usize = std::mem::size_of::<u64>();
 
 /// The run's parking policy, carried onto the eval thread beside the settle
 /// plan: what a suspension is parked with.
@@ -1031,7 +1026,7 @@ impl PreparedEngine {
             verb_sites: BTreeMap::new(),
             old_bytes: 0,
             installs_since_major: 0,
-            block_words_at_last_major: 0,
+            old_bytes_at_last_major: 0,
         };
         // The first program can conflict only with itself.
         let plan = engine.plan_evidence(&facts)?;
@@ -2092,30 +2087,30 @@ impl PreparedEngine {
     /// Whether [`Self::quiesce_and_collect`] should actually run a major
     /// collection at this between-turn point, rather than return without
     /// touching the machine: either the install-count window has closed
-    /// (`installs_since_major >= MAJOR_COLLECTION_INSTALL_INTERVAL`), or
-    /// root-block bytes have grown by at least
-    /// [`MAJOR_COLLECTION_GROWTH_BYTES`] or 50% since the baseline recorded
-    /// at the last major collection ([`Self::block_words_at_last_major`]).
-    /// The growth check is skipped while there is no baseline yet (`0`,
-    /// before any collection has run) -- the install count alone gates the
-    /// first collection, matching the residency test's bound.
+    /// (`installs_since_major >= MAJOR_COLLECTION_INSTALL_INTERVAL`), or live
+    /// old-space bytes have grown by at least [`MAJOR_COLLECTION_GROWTH_BYTES`]
+    /// or 50% since the baseline recorded at the last major collection
+    /// ([`Self::old_bytes_at_last_major`]). The growth check is skipped while
+    /// there is no baseline yet (`0`, before any collection has run) -- the
+    /// install count alone gates the first collection, matching the
+    /// residency test's bound.
     ///
-    /// `residency().block_words` is read fresh here as the cheapest
-    /// available proxy for old-space bytes: it is an ordinary live snapshot,
-    /// callable at any time, and grows with root-block table size the same
-    /// way old-space occupancy does; there is no cross-crate accessor for a
-    /// live old-space byte count (only the compacted figure a completed
-    /// collection's `RetirementReceipt` reports).
+    /// `PreparedMachine::old_bytes_live` is read fresh here: unlike
+    /// `residency().block_words` (which only grows with installs and is
+    /// therefore redundant with the install-count trigger above), it reads
+    /// the old space's own live byte count, so a turn that promotes a large
+    /// structure without installing another program still trips the growth
+    /// trigger early.
     #[must_use]
     fn major_collection_due(&self) -> bool {
         if self.installs_since_major >= MAJOR_COLLECTION_INSTALL_INTERVAL {
             return true;
         }
-        if self.block_words_at_last_major == 0 {
+        if self.old_bytes_at_last_major == 0 {
             return false;
         }
-        let baseline_bytes = self.block_words_at_last_major * ROOT_WORD_BYTES;
-        let current_bytes = self.machine.residency().block_words * ROOT_WORD_BYTES;
+        let baseline_bytes = self.old_bytes_at_last_major;
+        let current_bytes = self.machine.old_bytes_live();
         let grown = current_bytes.saturating_sub(baseline_bytes);
         grown >= MAJOR_COLLECTION_GROWTH_BYTES || current_bytes.saturating_mul(2) >= baseline_bytes.saturating_mul(3)
     }
@@ -2156,8 +2151,8 @@ impl PreparedEngine {
     /// nothing (see [`Self::quiesce_and_collect`]'s doc); every other
     /// failure of the gate or the collection is returned. On a successful
     /// collection, [`Self::installs_since_major`] resets to `0` and
-    /// [`Self::block_words_at_last_major`] is rebaselined from the
-    /// post-collection residency snapshot. The prepared route currently
+    /// [`Self::old_bytes_at_last_major`] is rebaselined from the
+    /// post-collection live old-space bytes. The prepared route currently
     /// leases nothing per program, so there are no leases to release here
     /// (see the S4/G2 test module doc below). Used directly by tests and by
     /// any explicit session-level "collect now" entry point.
@@ -2179,7 +2174,7 @@ impl PreparedEngine {
             }
         }
         self.installs_since_major = 0;
-        self.block_words_at_last_major = self.machine.residency().block_words;
+        self.old_bytes_at_last_major = self.machine.old_bytes_live();
         Ok(())
     }
 
