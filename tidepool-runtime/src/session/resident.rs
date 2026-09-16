@@ -67,7 +67,7 @@ use tidepool_codegen::prepared_program::{PreparedHandle, ProgramId};
 use tidepool_repr::execution_schema::SymbolIdentity;
 
 use super::persistent::{EngineKind, ResidentEngine};
-use super::prepared::{PreparedRuntimeError, PreparedSettlement};
+use super::prepared::{ParkPolicy, PreparedRuntimeError, PreparedSettlement};
 use super::turn::{PreparedTurn, TurnCode};
 use tidepool_codegen::suspension::{
     ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput, SuspensionRun, ValueHandle,
@@ -641,15 +641,6 @@ enum PreparedRun {
     Suspended { id: ContinuationId, request: Value },
 }
 
-/// The run's parking policy, carried onto the eval thread beside the settle
-/// plan: what a suspension is parked with.
-#[derive(Clone, Copy)]
-struct ParkPolicy {
-    principal: PrincipalId,
-    effect_policy: EffectRunPolicy,
-    live_payload: LivePayloadPolicy,
-}
-
 /// The hole a suspension of a turn run in `mode` mints: the same completion
 /// obligation Core's turn paths seed, carried forward across resumes.
 fn hole_seed_of(mode: &PreparedTurnMode<'_>, lexical_scope: ScopeId) -> HoleSeed {
@@ -714,8 +705,8 @@ fn settle_prepared(
     table: &DataConTable,
 ) -> Result<PreparedRun, PreparedRuntimeError> {
     let engine = engine
-        .prepared_mut()
-        .ok_or(PreparedRuntimeError::WrongEngine)?;
+        .require_prepared()
+        .map_err(|_| PreparedRuntimeError::WrongEngine)?;
     let settlement = engine.run_settled(program, realm)?;
     finish_prepared(engine, program, realm, plan, park, table, settlement)
 }
@@ -739,16 +730,8 @@ fn finish_prepared(
             request,
             continuation,
         } => {
-            let parked = engine.park_suspension(
-                program,
-                realm,
-                park.principal,
-                park.effect_policy,
-                park.live_payload,
-                request,
-                continuation,
-                table,
-            )?;
+            let parked =
+                engine.park_suspension(program, realm, park, request, continuation, table)?;
             return Ok(PreparedRun::Suspended {
                 id: parked.id,
                 request: parked.request,
@@ -784,11 +767,13 @@ fn finish_prepared(
                 }
                 if let Err(error) = observe(engine, *field) {
                     // `observe` released the failing field; release the rest.
-                    for (other, field) in fields.iter().enumerate() {
-                        if other != index {
-                            engine.release(*field);
-                        }
-                    }
+                    engine.release_all(
+                        fields
+                            .iter()
+                            .enumerate()
+                            .filter(|(other, _)| *other != index)
+                            .map(|(_, field)| *field),
+                    );
                     return Err(error);
                 }
             }
@@ -2177,9 +2162,7 @@ where
                 } = mode
                 else {
                     if let Some(engine) = self.core.prepared_mut() {
-                        for field in fields {
-                            engine.release(field);
-                        }
+                        engine.release_all(fields);
                     }
                     return Err(PreparedRuntimeError::UnsettledEntry {
                         program,
@@ -2215,10 +2198,7 @@ where
                 ));
             }
         };
-        let engine = self
-            .core
-            .prepared_mut()
-            .ok_or(PreparedRuntimeError::WrongEngine)?;
+        let engine = self.core.require_prepared()?;
         match mode {
             PreparedTurnMode::Value => {
                 engine.release(handle);
@@ -2269,14 +2249,9 @@ where
         bound: &[(&BoundBinder, PreparedHandle)],
     ) -> Result<(), ResidentError> {
         let scope_is_live = self.core.scope_tree().is_live(scope);
-        let engine = self
-            .core
-            .prepared_mut()
-            .ok_or(PreparedRuntimeError::WrongEngine)?;
+        let engine = self.core.require_prepared()?;
         if !scope_is_live {
-            for (_, handle) in bound {
-                engine.release(*handle);
-            }
+            engine.release_all(bound.iter().map(|(_, handle)| *handle));
             return Err(SessionError::DeadScope(scope).into());
         }
         let unit = engine.entry_unit(program).unwrap_or_default();
@@ -2285,9 +2260,7 @@ where
             match engine.adopt(*handle) {
                 Some(root) => roots.push(root),
                 None => {
-                    for (_, handle) in bound {
-                        engine.release(*handle);
-                    }
+                    engine.release_all(bound.iter().map(|(_, handle)| *handle));
                     return Err(PreparedRuntimeError::Run(
                         tidepool_codegen::prepared_program::ExecutionError::UnknownPreparedHandle,
                     )
@@ -2324,9 +2297,7 @@ where
             };
             if let Err(error) = self.core.bind_replacing_decl_in(scope, entry) {
                 if let Some(engine) = self.core.prepared_mut() {
-                    for (_, handle) in &bound[index..] {
-                        engine.release(*handle);
-                    }
+                    engine.release_all(bound[index..].iter().map(|(_, handle)| *handle));
                 }
                 return Err(error.into());
             }
@@ -3609,11 +3580,7 @@ where
             ResumeInput::Answer(value) => value,
             ResumeInput::Abort(reason) => {
                 let aborted = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
-                    let engine = engine
-                        .prepared_mut()
-                        .ok_or(JitError::InvalidSuspensionState(
-                            "this session runs prepared STG but holds no prepared engine",
-                        ))?;
+                    let engine = engine.require_prepared()?;
                     Ok(engine.abort_parked(frame_id))
                 });
                 self.reconcile_failed_reentry(cont_id, frame_id);
@@ -3665,11 +3632,7 @@ where
             live_payload: self.core.live_payload_policy(),
         };
         let resumed = self.on_eval_thread(move |engine, table, _handlers, _captured| {
-            let engine = engine
-                .prepared_mut()
-                .ok_or(JitError::InvalidSuspensionState(
-                    "this session runs prepared STG but holds no prepared engine",
-                ))?;
+            let engine = engine.require_prepared()?;
             Ok(engine
                 .resume_with_answer(frame_id, &value)
                 .and_then(|resumed| {

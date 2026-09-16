@@ -56,8 +56,6 @@ pub enum PreparedRuntimeError {
     Compile(CompileError),
     #[error("prepared execution failed: {0}")]
     Run(ExecutionError),
-    #[error("prepared runtime is unavailable after an integrity failure")]
-    Unavailable(MachineFailure),
     #[error("session binding {0:?} is not a live prepared binding")]
     UnknownBinding(SessionVarId),
     #[error(
@@ -172,7 +170,6 @@ impl PreparedRuntimeError {
             | Self::AnswerUnconstructible { .. }
             | Self::CrossRealmArgument { .. } => PreparedFailureKind::Rejected,
             Self::Cancelled => PreparedFailureKind::Cancelled,
-            Self::Unavailable(_) => PreparedFailureKind::Integrity,
             Self::Compile(_) => PreparedFailureKind::Rejected,
             Self::Run(error) => match error {
                 ExecutionError::MissingEntry(_)
@@ -187,6 +184,7 @@ impl PreparedRuntimeError {
                 | ExecutionError::UnknownProgram(_)
                 | ExecutionError::UnknownContinuation(_)
                 | ExecutionError::Answer(_)
+                | ExecutionError::Invariant(_)
                 | ExecutionError::NotQuiescent => PreparedFailureKind::Rejected,
                 ExecutionError::Runtime(failure) => {
                     if failure.disposition == MachineDisposition::Unavailable {
@@ -239,6 +237,11 @@ struct ProgramFacts {
     /// rather than local index, and a bridge `Value`'s constructor resolves
     /// to the row that admits it.
     constructors: Vec<(SymbolIdentity, DataConId)>,
+    /// `constructors`, indexed by qualified identity `(module, occurrence)`
+    /// and built once in [`Self::of`], so a leaf lookup
+    /// ([`Self::constructor_named`]) is one map lookup rather than a full
+    /// scan repeated per leaf of an answer.
+    by_identity: BTreeMap<(String, String), DataConId>,
 }
 
 /// Which installed program's site table is authoritative for one site id.
@@ -259,20 +262,12 @@ struct SettledIds {
 impl SettledIds {
     const MODULE: &'static str = "Tidepool.Internal.Resume";
 
-    fn of(prepared: &PreparedProgram) -> Option<Self> {
-        let host_id = |occurrence: &str| {
-            prepared
-                .constructors()
-                .iter()
-                .find(|declaration| {
-                    declaration.identity.module == Self::MODULE
-                        && declaration.identity.occurrence == occurrence
-                })
-                .map(|declaration| declaration.host_id)
-        };
+    fn of(by_identity: &BTreeMap<(String, String), DataConId>) -> Option<Self> {
+        let host_id =
+            |occurrence: &str| by_identity.get(&(Self::MODULE.to_string(), occurrence.to_string()));
         Some(Self {
-            done: host_id("Done")?,
-            suspended: host_id("Suspended")?,
+            done: *host_id("Done")?,
+            suspended: *host_id("Suspended")?,
         })
     }
 }
@@ -306,18 +301,29 @@ impl ProgramFacts {
                         .then_some(*id)
                 })
             });
+        let constructors: Vec<(SymbolIdentity, DataConId)> = prepared
+            .constructors()
+            .iter()
+            .map(|declaration| (declaration.identity.clone(), declaration.host_id))
+            .collect();
+        let by_identity: BTreeMap<(String, String), DataConId> = constructors
+            .iter()
+            .map(|(identity, host_id)| {
+                (
+                    (identity.module.clone(), identity.occurrence.clone()),
+                    *host_id,
+                )
+            })
+            .collect();
         Self {
             entry,
             tops,
-            settled: SettledIds::of(prepared),
+            settled: SettledIds::of(&by_identity),
             resume,
             sites: prepared.sites().to_vec(),
             types: prepared.types().to_vec(),
-            constructors: prepared
-                .constructors()
-                .iter()
-                .map(|declaration| (declaration.identity.clone(), declaration.host_id))
-                .collect(),
+            constructors,
+            by_identity,
         }
     }
 
@@ -408,10 +414,9 @@ impl ProgramFacts {
 
     /// The bridge id of a declared constructor, by qualified identity.
     fn constructor_named(&self, module: &str, occurrence: &str) -> Option<DataConId> {
-        self.constructors
-            .iter()
-            .find(|(identity, _)| identity.module == module && identity.occurrence == occurrence)
-            .map(|(_, host_id)| *host_id)
+        self.by_identity
+            .get(&(module.to_string(), occurrence.to_string()))
+            .copied()
     }
 
     /// One byte-backed leaf: the constructor `module.occurrence` over a
@@ -715,24 +720,69 @@ fn type_nodes_equivalent(
 /// classifies a Core suspension by. `None` for a request that carries no such
 /// field: an ordinary handled effect.
 fn typed_site_of(request: &Value, table: &DataConTable) -> Option<u64> {
-    fn find(json: &serde_json::Value, depth: usize) -> Option<u64> {
-        if depth > 4 {
-            return None;
-        }
-        match json {
-            serde_json::Value::Object(object) => {
-                if let Some(site) = object.get("typedSite").and_then(serde_json::Value::as_u64) {
-                    return Some(site);
-                }
-                object.values().find_map(|value| find(value, depth + 1))
+    /// The `Text`/string-literal content of an aeson `Key`/`Value` leaf.
+    fn value_text(value: &Value, table: &DataConTable) -> Option<String> {
+        match value {
+            Value::Lit(Literal::LitString(bytes)) => {
+                std::str::from_utf8(bytes).ok().map(str::to_owned)
             }
-            serde_json::Value::Array(items) => {
-                items.iter().find_map(|value| find(value, depth + 1))
+            Value::Con(id, fields) if table.name_of(*id) == Some("Text") => {
+                tidepool_bridge::shapes::text_bytes_clamped(fields, table)
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
             }
             _ => None,
         }
     }
-    find(&crate::render::value_to_json(request, table, 0), 0)
+    /// The numeric content of a `typedSite` leaf: an unboxed or boxed
+    /// integral literal, or an aeson `Number` wrapping one. This is the one
+    /// leaf this walk ever renders through the generic JSON decoder — never
+    /// the whole request.
+    fn value_u64(value: &Value, table: &DataConTable) -> Option<u64> {
+        match value {
+            Value::Lit(Literal::LitInt(n)) => u64::try_from(*n).ok(),
+            Value::Lit(Literal::LitWord(n)) => Some(*n),
+            Value::Con(_, _) => match crate::render::value_to_json(value, table, 0) {
+                serde_json::Value::Number(n) => n.as_u64(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    /// Walk the request's `Value` tree directly (never its JSON rendering)
+    /// looking for an aeson `Object` layer with a `typedSite` entry, the same
+    /// depth bound (4) the JSON walk used.
+    fn search(value: &Value, table: &DataConTable, depth: usize) -> Option<u64> {
+        if depth > 4 {
+            return None;
+        }
+        let Value::Con(id, fields) = value else {
+            return None;
+        };
+        if table.name_of(*id) == Some("Object") {
+            if let [map_val] = fields.as_slice() {
+                let mut found = None;
+                tidepool_bridge::shapes::walk_map_entries(
+                    map_val,
+                    table,
+                    0,
+                    MAX_ANSWER_DEPTH,
+                    &mut |key, val, _| {
+                        if found.is_none() && value_text(key, table).as_deref() == Some("typedSite")
+                        {
+                            found = value_u64(val, table);
+                        }
+                    },
+                );
+                if found.is_some() {
+                    return found;
+                }
+            }
+        }
+        fields
+            .iter()
+            .find_map(|field| search(field, table, depth + 1))
+    }
+    search(request, table, 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -758,6 +808,15 @@ pub struct PreparedEngine {
     /// transaction before any code is compiled; a conflicting duplicate
     /// refuses the install (see [`Self::install`]).
     sites: BTreeMap<u64, SiteWitness>,
+}
+
+/// The run's parking policy, carried onto the eval thread beside the settle
+/// plan: what a suspension is parked with.
+#[derive(Clone, Copy)]
+pub(crate) struct ParkPolicy {
+    pub(crate) principal: PrincipalId,
+    pub(crate) effect_policy: EffectRunPolicy,
+    pub(crate) live_payload: LivePayloadPolicy,
 }
 
 /// How a settled entry (the scaffold or a resume) is called: nothing is
@@ -1006,20 +1065,12 @@ impl PreparedEngine {
         realm: RealmId,
         batch: PreparedResultBatch,
     ) -> Result<PreparedSettlement, PreparedRuntimeError> {
-        let mut outer = None;
-        for value in batch.values {
-            match (value, outer) {
-                (PreparedResult::Managed(handle), None) => outer = Some(handle),
-                (PreparedResult::Managed(handle), Some(_)) => {
-                    self.machine.release(handle);
-                }
-                _ => {}
-            }
-        }
-        let outer = outer.ok_or(PreparedRuntimeError::UnsettledEntry {
-            program,
-            detail: "the entry returned no managed settled value",
-        })?;
+        let outer =
+            self.take_first_managed(batch.values)
+                .ok_or(PreparedRuntimeError::UnsettledEntry {
+                    program,
+                    detail: "the entry returned no managed settled value",
+                })?;
         self.decode_settled(program, outer, realm)
     }
 
@@ -1057,9 +1108,7 @@ impl PreparedEngine {
             })
             .collect();
         let mut shape = |detail| {
-            for handle in &managed {
-                self.machine.release(*handle);
-            }
+            self.release_all(managed.iter().copied());
             Err(PreparedRuntimeError::UnsettledEntry { program, detail })
         };
         if identity == settled.done {
@@ -1080,6 +1129,21 @@ impl PreparedEngine {
         }
     }
 
+    /// The admitted resume entry of `program`, read without holding a borrow
+    /// past this call so callers remain free to release handles afterward.
+    fn resume_entry_of(&self, program: ProgramId) -> Result<ValueId, PreparedRuntimeError> {
+        self.programs
+            .get(&program)
+            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                program,
+            )))?
+            .resume
+            .ok_or(PreparedRuntimeError::NoResumeEntry {
+                program,
+                entry: PREPARED_RESUME_TARGET,
+            })
+    }
+
     /// Park a suspension `program`'s settled layer produced under `realm`:
     /// read the `Union` layer of `request`, observe its payload through the
     /// machine observe path (the request the host reports, as on Core), read
@@ -1090,112 +1154,73 @@ impl PreparedEngine {
     /// suspension under `HandleOrError` (nothing is handled on this route
     /// yet), a request without a typed site (an ordinary handled effect, not
     /// yet answered on this route), or a site no installed program declares.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one park carries the run's realm, principal and both effect policies beside the two settled-layer handles, as the Core park does"
-    )]
-    pub fn park_suspension(
+    pub(crate) fn park_suspension(
         &mut self,
         program: ProgramId,
         realm: RealmId,
-        principal: PrincipalId,
-        effect_policy: EffectRunPolicy,
-        live_payload: LivePayloadPolicy,
+        park: ParkPolicy,
         request: PreparedHandle,
         continuation: PreparedHandle,
         table: &DataConTable,
     ) -> Result<PreparedParked, PreparedRuntimeError> {
-        // Every handle this park holds is released here on any refusal;
-        // `try_park_suspension` hands them over as it consumes them.
-        let mut temporaries = vec![request, continuation];
-        let parked = self.try_park_suspension(
-            program,
-            realm,
-            principal,
-            effect_policy,
-            live_payload,
-            table,
-            &mut temporaries,
-        );
-        for handle in temporaries {
-            self.machine.release(handle);
-        }
-        parked
-    }
-
-    /// [`Self::park_suspension`]'s body. `temporaries` holds the request
-    /// and continuation on entry; a handle is removed as it is consumed
-    /// (released here, or parked), so whatever remains on any exit is what the
-    /// caller must release.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the park's policy arguments plus the temporaries it consumes"
-    )]
-    fn try_park_suspension(
-        &mut self,
-        program: ProgramId,
-        realm: RealmId,
-        principal: PrincipalId,
-        effect_policy: EffectRunPolicy,
-        live_payload: LivePayloadPolicy,
-        table: &DataConTable,
-        temporaries: &mut Vec<PreparedHandle>,
-    ) -> Result<PreparedParked, PreparedRuntimeError> {
-        let [request, continuation] = *temporaries.as_slice() else {
-            return Err(PreparedRuntimeError::UnsettledEntry {
-                program,
-                detail: "a park needs exactly the request and continuation handles",
-            });
+        let resume_entry = match self.resume_entry_of(program) {
+            Ok(resume_entry) => resume_entry,
+            Err(error) => {
+                self.release_all([request, continuation]);
+                return Err(error);
+            }
         };
-        let facts = self
-            .programs
-            .get(&program)
-            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
-                program,
-            )))?;
-        let resume_entry = facts.resume.ok_or(PreparedRuntimeError::NoResumeEntry {
-            program,
-            entry: PREPARED_RESUME_TARGET,
-        })?;
-        if effect_policy == EffectRunPolicy::HandleOrError {
+        if park.effect_policy == EffectRunPolicy::HandleOrError {
+            self.release_all([request, continuation]);
             return Err(PreparedRuntimeError::UnhandledRequest);
         }
         // The `Union` layer: an unpacked tag word and the lazy payload.
-        let CodegenPreparedOuter::Constructor { fields, .. } = self
-            .machine
-            .inspect_outer(request, realm)
-            .map_err(PreparedRuntimeError::Run)?;
-        temporaries.retain(|handle| *handle != request);
+        let outer = self.machine.inspect_outer(request, realm);
         self.machine.release(request);
-        let mut payload = None;
-        for field in fields {
-            match (field, payload) {
-                (PreparedResult::Managed(handle), None) => payload = Some(handle),
-                (PreparedResult::Managed(handle), Some(_)) => {
-                    self.machine.release(handle);
-                }
-                (PreparedResult::Void | PreparedResult::Scalar(_), _) => {}
+        let CodegenPreparedOuter::Constructor { fields, .. } = match outer {
+            Ok(outer) => outer,
+            Err(error) => {
+                self.machine.release(continuation);
+                return Err(PreparedRuntimeError::Run(error));
             }
-        }
-        let payload = payload.ok_or(PreparedRuntimeError::UnsettledEntry {
-            program,
-            detail: "the suspended Union carried no managed payload",
-        })?;
-        temporaries.push(payload);
+        };
+        let payload = match self.take_first_managed(fields) {
+            Some(payload) => payload,
+            None => {
+                self.machine.release(continuation);
+                return Err(PreparedRuntimeError::UnsettledEntry {
+                    program,
+                    detail: "the suspended Union carried no managed payload",
+                });
+            }
+        };
         // The request is observed (forced) through the existing observe
         // path, exactly the value Core reports for a suspension.
-        let request = self
-            .machine
-            .observe_handle(program, payload, RunOptions::default().observation_budget)
-            .map_err(PreparedRuntimeError::Run)?;
-        temporaries.retain(|handle| *handle != payload);
+        let observed =
+            self.machine
+                .observe_handle(program, payload, RunOptions::default().observation_budget);
         self.machine.release(payload);
-        let site = typed_site_of(&request, table).ok_or(PreparedRuntimeError::UntypedRequest)?;
-        let witness = self
-            .sites
-            .get(&site)
-            .copied()
-            .ok_or(PreparedRuntimeError::UnknownSite { site })?;
+        let request = match observed {
+            Ok(request) => request,
+            Err(error) => {
+                self.machine.release(continuation);
+                return Err(PreparedRuntimeError::Run(error));
+            }
+        };
+        let site = match typed_site_of(&request, table) {
+            Some(site) => site,
+            None => {
+                self.machine.release(continuation);
+                return Err(PreparedRuntimeError::UntypedRequest);
+            }
+        };
+        let witness = match self.sites.get(&site).copied() {
+            Some(witness) => witness,
+            None => {
+                self.machine.release(continuation);
+                return Err(PreparedRuntimeError::UnknownSite { site });
+            }
+        };
         let evidence = PreparedFrameEvidence {
             owner: witness.owner,
             site,
@@ -1208,13 +1233,12 @@ impl PreparedEngine {
             .park(
                 continuation,
                 realm,
-                principal,
-                effect_policy,
-                live_payload,
+                park.principal,
+                park.effect_policy,
+                park.live_payload,
                 evidence,
             )
             .map_err(PreparedRuntimeError::Run)?;
-        temporaries.retain(|handle| *handle != continuation);
         Ok(PreparedParked { id, request })
     }
 
@@ -1411,9 +1435,7 @@ impl PreparedEngine {
             })
             .collect();
         if managed.len() != binders || produced != binders {
-            for handle in managed {
-                self.machine.release(handle);
-            }
+            self.release_all(managed);
             return Err(PreparedRuntimeError::ProjectionShape {
                 binders,
                 fields: produced,
@@ -1438,6 +1460,33 @@ impl PreparedEngine {
     /// Release one retained handle and deregister its root.
     pub fn release(&mut self, handle: PreparedHandle) -> bool {
         self.machine.release(handle)
+    }
+
+    /// Release every handle in `handles`.
+    pub fn release_all(&mut self, handles: impl IntoIterator<Item = PreparedHandle>) {
+        for handle in handles {
+            self.machine.release(handle);
+        }
+    }
+
+    /// Take the first managed value out of a batch of call results, releasing
+    /// every other managed value the batch carried. Non-managed results
+    /// (`Void`, `Scalar`) are ignored.
+    fn take_first_managed(
+        &mut self,
+        values: impl IntoIterator<Item = PreparedResult>,
+    ) -> Option<PreparedHandle> {
+        let mut first = None;
+        for value in values {
+            match (value, &first) {
+                (PreparedResult::Managed(handle), None) => first = Some(handle),
+                (PreparedResult::Managed(handle), Some(_)) => {
+                    self.machine.release(handle);
+                }
+                (PreparedResult::Void | PreparedResult::Scalar(_), _) => {}
+            }
+        }
+        first
     }
 
     /// Close a runtime resource scope: `(frames, handles_released)`.
@@ -1510,11 +1559,11 @@ mod tests {
             cause: RuntimeError::Cancelled,
             disposition: MachineDisposition::Unavailable,
         };
-        let error = PreparedRuntimeError::Unavailable(failure.clone());
+        let error = PreparedRuntimeError::Run(ExecutionError::Runtime(failure.clone()));
         assert_eq!(error.kind(), PreparedFailureKind::Integrity);
         assert!(matches!(
             error,
-            PreparedRuntimeError::Unavailable(retained) if retained == failure
+            PreparedRuntimeError::Run(ExecutionError::Runtime(retained)) if retained == failure
         ));
     }
 

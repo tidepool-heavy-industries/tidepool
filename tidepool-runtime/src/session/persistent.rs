@@ -134,6 +134,33 @@ impl ResidentEngine {
         ))
     }
 
+    /// The prepared engine, or the typed refusal a prepared-only turn path
+    /// reports on the Core route. No path ever falls back across engines.
+    pub fn require_prepared(&mut self) -> Result<&mut PreparedEngine, JitError> {
+        self.prepared_mut().ok_or(JitError::InvalidSuspensionState(
+            "this session runs prepared STG but holds no prepared engine",
+        ))
+    }
+
+    /// The continuation ids parked on this session's machine, whichever
+    /// engine it runs.
+    #[must_use]
+    pub fn parked_ids(&self) -> Vec<ContinuationId> {
+        match self {
+            Self::Core(machine) => machine.parked_ids(),
+            Self::Prepared(engine) => engine.parked_ids(),
+        }
+    }
+
+    /// Cancellation handle for this capacity-one registry realm.
+    #[must_use]
+    pub fn cancel_handle(&mut self) -> CancelHandle {
+        match self {
+            Self::Core(machine) => machine.realm_cancel_handle(RealmId::ROOT),
+            Self::Prepared(engine) => engine.cancel_handle(RealmId::ROOT),
+        }
+    }
+
     #[must_use]
     pub fn disposition(&self) -> MachineDisposition {
         match self {
@@ -431,16 +458,21 @@ impl PersistentSession {
         self.machine.as_mut().and_then(ResidentEngine::prepared_mut)
     }
 
+    /// The prepared engine, or the typed refusal a prepared-only turn path
+    /// reports on the Core route.
+    pub fn require_prepared(&mut self) -> Result<&mut PreparedEngine, PreparedRuntimeError> {
+        self.prepared_mut().ok_or(PreparedRuntimeError::WrongEngine)
+    }
+
     /// The continuation ids parked on this session's machine, whichever
     /// engine it runs: the ground truth a hole is reconciled against after a
     /// failed resume. Empty before the machine exists.
     #[must_use]
     pub fn parked_ids(&self) -> Vec<ContinuationId> {
-        match self.machine.as_ref() {
-            Some(ResidentEngine::Core(machine)) => machine.parked_ids(),
-            Some(ResidentEngine::Prepared(engine)) => engine.parked_ids(),
-            None => Vec::new(),
-        }
+        self.machine
+            .as_ref()
+            .map(ResidentEngine::parked_ids)
+            .unwrap_or_default()
     }
 
     /// Whether the resident machine can safely accept another entry.
@@ -464,10 +496,7 @@ impl PersistentSession {
 
     /// Cancellation handle for this capacity-one registry realm.
     pub fn cancel_handle(&mut self) -> Option<CancelHandle> {
-        self.machine.as_mut().map(|engine| match engine {
-            ResidentEngine::Core(machine) => machine.realm_cancel_handle(RealmId::ROOT),
-            ResidentEngine::Prepared(engine) => engine.cancel_handle(RealmId::ROOT),
-        })
+        self.machine.as_mut().map(ResidentEngine::cancel_handle)
     }
 
     // -- table accumulation ------------------------------------------------
