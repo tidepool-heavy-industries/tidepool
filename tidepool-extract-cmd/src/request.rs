@@ -186,8 +186,11 @@ impl ExtractRequest {
     /// headers, truncated fields, unknown tags, and trailing bytes are errors.
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
         let mut decoder = Decoder::new(bytes)?;
-        let field_count = decoder.count(1)?;
-        let mut fields = Vec::with_capacity(field_count);
+        let field_count = decoder.count(Decoder::MIN_FIELD_BYTES)?;
+        // A field can be only its one-byte tag, while `Field` is much larger.
+        // Do not amplify an untrusted count into a count-sized allocation
+        // before the tags themselves have been validated.
+        let mut fields = Vec::new();
         for _ in 0..field_count {
             let tag = decoder.byte()?;
             let field = match tag {
@@ -561,6 +564,8 @@ impl<'a> Decoder<'a> {
         Ok(u32::from_le_bytes(self.fixed()?))
     }
 
+    const MIN_FIELD_BYTES: usize = 1;
+
     // Bound collection allocations by the minimum encoded size of each item.
     fn count(&mut self, minimum_bytes: usize) -> Result<usize, ProtocolError> {
         let count = self.u32()? as usize;
@@ -912,6 +917,19 @@ mod tests {
             ExtractRequest::decode(&targets).unwrap_err(),
             ProtocolError::Truncated
         );
+    }
+
+    #[test]
+    fn payload_free_tags_are_one_byte_fields() {
+        let mut request = MAGIC.to_vec();
+        request.extend_from_slice(&3u32.to_le_bytes());
+        request.extend_from_slice(&[5, 6, 7]);
+
+        let decoded = ExtractRequest::decode(&request).unwrap();
+        assert!(matches!(
+            decoded.fields.as_slice(),
+            [Field::DumpCore, Field::AllClosed, Field::TargetModuleOnly]
+        ));
     }
 
     #[test]

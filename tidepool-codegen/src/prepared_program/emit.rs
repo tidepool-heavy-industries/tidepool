@@ -30,6 +30,7 @@ struct Destination {
 struct JoinTarget {
     block: Block,
     signature: Signature,
+    declared_results: ResultContract,
 }
 
 enum Work {
@@ -302,12 +303,7 @@ fn emit_function_at(
                             block,
                             block_reps: Vec::new(),
                             values,
-                            joins: joins
-                                .into_iter()
-                                .filter(|(_, target)| {
-                                    target.signature.results == ResultContract::NoSuccess
-                                })
-                                .collect(),
+                            joins: joins_visible_in_scrutinee(joins),
                             destination: Destination {
                                 block: scrutinee_block,
                                 results: scrutinee_results.clone(),
@@ -320,17 +316,19 @@ fn emit_function_at(
                         let declared: Vec<_> = group_items(bindings)
                             .iter()
                             .map(|binding| {
-                                let mut signature =
-                                    plan.program.signatures()[binding.signature.0 as usize].clone();
-                                if signature.results.is_caller_result() {
-                                    signature.results = destination.results.clone();
-                                }
+                                let declared_signature =
+                                    &plan.program.signatures()[binding.signature.0 as usize];
+                                let signature = resolve_join_contract(
+                                    declared_signature.clone(),
+                                    &destination.results,
+                                );
                                 let join_block = builder.create_block();
                                 (
                                     binding,
                                     JoinTarget {
                                         block: join_block,
                                         signature,
+                                        declared_results: declared_signature.results.clone(),
                                     },
                                 )
                             })
@@ -757,6 +755,34 @@ fn group_items<T>(group: &Group<T>) -> &[T] {
         Group::NonRecursive(item) => std::slice::from_ref(item),
         Group::Recursive(items) => items,
     }
+}
+
+/// A join is only a legal jump target from inside a `Case`'s scrutinee when
+/// it can never hand back a successful value along that path: the scrutinee
+/// block feeds its own destination (the case-dispatch block), so a join
+/// declared `Returns(..)` or `CallerResult` would smuggle a result to a
+/// destination that never asked for one. Keep only `NoSuccess` joins; every
+/// other declared contract is dropped (not reachable) for the scrutinee.
+fn joins_visible_in_scrutinee(joins: BTreeMap<JoinId, JoinTarget>) -> BTreeMap<JoinId, JoinTarget> {
+    joins
+        .into_iter()
+        .filter(|(_, target)| target.declared_results == ResultContract::NoSuccess)
+        .collect()
+}
+
+/// A `LetJoins` binding declared `CallerResult` takes on the enclosing
+/// destination's concrete result contract once its block is created — that
+/// is what lets a join written as "return whatever my caller wants" share a
+/// destination block with ordinary code. Every other declared contract
+/// (including `NoSuccess`) is used exactly as declared, unresolved.
+fn resolve_join_contract(
+    mut signature: Signature,
+    destination_results: &ResultContract,
+) -> Signature {
+    if signature.results.is_caller_result() {
+        signature.results = destination_results.clone();
+    }
+    signature
 }
 
 fn append_params(
@@ -1783,4 +1809,104 @@ pub(super) fn emit_algebraic_dispatch(
         builder.seal_block(next);
     }
     builder.ins().jump(invalid, &[]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn join_target(
+        declared_results: ResultContract,
+        resolved_results: ResultContract,
+    ) -> JoinTarget {
+        JoinTarget {
+            block: Block::from_u32(0),
+            signature: Signature {
+                arguments: Vec::new(),
+                results: resolved_results,
+            },
+            declared_results,
+        }
+    }
+
+    // `joins_visible_in_scrutinee` keeps a `NoSuccess` join: it can never
+    // return a value along the scrutinee path, so jumping to it from
+    // mid-scrutinee-evaluation never smuggles a result to the scrutinee's
+    // own (unrelated) destination block.
+    #[test]
+    fn scrutinee_filter_keeps_no_success_joins() {
+        let mut joins = BTreeMap::new();
+        joins.insert(
+            JoinId(1),
+            join_target(ResultContract::NoSuccess, ResultContract::NoSuccess),
+        );
+
+        let visible = joins_visible_in_scrutinee(joins);
+
+        assert_eq!(visible.len(), 1);
+        assert!(visible.contains_key(&JoinId(1)));
+    }
+
+    // `joins_visible_in_scrutinee` drops a join declared `Returns(..)` or
+    // `CallerResult`: either would hand the scrutinee's destination a result
+    // it never asked for, so both are unreachable from inside a scrutinee.
+    #[test]
+    fn scrutinee_filter_drops_returning_and_caller_result_joins() {
+        let mut joins = BTreeMap::new();
+        joins.insert(
+            JoinId(1),
+            join_target(
+                ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+                ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+            ),
+        );
+        joins.insert(
+            JoinId(2),
+            join_target(ResultContract::CallerResult, ResultContract::NoSuccess),
+        );
+        joins.insert(
+            JoinId(3),
+            join_target(ResultContract::NoSuccess, ResultContract::NoSuccess),
+        );
+
+        let visible = joins_visible_in_scrutinee(joins);
+
+        assert_eq!(visible.len(), 1);
+        assert!(visible.contains_key(&JoinId(3)));
+        assert!(!visible.contains_key(&JoinId(1)));
+        assert!(!visible.contains_key(&JoinId(2)));
+    }
+
+    // A `LetJoins` binding declared `CallerResult` resolves to the enclosing
+    // destination's concrete results — this is what lets a join written as
+    // "return whatever my caller wants" share a destination block with
+    // ordinary code emitted alongside it.
+    #[test]
+    fn caller_result_contract_resolves_to_destination_results() {
+        let signature = Signature {
+            arguments: Vec::new(),
+            results: ResultContract::CallerResult,
+        };
+        let destination_results = ResultContract::Returns(vec![RuntimeRep::Int(64)]);
+
+        let resolved = resolve_join_contract(signature, &destination_results);
+
+        assert_eq!(resolved.results, destination_results);
+    }
+
+    // Every other declared contract (including `NoSuccess`) is used exactly
+    // as declared: only `CallerResult` is a placeholder awaiting the
+    // destination's results.
+    #[test]
+    fn non_caller_result_contract_is_left_unresolved() {
+        let signature = Signature {
+            arguments: Vec::new(),
+            results: ResultContract::NoSuccess,
+        };
+        let destination_results = ResultContract::Returns(vec![RuntimeRep::Int(64)]);
+
+        let resolved = resolve_join_contract(signature, &destination_results);
+
+        assert_eq!(resolved.results, ResultContract::NoSuccess);
+    }
 }

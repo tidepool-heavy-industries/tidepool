@@ -276,10 +276,11 @@ where
     }
 }
 
-/// The prepared-STG engine has no effect handlers of its own yet: mounting it
-/// can only record the ambient context, never fail, so its `Error` is
-/// uninhabited rather than borrowed from `ResidentSession`'s handler-backed
-/// contract.
+/// Temporary compatibility target for the prepared-engine retirement proof.
+/// Production actor sessions mount [`ResidentSession`]; this implementation
+/// remains until prepared suspension is driven through that owner, so the
+/// actor-level exact-incarnation retirement test continues to exercise the
+/// same `ActorRunTarget` boundary as production.
 impl ActorRunTarget for PreparedRuntime {
     type Error = std::convert::Infallible;
     type Hole = tidepool_runtime::session::prepared::PreparedHole;
@@ -294,9 +295,6 @@ impl ActorRunTarget for PreparedRuntime {
         Ok(())
     }
 
-    /// This engine has no lexical-scope frames of its own (see
-    /// `RealmRetirement::frames`'s doc: it never parks a continuation), so
-    /// `lexical_scope` is a no-op here and `scope_roots` is always `0`.
     fn retire_placement(
         &mut self,
         resource_scope: RealmId,

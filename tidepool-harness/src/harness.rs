@@ -395,6 +395,9 @@ struct LiveTurnContext {
     bind_ctx_gen: Option<Generation>,
     bind_source: String,
     binddiscard_source: String,
+    /// Live prepared bindings at this compile snapshot. `Some`, including an
+    /// empty vector, means this session is on the prepared route.
+    prepared_retained: Option<Vec<(tidepool_repr::execution_schema::SymbolIdentity, u64)>>,
 }
 
 /// External/system imports for one authored turn. Session-generated lexical
@@ -1685,6 +1688,7 @@ impl Harness {
         let session_root = ctx.session_root.clone();
         let inject_modules = ctx.inject_modules.clone();
         let gen = ctx.gen;
+        let prepared_retained = ctx.prepared_retained.clone();
 
         let block_owned = block.to_string();
         let req_block = block_owned.clone();
@@ -1699,7 +1703,9 @@ impl Harness {
                 gen,
                 verdict: None,
                 target: None,
-                prepared: None,
+                prepared: prepared_retained
+                    .as_deref()
+                    .map(|retained| tidepool_runtime::session::PreparedTurn { retained }),
             };
             run_turn(req)
         })
@@ -1825,6 +1831,11 @@ impl Harness {
         target_include: &[PathBuf],
     ) -> Result<LiveTurnContext, HarnessError> {
         let session_view = self.session_compile_view(node);
+        let prepared_retained = self.tree.session_of(node).and_then(|sid| {
+            self.tree.registry().peek(sid, |session| {
+                (session.engine_kind() == EngineKind::Prepared).then(|| session.prepared_retained())
+            })?
+        });
 
         // SessionCompileView is the one source of truth for the exact lexical
         // modules visible to this scope. Keep the authored/exact-facade imports
@@ -1869,6 +1880,7 @@ impl Harness {
             bind_ctx_gen,
             bind_source,
             binddiscard_source,
+            prepared_retained,
         })
     }
 
@@ -2106,6 +2118,7 @@ impl Harness {
             let session_root = ctx.session_root.clone();
             let inject_modules = ctx.inject_modules.clone();
             let gen = ctx.gen;
+            let prepared_retained = ctx.prepared_retained.clone();
             let req_item_text = item_text.clone();
             let req_verdict = verdict.clone();
             let outcome = tokio::task::spawn_blocking(move || {
@@ -2119,7 +2132,9 @@ impl Harness {
                     gen,
                     verdict: Some(req_verdict),
                     target: None,
-                    prepared: None,
+                    prepared: prepared_retained
+                        .as_deref()
+                        .map(|retained| tidepool_runtime::session::PreparedTurn { retained }),
                 };
                 run_turn(req)
             })

@@ -559,6 +559,15 @@ impl SelfHarnessDriver {
         std::fs::create_dir_all(&session_root)
             .map_err(|e| DriverError::Session(format!("harness-ctx session root: {e}")))?;
 
+        let sid = self.outer_sid()?;
+        let prepared_retained = self
+            .agent
+            .with_session(sid, |session| {
+                (session.engine_kind() == tidepool_runtime::session::EngineKind::Prepared)
+                    .then(|| session.prepared_retained())
+            })
+            .map_err(|e| DriverError::Session(e.to_string()))?;
+
         let turn = tidepool_runtime::session::run_turn(tidepool_runtime::session::TurnRequest {
             turn_text: &statement,
             templates: std::slice::from_ref(&template),
@@ -568,7 +577,9 @@ impl SelfHarnessDriver {
             gen: 0,
             verdict: None,
             target: None,
-            prepared: None,
+            prepared: prepared_retained
+                .as_deref()
+                .map(|retained| tidepool_runtime::session::PreparedTurn { retained }),
         })
         .map_err(|failure| {
             DriverError::Session(format!(
@@ -597,7 +608,6 @@ impl SelfHarnessDriver {
             }
         };
 
-        let sid = self.outer_sid()?;
         let outcome = self
             .agent
             .with_session(sid, |s| {
