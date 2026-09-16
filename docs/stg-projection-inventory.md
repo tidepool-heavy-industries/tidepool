@@ -5,21 +5,27 @@ unarisation pipeline. The wire format is a finite prepared representation; it
 is not rendered STG, a Core compatibility format, or a production-execution
 parity claim.
 
-## Wire contract (schema 8, execution ABI 5)
+## Wire contract (schema 10, execution ABI 5)
 
-`ProgramEnvelope.schema_version` is 8 and `execution_abi_version` is 5.
-Schema 8 adds `Capability` and `WiredInError` operation identities. Capabilities
+`ProgramEnvelope.schema_version` is 10 and `execution_abi_version` is 5.
+The artifact carries a site table: each `SiteRow` names its site id, its
+`SiteDelivery` mode, and the structural `TypeNode` of the wire value a host
+answer must build, so a parked continuation's answer is validated against the
+answer type itself rather than nominal heads. The constructor closure of
+every host-answer type is declared, so an answer constructor the program
+never matches still has a descriptor.
+
+`Capability` and `WiredInError` operation identities are part of the contract. Capabilities
 retain GHC's `Returns` contract but fail with a typed reusable error when
 executed; only exact catalogued identity/signature pairs are admitted. Wired-in
 errors carry their kind and an authoritative `NoSuccess` contract. The producer
 recognizes GHC builtin keys, not user spelling, and synthesizes ordinary callable
 tops so bare references and partial applications retain their meaning.
 
-Schema 7 added explicit `ResultContract` values (`Returns` versus authoritative
-`NoSuccess`) and carries that contract on case scrutinees; it also removes the
-obsolete global `dead_end` field. Schema 6's optional external record-parent
-identity and typed operation identity (`PrimOp` versus an intrinsic symbol
-with a calling convention) remain part of the wire contract. ABI 5 carries
+`ResultContract` values (`Returns` versus authoritative `NoSuccess`) are
+carried on case scrutinees. An external record-parent identity is optional,
+and an operation identity is typed (`PrimOp` versus an intrinsic symbol with
+a calling convention). ABI 5 carries
 the explicit terminal-result distinction through prepared calls while keeping
 the physical `NoSuccess` shape status-only. Lowering keeps the semantic result
 contract beside the physical register/area layout: status-only does not mean a
@@ -123,9 +129,10 @@ nested expression ownership iteratively and reports the owning binding and
 arena node for unsupported expressions. `run_entry` also rejects managed
 host arguments.
 
-An admitted global is an executable import: `plan.rs` assigns it a
-machine-wide top-table slot immediately after the program's own tops,
-`ValueRef::Global` lowers to a load of that slot, and
+An admitted global is an executable import: `plan.rs` assigns it a slot in
+the importing program's own fixed-address root block, immediately after the
+program's own top slots; `ValueRef::Global` lowers to a load of that slot,
+whose address the generated code embeds, and
 `PreparedMachine::install_program` takes an `ImportBindings` map of one
 retained `PreparedHandle` per declared identity. Identity, signature and
 generation agreement are `link_program`'s contract; install re-verifies only
@@ -133,8 +140,8 @@ the live handle's runtime shape (representation, and weak-head-normal-form
 settledness when the declaration requires an evaluated value, where a
 function or PAP counts as evaluated exactly as a constructor does) before
 publishing the slot from the handle's current pointer and registering the
-slot as its own persistent root. A rejected import leaves the table, the
-roots and every installed program untouched. The import is read by
+slot as its own persistent root. A rejected import leaves the candidate's
+root block, the machine's roots and every installed program untouched. The import is read by
 identity, not copied: the slot resolves to the producing program's own
 object on the shared heap.
 
@@ -488,7 +495,7 @@ asserts the machine's disposition stays `Reusable` throughout, plus that
 inspecting a parked continuation's own closure field is a typed
 `ObservationFailure::Unobservable` refusal, never a forced value; and
 `cancellation_before_commit_leaves_a_parked_k_valid_for_retry` drives the
-compiled adapter directly (not through `PreparedRuntime`'s own precondition
+compiled adapter directly (not through the session's own precondition
 check) to confirm cancellation observed at `resumeInt`'s `prepared_poll_at`
 safepoint leaves the continuation handle valid for an uncancelled retry.
 
