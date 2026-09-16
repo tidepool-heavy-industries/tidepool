@@ -30,7 +30,14 @@ step "Preflight"
 # not) and EXCLUDES untracked files. So: untracked Haskell sources silently
 # fail to ship (fatal), while tracked-dirty edits DO ship but make the build
 # non-reproducible (informational).
-haskell_untracked=$(git status --porcelain haskell/ 2>/dev/null | grep -E '^\?\?' || true)
+#
+# Excludes `haskell/dist-newstyle*` — cabal's own build-output dirs (the
+# plain `dist-newstyle/` name is .gitignore'd already; concurrent agents on a
+# shared box sometimes run cabal with a differently-suffixed `--builddir`,
+# e.g. `dist-newstyle-schema10/`). These are build OUTPUTS, never deploy
+# SOURCE inputs the flake would need to ship, so their being untracked is not
+# the silent-failure case this check exists to catch.
+haskell_untracked=$(git status --porcelain haskell/ 2>/dev/null | grep -E '^\?\?' | grep -vE '^\?\? haskell/dist-newstyle' || true)
 if [ -n "$haskell_untracked" ]; then
   echo "ERROR: untracked files under haskell/ — the nix flake source EXCLUDES"
   echo "       untracked files, so these would silently not ship:"
@@ -102,14 +109,43 @@ else
 fi
 
 # Step 5: clear stale CBOR + stdlib materialization cache.
+#
+#   Scoped to exactly the toolchain/compile-cache paths a redeploy can make
+#   stale (tidepool-toolchain::paths — see its module doc's "regenerable
+#   cache" scope, and cache.rs's key-file layout): the materialized stdlib
+#   (`stdlib/`), the generated `Tidepool.Effects` module (`effects/`), the
+#   module-granular GHC interface cache (`build-products/`), and the
+#   content-addressed compile-cache key files that cache.rs writes as loose
+#   files directly under the cache root (`<key>.ok`, `<key>.cbor` and its
+#   `.meta`/`.prepared` variants, `<key>.asks.json`, `<key>.a<N>`).
+#
+#   Deliberately NOT a wholesale `rm -rf ~/.cache/tidepool/`: that root also
+#   holds `listen/` (durable listen-channel state), `actor-builds/` and
+#   `shoal/` (Shoal actor-worktree state), and `toolchain-stamp.json` itself
+#   — none of which a redeploy invalidates, and on a shared box the worktree
+#   state under `shoal/actor-worktrees/**` belongs to OTHER agents' live
+#   work. `toolchain-stamp.json` is left alone here too: Step 6 overwrites it
+#   atomically regardless of its prior content, so there is nothing to clear
+#   pre-emptively, and the old MUST-run-after-Step-5 ordering concern
+#   (deleting a stamp Step 6 just wrote) no longer applies.
 
-step "Step 5: clear ~/.cache/tidepool/"
-run rm -rf "${HOME}/.cache/tidepool/"
+step "Step 5: clear the toolchain/compile-cache subdirectories of ~/.cache/tidepool/"
+cache_dir="${HOME}/.cache/tidepool"
+run rm -rf "${cache_dir}/stdlib" "${cache_dir}/effects" "${cache_dir}/build-products"
+if [ "$DRY" -eq 1 ]; then
+  echo "  \$ find ${cache_dir} -maxdepth 1 -type f \\( -name '*.ok' -o -name '*.cbor' -o -name '*.asks.json' -o -name '*.a[0-9]*' -o -name 'binfp-*' \\) -delete"
+else
+  find "${cache_dir}" -maxdepth 1 -type f \
+    \( -name '*.ok' -o -name '*.cbor' -o -name '*.asks.json' -o -name '*.a[0-9]*' -o -name 'binfp-*' \) \
+    -delete 2>/dev/null || true
+fi
 
 # Step 6: write the toolchain deploy stamp — content fingerprints of the
 #   extract + stdlib just deployed, checked by every server at startup
-#   (tidepool-toolchain/src/toolchain.rs). MUST run after Step 5: the cache
-#   clear above would otherwise delete a stamp written before it.
+#   (tidepool-toolchain/src/toolchain.rs). Runs after Step 5 by convention
+#   (mirrors the deploy order: invalidate stale cache, then bless the fresh
+#   pair), though Step 5 no longer touches toolchain-stamp.json, so ordering
+#   between them is no longer load-bearing.
 #   Skipped when --no-servers was passed: the tidepool binary this stamp
 #   describes was not (re)installed this run, so there is nothing fresh to
 #   fingerprint. Call by ABSOLUTE path (do not trust PATH), same discipline
