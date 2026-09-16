@@ -39,6 +39,35 @@ pub enum Probe {
     EscapedKeys,
     ExtraRequestProperty,
     ExtraQuestionProperty,
+    StateEmptyString,
+    StateEmptyObject,
+    StateEmptyArray,
+    StateOmitted,
+    ModelOmitted,
+    ModelNull,
+    ModelUnknown,
+    QuestionsOmitted,
+    QuestionsNull,
+    QuestionsArray,
+    QuestionTypeOmitted,
+    QuestionTypeUnknown,
+    QuestionTypeUppercase,
+    QuestionEmptyKey,
+    ChoiceEmptyKey,
+    ChoiceEmptyStringDescription,
+    ChoiceEmptyObjectDescription,
+    ChoiceDeepDescription,
+    ScoreEmptyStringLevel,
+    ScoreEmptyObjectLevel,
+    ScoreArrayLevel,
+    InstructionsEmptyString,
+    InstructionsEmptyObject,
+    InstructionsEmptyArray,
+    NoulUnknownCriterion,
+    MixedValidInvalidQuestions,
+    Questions255,
+    Questions256,
+    BoundingBoxEmpty,
 }
 
 impl Probe {
@@ -178,6 +207,109 @@ impl Probe {
             }
             Self::ExtraQuestionProperty => {
                 request["questions"]["wake"]["research_extension"] = json!({"synthetic": true})
+            }
+            Self::StateEmptyString => request["state"] = json!(""),
+            Self::StateEmptyObject => request["state"] = json!({}),
+            Self::StateEmptyArray => request["state"] = json!([]),
+            Self::StateOmitted => {
+                request.as_object_mut().unwrap().remove("state");
+            }
+            Self::ModelOmitted => {
+                request.as_object_mut().unwrap().remove("model");
+            }
+            Self::ModelNull => request["model"] = Value::Null,
+            Self::ModelUnknown => request["model"] = json!("jev-does-not-exist"),
+            Self::QuestionsOmitted => {
+                request.as_object_mut().unwrap().remove("questions");
+            }
+            Self::QuestionsNull => request["questions"] = Value::Null,
+            Self::QuestionsArray => request["questions"] = json!([]),
+            Self::QuestionTypeOmitted => {
+                request["questions"]["wake"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("type");
+            }
+            Self::QuestionTypeUnknown => request["questions"]["wake"]["type"] = json!("rank"),
+            Self::QuestionTypeUppercase => request["questions"]["wake"]["type"] = json!("NOUL"),
+            Self::QuestionEmptyKey => {
+                let question = request["questions"]["wake"].take();
+                request["questions"] = json!({"": question});
+            }
+            Self::ChoiceEmptyKey
+            | Self::ChoiceEmptyStringDescription
+            | Self::ChoiceEmptyObjectDescription
+            | Self::ChoiceDeepDescription => {
+                let first = match self {
+                    Self::ChoiceEmptyStringDescription => json!(""),
+                    Self::ChoiceEmptyObjectDescription => json!({}),
+                    Self::ChoiceDeepDescription => json!({
+                        "rules": [true, false, null, 3.5, {"nested": ["configuration"]}]
+                    }),
+                    _ => json!({"owns": "configuration"}),
+                };
+                let first_key = if matches!(self, Self::ChoiceEmptyKey) {
+                    ""
+                } else {
+                    "owner"
+                };
+                request["questions"] = json!({"route": {
+                    "type": "choice",
+                    "instructions": "Who owns configuration?",
+                    "criteria": {first_key: first, "reviewer": "Reviews completed work"}
+                }});
+            }
+            Self::ScoreEmptyStringLevel | Self::ScoreEmptyObjectLevel | Self::ScoreArrayLevel => {
+                let first = match self {
+                    Self::ScoreEmptyStringLevel => json!(""),
+                    Self::ScoreEmptyObjectLevel => json!({}),
+                    Self::ScoreArrayLevel => json!(["Work can continue", {"blocked": false}, null]),
+                    _ => unreachable!(),
+                };
+                request["questions"] = json!({"urgency": {
+                    "type": "score",
+                    "instructions": "How urgent is the message?",
+                    "criteria": [first, {"blocked": true}]
+                }});
+            }
+            Self::InstructionsEmptyString => {
+                request["questions"]["wake"]["instructions"] = json!("")
+            }
+            Self::InstructionsEmptyObject => {
+                request["questions"]["wake"]["instructions"] = json!({})
+            }
+            Self::InstructionsEmptyArray => {
+                request["questions"]["wake"]["instructions"] = json!([])
+            }
+            Self::NoulUnknownCriterion => {
+                request["questions"]["wake"]["criteria"] =
+                    json!({"true": "Blocked", "false": "Can proceed", "maybe": "Unclear"});
+            }
+            Self::MixedValidInvalidQuestions => {
+                request["questions"]["invalid"] = json!({
+                    "type": "choice", "instructions": "Invalid empty choice", "criteria": {}
+                });
+            }
+            Self::Questions255 | Self::Questions256 => {
+                let count = if matches!(self, Self::Questions255) {
+                    255
+                } else {
+                    256
+                };
+                let questions: Map<String, Value> = (0..count)
+                    .map(|i| {
+                        (
+                            format!("same_{i}"),
+                            json!({
+                                "type": "noul", "instructions": "Is `context.active` true?"
+                            }),
+                        )
+                    })
+                    .collect();
+                request["questions"] = Value::Object(questions);
+            }
+            Self::BoundingBoxEmpty => {
+                request["questions"] = json!({"region": {"type": "bounding_box"}});
             }
         }
         request

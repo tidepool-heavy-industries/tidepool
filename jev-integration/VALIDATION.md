@@ -26,6 +26,17 @@ nominal-role rejection of `coerce`, and rejection of missing record handlers wit
 `-Werror=missing-fields`. Compiler diagnostics were inspected; these were not
 failures caused by missing dependencies. No Tidepool JIT behavior was tested.
 
-No authenticated inference calls have run. A key has been requested; provider
-contract contradictions remain unresolved. No broad workspace batteries ran and
-no production engine, protocol, handler, or actor behavior was changed.
+Subsequently, all 34 authenticated probes ran once using the compiled harness:
+21 HTTP 200, three HTTP 400, ten HTTP 422, no transport failures. All successful
+responses passed provisional interpretation checks. See [CONTRACT.md](CONTRACT.md)
+for results and capture provenance. No broad workspace batteries ran and no
+production engine, protocol, handler, or actor behavior was changed.
+
+A second constructor-shape matrix then ran 29 probes: 16 HTTP 200, four HTTP
+400, nine HTTP 422, and no transport failures. This covered required request
+fields, empty values and identifiers, recursive description forms, discriminator
+validation, mixed-request atomicity, and 255/256-question maps. Both large maps
+returned the exact number of corresponding answers. An undocumented
+`bounding_box` tag was recognized but account-disabled and is excluded from the
+current DSL scope. After extending the harness, the focused Rust test suite still
+passed all 12 tests.

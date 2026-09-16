@@ -2,7 +2,8 @@
 
 Recorded 2026-09-16. Status: exploration and agreed design direction, **not an
 implementation-ready specification**. Preserve the uncertainties below for API
-experiments and further design. No authenticated inference calls have been run.
+experiments and further design. All 63 initial authenticated probes have now run;
+see [observed contract](../jev-integration/CONTRACT.md#authenticated-observations--2026-09-16).
 An isolated GHC feasibility sketch and Rust probe harness now exist; see the
 continuation below. The unrelated Core → STG cutover is outside this work.
 
@@ -27,7 +28,7 @@ The research client captures raw bytes and separate provisional interpretations,
 has no automatic retries/redirects, and uses synthetic probes for disputed or
 invalid forms. These raw builders deliberately are not the future valid-by-type
 public request surface. A public OpenAPI fetch succeeded through the client;
-authenticated evaluation experiments await an API key.
+authenticated experiments succeeded against `jev-latest`, resolving to `jev-1.13.0`.
 
 ## Intent and conversation decisions
 
@@ -202,6 +203,61 @@ inhabited. The final signature must reflect that rather than accepting unchecked
 collections and claiming they are valid. Construction, projection, inspection,
 and result elimination are pure; this remains one effect operation.
 
+### Contract-shaped value algebra after live probes
+
+The initial wire target can now be stated precisely enough to prototype. Keep
+these position types distinct even when they share encoders:
+
+```haskell
+-- Illustrative names, not the final API.
+data Structured = SText Text | SObject (Map Text Json) | SArray [Json]
+data NullableStructured = Structured Structured | StructuredNull
+
+data Instructions
+  = InstructionsOmitted
+  | InstructionsPresent NullableStructured
+
+data NoulCriteria
+  = NoulCriteriaOmitted
+  | NoulCriteriaNull
+  | NoulCriteriaPresent
+      { trueWhen  :: Maybe NullableStructured
+      , falseWhen :: Maybe NullableStructured
+      }
+```
+
+`Json` inside an object or array is fully recursive and admits strings, objects,
+arrays, numbers, booleans, and null. The outer constructors are position-specific:
+
+| Position | Outermost forms |
+| --- | --- |
+| State | String, object, array; required; empty forms valid; no null/number/boolean |
+| Instructions | Omitted, or string/object/array/null; empty forms valid |
+| Choice description | String/object/array/null; empty forms valid |
+| Score level | String/object/array; empty forms valid; no null |
+| Noul `true`/`false` description | Independently omitted, or string/object/array/null |
+
+The collection invariants are also position-specific. Questions are a nonempty
+map with nonempty text keys; no upper bound was found through 256 entries. Choice
+criteria are a map of 1–255 alternatives, whose text keys may even be empty.
+Scores contain an ordered 1–10 sequence. Static record schemas should prove these
+facts structurally. Dynamic maps/sequences need total checked constructors that
+return the validated opaque collection or a construction error. They must not
+silently drop entries, synthesize labels, or defer known invalidity to the effect.
+
+`Model` remains an evolvable text identifier or alias, not a closed promoted enum:
+presence and string shape are local facts, while availability is service/account
+state and therefore a typed operation failure. The response model remains the
+resolved concrete model and must not be overwritten with the requested alias.
+
+The response is all-or-nothing at the request level. Before producing typed
+answers, validate that every requested question has exactly one same-kind answer,
+Choice selections and probability keys belong to the exact submitted candidate
+set, Score legend/probability indices cover the exact submitted levels, and no
+unexpected answer keys exist. Preserve the full distributions, structured legend,
+resolved model, and usage. This validation is the runtime bridge from untrusted
+JSON to the mode-indexed answer record.
+
 ### Records interpreted under modes
 
 Use one authored question record across request and response modes. Its leaves
@@ -243,7 +299,15 @@ eliminators. Generic derivation, full criteria modes, valid entry construction,
 and the complete effect signature still need prototypes. The sketch does not
 establish that the illustrative signature supports all of these goals.
 
-## Contract uncertainty and later experiments
+## Declared contract disagreements and initial experiments
+
+The table below preserves the original research questions. Live observations now
+resolve the tested forms for the current endpoint: null state and null Score
+levels are rejected; Scores accept 1–10 levels and Choices 1–255 alternatives;
+omitted/null/structured instructions and all tested optional Noul forms succeed.
+Usage contains input/output token counts. Extra properties are accepted, but their
+meaning remains unknown. See the crate contract for exact status codes and
+provenance. These are single samples, not promises about future model versions.
 
 The live [OpenAPI document](https://api.typesafe.ai/openapi.json) was successfully
 read without credentials. It identifies version `0.2.0` and the `/v1/systemone`
@@ -269,8 +333,22 @@ model-dependent limits when refining the design.
 Experiment with small synthetic inputs, recording model, exact request shape,
 status, response, usage, and SDK/OpenAPI revisions. Include valid structured
 objects/arrays, nested numbers/booleans/nulls, and invalid bare numeric/boolean
-entries. Never include credentials in captures. No live experiments are part of
-this documentation task.
+entries. Never include credentials in captures. The first live matrix is complete;
+behavioral quality, calibration, concurrency, and production integration remain
+unverified. A second matrix established that the operation's request spine is
+total: model, state, and a nonempty question map are required, and one invalid
+question rejects the whole request. Question identifiers are nonempty; Choice
+identifiers may be empty. Empty string/object/array descriptions are accepted,
+and recursively nested scalar/null leaves work everywhere structure is admitted.
+The precise position-specific outer grammar still matters: Score levels and state
+exclude null, while Choice descriptions include it.
+
+Server validation also revealed an undocumented `bounding_box` discriminator,
+absent from public OpenAPI, docs, and pinned SDK sources. The account rejected it
+as not enabled before exposing its schema. It likely concerns image localization,
+but that is unverified and explicitly outside the current text/glue scope by user
+decision. Preserve the finding as capability drift evidence; do not include a
+speculative BoundingBox constructor in this DSL.
 
 ## Repository fit and later implementation sequence
 
@@ -296,8 +374,8 @@ Read the nearest `AGENTS.md` again before implementation. Owning sources inspect
 
 Suggested continuation sequence:
 
-1. Run the contract experiments and reconcile a versioned capability matrix.
-2. Prototype the record modes, structured entry construction, heterogeneous
+1. Reconcile future provider/schema revisions against the captured capability matrix.
+2. Prototype the record modes, position-indexed structured entry construction, heterogeneous
    alternative elimination, and hidden candidate scopes under GHC. Review real
    authored examples before committing to names and syntax.
 3. Settle nested record flattening, collision-free question IDs, meaningful Choice

@@ -16,8 +16,10 @@ bash scripts/dev-shell.sh cargo run -p jev-integration -- show structured
 `list` and `show` are offline. `run` performs one authenticated attempt with no
 automatic retry or redirect following. Requests are synthetic and deliberately
 include invalid/disputed forms. Do not use these raw JSON builders as the future
-validity-preserving DSL. Each invocation selects one probe; there is no automatic
-matrix run or batching scheduler.
+validity-preserving DSL. Each invocation selects one of 63 probes; there is no
+automatic matrix run or batching scheduler. One discovery probe names an
+undocumented, account-disabled `bounding_box` discriminator; it is retained as
+evidence but excluded from the current text/glue DSL scope.
 
 ## Live experiments
 
