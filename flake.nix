@@ -222,6 +222,17 @@
                 (old: {
                   preCheck = (old.preCheck or "") + ''
                     export TIDEPOOL_EXTRACT_WORKER="$PWD/dist/build/tidepool-extract-bin/tidepool-extract-bin"
+                    # Test suites (prepared-stg-pipeline-test, extract-fidelity-test,
+                    # …) drive the extractor pipeline over fixture Haskell source that
+                    # is compiled by discovering GHC on PATH at runtime (haskell/
+                    # CLAUDE.md's toolchain resolution), the same mechanism the
+                    # deployed `tidepool-extract` wrapper uses via ghcEnv on PATH. Since
+                    # e50831879, site-fixtures/Core.hs imports the real
+                    # `Control.Monad.Freer` (freer-simple) instead of a local stub, so
+                    # that runtime-discovered GHC must have freer-simple (and the rest
+                    # of ghcEnv's extra package set) in its package db, not just the
+                    # bare compiler `hsPkgs` builds this derivation with.
+                    export PATH="${ghcEnv}/bin:$PATH"
                   '';
                 });
             # This crate has an independent minimal lockfile so Nix vendors
