@@ -55,13 +55,12 @@ use tidepool_bridge::Value;
 use tidepool_extract_cmd::ResolvedExtractBin;
 pub use tidepool_extract_cmd::{extract_spawn_count, reset_extract_spawn_count};
 use tidepool_repr::{CoreExpr, DataConTable};
-use tidepool_runtime::session::{
-    assemble_bind_module, insert_preamble_imports, place_turn_stmt, TurnCode,
-};
+use tidepool_runtime::session::turn::{prepared_scaffold_binding_named, with_resume_import};
+use tidepool_runtime::session::{assemble_bind_module, insert_preamble_imports, place_turn_stmt, TurnCode};
 pub use tidepool_runtime::YieldSites;
 use tidepool_runtime::{
     compile_targets, compile_targets_with_stable_inject, CompileError, CompiledArtifacts,
-    PreparedArtifact, StableValInject,
+    PreparedArtifact, StableValInject, TargetArtifact,
 };
 
 use crate::provider::{
@@ -213,6 +212,183 @@ pub fn compile_turns_with_stable_inject(
             )
         })
         .collect())
+}
+
+/// The settled/resume/decode binder names one `target` gets when
+/// [`with_settled_scaffolds`] appends its scaffold — unique per target (not
+/// the fixed [`tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET`] triple
+/// `run_turn`'s resident-turn templates use) because a fused compile can
+/// settle MORE than one target in the same module (the render+loop fusion —
+/// see [`compile_turns_prepared`]'s doc): two settled bindings both named
+/// `__prepared` would be a duplicate top-level declaration.
+fn settled_names(target: &str) -> (String, String, String) {
+    (
+        format!("__prepared_{target}"),
+        format!("__resume_{target}"),
+        format!("__decode_{target}"),
+    )
+}
+
+/// Append the settled-scaffold lines every fragment compiled for a PREPARED
+/// session run needs, one per `targets` entry, using
+/// [`tidepool_runtime::session::prepared_scaffold_binding_named`] /
+/// [`tidepool_runtime::session::with_resume_import`] — the SAME text
+/// `run_turn`'s resident-turn templates append (`turn.rs`'s
+/// `prepared_scaffold_binding`/`with_resume_import`), not a second copy —
+/// rather than the fixed single-target names those templates use, since more
+/// than one target can share this module (see [`settled_names`]). Returns
+/// the augmented source and, for each of `targets` in order, the settled
+/// binder name to additionally request as a `--targets` entry: `target`
+/// itself stays the ordinary (unsettled) Core binder every existing reader
+/// of `.expr`/`.table` still gets, while the settled binder is the ONLY one
+/// whose `.prepared` a caller should keep.
+fn with_settled_scaffolds(source: &str, targets: &[&str]) -> (String, Vec<String>) {
+    let mut out = with_resume_import(source);
+    let mut scaffolds = Vec::with_capacity(targets.len());
+    for target in targets {
+        let (scaffold, resume, decode) = settled_names(target);
+        out.push_str(&prepared_scaffold_binding_named(
+            &scaffold, &resume, &decode, target,
+        ));
+        scaffolds.push(scaffold);
+    }
+    (out, scaffolds)
+}
+
+/// Pair each of `targets` with its settled artifact from `artifacts` (keyed
+/// by the corresponding entry of `scaffolds`, same order — see
+/// [`with_settled_scaffolds`]), building the [`CompiledTurn`]s
+/// [`compile_turn_prepared`]/[`compile_turns_prepared`] return: `.expr`/
+/// `.asks` come from `target`'s own (unsettled) artifact, `.prepared` comes
+/// from the settled one, `.table` is the one shared merged table every
+/// target in this spawn compiled against.
+fn assemble_prepared_turns(
+    targets: &[&str],
+    scaffolds: &[String],
+    table: DataConTable,
+    artifacts: &mut std::collections::BTreeMap<String, TargetArtifact>,
+) -> Result<HashMap<String, CompiledTurn>, CompileError> {
+    targets
+        .iter()
+        .zip(scaffolds.iter())
+        .map(|(target, scaffold)| {
+            let a = artifacts.remove(*target).ok_or_else(|| {
+                CompileError::MissingOutput(PathBuf::from(format!("{target}.cbor")))
+            })?;
+            let settled = artifacts.remove(scaffold.as_str()).ok_or_else(|| {
+                CompileError::MissingOutput(PathBuf::from(format!("{scaffold}.prepared.cbor")))
+            })?;
+            Ok((
+                (*target).to_string(),
+                CompiledTurn {
+                    expr: a.expr,
+                    table: table.clone(),
+                    sites: a.asks.sites(),
+                    asks: a.asks,
+                    prepared: settled.prepared,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// As [`compile_turn`], but for a fragment that will be RUN against a
+/// prepared session (`s.run_with_sites`/`s.run_bind_with_sites` — the default
+/// engine): the returned [`CompiledTurn::prepared`] is the SETTLED program
+/// (`Tidepool.Internal.Resume.settle target`), not `target`'s own unsettled
+/// prepared-Core. Without this, a prepared-engine session refuses the run
+/// with "no settled entry layer" (the program declares no
+/// `Tidepool.Internal.Resume.Settled` constructors) — `target`'s own
+/// prepared-Core never constructs `Settled` at all, since only `settle`
+/// does. A thin wrapper over [`compile_turns_prepared`] (a one-element
+/// target slice), mirroring [`compile_turn`]/[`compile_turns`].
+pub fn compile_turn_prepared(
+    extract_bin: &ResolvedExtractBin,
+    source: &str,
+    target: &str,
+    include: &[PathBuf],
+    node: u64,
+    round: u64,
+) -> Result<CompiledTurn, CompileError> {
+    let mut turns =
+        compile_turns_prepared(extract_bin, source, &[target], include, node, round)?;
+    turns
+        .remove(target)
+        .ok_or_else(|| CompileError::MissingOutput(PathBuf::from(format!("{target}.cbor"))))
+}
+
+/// As [`compile_turns`], but for fragments that will be RUN against a
+/// prepared session — see [`compile_turn_prepared`]'s doc for why. Settles
+/// EACH of `targets` under its own unique scaffold binder
+/// ([`with_settled_scaffolds`]) in the SAME spawn, so a fused multi-target
+/// compile (the render+loop fusion, [`compile_turns_with_stable_inject_prepared`])
+/// never collides two settled bindings under one fixed name the way
+/// `run_turn`'s single-target scaffold can.
+pub fn compile_turns_prepared(
+    extract_bin: &ResolvedExtractBin,
+    source: &str,
+    targets: &[&str],
+    include: &[PathBuf],
+    node: u64,
+    round: u64,
+) -> Result<HashMap<String, CompiledTurn>, CompileError> {
+    let (scaffolded_source, scaffolds) = with_settled_scaffolds(source, targets);
+    let all_targets: Vec<&str> = targets
+        .iter()
+        .copied()
+        .chain(scaffolds.iter().map(String::as_str))
+        .collect();
+    let CompiledArtifacts {
+        table,
+        targets: mut artifacts,
+        ..
+    } = compile_targets(
+        &scaffolded_source,
+        &all_targets,
+        include,
+        Some(extract_bin),
+        |stage, elapsed, bytes| {
+            timing::record_stage(node, round, stage, elapsed, bytes);
+        },
+    )?;
+    assemble_prepared_turns(targets, &scaffolds, table, &mut artifacts)
+}
+
+/// As [`compile_turns_with_stable_inject`], but for fragments that will be
+/// RUN against a prepared session — see [`compile_turn_prepared`]'s doc for
+/// why, and [`compile_turns_prepared`]'s doc for the per-target settled-name
+/// shape. The self-iterating harness driver's fused outer render/loop
+/// compile is the caller.
+pub fn compile_turns_with_stable_inject_prepared(
+    extract_bin: &ResolvedExtractBin,
+    source: &str,
+    targets: &[&str],
+    include: &[PathBuf],
+    stable_val: StableValInject<'_>,
+    node: u64,
+    round: u64,
+) -> Result<HashMap<String, CompiledTurn>, CompileError> {
+    let (scaffolded_source, scaffolds) = with_settled_scaffolds(source, targets);
+    let all_targets: Vec<&str> = targets
+        .iter()
+        .copied()
+        .chain(scaffolds.iter().map(String::as_str))
+        .collect();
+    let CompiledArtifacts {
+        table,
+        targets: mut artifacts,
+        ..
+    } = compile_targets_with_stable_inject(
+        &scaffolded_source,
+        &all_targets,
+        include,
+        Some(extract_bin),
+        stable_val,
+        |stage, elapsed, bytes| {
+            timing::record_stage(node, round, stage, elapsed, bytes);
+        },
+    )?;
+    assemble_prepared_turns(targets, &scaffolds, table, &mut artifacts)
 }
 
 /// Which surface verb produced a [`SuspensionRouting::Fork`] suspension. Two

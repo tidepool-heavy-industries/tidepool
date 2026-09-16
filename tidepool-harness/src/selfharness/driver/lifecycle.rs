@@ -342,7 +342,7 @@ impl SelfHarnessDriver {
             label: label.to_string(),
             source: src.clone(),
         });
-        engine::compile_turn(
+        engine::compile_turn_prepared(
             &extract_bin,
             &src,
             "result",
@@ -403,8 +403,9 @@ impl SelfHarnessDriver {
 
     /// Compile the PRE-loop `render` and this cycle's `loop` fragment as TWO
     /// entries of ONE module, in a SINGLE `tidepool-extract` spawn
-    /// ([`compile_turns`]) — the pre-model boot-path fusion this
-    /// driver exists to land. Both entries splice
+    /// ([`engine::compile_turns_with_stable_inject_prepared`]) — the
+    /// pre-model boot-path fusion this driver exists to land. Both entries
+    /// splice
     /// `state_cross::state_in(prior_state)` with the SAME `prior_state`, so
     /// their helper text is byte-identical by construction — one splice, not
     /// two — and [`tidepool_mcp::TurnTemplate::extra_entries`] renders the
@@ -481,7 +482,7 @@ impl SelfHarnessDriver {
             label: "render+loop".to_string(),
             source: src.clone(),
         });
-        let mut turns = engine::compile_turns_with_stable_inject(
+        let mut turns = engine::compile_turns_with_stable_inject_prepared(
             &extract_bin,
             &src,
             &["result", Self::LOOP_ENTRY_TARGET],
