@@ -116,8 +116,11 @@ every artifact that one machine can hold. Everything else here is reversible.
    reported in `ResidencyCounts`.
 3. **Unknown call = fast exact check, then one generic slow path.** For
    demand D, with argument id A and result id R known at compile time, the
-   call site keeps a *direct* call when the callee is statically known
-   (`plan.callee`, unchanged). Otherwise it emits:
+   call site emits the sequence below. Today every call, including one whose
+   callee `plan.callee` classifies as `Known`, goes through D's dispatcher
+   (`emit::emit_exact_call`); lowering a `Known` exact call to a direct call
+   is new work, a later optimization this design enables but does not
+   require. The emitted sequence:
    enter the callee → load the header → mask 3 bits → load
    `dispatch.arguments_id` and the first `exact` row → if the id is A and the
    row's result is R, `call_indirect` the entry with the D ABI (the callee
