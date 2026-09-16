@@ -16,10 +16,23 @@ bash scripts/dev-shell.sh cargo run -p jev-integration -- show structured
 `list` and `show` are offline. `run` performs one authenticated attempt with no
 automatic retry or redirect following. Requests are synthetic and deliberately
 include invalid/disputed forms. Do not use these raw JSON builders as the future
-validity-preserving DSL. Each invocation selects one of 63 probes; there is no
+validity-preserving DSL. Each invocation selects one of 82 probes; there is no
 automatic matrix run or batching scheduler. One discovery probe names an
 undocumented, account-disabled `bounding_box` discriminator; it is retained as
 evidence but excluded from the current text/glue DSL scope.
+
+The 14 `shoal-*` probes exercise routing, attention, investigation expansion and
+folding, evidence selection, question relationships, repair routing, and experiment
+selection. See [expectations and live results](SHOAL-EXPERIMENTS.md).
+
+Five `world-*` probes explore structured agent graphs, contract-sensitive delegation,
+and joint versus per-piece evidence selection; see [results](WORLD-EXPERIMENTS.md).
+
+`simulate <scenario> --output-dir <new-directory>` runs bounded dependent Jev
+calls over synthetic tool observations. Selections choose the next fixture; no
+shell commands execute. The initial four are documented in
+[linked simulation results](NOTEBOOK-SIMULATIONS.md). Ten Bash/LSP scenarios with
+paired absence cases are documented in [Bash/LSP experiments](BASH-LSP-EXPERIMENTS.md).
 
 ## Live experiments
 

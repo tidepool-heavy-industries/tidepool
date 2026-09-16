@@ -1,6 +1,9 @@
 mod interpret;
 mod probes;
+mod scenarios;
+mod simulations;
 mod transport;
+mod worlds;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use probes::Probe;
@@ -27,6 +30,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run a bounded synthetic notebook decision chain; no shell commands execute.
+    Simulate {
+        #[arg(value_enum)]
+        scenario: simulations::Scenario,
+        #[arg(long)]
+        output_dir: PathBuf,
+        #[arg(long, default_value = "jev-latest")]
+        model: String,
+    },
     /// List synthetic experiments; no network.
     List,
     /// Print an experiment's exact JSON request; no network or key required.
@@ -73,6 +85,9 @@ fn harness_hash() -> String {
     for source in [
         include_str!("main.rs"),
         include_str!("probes.rs"),
+        include_str!("scenarios.rs"),
+        include_str!("simulations.rs"),
+        include_str!("worlds.rs"),
         include_str!("transport.rs"),
         include_str!("interpret.rs"),
         include_str!("../Cargo.toml"),
@@ -134,6 +149,13 @@ async fn main() -> ExitCode {
 
 async fn execute(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let (endpoint, probe, request, key, output, timeout) = match cli.command {
+        Command::Simulate {
+            scenario,
+            output_dir,
+            model,
+        } => {
+            return simulations::run(scenario, output_dir, &model).await;
+        }
         Command::List => {
             for probe in Probe::value_variants() {
                 println!("{}", probe.name());
@@ -172,6 +194,22 @@ async fn execute(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             Duration::from_secs(15),
         ),
     };
+    let (_, success) = capture_exchange(endpoint, probe, request, key, output, timeout).await?;
+    Ok(if success {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    })
+}
+
+async fn capture_exchange(
+    endpoint: &'static str,
+    probe: Option<String>,
+    request: Option<Value>,
+    key: Option<String>,
+    output: PathBuf,
+    timeout: Duration,
+) -> Result<(Evidence, bool), Box<dyn std::error::Error>> {
     let client = Transport::new(timeout)?;
     // Reserve output before spending a request; refuse to overwrite evidence.
     let mut file = new_evidence_file(&output)?;
@@ -219,11 +257,7 @@ async fn execute(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         findings
     );
     // Rejection is evidence, but must not look like successful inference.
-    Ok(if http_success && findings == 0 {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(2)
-    })
+    Ok((evidence, http_success && findings == 0))
 }
 
 #[cfg(test)]

@@ -32,6 +32,22 @@ authenticated experiments succeeded against `jev-latest`, resolving to `jev-1.13
 
 ## Intent and conversation decisions
 
+Concrete follow-on applications, source anchors, and proposed evaluation cases are
+recorded in [Jev in Shoal: practical semantic decisions](jev-shoal-examples.md).
+
+The clarified focus is internal glue for many small workers with occasional larger
+reasoners, not an operator conversational frontend or intent compiler. Follow-on
+[structured swarm experiments](../jev-integration/WORLD-EXPERIMENTS.md) exercise
+contract-sensitive delegation and evidence selection over artificial agent graphs.
+
+[Notebook microprogram mockups](jev-notebook-microprograms.md) show complete cells
+with two or three dependent command/Jev decisions, typed continuation boundaries,
+and the proposed record DSL. They assume the effect exists and are not compiled.
+
+[Bash and code-exploration examples](jev-bash-lsp-examples.md) extend that shape
+with five potential LSP-assisted notebook workflows: symptom tracing, focused
+verification, implementation reuse, migration archaeology, and reproducer selection.
+
 The user wants TypeSafe's Jev available as a fluent, expressive Haskell effect for
 resident LLM-authored programs. Previously considered FunctionGemma, Haiku, and
 Luna for this role. The motivating workloads are small semantic decisions embedded
