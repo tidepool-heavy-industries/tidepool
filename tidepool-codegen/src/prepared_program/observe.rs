@@ -105,13 +105,35 @@ impl recursion::MappableFrame for ObservationFrame<recursion::PartiallyApplied> 
     }
 }
 
+/// Header-keyed descriptor lookup. The registry-backed variant borrows the
+/// machine's own persistent `descriptor_registry` directly -- no per-call
+/// rebuild -- since that map is already maintained incrementally at
+/// `PreparedMachine::install` and `release_metadata`. The owned variant backs
+/// the `#[cfg(test)]` constructors that build a heap from a bare descriptor
+/// list with no machine behind it.
+enum DescriptorSource<'a> {
+    Registry(&'a BTreeMap<usize, DescriptorMetadata>),
+    Owned(BTreeMap<usize, Arc<ObjectDescriptor>>),
+}
+
+impl DescriptorSource<'_> {
+    fn get(&self, header: usize) -> Option<&Arc<ObjectDescriptor>> {
+        match self {
+            DescriptorSource::Registry(registry) => {
+                registry.get(&header).map(|metadata| &metadata.descriptor)
+            }
+            DescriptorSource::Owned(map) => map.get(&header),
+        }
+    }
+}
+
 pub(super) struct ObservationHeap<'a> {
     nursery: &'a [u64],
     /// Every installed program's immutable static image. A pointer is static
     /// iff SOME region in this set admits it -- see [`Self::object`].
     statics: Vec<&'a StaticRegion>,
     old_space: Option<&'a dyn tidepool_heap::descriptor_region::DescriptorOldSpace>,
-    descriptors: BTreeMap<usize, Arc<ObjectDescriptor>>,
+    descriptors: DescriptorSource<'a>,
     starts: Vec<u64>,
     constructors: Option<&'a BTreeMap<usize, ConstructorObservation>>,
     registry: Option<&'a BTreeMap<usize, DescriptorMetadata>>,
@@ -126,22 +148,14 @@ pub(super) fn append_exact_starts(
     starts: &mut Vec<u64>,
     scanned_words: &mut usize,
 ) -> Result<(), ObservationFailure> {
-    let descriptors: BTreeMap<_, _> = registry
-        .values()
-        .map(|metadata| {
-            (
-                metadata.descriptor.initial_header_word(),
-                &metadata.descriptor,
-            )
-        })
-        .collect();
     starts.resize(nursery.len().div_ceil(64), 0);
     let mut offset = *scanned_words;
     while offset < nursery.len() {
         let header = nursery[offset] as usize;
         let descriptor =
-            descriptors
+            registry
                 .get(&(header & !7))
+                .map(|metadata| &metadata.descriptor)
                 .ok_or(DescriptorTraceError::UnknownDescriptor {
                     address: header & !7,
                 })?;
@@ -195,20 +209,11 @@ impl<'a> ObservationHeap<'a> {
         old_space: Option<&'a dyn tidepool_heap::descriptor_region::DescriptorOldSpace>,
         external_owner: &'a crate::machine_state::MachineState,
     ) -> Result<Self, ObservationFailure> {
-        let descriptors: BTreeMap<_, _> = registry
-            .values()
-            .map(|metadata| {
-                (
-                    metadata.descriptor.initial_header_word(),
-                    Arc::clone(&metadata.descriptor),
-                )
-            })
-            .collect();
         Ok(Self {
             nursery,
             statics: statics.iter().map(Arc::as_ref).collect(),
             old_space,
-            descriptors,
+            descriptors: DescriptorSource::Registry(registry),
             starts: starts.to_vec(),
             constructors: None,
             registry: Some(registry),
@@ -267,7 +272,7 @@ impl<'a> ObservationHeap<'a> {
             nursery,
             statics,
             old_space: None,
-            descriptors,
+            descriptors: DescriptorSource::Owned(descriptors),
             starts,
             constructors,
             registry,
@@ -307,7 +312,7 @@ impl<'a> ObservationHeap<'a> {
             // `admit` proved an exact initialized start and the arena keeps
             // its bytes stable for this borrow; read the header only now.
             let header = unsafe { std::ptr::read(address as *const usize) };
-            let descriptor = self.descriptors.get(&(header & !7)).ok_or(
+            let descriptor = self.descriptors.get(header & !7).ok_or(
                 DescriptorTraceError::UnknownDescriptor {
                     address: header & !7,
                 },
@@ -331,7 +336,7 @@ impl<'a> ObservationHeap<'a> {
                 .ok_or(DescriptorTraceError::InvalidManagedPointer { address })?
         };
         let header = unsafe { std::ptr::read(address as *const usize) };
-        let descriptor = self.descriptors.get(&(header & !7)).ok_or(
+        let descriptor = self.descriptors.get(header & !7).ok_or(
             DescriptorTraceError::UnknownDescriptor {
                 address: header & !7,
             },
