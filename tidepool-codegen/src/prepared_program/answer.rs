@@ -52,6 +52,15 @@ pub enum AnswerBuildError {
     Wrapper(DescriptorMarshalError),
     #[error("constructor {0:?} is not declared by any installed program")]
     UnknownConstructor(DataConId),
+    /// The plan's root is a bare `Scalar` or `Bytes` leaf, not a
+    /// `Constructor`. A host answer names the lifted value it hands back to
+    /// generated code, and only a constructor is a heap object with a
+    /// taggable reference; there is nothing to root otherwise.
+    #[error(
+        "a host answer must be a constructor; a bare scalar or byte array cannot be a lifted \
+         value"
+    )]
+    UnboxedRoot,
     #[error("constructor {host_id:?} takes {expected} fields, the answer supplies {actual}")]
     FieldCount {
         host_id: DataConId,
@@ -112,6 +121,11 @@ pub(super) struct FlattenedAnswer {
     /// The external `Bytes` wrapper descriptor every byte array is written
     /// with, from the program the answer is built for.
     bytes_descriptor: Arc<ObjectDescriptor>,
+    /// Index into `objects` of the plan's root, recorded once
+    /// [`Self::resolve`] has refused a non-`Constructor` root: `write`
+    /// returns this object's word rather than assuming the last object
+    /// pushed is the root.
+    root: usize,
     /// Total bytes the build writes, alignment padding included.
     pub(super) extent: usize,
 }
@@ -132,13 +146,26 @@ impl FlattenedAnswer {
         resolve: &impl Fn(DataConId) -> Option<&'a Arc<ObjectDescriptor>>,
         bytes_descriptor: &Arc<ObjectDescriptor>,
     ) -> Result<Self, AnswerBuildError> {
+        if !matches!(plan, AnswerPlan::Constructor { .. }) {
+            return Err(AnswerBuildError::UnboxedRoot);
+        }
         let mut flattened = Self {
             objects: Vec::new(),
             byte_arrays: Vec::new(),
             bytes_descriptor: Arc::clone(bytes_descriptor),
+            root: 0,
             extent: 0,
         };
         flattened.visit(plan, resolve, 0)?;
+        // The root was just refused above unless `plan` is `Constructor`, and
+        // a `Constructor`'s own `visit` call pushes its `PlannedObject` last
+        // (its fields are visited first, then itself), so the last entry is
+        // always the root's.
+        flattened.root = flattened
+            .objects
+            .len()
+            .checked_sub(1)
+            .ok_or(AnswerBuildError::UnboxedRoot)?;
         Ok(flattened)
     }
 
@@ -276,6 +303,9 @@ impl FlattenedAnswer {
             })?;
             words.push(tagged(pointer, &object.descriptor));
         }
-        words.last().copied().ok_or(AnswerBuildError::TooLarge(0))
+        // `resolve` refused any plan whose root is not a `Constructor` and
+        // recorded that root's index into `objects`/`words`, so this is a
+        // plain index, never a fallback for an empty tree.
+        Ok(words[self.root])
     }
 }

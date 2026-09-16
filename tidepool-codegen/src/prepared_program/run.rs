@@ -102,6 +102,12 @@ pub enum ExecutionError {
     Observation(#[from] ObservationFailure),
     #[error(transparent)]
     Static(#[from] tidepool_heap::static_region::StaticImageError),
+    /// A condition this machine's own bookkeeping should never let happen,
+    /// discovered at a caller/ordering boundary rather than while tracing
+    /// heap content: it does not indicate the heap itself is untrustworthy,
+    /// so it must not latch the machine (see [`runtime_error`]'s doc).
+    #[error("prepared machine invariant: {0}")]
+    Invariant(&'static str),
 }
 
 impl CompiledProgram {

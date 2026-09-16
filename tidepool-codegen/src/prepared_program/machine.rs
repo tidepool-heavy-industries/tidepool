@@ -1,15 +1,17 @@
 //! Persistent ownership for every prepared compiled program installed on one
-//! machine-wide top table AND one shared heap.
+//! shared heap, each program addressing it through its own root block.
 //!
 //! `PreparedMachine` owns exactly one `MachineState`, one `VMContext`, one
 //! nursery (inside that `MachineState`'s `GcState`), and one `OldSpace`.
 //! Every installed program shares all of it. An `InstalledProgram` keeps only
-//! its code custody (`CompiledProgram`/`ProgramCustody`) -- its claimed
-//! top-table range lives implicitly in `program.get().top_slots`, and its
-//! contribution to the shared heap (pinned descriptor layouts, instantiated
-//! static image) is folded into the machine-wide `descriptors`/
-//! `descriptor_registry`/`statics` sets and the shared `MachineState`'s
-//! descriptor space at install time, not kept per-program.
+//! its code custody (`CompiledProgram`/`ProgramCustody`) -- its top-level
+//! roots live in its own root block (a fixed-address `RootWords`, see
+//! `roots.rs`, that the `CompiledProgram` owns and its generated code embeds
+//! the address of; there is no machine-wide top table), and its contribution
+//! to the shared heap (pinned descriptor layouts, instantiated static image)
+//! is folded into the machine-wide `descriptors`/`descriptor_registry`/
+//! `statics` sets and the shared `MachineState`'s descriptor space at install
+//! time, not kept per-program.
 //!
 //! This is Path A from the design pass (see `plans/` "S2 restated"): a
 //! mediated copy-at-import-time alternative was rejected because a closure
@@ -19,18 +21,14 @@
 //! required either way, and only sharing one heap gives identity (rung 2:
 //! "reads the same persistent heap", not a re-imported copy).
 //!
-//! Generated code addresses every top through its own program's root block
-//! (a fixed-address `RootWords` the code embeds the address of, owned by the
-//! `CompiledProgram`) and every heap-managed value through the one shared
-//! nursery/`OldSpace` -- so a value handle produced by one
-//! program's code is, structurally, just as usable as an argument to another
-//! program's entry as a handle produced by that program itself: there is no
-//! "owner" to check. `handle_owner` (a Wave-6A relic from the one-machine-
-//! per-program design S1 shipped) is gone; a handle from a genuinely
-//! different `PreparedMachine` is rejected because `ValueHandle`s are
-//! process-unique (`suspension::ValueHandle::fresh`) and this machine's own
-//! `RootHandleLedger` simply never saw it minted -- ledger emptiness is what
-//! rejects a foreign handle, today as before.
+//! Every heap-managed value is addressed through the one shared
+//! nursery/`OldSpace`, so a value handle produced by one program's code is,
+//! structurally, just as usable as an argument to another program's entry as
+//! a handle produced by that program itself: there is no "owner" to check. A
+//! handle from a genuinely different `PreparedMachine` is rejected because
+//! `ValueHandle`s are process-unique (`suspension::ValueHandle::fresh`) and
+//! this machine's own `RootHandleLedger` simply never saw it minted --
+//! ledger emptiness is what rejects a foreign handle.
 //!
 //! Install order for the second and later program (the first program's
 //! install additionally creates the shared `MachineState`/nursery/`vmctx`/
@@ -205,6 +203,20 @@ pub struct PreparedMachine<'code> {
     /// Union of every installed program's descriptor registry (constructor
     /// identity/field-representation metadata for non-forcing observation).
     descriptor_registry: BTreeMap<usize, DescriptorMetadata>,
+    /// Every installed program's owned descriptor headers, inverted for
+    /// [`Self::mark_live_programs`]: which program a live object's header
+    /// belongs to. [`Self::install`] inserts a program's
+    /// `InstalledProgram::owned_headers`; [`Self::retire`] removes them.
+    /// Interned/shared headers are never inserted (no single owner), same as
+    /// `owned_headers` itself.
+    header_owners: HashMap<usize, ProgramId>,
+    /// Each installed program's static region paired with its owner, in
+    /// install order, for [`Self::mark_live_programs`]'s
+    /// `observation_heap_over` call: a `Traced::Static { region }` hit is an
+    /// index into this same list, so it names the owning program directly.
+    /// [`Self::install`] pushes; [`Self::retire`] removes the retired
+    /// program's entry.
+    region_owners: Vec<(ProgramId, Arc<StaticRegion>)>,
 }
 
 /// Immutable capacity selected when a prepared machine is created. Root
@@ -385,6 +397,8 @@ impl<'code> PreparedMachine<'code> {
             descriptors: Vec::new(),
             descriptor_registry: BTreeMap::new(),
             interner: super::DescriptorInterner::default(),
+            header_owners: HashMap::new(),
+            region_owners: Vec::new(),
         })
     }
 
@@ -392,9 +406,14 @@ impl<'code> PreparedMachine<'code> {
     /// machine's descriptor interner, so every constructor identity an
     /// installed program already declared resolves to the same descriptor
     /// address the existing cells carry. Each compile owns its root block, so
-    /// any number of compiles may be outstanding; a compile that minted a
-    /// descriptor another install has since minted differently is refused at
-    /// install by the interner's identity check, never by a slot reservation.
+    /// any number of compiles may be outstanding; every one of them compiles
+    /// through a clone of this same machine's interner, so at install time
+    /// [`super::interner::DescriptorInterner::absorb`] finds each declaration
+    /// already agreeing with what it staged and keeps the existing `Arc`
+    /// rather than minting a second one -- a fresh compile's own externals
+    /// are likewise absorbed, or, for a genuinely divergent descriptor,
+    /// refused as [`ExecutionError::ForeignExternals`], never accepted by a
+    /// slot reservation.
     pub fn compile_for_install(
         &mut self,
         linked: &tidepool_repr::execution_schema::LinkedProgram,
@@ -462,7 +481,7 @@ impl<'code> PreparedMachine<'code> {
             .map(|(_, descriptor)| descriptor.initial_header_word())
             .chain(compiled.externals.headers())
             .collect();
-        let owned_headers = compiled
+        let owned_headers: Vec<usize> = compiled
             .descriptors
             .iter()
             .map(|descriptor| descriptor.initial_header_word())
@@ -476,6 +495,9 @@ impl<'code> PreparedMachine<'code> {
         let pinned_by_bytes = !compiled.bytes.is_empty();
         let id = ProgramId(self.next_program);
         self.next_program += 1;
+        self.header_owners
+            .extend(owned_headers.iter().map(|&header| (header, id)));
+        self.region_owners.push((id, Arc::clone(&statics)));
         self.programs.insert(
             id,
             InstalledProgram {
@@ -630,7 +652,14 @@ impl<'code> PreparedMachine<'code> {
             let (start, size) = match self.machine.gc_active_range() {
                 Some(range) => range,
                 None => {
-                    return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+                    // `install_prepared_buffer_with_static_region` just
+                    // returned `Ok`, which unconditionally sets this
+                    // machine's `GcState` before returning -- reaching here
+                    // means that postcondition did not hold, not that
+                    // anything already on the heap is untrustworthy.
+                    return Err(ExecutionError::Invariant(
+                        "install: heap buffer installed with no active range",
+                    ));
                 }
             };
             // Publish every verified import before this program's own heap
@@ -795,9 +824,11 @@ impl<'code> PreparedMachine<'code> {
 
     // --- residency: pins, quiescence, major collection, retirement --------
 
-    /// Hold `program` live until [`Self::unpin`], whatever reaches it. The
-    /// runtime pins a program between install and the first binding made
-    /// from its tops; a test pins what it means to keep.
+    /// Hold `program` live until [`Self::unpin`], whatever reaches it. This
+    /// is the host's facility: closing the install-to-first-binding gap is
+    /// its responsibility once it calls this, not something the runtime
+    /// does on a caller's behalf today -- no runtime caller pins yet, so
+    /// that integration is still pending. A test pins what it means to keep.
     pub fn pin(&mut self, program: ProgramId) -> Result<(), ExecutionError> {
         if !self.programs.contains_key(&program) {
             return Err(ExecutionError::UnknownProgram(program));
@@ -816,10 +847,11 @@ impl<'code> PreparedMachine<'code> {
     /// generated frames, temporary roots or an observation borrow could be
     /// looking at what it moves or frees.
     pub fn quiesce(&self) -> Result<Quiescent, ExecutionError> {
-        let unavailable = |cause| runtime_error(&self.machine, cause);
         if self.machine.disposition() != MachineDisposition::Reusable {
-            return Err(self.machine.last_failure().map_or_else(
-                || unavailable(RuntimeError::BadPointer),
+            return Err(self.machine.last_failure().map_or(
+                ExecutionError::Invariant(
+                    "quiesce: machine is not Reusable but no failure was recorded",
+                ),
                 ExecutionError::Runtime,
             ));
         }
@@ -903,22 +935,27 @@ impl<'code> PreparedMachine<'code> {
 
     /// The set of live programs, by a worklist mark over handles, frames,
     /// pins and live programs' root blocks.
+    ///
+    /// `header_owners` and `region_owners` are machine fields maintained
+    /// incrementally by [`Self::install`]/[`Self::retire`], not rebuilt here:
+    /// a collection touches only the programs whose liveness this worklist
+    /// actually needs to snapshot, not every installed program's bookkeeping.
     fn mark_live_programs(&self) -> Result<BTreeSet<ProgramId>, ExecutionError> {
-        let order: Vec<ProgramId> = self.programs.keys().copied().collect();
         let regions: Vec<Arc<StaticRegion>> = self
-            .programs
-            .values()
-            .map(|installed| Arc::clone(&installed.statics))
-            .collect();
-        let owners: HashMap<usize, ProgramId> = self
-            .programs
+            .region_owners
             .iter()
-            .flat_map(|(id, installed)| installed.owned_headers.iter().map(move |h| (*h, *id)))
+            .map(|(_, region)| Arc::clone(region))
             .collect();
         let heap = self.observation_heap_over(&regions)?;
 
         let mut live: BTreeSet<ProgramId> = self.pins.iter().copied().collect();
         live.extend(self.byte_pinned_programs());
+        // One worklist of program ids still needing their root block
+        // snapshotted into `work`, seeded with the programs live from the
+        // start (pins, byte-pinned); a program discovered live later by the
+        // trace below is pushed here exactly once (`live.insert` guards it),
+        // never re-snapshotted.
+        let mut program_work: Vec<ProgramId> = live.iter().copied().collect();
         let mut work: Vec<usize> = self
             .handles
             .handle_slots()
@@ -931,36 +968,45 @@ impl<'code> PreparedMachine<'code> {
                 live.insert(evidence.runner);
             }
         }
-        let block_words = |id: ProgramId| -> Vec<usize> {
-            self.programs.get(&id).map_or_else(Vec::new, |installed| {
-                installed
-                    .program
-                    .get()
-                    .root_block
-                    .snapshot()
-                    .into_iter()
-                    .map(|word| word as usize)
-                    .collect()
-            })
-        };
-        for id in live.clone() {
-            work.extend(block_words(id));
-        }
         let mut visited: HashSet<usize> = HashSet::new();
-        while let Some(word) = work.pop() {
+        loop {
+            if let Some(id) = program_work.pop() {
+                if let Some(installed) = self.programs.get(&id) {
+                    work.extend(
+                        installed
+                            .program
+                            .get()
+                            .root_block
+                            .snapshot()
+                            .into_iter()
+                            .map(|word| word as usize),
+                    );
+                }
+                continue;
+            }
+            let Some(word) = work.pop() else {
+                break;
+            };
             if word == 0 || !visited.insert(tidepool_heap::managed_reference::untag(word)) {
                 continue;
             }
             let reached = match heap.trace_step(word)? {
-                super::observe::Traced::Static { region } => Some(order[region]),
+                super::observe::Traced::Static { region } => {
+                    Some(self.region_owners.get(region).map(|(id, _)| *id).ok_or(
+                        ExecutionError::Invariant(
+                            "mark_live_programs: a static hit named a region index outside the \
+                             observation heap's own region list",
+                        ),
+                    )?)
+                }
                 super::observe::Traced::Object { header, children } => {
                     work.extend(children);
-                    owners.get(&header).copied()
+                    self.header_owners.get(&header).copied()
                 }
             };
             if let Some(program) = reached {
                 if live.insert(program) {
-                    work.extend(block_words(program));
+                    program_work.push(program);
                 }
             }
         }
@@ -1001,6 +1047,7 @@ impl<'code> PreparedMachine<'code> {
             .retain(|descriptor| !owned.contains(&descriptor.initial_header_word()));
         for header in &owned {
             self.descriptor_registry.remove(header);
+            self.header_owners.remove(header);
         }
         self.machine
             .retire_prepared_descriptors(&installed.owned_headers, &installed.statics)
@@ -1011,6 +1058,7 @@ impl<'code> PreparedMachine<'code> {
         // 5. Static region and literal pool.
         self.statics
             .retain(|region| !Arc::ptr_eq(region, &installed.statics));
+        self.region_owners.retain(|(owner, _)| *owner != id);
         self.machine.remove_prepared_byte_pool(&compiled.bytes);
         // 6-8. The block, the receipt entry and the code go with `installed`.
         Ok(block.len())
@@ -1254,8 +1302,11 @@ impl<'code> PreparedMachine<'code> {
         else {
             // Only `park` above inserts frames here, and it inserts exactly
             // this shape; a Core-shaped frame on a prepared machine is a
-            // registry integrity failure, not a caller error.
-            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+            // registry mismatch (the caller handed this id to the wrong
+            // engine's machine), not evidence the heap itself is corrupt.
+            return Err(ExecutionError::Invariant(
+                "take_parked: continuation is parked with Core evidence on a prepared machine",
+            ));
         };
         let (evidence, slot, realm) = (*evidence, *slot, frame.realm);
         let mut frame = self
@@ -1642,7 +1693,10 @@ impl<'code> PreparedMachine<'code> {
             &self
                 .interner
                 .shared_externals()
-                .ok_or_else(|| runtime_error(&self.machine, RuntimeError::BadPointer))?
+                .ok_or(ExecutionError::Invariant(
+                    "build_answer: no program has installed the shared external wrapper \
+                     descriptors yet",
+                ))?
                 .bytes_array,
         );
         let flattened = super::answer::FlattenedAnswer::resolve(
@@ -6497,6 +6551,45 @@ mod tests {
         assert!(machine.release(handle));
         assert_eq!(machine.handle_count(), handles_before);
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// A plan whose root is a bare `Scalar` (no constructor to root) is
+    /// refused as `UnboxedRoot` before anything is sized or allocated: the
+    /// cursor, handle count, persistent-root count and external ledger are
+    /// all exactly as they were.
+    #[test]
+    fn a_scalar_root_is_refused_with_nothing_allocated() {
+        use crate::prepared_program::{AnswerBuildError, AnswerPlan};
+        let (mut machine, _program) = PreparedMachine::new(
+            text_shaped_program(920, 921),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("prepared machine");
+        let realm = RealmId::fresh();
+        let handles_before = machine.handle_count();
+        let roots_before = machine.total_persistent_roots();
+        let ledger_before = machine.machine.external_storage_stats();
+        let cursor_before = machine.vmctx.alloc_ptr;
+
+        let mut bits = [0u8; 16];
+        bits[..8].copy_from_slice(&42i64.to_ne_bytes());
+        let plan = AnswerPlan::Scalar {
+            rep: RuntimeRep::Int(64),
+            bits,
+        };
+        assert!(matches!(
+            machine.build_answer(realm, &plan),
+            Err(ExecutionError::Answer(AnswerBuildError::UnboxedRoot))
+        ));
+        assert_eq!(
+            machine.machine.external_storage_stats().live_objects,
+            ledger_before.live_objects
+        );
+        assert_eq!(machine.vmctx.alloc_ptr, cursor_before);
+        assert_eq!(machine.handle_count(), handles_before);
+        assert_eq!(machine.total_persistent_roots(), roots_before);
     }
 
     /// Compile a fixture as the first program of a fresh machine
