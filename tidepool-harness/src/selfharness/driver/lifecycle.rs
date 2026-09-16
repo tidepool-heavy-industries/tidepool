@@ -1192,7 +1192,7 @@ impl SelfHarnessDriver {
             let sid = self.outer_sid()?;
             let first = self
                 .agent
-                .with_session(sid, |s| s.run("loop", &compiled.expr, &compiled.table))
+                .with_session(sid, |s| s.run_with_sites("loop", compiled.code()))
                 .map_err(|e| DriverError::Session(e.to_string()))?
                 .map_err(|e| map_run_error("loop run failed", e.to_string()))?;
             ready.push_back(GreenReady {
@@ -1715,7 +1715,7 @@ impl SelfHarnessDriver {
         let sid = self.outer_sid()?;
         let outcome = self
             .agent
-            .with_session(sid, |s| s.run("render", &compiled.expr, &compiled.table))
+            .with_session(sid, |s| s.run_with_sites("render", compiled.code()))
             .map_err(|e| DriverError::Session(e.to_string()))?
             .map_err(|e| map_run_error("render run failed", e.to_string()))?;
         let author_text = match outcome {

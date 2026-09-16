@@ -55,7 +55,9 @@ use tidepool_bridge::Value;
 use tidepool_extract_cmd::ResolvedExtractBin;
 pub use tidepool_extract_cmd::{extract_spawn_count, reset_extract_spawn_count};
 use tidepool_repr::{CoreExpr, DataConTable};
-use tidepool_runtime::session::{assemble_bind_module, insert_preamble_imports, place_turn_stmt};
+use tidepool_runtime::session::{
+    assemble_bind_module, insert_preamble_imports, place_turn_stmt, TurnCode,
+};
 pub use tidepool_runtime::YieldSites;
 use tidepool_runtime::{
     compile_targets, compile_targets_with_stable_inject, CompileError, CompiledArtifacts,
@@ -79,6 +81,29 @@ pub struct CompiledTurn {
     pub table: DataConTable,
     pub asks: YieldSites,
     pub prepared: PreparedArtifact,
+    /// [`Self::asks`]'s entries in stable site-id order — cached at compile
+    /// time so [`Self::code`] can hand back a [`TurnCode`] borrowing a
+    /// `&[YieldSite]` slice without materializing one on every call (`asks`
+    /// is a `HashMap`-backed lookup with no slice of its own; see
+    /// [`YieldSites::sites`]).
+    sites: Vec<tidepool_runtime::YieldSite>,
+}
+
+impl CompiledTurn {
+    /// Borrow the halves a resident session runs — the engine-neutral
+    /// counterpart of [`tidepool_runtime::session::CompiledTurn::code`],
+    /// carrying this turn's [`PreparedArtifact`] (see that type's doc) so a
+    /// run on the prepared route is never silently dropped back to Core-only
+    /// [`TurnCode::core`].
+    #[must_use]
+    pub fn code(&self) -> TurnCode<'_> {
+        TurnCode {
+            expr: &self.expr,
+            table: &self.table,
+            sites: &self.sites,
+            prepared: Some(self.prepared.prepared()),
+        }
+    }
 }
 
 /// Compile `source` with entry binder `target`, searching `include` for
@@ -134,6 +159,7 @@ pub fn compile_turns(
                 CompiledTurn {
                     expr: a.expr,
                     table: table.clone(),
+                    sites: a.asks.sites(),
                     asks: a.asks,
                     prepared: a.prepared,
                 },
@@ -180,6 +206,7 @@ pub fn compile_turns_with_stable_inject(
                 CompiledTurn {
                     expr: a.expr,
                     table: table.clone(),
+                    sites: a.asks.sites(),
                     asks: a.asks,
                     prepared: a.prepared,
                 },
