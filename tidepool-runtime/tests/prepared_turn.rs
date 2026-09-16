@@ -1533,3 +1533,208 @@ fn notebook_end_to_end_on_core() {
 fn notebook_end_to_end_on_prepared_stg() {
     notebook_end_to_end(EngineKind::Prepared);
 }
+
+impl Notebook {
+    /// Run `text` (an expression or single-binder bind turn) to the
+    /// suspension of an ordinary effect request: one that carries no
+    /// `typedSite`, so the prepared route must classify it by its request
+    /// constructor. Returns the hole, the rendered request, and the turn's
+    /// binder when `text` is a bind.
+    fn suspend_ordinary(
+        &mut self,
+        engine: EngineKind,
+        text: &str,
+    ) -> (
+        tidepool_runtime::session::ResidentHole,
+        serde_json::Value,
+        Option<BoundBinder>,
+    ) {
+        let (outcome, binder, table) = match self.compile(text) {
+            TurnResult::Expr { compiled, .. } => {
+                let outcome = self
+                    .session
+                    .run_with_sites("notebook_ordinary", compiled.code())
+                    .unwrap_or_else(|error| panic!("{engine:?}: {text:?} failed to run: {error}"));
+                (outcome, None, compiled.code().table.clone())
+            }
+            TurnResult::Bind {
+                bound, compiled, ..
+            } => {
+                let [binder] = bound.as_slice() else {
+                    panic!("{engine:?}: {text:?} bound {} names", bound.len());
+                };
+                let outcome = self
+                    .session
+                    .run_bind_with_sites(
+                        "notebook_ordinary",
+                        compiled.code(),
+                        binder,
+                        Generation(self.generation),
+                    )
+                    .unwrap_or_else(|error| panic!("{engine:?}: {text:?} failed to run: {error}"));
+                (outcome, Some(binder.clone()), compiled.code().table.clone())
+            }
+            _ => panic!("{engine:?}: {text:?} is neither an expression nor a bind"),
+        };
+        let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
+            panic!("{engine:?}: {text:?} did not suspend: {outcome:?}");
+        };
+        let request = tidepool_runtime::value_to_json(&request, &table, 0);
+        assert_eq!(
+            typed_site_of(&request),
+            None,
+            "{engine:?}: the ordinary request {request} carries a typedSite"
+        );
+        self.last_table = Some(table);
+        (hole, request, binder)
+    }
+}
+
+/// Ordinary effect requests -- effect-GADT constructors with no dynamic
+/// site -- park and resume on both engines with identical results. On the
+/// prepared route the request is classified by its constructor through the
+/// machine's verb index and answered at the constructor's synthetic reply
+/// site: `say` takes a host-built `()` and `readFile` takes either side of
+/// `Either FsError Text`. A `Value`-carrying reply (`kvGet`) still parks
+/// and is refused as unconstructible with the frame intact.
+fn notebook_ordinary_effects(engine: EngineKind) {
+    use tidepool_bridge::{ToCore, Value};
+    use tidepool_repr::Literal;
+
+    let mut notebook = Notebook::new(engine);
+    let rendered = notebook.expression("41 + 1").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: warm-up rendered {rendered}"
+    );
+    let handles_before = notebook.session.value_handle_count();
+    assert_eq!(notebook.session.parked_count(), 0);
+
+    // --- Slice A: `say` parks on `Print` and resumes with `()`. ---
+    let (hole, request, _) = notebook.suspend_ordinary(engine, "say \"hi\" >> pure (42 :: Int)");
+    assert!(
+        request.to_string().contains("hi"),
+        "{engine:?}: the Print request rendered as {request}"
+    );
+    assert_eq!(notebook.session.parked_count(), 1, "{engine:?}");
+    assert_eq!(notebook.session.stowed_roots_count(), 1, "{engine:?}");
+    // Built exactly as the actor workbench's `resume_unit` builds it.
+    let unit = ().to_value(notebook.session.data_con_table()).expect("() is in the session table");
+    let outcome = notebook
+        .session
+        .resume(hole, unit)
+        .unwrap_or_else(|error| panic!("{engine:?}: resuming say failed: {error}"));
+    let ResidentOutcome::Completed { result, .. } = outcome else {
+        panic!("{engine:?}: the resumed say turn did not complete: {outcome:?}");
+    };
+    let rendered = tidepool_runtime::value_to_json(result.value(), result.table(), 0).to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: the say turn completed with {rendered}"
+    );
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    assert_eq!(notebook.session.stowed_roots_count(), 0, "{engine:?}");
+    assert_eq!(
+        notebook.session.value_handle_count(),
+        handles_before,
+        "{engine:?}: the resumed say turn leaked a value handle"
+    );
+
+    // --- Slice B: `readFile` answered with `Right` and with `Left`. ---
+    let (hole, request, binder) = notebook.suspend_ordinary(engine, "c <- readFile \"notes.txt\"");
+    assert!(
+        request.to_string().contains("notes.txt"),
+        "{engine:?}: the FsRead request rendered as {request}"
+    );
+    let binder = binder.expect("a bind turn");
+    let table = notebook.last_table.clone().expect("the ask turn's table");
+    let text = |value: &str| value.to_string().to_value(&table).expect("Text answer");
+    let right_id = notebook.constructor("Right");
+    let left_id = notebook.constructor("Left");
+    let not_found_id = notebook.constructor("FsNotFound");
+    notebook.resume_bind(hole, &binder, Value::Con(right_id, vec![text("contents")]));
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    let rendered = notebook
+        .expression("either (const \"failed\") id c")
+        .to_string();
+    assert!(
+        rendered.contains("contents"),
+        "{engine:?}: the Right answer rendered as {rendered}"
+    );
+
+    let (hole, _, binder) = notebook.suspend_ordinary(engine, "d <- readFile \"missing.txt\"");
+    let binder = binder.expect("a bind turn");
+    notebook.resume_bind(
+        hole,
+        &binder,
+        Value::Con(
+            left_id,
+            vec![Value::Con(not_found_id, vec![text("missing.txt")])],
+        ),
+    );
+    let rendered = notebook
+        .expression("case d of { Left (FsNotFound p) -> p; _ -> \"other\" }")
+        .to_string();
+    assert!(
+        rendered.contains("missing.txt"),
+        "{engine:?}: the Left answer rendered as {rendered}"
+    );
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    assert_eq!(notebook.session.stowed_roots_count(), 0, "{engine:?}");
+
+    // --- Deferred: a `Value`-carrying reply parks and is refused. ---
+    // `kvGet`'s reply is `Maybe Value`. The `Maybe` and `Value` layers are
+    // ordinary data evidence, so `Nothing` is answerable; an `Object` must
+    // build aeson's `KeyMap` spine, whose evidence is unconstructible, and is
+    // refused with the frame intact.
+    if engine == EngineKind::Prepared {
+        let (hole, request, binder) = notebook.suspend_ordinary(engine, "e <- kvGet \"key\"");
+        assert!(
+            request.to_string().contains("key"),
+            "{engine:?}: the KvGet request rendered as {request}"
+        );
+        let binder = binder.expect("a bind turn");
+        let nothing_id = notebook.constructor("Nothing");
+        let just_id = notebook.constructor("Just");
+        let object_id = notebook.constructor("Object");
+        notebook.assert_refusal_leaves_frame_parked(
+            &hole,
+            Value::Con(
+                just_id,
+                vec![Value::Con(object_id, vec![Value::Lit(Literal::LitInt(0))])],
+            ),
+            |error| {
+                matches!(
+                    error,
+                    ResidentError::Prepared(PreparedRuntimeError::AnswerUnconstructible { .. })
+                )
+            },
+            1,
+        );
+        notebook.resume_bind(hole, &binder, Value::Con(nothing_id, Vec::new()));
+        assert_eq!(notebook.session.parked_count(), 0);
+        assert_eq!(notebook.session.stowed_roots_count(), 0);
+        let rendered = notebook.expression("isNothing e").to_string();
+        assert!(
+            rendered.contains("true"),
+            "{engine:?}: isNothing e rendered as {rendered}"
+        );
+    }
+
+    // The session stays usable.
+    let rendered = notebook.expression("40 + 2").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: 40 + 2 rendered as {rendered}"
+    );
+}
+
+#[test]
+fn notebook_ordinary_effects_on_core() {
+    notebook_ordinary_effects(EngineKind::Core);
+}
+
+#[test]
+fn notebook_ordinary_effects_on_prepared_stg() {
+    notebook_ordinary_effects(EngineKind::Prepared);
+}
