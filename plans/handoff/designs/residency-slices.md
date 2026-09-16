@@ -67,49 +67,41 @@ counts in the session receipt.
 
 ## Slice 1c: descriptor-arena compaction (decision 2 remainder)
 
-Source facts (2026-09-16): every retention promotion (`OldSpace::
-promote_prepared`, `old_space/prepared.rs`) mints one `DescriptorArena`
-sized to the nursery's used bytes and copies the selected graph into it
-through `promote_and_fixup_with_external`; arenas are never freed, so
-`RetirementReceipt::old_bytes` (`OldSpace::prepared_bytes_used`) grows with
-every bound value and the loop test only asserts it monotonic. The Core
-compactor (`stage_compaction`/`commit_compaction`) reads the Core object
-format and is not applicable to descriptor objects.
+Landed (`ffa904bef`). Every retention promotion mints one `DescriptorArena`;
+`collect_major` now compacts all of them into one arena holding exactly the
+live descriptor objects, so `RetirementReceipt::old_bytes` is flat across
+install/bind/release/retire cycles and `compacted_bytes` reports what was
+reclaimed.
 
-Design: compaction is the existing Cheney copy with its *source* generalized.
-`raw::copy_prevalidated_descriptor_graph_with_external` today decides
-membership by one contiguous range (`from_start`, `from_used`); the
-compactor needs "any object admitted by one of the retiring arenas". Give the
-raw copier a source admission (`&dyn DescriptorOldSpace`, the trait the
-`previous` parameter already uses) beside the range form, so promotion and
-compaction share one copy loop and one forwarding protocol (`Forwarded`
-headers written into the source objects, exact-start admission on the
-destination).
+- One copy loop. The raw Cheney copier takes its source membership from a
+  `DescriptorSourceSpace` (`descriptor_region.rs`): the nursery range for
+  promotion, the set of old arenas for compaction. It is a separate trait
+  from `DescriptorOldSpace` because a source space must still recognise an
+  object the copy has already forwarded, which target admission rejects.
+- Roots: the complete root snapshot minus remembered slots inside the old
+  arenas, plus every program root-block word, plus every nursery field and
+  boxed-array payload slot that points into old space. Remembered slots
+  outside the arenas stay roots, as in promotion: a retained boxed array
+  registers all its slots and payloads are not yet swept from old space.
+- The destination is sized to the old arenas' total bytes; only live objects
+  are copied, so `old_bytes` is exact and the slack is freed at the next
+  compaction. With nothing live, no arena is kept. Every fallible step
+  precedes the copy.
+- Order: compaction runs before `retire`, because the nursery walk resolves
+  headers in the installed descriptor space and a retiring program's nursery
+  objects still carry its headers. A retiring program's old-space objects are
+  therefore reclaimed one collection later. The follow-up that detaches a
+  retiring program's roots and runs a minor collection before removing its
+  descriptors (decision 7) may move this.
+- Install no longer re-appends shared constructor descriptors to the
+  machine's descriptor list, which had grown by one copy per install and was
+  walked by every promotion and compaction.
 
-`OldSpace::compact_prepared(Quiescent, machine, vmctx, descriptors,
-external)` then runs after ordinary collection under the token:
-
-1. Roots are the complete root snapshot (`complete_root_snapshot`: run,
-   persistent, stowed, remembered, tail slots) plus every root-block word;
-   the nursery is the additional source of edges into old space, walked by
-   exact-start scan from `active_start` to `alloc_ptr`.
-2. Size the live set (a mark over the retiring arenas' objects only; nursery
-   and static targets stop the walk), reserve one destination arena of that
-   size with every descriptor the machine holds, copy, seal.
-3. Fix up: roots, nursery object fields whose target forwarded, copied
-   objects' fields, and boxed-array payload slots through the external
-   owner; re-register remembered slots at their copied addresses
-   (`clear_remembered_slots` then `register_remembered_slot` for each
-   copied old→nursery edge, as `commit_compaction` does for Core).
-4. Retire every old arena range from the machine (`retire_old_space_arena`),
-   register the new one, replace `prepared_arenas` with the single arena.
-   Nothing after the copy may fail; every fallible step precedes it, as in
-   promotion.
-
-Acceptance: the residency loop's `old_bytes` is flat after warm-up (it joins
-the `ResidencyCounts` equality), a value graph shared between two handles
-compacts to one copy, and a parked frame's continuation survives compaction
-and resumes.
+Evidence: the residency loop at 10,000 iterations holds every
+`ResidencyCounts` field and `old_bytes` flat; a graph shared by two handles
+compacts to one copy; a parked heap closure survives compaction and resumes;
+boxed-array edges in both directions (old to nursery, nursery to old) are
+followed.
 
 ## Deferred beyond the first slice
 
