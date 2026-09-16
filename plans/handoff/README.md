@@ -100,10 +100,13 @@ Broader read-only audit findings (bugs, coverage gaps, idioms) are collected in
 `designs/`: `resume-contract-v2.md` (typed resume after adversarial review:
 delivery mode per site, structural type evidence, constructor closure,
 continuation ledger, first slice `runLLMTurn @Bool` answered by JSON),
-`lifetime-contract-v2.md` (per-program root blocks, mark phase, owner sets,
-stable program ids, quiescence token), `cell-compiles.md` (one compile per
-expression via two internal pauses: 39 → 21 compiles for a large cell),
-`actor-exit-contract.md` (decision memo), `corpus-driver.md`. The completion
+`prepared-parking.md` (the F4 slice 1 contract: prepared suspensions park in
+the machine's `ResourceLedger` with per-engine frame evidence, alongside
+`prepared-resume-integration.md`), `lifetime-contract-v2.md` (per-program root
+blocks, mark phase, owner sets, stable program ids, quiescence token),
+`cell-compiles.md` (one compile per expression via two internal pauses: 39 →
+21 compiles for a large cell), `actor-exit-contract.md` (decision memo),
+`corpus-driver.md`. The completion
 plan's step 2/3 sections still hold the v1 contracts plus review findings;
 replace them with the v2 drafts after peer review.
 

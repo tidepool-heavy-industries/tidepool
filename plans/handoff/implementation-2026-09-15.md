@@ -308,3 +308,77 @@ turn (`(lo, hi) <- pure (x - 19, x + 80)` then `hi - lo`);
 `begin_fragment` on a bare session: pattern bind, expression cell rendered
 through `render_cell_observation`/`cellDisplay`, a failing pattern bind
 rejected with the prefix intact, and a later cell importing the prefix.
+
+**F4 slice 1 (committed as `97df2d711`), "prepared suspensions park in the
+machine ledger".** A prepared turn that requests a typed effect now parks
+instead of being refused. `ContinuationFrame` carries per-engine evidence:
+`FrameEvidence::Core` keeps the session constructor snapshot as before;
+`FrameEvidence::Prepared(PreparedFrameEvidence)` records the site's evidence
+owner, the site id, the runner program and its admitted `__resume` entry.
+`FrameCell` is either the Core `Box` cell or, for a prepared frame, the
+continuation handle's own `OldSpace` root slot moved from the persistent-root
+list to the stowed-root list for the park; the rooting receipt
+(`stowed_roots_count() == parked_count()`) holds on both machines, and the
+prepared collector traces stowed roots through the one root snapshot both
+engines share. `PreparedMachine::{park, parked, parked_ids, parked_realm,
+parked_count, take_parked}` land beside the existing `close_realm`, which now
+drops a realm's parked frames (deregistering their stowed roots first) and
+reports them. `abort` retires a prepared frame with Core's abort error
+without entering it.
+On the engine side, `ProgramFacts` keeps each installed program's sites, type
+graph, constructor identities and admitted `__resume` entry; a machine-owned
+site index maps site id to evidence owner, and installation checks a
+duplicate id for structural equivalence (delivery, wire and input type graphs
+by family/constructor identity with ordered arguments, cycles compared
+coinductively) before anything compiles, refusing a conflict with
+`SiteConflict` and keeping the existing owner canonical. One settled-layer
+decoder (`decode_settled`) serves both the initial scaffold and
+`resume_parked`; `finish_prepared` is the one completion routine for a
+settled layer whichever entry produced it. `park_suspension` reads the
+`Union` layer, observes its payload through the machine observe path,
+reads the protocol's `typedSite` field, resolves the witness and parks; a
+runner without a resume entry, a suspension under `HandleOrError`, an
+untyped request or an unknown site releases both handles and parks nothing.
+`reenter` dispatches on the engine, and hole reconciliation reads
+`PersistentSession::parked_ids`, which answers for either engine, as do the
+value-handle, stowed-root and parked-count accounting accessors. On the
+producer side, `ProjectionContext.projectionAuxiliaryRoots` seeds reachability
+for `__resume` beside the entry, and `Tidepool.Internal.Resume.Settled` is now
+strict in the request (`send` builds an unevaluated `inj x`; the host reads a
+constructor layer without forcing, and the payload is forced through the
+machine's observation path instead).
+Along the way, the new codegen test exposed a Core root leak:
+`resume_continuation` dropped an unclaimed live-payload `RootSlot` without
+deregistering it, leaking one persistent root per resumed or aborted frame;
+it now releases the root as `close_realm` does.
+`a2_live_payload_requires_an_explicit_run_policy` parked under ROOT (not
+closable, since the ledger refused it) and asserted a `(1, 0)` closure
+receipt; it now parks under a fresh realm.
+Tests: `tidepool-codegen`
+`a_parked_frame_roots_its_continuation_until_taken_or_its_realm_closes`
+(park moves the handle out of the ledger and the persistent-root class, the
+value survives a forced collection while parked, `take_parked` hands back a
+realm-owned handle observing to the original value, a taken id is unknown,
+`close_realm` drops a parked frame); `tidepool-runtime/tests/prepared_turn.rs`
+`notebook_ask_parks_and_aborts_on_{core,prepared_stg}` (`b <- runLLMTurn
+@Bool "q"` suspends on both engines; the request names one of the turn's
+declared sites; the prepared artifact admits `__resume`; an unrelated turn
+runs while the frame is parked; a host answer on the prepared route is
+refused with the hole intact; `abort` reports Core's error on both routes,
+retires the hole, and returns handle and root counts to where the turn found
+them — prepared program tops stay rooted until program retirement, which the
+residency wave owns).
+Not in this slice: host-built and handle answers are refused
+(`PreparedRuntimeError::NotYetSupported`) before the frame is touched until
+F5 lands the validator and builder; ordinary handled effects (a request
+without a typed site) are refused as `UntypedRequest` with temporaries
+released; there is no live-payload custody on prepared parks
+(`receive`/`serve` park nothing yet); `HandleOrError` refuses every prepared
+suspension, since nothing is handled on this route.
+Verification: the codegen unit test above passed solo; `just test-target
+tidepool-runtime session 'test(prepared_turn)'` — all five tests pass on both
+engines; codegen tests filtered `payload|realm|rooting|resume` pass (58, plus
+the fixed `a2` test); `cargo clippy --all-targets -D warnings` clean for
+`tidepool-codegen` and `tidepool-runtime`; `just fixtures-update` regenerated
+only the source fingerprint (no corpus output changed). No broad gate has
+run.

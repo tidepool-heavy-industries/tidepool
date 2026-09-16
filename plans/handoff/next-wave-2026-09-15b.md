@@ -244,6 +244,12 @@ from the template Fable writes in F4.
 
 ### F4. Suspension and one settlement routine (decisions 4–5)
 
+**Status: slice 1 landed, committed as `97df2d711`** ("park prepared
+suspensions in the machine ledger"; design: `designs/prepared-parking.md`).
+Remaining F4 items: the generated `settleEff` forcing parcel, synthetic reply
+sites for ordinary effects, and live-payload custody on prepared parks. F5
+(host-built answers with rollback) is next.
+
 `Tidepool.Internal.Resume.resumeLifted = qApp` (NOINLINE, deployed stdlib);
 `settleEff` template; prepared machine gains real parking: on `E`, observe
 the `Union` payload through the existing observe path, read the site id,

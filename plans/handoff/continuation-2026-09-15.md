@@ -5,12 +5,16 @@ session. `plans/stg-completion.md` remains the governing completion contract;
 `next-wave-2026-09-15b.md` supplies the F/S work breakdown. This map records
 current evidence and narrows the next assignments. It does not declare step 2
 or the cutover complete. Schema 10 landed as `cf54ed3a0`; the branch head also
-contains `3f330a41d` for the independent child-budget rendering cleanup.
+contains `3f330a41d` for the independent child-budget rendering cleanup, and
+`97df2d711` for F4 slice 1 (prepared suspensions park in the machine ledger).
 
 ## Recovered state
 
 - `b8d25637f`: F1, engine selection inside the resident session.
 - `7b136ecbb`: F2, pattern binds and cell display on the prepared route.
+- `97df2d711`: F4 slice 1, prepared suspensions park in the machine's
+  `ResourceLedger` with per-engine frame evidence and a shared settlement
+  routine.
 - `29602fe8c`: fake extractor emits the prepared artifact required by the cache
   property harness. The current continuation has not rerun that property suite.
 - `aad9f184b`: actor-exit publication owner, already committed before recovery.
@@ -43,9 +47,13 @@ continue independent work.
 
 Deferred to the next structural review/implementation wave:
 
-- **F4 frame and site ownership:** evidence owner and runner can be different
-  programs. The proposed contract is in `designs/prepared-resume-integration.md`;
-  choosing the final API affects roots, installation rollback, and retirement.
+- **F4 frame and site ownership:** decided. Evidence owner and runner can be
+  different programs; per `designs/prepared-parking.md` (refining
+  `designs/prepared-resume-integration.md`), the frame records both — the
+  site's evidence owner and the runner program and its admitted `__resume`
+  entry — through a machine-owned site index, and a conflicting duplicate
+  site id refuses the install (`SiteConflict`), keeping the existing owner
+  canonical. Landed as `97df2d711`.
 - **F4 generated settlement and ordinary replies:** auxiliary executable roots,
   request forcing, and synthetic reply evidence must agree with the production
   effect generator. A Bool-only shortcut would leave ordinary handled replies
@@ -106,16 +114,17 @@ Those limits must not disappear from the parity checklist when Bool works.
 
 | Gate | Concrete proof | Work that follows |
 |---|---|---|
-| F3: authoritative site evidence | Real prepared Bool site, complete constructor closure, schema-9 refusal, codec/validator negatives, regenerated fixtures | F4 parking and shared settlement |
-| F4/F5 first slice | A production `ResidentSession` turn parks on `runLLMTurn @Bool`; a valid answer completes; invalid answers preserve the same parked frame | General answer and delivery coverage |
+| F3: authoritative site evidence | **Done.** Real prepared Bool site, complete constructor closure, schema-9 refusal, codec/validator negatives, regenerated fixtures | F4 parking and shared settlement |
+| F4/F5 first slice | **Partially done.** Parking, abort and the shared settlement routine landed (`97df2d711`): a production `ResidentSession` turn parks on `runLLMTurn @Bool` through the machine ledger on both engines. Remaining: a valid answer completes and invalid answers preserve the same parked frame — the Bool answer through the validator/builder (F5) | General answer and delivery coverage |
 | Step 2 integration | Declare, retain/PAP, effect, sibling turn, resume, lookup; cancellation, committed-prefix failure, stale incarnation and sibling retirement through real owners | Wave A broad gate |
 | Step 3 residency | Quiescent retirement and full collection; escaped values remain callable; repeated turns beyond the old slot budget have bounded live counters | Default-routing eligibility |
 | Step 4 parity/default | Notebook dialect, production effect deliveries and answer forms pass; fresh production sessions use prepared execution | Delete Core and migration paths |
 | Step 5 deletion | One production engine and notebook route; obsolete adapters/tests/config removed and the final gate passes | STG complete |
 
-F3 is complete. Pure prepared notebook execution is implemented;
-production effect suspension is still refused. Prepared execution must not be
-made the default while effect routing or bounded residency is incomplete.
+F3 is complete. Pure prepared notebook execution is implemented; production
+effect suspension now parks (`97df2d711`), but answers are refused until F5
+lands the validator and builder. Prepared execution must not be made the
+default while effect routing or bounded residency is incomplete.
 
 The Bool first slice does not satisfy all of step 2. Outstanding scope includes
 structured and byte-backed host answers, managed/framed answers, live reentry,
@@ -125,7 +134,9 @@ parked-frame lifetime coverage by itself.
 
 ## Lead decisions for F4/F5
 
-The source-reviewed refinement is [prepared resume integration](designs/prepared-resume-integration.md).
+The source-reviewed refinement is [prepared resume integration](designs/prepared-resume-integration.md),
+further refined for the first F4 slice by
+[prepared parking](designs/prepared-parking.md).
 Before implementation, establish these facts in the owning APIs:
 
 - A site reached by calling a retained closure may belong to an earlier

@@ -13,6 +13,14 @@ Every suspended continuation lives in the parked-continuation registry as a
 registered GC root. Callers that permit only one active continuation enforce
 that policy above the JIT while still carrying its `ContinuationId` explicitly.
 
+Both engines park in the same `ResourceLedger`. A frame carries per-engine
+evidence: `FrameEvidence::Core` holds the Core constructor snapshot;
+`FrameEvidence::Prepared` holds the site's evidence owner, site id, runner
+program and admitted resume entry. A prepared frame's cell is the
+continuation handle's own root slot, moved from the persistent-root list to
+the stowed-root list for the park; the rooting receipt
+(`stowed_roots_count() == parked_count()`) holds for both machines.
+
 The public parked-path contract is
 `docs/continuation-parking-contract.md`. Keep frame layout and helper plumbing
 private.
