@@ -4,7 +4,8 @@ This is the current execution map after recovering the interrupted Claude
 session. `plans/stg-completion.md` remains the governing completion contract;
 `next-wave-2026-09-15b.md` supplies the F/S work breakdown. This map records
 current evidence and narrows the next assignments. It does not declare step 2
-or the cutover complete.
+or the cutover complete. Schema 10 landed as `cf54ed3a0`; the branch head also
+contains `3f330a41d` for the independent child-budget rendering cleanup.
 
 ## Recovered state
 
@@ -112,7 +113,7 @@ Those limits must not disappear from the parity checklist when Bool works.
 | Step 4 parity/default | Notebook dialect, production effect deliveries and answer forms pass; fresh production sessions use prepared execution | Delete Core and migration paths |
 | Step 5 deletion | One production engine and notebook route; obsolete adapters/tests/config removed and the final gate passes | STG complete |
 
-F3 is currently in progress. Pure prepared notebook execution is implemented;
+F3 is complete. Pure prepared notebook execution is implemented;
 production effect suspension is still refused. Prepared execution must not be
 made the default while effect routing or bounded residency is incomplete.
 
