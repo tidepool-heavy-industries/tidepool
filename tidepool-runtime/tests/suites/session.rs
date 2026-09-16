@@ -1,6 +1,8 @@
 // Each module remains a separate source file; nextest isolates each test process.
 #[path = "../introspection_public_api.rs"]
 mod introspection_public_api;
+#[path = "../prepared_reply_types.rs"]
+mod prepared_reply_types;
 #[path = "../prepared_residency.rs"]
 mod prepared_residency;
 #[path = "../prepared_turn.rs"]
