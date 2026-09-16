@@ -3607,8 +3607,10 @@ where
     /// answer leaves the frame parked and the hole open. `Abort` consumes the
     /// frame without entering it and fails the ask with the same error Core's
     /// stowed-abort path reports, so the frontends see one abort contract.
-    /// Handle delivery is a later slice and is refused before the frame is
-    /// touched.
+    /// `Handle`/`FramedHandle` deliver an already-retained value by borrow,
+    /// the prepared analogue of Core's own handle and framed-custody
+    /// delivery (`docs/continuation-parking-contract.md`): the handle's root
+    /// is untouched by the resume either way.
     fn reenter_prepared(
         &mut self,
         cont_id: &str,
@@ -3617,8 +3619,7 @@ where
         seed: HoleSeed,
         provenance: Arc<ProgramProvenance>,
     ) -> Result<ResidentOutcome, ResidentError> {
-        let value = match input {
-            ResumeInput::Answer(value) => value,
+        let input = match input {
             ResumeInput::Abort(reason) => {
                 let aborted = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
                     let engine = engine.require_prepared()?;
@@ -3630,12 +3631,7 @@ where
                     EffectError::Handler(format!("ask aborted by caller: {reason}")),
                 ))));
             }
-            ResumeInput::Handle(_) | ResumeInput::FramedHandle { .. } => {
-                return Err(PreparedRuntimeError::NotYetSupported(
-                    "handle answers on the prepared route (handle delivery lands them)",
-                )
-                .into());
-            }
+            other => other,
         };
         // The hole's own obligation says how the resumed run completes; the
         // frame carries the runner whose entry re-enters the continuation.
@@ -3674,21 +3670,31 @@ where
         };
         let resumed = self.on_eval_thread(move |engine, table, _handlers, _captured| {
             let engine = engine.require_prepared()?;
-            Ok(engine
-                .resume_with_answer(frame_id, &value)
-                .and_then(|resumed| {
-                    let runner = resumed.runner;
-                    finish_prepared(
-                        engine,
-                        runner,
-                        resumed.realm,
-                        plan,
-                        park,
-                        table,
-                        resumed.settlement,
-                    )
-                    .map(|run| (runner, run))
-                }))
+            let outcome = match input {
+                ResumeInput::Answer(value) => engine.resume_with_answer(frame_id, &value, table),
+                ResumeInput::Handle(handle) => engine.resume_with_handle(frame_id, handle),
+                ResumeInput::FramedHandle {
+                    handle,
+                    constructor,
+                    prefix,
+                } => engine.resume_with_framed_handle(frame_id, handle, constructor, prefix, table),
+                ResumeInput::Abort(_) => {
+                    unreachable!("Abort is handled before the frame is touched")
+                }
+            };
+            Ok(outcome.and_then(|resumed| {
+                let runner = resumed.runner;
+                finish_prepared(
+                    engine,
+                    runner,
+                    resumed.realm,
+                    plan,
+                    park,
+                    table,
+                    resumed.settlement,
+                )
+                .map(|run| (runner, run))
+            }))
         });
         let (runner, run) = match resumed {
             Ok(Ok(resumed)) => resumed,
@@ -3702,6 +3708,28 @@ where
             }
         };
         self.complete_prepared(run, mode, runner, lexical_scope, provenance, Some(cont_id))
+    }
+
+    /// The `ValueHandle` custody of a prepared-route binding named `name`,
+    /// for delivering an already-bound value into another parked frame by
+    /// handle ([`Self::resume_handle`]/[`Self::resume_framed_custody`]) —
+    /// [`Self::reenter_prepared`]'s `Handle`/`FramedHandle` branches' test
+    /// surface, mirroring how [`Self::live_payload_handle`] mints a Core
+    /// frame's live payload as a `RootCustody`. Reuses `BoundValue::
+    /// Prepared`'s own linking handle rather than minting a fresh one, so
+    /// custody moves without disturbing the binding's root. `None` for an
+    /// unknown binding or a Core-route binding (no `PreparedHandle` to
+    /// borrow).
+    pub fn prepared_binding_handle(&self, name: &str) -> Option<RootCustody> {
+        let entry = self.core.bindings().resolve(name)?;
+        let BoundValue::Prepared { handle, .. } = &entry.value else {
+            return None;
+        };
+        Some(RootCustody::new(
+            handle.raw(),
+            Arc::clone(&self.custody_cleanup),
+            Arc::new(ProgramProvenance::default()),
+        ))
     }
 
     fn retire_resumed(&mut self, resumed: Option<&str>) {
