@@ -142,11 +142,16 @@ pub struct RetirementReceipt {
     /// Programs kept only because their byte storage may be addressed
     /// (edge (c), deferred): reported, never retired.
     pub pinned_by_bytes: Vec<ProgramId>,
+    /// Unreachable programs whose roots were detached but whose metadata a
+    /// surviving nursery object still names: garbage the generational
+    /// collectors cannot drop in one pass (an old-to-young remembered edge
+    /// from dead old space, or a cycle across generations). They stay
+    /// installed, rootless, and are retried on the next major collection.
+    pub deferred: Vec<ProgramId>,
     /// Prepared old-space bytes in use after the collection: the live
-    /// descriptor objects, compacted into one arena. A retiring program's
-    /// objects are still rooted by its block when compaction commits (before
-    /// retirement, per the contract's order), so they leave on the next
-    /// collection.
+    /// descriptor objects, compacted into one arena. Retiring programs'
+    /// blocks are detached before compaction, so their old objects leave in
+    /// the same collection.
     pub old_bytes: usize,
     /// Prepared old-space bytes this collection's compaction reclaimed.
     pub compacted_bytes: usize,
@@ -217,7 +222,7 @@ pub struct PreparedMachine<'code> {
     header_owners: HashMap<usize, ProgramId>,
     /// Each installed program's static region paired with its owner, in
     /// install order, for [`Self::mark_live_programs`]'s
-    /// `observation_heap_over` call: a `Traced::Static { region }` hit is an
+    /// `observation_heap_and_starts` call: a `Traced::Static { region }` hit is an
     /// index into this same list, so it names the owning program directly.
     /// [`Self::install`] pushes; [`Self::retire`] removes the retired
     /// program's entry.
@@ -915,18 +920,27 @@ impl<'code> PreparedMachine<'code> {
     /// (lifetime contract decision 1). The mark is non-moving and forces
     /// nothing; ordinary collection runs first so it sees a compact nursery.
     /// Programs with byte storage are pinned and reported (edge (c) is a
-    /// later slice). The prepared descriptor arenas are then compacted into
-    /// one arena of live objects, before retirement as decision 7 orders.
-    /// Retirement follows decision 7's order; the receipt is what the
-    /// runtime drains.
+    /// later slice).
+    ///
+    /// Retirement is split around the collectors (decision 7): every
+    /// unreachable program's block roots are detached first, so one ordinary
+    /// collection drops the nursery objects only those blocks reached, and
+    /// compaction then drops their old objects in the same pass. A second
+    /// ordinary collection drops nursery objects that only a now-compacted
+    /// dead old object remembered. Every step that can fail runs while every
+    /// descriptor is still installed. A retiring program a surviving nursery
+    /// object still names is deferred, never released: the next ordinary
+    /// collection validates every nursery start against the installed
+    /// descriptor space. The remaining programs' metadata is then released;
+    /// the receipt is what the runtime drains.
     pub fn collect_major(&mut self, token: Quiescent) -> Result<RetirementReceipt, ExecutionError> {
         drop(token);
         // Re-check: the token proves the caller went through the gate, and
         // nothing may have changed between the two calls.
         let still_quiescent = self.quiesce()?;
         collect_on(&self.machine, &mut self.vmctx, &self.old_space, 0)?;
-        let live = self.mark_live_programs()?;
-        let retiring: Vec<ProgramId> = self
+        let live = self.mark_live_programs(false)?;
+        let retiring: BTreeSet<ProgramId> = self
             .programs
             .keys()
             .copied()
@@ -936,12 +950,39 @@ impl<'code> PreparedMachine<'code> {
             pinned_by_bytes: self.byte_pinned_programs().collect(),
             ..RetirementReceipt::default()
         };
-        // Compaction commits before retirement step 1 (contract decision 7):
-        // every descriptor a nursery or old object may carry is still
-        // installed, and every slot is rewritten before any is deregistered.
-        receipt.compacted_bytes = self.compact_old_space(&still_quiescent)?.reclaimed_bytes;
-        for id in retiring {
-            receipt.block_words += self.retire(id)?;
+        // 1. Detach, then collect: the nursery keeps nothing only a
+        //    retiring block reached.
+        for id in &retiring {
+            self.detach_roots(*id)?;
+        }
+        if !retiring.is_empty() {
+            collect_on(&self.machine, &mut self.vmctx, &self.old_space, 0)?;
+        }
+        // Compaction commits before any metadata is released: every
+        // descriptor a nursery or old object may carry is still installed.
+        receipt.compacted_bytes = self
+            .compact_old_space(&still_quiescent, &retiring)?
+            .reclaimed_bytes;
+        let mut releasing = retiring;
+        if !releasing.is_empty() {
+            collect_on(&self.machine, &mut self.vmctx, &self.old_space, 0)?;
+            let named_by_nursery = self.mark_live_programs(true)?;
+            releasing.retain(|id| {
+                let deferred = named_by_nursery.contains(id);
+                if deferred {
+                    receipt.deferred.push(*id);
+                }
+                !deferred
+            });
+            // `release_metadata` fails only on these, so check them once
+            // before the first descriptor leaves.
+            self.machine
+                .check_prepared_descriptor_space()
+                .map_err(|cause| runtime_error(&self.machine, cause))?;
+        }
+        // 2-8. Nothing below can fail.
+        for id in releasing {
+            receipt.block_words += self.release_metadata(id);
             receipt.programs.push(id);
         }
         receipt.old_bytes = self.old_space.prepared_bytes_used();
@@ -950,15 +991,19 @@ impl<'code> PreparedMachine<'code> {
     }
 
     /// Compact the prepared descriptor arenas into one arena holding exactly
-    /// the objects reachable from the machine's roots, every installed
-    /// program's root block, and the live nursery. Only a major collection
-    /// calls this, after ordinary collection, under its token.
+    /// the objects reachable from the machine's roots, every non-`retiring`
+    /// installed program's root block, and the live nursery. Only a major
+    /// collection calls this, after ordinary collection, under its token.
     fn compact_old_space(
         &mut self,
         _quiescent: &Quiescent,
+        retiring: &BTreeSet<ProgramId>,
     ) -> Result<crate::old_space::PreparedCompactionStats, ExecutionError> {
         let mut block_roots = Vec::new();
-        for installed in self.programs.values() {
+        for (id, installed) in &self.programs {
+            if retiring.contains(id) {
+                continue;
+            }
             let block = &installed.program.get().root_block;
             block_roots.extend((0..block.len()).filter_map(|slot| block.slot_address(slot)));
         }
@@ -986,19 +1031,24 @@ impl<'code> PreparedMachine<'code> {
     }
 
     /// The set of live programs, by a worklist mark over handles, frames,
-    /// pins and live programs' root blocks.
+    /// pins and live programs' root blocks. With `from_nursery`, every
+    /// nursery object is a seed too: the result then also names each
+    /// program a surviving nursery object reaches.
     ///
     /// `header_owners` and `region_owners` are machine fields maintained
     /// incrementally by [`Self::install`]/[`Self::retire`], not rebuilt here:
     /// a collection touches only the programs whose liveness this worklist
     /// actually needs to snapshot, not every installed program's bookkeeping.
-    fn mark_live_programs(&self) -> Result<BTreeSet<ProgramId>, ExecutionError> {
+    fn mark_live_programs(
+        &self,
+        from_nursery: bool,
+    ) -> Result<BTreeSet<ProgramId>, ExecutionError> {
         let regions: Vec<Arc<StaticRegion>> = self
             .region_owners
             .iter()
             .map(|(_, region)| Arc::clone(region))
             .collect();
-        let heap = self.observation_heap_over(&regions)?;
+        let (heap, nursery_base, nursery_starts) = self.observation_heap_and_starts(&regions)?;
 
         let mut live: BTreeSet<ProgramId> = self.pins.iter().copied().collect();
         live.extend(self.byte_pinned_programs());
@@ -1013,6 +1063,16 @@ impl<'code> PreparedMachine<'code> {
             .handle_slots()
             .map(|slot| unsafe { slot.current() } as usize)
             .collect();
+        if from_nursery {
+            for (index, bits) in nursery_starts.iter().enumerate() {
+                let mut bits = *bits;
+                while bits != 0 {
+                    let word = index * 64 + bits.trailing_zeros() as usize;
+                    work.push(nursery_base + word * std::mem::size_of::<u64>());
+                    bits &= bits - 1;
+                }
+            }
+        }
         for (root, evidence) in self.handles.frame_roots() {
             work.push(unsafe { root.read() } as usize);
             if let Some(evidence) = evidence {
@@ -1065,17 +1125,16 @@ impl<'code> PreparedMachine<'code> {
         Ok(live)
     }
 
-    /// Retire one unreachable program in the contract's order; returns the
-    /// root-block words freed. Nothing here allocates or runs generated code.
-    fn retire(&mut self, id: ProgramId) -> Result<usize, ExecutionError> {
+    /// Retirement step 1 for one unreachable program: deregister and zero
+    /// its block roots and forget remembered slots inside its block and
+    /// statics. The program stays installed; its objects become garbage for
+    /// the next collection. Idempotent, so a deferred program detaches again.
+    fn detach_roots(&self, id: ProgramId) -> Result<(), ExecutionError> {
         let installed = self
             .programs
-            .remove(&id)
+            .get(&id)
             .ok_or(ExecutionError::UnknownProgram(id))?;
-        self.pins.remove(&id);
-        let compiled = installed.program.get();
-        // 1. Block roots and remembered slots inside the block and statics.
-        let block = &compiled.root_block;
+        let block = &installed.program.get().root_block;
         for slot in 0..block.len() {
             if let Some(root) = block.slot_address(slot) {
                 self.machine.deregister_persistent_root(root);
@@ -1089,6 +1148,20 @@ impl<'code> PreparedMachine<'code> {
         let range = installed.statics.address_range();
         self.machine
             .forget_remembered_range(range.start as *const u8, range.end as *const u8);
+        Ok(())
+    }
+
+    /// Retirement steps 2-8 for one detached program no heap object names:
+    /// release its rows, descriptors, stack maps, statics and code; returns
+    /// the root-block words freed. Infallible: the caller checked the
+    /// descriptor space is installed, and an unknown id releases nothing.
+    fn release_metadata(&mut self, id: ProgramId) -> usize {
+        let Some(installed) = self.programs.remove(&id) else {
+            return 0;
+        };
+        self.pins.remove(&id);
+        let compiled = installed.program.get();
+        let block = &compiled.root_block;
         // 2. Call and enter rows.
         self.machine
             .retire_prepared_entries(&installed.callable_headers, &compiled.enter_owned_headers);
@@ -1102,8 +1175,7 @@ impl<'code> PreparedMachine<'code> {
             self.header_owners.remove(header);
         }
         self.machine
-            .retire_prepared_descriptors(&installed.owned_headers, &installed.statics)
-            .map_err(|cause| runtime_error(&self.machine, cause))?;
+            .retire_prepared_descriptors(&installed.owned_headers, &installed.statics);
         // 4. Stack maps, by identity.
         self.machine
             .remove_stack_map_registry(&compiled.pipeline.stack_maps);
@@ -1113,7 +1185,7 @@ impl<'code> PreparedMachine<'code> {
         self.region_owners.retain(|(owner, _)| *owner != id);
         self.machine.remove_prepared_byte_pool(&compiled.bytes);
         // 6-8. The block, the receipt entry and the code go with `installed`.
-        Ok(block.len())
+        block.len()
     }
 
     /// Publish each verified import into the candidate's root block as a
@@ -1526,16 +1598,19 @@ impl<'code> PreparedMachine<'code> {
     /// installed); [`Self::install`] only reaches this after a declared
     /// import's handle has resolved, which itself requires a live heap.
     fn observation_heap(&self) -> Result<super::observe::ObservationHeap<'_>, ExecutionError> {
-        self.observation_heap_over(&self.statics)
+        self.observation_heap_and_starts(&self.statics)
+            .map(|(heap, _, _)| heap)
     }
 
     /// [`Self::observation_heap`] admitting exactly `statics` (in that
     /// order), so a caller that maps static hits back to programs supplies
-    /// the regions in the order it indexes them.
-    fn observation_heap_over<'s>(
+    /// the regions in the order it indexes them. Also returns the nursery
+    /// base address and its exact-start bitmap (bit `i` is the word at
+    /// `base + 8 * i`).
+    fn observation_heap_and_starts<'s>(
         &'s self,
         statics: &'s [Arc<StaticRegion>],
-    ) -> Result<super::observe::ObservationHeap<'s>, ExecutionError> {
+    ) -> Result<(super::observe::ObservationHeap<'s>, usize, Vec<u64>), ExecutionError> {
         let (start, size) = self
             .machine
             .gc_active_range()
@@ -1555,7 +1630,7 @@ impl<'code> PreparedMachine<'code> {
             &mut starts,
             &mut scanned_words,
         )?;
-        super::observe::ObservationHeap::new_with_registry_and_starts(
+        let heap = super::observe::ObservationHeap::new_with_registry_and_starts(
             nursery,
             statics,
             &self.descriptor_registry,
@@ -1563,7 +1638,8 @@ impl<'code> PreparedMachine<'code> {
             Some(&*self.old_space),
             &self.machine,
         )
-        .map_err(ExecutionError::from)
+        .map_err(ExecutionError::from)?;
+        Ok((heap, start as usize, starts))
     }
 
     #[cfg(test)]
@@ -6786,19 +6862,19 @@ mod tests {
                     "iteration {iteration}"
                 ),
             }
-            // Compaction commits before retirement, so a retiring program's
-            // objects leave one collection later: bytes are flat from the
-            // second cycle on.
-            match (iteration, old_bytes) {
-                (0, _) => {}
-                (_, None) => {
+            // Retiring blocks are detached before compaction, so a retiring
+            // program's objects leave in the same collection: bytes are flat
+            // from the first cycle on.
+            match old_bytes {
+                None => {
                     assert!(receipt.old_bytes > 0, "the latest answer stays retained");
                     old_bytes = Some(receipt.old_bytes);
                 }
-                (_, Some(old_bytes)) => {
+                Some(old_bytes) => {
                     assert_eq!(receipt.old_bytes, old_bytes, "iteration {iteration}");
                 }
             }
+            assert!(receipt.deferred.is_empty(), "iteration {iteration}");
         }
         assert!(matches!(
             machine.observe_handle(latest, previous, 100),
@@ -6806,6 +6882,58 @@ mod tests {
         ));
         assert!(machine.release(previous));
         assert!(machine.release(answer_handle.expect("the loop ran")));
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// Retirement drops a program's nursery objects before its descriptors
+    /// (contract decision 7): forcing A's CAF leaves its closure `f` -- a
+    /// header A owns -- in the nursery, reachable only through A's root
+    /// block. With no handle, frame or pin, a major collection retires A;
+    /// the next ordinary collection validates every nursery allocation start
+    /// against the installed descriptor space, so an `f` left behind would
+    /// be an unknown descriptor and latch the machine.
+    #[test]
+    fn a_retired_programs_nursery_objects_leave_before_its_descriptors() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            thunk_to_closure_program(),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("A installs");
+        let program_b = install_linked(&mut machine, &unit_thunk_linked(), ImportBindings::new())
+            .expect("B installs");
+        machine.pin(program_b).expect("B is installed");
+        let quiet = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        // A closure is not observable: the refusal comes after the force.
+        assert!(matches!(
+            machine.run_entry(program_a, ValueId(0), &[], quiet, RealmId::ROOT),
+            Err(ExecutionError::Observation(_))
+        ));
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+        assert_eq!(machine.handle_count(), 0);
+
+        let token = machine.quiesce().expect("quiescent");
+        let receipt = machine.collect_major(token).expect("major collection");
+        assert_eq!(receipt.programs, vec![program_a], "{receipt:?}");
+        assert!(receipt.deferred.is_empty(), "{receipt:?}");
+
+        let collecting = PreparedCallOptions {
+            collect_before_observation: true,
+            ..quiet
+        };
+        machine
+            .run_entry(program_b, ValueId(0), &[], collecting, RealmId::ROOT)
+            .expect("an ordinary collection after A's retirement succeeds");
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+        let token = machine.quiesce().expect("still quiescent and reusable");
+        let receipt = machine
+            .collect_major(token)
+            .expect("second major collection");
+        assert!(receipt.programs.is_empty(), "B is pinned: {receipt:?}");
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 

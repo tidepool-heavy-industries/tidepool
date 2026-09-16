@@ -1219,23 +1219,41 @@ impl MachineState {
         )
     }
 
+    /// Program retirement's precondition: the live descriptor space is
+    /// installed and not borrowed, so [`Self::retire_prepared_descriptors`]
+    /// cannot miss it. Checked once before the first descriptor leaves.
+    pub(crate) fn check_prepared_descriptor_space(&self) -> Result<(), RuntimeError> {
+        let active = self
+            .gc_state
+            .try_borrow()
+            .map_err(|_| RuntimeError::BadPointer)?;
+        active
+            .as_ref()
+            .and_then(|state| state.prepared.as_ref())
+            .map(|_| ())
+            .ok_or(RuntimeError::BadPointer)
+    }
+
     /// Program retirement: remove the layouts only that program owned and
-    /// its static region from the live descriptor space.
+    /// its static region from the live descriptor space. The caller checked
+    /// [`Self::check_prepared_descriptor_space`] and nothing between that
+    /// check and this call takes the GC state, so the space is always found.
+    /// Were it not, keeping the layouts admitted is the safe outcome: a
+    /// descriptor that outlives its program is a leak, never a failure.
     pub(crate) fn retire_prepared_descriptors(
         &self,
         headers: &[usize],
         region: &Arc<tidepool_heap::static_region::StaticRegion>,
-    ) -> Result<(), RuntimeError> {
-        let mut active = self
-            .gc_state
-            .try_borrow_mut()
-            .map_err(|_| RuntimeError::BadPointer)?;
-        let prepared = active
-            .as_mut()
-            .and_then(|state| state.prepared.as_mut())
-            .ok_or(RuntimeError::BadPointer)?;
+    ) {
+        let Ok(mut active) = self.gc_state.try_borrow_mut() else {
+            debug_assert!(false, "retirement checked the descriptor space");
+            return;
+        };
+        let Some(prepared) = active.as_mut().and_then(|state| state.prepared.as_mut()) else {
+            debug_assert!(false, "retirement checked the descriptor space");
+            return;
+        };
         prepared.space.retire_owner(headers, Some(region));
-        Ok(())
     }
 
     /// Program retirement: forget a literal pool once no installed program
