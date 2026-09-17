@@ -1,0 +1,19 @@
+{
+  "model": "synthetic-fixture-not-live",
+  "answers": {
+    "wake": { "type": "noul", "noul": 0.9 },
+    "route": {
+      "type": "choice", "choice": "configuration_owner", "confidence": 0.8,
+      "probabilities": { "configuration_owner": 0.9, "reviewer": 0.05, "neither": 0.05 }
+    },
+    "urgency": {
+      "type": "score", "score": 0.9, "confidence": 0.8,
+      "legend": {
+        "0": { "means": "Useful information, work can continue" },
+        "1": { "means": "Work cannot continue until someone responds" }
+      },
+      "probabilities": { "0": 0.1, "1": 0.9 }
+    }
+  },
+  "usage": { "input_tokens": 100, "output_tokens": 20, "billing_units": 7 }
+}

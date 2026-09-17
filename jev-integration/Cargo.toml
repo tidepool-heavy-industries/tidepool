@@ -1,0 +1,19 @@
+[package]
+name = "jev-integration"
+description = "Isolated TypeSafe API contract experiments for the Tidepool Jev DSL"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+blake3.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
+
+[dev-dependencies]
+tempfile.workspace = true
