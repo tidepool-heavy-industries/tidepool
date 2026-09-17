@@ -486,8 +486,8 @@ fn audit(surface_name: &str, decls: &[EffectDecl]) -> BTreeSet<String> {
     }
 
     println!(
-        "\n[{surface_name}] {:<40} {:<24} {}",
-        "VERB (request constructor)", "constructible?", "reason"
+        "\n[{surface_name}] {:<40} {:<24} reason",
+        "VERB (request constructor)", "constructible?"
     );
     println!("{}", "-".repeat(110));
 
