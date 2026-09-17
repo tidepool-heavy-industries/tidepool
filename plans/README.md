@@ -12,6 +12,11 @@ archive).
   uncertainties; isolated experiments live in the `jev-integration` workspace crate.
   Its [core Shoal examples](jev-core-shoal-uses.md) show paired Haskell DSL and
   Jev request sketches for the intended semantic-control-plane capabilities.
+  The [Jev in Shoal set](jev/README.md) changes altitude: what was learned
+  about the provider, a DSL review, eight workflow-reshaping capabilities with
+  traces and a ranking, typed request triage as the first implementation,
+  run-ahead as the emergent mechanism, authoring patterns, replayable
+  evaluation, and open questions.
 - [Shoal implementation handoff](../NEXT.md): complete the programmable foundation
   and a usable workspace orchestration package. Model/context selection, frozen
   customization, routes, scoped observations, launch previews and the executable

@@ -91,6 +91,19 @@ bash scripts/dev-shell.sh cargo run -p jev-integration -- snapshot \
   --output jev-integration/evidence/openapi-next.json
 ```
 
+## Haskell DSL package
+
+The Jev DSL lives in its own repository at `~/dev/jev-dsl` (package
+`jev-dsl`, MIT): one packet of labelled questions that both renders the
+request and decodes the response. `Jev.Operators` is the implemented front,
+written for agents and cut to what a program wants to express rather than
+every request the provider accepts; a declared-record front for humans is
+designed there but not implemented. The core is polymorphic over the JSON
+type with an aeson facade. It is tested against 71 curated captures from
+this directory's evidence and, with `JEV_EVIDENCE_DIR` pointed here, against
+every recorded success through a replay module in its test tree. Design and
+usage notes stay in this repository under `plans/jev/`.
+
 ## Haskell feasibility sketches
 
 ```sh
