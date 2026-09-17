@@ -205,6 +205,34 @@ enum ObservationShareResult {
     Unauthorized,
 }
 
+/// Why a watch was refused, said in terms of what the caller did.
+///
+/// A watch names the requests it waits on, and an actor may only wait on
+/// requests it made itself. A dogfood run 7 leaf tried to watch its own
+/// settlement through a binding it had inherited from its parent's scope — the
+/// parent's request about that leaf — and got a bare `Unauthorized`, which
+/// says nothing about which rule it met.
+fn watch_registration_refusal(error: crate::request::ReplyError) -> String {
+    use crate::request::ReplyError;
+    let detail = match error {
+        ReplyError::Unauthorized | ReplyError::WrongIncarnation => {
+            "a watch may only wait on requests this actor made itself; this one names a \
+             request belonging to another actor, such as a parent's request about this one"
+        }
+        ReplyError::Stale => {
+            "a request this watch names is gone: it has already settled and been forgotten, \
+             or it was never registered here"
+        }
+        ReplyError::CancellationRequested => {
+            "this actor or the actor it waits on is being cleaned up, so no new watch is \
+             admitted"
+        }
+        ReplyError::AlreadySettled => "a request this watch names has already settled",
+        ReplyError::UpdatePending => "a request this watch names has an update in flight",
+    };
+    format!("watch registration was rejected: {detail}")
+}
+
 fn actor_can_control(
     owner: ActorRef,
     candidate: ActorRef,
@@ -3215,9 +3243,9 @@ where
                         registration.dependencies,
                     )
                     .map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(format!(
-                            "watch registration was rejected: {error:?}"
-                        ))
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            watch_registration_refusal(error),
+                        )
                     })?;
                 self.publish_watch_notifications(notifications);
                 self.environment

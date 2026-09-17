@@ -34,6 +34,8 @@ module Tidepool.Command
     job,
     status,
     stdout,
+    stderr,
+    failure,
     readStdout,
     decodeWith,
     asJSON,
@@ -179,6 +181,32 @@ stdout result@Finished {commandResult = outcome, capturedOutput = captured} =
                 then Left (IncompleteStdout (job result))
                 else Right (outputText text)
     other -> Left (Unsuccessful other)
+
+-- | Everything the command wrote to standard error, whatever its exit status.
+--
+-- 'stdout' deliberately refuses a non-zero exit, because a caller asking for a
+-- command's output usually wants the output of a command that worked. Asking
+-- why one failed is the opposite case and just as common, and most programs
+-- say why on standard error — so this does not gate on the outcome. Reading a
+-- failure through 'capturedOutput' and 'commandStderr' by hand is what dogfood
+-- run 7's merge actor did not do, and it reported a confident wrong cause as a
+-- result.
+stderr :: RunResult -> Text
+stderr Finished {capturedOutput = captured} = outputText (commandStderr captured)
+
+-- | A short account of a command that did not exit 0: how it ended, and the
+-- tail of whatever it said about that. 'Nothing' when it succeeded.
+--
+-- > Just detail -> block ("git update-ref failed: " <> detail)
+failure :: RunResult -> Maybe Text
+failure result@Finished {commandResult = outcome} = case commandOutcome outcome of
+  CommandExited 0 -> Nothing
+  other -> Just (T.pack (show other) <> said)
+  where
+    said = case filter (not . T.null) (map T.strip [stderr result, spoken]) of
+      [] -> ""
+      (text : _) -> ": " <> T.takeEnd 400 text
+    spoken = outputText (commandStdout (capturedOutput result))
 
 -- | Read complete retained stdout without starting or waiting for execution.
 readStdout :: (Member Commands effects) => Job -> Eff effects (Either OutputIssue Text)

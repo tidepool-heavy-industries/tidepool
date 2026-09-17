@@ -184,10 +184,16 @@ pub enum ForkGroupError {
     Cleaning(ActorRef),
     #[error("fork group {0} has unfinished descendant admission")]
     CleanupAdmissionPending(u64),
+    /// Every ancestor's ceiling counts this actor's whole subtree, so the
+    /// coordinator whose ceiling is full is often not the one forking: a node
+    /// can be refused because a grandchild of its sibling is still running.
+    /// Naming it is the difference between freeing the right slot and
+    /// widening the wrong budget.
     #[error(
-        "fork group would exceed a coordinator's active descendant ceiling ({requested} requested, {active} already active or reserved, maximum {maximum})"
+        "fork group would exceed the active descendant ceiling of coordinator {coordinator:?} ({requested} requested, {active} already active or reserved in its subtree, maximum {maximum})"
     )]
     DescendantBudgetExceeded {
+        coordinator: ActorRef,
         requested: usize,
         active: usize,
         maximum: usize,
@@ -391,6 +397,7 @@ impl ForkGroupRegistry {
                 let active = reserved_descendants(&state, actor);
                 if active.saturating_add(children.len()) > maximum {
                     return Err(ForkGroupError::DescendantBudgetExceeded {
+                        coordinator: actor,
                         requested: children.len(),
                         active,
                         maximum,
@@ -1411,11 +1418,15 @@ mod tests {
                 vec![segment("leaf")],
                 None,
             ),
+            // The refusal names the coordinator whose ceiling is full — here
+            // the root, not the child that asked — because the ceiling counts
+            // its whole subtree and freeing the wrong slot does not help.
             Err(ForkGroupError::DescendantBudgetExceeded {
+                coordinator,
                 active: 2,
                 requested: 1,
                 maximum: 2,
-            })
+            }) if coordinator == root
         ));
 
         groups.retire_actor(children[1]);

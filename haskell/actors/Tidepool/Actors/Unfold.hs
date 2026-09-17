@@ -435,7 +435,7 @@ planCleanupFor response = case forkGroupHandle response of
     , cleanupPlanPendingResponses = []
     , cleanupPlanPendingWatches = []
     , cleanupPlanRefusal = Just
-        "this response has no fork group: it was not admitted through unfold, so there is nothing to clean up"
+        "this response has no fork group of its own: it came from a request sent to an actor that already existed, not from unfold. Retire that actor through the response unfold returned when it was admitted."
     }
 
 executeCleanup
