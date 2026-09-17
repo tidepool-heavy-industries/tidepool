@@ -1,6 +1,6 @@
 # Jev decision frontier experiments
 
-Date: 2026-09-16  
+Date: 2026-09-16
 Observed service model: `jev-1.13.0` via requested alias `jev-latest`
 
 These experiments ask where a Jev-shaped oracle stops being a useful semantic
