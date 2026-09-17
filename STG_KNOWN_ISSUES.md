@@ -39,8 +39,21 @@ the compiler log records every phase):
 The spelling fix replaced a per-entry list append in
 `assignTopIdentitySpellings`, which made each round quadratic in top
 binders.
+Live Shoal session (2026-09-17, `shoal-console`, warm daemon): every
+workbench statement costs 9–10 s of daemon time against ~40 ms of GHC
+(`compile summary ... wall_ms=38 ... top=Expr:15`); a four-statement cell
+takes about 75 s end to end. Recovery is the whole gap.
 Direction: an incremental worklist so a round touches only the modules it
 added; maps keyed by signature and `DataCon`.
+
+### `lookup` typechecks the library closure once per query
+The actor's `lookup` tool answers each query with its own GHC request
+(`compiler request started` per query in the daemon log), and each request
+re-typechecks the 66-module library closure (~4 s). Queries run
+sequentially, so a seven-query batch took 27.6 s in the live Shoal session
+(2026-09-17). Nothing is executed; this is inspection only.
+Direction: one GHC request per batch, or answer name queries from the
+warm interface cache without a typecheck.
 
 ### Prepared requests still build the Core artifact
 A prepared turn also writes the closed Core translation and its metadata
