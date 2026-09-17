@@ -218,6 +218,124 @@ Friction, new:
 - Sol wrote its log in three batches instead of incrementally; the
   operator survey is the reliable record.
 
+## Run 6 (31b38b4f, tui-test-app, after wave 2)
+
+Sol low root, Luna children, three waves over five new tasks on top of
+run 5's `shoal/integration`. Every task merged; `check.sh` green on the
+integrated revision (33 tests); `main` untouched at the scaffold; fourteen
+`AgentStoppedNow` stops with complete receipts. Wave 1 ended at +17m11s
+(Task 1 alone, one repair round, then four children in one `unfold`),
+wave 2 at +35m43s (five fresh reviewers, two repairs, two re-reviews, four
+`tryMerge`s), wave 3 under a minute. Log:
+`~/dev/shoal-evals/tui-test-app/.shoal/dogfood-notes-run6.md` (with the
+survey and the interview appended); observer:
+`~/.claude/jobs/4940a626/tmp/observer-run6.md`; pane transcript
+`~/.claude/jobs/4940a626/tmp/pane-run6-full.txt`.
+
+What the wave-2 primitives bought, in Sol's own scoring:
+
+- Parent-derived artifacts: `responseWorktree` OID, then `git show` /
+  `git diff --stat` / `git diff --numstat` in the root's checkout, with the
+  coverage check (every stat file has a hunk, counts equal) done in awk
+  before every packet. Saved model turns; used for all five candidates and
+  all three repairs; never touched a child `cwd`.
+- Root-allocated integration worktree: `createWorktree (fromRef (GitRef
+  "shoal/integration") …)`, `tryMerge` into it, `git merge --ff-only`,
+  `./check.sh` run by the root itself three times. Saved model turns. Sol
+  wants `tryMerge` to advance the named branch too (the extra `--ff-only`
+  is a turn).
+- Pre-wave "most likely missed condition" per task, carried into the gate
+  checklists and the reviewer briefs: two of the three repairs (Task 3
+  bare `--file` swallowing the next flag, Task 4 empty-list style overlap)
+  were exactly the predicted misses.
+- Reflex before classification: zero of eight Jev calls looked at a
+  `check.sh` output. Predicted from run 5's data, confirmed live.
+- Incremental logging held: the log was current through every wave.
+- Skills loaded via `.agents/skills` in one `cat`; the only `doc` fallback
+  (`doc worktree`) returned "unknown topic".
+
+Jev, eight calls, all from the root, all the playbook gate (`J.choice`,
+four options including Sol's own `insufficient_evidence`, `J.accept
+J.merging`, `J.explain` printed):
+
+- Task 1 first candidate refused at 0.63; the reviewer found the timestamp
+  test cheating (`created_at - 1`, `>=`) and a prose `implOutput`. Repair
+  accepted at 0.92.
+- Task 3 refused at 0.61; the reviewer confirmed the predicted miss. The
+  repaired candidate was refused again at 0.74 and the fresh reviewer
+  accepted it: one conservative doubt on a good candidate.
+- Task 4 accepted at 0.90; the reviewer found the empty-list case untested.
+  A confident false accept with complete evidence: the checklist item
+  "distinct styles for zero/all/partial" did not name the empty list, so
+  the gate had nothing to check it against. The lesson is in the options,
+  not the policy: the pre-wave miss list must be written into the
+  `item_missing` conditions verbatim.
+- Tasks 2 and 5 accepted at 0.95 and 0.94; reviewers agreed.
+- Sol on trust: it would merge unseen only after a labeled corpus covers
+  every checklist dimension with planted misses, `insufficient_evidence`
+  reliably wins when hunks are removed, and the gate names the violated
+  item structurally. "Confidence can reflect textual plausibility rather
+  than contract coverage."
+
+Friction, by time cost (observer and survey agree):
+
+- Reusable gate helper: `universalChecklist`/`mkGateState` took four
+  attempts across ~8 minutes. "this declaration's type is ambiguous; add a
+  signature (e.g. :: Text)" fired at least four times in different cells;
+  splitting a signature from its equation inside `let` lost the argument
+  scope ("Variable not in scope: specific"); top-level signature plus
+  equation worked. Bare literals under `ToJSON` needed `:: Text`. The
+  diagnostic must name the binding and show where the signature goes.
+- `shoal-define-actors`: `coordinationActor` is not in scope in a fresh
+  project (it lives in `examples/shoal-workspace`'s `Project.Routing`);
+  `import Project.Work`/`Project.Routing` fail. The skill has to stand on
+  the shipped surface (`R.start`, `R.client`, `R.on`, `R.settlement`).
+- `atRef "shoal/integration"`: `No instance for IsString GitRef`; wants
+  either the instance or an error that shows `atRef (GitRef "…")`.
+- `readFile` from a cell: `Ambiguous type variable 'effs0' … FindElem
+  FsRead` plus `No instance for Pack (Either FsError Text)`; Sol shelled
+  out with `cat` for every file read afterwards. Bash won all repository
+  evidence work: "short, familiar pipelines with transparent failure
+  semantics" versus quoting, `Either OutputIssue Text`, effect-row
+  inference and display budgets.
+- Multi-statement `case` extraction cells over `J.answers`/`J.explain` ran
+  30 to 107 s each, six times.
+- Combined reply displays overflowed into `cellDisplay.more` pages.
+- No settlement timestamp on replies (known; `responseSettledAt` still
+  needs a clock effect); watch notices' "+Xm since actor launch" served.
+- Task 1's new shared API tripped `-D warnings` dead-code until the child
+  added `#[allow(dead_code)]`.
+
+Sol's asks, read through "primitives, not helpers": `collectSettlements`,
+`artifactBundle`, `checklistGate`, `mergeIntoNamedBranch`. Each is a
+`collectArtifacts`-shaped helper the model writes itself once the
+primitives are there: a record-actor effect row that admits Jev, Commands
+and Forks (so a gate actor is definable in `.shoal`), `GitRef` from a
+literal, a `readFile` that types, `tryMerge` optionally advancing a
+branch. The first non-LLM actor Sol described unprompted is the wave-3
+gate actor: subscribe to settlements, derive stat and hunks in parent
+custody, prove coverage, run the reflex, wake the root only with a ready
+bundle, a concrete mechanical repair list, or an unclassified failure.
+
+Interview question 17 ("where did you still have to say the obvious next
+thing") is the wave-3 specification. Sol listed ten predetermined
+transitions that each cost a root turn: implementation settled → collect
+artifacts, start review; review asked repair → send the findings back;
+repair settled → collect, re-review; re-review accepted → merge, run the
+integrated check; four children settled → collect, start four reviews;
+mixed verdicts → merge the accepted, request the repairs; repairs settled
+→ re-review; re-reviews accepted → merge, final check; check green → plan
+cleanup; plans clear → execute. Plus "pending" turns after registering
+watches. The root should wake only when mechanical evidence fails
+unexpectedly, Jev doubts or finds conflict, a reviewer asks for a
+contract-changing repair, a merge conflicts, the integrated check fails,
+cleanup retains resources, or the outcome is ready. Sol also wants
+policy-based escalation (deterministic checks, then Jev, Luna only on
+doubt or high risk) instead of every candidate seeing both, and capability
+search over the installed surface ("collect responses of the same result
+type", "settlement timestamp") that distinguishes documented, installed and
+callable here.
+
 ## Wave 3 candidates (from Astra's review, 2026-09-17)
 
 - Ambiguous-type diagnostic: name the ambiguous binding or expression,
@@ -273,3 +391,37 @@ projection of `ResponseResult`; needs a small effect). Spot tests: 47 of 49
 pass; `typed_reply_settles…` (pre-existing Text quoting) and
 `activation_presents_prose…` (a long-Text display truncation assertion, same
 family, not verified against main) fail.
+- Run 6, live: the `shoal-define-actors` skill's example depends on
+  `coordinationActor` from `Project.Routing`, which exists only in
+  `examples/shoal-workspace`, not in a fresh project's `.shoal`; Sol's
+  `lookup`, `rg` and imports all failed. Skills must be self-contained over
+  the shipped surface (`R.start`, `R.client`, …) or ship the Project modules
+  they cite. Otherwise run 6 so far: the checklist gate refused a 0.63
+  candidate, the reviewer found two real defects, the repair went back to
+  the same child, a fresh reviewer accepted, the root ran `check.sh` in its
+  own worktree and merged.
+
+## Wave 3 target (agreed 2026-09-17, after run 6 observation)
+
+Efficacy means more of the loop as code, with Jev inside the coordination
+machinery so the root stops spending turns on routing and Luna boilerplate;
+deeper trees follow from that. Shape (Astra, agreed): Sol supplies task,
+acceptance conditions, allowed roles and escalation policy once; Haskell in
+the project's `.shoal` watches typed replies and gathers evidence tied to
+their revisions; deterministic checks handle known outcomes first; Jev
+classifies the residue into explicit conditions, always with a "cannot
+determine from this evidence" exit; code performs already-authorized
+actions (request missing evidence, route a candidate to review, return a
+concrete repair request); Sol receives unresolved cases and completion
+summaries. Start with the child outcomes whose next action is already
+determined: missing evidence → request it; candidate ready → dispatch
+review; conflicting reviews or unclear failure → escalate. For the deeper
+tree, give an intermediate actor a coherent responsibility (implement and
+repair one component through its own children) so the level absorbs work.
+Settle before implementing: what proceeds without waking the parent and
+what bounds it (spawning authority, repair-attempt limit, repeated identical
+failures, merge); existing authority and budgets govern, Jev chooses within
+them. Primitive to confirm first: a record actor's `EffectProfile` must
+admit `Jev`, read-only `Commands` (git diff) and reviewer admission.
+Run-7 interview question: "Where did Sol still have to say the obvious next
+thing?"
