@@ -149,7 +149,11 @@ pub(super) fn emit_encode_double(
     let host = pipeline.module.declare_func_in_func(host, builder.func);
     let call = builder.ins().call(host, &[mantissa, exponent]);
     let bits = builder.inst_results(call)[0];
-    Ok(vec![builder.ins().bitcast(types::F64, MemFlags::new(), bits)])
+    Ok(vec![builder.ins().bitcast(
+        types::F64,
+        MemFlags::new(),
+        bits,
+    )])
 }
 
 pub(super) const LIBM_HOST: &str = "prepared_float_libm";
@@ -353,10 +357,18 @@ pub(super) enum FloatingOperation {
     Unary(UnaryKind),
     Binary(BinaryKind),
     Compare(CompareKind),
-    Convert { from_float: bool },
+    Convert {
+        from_float: bool,
+    },
     /// A 64-bit integer (signed or unsigned) to a float of `width` bits.
-    FromInteger { signed: bool, width: u8 },
-    Classify { width: u8, kind: ClassificationKind },
+    FromInteger {
+        signed: bool,
+        width: u8,
+    },
+    Classify {
+        width: u8,
+        kind: ClassificationKind,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -447,10 +459,22 @@ impl ScalarFamily for FloatingFamily {
                         _ => CompareKind::Ge,
                     })
                 }
-                "int2Double#" => FloatingOperation::FromInteger { signed: true, width: 64 },
-                "word2Double#" => FloatingOperation::FromInteger { signed: false, width: 64 },
-                "int2Float#" => FloatingOperation::FromInteger { signed: true, width: 32 },
-                "word2Float#" => FloatingOperation::FromInteger { signed: false, width: 32 },
+                "int2Double#" => FloatingOperation::FromInteger {
+                    signed: true,
+                    width: 64,
+                },
+                "word2Double#" => FloatingOperation::FromInteger {
+                    signed: false,
+                    width: 64,
+                },
+                "int2Float#" => FloatingOperation::FromInteger {
+                    signed: true,
+                    width: 32,
+                },
+                "word2Float#" => FloatingOperation::FromInteger {
+                    signed: false,
+                    width: 32,
+                },
                 "float2Double#" => FloatingOperation::Convert { from_float: true },
                 "double2Float#" => FloatingOperation::Convert { from_float: false },
                 _ => return None,
@@ -577,13 +601,15 @@ impl ScalarFamily for FloatingFamily {
                             // magnitude - 1 wraps for zero, so one unsigned
                             // compare selects 0 < magnitude < smallest normal.
                             let below = builder.ins().iadd_imm(magnitude, -1);
-                            builder.ins().icmp_imm(IntCC::UnsignedLessThan, below, 0x007f_ffff)
+                            builder
+                                .ins()
+                                .icmp_imm(IntCC::UnsignedLessThan, below, 0x007f_ffff)
                         }
-                        ClassificationKind::Finite => builder.ins().icmp_imm(
-                            IntCC::UnsignedLessThan,
-                            magnitude,
-                            0x7f80_0000,
-                        ),
+                        ClassificationKind::Finite => {
+                            builder
+                                .ins()
+                                .icmp_imm(IntCC::UnsignedLessThan, magnitude, 0x7f80_0000)
+                        }
                     }
                 } else {
                     let bits = builder

@@ -65,7 +65,7 @@ pub fn matches_expected_failure(
             ExpectedFailure::Blackhole
         ) | (
             ExecutionError::Runtime(MachineFailure {
-                cause: RuntimeError::RaisedException,
+                cause: RuntimeError::RaisedException | RuntimeError::RaisedExceptionMessage(_),
                 disposition: MachineDisposition::Reusable,
             }),
             ExpectedFailure::RaisedException

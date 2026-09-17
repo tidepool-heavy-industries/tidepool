@@ -176,7 +176,7 @@ pub(super) fn observe_results(
         .try_reserve_exact(result_slots.len())
         .map_err(|_| super::run::runtime_error(machine, RuntimeError::HeapOverflow))?;
     for root in result_slots {
-        let value = recursion::try_expand_and_collapse::<
+        let expanded = recursion::try_expand_and_collapse::<
             super::observe::ObservationFrame<recursion::PartiallyApplied>,
             _,
             _,
@@ -250,10 +250,115 @@ pub(super) fn observe_results(
                     Ok(Value::Con(identity, fields))
                 }
             },
-        )?;
+        );
+        let value = match expanded {
+            Ok(value) => value,
+            Err(ExecutionError::Runtime(failure))
+                if failure.cause == RuntimeError::RaisedException =>
+            {
+                // The observation's own roots stay registered while the
+                // exception is described; they are released on return.
+                describe_raised_exception(machine, program, vmctx, statics, registry, old_space);
+                return Err(super::run::runtime_error_from_machine(machine));
+            }
+            Err(error) => return Err(error),
+        };
         values.push(value);
     }
     Ok(values)
+}
+
+/// Node budget for describing one raised exception.
+const EXCEPTION_DESCRIPTION_BUDGET: usize = 16_384;
+
+/// After a call failed by raising a Haskell exception, force the exception
+/// under a bounded budget and restore the failure with its message (the
+/// `error` text, or the first string the exception carries). Any failure
+/// while describing leaves the plain raise.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "description forces through the same machine, program, VM and heap custody as observation"
+)]
+pub(super) fn describe_raised_exception(
+    machine: &MachineState,
+    program: &CompiledProgram,
+    vmctx: &mut VMContext,
+    statics: &[Arc<StaticRegion>],
+    registry: &BTreeMap<usize, super::DescriptorMetadata>,
+    old_space: &OldSpace,
+) {
+    let Some(word) = machine.suspend_prepared_raise() else {
+        return;
+    };
+    let scope = if unsafe { machine.prepared_old_space() }.is_some() {
+        None
+    } else {
+        super::roots::OldSpaceScope::new(machine, old_space).ok()
+    };
+    let observed = observe_results(
+        machine,
+        program,
+        vmctx,
+        statics,
+        registry,
+        old_space,
+        &[super::observe::ObservationSeed {
+            word,
+            rep: RuntimeRep::LiftedRef,
+        }],
+        EXCEPTION_DESCRIPTION_BUDGET,
+    );
+    drop(scope);
+    let message = observed
+        .ok()
+        .and_then(|values| values.first().and_then(exception_message));
+    machine.restore_prepared_raise(message);
+}
+
+/// The message an observed exception carries: the first character list,
+/// searching the exception's own fields before its context.
+fn exception_message(exception: &Value) -> Option<String> {
+    let mut pending: Vec<&Value> = match exception {
+        Value::Con(_, fields) => fields.iter().collect(),
+        other => vec![other],
+    };
+    while let Some(value) = pending.pop() {
+        if let Some(text) = character_list(value) {
+            return Some(text);
+        }
+        if let Value::Con(_, fields) = value {
+            pending.extend(fields.iter().rev());
+        }
+    }
+    None
+}
+
+fn character_list(mut value: &Value) -> Option<String> {
+    let mut text = String::new();
+    loop {
+        match value {
+            Value::Con(_, fields) if fields.is_empty() => {
+                return (!text.is_empty()).then_some(text);
+            }
+            Value::Con(_, fields) if fields.len() == 2 => {
+                text.push(character(&fields[0])?);
+                value = &fields[1];
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// A boxed character; observation reads `Char#` as its 32-bit word.
+fn character(value: &Value) -> Option<char> {
+    match value {
+        Value::Lit(tidepool_repr::Literal::LitChar(c)) => Some(*c),
+        Value::Lit(tidepool_repr::Literal::LitWord(word)) => {
+            u32::try_from(*word).ok().and_then(char::from_u32)
+        }
+        Value::Con(_, fields) if fields.len() == 1 => character(&fields[0]),
+        _ => None,
+    }
 }
 
 #[expect(
@@ -304,5 +409,59 @@ fn current_heap<'a>(
 impl Drop for ObservationRoots<'_> {
     fn drop(&mut self) {
         self.machine.truncate_rust_roots(self.mark);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exception_message;
+    use tidepool_bridge::Value;
+    use tidepool_repr::{DataConId, Literal};
+
+    fn text(s: &str, boxed_word: bool) -> Value {
+        s.chars()
+            .rev()
+            .fold(Value::Con(DataConId(1), vec![]), |tail, c| {
+                let raw = if boxed_word {
+                    Value::Lit(Literal::LitWord(u64::from(c)))
+                } else {
+                    Value::Lit(Literal::LitChar(c))
+                };
+                Value::Con(
+                    DataConId(2),
+                    vec![Value::Con(DataConId(3), vec![raw]), tail],
+                )
+            })
+    }
+
+    #[test]
+    fn exception_message_prefers_the_exception_over_its_context() {
+        let exception = Value::Con(
+            DataConId(4),
+            vec![
+                Value::Con(DataConId(5), vec![text("backtrace frame", true)]),
+                Value::Con(DataConId(6), vec![text("failed suffix", true)]),
+            ],
+        );
+        assert_eq!(
+            exception_message(&exception).as_deref(),
+            Some("failed suffix")
+        );
+    }
+
+    #[test]
+    fn exception_message_is_absent_without_text() {
+        let exception = Value::Con(
+            DataConId(4),
+            vec![
+                Value::Con(DataConId(1), vec![]),
+                Value::Lit(Literal::LitWord(7)),
+            ],
+        );
+        assert_eq!(exception_message(&exception), None);
+        assert_eq!(
+            exception_message(&Value::Con(DataConId(4), vec![text("é", false)])).as_deref(),
+            Some("é")
+        );
     }
 }

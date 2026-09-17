@@ -393,6 +393,14 @@ impl MountNamespace {
             .clone()
             .unwrap_or_else(|| descriptors.clone());
         let mut command = Command::new(program);
+        // The helper re-exec names this executable by descriptor: the entered
+        // view's `/proc` may belong to another PID namespace, where
+        // `/proc/self` does not resolve.
+        let helper = if program == std::ffi::OsStr::new("/proc/self/exe") {
+            Some(HelperExec::open()?)
+        } else {
+            None
+        };
         // SAFETY: only syscall wrappers with preconstructed arguments run
         // between fork and exec. The command retains every referenced FD.
         unsafe {
@@ -420,10 +428,66 @@ impl MountNamespace {
                         inheritable: CapabilitySet::empty(),
                     },
                 )?;
+                if let Some(helper) = &helper {
+                    return Err(helper.exec());
+                }
                 Ok(())
             });
         }
         Ok(command)
+    }
+}
+
+/// The mount-helper re-exec, prepared before fork: this executable as an
+/// `O_PATH` descriptor and a fixed argument vector.
+struct HelperExec {
+    executable: OwnedFd,
+    arguments: [CString; 2],
+    argv: [*mut libc::c_char; 3],
+    envp: [*mut libc::c_char; 1],
+}
+
+// SAFETY: the pointers refer to `arguments`, which the value owns and never
+// mutates; they are read only by `execveat` in the forked child.
+unsafe impl Send for HelperExec {}
+unsafe impl Sync for HelperExec {}
+
+impl HelperExec {
+    fn open() -> io::Result<Box<Self>> {
+        let executable = rustix::fs::open(
+            "/proc/self/exe",
+            OFlags::PATH | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let arguments = [
+            CString::new("tidepool-mount-helper").map_err(io::Error::other)?,
+            CString::new(MOUNT_HELPER_COMMAND).map_err(io::Error::other)?,
+        ];
+        let mut helper = Box::new(Self {
+            executable,
+            arguments,
+            argv: [std::ptr::null_mut(); 3],
+            envp: [std::ptr::null_mut()],
+        });
+        helper.argv[0] = helper.arguments[0].as_ptr().cast_mut();
+        helper.argv[1] = helper.arguments[1].as_ptr().cast_mut();
+        Ok(helper)
+    }
+
+    /// Replace the forked child; returns only on failure.
+    fn exec(&self) -> io::Error {
+        // SAFETY: argv and envp are NULL-terminated arrays of NUL-terminated
+        // strings owned by `self`; AT_EMPTY_PATH executes the descriptor.
+        unsafe {
+            libc::execveat(
+                self.executable.as_raw_fd(),
+                c"".as_ptr(),
+                self.argv.as_ptr(),
+                self.envp.as_ptr(),
+                libc::AT_EMPTY_PATH,
+            );
+        }
+        io::Error::last_os_error()
     }
 }
 

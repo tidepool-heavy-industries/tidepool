@@ -858,7 +858,9 @@ pub(super) enum PrimitiveOperation {
     TextSearch(super::text_search::TextSearchOperation),
     Formatting(super::formatting::FormattingOperation),
     DecodeDoubleInt64,
-    EncodeDouble { signed: bool },
+    EncodeDouble {
+        signed: bool,
+    },
     Libm {
         function: super::floating::LibmFunction,
         width: u8,

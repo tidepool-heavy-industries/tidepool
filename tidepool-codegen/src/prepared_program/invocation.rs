@@ -245,6 +245,15 @@ impl<'code> PreparedInvocation<'code> {
         if status != CallStatus::Success
             || invocation.machine.prepared_call_status() != CallStatus::Success
         {
+            let statics = Arc::clone(&invocation.statics);
+            super::forcing::describe_raised_exception(
+                &invocation.machine,
+                invocation.program,
+                &mut invocation.vmctx,
+                std::slice::from_ref(&statics),
+                &invocation.program.descriptor_registry,
+                &invocation.old_space,
+            );
             return Err(runtime_error_for_status(&invocation.machine, status));
         }
         if invocation.result_contract == ResultContract::NoSuccess {

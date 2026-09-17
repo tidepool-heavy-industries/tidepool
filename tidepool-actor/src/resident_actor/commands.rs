@@ -58,28 +58,24 @@ where
         }
         let outcome = async {
             match request {
+                // An inspection-only actor runs commands in its read-only
+                // project view; the mount, not this handler, prevents writes.
                 CommandsReq::CommandStartWith(spec) => answer!({
-                    if self.descriptor.effective_role().native_tools()
-                        == crate::NativeToolClass::InspectionOnly
-                    {
-                        Err(CommandError::CommandUnauthorized)
-                    } else {
-                        match jobs.start(kernel, spec).await {
-                            Ok((id, request)) => {
-                                if self
-                                    .environment
-                                    .deployments
-                                    .send(LocalResidentDeployment::CommandBackend(request.clone()))
-                                    .is_err()
-                                {
-                                    request.supply(Err(CommandError::CommandUnavailable(
-                                        "native host unavailable".into(),
-                                    )));
-                                }
-                                Ok(id)
+                    match jobs.start(kernel, spec).await {
+                        Ok((id, request)) => {
+                            if self
+                                .environment
+                                .deployments
+                                .send(LocalResidentDeployment::CommandBackend(request.clone()))
+                                .is_err()
+                            {
+                                request.supply(Err(CommandError::CommandUnavailable(
+                                    "native host unavailable".into(),
+                                )));
                             }
-                            Err(error) => Err(error),
+                            Ok(id)
                         }
+                        Err(error) => Err(error),
                     }
                 }),
                 CommandsReq::CommandStatusWith(id) => answer!(jobs.status(owner, &id).await),

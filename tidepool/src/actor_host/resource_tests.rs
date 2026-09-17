@@ -139,7 +139,10 @@ async fn retire_scoped_process_with_reserved_slot_reports_completed_for_either_d
 
 #[test]
 fn not_started_phase_names_pending_failed_and_abandoned_launches() {
-    assert_eq!(HostLaunchState::Pending.provider_not_started_phase(), "launching");
+    assert_eq!(
+        HostLaunchState::Pending.provider_not_started_phase(),
+        "launching"
+    );
     assert_eq!(
         HostLaunchState::Failed("worktree preparation: disk full".into())
             .provider_not_started_phase(),

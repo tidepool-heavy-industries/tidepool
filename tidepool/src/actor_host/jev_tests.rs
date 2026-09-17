@@ -125,6 +125,42 @@ either (const 0) (\r -> J.handle (J.chosen (J.answers r).place) (#line_4 id J..|
     campaign.hosted.await.unwrap();
 }
 
+/// The pooled packet in `doc jev` compiles, runs, and sends one request.
+#[tokio::test]
+async fn doc_jev_pool_example_sends_one_request() {
+    let doc = include_str!("../../../prompts/shoal/docs/jev.md");
+    let section = doc
+        .split("## A packet with a pool")
+        .nth(1)
+        .expect("doc jev has the pool section");
+    let cell = section
+        .split("```haskell\n")
+        .nth(1)
+        .and_then(|rest| rest.split("```").next())
+        .expect("the pool section has a Haskell cell");
+    let backend = Arc::new(FakeJev {
+        requests: Mutex::new(Vec::new()),
+        answer: Err(JevCallFailure::Unconfigured),
+    });
+    let campaign = campaign_with(Arc::clone(&backend)).await;
+    let result = dispatch_haskell_script(campaign.root_installation.policy.as_ref(), cell).await;
+    assert_eq!(result["status"], "committed", "{result}");
+    let output = result["items"].as_array().unwrap().last().unwrap()["output"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(output.contains("no Jev endpoint is configured"), "{result}");
+    let requests = backend.requests.lock();
+    assert_eq!(requests.len(), 1);
+    let questions = &requests[0]["questions"];
+    for key in ["best", "fixed"] {
+        assert!(questions.get(key).is_some(), "{key} missing: {questions}");
+    }
+    drop(requests);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
 /// Haskell cell -> host effect -> live TypeSafe API -> typed answer. Opt-in:
 /// `TYPESAFE_API_KEY` must be set; run with `--ignored`.
 #[tokio::test]

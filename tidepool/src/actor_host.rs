@@ -11,13 +11,13 @@ mod commands;
 mod custody_tests;
 #[cfg(test)]
 mod documentation_tests;
-#[cfg(test)]
-mod jev_tests;
 mod host_incarnation;
 #[allow(dead_code)] // Full retained domain evidence is richer than current UI rendering.
 mod hosted_retirement;
 #[cfg(test)]
 mod hosted_tools_tests;
+#[cfg(test)]
+mod jev_tests;
 #[cfg(test)]
 mod lookup_availability_tests;
 mod overlay_resource;

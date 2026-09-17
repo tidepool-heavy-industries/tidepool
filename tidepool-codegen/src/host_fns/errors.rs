@@ -29,6 +29,9 @@ pub enum RuntimeError {
     UserError,
     #[error("Haskell exception raised")]
     RaisedException,
+    /// A raised exception whose message was recovered after the call.
+    #[error("Haskell exception raised: {0}")]
+    RaisedExceptionMessage(String),
     #[error("non-returning prepared entry returned successfully")]
     NoSuccessReturned,
     /// GHC's generated failure path for a refutable binding, incomplete case,
@@ -143,6 +146,7 @@ impl RuntimeError {
             | Self::Underflow
             | Self::UserError
             | Self::RaisedException
+            | Self::RaisedExceptionMessage(_)
             | Self::PatternMatchFailure(_)
             | Self::Undefined
             | Self::HeapOverflow

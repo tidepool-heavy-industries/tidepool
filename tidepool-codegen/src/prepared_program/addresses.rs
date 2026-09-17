@@ -66,8 +66,7 @@ pub(super) fn recognize(
         }
         // The pure `index*` forms read the same element without a state token.
         "indexInt8OffAddr#"
-            if signature.arguments == [Address, Int(64)]
-                && returns_exact(signature, &[Int(8)]) =>
+            if signature.arguments == [Address, Int(64)] && returns_exact(signature, &[Int(8)]) =>
         {
             Some(AddressOperation::ReadInt8)
         }

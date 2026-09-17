@@ -26,22 +26,46 @@ Fixed after the run:
 
 Open:
 
-- **`error` messages are lost on the prepared route.** `raise#` records only
-  `RuntimeError::RaisedException`; the exception object is rooted
-  (`MachineState::prepared_exception`) but never rendered, so `error "..."`
-  and every `checked`/`error . show` helper reaches the model as "Haskell
-  exception raised". This cost the most time in run 1 and is why
-  `command_receipts_preserve_owner_settlement_across_continuation_failure`
-  fails (it expects the `CommandInvalid` detail). A fix needs either a
-  bounded forcing observation of the exception after the failed call, or a
-  projector-owned `error` that forces its message before raising.
-- Child retirement reports `BuildResource: No such file or directory`; the
-  failing step is now labelled, so the next run identifies it.
-- The research role row contains `Commands`, but the runtime refuses every
-  command start for inspection-only actors. Either drop `Commands` from that
-  row or document the split.
 - `nix develop` in an actor worktree failed with "Path 'flake.nix' ... is not
   tracked by Git" although the file is committed; `nix-shell` worked.
 - A `String` cell result was shown as a list of characters once
   (`['L','e','f','t',...]`); not reproduced yet.
 - Jev usage was not visible to the model without calling `J.usage`.
+
+## Run 2 (634a580a)
+
+Jev worked in research and coding children; the coding child's docs branch
+passed `check.sh`.
+
+Fixed after the run:
+
+- `error` messages reach the notebook on the prepared route. After a call
+  fails by raising, the exception is forced under a bounded budget and the
+  failure becomes `RaisedExceptionMessage` with its text
+  (`forcing::describe_raised_exception`); the corpus oracle treats it as a
+  raise.
+- Child retirement no longer fails `BuildResource` with ENOENT: the mount
+  helper re-execs this binary by descriptor (`execveat`), because the
+  retired view's `/proc/self` does not resolve.
+- Research (inspection-only) actors can start commands. Their project view
+  is mounted read-only; before, every command start was refused and they
+  had no way to read files.
+- `doc jev` has a complete pooled-packet cell (pool, `eachIn`/`askAbout`,
+  `given`, `accept` projected with `selectedKey`), compiled by
+  `doc_jev_pool_example_sends_one_request`, and explains the `let` layout
+  rule behind run 1's `:&` parse error.
+
+Open:
+
+- `stopAgent` answers `StoppedNow` before cleanup settles; degraded cleanup
+  arrives later as a notice with no handle to await or inspect.
+- Evidence transcription (cells, commands, errors, Jev scores) into the log
+  was the third-largest time cost; a notebook helper that appends a cell's
+  source and result to a log would remove it.
+- `spawnWatched` takes one child; launching a pair meant switching to
+  `unfold` plus an applicative `watch`.
+- Jev reported mass/confidence 1.0 for a subjective documentation choice.
+- `documentation_tests::workspace_lead_repairs_locally_...` and
+  `candidate_workspace_runs_its_own_model_free_recipes` fail on recipe type
+  drift (`GitOid` vs `GitRef`, the `coding` signature); unrelated to this
+  work and not yet checked against `main`.

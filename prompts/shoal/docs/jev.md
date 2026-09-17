@@ -66,10 +66,12 @@ don't retry blindly.
 - **`J.contenders floor answer`** reads every alternative at or above a mass
   floor, best first, not just `J.chosen`; a near tie is itself a typed
   outcome worth branching on.
-- **`J.accept policy answer`** applies a `J.Policy {minMass, minMargin,
-  minConfidence}` and returns the selection or a typed `J.Doubt`
+- **`J.accept policy answer`** applies a
+  `J.Policy {J.minMass, J.minMargin, J.minConfidence}` (the fields are
+  qualified too) and returns the selection or a typed `J.Doubt`
   (`NearTie`, `Underweight`, `Unconfident`). Set thresholds from what you
-  observe, not by guessing.
+  observe, not by guessing. `fmap J.selectedKey` turns an accepted selection
+  into plain `Text` for display or a later cell.
 - Keys and wording are model-facing: name alternatives by what choosing them
   means (`use_witness`, `not_in_file`, `defer_to_model`), never `a`/`b`/a
   counter. State is structured JSON context, built once and reused across
@@ -103,6 +105,32 @@ pickChild results = do
 A `Left` here is not fatal: the cell falls back to its own policy (read in
 order) and keeps going. Nothing about the fallback needs Jev; that is the
 point — the tree runs without it, and Jev makes it faster.
+
+## A packet with a pool
+
+A cell that asks one packet over a shared candidate set: a choice drawn from
+the pool, one relevance question per entry, and a question under a premise.
+Continuation lines of a multi-line `let` must be indented past the bound
+name; a line that starts at the name's column begins a new binding and
+fails to parse.
+
+```haskell
+{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
+let candidates = [("retry", "src/Retry.hs: retry loop and backoff" :: Text), ("fetch", "src/Fetch.hs: HTTP client and timeouts")]
+let files = J.pool #files [(k, String d, k) | (k, d) <- candidates]
+let packet =
+      #files := files
+        :& #best := J.choice "Which file explains the timeout?" (J.manyFrom files J..| J.alt #none "None of these files" "")
+        :& #per := J.eachIn files (\r -> #relevant := J.askAbout r "Is this file relevant to the timeout?" :& J.Nil)
+        :& #fixed := J.given "The retry loop changed yesterday" (J.noul "Is the timeout already fixed?")
+        :& J.Nil
+let policy = J.Policy { J.minMass = 0.5, J.minMargin = 0.2, J.minConfidence = 0.5 }
+answer <- J.ask (J.state (object ["failure" .= ("fetch times out after 3 retries" :: Text)])) packet
+fmap (\r -> let a = J.answers r in (fmap J.selectedKey (J.accept policy a.best), [(k, J.yes s.relevant) | (k, s) <- a.per], J.yes a.fixed)) answer
+```
+
+The last line keeps only plain values: the accepted key or the doubt, a
+relevance likelihood per file, and the likelihood under the premise.
 
 ## Patterns
 

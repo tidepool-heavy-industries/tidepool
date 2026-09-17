@@ -232,6 +232,9 @@ pub struct MachineState {
     /// Prepared invocations keep this machine in Rc storage while snapshots use
     /// the slot's address. No heap-backed operand escapes in RuntimeError.
     prepared_exception: Cell<*mut u8>,
+    /// A raised exception is being described; a raise inside the description
+    /// is not described again.
+    describing_exception: Cell<bool>,
     disposition: Cell<MachineDisposition>,
     last_failure: RefCell<Option<MachineFailure>>,
     diagnostics: RefCell<Vec<String>>,
@@ -388,6 +391,7 @@ impl MachineState {
             gc_state: RefCell::new(None),
             rust_roots: RefCell::new(Vec::new()),
             prepared_exception: Cell::new(std::ptr::null_mut()),
+            describing_exception: Cell::new(false),
             persistent_roots: RefCell::new(Vec::new()),
             stowed_roots: RefCell::new(Vec::new()),
             code_roots: RefCell::new(HashSet::new()),
@@ -711,6 +715,49 @@ impl MachineState {
                 *slot = Some(cause);
             }
         }
+    }
+
+    /// Present the pending raise for description: clear the call's
+    /// `RaisedException` so generated code may force its operand, and return
+    /// the operand. The operand stays rooted until
+    /// [`Self::restore_prepared_raise`], which the caller must call.
+    pub(crate) fn suspend_prepared_raise(&self) -> Option<usize> {
+        if self.disposition() != MachineDisposition::Reusable
+            || self.describing_exception.get()
+            || self.prepared_exception.get().is_null()
+        {
+            return None;
+        }
+        let mut slot = self.runtime_error.try_borrow_mut().ok()?;
+        if !matches!(slot.as_ref(), Some(RuntimeError::RaisedException)) {
+            return None;
+        }
+        *slot = None;
+        self.describing_exception.set(true);
+        Some(self.prepared_exception.get() as usize)
+    }
+
+    /// End a description begun by [`Self::suspend_prepared_raise`]. A failure
+    /// the description itself recorded is dropped unless it latched the
+    /// machine or was a cancellation; the call then fails with the raise,
+    /// carrying the message when one was recovered.
+    pub(crate) fn restore_prepared_raise(&self, message: Option<String>) {
+        self.describing_exception.set(false);
+        if self.disposition() == MachineDisposition::Unavailable {
+            return;
+        }
+        let exception = self.prepared_exception.get();
+        if let Ok(mut slot) = self.runtime_error.try_borrow_mut() {
+            if matches!(slot.as_ref(), Some(RuntimeError::Cancelled)) {
+                return;
+            }
+            *slot = None;
+        }
+        let cause = message.map_or(
+            RuntimeError::RaisedException,
+            RuntimeError::RaisedExceptionMessage,
+        );
+        self.record_first_cause(cause, (!exception.is_null()).then_some(exception));
     }
 
     pub(crate) fn disposition(&self) -> MachineDisposition {
@@ -1348,7 +1395,10 @@ impl MachineState {
     }
 
     /// Classify a prepared case miss by its scrutinee's header word.
-    pub(crate) fn prepared_constructor_at(&self, header: usize) -> Option<tidepool_repr::DataConId> {
+    pub(crate) fn prepared_constructor_at(
+        &self,
+        header: usize,
+    ) -> Option<tidepool_repr::DataConId> {
         self.prepared_constructors
             .try_borrow()
             .ok()?

@@ -147,7 +147,7 @@ execute
         started <- Cmd.tryStart command
         case started of
           Left Cmd.CommandUnauthorized ->
-            pure "Rejected · command not started · this actor's role does not run commands; use its native read tools"
+            pure "Rejected · command not started · this actor has no command authority"
           Left issue -> pure $ "Rejected · command not started · " <> T.pack (show issue)
           Right retained -> do
             _ <- Cmd.observe options retained

@@ -2347,6 +2347,8 @@ impl<'code> PreparedMachine<'code> {
             &mut self.old_space,
             &self.descriptors,
             &mut self.handles,
+            &self.statics,
+            &self.descriptor_registry,
         );
         // The call's outcome is in `result`; nothing of it outlives the call.
         self.machine.end_prepared_call();
@@ -2449,6 +2451,8 @@ impl<'code> InstalledProgram<'code> {
         old_space: &mut OldSpace,
         descriptors: &[Arc<ObjectDescriptor>],
         handles: &mut ResourceLedger,
+        statics: &[Arc<StaticRegion>],
+        descriptor_registry: &BTreeMap<usize, DescriptorMetadata>,
     ) -> Result<PreparedResultBatch, ExecutionError> {
         let (adapter, reps, result_contract, result_layout) = {
             let compiled = self
@@ -2560,6 +2564,14 @@ impl<'code> InstalledProgram<'code> {
         let status = CallStatus::from_raw(i64::from(raw))
             .map_err(|_| runtime_error(machine, RuntimeError::BadPointer))?;
         if status != CallStatus::Success || machine.prepared_call_status() != CallStatus::Success {
+            super::forcing::describe_raised_exception(
+                machine,
+                self.program.get(),
+                vmctx,
+                statics,
+                descriptor_registry,
+                old_space,
+            );
             return Err(runtime_error_for_status(machine, status));
         }
         let result_reps = result_contract
@@ -2730,6 +2742,14 @@ impl<'code> InstalledProgram<'code> {
             machine.set_first_cause(RuntimeError::BadPointer);
         }
         if status != CallStatus::Success || machine.prepared_call_status() != CallStatus::Success {
+            super::forcing::describe_raised_exception(
+                machine,
+                self.program.get(),
+                vmctx,
+                statics,
+                descriptor_registry,
+                old_space,
+            );
             return Err(runtime_error_for_status(machine, status));
         }
         if result_contract == ResultContract::NoSuccess {

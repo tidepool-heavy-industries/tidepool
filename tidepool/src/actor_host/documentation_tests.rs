@@ -112,6 +112,12 @@ async fn notebook_display_keeps_previous_cell_display_lexical_and_publishes_pref
     assert_eq!(prefix["items"][0]["status"], "committed", "{prefix}");
     assert_eq!(prefix["items"][0]["output"], "prefix page", "{prefix}");
     assert_eq!(prefix["items"][1]["status"], "rejected", "{prefix}");
+    assert!(
+        prefix["items"][1]["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("failed suffix")),
+        "{prefix}"
+    );
     let after_prefix = committed(policy, "cellDisplay.text").await;
     assert_eq!(
         after_prefix["items"][0]["output"], "prefix page",
