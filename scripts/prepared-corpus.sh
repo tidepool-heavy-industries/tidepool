@@ -195,16 +195,19 @@ jq -e '.source_tops | type == "array"' "$suite_oracle" >/dev/null || {
   "$metadata" "$suite_report"
 suite_expected_programs=812
 # Floors are measured values; raise them when a run exceeds them.
-suite_min_execution_passed=702
+suite_min_execution_passed=705
 suite_max_execution_failed=0
-# 104 not closed, 3 no finite observation, 3 function valued.
-suite_max_execution_classified=110
+# 104 not closed, 3 no finite observation; the 3 function-valued tops execute
+# since observation bridges closures as the sentinel (412a46c53).
+suite_max_execution_classified=107
 suite_min_comparison_passed=234
 # Source tops whose type has no expectation kind (Aeson Value and FmtKInt).
 suite_max_missing_expectation=4
 # Compiler-introduced rows have no source-level oracle. Measured ceiling: a
 # rise means source tops lost oracles or projection introduced new bindings.
-suite_max_no_oracle=464
+# 467 = 464 + the 3 function-valued tops that now execute without an
+# expectation kind (they need one; see the missing-oracle list below).
+suite_max_no_oracle=467
 assert_suite_report suite "$suite_report" \
   "$suite_expected_programs" "$suite_min_execution_passed" "$suite_max_execution_failed" \
   "$suite_max_execution_classified" "$suite_min_comparison_passed" \
