@@ -1939,6 +1939,8 @@ fn spawn_owned_retirement(
     // Only slots cross the task boundary; neither owns a back-reference to its
     // map row. Namespace cleanup is status only and does not discharge host work.
     retirements.spawn(async move {
+        hosted_retirement::settle_input_seal(&deployment.service, APPLICATION_TASK_GRACE_TIMEOUT)
+            .await;
         let process = retire_scoped_process(scope, native_retirement).await;
         let receipt =
             retire_interactive_application_guarded(deployment, &tmux, native_retirement, process)

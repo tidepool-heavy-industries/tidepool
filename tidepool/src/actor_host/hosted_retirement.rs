@@ -239,6 +239,20 @@ pub(super) async fn begin_input_seal(
     .await
 }
 
+/// Settle a retained native input seal while its producer process is still
+/// alive. Retirement stops the process next; a seal first attempted after that
+/// can only fail to connect, which leaves every hosted cleanup domain
+/// unconfirmed. A timeout leaves the operation retained for `observe`.
+pub(super) async fn settle_input_seal(owner: &HostedOwner, timeout: Duration) {
+    let _ = tokio::time::timeout(timeout, async {
+        let mut state = owner.lock().await;
+        if let InputSealState::Pending(operation) = &mut state.input_seal {
+            operation.finish().await;
+        }
+    })
+    .await;
+}
+
 /// Record the mutually exclusive pre-admission path. This is required when a
 /// launch is cancelled before the host creates its durable producer identity;
 /// absence is explicit rather than inferred from a missing operation.
