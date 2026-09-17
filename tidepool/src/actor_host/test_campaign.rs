@@ -61,6 +61,7 @@ impl TestCampaign {
         configure: impl FnOnce(&mut ActorHostConfig),
     ) -> Self {
         tidepool_testing::eval_harness::require_extract();
+        install_trace_file();
         let repository = tidepool_worktree::testing::TestRepo::init().unwrap();
         repository
             .writer()
@@ -119,4 +120,30 @@ impl TestCampaign {
             root_installation,
         }
     }
+}
+
+/// Diagnostic tracing for a campaign run: with `TIDEPOOL_TEST_TRACE=<path>`,
+/// every `tidepool*` target at debug level is appended to that file (the
+/// filter can be replaced through `RUST_LOG`). Unset, nothing is installed.
+fn install_trace_file() {
+    let Some(path) = std::env::var_os("TIDEPOOL_TEST_TRACE") else {
+        return;
+    };
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .unwrap_or_else(|error| panic!("TIDEPOOL_TEST_TRACE {path:?}: {error}"));
+    let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new(
+            "warn,tidepool=debug,tidepool_actor=debug,tidepool_runtime=debug",
+        )
+    });
+    // A second campaign in the same process keeps the first subscriber.
+    let _ = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_thread_names(true)
+        .with_env_filter(filter)
+        .with_writer(std::sync::Mutex::new(file))
+        .try_init();
 }

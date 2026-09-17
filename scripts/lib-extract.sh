@@ -196,6 +196,10 @@ finalize_battery_artifacts() {
   if [[ -n "$daemon_log" && -f "$daemon_log" ]]; then
     cp "$daemon_log" "$BATTERY_ARTIFACT_DIR/daemon.log"
   fi
+  local compiler_log="${daemon_log%/*}/compiler.log"
+  if [[ -n "$daemon_log" && -f "$compiler_log" ]]; then
+    cp "$compiler_log" "$BATTERY_ARTIFACT_DIR/compiler.log"
+  fi
   scripts/toolchain-doctor.sh >"$BATTERY_ARTIFACT_DIR/toolchain-doctor.log" 2>&1 || true
   echo "==> test/daemon failure artifacts: $BATTERY_ARTIFACT_DIR" >&2
   echo "==> reproduce: $BATTERY_ARTIFACT_DIR/reproduce.sh" >&2
@@ -310,9 +314,12 @@ start_battery_daemon() {
     echo "==> no toolchain stamp at $stamp (nothing deployed via scripts/redeploy.sh on this machine yet) — starting compile daemon without --watch-stamp" >&2
   fi
 
-  echo "==> starting per-run resident compile daemon: socket=$sock log=$log" >&2
+  # The detailed log carries per-request compile costs; with TIDEPOOL_TIMING=1
+  # it also carries each phase and every memo miss.
+  local compiler_log="$BATTERY_DAEMON_SOCKET_DIR/compiler.log"
+  echo "==> starting per-run resident compile daemon: socket=$sock log=$log detail=$compiler_log" >&2
   # Rotation and RSS flags are omitted so the frontend owns their defaults.
-  "$TIDEPOOL_EXTRACT" --daemon --persistent --socket "$sock" "${watch_args[@]}" >"$log" 2>&1 &
+  "$TIDEPOOL_EXTRACT" --daemon --persistent --socket "$sock" --log-path "$compiler_log" "${watch_args[@]}" >"$log" 2>&1 &
   BATTERY_DAEMON_PID=$!
   BATTERY_DAEMON_OWNED=1
   # Recorded before the boot-wait below so a signal arriving mid-wait still

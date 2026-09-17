@@ -1169,6 +1169,10 @@ enum ResidentRequest {
 
 impl ResidentRequest {
     fn decode(request: &Value, table: &DataConTable) -> Result<Self, ResidentActorWorkbenchError> {
+        tracing::trace!(
+            constructor = %request_constructor(request, table),
+            "decoding resident request"
+        );
         macro_rules! try_member {
             ($variant:path, $request:ty) => {
                 match <$request as FromCore>::from_value(request, table) {

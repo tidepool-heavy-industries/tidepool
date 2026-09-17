@@ -54,6 +54,12 @@ const MAX_REQUEST_ARGS: u32 = 4096;
 const PREFLIGHT: &[u8; 8] = b"TPDPF001";
 const PREFLIGHT_RESPONSE: &[u8; 8] = b"TPDPI001";
 const REQUEST: &[u8; 8] = b"TPDRQ001";
+/// Requests one worker serves before the daemon replaces it.
+const DEFAULT_ROTATE_AFTER: u64 = 256;
+/// Worker RSS above which the daemon replaces it after a request. A warm
+/// prepared-route worker holds its module memo at roughly 2.5 GiB; a lower
+/// bound replaces it after nearly every request and discards that memo.
+const DEFAULT_RSS_CEILING_MB: u64 = 6 * 1024;
 const ACCEPTED: u8 = 1;
 const REJECTED: u8 = 0;
 
@@ -333,8 +339,8 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
         .map(read_optional)
         .transpose()
         .map_err(FrontendError::Io)?;
-    let rotate_after = config.rotate_after.unwrap_or(256);
-    let rss_ceiling_mb = config.rss_ceiling_mb.unwrap_or(2048);
+    let rotate_after = config.rotate_after.unwrap_or(DEFAULT_ROTATE_AFTER);
+    let rss_ceiling_mb = config.rss_ceiling_mb.unwrap_or(DEFAULT_RSS_CEILING_MB);
     let executable = std::env::current_exe().map_err(FrontendError::Io)?;
     let socket = OwnedSocket::bind(&config.socket)?;
     let listener = &socket.listener;
@@ -442,6 +448,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                         exit_code = response.0,
                         "compiler request finished"
                     );
+                    log_compile_timing(run_id, &compile_request, &response.2);
                     response
                 }
                 Err(error) => {
@@ -467,9 +474,18 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
             served += 1;
             let _ = write_response(&mut connection, code, &stdout, &stderr);
 
-            if served >= rotate_after
-                || worker_rss_mb(worker.child.id()).unwrap_or(0) > rss_ceiling_mb
-            {
+            let worker_rss = worker_rss_mb(worker.child.id()).unwrap_or(0);
+            if served >= rotate_after || worker_rss > rss_ceiling_mb {
+                // Replacing the worker discards its module memo; the next
+                // request recompiles every library module.
+                tracing::info!(
+                    run_id,
+                    served,
+                    rotate_after,
+                    worker_rss_mb = worker_rss,
+                    rss_ceiling_mb,
+                    "replacing compiler worker"
+                );
                 if config.persistent {
                     // Long-lived composition roots keep the protocol endpoint
                     // stable while bounding GHC state. The worker executable
@@ -506,6 +522,27 @@ fn hex(bytes: &[u8]) -> String {
         encoded.push(DIGITS[(byte & 0xf) as usize] as char);
     }
     encoded
+}
+
+/// Record the worker's compile-cost lines in the detailed daemon log (debug
+/// level: the file, never the tmux pane), so a Shoal run's compiler log and a
+/// test battery's daemon log show where each request's time went. The worker always writes one `tidepool-compile-summary` line and,
+/// under `TIDEPOOL_TIMING=1`, one `tidepool-timing` line per phase and one
+/// `tidepool-memo-miss` line per memoized module it recompiled. The
+/// prefixes mirror `tidepool_toolchain::timing` (this crate is a dependency
+/// leaf and cannot name it).
+fn log_compile_timing(run_id: &str, compile_request: &str, stderr: &[u8]) {
+    const PREFIXES: [&str; 3] = [
+        "tidepool-timing ",
+        "tidepool-compile-summary ",
+        "tidepool-memo-miss ",
+    ];
+    for line in String::from_utf8_lossy(stderr).lines() {
+        let line = line.trim();
+        if PREFIXES.iter().any(|prefix| line.starts_with(prefix)) {
+            tracing::debug!(run_id, %compile_request, line, "compiler timing");
+        }
+    }
 }
 
 fn compile_request_correlation(cwd: &Path, worker_argv: &[OsString]) -> String {
