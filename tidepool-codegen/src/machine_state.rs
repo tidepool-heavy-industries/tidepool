@@ -1880,9 +1880,7 @@ impl MachineState {
     /// the rest of this machine's life -- including when the compile that
     /// asked for it never ends up installed (see `absorb_interned_bytes`'s
     /// doc for why that leak is acceptable).
-    pub(crate) fn interned_bytes(
-        &self,
-    ) -> Arc<crate::prepared_program::static_bytes::PinnedBytes> {
+    pub(crate) fn interned_bytes(&self) -> Arc<crate::prepared_program::static_bytes::PinnedBytes> {
         Arc::clone(&self.interned_bytes.borrow())
     }
 

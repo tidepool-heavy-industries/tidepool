@@ -187,7 +187,10 @@ fn extract_verb_sig(helper: &str) -> Option<(String, String)> {
             && name
                 .chars()
                 .all(|c| c.is_alphanumeric() || c == '_' || c == '\'')
-            && name.chars().next().is_some_and(|c| c.is_lowercase() || c == '_')
+            && name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_lowercase() || c == '_')
         {
             return Some((name.to_string(), ty.to_string()));
         }
@@ -361,8 +364,7 @@ fn walk(
             arguments,
             rows,
         }) => {
-            let is_value =
-                family.module == "Tidepool.Aeson.Value" && family.occurrence == "Value";
+            let is_value = family.module == "Tidepool.Aeson.Value" && family.occurrence == "Value";
             let inside = inside_aeson_value || is_value;
             for arg in arguments {
                 walk(program, *arg, inside, visited, reasons);
@@ -378,7 +380,8 @@ fn walk(
                 reasons.push(reason.clone());
             }
         }
-        Some(TypeNode::Text | TypeNode::Integer | TypeNode::Natural | TypeNode::Scalar(_)) | None => {}
+        Some(TypeNode::Text | TypeNode::Integer | TypeNode::Natural | TypeNode::Scalar(_))
+        | None => {}
     }
 }
 

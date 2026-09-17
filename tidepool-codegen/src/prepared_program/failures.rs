@@ -230,15 +230,12 @@ mod tests {
         let payload: Arc<[u8]> = Arc::from(&b"Suite.hs:3|f\0"[..]);
         let address = payload.as_ptr() as usize;
         let machine = crate::machine_state::MachineState::new();
-        machine.absorb_interned_bytes(&Arc::new(
-            super::super::static_bytes::PinnedBytes::new(BTreeMap::new()),
-        ));
-        machine.absorb_interned_bytes(&Arc::new(
-            super::super::static_bytes::PinnedBytes::new(BTreeMap::from([(
-                b"Suite.hs:3|f".to_vec(),
-                payload,
-            )])),
-        ));
+        machine.absorb_interned_bytes(&Arc::new(super::super::static_bytes::PinnedBytes::new(
+            BTreeMap::new(),
+        )));
+        machine.absorb_interned_bytes(&Arc::new(super::super::static_bytes::PinnedBytes::new(
+            BTreeMap::from([(b"Suite.hs:3|f".to_vec(), payload)]),
+        )));
         let mut vmctx = crate::context::VMContext::new(
             std::ptr::null_mut(),
             std::ptr::null(),

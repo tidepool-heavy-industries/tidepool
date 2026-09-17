@@ -115,7 +115,12 @@ impl RootHandleLedger {
         self.handles.len()
     }
 
-    pub(crate) fn insert(&mut self, slot: RootSlot, realm: RealmId, rep: RuntimeRep) -> ValueHandle {
+    pub(crate) fn insert(
+        &mut self,
+        slot: RootSlot,
+        realm: RealmId,
+        rep: RuntimeRep,
+    ) -> ValueHandle {
         let handle = ValueHandle::fresh();
         let replaced = self
             .handles
@@ -347,7 +352,10 @@ mod tests {
         let slot = unsafe { RootSlot::new(&mut cell) };
         let lifted = ledger.insert_handle(slot, RealmId::ROOT, RuntimeRep::LiftedRef);
         let unlifted = ledger.insert_handle(slot, RealmId::ROOT, RuntimeRep::UnliftedRef);
-        assert_eq!(ledger.handle(lifted).map(|e| e.rep), Some(RuntimeRep::LiftedRef));
+        assert_eq!(
+            ledger.handle(lifted).map(|e| e.rep),
+            Some(RuntimeRep::LiftedRef)
+        );
         assert_eq!(
             ledger.handle(unlifted).map(|e| e.rep),
             Some(RuntimeRep::UnliftedRef)

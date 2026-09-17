@@ -151,7 +151,8 @@ impl BindingIndex {
     pub(super) fn on_evict_record(&mut self, record: &BindRecord) -> bool {
         self.live_modules.remove(&record.module.module_name());
         if let Some((identity, generation)) = &record.prepared {
-            self.prepared_retained.remove(&(identity.clone(), *generation));
+            self.prepared_retained
+                .remove(&(identity.clone(), *generation));
             if let Some(candidates) = self.prepared_by_identity.get_mut(identity) {
                 if let Some(pos) = candidates.iter().position(|c| c.id == record.id) {
                     candidates.swap_remove(pos);
@@ -237,7 +238,12 @@ mod tests {
         }
     }
 
-    fn prepared_record(gen: u64, raw: u64, root: RootSlot, identity: &SymbolIdentity) -> BindRecord {
+    fn prepared_record(
+        gen: u64,
+        raw: u64,
+        root: RootSlot,
+        identity: &SymbolIdentity,
+    ) -> BindRecord {
         BindRecord {
             id: SessionVarId::from_extract(raw),
             module: SessionModule::val(Generation(gen)),
@@ -407,7 +413,10 @@ mod tests {
             !index.on_evict_record(&a),
             "b still holds the shared root slot"
         );
-        assert!(index.on_evict_record(&b), "b was the shared root's last live reference");
+        assert!(
+            index.on_evict_record(&b),
+            "b was the shared root's last live reference"
+        );
         assert!(index.live_modules().is_empty());
     }
 }

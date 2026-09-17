@@ -1832,7 +1832,10 @@ fn notebook_handle_delivery(engine: EngineKind) {
     // frame as `Just` into a second `Maybe Int` site.
     let x = notebook.bind("x <- pure (Just (41 :: Int))");
     let rendered = notebook.expression("x").to_string();
-    assert!(rendered.contains('4'), "{engine:?}: x rendered as {rendered}");
+    assert!(
+        rendered.contains('4'),
+        "{engine:?}: x rendered as {rendered}"
+    );
     let y = notebook.bind("y <- pure (7 :: Int)");
     let just_id = notebook
         .last_table
@@ -1899,9 +1902,7 @@ fn notebook_handle_delivery(engine: EngineKind) {
     let outcome = notebook
         .session
         .resume_framed_custody(m_hole, &y_custody, just_id, Vec::new())
-        .unwrap_or_else(|error| {
-            panic!("{engine:?}: resuming m by framed handle failed: {error}")
-        });
+        .unwrap_or_else(|error| panic!("{engine:?}: resuming m by framed handle failed: {error}"));
     assert!(
         matches!(outcome, ResidentOutcome::Completed { .. }),
         "{engine:?}: the framed handle resume of m did not complete: {outcome:?}"

@@ -97,7 +97,10 @@ impl PinnedBytes {
     /// exactly `additions`' size regardless of how large the session's pool
     /// has grown -- the replacement for the old `merged`, which cloned the
     /// whole pool on every compile that added even one literal.
-    pub(crate) fn overlay(base: &Arc<PinnedBytes>, additions: BTreeMap<Vec<u8>, Arc<[u8]>>) -> Self {
+    pub(crate) fn overlay(
+        base: &Arc<PinnedBytes>,
+        additions: BTreeMap<Vec<u8>, Arc<[u8]>>,
+    ) -> Self {
         debug_assert!(
             base.local.by_value.is_empty(),
             "a compile's overlay base must be the machine's flat pool"
@@ -469,7 +472,8 @@ mod tests {
         let first = storage_for(b"shared");
         let second = storage_for(b"shared");
         assert_ne!(first.as_ptr(), second.as_ptr());
-        let program_a = PinnedBytes::new(BTreeMap::from([(b"shared".to_vec(), Arc::clone(&first))]));
+        let program_a =
+            PinnedBytes::new(BTreeMap::from([(b"shared".to_vec(), Arc::clone(&first))]));
         let program_b =
             PinnedBytes::new(BTreeMap::from([(b"shared".to_vec(), Arc::clone(&second))]));
 
@@ -478,9 +482,18 @@ mod tests {
         pool.absorb(&program_b);
 
         assert!(Arc::ptr_eq(pool.get(b"shared").unwrap(), &first));
-        assert_eq!(pool.logical_suffix(first.as_ptr() as usize), Some(&b"shared"[..]));
-        assert_eq!(pool.logical_suffix(second.as_ptr() as usize), Some(&b"shared"[..]));
-        assert_eq!(pool.logical_suffix(second.as_ptr() as usize + 2), Some(&b"ared"[..]));
+        assert_eq!(
+            pool.logical_suffix(first.as_ptr() as usize),
+            Some(&b"shared"[..])
+        );
+        assert_eq!(
+            pool.logical_suffix(second.as_ptr() as usize),
+            Some(&b"shared"[..])
+        );
+        assert_eq!(
+            pool.logical_suffix(second.as_ptr() as usize + 2),
+            Some(&b"ared"[..])
+        );
     }
     use std::collections::HashSet;
     use tidepool_heap::external_storage::ExternalStorageValidationError;

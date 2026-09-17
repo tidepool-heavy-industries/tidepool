@@ -606,7 +606,11 @@ fn collect_atom(atom: &Atom, bytes: &mut BTreeMap<Vec<u8>, Arc<[u8]>>, existing:
     }
 }
 
-fn collect_literal(literal: &ScalarLiteral, bytes: &mut BTreeMap<Vec<u8>, Arc<[u8]>>, existing: &PinnedBytes) {
+fn collect_literal(
+    literal: &ScalarLiteral,
+    bytes: &mut BTreeMap<Vec<u8>, Arc<[u8]>>,
+    existing: &PinnedBytes,
+) {
     if let ScalarLiteral::Bytes(value) = literal {
         pin_bytes(value, bytes, existing);
     }

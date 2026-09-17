@@ -58,7 +58,9 @@ use tidepool_repr::{CoreExpr, DataConTable};
 use tidepool_runtime::session::turn::{
     prepared_resume_decode_binding, prepared_scaffold_binding_named, with_resume_import,
 };
-use tidepool_runtime::session::{assemble_bind_module, insert_preamble_imports, place_turn_stmt, TurnCode};
+use tidepool_runtime::session::{
+    assemble_bind_module, insert_preamble_imports, place_turn_stmt, TurnCode,
+};
 pub use tidepool_runtime::YieldSites;
 use tidepool_runtime::{
     compile_targets, compile_targets_with_stable_inject, CompileError, CompiledArtifacts,
@@ -319,8 +321,7 @@ pub fn compile_turn_prepared(
     node: u64,
     round: u64,
 ) -> Result<CompiledTurn, CompileError> {
-    let mut turns =
-        compile_turns_prepared(extract_bin, source, &[target], include, node, round)?;
+    let mut turns = compile_turns_prepared(extract_bin, source, &[target], include, node, round)?;
     turns
         .remove(target)
         .ok_or_else(|| CompileError::MissingOutput(PathBuf::from(format!("{target}.cbor"))))
