@@ -30,12 +30,25 @@ impl ResidentInteractivePolicy {
         Self::with_client(ResidentToolClient::local(actor))
     }
 
+    /// `tools` is the caller's custom set. A caller that reprojects an
+    /// already-built policy's own `tools()` (native-process re-registration
+    /// filters this policy's list down to its non-Haskell tools, then wraps
+    /// it again) hands back a list that already carries the three reserved
+    /// declarations below; dropping them here keeps this constructor
+    /// idempotent instead of requiring every caller to know and repeat the
+    /// exact reserved-name set.
     pub fn local_with_tools(actor: crate::LocalActorRef, tools: Vec<HostedTool>) -> Self {
+        let custom = tools.into_iter().filter(|tool| {
+            !matches!(
+                tool.name(),
+                HASKELL_TOOL | crate::lookup_tool::LOOKUP_TOOL | crate::status_tool::STATUS_TOOL
+            )
+        });
         Self {
             tools: std::iter::once(haskell_tool_declaration())
                 .chain(std::iter::once(crate::lookup_tool::declaration()))
                 .chain(std::iter::once(crate::status_tool::declaration()))
-                .chain(tools)
+                .chain(custom)
                 .collect::<Vec<_>>()
                 .into(),
             client: ResidentToolClient::local(actor),
