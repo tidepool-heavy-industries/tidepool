@@ -356,7 +356,7 @@ impl Drop for CustodyTransfer {
 }
 
 /// A parked turn's own completion obligation, carried on the token
-/// [`ResidentSession::run`]/[`ResidentSession::run_bind`]/[`ResidentSession::run_rooted_entry`]
+/// [`ResidentSession::run_with_sites`]/[`ResidentSession::run_bind_with_sites`]/[`ResidentSession::run_rooted_entry`]
 /// hand back on suspension: a [`ParkKind::Plain`] turn's hole needs nothing
 /// extra to resume; a [`ParkKind::Binding`] turn's hole must materialize its
 /// binder into the value plane on completion; and a [`ParkKind::Project`]
@@ -930,12 +930,44 @@ where
         nursery_size: usize,
         lib: Option<SessionLib>,
     ) -> Result<Self, JitError> {
-        let engine = EngineKind::from_env();
+        Self::bootstrap_on(
+            EngineKind::from_env(),
+            expr,
+            table,
+            handlers,
+            captured,
+            include,
+            nursery_size,
+            lib,
+        )
+    }
+
+    /// [`Self::bootstrap`] on an explicit engine route, for a caller that must
+    /// pin its route rather than read the ambient default — this crate's own
+    /// Core-JIT-internals test suites (`resident_session.rs`,
+    /// `green_thread_representation.rs`, `tenure_resume_gc_repro.rs`), which
+    /// drive `compile_session`/`add_function`/suspend-resume mechanics the
+    /// prepared engine does not share.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bootstrap_on(
+        engine: EngineKind,
+        expr: &CoreExpr,
+        table: DataConTable,
+        handlers: H,
+        captured: O,
+        include: Vec<PathBuf>,
+        nursery_size: usize,
+        lib: Option<SessionLib>,
+    ) -> Result<Self, JitError> {
         let mut core = PersistentSession::new(lib, nursery_size, engine);
         // A prepared-route machine comes up from its first turn's prepared
-        // program; only the table seed applies here.
+        // program; only the table seed applies here. The caller supplied a
+        // real first-turn seed, so this session is reusable even though its
+        // machine will not exist until that first prepared install.
         if engine == EngineKind::Core {
             core.bootstrap_if_needed(expr, &table)?;
+        } else {
+            core.mark_ready();
         }
         core.seed_session_table(table);
         Ok(ResidentSession {
@@ -956,8 +988,9 @@ where
     /// counterpart to [`Self::bootstrap`]. Same arguments MINUS `expr`/`table`:
     /// there is no seed program to compile, so construction cannot fail and
     /// pays no GHC extract compile. The machine comes up on the first REAL
-    /// turn ([`Self::run`]/[`Self::run_bind`]/[`Self::run_child`]/
-    /// [`Self::run_child_pure`], via `PersistentSession::bootstrap_if_needed`
+    /// turn ([`Self::run_with_sites`]/[`Self::run_bind_with_sites`]/
+    /// [`Self::run_child`]/[`Self::run_child_pure`], via
+    /// `PersistentSession::bootstrap_if_needed`
     /// immediately before that turn's fragment is added) — mirrors the repl's
     /// bootstrap-from-first-real-compile (`tidepool-repl/src/session.rs`).
     #[allow(clippy::too_many_arguments)]
@@ -1801,8 +1834,11 @@ where
 
     /// Whether the resident machine has been bootstrapped yet. `false` from
     /// [`Self::unbootstrapped`] until the session's first real turn brings the
-    /// machine up (`run`/`run_bind`/`run_child`/`run_child_pure`); always
-    /// `true` from [`Self::bootstrap`].
+    /// machine up (`run_with_sites`/`run_bind_with_sites`/`run_child`/
+    /// `run_child_pure`); always `true` from [`Self::bootstrap`] on Core, and
+    /// on the prepared route from [`Self::bootstrap`]'s recorded readiness
+    /// even before the first prepared install (see
+    /// `PersistentSession::mark_ready`).
     pub fn is_bootstrapped(&self) -> bool {
         self.core.is_bootstrapped()
     }
@@ -2041,8 +2077,8 @@ where
     /// the first bind materializes AND this fragment references one, so a
     /// value-plane-free session behaves exactly as before.
     ///
-    /// [`Self::run`] and [`Self::run_bind`] call this on their way to
-    /// `add_fragment_session`, so it is the seeding path rather than a
+    /// [`Self::run_with_sites`] and [`Self::run_bind_with_sites`] call this on
+    /// their way to `add_fragment_session`, so it is the seeding path rather than a
     /// reconstruction of it — a test asserting on the returned env is
     /// asserting on the env a fragment really compiles against, and the
     /// VarId-keyed isolation property (only referenced `SessionVarId`s, never
@@ -2076,15 +2112,6 @@ where
     ///
     /// `table` is this turn's constructor metadata; it is merged into the
     /// session table (later turns are a subset, so the merge is monotone).
-    pub fn run(
-        &mut self,
-        name_hint: &str,
-        expr: &CoreExpr,
-        table: &DataConTable,
-    ) -> Result<ResidentOutcome, ResidentError> {
-        self.run_with_sites(name_hint, TurnCode::core(expr, table, &[]))
-    }
-
     pub fn run_with_sites(
         &mut self,
         name_hint: &str,
@@ -2456,17 +2483,6 @@ where
     /// SUSPENDS here (no value yet); the returned [`ResidentHole::Binding`]
     /// carries `binder`/`gen` forward, so the eventual [`Self::resume`] on
     /// that hole materializes it without the caller re-supplying either.
-    pub fn run_bind(
-        &mut self,
-        name_hint: &str,
-        expr: &CoreExpr,
-        table: &DataConTable,
-        binder: &BoundBinder,
-        gen: Generation,
-    ) -> Result<ResidentOutcome, ResidentError> {
-        self.run_bind_with_sites(name_hint, TurnCode::core(expr, table, &[]), binder, gen)
-    }
-
     pub fn run_bind_with_sites(
         &mut self,
         name_hint: &str,
@@ -2822,10 +2838,11 @@ where
         self.core
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
-        // Lazy boot (see `run`'s comment). A child run requires a parked
-        // parent, so in practice the machine is always already live by the
-        // time this is reachable — kept for symmetry with `run`/`run_bind`
-        // and because `bootstrap_if_needed` is a no-op once live.
+        // Lazy boot (see `run_with_sites`'s comment). A child run requires a
+        // parked parent, so in practice the machine is always already live by
+        // the time this is reachable — kept for symmetry with
+        // `run_with_sites`/`run_bind_with_sites` and because
+        // `bootstrap_if_needed` is a no-op once live.
         self.core
             .bootstrap_if_needed(expr, table)
             .map_err(ResidentError::Bootstrap)?;

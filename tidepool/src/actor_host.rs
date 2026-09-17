@@ -82,9 +82,8 @@ use tidepool_node::{
 };
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::{
-    insert_preamble_imports, resident_workbench_templates, run_turn, EngineKind, PreparedTurn,
-    ResidentSession, ResidentSessionState, SessionLib, TurnRequest as HaskellTurnRequest,
-    TurnResult,
+    insert_preamble_imports, resident_workbench_templates, run_turn, PreparedTurn, ResidentSession,
+    ResidentSessionState, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tidepool_worktree::{
@@ -1668,8 +1667,7 @@ fn compile_driver(
         target: None,
         // The driver is the session's first turn, so there is nothing
         // retained to link against yet.
-        prepared: (EngineKind::from_env() == EngineKind::Prepared)
-            .then_some(PreparedTurn { retained: &[] }),
+        prepared: PreparedTurn::first_turn(),
     })
     .map_err(render_root_compile_failure)?
     {

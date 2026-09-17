@@ -440,7 +440,7 @@ mod actual_seal {
     };
     use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
     use tidepool_runtime::session::{
-        insert_preamble_imports, resident_workbench_templates, run_turn, ModuleEnv,
+        insert_preamble_imports, resident_workbench_templates, run_turn, ModuleEnv, PreparedTurn,
         ResidentSession, SessionLib, TurnRequest, TurnResult,
     };
     use tidepool_testing::eval_harness;
@@ -566,7 +566,7 @@ mod actual_seal {
             gen,
             verdict: None,
             target: None,
-            prepared: None,
+            prepared: PreparedTurn::first_turn(),
         })
         .unwrap()
         {

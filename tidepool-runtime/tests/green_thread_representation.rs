@@ -27,7 +27,9 @@ use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
 use tidepool_repr::types::*;
 use tidepool_repr::{CoreExpr, Literal, TreeBuilder};
-use tidepool_runtime::session::{OutputSink, ResidentHole, ResidentOutcome, ResidentSession};
+use tidepool_runtime::session::{
+    EngineKind, OutputSink, ResidentHole, ResidentOutcome, ResidentSession, TurnCode,
+};
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 
 use tidepool_codegen::suspension::RealmId;
@@ -295,8 +297,14 @@ impl DispatchEffect<TestSink> for NoDispatch {
     }
 }
 
+// This suite hand-builds raw `CoreExpr` frame trees (`build_operand_suspend`,
+// `build_wrap_suspend*`) exercising the Core JIT machine's root-entry green-
+// thread mechanics directly — there is no GHC compile step and so no
+// prepared-STG program could ever exist for these fragments. Pinned to
+// `EngineKind::Core` explicitly rather than reading the ambient default.
 fn fresh_session() -> ResidentSession<NoDispatch, TestSink> {
-    ResidentSession::unbootstrapped(
+    ResidentSession::unbootstrapped_on(
+        EngineKind::Core,
         NoDispatch,
         TestSink::default(),
         Vec::new(),
@@ -313,7 +321,10 @@ fn capture_operand(
     operand: RootedOperand,
 ) -> tidepool_runtime::session::RootCustody {
     let outcome = session
-        .run(label, &build_operand_suspend(tag, operand), table)
+        .run_with_sites(
+            label,
+            TurnCode::core(&build_operand_suspend(tag, operand), table, &[]),
+        )
         .unwrap_or_else(|error| panic!("{label}: operand suspension failed: {error}"));
     let hole = match outcome {
         ResidentOutcome::Suspended { hole, .. } => hole,
@@ -483,7 +494,7 @@ fn spawn_thread(
 ) -> ResidentHole {
     let expr = build_wrap_suspend(wrap_tag, dummy, body_tag);
     let outcome = session
-        .run(label, &expr, table)
+        .run_with_sites(label, TurnCode::core(&expr, table, &[]))
         .unwrap_or_else(|e| panic!("{label}: wrap suspend run failed: {e}"));
     let wrap_hole = match outcome {
         ResidentOutcome::Suspended { hole, .. } => hole,
@@ -747,7 +758,7 @@ fn a_green_thread_can_fork_another_green_thread() {
     // Level 0: the scratch spawner, exactly as the flat case.
     let expr = build_nested_wrap_suspend(100, 1, 101, 2, 200, 77);
     let outcome = session
-        .run("nested", &expr, &table)
+        .run_with_sites("nested", TurnCode::core(&expr, &table, &[]))
         .expect("wrap suspend runs");
     let wrap_hole = match outcome {
         ResidentOutcome::Suspended { hole, .. } => hole,

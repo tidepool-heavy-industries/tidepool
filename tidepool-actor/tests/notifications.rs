@@ -1,6 +1,7 @@
 //! Public one-way facade compilation, including opaque receipt construction.
 use tidepool_runtime::session::{
-    insert_preamble_imports, resident_workbench_templates, run_turn, TurnRequest, TurnResult,
+    insert_preamble_imports, resident_workbench_templates, run_turn, PreparedTurn, TurnRequest,
+    TurnResult,
 };
 use tidepool_testing::eval_harness;
 
@@ -30,7 +31,7 @@ fn notification_facade_compiles_and_receipt_constructor_is_private() {
             gen,
             verdict: None,
             target: None,
-            prepared: None,
+            prepared: PreparedTurn::first_turn(),
         })
     };
     assert!(matches!(
@@ -108,7 +109,7 @@ async fn notification_interpreter_denies_role_and_stale_target_then_continues() 
         gen,
         verdict: None,
         target: None,
-        prepared: None,
+        prepared: PreparedTurn::first_turn(),
     })
     .unwrap()
     {

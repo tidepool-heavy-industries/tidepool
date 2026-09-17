@@ -333,6 +333,15 @@ pub struct PersistentSession {
     last_bound_root: LinearRootStash,
     /// JIT nursery size for the resident machine.
     nursery_size: usize,
+    /// Set once, by [`Self::mark_ready`], when a caller supplied a real
+    /// first-turn seed on the prepared route even though `machine` stays
+    /// `None` until that turn's prepared program installs
+    /// ([`Self::install_prepared`]). Never reset. [`Self::is_bootstrapped`]
+    /// folds this in so a prepared session built with real intent
+    /// (`ResidentSession::bootstrap`) reports reusable, not uninitialized,
+    /// before its machine exists — matching Core, where `machine.is_some()`
+    /// alone already carries that fact.
+    ready: bool,
 }
 
 /// The committed fact from moving one name to the materialized value plane.
@@ -381,6 +390,7 @@ impl PersistentSession {
             active_continuation: None,
             last_bound_root: LinearRootStash(None),
             nursery_size,
+            ready: false,
         }
     }
 
@@ -492,9 +502,23 @@ impl PersistentSession {
         self.effect_policy = effect_policy;
         self.live_payload = live_payload;
     }
-    /// Whether the resident machine has been bootstrapped (first turn run).
+    /// Whether the session is reusable without a fresh first-turn bootstrap:
+    /// `machine.is_some()` on Core, where that alone is the fact; on the
+    /// prepared route, also true once [`Self::mark_ready`] recorded a real
+    /// first-turn seed, even before the first prepared install actually
+    /// creates `machine`.
     pub fn is_bootstrapped(&self) -> bool {
-        self.machine.is_some()
+        self.machine.is_some() || self.ready
+    }
+
+    /// Record that a caller supplied a real first-turn seed
+    /// (`ResidentSession::bootstrap`) on the prepared route, where `machine`
+    /// stays `None` until the first prepared program installs
+    /// ([`Self::install_prepared`]). [`Self::is_bootstrapped`] folds this in
+    /// so such a session reports reusable rather than uninitialized in the
+    /// gap before that install. Never reset.
+    pub(crate) fn mark_ready(&mut self) {
+        self.ready = true;
     }
     /// The route this session runs on.
     #[must_use]

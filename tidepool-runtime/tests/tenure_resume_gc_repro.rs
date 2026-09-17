@@ -61,7 +61,9 @@ use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
 use tidepool_repr::types::*;
 use tidepool_repr::{CoreExpr, Literal, TreeBuilder};
-use tidepool_runtime::session::{OutputSink, ResidentOutcome, ResidentSession};
+use tidepool_runtime::session::{
+    EngineKind, OutputSink, ResidentOutcome, ResidentSession, TurnCode,
+};
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 
 const VAL_ID: DataConId = DataConId(1);
@@ -396,8 +398,14 @@ impl DispatchEffect<TestSink> for NoDispatch {
     }
 }
 
+// This suite hand-builds raw `CoreExpr` frame trees (`build_wrap_suspend_*`)
+// and drives them straight through the Core JIT machine's GC tenure/resume
+// mechanics — there is no GHC compile step and so no prepared-STG program
+// could ever exist for these fragments. Every session here is pinned to
+// `EngineKind::Core` explicitly rather than reading the ambient default.
 fn fresh_session() -> ResidentSession<NoDispatch, TestSink> {
-    ResidentSession::unbootstrapped(
+    ResidentSession::unbootstrapped_on(
+        EngineKind::Core,
         NoDispatch,
         TestSink::default(),
         Vec::new(),
@@ -416,7 +424,7 @@ fn shared_free_variable_survives_forced_gc_between_tenure_and_resume() {
 
     let expr = build_wrap_suspend_shared(100, 1, 200, 11);
     let outcome = session
-        .run("wrap", &expr, &table)
+        .run_with_sites("wrap", TurnCode::core(&expr, &table, &[]))
         .expect("wrap suspend runs");
     let wrap_hole = match outcome {
         ResidentOutcome::Suspended { hole, .. } => hole,
@@ -488,7 +496,7 @@ fn shared_closure_applies_correctly_after_forced_gc_between_tenure_and_resume() 
 
     let expr = build_wrap_suspend_shared_closure(100, 1, 200, 11);
     let outcome = session
-        .run("wrap", &expr, &table)
+        .run_with_sites("wrap", TurnCode::core(&expr, &table, &[]))
         .expect("wrap suspend runs");
     let wrap_hole = match outcome {
         ResidentOutcome::Suspended { hole, .. } => hole,
@@ -560,7 +568,7 @@ fn shared_closure_survives_when_child_thread_runs_before_spawner_resumes() {
 
     let expr = build_wrap_suspend_shared_closure(100, 1, 200, 11);
     let outcome = session
-        .run("wrap", &expr, &table)
+        .run_with_sites("wrap", TurnCode::core(&expr, &table, &[]))
         .expect("wrap suspend runs");
     let wrap_hole = match outcome {
         ResidentOutcome::Suspended { hole, .. } => hole,
@@ -645,7 +653,8 @@ impl DispatchEffect<TestSink> for HandledThenSuspend {
 }
 
 fn handled_session() -> ResidentSession<HandledThenSuspend, TestSink> {
-    ResidentSession::unbootstrapped(
+    ResidentSession::unbootstrapped_on(
+        EngineKind::Core,
         HandledThenSuspend,
         TestSink::default(),
         Vec::new(),
@@ -827,7 +836,7 @@ fn handled_dependencies_survive_gc_between_tenure_and_resume() {
 
     let expr = build_wrap_suspend_handled_deps(100, 1, 200);
     let outcome = session
-        .run("wrap", &expr, &table)
+        .run_with_sites("wrap", TurnCode::core(&expr, &table, &[]))
         .expect("wrap suspend runs");
     let wrap_hole = match outcome {
         ResidentOutcome::Suspended { hole, .. } => hole,
@@ -1048,7 +1057,7 @@ fn handled_dependencies_survive_when_child_completes_synchronously() {
 
     let expr = build_wrap_suspend_sync_child(100, 1);
     let outcome = session
-        .run("wrap", &expr, &table)
+        .run_with_sites("wrap", TurnCode::core(&expr, &table, &[]))
         .expect("wrap suspend runs");
     let wrap_hole = match outcome {
         ResidentOutcome::Suspended { hole, .. } => hole,
@@ -1245,7 +1254,7 @@ fn shared_unforced_thunk_survives_forced_gc_between_tenure_and_resume() {
 
     let expr = build_wrap_suspend_shared_thunk(100, 1, 200, 11);
     let outcome = session
-        .run("wrap", &expr, &table)
+        .run_with_sites("wrap", TurnCode::core(&expr, &table, &[]))
         .expect("wrap suspend runs");
     let wrap_hole = match outcome {
         ResidentOutcome::Suspended { hole, .. } => hole,
@@ -1514,7 +1523,7 @@ fn event_shaped_capture_survives_tenure_and_resume() {
 
     let expr = build_wrap_suspend_with_event_capture(100, 1, 200);
     let outcome = session
-        .run("wrap", &expr, &table)
+        .run_with_sites("wrap", TurnCode::core(&expr, &table, &[]))
         .expect("wrap suspend runs");
     let wrap_hole = match outcome {
         ResidentOutcome::Suspended { hole, .. } => hole,
@@ -1572,7 +1581,8 @@ fn event_shaped_capture_survives_tenure_and_resume() {
 }
 
 fn tiny_handled_session() -> ResidentSession<HandledThenSuspend, TestSink> {
-    ResidentSession::unbootstrapped(
+    ResidentSession::unbootstrapped_on(
+        EngineKind::Core,
         HandledThenSuspend,
         TestSink::default(),
         Vec::new(),
@@ -1598,7 +1608,7 @@ fn event_shaped_capture_survives_real_inflight_gc_with_tiny_nursery() {
 
     let expr = build_wrap_suspend_with_event_capture(100, 1, 200);
     let outcome = session
-        .run("wrap", &expr, &table)
+        .run_with_sites("wrap", TurnCode::core(&expr, &table, &[]))
         .unwrap_or_else(|e| panic!("wrap suspend run failed: {e}"));
     let wrap_hole = match outcome {
         ResidentOutcome::Suspended { hole, .. } => hole,
@@ -1689,7 +1699,8 @@ impl DispatchEffect<TestSink> for HandledEitherThenSuspend {
 }
 
 fn handled_either_session() -> ResidentSession<HandledEitherThenSuspend, TestSink> {
-    ResidentSession::unbootstrapped(
+    ResidentSession::unbootstrapped_on(
+        EngineKind::Core,
         HandledEitherThenSuspend,
         TestSink::default(),
         Vec::new(),
@@ -1902,7 +1913,7 @@ fn event_capture_survives_via_either_unwrap_binding() {
 
     let expr = build_wrap_suspend_event_via_either_unwrap(100, 1, 200);
     let outcome = session
-        .run("wrap", &expr, &table)
+        .run_with_sites("wrap", TurnCode::core(&expr, &table, &[]))
         .unwrap_or_else(|e| panic!("wrap suspend run failed: {e}"));
     let wrap_hole = match outcome {
         ResidentOutcome::Suspended { hole, .. } => hole,
@@ -2106,7 +2117,7 @@ fn bare_list_capture_survives_tenure_and_resume() {
 
     let expr = build_wrap_suspend_with_bare_list_capture(100, 1, 200);
     let outcome = session
-        .run("wrap", &expr, &table)
+        .run_with_sites("wrap", TurnCode::core(&expr, &table, &[]))
         .unwrap_or_else(|e| panic!("wrap suspend run failed: {e}"));
     let wrap_hole = match outcome {
         ResidentOutcome::Suspended { hole, .. } => hole,
@@ -2366,7 +2377,7 @@ fn undceable_list_capture_survives_tenure_and_resume() {
 
     let expr = build_wrap_suspend_with_undce_able_list_capture(100, 1, 200);
     let outcome = session
-        .run("wrap", &expr, &table)
+        .run_with_sites("wrap", TurnCode::core(&expr, &table, &[]))
         .unwrap_or_else(|e| panic!("wrap suspend run failed: {e}"));
     let wrap_hole = match outcome {
         ResidentOutcome::Suspended { hole, .. } => hole,
@@ -2632,7 +2643,7 @@ fn thunked_app_capture_survives_tenure_and_resume() {
 
     let expr = build_wrap_suspend_with_thunked_app_capture(100, 1, 200);
     let outcome = session
-        .run("wrap", &expr, &table)
+        .run_with_sites("wrap", TurnCode::core(&expr, &table, &[]))
         .unwrap_or_else(|e| panic!("wrap suspend run failed: {e}"));
     let wrap_hole = match outcome {
         ResidentOutcome::Suspended { hole, .. } => hole,
@@ -2704,7 +2715,7 @@ fn shared_free_variable_stale_immediately_after_tenure_with_no_intervening_gc() 
 
     let expr = build_wrap_suspend_shared(100, 1, 200, 11);
     let outcome = session
-        .run("wrap", &expr, &table)
+        .run_with_sites("wrap", TurnCode::core(&expr, &table, &[]))
         .expect("wrap suspend runs");
     let wrap_hole = match outcome {
         ResidentOutcome::Suspended { hole, .. } => hole,

@@ -31,8 +31,9 @@ use tidepool_effect::error::EffectError;
 use tidepool_effect::Response;
 use tidepool_repr::SessionVarId;
 use tidepool_runtime::session::{
-    run_turn, BoundBinder, CompiledTurn, ResidentOutcome, ResidentSession, TemplateSelector,
-    TurnClassification, TurnKind, TurnRequest, TurnResult, TurnTemplate,
+    prepared_scaffold_binding, resume_import_targets, run_turn, BoundBinder, CompiledTurn,
+    PreparedTurn, ResidentOutcome, ResidentSession, TemplateSelector, TurnClassification, TurnKind,
+    TurnRequest, TurnResult, TurnTemplate,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tidepool_testing::eval_harness::{self, mock, EvalHarness};
@@ -91,17 +92,39 @@ fn compile_turn(
     (compiled.expr, compiled.table)
 }
 
-/// [`mock::MCP_PREAMBLE`] with extra `import` lines spliced right before its
-/// `default (Int, Text)` decl (every Haskell import must precede all other
-/// top-level declarations), followed by `body`.
+/// [`mock::MCP_PREAMBLE`] with extra `import` lines (the caller's own, plus
+/// the resume-scaffold aliases [`prepared_scaffold_binding`]'s output needs —
+/// [`resume_import_targets`]) spliced right before its `default (Int, Text)`
+/// decl (every Haskell import must precede all other top-level
+/// declarations), followed by `body` and the settled scaffold `body`'s
+/// `__result` needs for a prepared compile.
+///
+/// This suite's fixture templates (`bind_body.hs`/`read_body.hs`) are
+/// hand-rolled directly from `MCP_PREAMBLE`, bypassing the production
+/// template builders ([`tidepool_runtime::session::assemble_bind_module`]/
+/// `assemble_expression_module`, and their own `with_resume_import`) that
+/// every OTHER caller compiles through — which is why they never picked up
+/// the settled-scaffold lines those builders append unconditionally, and why
+/// this can't just call `with_resume_import` (its own splicing looks for
+/// production's `default (Int, Double, Text)` marker, which `MCP_PREAMBLE`
+/// does not carry, and silently falls back to appending past the module's
+/// own declarations). A prepared compile needs the scaffold lines
+/// (`__prepared`/`__resume`/`__decodeValue`/…) to exist in the SAME module:
+/// their absence fails extraction with `MissingPreparedEntry`, not a
+/// suspend/resume behavior difference.
 fn mcp_module_with_imports(imports: &[String], body: &str) -> String {
     let marker = "default (Int, Text)";
     let idx = mock::MCP_PREAMBLE
         .find(marker)
         .expect("mock::MCP_PREAMBLE carries the `default (Int, Text)` marker");
-    let mut out = String::new();
+    let mut out = String::from("{-# LANGUAGE MagicHash #-}\n");
     out.push_str(&mock::MCP_PREAMBLE[..idx]);
     for m in imports {
+        out.push_str("import ");
+        out.push_str(m);
+        out.push('\n');
+    }
+    for m in resume_import_targets().lines() {
         out.push_str("import ");
         out.push_str(m);
         out.push('\n');
@@ -110,6 +133,7 @@ fn mcp_module_with_imports(imports: &[String], body: &str) -> String {
     out.push('\n');
     out.push_str(body);
     out.push('\n');
+    out.push_str(&prepared_scaffold_binding("__result"));
     out
 }
 
@@ -118,10 +142,11 @@ fn compile_bind_turn(
     include: &[&Path],
     session_root: &Path,
     gen: u64,
+    prepared: Option<PreparedTurn<'_>>,
 ) -> (BoundBinder, CompiledTurn) {
     let template = TurnTemplate {
         kind: TemplateSelector::Bind,
-        source: mock::mcp_module(include_str!("realm_varid_pinning/bind_body.hs")),
+        source: mcp_module_with_imports(&[], include_str!("realm_varid_pinning/bind_body.hs")),
     };
     let turn_text = format!("x <- pure ({literal} :: Int)");
     let result = run_turn(TurnRequest {
@@ -137,9 +162,9 @@ fn compile_bind_turn(
             items: Vec::new(),
         }),
         target: None,
-        prepared: None,
+        prepared,
     })
-    .unwrap_or_else(|error| panic!("compile bind turn for {literal}: {error}"));
+    .unwrap_or_else(|error| panic!("compile bind turn for {literal}: {error}\nDEBUG: {error:#?}"));
     match result {
         TurnResult::Bind {
             mut bound,
@@ -180,15 +205,16 @@ fn second_scope_fragment_env_excludes_first_scopes_session_var_id() {
 
     // ---- scope A: bind x = 41, a real session-aware bind turn ----
     let gen_a = session.val_gen().next();
-    let (binder_a, compiled_a) = compile_bind_turn(41, &base_include, session_root.path(), gen_a.0);
+    let retained_a = session.prepared_retained();
+    let (binder_a, compiled_a) = compile_bind_turn(
+        41,
+        &base_include,
+        session_root.path(),
+        gen_a.0,
+        session.prepared_turn_request(&retained_a),
+    );
     match session
-        .run_bind(
-            "bind_a",
-            &compiled_a.expr,
-            &compiled_a.table,
-            &binder_a,
-            gen_a,
-        )
+        .run_bind_with_sites("bind_a", compiled_a.code(), &binder_a, gen_a)
         .expect("run bind turn (scope A)")
     {
         ResidentOutcome::Completed { .. } => {}
@@ -202,15 +228,16 @@ fn second_scope_fragment_env_excludes_first_scopes_session_var_id() {
     // name with scope A (both live in the SAME session `BindingTable`, as two
     // realms sharing one table would) ----
     let gen_b = session.val_gen().next();
-    let (binder_b, compiled_b) = compile_bind_turn(99, &base_include, session_root.path(), gen_b.0);
+    let retained_b = session.prepared_retained();
+    let (binder_b, compiled_b) = compile_bind_turn(
+        99,
+        &base_include,
+        session_root.path(),
+        gen_b.0,
+        session.prepared_turn_request(&retained_b),
+    );
     match session
-        .run_bind(
-            "bind_b",
-            &compiled_b.expr,
-            &compiled_b.table,
-            &binder_b,
-            gen_b,
-        )
+        .run_bind_with_sites("bind_b", compiled_b.code(), &binder_b, gen_b)
         .expect("run bind turn (scope B)")
     {
         ResidentOutcome::Completed { .. } => {}
@@ -246,6 +273,7 @@ fn second_scope_fragment_env_excludes_first_scopes_session_var_id() {
             include_str!("realm_varid_pinning/read_body.hs"),
         ),
     };
+    let retained_read = session.prepared_retained();
     let read_result = run_turn(TurnRequest {
         turn_text: "pure x",
         templates: &[read_template],
@@ -259,7 +287,7 @@ fn second_scope_fragment_env_excludes_first_scopes_session_var_id() {
             items: Vec::new(),
         }),
         target: None,
-        prepared: None,
+        prepared: session.prepared_turn_request(&retained_read),
     })
     .expect("compile read turn");
     let compiled_read = match read_result {
@@ -285,7 +313,7 @@ fn second_scope_fragment_env_excludes_first_scopes_session_var_id() {
     // not scope A's (41) or garbage — proves the narrowed env still lets the
     // Var-miss resolve correctly, not just that it's narrow.
     match session
-        .run("read_x", &compiled_read.expr, &compiled_read.table)
+        .run_with_sites("read_x", compiled_read.code())
         .expect("run read turn")
     {
         ResidentOutcome::Completed { result, .. } => {

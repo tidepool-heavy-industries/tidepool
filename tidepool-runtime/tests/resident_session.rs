@@ -31,8 +31,8 @@ use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy, Response};
 use tidepool_repr::{Generation, Literal, PrincipalId, SessionModule};
 use tidepool_runtime::session::TurnCode;
 use tidepool_runtime::session::{
-    BoundBinder, ResidentError, ResidentOutcome, ResidentSession, SessionError, SessionRunContext,
-    ValueTier,
+    BoundBinder, EngineKind, ResidentError, ResidentOutcome, ResidentSession, SessionError,
+    SessionRunContext, ValueTier,
 };
 use tidepool_runtime::{value_to_json, DEFAULT_NURSERY_SIZE};
 
@@ -106,12 +106,18 @@ fn compile_turn(
 /// `boot_body`. Handlers are the mock stack (its `MockKv` HashMap is the
 /// resident cross-turn accumulator), except that nominal `Ask` is deliberately
 /// left for the suspension boundary.
+///
+/// Pinned to `EngineKind::Core`: this whole suite (see the module doc) drives
+/// the Core JIT machine's own `compile_session`/`add_function`/
+/// suspend-resume mechanics directly (via `TurnCode::core`, with no prepared
+/// program), which the prepared/STG engine does not share.
 fn bootstrap(
     harness: &EvalHarness,
     boot_body: &str,
 ) -> ResidentSession<AsSink<impl DispatchEffect<()> + Send>, TestSink> {
     let (expr, table) = compile_turn(harness, boot_body);
-    let mut session = ResidentSession::bootstrap(
+    let mut session = ResidentSession::bootstrap_on(
+        EngineKind::Core,
         &expr,
         table,
         AsSink(mock::min_stack()),
@@ -170,7 +176,7 @@ fn multi_turn_accumulates_across_suspend_resume() {
            pure (0 :: Int)",
     );
     let outcome = session
-        .run("turn1", &t1_expr, &t1_table)
+        .run_with_sites("turn1", TurnCode::core(&t1_expr, &t1_table, &[]))
         .expect("turn 1 runs");
 
     let hole = match outcome {
@@ -198,7 +204,10 @@ fn multi_turn_accumulates_across_suspend_resume() {
     // and rooted. (This inverts the old reject-while-suspended pin.)
     let (intrude_expr, intrude_table) =
         compile_turn(&harness, "result :: M Int\nresult = pure (9 :: Int)");
-    match session.run("intrude", &intrude_expr, &intrude_table) {
+    match session.run_with_sites(
+        "intrude",
+        TurnCode::core(&intrude_expr, &intrude_table, &[]),
+    ) {
         Ok(ResidentOutcome::Completed { result, .. }) => {
             assert_eq!(result.to_json(), serde_json::json!(9));
         }
@@ -261,7 +270,7 @@ fn multi_turn_accumulates_across_suspend_resume() {
            pure (toJSON [b, a])",
     );
     let outcome = session
-        .run("turn2", &t2_expr, &t2_table)
+        .run_with_sites("turn2", TurnCode::core(&t2_expr, &t2_table, &[]))
         .expect("turn 2 runs on the reused machine");
 
     match outcome {
@@ -293,7 +302,8 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
     // Small nursery so a child's allocation forces a real collection with the
     // parent's continuation stowed and GC-rooted.
     let (expr, table) = compile_turn(&harness, "result :: M Int\nresult = pure (0 :: Int)");
-    let mut session = ResidentSession::bootstrap(
+    let mut session = ResidentSession::bootstrap_on(
+        EngineKind::Core,
         &expr,
         table,
         AsSink(mock::min_stack()),
@@ -314,7 +324,10 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
            send (KvSet \"answered\" n)\n  \
            pure (0 :: Int)",
     );
-    let hole = match session.run("t1", &t1_expr, &t1_table).expect("turn 1 runs") {
+    let hole = match session
+        .run_with_sites("t1", TurnCode::core(&t1_expr, &t1_table, &[]))
+        .expect("turn 1 runs")
+    {
         ResidentOutcome::Suspended { hole, .. } => hole,
         ResidentOutcome::Completed { .. } => panic!("turn 1 should suspend at ask"),
         ResidentOutcome::BindingsCommitted { .. } => {
@@ -360,7 +373,10 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
     // root, not a fragile slot).
     let (intrude_expr, intrude_table) =
         compile_turn(&harness, "result :: M Int\nresult = pure (1 :: Int)");
-    match session.run("intrude", &intrude_expr, &intrude_table) {
+    match session.run_with_sites(
+        "intrude",
+        TurnCode::core(&intrude_expr, &intrude_table, &[]),
+    ) {
         Ok(ResidentOutcome::Completed { result, .. }) => {
             assert_eq!(result.to_json(), serde_json::json!(1));
         }
@@ -399,7 +415,7 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
            pure (toJSON [p, a])",
     );
     match session
-        .run("verify", &verify_expr, &verify_table)
+        .run_with_sites("verify", TurnCode::core(&verify_expr, &verify_table, &[]))
         .expect("verify turn")
     {
         ResidentOutcome::Completed { result, .. } => {
@@ -446,7 +462,7 @@ fn plain_turns_reuse_the_machine() {
         let body = format!("result :: M Int\nresult = pure ({expected} :: Int)");
         let (expr, table) = compile_turn(&harness, &body);
         match session
-            .run("plain", &expr, &table)
+            .run_with_sites("plain", TurnCode::core(&expr, &table, &[]))
             .expect("plain turn runs")
         {
             ResidentOutcome::Completed { result, .. } => {
@@ -482,7 +498,12 @@ fn resumed_bind_keeps_its_originating_resource_and_lexical_scopes() {
         "result :: M Int\nresult = do\n  _ <- send (Ask \"first\")\n  _ <- send (Ask \"second\")\n  pure (41 :: Int)",
     );
     let first_hole = match session
-        .run_bind("scoped_bind", &expr, &table, &bound, generation)
+        .run_bind_with_sites(
+            "scoped_bind",
+            TurnCode::core(&expr, &table, &[]),
+            &bound,
+            generation,
+        )
         .expect("bind parks at its first ask")
     {
         ResidentOutcome::Suspended { hole, .. } => hole,
@@ -526,10 +547,9 @@ fn resumed_bind_keeps_its_originating_resource_and_lexical_scopes() {
         "result :: M Int\nresult = do\n  _ <- send (Ask \"fail\")\n  pure (42 :: Int)",
     );
     let failed_hole = match session
-        .run_bind(
+        .run_bind_with_sites(
             "failed_scoped_bind",
-            &failed_expr,
-            &failed_table,
+            TurnCode::core(&failed_expr, &failed_table, &[]),
             &failed_bound,
             failed_generation,
         )

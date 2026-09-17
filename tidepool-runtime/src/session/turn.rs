@@ -428,6 +428,17 @@ pub struct PreparedTurn<'a> {
     pub retained: &'a [(SymbolIdentity, u64)],
 }
 
+impl PreparedTurn<'static> {
+    /// The prepared half of a session's first turn on the current route:
+    /// `None` on Core, and on the prepared route a request linked against
+    /// nothing (there is no retained binding yet).
+    #[must_use]
+    pub fn first_turn() -> Option<PreparedTurn<'static>> {
+        (super::persistent::EngineKind::from_env() == super::persistent::EngineKind::Prepared)
+            .then_some(PreparedTurn { retained: &[] })
+    }
+}
+
 /// `tidepool-extract-cmd` is a dependency leaf and cannot name
 /// `tidepool_repr`'s identity type; this is the one conversion site.
 fn extract_identity(identity: &SymbolIdentity) -> tidepool_extract_cmd::SymbolIdentity {
@@ -521,7 +532,12 @@ const SCAFFOLD_EXTS_ALIAS: &str = "TidepoolScaffoldExts";
 /// at the fixed [`PREPARED_SCAFFOLD_TARGET`]/[`PREPARED_RESUME_TARGET`]/
 /// [`PREPARED_DECODE_TARGET`]/[`PREPARED_APPLY_ENTRY_TARGET`]/
 /// [`PREPARED_APPLY_VALUE_TARGET`] names every resident-turn template uses.
-fn prepared_scaffold_binding(target: &str) -> String {
+///
+/// Public so a caller assembling its OWN template outside
+/// [`assemble_bind_module`]/[`assemble_expression_module`] (a hand-rolled
+/// fixture in a test, say) can still append the exact scaffold a prepared
+/// compile requires, rather than hand-duplicating these binder names.
+pub fn prepared_scaffold_binding(target: &str) -> String {
     let mut out = prepared_scaffold_binding_named(PREPARED_SCAFFOLD_TARGET, target);
     out.push_str(&prepared_resume_decode_binding());
     out
@@ -585,21 +601,31 @@ pub fn prepared_resume_decode_binding() -> String {
     )
 }
 
+/// The bare import targets (no leading `import `, one per line)
+/// [`prepared_scaffold_binding`]/[`prepared_resume_decode_binding`]'s aliases
+/// need in scope. [`with_resume_import`] splices these in through
+/// [`insert_preamble_imports`]'s own marker
+/// ([`PREAMBLE_DEFAULT_MARKER`], the production preamble's shape); a caller
+/// assembling a differently-shaped preamble (a test fixture with its own
+/// import-splicing marker) can still get the exact same alias names by
+/// splicing this text in itself, rather than hand-duplicating the aliases.
+#[must_use]
+pub fn resume_import_targets() -> String {
+    format!(
+        "qualified Tidepool.Internal.Resume as {RESUME_ALIAS}\n\
+         qualified Data.Text as {TEXT_ALIAS}\n\
+         qualified Tidepool.Aeson.Value as {AESON_VALUE_ALIAS}\n\
+         qualified GHC.Exts as {SCAFFOLD_EXTS_ALIAS}"
+    )
+}
+
 /// The preamble with the settle module (and `GHC.Exts`, and the `MagicHash`
 /// extension the apply roots' `I#` reference needs) in scope for
 /// [`prepared_scaffold_binding`]/[`prepared_scaffold_binding_named`].
 #[must_use]
 pub fn with_resume_import(preamble_with_imports: &str) -> String {
     let preamble_with_imports = with_magic_hash(preamble_with_imports);
-    insert_preamble_imports(
-        &preamble_with_imports,
-        &format!(
-            "qualified Tidepool.Internal.Resume as {RESUME_ALIAS}\n\
-             qualified Data.Text as {TEXT_ALIAS}\n\
-             qualified Tidepool.Aeson.Value as {AESON_VALUE_ALIAS}\n\
-             qualified GHC.Exts as {SCAFFOLD_EXTS_ALIAS}"
-        ),
-    )
+    insert_preamble_imports(&preamble_with_imports, &resume_import_targets())
 }
 
 /// Prepend `{-# LANGUAGE MagicHash #-}` ahead of `preamble`'s own pragma

@@ -11,7 +11,7 @@ use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy, Response};
 use tidepool_runtime::session::{
     insert_preamble_imports, resident_workbench_templates, run_turn, ModuleEnv, OutputSink,
-    ResidentSession, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
+    PreparedTurn, ResidentSession, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tidepool_testing::eval_harness;
@@ -85,7 +85,7 @@ async fn resident_eff_structured_introspection_is_reentrant_and_read_only() {
         gen: 1,
         verdict: None,
         target: None,
-        prepared: None,
+        prepared: PreparedTurn::first_turn(),
     })
     .expect("compile resident introspection policy")
     {
