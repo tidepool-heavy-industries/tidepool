@@ -19,6 +19,23 @@ use std::process::Command;
 use crate::error::{GitFailureReceipt, InProgressKind, WorktreeError};
 use crate::id::GitOid;
 
+/// The repository-local exclusions Shoal installs, in the order written. Only
+/// the runtime state directories are excluded: a project's `.shoal/Project`
+/// modules, skills, and configuration are authored source and stay tracked.
+/// This is the single list; [`GitCli::ensure_shoal_local_exclude`] is the
+/// single writer.
+pub const SHOAL_LOCAL_EXCLUDES: &[&str] = &[
+    "/.shoal/logs/",
+    "/.shoal/sessions/",
+    "/.shoal/runtime/",
+    "/.shoal/build/",
+];
+
+/// One `info/exclude` line without the carriage return of a CRLF file.
+fn exclude_line(line: &[u8]) -> &[u8] {
+    line.strip_suffix(b"\r").unwrap_or(line)
+}
+
 /// A successful git invocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitOutput {
@@ -302,8 +319,10 @@ impl GitCli {
         self.run(cwd, args).map_err(WorktreeError::GitFailure)
     }
 
-    /// Add a repository-local exclusion for Shoal's runtime directory. This
-    /// leaves project ignore files and existing `info/exclude` bytes intact.
+    /// Add repository-local exclusions for Shoal's runtime state. This leaves
+    /// project ignore files and existing `info/exclude` bytes intact, and
+    /// removes a whole-directory `/.shoal/` line, which would hide a project's
+    /// authored modules, skills, and configuration from Git.
     pub fn ensure_shoal_local_exclude(&self, repo: &Path) -> Result<(), WorktreeError> {
         let _admission = self.admission.lock();
         let path = inspect::git_common_dir(self, repo)?.join("info/exclude");
@@ -313,21 +332,35 @@ impl GitCli {
         })?;
         std::fs::create_dir_all(parent)
             .map_err(|error| crate::storage::storage_failure(parent, error))?;
-        let mut contents = match std::fs::read(&path) {
+        let existing = match std::fs::read(&path) {
             Ok(contents) => contents,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(crate::storage::storage_failure(&path, error)),
         };
-        if contents
-            .split(|byte| *byte == b'\n')
-            .any(|line| line.strip_suffix(b"\r").unwrap_or(line) == b"/.shoal/")
-        {
-            return Ok(());
+        let mut lines: Vec<&[u8]> = existing.split(|byte| *byte == b'\n').collect();
+        if lines.last().is_some_and(|line| line.is_empty()) {
+            lines.pop();
         }
-        if !contents.is_empty() && !contents.ends_with(b"\n") {
+        let mut contents = Vec::with_capacity(existing.len());
+        for line in &lines {
+            if exclude_line(line) == b"/.shoal/" {
+                continue;
+            }
+            contents.extend_from_slice(line);
             contents.push(b'\n');
         }
-        contents.extend_from_slice(b"/.shoal/\n");
+        for exclusion in SHOAL_LOCAL_EXCLUDES {
+            if !lines
+                .iter()
+                .any(|line| exclude_line(line) == exclusion.as_bytes())
+            {
+                contents.extend_from_slice(exclusion.as_bytes());
+                contents.push(b'\n');
+            }
+        }
+        if contents == existing {
+            return Ok(());
+        }
         tidepool_atomic_write::write_best_effort(&path, &contents)
             .map_err(|error| crate::storage::storage_failure(&error.path, error.source))
     }

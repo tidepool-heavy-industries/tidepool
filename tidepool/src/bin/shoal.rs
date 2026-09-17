@@ -78,6 +78,18 @@ enum Command {
         #[command(subcommand)]
         action: OperatorCommand,
     },
+    /// Submit a Haskell cell into a running Shoal session as a resident operator (proxy) actor.
+    Proxy {
+        session: String,
+        #[arg(required_unless_present = "actors")]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        fresh: bool,
+        #[arg(long)]
+        actors: bool,
+    },
     /// Initialize an empty Git repository for Shoal orchestration.
     New {
         /// Directory to initialize. Defaults to the current directory.
@@ -248,6 +260,23 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             };
             tidepool::operator::command(&socket, action).await
         }
+        Command::Proxy {
+            session,
+            file,
+            json,
+            fresh,
+            actors,
+        } => {
+            tidepool::operator::proxy::proxy(tidepool::operator::proxy::ProxyOptions {
+                session,
+                file,
+                json,
+                fresh,
+                actors,
+                runs_dir: None,
+            })
+            .await
+        }
         Command::New { path } => tidepool::shoal::new(tidepool::shoal::NewOptions { path }).await,
         Command::Check { workspace, recipes } => tidepool::shoal::check(workspace, recipes).await,
         Command::Init {
@@ -369,9 +398,19 @@ mod tests {
         ));
         let help = Cli::try_parse_from(["shoal", "--help"]).unwrap_err();
         let rendered = help.to_string();
-        for command in ["new", "init", "host", "run-map"] {
+        for command in ["new", "init", "host", "run-map", "proxy"] {
             assert!(rendered.contains(command), "{rendered}");
         }
-        assert!(!rendered.contains("proxy"), "{rendered}");
+    }
+
+    #[test]
+    fn proxy_cli_parses_session_file_and_json() {
+        assert!(matches!(
+            Cli::try_parse_from(["shoal", "proxy", "run7", "cell.hs", "--json"])
+                .unwrap()
+                .command,
+            Command::Proxy { session, file: Some(file), json: true, fresh: false, actors: false }
+                if session == "run7" && file == std::path::Path::new("cell.hs")
+        ));
     }
 }

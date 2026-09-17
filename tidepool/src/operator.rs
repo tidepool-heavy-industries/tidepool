@@ -1,4 +1,5 @@
 //! Protected local attachment transport. Execution belongs to the resident actor.
+pub mod proxy;
 pub mod wire;
 
 use axum::{

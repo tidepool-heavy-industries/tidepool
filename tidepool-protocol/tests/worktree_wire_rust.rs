@@ -213,6 +213,7 @@ fn worktree_wire_types_match_the_hand_written_block_field_for_field() {
             ("source_branch", "Option<WtBranchName>"),
             ("target_worktree", "WtWorktreeId"),
             ("merge_message", "String"),
+            ("merge_advance", "Option<WtBranchName>"),
         ],
     );
 

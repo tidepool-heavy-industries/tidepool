@@ -59,6 +59,7 @@ fn divergent_merge_lands_a_merge_commit() {
         &node_path,
         &source,
         Some(&BranchName::from_raw("child")),
+        None,
         "fold child into node",
     )
     .expect("merge should run");
@@ -105,11 +106,11 @@ fn direct_descendant_fast_forwards_then_reports_already_contained() {
     );
     let node_path = add_worktree(&repo, "node", "main");
 
-    let first =
-        try_merge(repo.git(), &node_path, &source, None, "fold").expect("fast-forward should work");
+    let first = try_merge(repo.git(), &node_path, &source, None, None, "fold")
+        .expect("fast-forward should work");
     assert!(matches!(first, MergeOutcome::FastForwarded { ref after, .. } if after == &source));
 
-    let second = try_merge(repo.git(), &node_path, &source, None, "fold again")
+    let second = try_merge(repo.git(), &node_path, &source, None, None, "fold again")
         .expect("already-contained should work");
     assert!(
         matches!(second, MergeOutcome::AlreadyContained { ref target, .. } if target == &source)
@@ -144,6 +145,7 @@ fn conflicting_merge_reports_paths_and_restores_clean_state() {
         &node_path,
         &source,
         Some(&BranchName::from_raw("child")),
+        None,
         "fold child into node",
     )
     .expect("merge should run (a conflict is a typed outcome, not an Err)");
@@ -187,6 +189,7 @@ fn unknown_source_commit_is_a_typed_git_failure() {
         &node_path,
         &GitOid::from_raw("does-not-exist"),
         None,
+        None,
         "fold nothing into node",
     )
     .expect_err("an unknown branch never enters a merge to abort");
@@ -225,6 +228,7 @@ fn moved_readable_branch_returns_manual_handoff_without_mutation() {
         &node_path,
         &expected,
         Some(&BranchName::from_raw("child")),
+        None,
         "must not merge moved branch",
     )
     .expect("moved branch is a typed handoff");
@@ -239,6 +243,198 @@ fn moved_readable_branch_returns_manual_handoff_without_mutation() {
             .expect("node head")
             .trimmed(),
         expected.as_str()
+    );
+}
+
+/// The fold publishes to an integration branch nobody has checked out: the
+/// merge lands in the target worktree and the named branch moves to the same
+/// commit, in one call.
+#[test]
+fn an_advance_branch_moves_to_the_merge_result() {
+    let repo = TestRepo::init().expect("init repo");
+    repo.writer()
+        .commit_file("README.md", "base\n", "base commit")
+        .expect("base commit");
+    repo.git()
+        .try_run(repo.path(), &["branch", "integration", "main"])
+        .expect("integration branch");
+
+    let child_path = add_worktree(&repo, "child", "main");
+    repo.writer_at(&child_path)
+        .commit_file("child.txt", "child content\n", "child work")
+        .expect("child commit");
+    let node_path = add_worktree(&repo, "node", "main");
+    repo.writer_at(&node_path)
+        .commit_file("node.txt", "node content\n", "node work")
+        .expect("node commit");
+    let source = GitOid::from_raw(
+        repo.git()
+            .try_run(&child_path, &["rev-parse", "HEAD"])
+            .expect("child head")
+            .trimmed(),
+    );
+
+    let outcome = try_merge(
+        repo.git(),
+        &node_path,
+        &source,
+        Some(&BranchName::from_raw("child")),
+        Some(&BranchName::from_raw("integration")),
+        "fold child into node",
+    )
+    .expect("merge should run");
+
+    let MergeOutcome::CreatedMergeCommit { commit, .. } = outcome else {
+        panic!("expected a merge commit, got {outcome:?}");
+    };
+    assert_eq!(
+        repo.git()
+            .try_run(repo.path(), &["rev-parse", "refs/heads/integration"])
+            .expect("integration head")
+            .trimmed(),
+        commit.as_str(),
+        "the advance branch now names the merge result"
+    );
+}
+
+/// An advance the repository refuses — the branch moved under the merge, or
+/// the ref could not be written — is a handoff over a merge that DID land, so
+/// the reason says so and `target` is the merge result.
+#[test]
+fn a_refused_advance_is_a_manual_handoff_over_a_landed_merge() {
+    let repo = TestRepo::init().expect("init repo");
+    repo.writer()
+        .commit_file("README.md", "base\n", "base commit")
+        .expect("base commit");
+    repo.git()
+        .try_run(repo.path(), &["branch", "integration", "main"])
+        .expect("integration branch");
+    let integration_before = repo
+        .git()
+        .try_run(repo.path(), &["rev-parse", "refs/heads/integration"])
+        .expect("integration head")
+        .trimmed()
+        .to_string();
+
+    let child_path = add_worktree(&repo, "child", "main");
+    repo.writer_at(&child_path)
+        .commit_file("child.txt", "child content\n", "child work")
+        .expect("child commit");
+    let node_path = add_worktree(&repo, "node", "main");
+    repo.writer_at(&node_path)
+        .commit_file("node.txt", "node content\n", "node work")
+        .expect("node commit");
+    let source = GitOid::from_raw(
+        repo.git()
+            .try_run(&child_path, &["rev-parse", "HEAD"])
+            .expect("child head")
+            .trimmed(),
+    );
+
+    // Reject exactly this one ref's transaction, which is what a branch that
+    // moved between the pre-merge read and the update looks like to us.
+    let hook = repo.path().join(".git/hooks/reference-transaction");
+    std::fs::create_dir_all(hook.parent().expect("hooks dir")).expect("hooks dir");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\nwhile read -r old new ref; do case \"$ref\" in refs/heads/integration) exit 1;; esac; done\nexit 0\n",
+    )
+    .expect("write hook");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("hook permissions");
+    }
+
+    let outcome = try_merge(
+        repo.git(),
+        &node_path,
+        &source,
+        None,
+        Some(&BranchName::from_raw("integration")),
+        "fold child into node",
+    )
+    .expect("a refused advance is a typed outcome, not an Err");
+
+    let node_head = repo
+        .git()
+        .try_run(&node_path, &["rev-parse", "HEAD"])
+        .expect("node head")
+        .trimmed()
+        .to_string();
+    match outcome {
+        MergeOutcome::ManualGitRequired {
+            target,
+            reason,
+            paths,
+            ..
+        } => {
+            assert_eq!(target.as_str(), node_head, "target is the merge result");
+            assert!(reason.contains("integration"), "reason: {reason}");
+            assert!(paths.is_empty(), "no conflicted paths: {paths:?}");
+        }
+        other => panic!("expected a manual handoff, got {other:?}"),
+    }
+    assert_ne!(node_head, integration_before, "the merge itself landed");
+    assert_eq!(
+        repo.git()
+            .try_run(repo.path(), &["rev-parse", "refs/heads/integration"])
+            .expect("integration head")
+            .trimmed(),
+        integration_before,
+        "the refused branch did not move"
+    );
+}
+
+/// The advance branch is read before anything is mutated, so a name that does
+/// not resolve is the ordinary git failure over an untouched repository.
+#[test]
+fn an_unknown_advance_branch_fails_before_the_merge() {
+    let repo = TestRepo::init().expect("init repo");
+    repo.writer()
+        .commit_file("README.md", "base\n", "base commit")
+        .expect("base commit");
+    let child_path = add_worktree(&repo, "child", "main");
+    repo.writer_at(&child_path)
+        .commit_file("child.txt", "child\n", "child work")
+        .expect("child commit");
+    let node_path = add_worktree(&repo, "node", "main");
+    let before = repo
+        .git()
+        .try_run(&node_path, &["rev-parse", "HEAD"])
+        .expect("node head")
+        .trimmed()
+        .to_string();
+    let source = GitOid::from_raw(
+        repo.git()
+            .try_run(&child_path, &["rev-parse", "HEAD"])
+            .expect("child head")
+            .trimmed(),
+    );
+
+    let err = try_merge(
+        repo.git(),
+        &node_path,
+        &source,
+        None,
+        Some(&BranchName::from_raw("no-such-branch")),
+        "fold child into node",
+    )
+    .expect_err("an unresolvable advance branch never enters a merge");
+
+    match err {
+        WorktreeError::GitFailure(receipt) => {
+            assert!(receipt.args.iter().any(|a| a == "rev-parse"));
+        }
+        other => panic!("expected GitFailure, got {other:?}"),
+    }
+    assert_eq!(
+        repo.git()
+            .try_run(&node_path, &["rev-parse", "HEAD"])
+            .expect("node head after refusal")
+            .trimmed(),
+        before
     );
 }
 
@@ -268,7 +464,7 @@ fn dirty_target_is_refused_before_merge_mutates_it() {
     );
 
     assert!(matches!(
-        try_merge(repo.git(), &node_path, &source, None, "must refuse"),
+        try_merge(repo.git(), &node_path, &source, None, None, "must refuse"),
         Err(WorktreeError::SourceDirty(_))
     ));
     assert_eq!(

@@ -87,7 +87,9 @@ pub(crate) struct PromptArtifact {
 
 pub(crate) fn workbench_doc(topic: &str) -> Result<&'static str, String> {
     match topic {
-        "tree" => Ok(include_str!("../../prompts/shoal/docs/tree.md")),
+        "tree" | "worktree" | "worktrees" => {
+            Ok(include_str!("../../prompts/shoal/docs/tree.md"))
+        }
         "workbench" => Ok(include_str!("../../prompts/shoal/docs/workbench.md")),
         "request" | "requests" => Ok(include_str!("../../prompts/shoal/docs/request.md")),
         "unfold" | "fork" | "forks" => Ok(include_str!("../../prompts/shoal/docs/unfold.md")),
@@ -104,11 +106,11 @@ pub(crate) fn workbench_doc(topic: &str) -> Result<&'static str, String> {
         "lineage" | "status" | "trace" => Ok(include_str!("../../prompts/shoal/docs/lineage.md")),
         "recovery" | "recover" => Ok(include_str!("../../prompts/shoal/docs/recovery.md")),
         "help" | "topics" => Ok(
-            "Shoal topics: tree, workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors. Use hosted `lookup` with `doc <topic>`.\n\
-             Load the skill first where one exists; a topic is the fallback. Workspace skills: shoal-jev (judgment-model packets and gates), shoal-unfold (multi-child unfolds and reading a child's commit), shoal-workbench (cells that typecheck the first time), shoal-cleanup (retiring workers and groups), shoal-fork, shoal-coordinate, shoal-review, shoal-command, shoal-define-actors.",
+            "Shoal topics: tree (worktree), workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors. Use hosted `lookup` with `doc <topic>`.\n\
+             Load the skill first where one exists; a topic is the fallback. Workspace skills: shoal-jev (judgment-model packets and gates), shoal-orchestrate (the implement/review/repair/merge loop as one record actor), shoal-unfold (multi-child unfolds and reading a child's commit), shoal-workbench (cells that typecheck the first time), shoal-cleanup (retiring workers and groups), shoal-fork, shoal-coordinate, shoal-review, shoal-command, shoal-define-actors.",
         ),
         other => Err(format!(
-            "unknown Shoal documentation topic `{other}`; use hosted `lookup` with `doc`"
+            "unknown Shoal documentation topic `{other}`; topics: tree (worktree), workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors; `doc topics` lists the workspace skills"
         )),
     }
 }

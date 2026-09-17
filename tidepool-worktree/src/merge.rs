@@ -61,7 +61,9 @@ pub enum MergeOutcome {
     },
     /// The conservative operation could not finish automatically. Any merge
     /// that started has been aborted; `target` is both the starting and final
-    /// target HEAD when this value is returned.
+    /// target HEAD when this value is returned — except for a refused branch
+    /// advance, where the merge itself succeeded and `target` is the merge
+    /// result the named branch was NOT moved to. `reason` says which.
     ManualGitRequired {
         source: GitOid,
         target: GitOid,
@@ -82,11 +84,20 @@ pub enum MergeOutcome {
 /// branch name, for instance) is not a conflict at all — it never started a
 /// merge to abort — and surfaces as `Err(WorktreeError::GitFailure(_))`
 /// carrying the full invocation receipt.
+///
+/// `advance` names a branch to move to the merge result once the merge lands —
+/// the integration branch a fold publishes to, which is not the branch checked
+/// out in `target_cwd`. Its value is read BEFORE the merge and passed to
+/// `git update-ref` as the expected old value, so a branch that moved
+/// meanwhile fails the compare-and-swap instead of losing the commit that
+/// moved it; that refusal, and any other `update-ref` failure, is reported as
+/// `ManualGitRequired` over a merge that did happen.
 pub fn try_merge(
     git: &GitCli,
     target_cwd: &Path,
     source: &GitOid,
     source_branch: Option<&BranchName>,
+    advance: Option<&BranchName>,
     message: &str,
 ) -> Result<MergeOutcome, WorktreeError> {
     if let Some(kind) = inspect::in_progress(git, target_cwd)? {
@@ -122,6 +133,14 @@ pub fn try_merge(
         }
     }
 
+    // Read before any mutation: this is the expected old value the advance is
+    // pinned to, and an advance branch that does not resolve at all is an
+    // ordinary git failure over a repository nothing has touched yet.
+    let advance_from = advance
+        .map(|branch| read_branch(git, target_cwd, branch))
+        .transpose()?;
+    let advancing = advance.zip(advance_from.as_ref());
+
     if is_ancestor(git, target_cwd, source, &target)? {
         return Ok(MergeOutcome::AlreadyContained {
             source: source.clone(),
@@ -131,6 +150,14 @@ pub fn try_merge(
     if is_ancestor(git, target_cwd, &target, source)? {
         git.try_run(target_cwd, &["merge", "--ff-only", source.as_str()])?;
         let after = head(git, target_cwd)?;
+        if let Err(reason) = advance_branch(git, target_cwd, advancing, &after) {
+            return Ok(MergeOutcome::ManualGitRequired {
+                source: source.clone(),
+                target: after,
+                reason,
+                paths: Vec::new(),
+            });
+        }
         return Ok(MergeOutcome::FastForwarded {
             source: source.clone(),
             before: target,
@@ -143,10 +170,19 @@ pub fn try_merge(
         &["merge", "--no-ff", "-m", message, source.as_str()],
     ) {
         Ok(_) => {
+            let commit = head(git, target_cwd)?;
+            if let Err(reason) = advance_branch(git, target_cwd, advancing, &commit) {
+                return Ok(MergeOutcome::ManualGitRequired {
+                    source: source.clone(),
+                    target: commit,
+                    reason,
+                    paths: Vec::new(),
+                });
+            }
             return Ok(MergeOutcome::CreatedMergeCommit {
                 source: source.clone(),
                 before: target,
-                commit: head(git, target_cwd)?,
+                commit,
             });
         }
         Err(receipt) => receipt,
@@ -185,6 +221,53 @@ pub fn try_merge(
         reason: "merge conflict; target was restored to its starting state".into(),
         paths,
     })
+}
+
+fn branch_ref(branch: &BranchName) -> String {
+    format!("refs/heads/{}", branch.as_str())
+}
+
+fn read_branch(git: &GitCli, cwd: &Path, branch: &BranchName) -> Result<GitOid, WorktreeError> {
+    let reference = branch_ref(branch);
+    Ok(GitOid::from_raw(
+        git.try_run(cwd, &["rev-parse", "--verify", reference.as_str()])?
+            .trimmed(),
+    ))
+}
+
+/// Move `branch` from the value read before the merge to `result`, or describe
+/// why the caller has to finish by hand. The expected old value is the whole
+/// check: a branch someone else advanced during the merge fails the
+/// compare-and-swap rather than losing their commit.
+fn advance_branch(
+    git: &GitCli,
+    cwd: &Path,
+    advancing: Option<(&BranchName, &GitOid)>,
+    result: &GitOid,
+) -> Result<(), String> {
+    let Some((branch, before)) = advancing else {
+        return Ok(());
+    };
+    let reference = branch_ref(branch);
+    match git.run(
+        cwd,
+        &[
+            "update-ref",
+            reference.as_str(),
+            result.as_str(),
+            before.as_str(),
+        ],
+    ) {
+        Ok(_) => Ok(()),
+        Err(receipt) => Err(format!(
+            "the merge landed {} in the target worktree, but branch `{}` was not advanced from \
+             {}: it moved, or its ref could not be written ({})",
+            result.as_str(),
+            branch.as_str(),
+            before.as_str(),
+            receipt.stderr.trim()
+        )),
+    }
 }
 
 fn head(git: &GitCli, cwd: &Path) -> Result<GitOid, WorktreeError> {

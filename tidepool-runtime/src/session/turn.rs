@@ -688,6 +688,19 @@ impl From<std::io::Error> for TurnFailure {
 pub const AMBIGUOUS_TYPE_ADVICE: &str =
     "this declaration's type is ambiguous; add a signature (e.g. `:: Text`)";
 
+/// The advice for an ambiguity GHC blames on a literal rather than on a
+/// binding: no signature on a declaration fixes it, only an annotation at the
+/// literal itself.
+pub const LITERAL_ANNOTATION_ADVICE: &str =
+    "this literal's type is ambiguous; annotate the literal: `(\"src/app.rs\" :: Text)`";
+
+/// The advice for a cell item that carries a signature whose equation was
+/// submitted as a separate item. Each item compiles as its own
+/// `module SessionDecls where`, so the signature installs nothing and the
+/// equation's item then reports the name as out of scope.
+pub const SPLIT_SIGNATURE_ADVICE: &str =
+    "a signature and its equation belong in the same cell item";
+
 /// Recognize a GHC diagnostic that only ever means "this type never became
 /// concrete", so the model is told to add a signature instead of being handed
 /// a compiler-internal name or an instance-resolution trace.
@@ -709,14 +722,115 @@ pub const AMBIGUOUS_TYPE_ADVICE: &str =
 ///   or `TidepoolCellExpression` constraint never qualifies, and a
 ///   higher-kinded variable (`Render (f0 Double)`) cannot be named by a
 ///   `default (...)` list at all, which lists only `*`-kinded types.
+///
+/// GHC's own `Ambiguous type variable … arising from` family is recognized as
+/// well, including the effect-row form whose constraint is a `FindElem`. There
+/// the repair is the same signature, so the advice names the binding GHC
+/// printed and says where its signature goes for the form the submitted text
+/// used. An ambiguity GHC blames on a literal takes an annotation at the
+/// literal instead, and a signature submitted without its equation takes
+/// neither.
+///
+/// `submitted` is the text the model wrote — the turn or cell item, not the
+/// generated wrapper — and decides only between the `let` and top-level
+/// signature placements.
 #[must_use]
-pub fn ambiguous_type_advice(message: &str) -> Option<&'static str> {
+pub fn ambiguous_type_advice(message: &str, submitted: &str) -> Option<String> {
+    if message.contains("lacks an accompanying binding") {
+        let name = quoted_name_after(message, "The type signature for").unwrap_or("this binding");
+        return Some(format!(
+            "`{name}` has a signature but no equation in this cell item; {SPLIT_SIGNATURE_ADVICE}"
+        ));
+    }
+    if message.contains("Ambiguous type variable") {
+        if message.contains("arising from the literal") || message.contains("IsString") {
+            return Some(LITERAL_ANNOTATION_ADVICE.to_owned());
+        }
+        let Some(name) = quoted_name_after(message, "In an equation for")
+            .or_else(|| quoted_name_after(message, "In a pattern binding for"))
+        else {
+            return Some(AMBIGUOUS_TYPE_ADVICE.to_owned());
+        };
+        return Some(if let_bound(submitted, name) {
+            format!(
+                "`{name}`'s type is ambiguous; give it a signature in the same `let` binding: \
+                 `let {name} :: T -> U; {name} x = …` (a signature on its own `let` line loses \
+                 the argument scope)"
+            )
+        } else {
+            format!(
+                "`{name}`'s type is ambiguous; add its signature line directly above the \
+                 equation in the same cell item: `{name} :: T -> U`"
+            )
+        });
+    }
     // GHC emits this hint exactly when the overlapping-instance choice hangs
     // on a variable it has not instantiated — the ground-head overlaps a real
     // instance conflict produces carry no such line.
     let unresolved_overlap = message.contains("Overlapping instances for")
         && message.contains("The choice depends on the instantiation of");
-    (unresolved_overlap || message.contains("ZonkAny")).then_some(AMBIGUOUS_TYPE_ADVICE)
+    (unresolved_overlap || message.contains("ZonkAny"))
+        .then(|| AMBIGUOUS_TYPE_ADVICE.to_owned())
+}
+
+/// The identifier GHC prints immediately after `prefix`, quoted as `‘name’` or,
+/// under ASCII diagnostics, as `` `name' ``.
+fn quoted_name_after<'a>(message: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = message.split_once(prefix)?.1.trim_start();
+    let (open, close) = if rest.starts_with('\u{2018}') {
+        ('\u{2018}', '\u{2019}')
+    } else {
+        ('`', '\'')
+    };
+    let name = rest.strip_prefix(open)?.split(close).next()?;
+    (!name.is_empty() && !name.contains(char::is_whitespace)).then_some(name)
+}
+
+/// Whether `name` is bound inside a `let` in the submitted text. A `let`
+/// binding needs `let name :: T -> U; name x = …` on one binding: splitting the
+/// signature onto its own `let` line loses the argument scope.
+fn let_bound(submitted: &str, name: &str) -> bool {
+    let mut open_let: Option<usize> = None;
+    for line in submitted.lines() {
+        let body = line.trim_start();
+        let indent = line.len() - body.len();
+        if open_let.is_some_and(|column| body.is_empty() || indent <= column) {
+            open_let = None;
+        }
+        if open_let.is_some() && starts_with_token(body, name) {
+            return true;
+        }
+        if let Some(position) = find_let_token(line) {
+            if starts_with_token(line[position + 3..].trim_start(), name) {
+                return true;
+            }
+            open_let = Some(position);
+        }
+    }
+    false
+}
+
+/// The column of the first `let` keyword in `line`, ignoring `let` inside a
+/// longer word.
+fn find_let_token(line: &str) -> Option<usize> {
+    line.match_indices("let")
+        .find(|(position, _)| {
+            let before = line[..*position].chars().next_back();
+            let after = line[position + 3..].chars().next();
+            before.is_none_or(|character| !is_name_character(character))
+                && after.is_none_or(char::is_whitespace)
+        })
+        .map(|(position, _)| position)
+}
+
+/// Whether `text` opens with `name` as a whole identifier.
+fn starts_with_token(text: &str, name: &str) -> bool {
+    text.strip_prefix(name)
+        .is_some_and(|rest| !rest.starts_with(is_name_character))
+}
+
+fn is_name_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_' || character == '\''
 }
 
 /// Render a failed resident turn against the submitted input unit rather than
@@ -752,7 +866,7 @@ pub fn render_turn_compile_error(
             source,
         },
     );
-    ambiguous_type_advice(&rendered).map_or(rendered, ToOwned::to_owned)
+    ambiguous_type_advice(&rendered, turn_text).unwrap_or(rendered)
 }
 
 /// Render whole-cell diagnostics against the submitted cell coordinates.
@@ -775,7 +889,7 @@ pub fn render_cell_compile_error(error: &CompileError, cell_text: &str) -> Strin
             source: cell_text,
         },
     );
-    ambiguous_type_advice(&rendered).map_or(rendered, ToOwned::to_owned)
+    ambiguous_type_advice(&rendered, cell_text).unwrap_or(rendered)
 }
 
 /// Locate submitted turn text within one of the shared wrapper templates.
@@ -2325,7 +2439,10 @@ fn parse_classify_export_item(v: &serde_json::Value) -> Result<ExportItem, Compi
 
 #[cfg(test)]
 mod ambiguity_advice_tests {
-    use super::{ambiguous_type_advice, render_cell_compile_error, AMBIGUOUS_TYPE_ADVICE};
+    use super::{
+        ambiguous_type_advice, render_cell_compile_error, AMBIGUOUS_TYPE_ADVICE,
+        LITERAL_ANNOTATION_ADVICE, SPLIT_SIGNATURE_ADVICE,
+    };
     use crate::CompileError;
 
     /// Exactly the GHC texts observed in dogfood runs 4 and 5, not paraphrases:
@@ -2349,7 +2466,7 @@ mod ambiguity_advice_tests {
     fn every_unresolved_type_variable_shape_asks_for_a_signature() {
         for message in [ZONK_ANY, HIGHER_KINDED_RENDER, BARE_ERROR_CELL] {
             assert_eq!(
-                ambiguous_type_advice(message),
+                ambiguous_type_advice(message, "firstReview = \\(a,_,_) -> a").as_deref(),
                 Some(AMBIGUOUS_TYPE_ADVICE),
                 "unresolved-type-variable diagnostic was not recognized: {message}"
             );
@@ -2361,6 +2478,85 @@ mod ambiguity_advice_tests {
         }
     }
 
+    /// GHC's own ambiguity family, as run 6 hit it four times on one helper.
+    /// The advice names the binding and says where its signature goes for the
+    /// form the model actually wrote.
+    const AMBIGUOUS_TOP_LEVEL: &str = "<cell>:2:16: error: [GHC-01928]\n    \u{2022} Ambiguous type variable \u{2018}a0\u{2019} arising from a use of \u{2018}render\u{2019}\n      prevents the constraint \u{2018}(Render a0)\u{2019} from being solved.\n    \u{2022} In an equation for \u{2018}summarize\u{2019}:\n          summarize xs = render (head xs)";
+    const AMBIGUOUS_FIND_ELEM: &str = "<cell>:1:9: error: [GHC-01928]\n    \u{2022} Ambiguous type variable \u{2018}effects0\u{2019} arising from a use of \u{2018}say\u{2019}\n      prevents the constraint \u{2018}(FindElem Say effects0)\u{2019} from being solved.\n    \u{2022} In an equation for \u{2018}announce\u{2019}: announce message = say message";
+
+    #[test]
+    fn an_ambiguous_binding_is_named_with_its_signature_placement() {
+        assert_eq!(
+            ambiguous_type_advice(AMBIGUOUS_TOP_LEVEL, "summarize xs = render (head xs)").unwrap(),
+            "`summarize`'s type is ambiguous; add its signature line directly above the \
+             equation in the same cell item: `summarize :: T -> U`"
+        );
+        assert_eq!(
+            render_cell_compile_error(
+                &cell_error(AMBIGUOUS_TOP_LEVEL),
+                "summarize xs = render (head xs)"
+            ),
+            "`summarize`'s type is ambiguous; add its signature line directly above the \
+             equation in the same cell item: `summarize :: T -> U`"
+        );
+        // A handler helper that never got its effect row lands here too.
+        assert!(ambiguous_type_advice(AMBIGUOUS_FIND_ELEM, "announce message = say message")
+            .unwrap()
+            .starts_with("`announce`'s type is ambiguous"));
+    }
+
+    #[test]
+    fn a_let_bound_binding_keeps_its_signature_on_the_same_binding() {
+        let cell = "do\n  let summarize xs = render (head xs)\n  say (summarize items)";
+        assert_eq!(
+            ambiguous_type_advice(AMBIGUOUS_TOP_LEVEL, cell).unwrap(),
+            "`summarize`'s type is ambiguous; give it a signature in the same `let` binding: \
+             `let summarize :: T -> U; summarize x = …` (a signature on its own `let` line \
+             loses the argument scope)"
+        );
+        let block = "do\n  let\n    summarize xs = render (head xs)\n  say (summarize items)";
+        assert_eq!(
+            ambiguous_type_advice(AMBIGUOUS_TOP_LEVEL, block),
+            ambiguous_type_advice(AMBIGUOUS_TOP_LEVEL, cell)
+        );
+        // A name that merely shares a prefix with the `let` binding is not it.
+        let other = "do\n  let summarizeAll xs = render xs\n  say (summarize items)";
+        assert!(ambiguous_type_advice(AMBIGUOUS_TOP_LEVEL, other)
+            .unwrap()
+            .contains("directly above the"));
+    }
+
+    /// A bare literal under `ToJSON`/`IsString`: no declaration signature
+    /// repairs it, so the advice points at the literal.
+    #[test]
+    fn an_ambiguous_literal_asks_for_an_annotation_at_the_literal() {
+        let message = "<cell>:1:24: error: [GHC-01928]\n    \u{2022} Ambiguous type variable \u{2018}a0\u{2019} arising from the literal \u{2018}\"src/app.rs\"\u{2019}\n      prevents the constraint \u{2018}(Data.String.IsString a0)\u{2019} from being solved.\n    \u{2022} In the first argument of \u{2018}toJSON\u{2019}, namely \u{2018}\"src/app.rs\"\u{2019}";
+        assert_eq!(
+            ambiguous_type_advice(message, "value = toJSON \"src/app.rs\"").as_deref(),
+            Some(LITERAL_ANNOTATION_ADVICE)
+        );
+        assert_eq!(
+            render_cell_compile_error(&cell_error(message), "value = toJSON \"src/app.rs\""),
+            LITERAL_ANNOTATION_ADVICE
+        );
+    }
+
+    /// Each cell item compiles alone, so a signature whose equation went into
+    /// the next item installs nothing and the next item reports the name as
+    /// out of scope. The first item says so.
+    #[test]
+    fn a_signature_without_its_equation_says_they_share_one_item() {
+        let message = "<cell>:1:1: error: [GHC-44432]\n    The type signature for \u{2018}summarize\u{2019} lacks an accompanying binding";
+        let advice = render_cell_compile_error(&cell_error(message), "summarize :: [Text] -> Text");
+        assert_eq!(
+            advice,
+            format!(
+                "`summarize` has a signature but no equation in this cell item; \
+                 {SPLIT_SIGNATURE_ADVICE}"
+            )
+        );
+    }
+
     /// A ground overlap is a real instance conflict the author must resolve,
     /// and an ordinary mismatch already names the two types. Neither is
     /// repaired by a signature, so neither is rewritten.
@@ -2369,7 +2565,7 @@ mod ambiguity_advice_tests {
         let ground_overlap = "<cell>:1:1: error: [GHC-43085]\n    \u{2022} Overlapping instances for Render Text\n      Matching instances:\n        instance Render Text\n        instance [overlappable] Show a => Render a";
         let mismatch = "<cell>:1:1: error: [GHC-83865]\n    \u{2022} Couldn't match type \u{2018}Int\u{2019} with \u{2018}Text\u{2019}";
         for message in [ground_overlap, mismatch] {
-            assert_eq!(ambiguous_type_advice(message), None);
+            assert_eq!(ambiguous_type_advice(message, "x = 1"), None);
             let rendered = render_cell_compile_error(&cell_error(message), "x = 1");
             assert_ne!(rendered, AMBIGUOUS_TYPE_ADVICE);
             assert!(

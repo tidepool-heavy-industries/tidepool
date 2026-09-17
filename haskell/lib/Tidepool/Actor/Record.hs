@@ -27,7 +27,7 @@ module Tidepool.Actor.Record
   , on, progress, settlement, lifecycle, command
   , get, gets, put, modify'
   , start, client, send, call, finish, replace
-  , definition
+  , definition, withWorktree
   , self, sender, ActorInputOrigin (..)
   , LocalEffects, Forwarding, forwardResult, forwardingExit
   -- Named by exported signatures ('definition', 'self', 'sender',
@@ -45,6 +45,7 @@ import GHC.Generics
 import GHC.TypeLits (ErrorMessage (..), TypeError)
 import qualified Tidepool.Actor as Actor
 import Tidepool.Actor (ActorExit, EffectProfile)
+import qualified Tidepool.Actor.Internal as ActorInternal
 import Tidepool.Actor.Source (Source)
 import qualified Tidepool.Actor.Source as Source
 import Tidepool.Command.Types (Job)
@@ -269,6 +270,7 @@ data ActorSpec api effects = ActorSpec
   { specLabel :: Text
   , specProfile :: EffectProfile (Message api) effects
   , specRecord :: api (Definition (Handler (ActorState api) effects))
+  , specWorktree :: Maybe Core.WorktreeId
   }
 
 definition
@@ -276,7 +278,16 @@ definition
   -> EffectProfile (Message api) effects
   -> api (Definition (Handler (ActorState api) effects))
   -> ActorSpec api effects
-definition = ActorSpec
+definition label profile record = ActorSpec label profile record Nothing
+
+-- | Start the actor holding one registered worktree. Custody is exclusive and
+-- integrate authority follows custody, so this is how a record actor comes
+-- to own the tree it merges into: the parent creates the worktree and hands
+-- the (still unbound) id here. An actor with a worktree resolves to the
+-- coding role; one without resolves to research. The host admits at most one
+-- worktree per actor, so a second call replaces the first.
+withWorktree :: Core.WorktreeId -> ActorSpec api effects -> ActorSpec api effects
+withWorktree tree spec = spec { specWorktree = Just tree }
 
 type Derive api effects =
   ( Generic (api Shape)
@@ -302,13 +313,14 @@ lower
   :: forall api effects. Derive api effects
   => ActorSpec api effects
   -> (Actor.ActorDefinition (ActorState api) (Message api) (ActorState api), ActorState api)
-lower ActorSpec { specLabel = label, specProfile = profile, specRecord = record } =
+lower ActorSpec { specLabel = label, specProfile = profile, specRecord = record, specWorktree = worktree } =
   let spec = View (from record)
       step :: forall result. ActorState api -> Message api result
            -> Eff effects (result, ActorState api)
       step state message = S.runState state (dispatch message spec)
-      actor = Actor.withSources (sources @api @(Schema api) spec id)
-        (Actor.stateful label profile step)
+      hold = maybe id (\(Core.WorktreeId raw) -> ActorInternal.withLaunchWorktree raw) worktree
+      actor = hold (Actor.withSources (sources @api @(Schema api) spec id)
+        (Actor.stateful label profile step))
   in case states @api @(Schema api) spec of
     [initial] -> (actor, initial)
     _ -> error "record derivation violated the single State field invariant"

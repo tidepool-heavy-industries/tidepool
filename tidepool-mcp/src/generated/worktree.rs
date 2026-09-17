@@ -37,7 +37,7 @@ pub fn worktree_decl() -> crate::EffectDecl {
             "data WorktreeReceipt = WorktreeReceipt { treeId :: WorktreeId, cwd :: Text, branch :: BranchName, sourceHead :: GitOid, snapshotRef :: Maybe GitRef, createdAt :: Int } deriving (Show, Eq)",
             "data WorktreeHandle = WorktreeHandle { handleReceipt :: WorktreeReceipt } deriving (Show, Eq)",
             "data WorktreeSummary = WorktreeSummary { summaryReceipt :: WorktreeReceipt, present :: Bool } deriving (Show, Eq)",
-            "data MergeRequest = MergeRequest { mergeSourceHead :: GitOid, mergeSourceBranch :: Maybe BranchName, mergeTargetWorktree :: WorktreeId, mergeMessage :: Text } deriving (Show, Eq)",
+            "data MergeRequest = MergeRequest { mergeSourceHead :: GitOid, mergeSourceBranch :: Maybe BranchName, mergeTargetWorktree :: WorktreeId, mergeMessage :: Text, mergeAdvance :: Maybe BranchName } deriving (Show, Eq)",
             "data MergeOutcome = AlreadyContained GitOid GitOid | FastForwarded GitOid GitOid GitOid | CreatedMergeCommit GitOid GitOid GitOid | ManualGitRequired GitOid GitOid Text [Text] deriving (Show, Eq)",
             "instance ToJSON WorktreeId where toJSON (WorktreeId t) = toJSON t",
             "instance ToJSON GitOid where toJSON (GitOid t) = toJSON t",

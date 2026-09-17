@@ -737,6 +737,18 @@ fn type_defs() -> Vec<TypeDef> {
                         ty: HsType::Text,
                         doc: &[],
                     },
+                    RecordField {
+                        hs_name: "mergeAdvance",
+                        rust_name: "merge_advance",
+                        ty: HsType::maybe(HsType::Named("BranchName")),
+                        doc: &[
+                            "Optionally move this branch to the merge result once the merge lands —",
+                            "the integration branch a fold publishes to, not the branch checked out in",
+                            "the target worktree. Its value is read before the merge and pinned as the",
+                            "expected old value, so a branch that moved meanwhile is refused as",
+                            "`ManualGitRequired` rather than losing the commit that moved it.",
+                        ],
+                    },
                 ],
             },
             json: JsonInstance::None,

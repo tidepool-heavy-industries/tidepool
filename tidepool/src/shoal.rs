@@ -31,12 +31,6 @@ const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(420);
 pub mod resources;
 pub mod workspace;
 
-const SHOAL_EXCLUDES: &[&str] = &[
-    "/.shoal/logs/",
-    "/.shoal/sessions/",
-    "/.shoal/runtime/",
-    "/.shoal/build/",
-];
 const SHOAL_CONFIG: &str = ".shoal/config.toml";
 const DEFAULT_CONFIG: &str = r#"[defaults]
 model = "gpt-5.6-sol"
@@ -247,7 +241,7 @@ pub async fn new(options: NewOptions) -> Result<(), Box<dyn std::error::Error>> 
     std::fs::create_dir_all(state.join("logs"))?;
     std::fs::create_dir_all(state.join("sessions"))?;
     ensure_project_config(&workspace)?;
-    install_local_exclude(&workspace)?;
+    tidepool_worktree::GitCli::new().ensure_shoal_local_exclude(&workspace)?;
 
     run_git(&workspace, &["add", "--", SHOAL_CONFIG]).await?;
 
@@ -343,31 +337,6 @@ fn resolve_agent_defaults(
         effort: effort.unwrap_or(configured.effort),
     };
     validate_agent_defaults(resolved, "resolved Shoal agent defaults")
-}
-
-fn install_local_exclude(workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let exclude = tidepool_worktree::git::inspect::git_common_dir(
-        &tidepool_worktree::GitCli::new(),
-        workspace,
-    )?
-    .join("info/exclude");
-    let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
-    let mut updated = existing
-        .lines()
-        .filter(|line| line.trim() != "/.shoal/")
-        .map(|line| format!("{line}\n"))
-        .collect::<String>();
-    if !updated.is_empty() && !updated.ends_with('\n') {
-        updated.push('\n');
-    }
-    for exclusion in SHOAL_EXCLUDES {
-        if !updated.lines().any(|line| line.trim() == *exclusion) {
-            updated.push_str(exclusion);
-            updated.push('\n');
-        }
-    }
-    tidepool_atomic_write::write_best_effort(&exclude, updated.as_bytes())?;
-    Ok(())
 }
 
 async fn run_git(workspace: &Path, arguments: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
@@ -470,7 +439,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             .into());
     }
     tracing::info!(slice = slice.as_str(), ?limits, "selected swarm budget");
-    install_local_exclude(&workspace)?;
+    tidepool_worktree::GitCli::new().ensure_shoal_local_exclude(&workspace)?;
     let agent = resolve_agent_defaults(configuration.defaults, options.model, options.effort)?;
     retain_packaged_interactive_agent(&workspace).await?;
     let session_name = options
@@ -1500,10 +1469,11 @@ mod tests {
                 effort: ShoalEffort::Low,
             }
         );
-        assert!(std::fs::read_to_string(workspace.join(".git/info/exclude"))
-            .unwrap()
-            .lines()
-            .any(|line| line == SHOAL_EXCLUDES[0]));
+        let installed = std::fs::read_to_string(workspace.join(".git/info/exclude")).unwrap();
+        for exclusion in tidepool_worktree::git::SHOAL_LOCAL_EXCLUDES {
+            assert!(installed.lines().any(|line| line == *exclusion));
+        }
+        assert!(!installed.lines().any(|line| line == "/.shoal/"));
         assert_eq!(git_stdout(&workspace, &["status", "--short"]).await, "");
         assert_eq!(
             git_stdout(&workspace, &["show", "--format=%s", "--no-patch", "HEAD"])
@@ -1533,12 +1503,16 @@ mod tests {
         )
         .await;
         let exclude = workspace.join(".git/info/exclude");
-        std::fs::write(&exclude, "/user-local-file\n").unwrap();
-        install_local_exclude(&linked).unwrap();
+        std::fs::write(&exclude, "/user-local-file\n/.shoal/\n").unwrap();
+        let git = tidepool_worktree::GitCli::new();
+        git.ensure_shoal_local_exclude(&linked).unwrap();
         let first = std::fs::read_to_string(&exclude).unwrap();
         assert!(first.contains("/user-local-file\n"));
-        assert!(first.lines().any(|line| line == SHOAL_EXCLUDES[0]));
-        install_local_exclude(&linked).unwrap();
+        for exclusion in tidepool_worktree::git::SHOAL_LOCAL_EXCLUDES {
+            assert!(first.lines().any(|line| line == *exclusion));
+        }
+        assert!(!first.lines().any(|line| line == "/.shoal/"));
+        git.ensure_shoal_local_exclude(&linked).unwrap();
         assert_eq!(first, std::fs::read_to_string(&exclude).unwrap());
         assert!(linked.join(".git").is_file());
     }

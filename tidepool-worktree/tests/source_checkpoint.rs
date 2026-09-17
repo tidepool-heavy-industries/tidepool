@@ -105,12 +105,19 @@ fn checkpoint_leaves_staged_exclusions_and_disables_hooks_and_signing() {
 
     fs::write(
         repo.path().join(".git/info/exclude"),
-        b"# local\r\n/custom/\n",
+        b"# local\r\n/custom/\n/.shoal/\r\n",
     )
     .unwrap();
     git.ensure_shoal_local_exclude(repo.path()).unwrap();
     let first_exclude = fs::read(repo.path().join(".git/info/exclude")).unwrap();
     assert!(first_exclude.starts_with(b"# local\r\n/custom/\n"));
+    let installed = String::from_utf8(first_exclude.clone()).unwrap();
+    // The whole-directory line hides a project's authored `.shoal` source, so
+    // the writer removes it and installs only the runtime state directories.
+    assert!(!installed.lines().any(|line| line.trim() == "/.shoal/"));
+    for exclusion in tidepool_worktree::git::SHOAL_LOCAL_EXCLUDES {
+        assert!(installed.lines().any(|line| line == *exclusion));
+    }
     git.ensure_shoal_local_exclude(repo.path()).unwrap();
     assert_eq!(
         fs::read(repo.path().join(".git/info/exclude")).unwrap(),

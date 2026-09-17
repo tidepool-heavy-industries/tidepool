@@ -133,6 +133,7 @@ module Tidepool.Worktree
 
 import Control.Monad.Freer (Eff, Member, send)
 import Data.Proxy (Proxy (..))
+import Data.String (IsString (fromString))
 import qualified Tidepool.Data.Text as T
 import Tidepool.Actor.Internal (ActorDefinition, withLaunchWorktree)
 import Tidepool.Aeson (FromJSON (..), Result (..), ToJSON (..), object, withObject, withText, (.:), (.:?), (.=))
@@ -144,7 +145,7 @@ import Tidepool.Effects
   , DirtySummary (..)
   , GitFailureReceipt (..)
   , GitOid (..)
-  , GitRef
+  , GitRef (..)
   , InProgressKind (..)
   , MergeRequest (..)
   , MergeOutcome (..)
@@ -382,6 +383,17 @@ withWorktree tree = withLaunchWorktree (renderWorktreeId (worktreeId tree))
 -- resolves to the request's exact source commit.
 mkBranchName :: Text -> BranchName
 mkBranchName = BranchName
+
+-- | A ref written as a literal is that ref: @fromRef "shoal/integration"@ and
+-- @atRef "main"@ say what they mean without a constructor in the way. The
+-- constructors stay exported for code that already holds a 'Text'. Infallible
+-- for the same reason 'mkBranchName' is: Git remains the authority for whether
+-- the name resolves.
+instance IsString GitRef where
+  fromString = GitRef . T.pack
+
+instance IsString BranchName where
+  fromString = mkBranchName . T.pack
 
 renderGitOid :: GitOid -> Text
 renderGitOid (GitOid t) = t

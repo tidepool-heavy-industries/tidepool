@@ -39,6 +39,8 @@ import Tidepool.Effects.Core
   , AgentControl
   , Notifications
   , Commands
+  , Console
+  , Sleep
   , Actor
   , AgentInspection
   , AgentLaunch
@@ -58,14 +60,19 @@ import Tidepool.Effects.Row
 
 type CoreEffects = '[Replies, Watches, ActorContext, Notifications, Jev, Commands, Actor]
 type ResearchLeafEffects = '[Replies, Watches, ActorContext, BoundWorktree, Notifications, Jev, Commands, Actor]
+-- The research and coding rows mirror `EffectiveRole::research()` and
+-- `EffectiveRole::coding()` in `tidepool-actor/src/role.rs`; a parity test
+-- there reads this file and fails when the two drift.
 type ResearchEffects =
   '[ Replies, Watches, Forks, ActorContext
-   , AgentInspection, AgentControl, BoundWorktree, Notifications, Jev, Commands, Actor
+   , AgentInspection, AgentControl, BoundWorktree
+   , Sleep, Notifications, Jev, Commands, Console, Actor
    ]
 type CodingEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentInspection, AgentControl, BoundWorktree
-   , WorktreeIntegration, Notifications, Jev, Commands, Actor
+   , WorktreeAllocation, WorktreeIntegration
+   , Sleep, Notifications, Jev, Commands, Console, Actor
    ]
 type IntegrationEffects =
   '[ Replies, Watches, ActorContext

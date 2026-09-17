@@ -186,7 +186,7 @@ impl EffectiveRole {
                 maximum_depth: 0,
                 maximum_active_children: Some(0),
             },
-            "coding-v2",
+            "coding-v3",
             vec![
                 ActorEffectKey::Replies,
                 ActorEffectKey::Watches,
@@ -195,6 +195,11 @@ impl EffectiveRole {
                 ActorEffectKey::AgentInspection,
                 ActorEffectKey::AgentControl,
                 ActorEffectKey::BoundWorktree,
+                // A coding actor may allocate worktrees so that a node in a
+                // recursive tree can create its own integration worktree and
+                // hand it to a record actor it starts (`R.withWorktree`); the
+                // grant (`allocate: true`) already followed the role.
+                ActorEffectKey::WorktreeAllocation,
                 ActorEffectKey::WorktreeIntegration,
                 ActorEffectKey::Sleep,
                 ActorEffectKey::Notifications,
@@ -542,6 +547,152 @@ mod tests {
             coding.effect_keys(),
             EffectiveRole::scaffolding(coding.descendants()).effect_keys()
         );
+    }
+
+    /// `Tidepool.Actors.Role` spells the research and coding rows as Haskell
+    /// type aliases; the Rust ceilings are the authority. Read the Haskell
+    /// source at compile time and compare, so the next drift fails here.
+    #[test]
+    fn haskell_role_aliases_match_the_rust_ceilings() {
+        let source = include_str!("../../haskell/actors/Tidepool/Actors/Role.hs");
+        fn alias(source: &str, name: &str) -> String {
+            let start = source
+                .find(&format!("type {name} ="))
+                .unwrap_or_else(|| panic!("alias {name} missing from Role.hs"));
+            let body = &source[start + format!("type {name} =").len()..];
+            let end = body.find("]").expect("alias closes") + 1;
+            body[..end].chars().filter(|c| !c.is_whitespace()).collect()
+        }
+        for (name, role) in [
+            ("ResearchEffects", EffectiveRole::research()),
+            ("CodingEffects", EffectiveRole::coding()),
+        ] {
+            let rust: String = role
+                .haskell_effects_type()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            assert_eq!(alias(source, name), rust, "{name} drifted from the Rust row");
+        }
+    }
+
+    /// The rows a project's own `.shoal` actors declare. The gate routes
+    /// settled replies, admits reviewers, runs mechanical evidence commands,
+    /// asks Jev, and wakes the root; it holds no worktree, so a record actor
+    /// started with `ActorRole::Inherited` resolves it to `research`. The
+    /// integrator holds the merge target and merges into it; worktree custody
+    /// is exclusive and integrate authority follows custody, so its row only
+    /// sits under a ceiling that comes with a worktree (`coding`), never under
+    /// `research`.
+    #[test]
+    fn a_project_gate_row_sits_under_every_ceiling_the_root_can_start_it_with() {
+        let gate = vec![
+            ActorEffectKey::Replies,
+            ActorEffectKey::Watches,
+            ActorEffectKey::Forks,
+            ActorEffectKey::ActorContext,
+            ActorEffectKey::AgentInspection,
+            ActorEffectKey::BoundWorktree,
+            ActorEffectKey::Notifications,
+            ActorEffectKey::Jev,
+            ActorEffectKey::Commands,
+            ActorEffectKey::Actor,
+        ];
+        let integrator = vec![
+            ActorEffectKey::Replies,
+            ActorEffectKey::BoundWorktree,
+            ActorEffectKey::WorktreeIntegration,
+            ActorEffectKey::Commands,
+            ActorEffectKey::Actor,
+        ];
+        let root = EffectiveRole::root();
+        for (role, generations) in [
+            (EffectiveRole::root(), 7),
+            (EffectiveRole::coding(), 7),
+            // A gate with no worktree of its own is a research role, and the
+            // host's research policy spends it down to one generation — still
+            // enough to admit a leaf reviewer.
+            (EffectiveRole::research(), 1),
+        ] {
+            let actor = role.clone().with_effect_keys(gate.clone());
+            assert!(
+                actor.respects_role_ceiling(),
+                "the gate row exceeds the {:?} ceiling",
+                role.role()
+            );
+            let admitted = root
+                .preview_child(actor, None)
+                .expect("the root admits its own gate actor");
+            // `Forks` in the row is what keeps a descendant budget at all: the
+            // gate spends one of the root's eight generations and admits its
+            // own reviewers out of the rest.
+            assert_eq!(admitted.descendants().maximum_depth, generations);
+            assert_eq!(admitted.effect_keys(), gate.as_slice());
+        }
+        for role in [EffectiveRole::root(), EffectiveRole::coding()] {
+            let actor = role.clone().with_effect_keys(integrator.clone());
+            assert!(
+                actor.respects_role_ceiling(),
+                "the integrator row exceeds the {:?} ceiling",
+                role.role()
+            );
+            root.preview_child(actor, None)
+                .expect("the root admits its own integrator");
+        }
+        assert!(
+            !EffectiveRole::research()
+                .with_effect_keys(integrator)
+                .respects_role_ceiling(),
+            "an integrator without a worktree would have no integrate authority"
+        );
+
+        // The read-only reviewer the gate admits is a leaf one generation
+        // below it, and its row must be a SUBSET of the gate's own row: a
+        // narrow parent cannot hand out authority it does not hold.
+        let gate_actor = root
+            .preview_child(EffectiveRole::research().with_effect_keys(gate.clone()), None)
+            .expect("gate admitted");
+        let reviewer = gate_actor
+            .preview_child(
+                EffectiveRole::research().with_effect_keys(vec![
+                    ActorEffectKey::Replies,
+                    ActorEffectKey::Watches,
+                    ActorEffectKey::ActorContext,
+                    ActorEffectKey::BoundWorktree,
+                    ActorEffectKey::Notifications,
+                    ActorEffectKey::Jev,
+                    ActorEffectKey::Commands,
+                    ActorEffectKey::Actor,
+                ]),
+                None,
+            )
+            .expect("the gate admits its own read-only reviewer");
+        assert_eq!(
+            reviewer.descendants(),
+            DescendantBudget {
+                maximum_depth: 0,
+                maximum_active_children: Some(0)
+            }
+        );
+        assert_eq!(reviewer.workspace(), WorkspaceAccess::InspectOnly);
+        assert!(gate_actor.permits_child(&reviewer));
+        // A gate without a worktree spends the research policy's one
+        // generation on its reviewers: a reviewer that keeps `Forks` is still
+        // admitted, but it is a leaf. The tree recurses through nodes that
+        // hold worktrees, never through gates.
+        let recursive = gate_actor
+            .preview_child(
+                EffectiveRole::research()
+                    .with_effect_keys(vec![ActorEffectKey::Replies, ActorEffectKey::Forks]),
+                None,
+            )
+            .expect("a forking reviewer is still admitted");
+        assert_eq!(recursive.descendants().maximum_depth, 0);
+        // The full research row is not a subset of the gate's row, so the gate
+        // cannot widen a child past itself.
+        assert!(gate_actor
+            .preview_child(EffectiveRole::research(), None)
+            .is_err());
     }
 
     #[test]

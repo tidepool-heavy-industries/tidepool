@@ -1073,11 +1073,13 @@ impl WorktreeHandler {
             .ok_or_else(|| never_registered(&request.target_worktree))?;
         let source = tidepool_worktree::GitOid::from_raw(request.source_head.raw);
         let source_branch = request.source_branch.as_ref().map(branch_name_from_wire);
+        let advance = request.merge_advance.as_ref().map(branch_name_from_wire);
         let outcome = try_merge(
             self.manager.git(),
             handle.cwd(),
             &source,
             source_branch.as_ref(),
+            advance.as_ref(),
             &request.merge_message,
         )
         .map_err(error_to_wire)?;
@@ -1272,6 +1274,7 @@ mod tests {
             },
             source_branch: None,
             target_worktree: reviewed.handle_receipt.tree_id.clone(),
+            merge_advance: None,
             merge_message: "must not merge another worker's checkout".into(),
         });
         let value = crate::test_support::response_value(
