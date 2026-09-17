@@ -1578,8 +1578,36 @@ fn atom_value(
             Ok(root_slot_value(builder, plan, slot.slot, expected))
         }
         Atom::Scalar(scalar) => scalar_value(builder, scalar, expected, plan, owner, node),
-        Atom::Void | Atom::Rubbish(_) => Err(unsupported(owner, node)),
+        Atom::Rubbish(rep) => rubbish_value(builder, *rep, owner, node),
+        Atom::Void => Err(unsupported(owner, node)),
     }
+}
+
+/// Materialise a dummy value for a `Rubbish` atom: GHC emits `Rubbish` only
+/// for provably-dead slots (worker/wrapper absent arguments, unreachable
+/// branches), so any bit pattern already satisfies the program's semantics.
+/// A zero constant is used uniformly, including for the pointer reps
+/// (`LiftedRef`/`UnliftedRef`/`Address`): the copying collector's tracing
+/// entry point treats an untagged zero word as a safe null and returns it
+/// unexamined before any tag check or dereference
+/// (`tidepool-heap/src/gc/raw.rs`, `evacuate_descriptor`'s
+/// `if encoded == 0 { return Ok(0); }`), and every traced slot — root slots
+/// and `for_each_trace_slot` fields alike — is routed through that same
+/// function regardless of the field's static rep. This mirrors the existing
+/// `ScalarLiteral::NullAddress` encoding, which already emits `iconst(I64, 0)`
+/// for a real (non-rubbish) `Addr#` null under the same rep.
+fn rubbish_value(
+    builder: &mut FunctionBuilder<'_>,
+    rep: RuntimeRep,
+    owner: ValueId,
+    node: usize,
+) -> Result<Value, CompileError> {
+    let ty = physical_type(rep).map_err(|_| unsupported(owner, node))?;
+    Ok(match ty {
+        types::F32 => builder.ins().f32const(0.0),
+        types::F64 => builder.ins().f64const(0.0),
+        _ => builder.ins().iconst(ty, 0),
+    })
 }
 
 fn emit_atoms(

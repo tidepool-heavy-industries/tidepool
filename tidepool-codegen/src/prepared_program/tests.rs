@@ -85,10 +85,11 @@ fn rep(rep: RuntimeRep) -> Vec<u8> {
     match rep {
         RuntimeRep::Void => array([uint(0)]),
         RuntimeRep::LiftedRef => array([uint(1)]),
+        RuntimeRep::UnliftedRef => array([uint(2)]),
+        RuntimeRep::Address => array([uint(3)]),
         RuntimeRep::Int(bits) => array([uint(4), uint(u64::from(bits))]),
         RuntimeRep::Word(bits) => array([uint(5), uint(u64::from(bits))]),
         RuntimeRep::Float(bits) => array([uint(6), uint(u64::from(bits))]),
-        other => panic!("fixture does not encode {other:?}"),
     }
 }
 
@@ -135,6 +136,10 @@ fn value_ref_local(id: u8) -> Vec<u8> {
 
 fn atom_scalar(scalar: Vec<u8>) -> Vec<u8> {
     array([uint(1), scalar])
+}
+
+fn atom_rubbish(value_rep: RuntimeRep) -> Vec<u8> {
+    array([uint(3), rep(value_rep)])
 }
 
 fn return_frame(atoms: Vec<Vec<u8>>) -> Vec<u8> {
@@ -510,6 +515,15 @@ fn join_wire() -> Vec<u8> {
             let_joins_frame(join_binding(0, 1, 1, 0), 1),
         ],
         2,
+    )
+}
+
+fn rubbish_result_wire(value_rep: RuntimeRep) -> Vec<u8> {
+    wire_program(
+        vec![signature(&[value_rep])],
+        vec![],
+        vec![return_frame(vec![atom_rubbish(value_rep)])],
+        0,
     )
 }
 
@@ -906,6 +920,25 @@ fn nested_function_rejection_reports_the_nested_expression_owner() {
             node: 0,
         }))
     ));
+}
+
+#[test]
+fn rubbish_atom_compiles_for_every_supported_rep() {
+    for value_rep in [
+        RuntimeRep::Int(64),
+        RuntimeRep::Word(64),
+        RuntimeRep::Float(64),
+        RuntimeRep::LiftedRef,
+        RuntimeRep::UnliftedRef,
+        RuntimeRep::Address,
+    ] {
+        let result = CompiledProgram::compile(&linked_wire(rubbish_result_wire(value_rep)));
+        assert!(
+            result.is_ok(),
+            "rubbish atom of rep {value_rep:?} failed to compile: {:?}",
+            result.err()
+        );
+    }
 }
 
 #[test]
