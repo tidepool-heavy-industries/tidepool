@@ -18,6 +18,7 @@ module Tidepool.Agent.Watch
   , awaitSettled
   , awaitProgressAfter
   , awaitAnyProgress
+  , awaitAnySettled
   , watch
   , Route
   , RouteState (..)
@@ -46,6 +47,7 @@ import Tidepool.Agent.Watch.Internal
   , awaitSettled
   , awaitProgressAfter
   , awaitAnyProgress
+  , awaitAnySettled
   , pollWatch
   , ForgetWatchOutcome (..)
   , forgetWatch

@@ -7,16 +7,17 @@ modules such as `Project.Work` provide project policy.
 
 ```haskell
 let task = "Remove the stale path and report the focused check." :: Text
-worker <- unfold (batch "cleanup" "implementation") $
+(worker, ready) <- spawnWatched "implementation-ready" (batch "cleanup" "implementation") $
   child @Text $
     coding projectHead $
       assignment "remove-stale-path" task
-
-ready <- watch "implementation-ready" (awaitSettled worker)
 ready
 ```
 
-The final expression displays the watch handle. End the model turn while waiting.
+`spawnWatched label path plan` is `unfold path plan` followed by
+`watch label (awaitSettled response)`; use `unfold` directly to admit several
+children at once. The final expression displays the watch handle. End the model
+turn while waiting.
 Truncated displays offer `cellDisplay.more`, which reads retained output without
 repeating the original effect.
 
@@ -88,6 +89,26 @@ Stopping actors and releasing groups remain explicit supervision decisions.
 Inspect failure values before retrying. Typecheck rejection runs no effects;
 runtime failure or interruption keeps the completed prefix.
 
+Delegation at a glance:
+
+- start work: `spawnWatched` or `unfold` with `child`; follow-up work for a
+  retained actor: `request`.
+- steer: `sendMessage` delivers a note; `updateRequest` clarifies the active
+  request; `cancelRequest` withdraws a request (a queued one never starts) and
+  keeps the actor; `stopAgent` retires the actor.
+- inspect: `listAgents`, `lookupAgent`, `findAgentsByLabel`, `observeForkGroup`,
+  `pollResponse`.
+- wait: `watch` with `awaitSettled` (combine with `<*>` for all-of) or
+  `awaitAnySettled` (wake when any settles).
+- launch options: `withContext (Selected render)` starts a fresh conversation
+  with only the rendered input; `withModel`, `withEffort`; `previewBranch`
+  shows the resolved launch before admission.
+- finish: `tryMerge` integrates a submission; `planCleanup` and
+  `executeCleanup` retire a group.
+
+For repository delegation use these operations rather than generic agent tools:
+they give typed results, worktree custody, and wakes.
+
 Common signatures (reference, not a cell to execute):
 
 ```haskell signatures
@@ -100,7 +121,10 @@ unfold :: (Member Forks effects, Member Replies effects, Member AgentInspection 
        => ForkGroupPath -> Unfold effects result -> Eff effects result
 request :: Member Replies effects
         => AgentRef -> Assignment input -> Eff effects (Response result)
+spawnWatched :: WatchLabel -> ForkGroupPath -> Unfold effects (Response result)
+             -> Eff effects (Response result, Watch (Settlement result))
 awaitSettled :: Response result -> Await (Settlement result)
+awaitAnySettled :: [Response result] -> Await [Maybe (Settlement result)]
 watch :: Member Watches effects => WatchLabel -> Await result -> Eff effects (Watch result)
 pollWatch :: Member Watches effects => Watch result -> Eff effects (WatchState result)
 pollResponse :: Member Replies effects => Response result -> Eff effects (ResponseState result)

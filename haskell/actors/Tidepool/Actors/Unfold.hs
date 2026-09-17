@@ -78,6 +78,7 @@ module Tidepool.Actors.Unfold
   , UnfoldError (..)
   , attemptUnfold
   , unfold
+  , spawnWatched
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)
@@ -90,6 +91,7 @@ import Prelude
 
 import qualified Tidepool.Actor as Actor
 import Tidepool.Agent.Reply (Replies, Response)
+import Tidepool.Agent.Watch (Settlement, Watch, WatchLabel, Watches, awaitSettled, watch)
 import Tidepool.Agent.Reply.Internal (Progress (..), responseRequestId, responseAdmission, withResponseAdmission)
 import Tidepool.Agent.Assignment (Assignment (..), Label, NameError (..), labelText)
 import Tidepool.Agent.Launch
@@ -589,6 +591,23 @@ unfold path plan = do
   case attempted of
     Left failure -> error ("unfold admission failed: " <> show failure)
     Right result -> pure result
+
+-- | Admit one planned child (@child \@T branch@) in @path@ and register a
+-- labeled wake for its settlement: 'unfold' followed by
+-- @watch label (awaitSettled response)@. Both handles are returned; the child
+-- starts after the cell returns.
+spawnWatched
+  :: forall result parent
+   . ( Member Forks parent, Member Replies parent, Member AgentInspection parent
+     , Member Watches parent )
+  => WatchLabel
+  -> ForkGroupPath
+  -> Unfold parent (Response result)
+  -> Eff parent (Response result, Watch (Settlement result))
+spawnWatched label path planned = do
+  response <- unfold path planned
+  settled <- watch label (awaitSettled response)
+  pure (response, settled)
 
 startBranch
   :: forall effects child input result

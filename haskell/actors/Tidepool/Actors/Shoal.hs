@@ -126,6 +126,7 @@ module Tidepool.Actors.Shoal
   , UnfoldError (..)
   , attemptUnfold
   , unfold
+  , spawnWatched
   , AgentSpec
   , AgentRef
   , AgentState (..)
@@ -146,6 +147,7 @@ module Tidepool.Actors.Shoal
   , ProviderUsageSummary (..)
   , CacheBoundaryReason (..)
   , listAgents
+  , findAgentsByLabel
   , SwarmSnapshot (..)
   , UsageTotal (..)
   , UsageDelta (..)
@@ -216,6 +218,7 @@ module Tidepool.Actors.Shoal
   , awaitSettled
   , awaitProgressAfter
   , awaitAnyProgress
+  , awaitAnySettled
   , watch
   , pollWatch
   , Route
@@ -288,6 +291,7 @@ import Tidepool.Actors.Internal.Agent
   , agentIdentity
   , observeAgent
   , listAgents
+  , findAgentsByLabel
   , AgentForgetOutcome (..)
   , forgetAgent
   , readonlyAgent

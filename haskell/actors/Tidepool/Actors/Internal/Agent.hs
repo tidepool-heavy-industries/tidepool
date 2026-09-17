@@ -44,6 +44,7 @@ module Tidepool.Actors.Internal.Agent
   , observeAgent
   , lookupAgent
   , listAgents
+  , findAgentsByLabel
   , AgentForgetOutcome (..)
   , forgetAgent
   , StopOutcome (..)
@@ -189,6 +190,11 @@ rosterAgentState entry = case rosterState entry of
 
 listAgents :: Member AgentInspection effs => Eff effs [AgentRosterEntry]
 listAgents = send AgentListWith
+
+-- | Every visible actor carrying this label, retired incarnations included,
+-- so a reused or ambiguous label shows all its matches.
+findAgentsByLabel :: Member AgentInspection effs => Text -> Eff effs [AgentRosterEntry]
+findAgentsByLabel label = filter ((== label) . rosterLabel) <$> listAgents
 
 data AgentForgetOutcome
   = AgentForgotten

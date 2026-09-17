@@ -24,6 +24,7 @@ module Tidepool.Agent.Watch.Internal
   , awaitSettled
   , awaitProgressAfter
   , awaitAnyProgress
+  , awaitAnySettled
   , watch
   , Route
   , RouteState (..)
@@ -187,6 +188,18 @@ awaitAnyProgress sources =
     dependency (Progress request, cursor) = AwaitProgress request cursor
     observe watchId (Progress (RequestId requestId), ProgressCursor revision) =
       send (ObserveWatchProgressWith watchId requestId revision)
+
+-- | Wait until any supplied response settles. Results retain input order;
+-- a response still pending at the wake is 'Nothing'.
+awaitAnySettled :: [Response result] -> Await [Maybe (Settlement result)]
+awaitAnySettled [] = pure []
+awaitAnySettled responses =
+  Await [[AwaitDependency (responseRequestId response) True | response <- responses]]
+    $ \_ failures -> pure (Just (map (settled failures) responses))
+  where
+    settled failures response = case readResponse response of
+      Just result -> Just (ReplyAvailable result)
+      Nothing -> ReplyUnavailable <$> lookup (responseRequestId response) failures
 
 watch :: Member Watches effs => WatchLabel -> Await result -> Eff effs (Watch result)
 watch (WatchLabel label) awaiting@(Await groups _) = do

@@ -126,3 +126,7 @@ is not parent acceptance. The coordinator inspects and integrates each selected
 commit, then communicates the accepted baseline and decision delta. A normal
 `request` to a busy specialist queues; this example does not provide mid-flight
 steering or a synchronous checkpoint. Never wait circularly for that request.
+
+`awaitAnySettled responses` wakes when any listed response settles. Its value
+keeps input order: `Just` settlements for those settled at the wake, `Nothing`
+for the rest. Register another watch for the remainder when you still need them.
