@@ -686,7 +686,8 @@ impl From<std::io::Error> for TurnFailure {
 /// concrete. It names the repair (a signature) rather than the compiler
 /// artifact the ambiguity leaked as.
 pub const AMBIGUOUS_TYPE_ADVICE: &str =
-    "this declaration's type is ambiguous; add a signature (e.g. `:: Text`)";
+    "this declaration's type is ambiguous; give it a signature naming the type you \
+     meant (the diagnostic above says which constraint was left open)";
 
 /// The advice for an ambiguity GHC blames on a literal rather than on a
 /// binding: no signature on a declaration fixes it, only an annotation at the
@@ -992,7 +993,7 @@ pub fn render_turn_compile_error(
             source,
         },
     );
-    ambiguous_type_advice(&rendered, turn_text).unwrap_or(rendered)
+    with_advice(rendered, |text| advice_for(text, turn_text))
 }
 
 /// Render whole-cell diagnostics against the submitted cell coordinates.
@@ -1015,7 +1016,94 @@ pub fn render_cell_compile_error(error: &CompileError, cell_text: &str) -> Strin
             source: cell_text,
         },
     );
-    ambiguous_type_advice(&rendered, cell_text).unwrap_or(rendered)
+    with_advice(rendered, |text| advice_for(text, cell_text))
+}
+
+/// Whether GHC's own text is worth keeping beside the advice.
+///
+/// Both answers are right somewhere. When the diagnostic is about the reader's
+/// code — a named binding whose constraint stayed open, an ambiguous literal,
+/// a field that two cell generations both define — GHC says which binding and
+/// which constraint, and the advice is only a sentence about what to do with
+/// that. Replacing it left eight cells across two dogfood runs told to add a
+/// signature with no way to know what to write.
+///
+/// When the diagnostic is an artifact of how a cell is wrapped — a `ZonkAny`
+/// standing in for a type the reader never named, or an overlap that hangs on
+/// an uninstantiated variable — its text names internals from the generated
+/// module, and keeping it only invites chasing them. Those are replaced.
+enum Diagnostic {
+    /// About the submitted code: keep it, and add the advice after it.
+    WorthReading,
+    /// About the wrapper: the advice is the whole of what can be acted on.
+    Artifact,
+}
+
+fn with_advice(
+    rendered: String,
+    advise: impl FnOnce(&str) -> Option<(String, Diagnostic)>,
+) -> String {
+    match advise(&rendered) {
+        None => rendered,
+        Some((advice, Diagnostic::Artifact)) => advice,
+        Some((advice, Diagnostic::WorthReading)) if rendered.contains(&advice) => rendered,
+        Some((advice, Diagnostic::WorthReading)) => format!("{rendered}\n\n{advice}"),
+    }
+}
+
+/// Types a cell cannot write as a literal, and how to build one.
+///
+/// Passing the wrong shape was the largest single cost across four dogfood
+/// runs and did not fall between them, because the diagnostic says what was
+/// expected without saying how to make one. Where a literal works the instance
+/// is the fix — `GitRef` and `BranchName` took `IsString` and the whole class
+/// went away — but a fork group path is a campaign and a group, so no literal
+/// can mean it and naming the constructor is the fix instead.
+const CONSTRUCTORS: &[(&str, &str)] = &[
+    (
+        "ForkGroupPath",
+        "a fork group path is a campaign and a group, so no string literal can name one:          build it with `batch \"campaign\" \"group\"`",
+    ),
+    (
+        "WorktreeSpec",
+        "build a worktree spec with `fromRef ref label`, `fromCurrentRepository label`,          or `fromWorktree id label`",
+    ),
+];
+
+/// Name the constructor for a type the cell tried to write directly.
+#[must_use]
+pub fn constructor_advice(message: &str) -> Option<String> {
+    let names_expected = |name: &str| {
+        message.contains(&format!("expected type: {name}"))
+            || message.contains(&format!("expected type ‘{name}’"))
+            || message.contains(&format!("expected type `{name}'"))
+            || message.contains(&format!("IsString {name}"))
+            || message.contains(&format!("IsString ‘{name}’"))
+    };
+    CONSTRUCTORS
+        .iter()
+        .find(|(name, _)| names_expected(name))
+        .map(|(_, advice)| (*advice).to_owned())
+}
+
+/// [`ambiguous_type_advice`] plus whether the diagnostic it recognised is one
+/// the reader should still see.
+fn advice_for(message: &str, submitted: &str) -> Option<(String, Diagnostic)> {
+    if let Some(advice) = constructor_advice(message) {
+        return Some((advice, Diagnostic::WorthReading));
+    }
+    let advice = ambiguous_type_advice(message, submitted)?;
+    let artifact = message.contains("ZonkAny")
+        || (message.contains("Overlapping instances for")
+            && message.contains("The choice depends on the instantiation of"));
+    Some((
+        advice,
+        if artifact {
+            Diagnostic::Artifact
+        } else {
+            Diagnostic::WorthReading
+        },
+    ))
 }
 
 /// Locate submitted turn text within one of the shared wrapper templates.
@@ -2612,7 +2700,7 @@ fn parse_classify_export_item(v: &serde_json::Value) -> Result<ExportItem, Compi
 #[cfg(test)]
 mod ambiguity_advice_tests {
     use super::{
-        ambiguous_type_advice, refutable_binds, render_cell_compile_error,
+        ambiguous_type_advice, constructor_advice, refutable_binds, render_cell_compile_error,
         runtime_failure_advice, AMBIGUOUS_TYPE_ADVICE, LITERAL_ANNOTATION_ADVICE,
         SPLIT_SIGNATURE_ADVICE,
     };
@@ -2664,13 +2752,20 @@ mod ambiguity_advice_tests {
             "`summarize`'s type is ambiguous; add its signature line directly above the \
              equation in the same cell item: `summarize :: T -> U`"
         );
-        assert_eq!(
-            render_cell_compile_error(
-                &cell_error(AMBIGUOUS_TOP_LEVEL),
-                "summarize xs = render (head xs)"
+        // Advice is added to the diagnostic, never in place of it: the
+        // reader needs GHC's own account of which constraint was left open in
+        // order to know what signature to write.
+        let rendered = render_cell_compile_error(
+            &cell_error(AMBIGUOUS_TOP_LEVEL),
+            "summarize xs = render (head xs)",
+        );
+        assert!(rendered.contains("Ambiguous type variable"), "{rendered}");
+        assert!(
+            rendered.ends_with(
+                "`summarize`'s type is ambiguous; add its signature line directly above the \
+                 equation in the same cell item: `summarize :: T -> U`"
             ),
-            "`summarize`'s type is ambiguous; add its signature line directly above the \
-             equation in the same cell item: `summarize :: T -> U`"
+            "{rendered}"
         );
         // A handler helper that never got its effect row lands here too.
         assert!(ambiguous_type_advice(AMBIGUOUS_FIND_ELEM, "announce message = say message")
@@ -2708,10 +2803,9 @@ mod ambiguity_advice_tests {
             ambiguous_type_advice(message, "value = toJSON \"src/app.rs\"").as_deref(),
             Some(LITERAL_ANNOTATION_ADVICE)
         );
-        assert_eq!(
-            render_cell_compile_error(&cell_error(message), "value = toJSON \"src/app.rs\""),
-            LITERAL_ANNOTATION_ADVICE
-        );
+        let rendered = render_cell_compile_error(&cell_error(message), "value = toJSON \"src/app.rs\"");
+        assert!(rendered.contains("arising from the literal"), "{rendered}");
+        assert!(rendered.ends_with(LITERAL_ANNOTATION_ADVICE), "{rendered}");
     }
 
     /// Each cell item compiles alone, so a signature whose equation went into
@@ -2720,13 +2814,14 @@ mod ambiguity_advice_tests {
     #[test]
     fn a_signature_without_its_equation_says_they_share_one_item() {
         let message = "<cell>:1:1: error: [GHC-44432]\n    The type signature for \u{2018}summarize\u{2019} lacks an accompanying binding";
-        let advice = render_cell_compile_error(&cell_error(message), "summarize :: [Text] -> Text");
-        assert_eq!(
-            advice,
-            format!(
+        let rendered = render_cell_compile_error(&cell_error(message), "summarize :: [Text] -> Text");
+        assert!(rendered.contains("lacks an accompanying binding"), "{rendered}");
+        assert!(
+            rendered.ends_with(&format!(
                 "`summarize` has a signature but no equation in this cell item; \
                  {SPLIT_SIGNATURE_ADVICE}"
-            )
+            )),
+            "{rendered}"
         );
     }
 
@@ -2766,10 +2861,40 @@ mod ambiguity_advice_tests {
              that already exists in this session — or rename this one and its fields if you \
              meant a distinct type"
         );
-        assert_eq!(
-            render_cell_compile_error(&cell_error(AMBIGUOUS_REDECLARED_FIELD), "probe holder"),
-            advice
+        // The compiler's own text survives: it names the occurrence, both
+        // generations, and the line. The advice is added after it, not
+        // substituted for it.
+        let rendered = render_cell_compile_error(&cell_error(AMBIGUOUS_REDECLARED_FIELD), "probe holder");
+        assert!(rendered.contains("Ambiguous occurrence"), "{rendered}");
+        assert!(rendered.ends_with(&advice), "{rendered}");
+    }
+
+    /// Run 7's first friction: `unfold "run7/wave1"`. A fork group path is a
+    /// pair, so unlike `GitRef` it cannot take a string literal, and the
+    /// diagnostic alone leaves the reader to find `batch` by search.
+    #[test]
+    fn a_type_that_needs_a_constructor_names_it() {
+        let literal = "<cell>:42:22: error:\n    No instance for `GHC.Internal.Data.String.IsString ForkGroupPath' arising from the literal \"run7/wave1\"";
+        let advice = constructor_advice(literal).unwrap();
+        assert!(advice.contains("batch \"campaign\" \"group\""), "{advice}");
+
+        let mismatch = "<cell>:1:1: error:\n    Couldn't match expected type `WorktreeSpec' with actual type `WorktreeSeed'";
+        assert!(
+            constructor_advice(mismatch).unwrap().contains("fromRef"),
+            "a seed where a spec was wanted should name the spec's constructors"
         );
+        // The diagnostic survives: it says which types, which the advice does not.
+        let rendered = render_cell_compile_error(&cell_error(mismatch), "createWorktree boundHead");
+        assert!(rendered.contains("WorktreeSeed"), "{rendered}");
+        assert!(rendered.ends_with(&constructor_advice(mismatch).unwrap()), "{rendered}");
+    }
+
+    #[test]
+    fn a_type_that_takes_a_literal_is_left_to_its_instance() {
+        // GitRef and BranchName have IsString, so a literal already works and
+        // there is nothing to say.
+        let git_ref = "<cell>:1:1: error:\n    Couldn't match expected type `GitRef' with actual type `[Char]'";
+        assert_eq!(constructor_advice(git_ref), None);
     }
 
     /// The exact text a cell gets today for `Right handle <- createWorktree …`

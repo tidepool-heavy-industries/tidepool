@@ -22,7 +22,10 @@
 module Tidepool.Actor.Record
   ( (:-), State, Call, NoReply, Reply, Event
   , Shape, Definition, Client, Self, Private
-  , ActorState, Handler, ActorSpec, ActorHandle
+    -- The field, not the constructor: a handle can be read for the exact
+    -- incarnation it names — which is how one actor compares a handle it holds
+    -- against a reference it was sent — but it cannot be forged from parts.
+  , ActorState, Handler, ActorSpec, ActorHandle (actorRef)
   , Send, Request, EventHandler, EventSource
   , on, progress, settlement, lifecycle, command
   , get, gets, put, modify'

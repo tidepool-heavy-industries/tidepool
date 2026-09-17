@@ -90,7 +90,7 @@ pub use workbench::{
 };
 
 pub use turn::{
-    ambiguous_type_advice, assemble_bind_module, assemble_display_expression_module,
+    ambiguous_type_advice, assemble_bind_module, constructor_advice, assemble_display_expression_module,
     assemble_expression_module,
     assemble_inspection_module, assemble_opaque_expression_module, check_cell, classify_block,
     enable_no_monomorphism_restriction, insert_preamble_imports, place_turn_stmt,
