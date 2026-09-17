@@ -50,16 +50,16 @@ impl CallAncestry {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KernelCallFailure {
-    #[error("synchronous call to {target:?} would re-enter {ancestry:?}")]
+    #[error("synchronous call to actor {target} would re-enter its own ancestry {ancestry:?}")]
     Cycle {
         target: ActorRef,
         ancestry: Vec<ActorRef>,
     },
-    #[error("target actor {0:?} has exited")]
+    #[error("target actor {0} has exited")]
     TargetExited(ActorRef),
-    #[error("target actor {0:?} is unavailable")]
+    #[error("target actor {0} is unavailable")]
     TargetUnavailable(ActorRef),
-    #[error("target actor {0:?} has closed mailbox admission")]
+    #[error("target actor {0} has closed mailbox admission")]
     MailboxClosed(ActorRef),
     #[error(
         "call from {caller:?} in session {caller_session} to {target:?} in session {target_session} crosses a machine boundary"
@@ -78,11 +78,11 @@ pub type KernelCallReply = Result<MailboxValue, KernelCallFailure>;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KernelInvocationFailure {
-    #[error("actor {0:?} has exited")]
+    #[error("actor {0} has exited")]
     ActorExited(ActorRef),
-    #[error("actor {actor:?} rejected the invocation: {detail}")]
+    #[error("actor {actor} rejected the invocation: {detail}")]
     Rejected { actor: ActorRef, detail: String },
-    #[error("actor {actor:?} invocation failed: {detail}")]
+    #[error("actor {actor} invocation failed: {detail}")]
     Failed { actor: ActorRef, detail: String },
     #[error(transparent)]
     Workbench(#[from] KernelWorkbenchFailure),
@@ -101,7 +101,7 @@ impl std::fmt::Display for KernelWorkbenchFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "actor {:?} workbench input unit {} of {} failed: {}",
+            "actor {} workbench input unit {} of {} failed: {}",
             self.actor,
             self.failed_index + 1,
             self.total,
@@ -659,7 +659,7 @@ mod tests {
         };
         assert_eq!(
             failure.to_string(),
-            "actor ActorRef { id: ActorId(7), incarnation: Incarnation(1) } workbench input unit 2 of 3 failed: actor protocol violation: unsupported resident actor request `MissingEffect`\ninput receipts before failure:\ninput unit 1 (Committed): defined spotTaskText at generation 2"
+            "actor 7@1 workbench input unit 2 of 3 failed: actor protocol violation: unsupported resident actor request `MissingEffect`\ninput receipts before failure:\ninput unit 1 (Committed): defined spotTaskText at generation 2"
         );
     }
 }

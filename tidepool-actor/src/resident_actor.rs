@@ -775,6 +775,38 @@ impl WorkbenchExecutions {
 }
 
 impl<H, O> ResidentKernelBehavior<H, O> {
+    /// A fork refusal, with the full coordinator named by its path.
+    ///
+    /// Every ancestor's ceiling counts its whole subtree, so the coordinator
+    /// that is full is often not the one forking. It is carried as an
+    /// incarnation, which an agent cannot act on: it reasons in paths.
+    /// Resolve it here, where the actor records are in reach, and fall back to
+    /// the short form when the record is gone.
+    fn name_coordinator(&self, error: crate::lineage::ForkGroupError) -> String {
+        use crate::lineage::ForkGroupError;
+        let ForkGroupError::DescendantBudgetExceeded {
+            coordinator,
+            requested,
+            active,
+            maximum,
+        } = error
+        else {
+            return error.to_string();
+        };
+        let named = self
+            .environment
+            .actors
+            .lock()
+            .get(&coordinator)
+            .and_then(|record| record.descriptor.actor_path())
+            .map_or_else(|| coordinator.to_string(), |path| path.to_string());
+        format!(
+            "fork group would exceed the active descendant ceiling of coordinator {named} \
+             ({requested} requested, {active} already active or reserved in its subtree, \
+             maximum {maximum})"
+        )
+    }
+
     fn pending_in_tool_block(&self, target: ActorRef) -> bool {
         self.active_fork_boundary.is_some() && self.environment.fork_groups.is_pending_child(target)
     }
@@ -2590,7 +2622,7 @@ where
                             maximum,
                         ),
                     }
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| self.name_coordinator(error))?;
                     Ok::<_, String>((group_id, group_path, reservations))
                 })();
                 match admitted {

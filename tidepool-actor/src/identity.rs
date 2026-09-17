@@ -32,6 +32,18 @@ impl ActorRef {
     }
 }
 
+/// `3@1`, the way every actor-facing surface already spells an incarnation.
+///
+/// The derived `Debug` renders `ActorRef { id: ActorId(3), incarnation:
+/// Incarnation(1) }`, which is how an id reached agents inside a dozen refusal
+/// messages. An agent reasons about actors by path and by this short form, and
+/// can do nothing with a struct dump of the Rust representation.
+impl std::fmt::Display for ActorRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}@{}", self.id.0, self.incarnation.0)
+    }
+}
+
 impl From<ActorRef> for PrincipalId {
     fn from(actor: ActorRef) -> Self {
         Self::new(actor.id.0, actor.incarnation.0)

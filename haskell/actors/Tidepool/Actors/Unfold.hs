@@ -77,6 +77,7 @@ module Tidepool.Actors.Unfold
   , planCleanupFor
   , executeCleanup
   , UnfoldError (..)
+  , renderUnfoldError
   , attemptUnfold
   , unfold
   , spawnWatched
@@ -611,8 +612,23 @@ unfold
 unfold path plan = do
   attempted <- attemptUnfold path plan
   case attempted of
-    Left failure -> error ("unfold admission failed: " <> show failure)
+    Left failure -> error (Text.unpack (renderUnfoldError failure))
     Right result -> pure result
+
+-- | What an admission refusal says, in the words the host used.
+--
+-- The host already composes one clean sentence for each of these — which
+-- coordinator's ceiling is full, which branch was rejected and why. Showing
+-- the constructor instead wrapped that sentence in Haskell source syntax and
+-- buried it, which is what a dogfood run 7 node read when its reviewer was
+-- refused. The label is kept for the branch case, because a plan that admits
+-- several children needs to know which one was refused.
+renderUnfoldError :: UnfoldError -> Text
+renderUnfoldError failure = case failure of
+  UnfoldBeginRejected detail -> detail
+  UnfoldBranchRejected label detail -> label <> ": " <> detail
+  UnfoldShapeMismatch detail -> detail
+  UnfoldCommitRejected detail -> detail
 
 -- | Admit one planned child (@child \@T branch@) in @path@ and register a
 -- labeled wake for its settlement: 'unfold' followed by

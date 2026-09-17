@@ -125,6 +125,7 @@ module Tidepool.Actors.Shoal
   , responseActor
   , responseAdmission
   , UnfoldError (..)
+  , renderUnfoldError
   , attemptUnfold
   , unfold
   , spawnWatched
