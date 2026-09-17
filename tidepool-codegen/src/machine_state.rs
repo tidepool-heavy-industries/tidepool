@@ -78,6 +78,15 @@ pub enum MachineDisposition {
     Unavailable,
 }
 
+/// Whether a byte-range copy may alias its source and destination.
+/// `copyByteArray#` requires distinct arrays; `copyMutableByteArray#` permits
+/// one array with overlapping ranges (memmove).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ByteCopyAliasing {
+    Disjoint,
+    Overlapping,
+}
+
 /// The retained first cause and the reuse decision it imposed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineFailure {
@@ -2033,17 +2042,79 @@ impl MachineState {
         destination_offset: usize,
         count: usize,
     ) -> Result<(), ExternalStorageValidationError> {
+        self.copy_external_byte_range_with(
+            source,
+            source_offset,
+            destination,
+            destination_offset,
+            count,
+            ByteCopyAliasing::Disjoint,
+        )
+    }
+
+    /// GHC copyMutableByteArray# permits the source and destination to be the
+    /// same array with overlapping ranges (memmove semantics). Both complete
+    /// ranges are still validated before any write.
+    pub(crate) fn copy_external_byte_range_overlapping(
+        &self,
+        source: *mut u8,
+        source_offset: usize,
+        destination: *mut u8,
+        destination_offset: usize,
+        count: usize,
+    ) -> Result<(), ExternalStorageValidationError> {
+        self.copy_external_byte_range_with(
+            source,
+            source_offset,
+            destination,
+            destination_offset,
+            count,
+            ByteCopyAliasing::Overlapping,
+        )
+    }
+
+    /// GHC setByteArray#: fill a complete active byte span with one byte.
+    /// The range is validated before any write; this is a noncollecting
+    /// ledger mutation.
+    pub(crate) fn fill_external_byte_range(
+        &self,
+        array: *mut u8,
+        offset: usize,
+        count: usize,
+        value: u8,
+    ) -> Result<(), ExternalStorageValidationError> {
+        let storage = self.external_storage.borrow();
+        let to = Self::checked_external_byte_range(&storage, array, offset, count)?;
+        if count != 0 {
+            // The complete span was authenticated above, including activity.
+            unsafe { std::ptr::write_bytes(to, value, count) };
+            self.external_changed();
+        }
+        Ok(())
+    }
+
+    fn copy_external_byte_range_with(
+        &self,
+        source: *mut u8,
+        source_offset: usize,
+        destination: *mut u8,
+        destination_offset: usize,
+        count: usize,
+        aliasing: ByteCopyAliasing,
+    ) -> Result<(), ExternalStorageValidationError> {
         let storage = self.external_storage.borrow();
         let from = Self::checked_external_byte_range(&storage, source, source_offset, count)?;
         let to =
             Self::checked_external_byte_range(&storage, destination, destination_offset, count)?;
-        if source == destination {
+        if source == destination && aliasing == ByteCopyAliasing::Disjoint {
             return Err(ExternalStorageValidationError::AliasedByteCopy);
         }
         if count != 0 {
-            // Distinct ledger allocations are disjoint; both complete spans
-            // were authenticated before copying, including their activity.
-            unsafe { std::ptr::copy_nonoverlapping(from, to, count) };
+            // Both complete spans were authenticated before copying, including
+            // their activity. Distinct ledger allocations are disjoint; the
+            // overlapping policy only ever aliases within one allocation, and
+            // `copy` handles that ordering.
+            unsafe { std::ptr::copy(from, to, count) };
             self.external_changed();
         }
         Ok(())
@@ -3822,6 +3893,44 @@ mod tests {
             Err(ExternalStorageValidationError::AliasedByteCopy)
         );
         assert_eq!(ms.copy_external_bytes(bytes).unwrap(), b"abcd");
+    }
+
+    #[test]
+    fn byte_fill_writes_only_the_validated_span() {
+        let ms = MachineState::new();
+        let bytes = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 4)
+            .unwrap();
+        ms.store_external_bytes(bytes, 0, b"abcd").unwrap();
+        ms.fill_external_byte_range(bytes, 1, 2, b'z').unwrap();
+        assert_eq!(ms.copy_external_bytes(bytes).unwrap(), b"azzd");
+        ms.fill_external_byte_range(bytes, 4, 0, b'q').unwrap();
+        assert_eq!(ms.copy_external_bytes(bytes).unwrap(), b"azzd");
+        assert!(matches!(
+            ms.fill_external_byte_range(bytes, 3, 2, b'q'),
+            Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
+        ));
+        assert_eq!(ms.copy_external_bytes(bytes).unwrap(), b"azzd");
+    }
+
+    #[test]
+    fn overlapping_byte_copy_moves_within_one_array_in_both_directions() {
+        let ms = MachineState::new();
+        let bytes = ms
+            .allocate_external_storage(ExternalStorageKind::Bytes, 4)
+            .unwrap();
+        ms.store_external_bytes(bytes, 0, b"abcd").unwrap();
+        ms.copy_external_byte_range_overlapping(bytes, 0, bytes, 1, 3)
+            .unwrap();
+        assert_eq!(ms.copy_external_bytes(bytes).unwrap(), b"aabc");
+        ms.copy_external_byte_range_overlapping(bytes, 1, bytes, 0, 3)
+            .unwrap();
+        assert_eq!(ms.copy_external_bytes(bytes).unwrap(), b"abcc");
+        assert!(matches!(
+            ms.copy_external_byte_range_overlapping(bytes, 2, bytes, 0, 3),
+            Err(ExternalStorageValidationError::IndexOutOfBounds { .. })
+        ));
+        assert_eq!(ms.copy_external_bytes(bytes).unwrap(), b"abcc");
     }
 
     #[test]

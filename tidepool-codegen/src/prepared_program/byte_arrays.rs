@@ -2,6 +2,7 @@
 //! reserved and initialized before allocating external bytes.
 
 use super::primitives::returns_exact;
+use crate::machine_state::ByteCopyAliasing;
 use crate::{host_fns::RuntimeError, prepared_control::CallStatus};
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
 use cranelift_frontend::FunctionBuilder;
@@ -40,6 +41,11 @@ pub(super) enum ByteOperation {
     Size,
     Shrink,
     Copy,
+    /// `copyMutableByteArray#`: the same shape as `Copy`, but the source and
+    /// destination may be one array with overlapping ranges.
+    CopyMutable,
+    /// `setByteArray#`: fill a range with one byte.
+    Set,
     Compare,
     Read(Element),
     Write(Element),
@@ -112,6 +118,19 @@ pub(super) fn recognize(
                 && returns_exact(signature, &[]) =>
         {
             Some(ByteOperation::Copy)
+        }
+        "copyMutableByteArray#"
+            if signature.arguments
+                == [UnliftedRef, Int(64), UnliftedRef, Int(64), Int(64), Void]
+                && returns_exact(signature, &[]) =>
+        {
+            Some(ByteOperation::CopyMutable)
+        }
+        "setByteArray#"
+            if signature.arguments == [UnliftedRef, Int(64), Int(64), Int(64), Void]
+                && returns_exact(signature, &[]) =>
+        {
+            Some(ByteOperation::Set)
         }
         "compareByteArrays#"
             if signature.arguments == [UnliftedRef, Int(64), UnliftedRef, Int(64), Int(64)]
@@ -419,6 +438,7 @@ pub(super) fn byte_range_error(error: ExternalStorageValidationError) -> Runtime
 
 /// Both wrappers and complete spans are admitted before the owner copies.
 /// No collection, callback, or partial write occurs in this host call.
+/// `copyByteArray#`: the source and destination must be distinct arrays.
 pub(super) unsafe extern "C" fn prepared_copy_bytes(
     vmctx: *mut crate::context::VMContext,
     descriptor: *const ObjectDescriptor,
@@ -427,6 +447,85 @@ pub(super) unsafe extern "C" fn prepared_copy_bytes(
     destination: *mut u8,
     destination_offset: i64,
     count: i64,
+) -> i32 {
+    unsafe {
+        copy_bytes_host(
+            vmctx,
+            descriptor,
+            source,
+            source_offset,
+            destination,
+            destination_offset,
+            count,
+            ByteCopyAliasing::Disjoint,
+        )
+    }
+}
+
+/// `copyMutableByteArray#`: as `prepared_copy_bytes`, but one array may be
+/// both source and destination with overlapping ranges.
+pub(super) unsafe extern "C" fn prepared_copy_mutable_bytes(
+    vmctx: *mut crate::context::VMContext,
+    descriptor: *const ObjectDescriptor,
+    source: *mut u8,
+    source_offset: i64,
+    destination: *mut u8,
+    destination_offset: i64,
+    count: i64,
+) -> i32 {
+    unsafe {
+        copy_bytes_host(
+            vmctx,
+            descriptor,
+            source,
+            source_offset,
+            destination,
+            destination_offset,
+            count,
+            ByteCopyAliasing::Overlapping,
+        )
+    }
+}
+
+/// `setByteArray#`: the wrapper and complete span are admitted before the
+/// fill. No collection, callback, or partial write occurs in this host call;
+/// the value is truncated to its low byte as GHC does.
+pub(super) unsafe extern "C" fn prepared_set_bytes(
+    vmctx: *mut crate::context::VMContext,
+    descriptor: *const ObjectDescriptor,
+    array: *mut u8,
+    offset: i64,
+    count: i64,
+    value: i64,
+) -> i32 {
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    if machine.prepared_call_status() != CallStatus::Success {
+        return machine.prepared_call_status() as i32;
+    }
+    let result = (|| {
+        let (array, len) = unsafe { active_bytes(machine, vmctx, array, descriptor) }?;
+        let offset = checked_byte_span_arg(offset, len)?;
+        let count = checked_byte_span_arg(count, len)?;
+        machine
+            .fill_external_byte_range(array, offset, count, value as u8)
+            .map_err(byte_range_error)
+    })();
+    match result {
+        Ok(()) => CallStatus::Success as i32,
+        Err(error) => super::arrays::array_error(machine, error),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn copy_bytes_host(
+    vmctx: *mut crate::context::VMContext,
+    descriptor: *const ObjectDescriptor,
+    source: *mut u8,
+    source_offset: i64,
+    destination: *mut u8,
+    destination_offset: i64,
+    count: i64,
+    aliasing: ByteCopyAliasing,
 ) -> i32 {
     let machine = unsafe { crate::machine_state::machine_state(vmctx) };
     if machine.prepared_call_status() != CallStatus::Success {
@@ -439,15 +538,23 @@ pub(super) unsafe extern "C" fn prepared_copy_bytes(
         let source_offset = checked_byte_span_arg(source_offset, source_len)?;
         let destination_offset = checked_byte_span_arg(destination_offset, destination_len)?;
         let count = checked_byte_span_arg(count, source_len)?;
-        machine
-            .copy_external_byte_range(
+        match aliasing {
+            ByteCopyAliasing::Disjoint => machine.copy_external_byte_range(
                 source,
                 source_offset,
                 destination,
                 destination_offset,
                 count,
-            )
-            .map_err(byte_range_error)
+            ),
+            ByteCopyAliasing::Overlapping => machine.copy_external_byte_range_overlapping(
+                source,
+                source_offset,
+                destination,
+                destination_offset,
+                count,
+            ),
+        }
+        .map_err(byte_range_error)
     })();
     match result {
         Ok(()) => CallStatus::Success as i32,
@@ -795,14 +902,44 @@ pub(super) fn emit_shrink_bytes(
     Ok(Vec::new())
 }
 
-pub(super) fn emit_copy_bytes(
+pub(super) fn emit_set_bytes(
     builder: &mut FunctionBuilder<'_>,
     pipeline: &mut crate::pipeline::CodegenPipeline,
     vmctx: Value,
     descriptor: &ObjectDescriptor,
     arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
-    let host = super::arrays::declare_host(builder, pipeline, "prepared_copy_bytes", 7)?;
+    let host = super::arrays::declare_host(builder, pipeline, "prepared_set_bytes", 6)?;
+    let owner = owner_value(builder, descriptor);
+    let call = builder.ins().call(
+        host,
+        &[
+            vmctx,
+            owner,
+            arguments[0],
+            arguments[1],
+            arguments[2],
+            arguments[3],
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    super::arrays::finish_checked_call(builder, status);
+    Ok(Vec::new())
+}
+
+pub(super) fn emit_copy_bytes(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    descriptor: &ObjectDescriptor,
+    arguments: &[Value],
+    aliasing: ByteCopyAliasing,
+) -> Result<Vec<Value>, super::CompileError> {
+    let host_name = match aliasing {
+        ByteCopyAliasing::Disjoint => "prepared_copy_bytes",
+        ByteCopyAliasing::Overlapping => "prepared_copy_mutable_bytes",
+    };
+    let host = super::arrays::declare_host(builder, pipeline, host_name, 7)?;
     let owner = owner_value(builder, descriptor);
     let call = builder.ins().call(
         host,
@@ -1939,9 +2076,37 @@ mod tests {
             Some(ByteOperation::Copy)
         );
         assert!(recognize(&op("copyByteArray#"), &sig(span_arguments.clone(), vec![])).is_none());
+        assert_eq!(
+            recognize(
+                &op("copyMutableByteArray#"),
+                &sig(copy_arguments.clone(), vec![])
+            ),
+            Some(ByteOperation::CopyMutable)
+        );
+        assert!(recognize(
+            &op("copyMutableByteArray#"),
+            &sig(span_arguments.clone(), vec![])
+        )
+        .is_none());
         assert!(recognize(
             &op("copyByteArray#"),
             &sig(copy_arguments, vec![RuntimeRep::Int(64)])
+        )
+        .is_none());
+        let set_arguments = vec![
+            RuntimeRep::UnliftedRef,
+            RuntimeRep::Int(64),
+            RuntimeRep::Int(64),
+            RuntimeRep::Int(64),
+            RuntimeRep::Void,
+        ];
+        assert_eq!(
+            recognize(&op("setByteArray#"), &sig(set_arguments.clone(), vec![])),
+            Some(ByteOperation::Set)
+        );
+        assert!(recognize(
+            &op("setByteArray#"),
+            &sig(set_arguments[..4].to_vec(), vec![])
         )
         .is_none());
         assert_eq!(

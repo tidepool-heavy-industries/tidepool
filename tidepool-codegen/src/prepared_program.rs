@@ -495,6 +495,14 @@ impl CompiledProgram {
                     byte_arrays::prepared_copy_bytes as *const u8,
                 ),
                 (
+                    "prepared_copy_mutable_bytes",
+                    byte_arrays::prepared_copy_mutable_bytes as *const u8,
+                ),
+                (
+                    "prepared_set_bytes",
+                    byte_arrays::prepared_set_bytes as *const u8,
+                ),
+                (
                     "prepared_compare_bytes",
                     byte_arrays::prepared_compare_bytes as *const u8,
                 ),

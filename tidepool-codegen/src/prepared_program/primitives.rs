@@ -998,8 +998,30 @@ pub(super) fn emit_operation(
                 .map(Some)
         }
         PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Copy) => {
-            super::byte_arrays::emit_copy_bytes(builder, pipeline, vmctx, bytes_array, arguments)
+            super::byte_arrays::emit_copy_bytes(
+                builder,
+                pipeline,
+                vmctx,
+                bytes_array,
+                arguments,
+                crate::machine_state::ByteCopyAliasing::Disjoint,
+            )
+            .map(Some)
+        }
+        PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Set) => {
+            super::byte_arrays::emit_set_bytes(builder, pipeline, vmctx, bytes_array, arguments)
                 .map(Some)
+        }
+        PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::CopyMutable) => {
+            super::byte_arrays::emit_copy_bytes(
+                builder,
+                pipeline,
+                vmctx,
+                bytes_array,
+                arguments,
+                crate::machine_state::ByteCopyAliasing::Overlapping,
+            )
+            .map(Some)
         }
         PrimitiveOperation::ByteArray(super::byte_arrays::ByteOperation::Compare) => {
             super::byte_arrays::emit_compare_bytes(builder, pipeline, vmctx, bytes_array, arguments)
