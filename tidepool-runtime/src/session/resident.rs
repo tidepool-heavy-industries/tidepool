@@ -711,6 +711,72 @@ fn settle_prepared(
     finish_prepared(engine, program, realm, plan, park, table, settlement)
 }
 
+/// Apply a rooted `Int -> M a` closure to `argument` through the shared
+/// `__applyEntry` scaffold root instead of a turn's own settled scaffold, and
+/// finish the settled layer through [`finish_prepared`] — the prepared-route
+/// arm of [`ResidentSession::run_rooted_entry_borrowed`]. `entry` is a bare
+/// cross-engine handle; BORROWED throughout (never released on any path,
+/// success or failure), matching the Core rooted path's own borrow contract.
+fn settle_rooted_entry(
+    engine: &mut ResidentEngine,
+    entry: ValueHandle,
+    argument: i64,
+    realm: RealmId,
+    park: ParkPolicy,
+    table: &DataConTable,
+) -> Result<(ProgramId, PreparedRun), PreparedRuntimeError> {
+    let engine = engine
+        .require_prepared()
+        .map_err(|_| PreparedRuntimeError::WrongEngine)?;
+    let f = engine
+        .prepared_handle_of(entry)
+        .ok_or(PreparedRuntimeError::UnknownHandle)?;
+    let (program, settlement) = engine.run_rooted_entry(f, argument, realm)?;
+    let run = finish_prepared(
+        engine,
+        program,
+        realm,
+        SettlePlan::Observe,
+        park,
+        table,
+        settlement,
+    )?;
+    Ok((program, run))
+}
+
+/// [`settle_rooted_entry`], but applying one rooted value to another through
+/// `__applyValue` — the prepared-route arm of
+/// [`ResidentSession::run_rooted_application`]. Both handles are BORROWED.
+fn settle_rooted_application(
+    engine: &mut ResidentEngine,
+    function: ValueHandle,
+    argument: ValueHandle,
+    realm: RealmId,
+    park: ParkPolicy,
+    table: &DataConTable,
+) -> Result<(ProgramId, PreparedRun), PreparedRuntimeError> {
+    let engine = engine
+        .require_prepared()
+        .map_err(|_| PreparedRuntimeError::WrongEngine)?;
+    let f = engine
+        .prepared_handle_of(function)
+        .ok_or(PreparedRuntimeError::UnknownHandle)?;
+    let x = engine
+        .prepared_handle_of(argument)
+        .ok_or(PreparedRuntimeError::UnknownHandle)?;
+    let (program, settlement) = engine.run_rooted_application(f, x, realm)?;
+    let run = finish_prepared(
+        engine,
+        program,
+        realm,
+        SettlePlan::Observe,
+        park,
+        table,
+        settlement,
+    )?;
+    Ok((program, run))
+}
+
 /// The one completion routine for a settled layer, whichever entry produced
 /// it (the initial scaffold or a resume): a suspension is parked with the
 /// run's policy and reported as Core reports one; a completed value is
@@ -2957,15 +3023,15 @@ where
         let Some(entry) = entry.handle else {
             unreachable!("live custody contains its handle");
         };
-        // Whichever engine this session runs: Core's `handle_slot` and
-        // `PreparedEngine::handle_slot` both take the bare cross-engine
-        // `ValueHandle` a `RootCustody` carries.
-        let slot = if let Some(machine) = self.core.machine_mut() {
-            machine.handle_slot(entry).map_err(resident_jit)?
-        } else if let Some(engine) = self.core.prepared_mut() {
-            engine.handle_slot(entry)
-        } else {
-            None
+
+        if self.engine_kind() == EngineKind::Prepared {
+            return self.run_rooted_entry_prepared(entry, argument, realm, run_table, provenance);
+        }
+
+        // The prepared route returned above; only Core reaches here.
+        let slot = match self.core.machine_mut() {
+            Some(machine) => machine.handle_slot(entry).map_err(resident_jit)?,
+            None => None,
         };
         let slot = slot.ok_or_else(|| {
             ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
@@ -3028,6 +3094,20 @@ where
         let Some(argument_handle) = argument.handle else {
             unreachable!("live custody always contains its handle");
         };
+
+        if self.engine_kind() == EngineKind::Prepared {
+            let mut provenance = (*function.provenance).clone();
+            provenance.merge(&argument.provenance)?;
+            return self.run_rooted_application_prepared(
+                function_handle,
+                argument_handle,
+                realm,
+                run_table,
+                Arc::new(provenance),
+            );
+        }
+
+        // The prepared route returned above; only Core reaches here.
         let (function_addr, argument_addr) = {
             let machine = self.core.machine_mut().ok_or_else(|| {
                 ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
@@ -3080,6 +3160,93 @@ where
         let outcome =
             self.run_rooted_fragment(name_hint, &expression, &environment, realm, run_table)?;
         Ok(self.classify_parked(outcome, None, HoleSeed::Plain, Arc::new(provenance)))
+    }
+
+    /// The prepared-route arm of [`Self::run_rooted_entry_borrowed`]: apply
+    /// the rooted closure through the shared `__applyEntry` scaffold root
+    /// (`settle_rooted_entry`) instead of synthesizing a Core fragment for
+    /// [`Self::run_rooted_fragment`], then finish through
+    /// [`Self::finish_rooted_prepared`] exactly as an ordinary prepared turn
+    /// finishes: a suspension parks under `realm` in the machine's ordinary
+    /// continuation registry and resumes through [`Self::reenter_prepared`]
+    /// like any other prepared frame, whatever produced it.
+    fn run_rooted_entry_prepared(
+        &mut self,
+        entry: ValueHandle,
+        argument: i64,
+        realm: RealmId,
+        run_table: Option<&DataConTable>,
+        provenance: Arc<ProgramProvenance>,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        let table = run_table
+            .cloned()
+            .unwrap_or_else(|| self.core.session_table().clone());
+        let park = ParkPolicy {
+            principal: self.run_context.principal,
+            effect_policy: self.core.effect_policy(),
+            live_payload: self.core.live_payload_policy(),
+        };
+        let ran = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
+            Ok(settle_rooted_entry(
+                engine, entry, argument, realm, park, &table,
+            ))
+        })?;
+        let (program, run) = ran?;
+        self.finish_rooted_prepared(run, program, provenance)
+    }
+
+    /// [`Self::run_rooted_entry_prepared`], but applying one rooted value to
+    /// another through `__applyValue` (`settle_rooted_application`) — the
+    /// prepared-route arm of [`Self::run_rooted_application`].
+    fn run_rooted_application_prepared(
+        &mut self,
+        function: ValueHandle,
+        argument: ValueHandle,
+        realm: RealmId,
+        run_table: Option<&DataConTable>,
+        provenance: Arc<ProgramProvenance>,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        let table = run_table
+            .cloned()
+            .unwrap_or_else(|| self.core.session_table().clone());
+        let park = ParkPolicy {
+            principal: self.run_context.principal,
+            effect_policy: self.core.effect_policy(),
+            live_payload: self.core.live_payload_policy(),
+        };
+        let ran = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
+            Ok(settle_rooted_application(
+                engine, function, argument, realm, park, &table,
+            ))
+        })?;
+        let (program, run) = ran?;
+        self.finish_rooted_prepared(run, program, provenance)
+    }
+
+    /// Finish a rooted apply's settled layer through the same
+    /// [`Self::complete_prepared`] a turn's own settled scaffold finishes
+    /// through, in [`PreparedTurnMode::Value`]: a `Done` value is observed
+    /// and returned (never bound into the value plane — a rooted apply is
+    /// not a session turn), and a `Suspended` frame is classified exactly
+    /// like any other prepared suspension. `program` is the rooted apply's
+    /// hosting program, carried only for `complete_prepared`'s own
+    /// diagnostics — the parked frame's own evidence (not `program`) is what
+    /// a later resume actually re-enters through.
+    fn finish_rooted_prepared(
+        &mut self,
+        run: PreparedRun,
+        program: ProgramId,
+        provenance: Arc<ProgramProvenance>,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        let lexical_scope = self.run_context.lexical_scope;
+        self.complete_prepared(
+            run,
+            PreparedTurnMode::Value,
+            program,
+            lexical_scope,
+            provenance,
+            None,
+        )
     }
 
     fn run_rooted_fragment(

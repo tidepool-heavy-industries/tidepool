@@ -2072,3 +2072,193 @@ fn notebook_either_decode_renders_the_same_on_both_engines() {
         "expected a successful decode, got {prepared_rendered}"
     );
 }
+
+/// [`ResidentSession::run_rooted_entry`] over a rooted `Int -> M a` closure:
+/// on the prepared route this is the last dogfood blocker's ONLY suspension
+/// path (`PreparedEngine::run_rooted_entry` through the shared
+/// `__applyEntry` scaffold root, since a prepared session cannot compile a
+/// fresh Core fragment). One closure never suspends (a `Done` settlement);
+/// a second asks and is resumed exactly like an ordinary turn's suspension.
+/// Core's own rooted-entry contract is covered exhaustively elsewhere
+/// (`tenure_resume_gc_repro.rs`, `green_thread_representation.rs`, both
+/// hand-built `CoreExpr` programs); this GHC-driven notebook has no minting
+/// surface for a Core-bound value's custody (Core tenures a binding's root
+/// straight into the binding table, never the handle registry
+/// `prepared_binding_handle` reads -- see `notebook_handle_delivery`'s same
+/// early return), so this notebook exercises the warm-up on Core and stops.
+fn notebook_rooted_entry(engine: EngineKind) {
+    use tidepool_bridge::Value;
+    use tidepool_repr::Literal;
+
+    let mut notebook = Notebook::new(engine);
+    let rendered = notebook.expression("41 + 1").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: warm-up rendered {rendered}"
+    );
+    let i_hash_id = notebook.constructor("I#");
+
+    if engine != EngineKind::Prepared {
+        return;
+    }
+
+    let realm = notebook.session.run_context().resource_scope;
+
+    // --- Done case: a closure that never suspends. ---
+    let f = notebook.bind("f <- pure (\\n -> pure (n + 1 :: Int) :: M Int)");
+    let f_custody = notebook
+        .session
+        .prepared_binding_handle(&f.name)
+        .unwrap_or_else(|| panic!("{engine:?}: f has no rooted binding handle"));
+    let outcome = notebook
+        .session
+        .run_rooted_entry("notebook_rooted_entry_done", f_custody, 41, realm, None)
+        .unwrap_or_else(|error| panic!("{engine:?}: run_rooted_entry (done) failed: {error}"));
+    let ResidentOutcome::Completed { result, .. } = outcome else {
+        panic!("{engine:?}: run_rooted_entry (done) did not complete: {outcome:?}");
+    };
+    let rendered = tidepool_runtime::value_to_json(result.value(), result.table(), 0).to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: run_rooted_entry (done) rendered {rendered}"
+    );
+    // The applied closure's own binding is a borrow: its root survives the
+    // apply untouched.
+    assert!(
+        notebook.session.prepared_binding_handle(&f.name).is_some(),
+        "{engine:?}: f's own binding handle is no longer live after run_rooted_entry"
+    );
+
+    // --- Suspend case: a closure whose body asks, then resumes normally
+    // through the ordinary continuation registry -- the parked frame is
+    // indistinguishable from any other prepared suspension. ---
+    let g =
+        notebook.bind("g <- pure (\\n -> (runLLMTurn @Int (T.pack (show (n :: Int))) :: M Int))");
+    let g_custody = notebook
+        .session
+        .prepared_binding_handle(&g.name)
+        .unwrap_or_else(|| panic!("{engine:?}: g has no rooted binding handle"));
+    let outcome = notebook
+        .session
+        .run_rooted_entry("notebook_rooted_entry_suspend", g_custody, 41, realm, None)
+        .unwrap_or_else(|error| panic!("{engine:?}: run_rooted_entry (suspend) failed: {error}"));
+    let ResidentOutcome::Suspended { hole, .. } = outcome else {
+        panic!("{engine:?}: run_rooted_entry (suspend) did not suspend: {outcome:?}");
+    };
+    let outcome = notebook
+        .session
+        .resume(
+            hole,
+            Value::Con(i_hash_id, vec![Value::Lit(Literal::LitInt(42))]),
+        )
+        .unwrap_or_else(|error| {
+            panic!("{engine:?}: resuming the rooted-entry suspension failed: {error}")
+        });
+    let ResidentOutcome::Completed { result, .. } = outcome else {
+        panic!("{engine:?}: the resumed rooted-entry suspension did not complete: {outcome:?}");
+    };
+    let rendered = tidepool_runtime::value_to_json(result.value(), result.table(), 0).to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: resumed run_rooted_entry rendered {rendered}"
+    );
+    assert!(
+        notebook.session.prepared_binding_handle(&g.name).is_some(),
+        "{engine:?}: g's own binding handle is no longer live after resuming its rooted apply"
+    );
+
+    // The session stays usable.
+    let rendered = notebook.expression("40 + 2").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: 40 + 2 rendered as {rendered}"
+    );
+}
+
+#[test]
+fn notebook_rooted_entry_on_core() {
+    notebook_rooted_entry(EngineKind::Core);
+}
+
+#[test]
+fn notebook_rooted_entry_on_prepared_stg() {
+    notebook_rooted_entry(EngineKind::Prepared);
+}
+
+/// [`ResidentSession::run_rooted_application`] over two rooted Haskell
+/// values -- the actor-mailbox shape (a handler closure and its own
+/// protocol-indexed request, both retained, neither bridged) -- through the
+/// shared `__applyValue` scaffold root. See [`notebook_rooted_entry`]'s doc
+/// for why the Core arm stops after the warm-up.
+fn notebook_rooted_application(engine: EngineKind) {
+    let mut notebook = Notebook::new(engine);
+    let rendered = notebook.expression("41 + 1").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: warm-up rendered {rendered}"
+    );
+
+    if engine != EngineKind::Prepared {
+        return;
+    }
+
+    let realm = notebook.session.run_context().resource_scope;
+
+    let h = notebook.bind("h <- pure (\\x -> pure (x * 2 :: Int) :: M Int)");
+    let r = notebook.bind("r <- pure (21 :: Int)");
+
+    let h_custody = notebook
+        .session
+        .prepared_binding_handle(&h.name)
+        .unwrap_or_else(|| panic!("{engine:?}: h has no rooted binding handle"));
+    let r_custody = notebook
+        .session
+        .prepared_binding_handle(&r.name)
+        .unwrap_or_else(|| panic!("{engine:?}: r has no rooted binding handle"));
+
+    let outcome = notebook
+        .session
+        .run_rooted_application(
+            "notebook_rooted_application",
+            &h_custody,
+            &r_custody,
+            realm,
+            None,
+        )
+        .unwrap_or_else(|error| panic!("{engine:?}: run_rooted_application failed: {error}"));
+    let ResidentOutcome::Completed { result, .. } = outcome else {
+        panic!("{engine:?}: run_rooted_application did not complete: {outcome:?}");
+    };
+    let rendered = tidepool_runtime::value_to_json(result.value(), result.table(), 0).to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: run_rooted_application rendered {rendered}"
+    );
+    // Both roots are borrowed: `run_rooted_application` takes custody by
+    // reference, so both bindings stay live afterward.
+    assert!(
+        notebook.session.prepared_binding_handle(&h.name).is_some(),
+        "{engine:?}: h's own binding handle is no longer live after run_rooted_application"
+    );
+    assert!(
+        notebook.session.prepared_binding_handle(&r.name).is_some(),
+        "{engine:?}: r's own binding handle is no longer live after run_rooted_application"
+    );
+
+    // The session stays usable.
+    let rendered = notebook.expression("40 + 2").to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: 40 + 2 rendered as {rendered}"
+    );
+}
+
+#[test]
+fn notebook_rooted_application_on_core() {
+    notebook_rooted_application(EngineKind::Core);
+}
+
+#[test]
+fn notebook_rooted_application_on_prepared_stg() {
+    notebook_rooted_application(EngineKind::Prepared);
+}

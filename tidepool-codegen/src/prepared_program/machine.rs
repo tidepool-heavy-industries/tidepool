@@ -2218,6 +2218,41 @@ impl<'code> PreparedMachine<'code> {
         })
     }
 
+    /// The program whose descriptor owns the object `handle` currently
+    /// refers to (following any settled thunk indirection), for a rooted
+    /// apply's hosting-program choice
+    /// (`tidepool-runtime::session::prepared::PreparedEngine::hosting_program`).
+    /// `None` for an unknown/released handle, a null slot, a reference into a
+    /// static region whose owner is not in [`Self::region_owners`] (should
+    /// not happen: every installed program's own region is pushed there), or
+    /// any representation this machine cannot trace. Mirrors
+    /// [`Self::mark_live_programs`]'s single mark step, but for one handle
+    /// rather than a whole-heap worklist.
+    #[must_use]
+    pub fn owner_of_handle(&self, handle: PreparedHandle) -> Option<ProgramId> {
+        let word = self
+            .handles
+            .handle(handle.raw)
+            .map(|entry| unsafe { entry.slot.current() } as usize)?;
+        if word == 0 {
+            return None;
+        }
+        let regions: Vec<Arc<StaticRegion>> = self
+            .region_owners
+            .iter()
+            .map(|(_, region)| Arc::clone(region))
+            .collect();
+        let (heap, _, _) = self.observation_heap_and_starts(&regions).ok()?;
+        match heap.trace_step(word).ok()? {
+            super::observe::Traced::Object { header, .. } => {
+                self.header_owners.get(&header).copied()
+            }
+            super::observe::Traced::Static { region } => {
+                self.region_owners.get(region).map(|(id, _)| *id)
+            }
+        }
+    }
+
     /// Test-only: fail the `occurrence`th poll of `point` in the next call(s)
     /// with `cause`, through the same status path as real cancellation. The
     /// injection is consumed when it fires; an unfired one stays armed.

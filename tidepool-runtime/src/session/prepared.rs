@@ -36,7 +36,10 @@ use tidepool_repr::{DataConId, DataConTable, Literal, PrincipalId, SessionVarId}
 
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 
-use super::turn::{PREPARED_DECODE_TARGET, PREPARED_RESUME_TARGET};
+use super::turn::{
+    PREPARED_APPLY_ENTRY_TARGET, PREPARED_APPLY_VALUE_TARGET, PREPARED_DECODE_TARGET,
+    PREPARED_RESUME_TARGET,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreparedFailureKind {
@@ -161,6 +164,33 @@ pub enum PreparedRuntimeError {
     /// frame stays parked.
     #[error("resume delivered a handle that is not live in this engine's ledger")]
     UnknownHandle,
+    /// [`PreparedEngine::run_rooted_entry`]/[`PreparedEngine::run_rooted_application`]
+    /// found no installed program that both owns the rooted closure's object
+    /// and admits the generic apply roots, and no OTHER installed program
+    /// admits them either. Every executable template emits
+    /// `__applyEntry`/`__applyValue` beside its settled scaffold, so this is
+    /// only reachable before any program is installed.
+    #[error(
+        "no installed program admits `{}`/`{}`, so a rooted apply has nowhere to run",
+        PREPARED_APPLY_ENTRY_TARGET,
+        PREPARED_APPLY_VALUE_TARGET
+    )]
+    NoHostingProgram,
+    /// The program hosting a rooted apply admits no `__applyEntry` entry.
+    /// Every executable template defines it beside its settled scaffold;
+    /// this is a stale or foreign artifact, never a user error.
+    #[error("program {program:?} admits no `{entry}` entry, so a rooted apply cannot run")]
+    NoApplyEntryEntry {
+        program: ProgramId,
+        entry: &'static str,
+    },
+    /// The program hosting a rooted apply admits no `__applyValue` entry. See
+    /// [`Self::NoApplyEntryEntry`].
+    #[error("program {program:?} admits no `{entry}` entry, so a rooted apply cannot run")]
+    NoApplyValueEntry {
+        program: ProgramId,
+        entry: &'static str,
+    },
 }
 
 impl PreparedRuntimeError {
@@ -187,6 +217,9 @@ impl PreparedRuntimeError {
             | Self::AnswerUnconstructible { .. }
             | Self::AnswerRejected { .. }
             | Self::UnknownHandle
+            | Self::NoHostingProgram
+            | Self::NoApplyEntryEntry { .. }
+            | Self::NoApplyValueEntry { .. }
             | Self::CrossRealmArgument { .. } => PreparedFailureKind::Rejected,
             Self::Cancelled => PreparedFailureKind::Cancelled,
             Self::Compile(_) => PreparedFailureKind::Rejected,
@@ -251,6 +284,14 @@ struct ProgramFacts {
     /// retained it. A `Value`-carrying leaf of an answer to a program
     /// without one is refused before anything is built.
     decode: Option<ValueId>,
+    /// The turn's admitted generic apply entries (`__applyEntry f n = settle
+    /// (f (I# n))`, `__applyValue f x = settle (f x)`, beside the entry in
+    /// its module), when the artifact retained them. Looked up by
+    /// [`PreparedEngine::run_rooted_entry`]/
+    /// [`PreparedEngine::run_rooted_application`] to apply a rooted closure
+    /// without compiling a fresh Core fragment for it.
+    apply_entry: Option<ValueId>,
+    apply_value: Option<ValueId>,
     /// The typed sites this program declares and the type graph they point
     /// into, kept for site-evidence resolution and answer validation after
     /// the machine has taken the program's code.
@@ -332,9 +373,21 @@ impl ProgramFacts {
                     .then_some(*id)
             })
         });
-        let decode = entry_module.and_then(|module| {
+        let decode = entry_module.clone().and_then(|module| {
             tops.iter().find_map(|(id, (identity, _))| {
                 (identity.module == module && identity.occurrence == PREPARED_DECODE_TARGET)
+                    .then_some(*id)
+            })
+        });
+        let apply_entry = entry_module.clone().and_then(|module| {
+            tops.iter().find_map(|(id, (identity, _))| {
+                (identity.module == module && identity.occurrence == PREPARED_APPLY_ENTRY_TARGET)
+                    .then_some(*id)
+            })
+        });
+        let apply_value = entry_module.and_then(|module| {
+            tops.iter().find_map(|(id, (identity, _))| {
+                (identity.module == module && identity.occurrence == PREPARED_APPLY_VALUE_TARGET)
                     .then_some(*id)
             })
         });
@@ -370,6 +423,8 @@ impl ProgramFacts {
             settled: SettledIds::of(&by_identity),
             resume,
             decode,
+            apply_entry,
+            apply_value,
             sites,
             verb_sites,
             types: prepared.types().to_vec(),
@@ -1362,6 +1417,131 @@ impl PreparedEngine {
             })
     }
 
+    /// The admitted generic apply-entry entry (`__applyEntry`) of `program`.
+    fn apply_entry_of(&self, program: ProgramId) -> Result<ValueId, PreparedRuntimeError> {
+        self.programs
+            .get(&program)
+            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                program,
+            )))?
+            .apply_entry
+            .ok_or(PreparedRuntimeError::NoApplyEntryEntry {
+                program,
+                entry: PREPARED_APPLY_ENTRY_TARGET,
+            })
+    }
+
+    /// The admitted generic apply-value entry (`__applyValue`) of `program`.
+    fn apply_value_of(&self, program: ProgramId) -> Result<ValueId, PreparedRuntimeError> {
+        self.programs
+            .get(&program)
+            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                program,
+            )))?
+            .apply_value
+            .ok_or(PreparedRuntimeError::NoApplyValueEntry {
+                program,
+                entry: PREPARED_APPLY_VALUE_TARGET,
+            })
+    }
+
+    /// The program that should host a rooted apply of `handle`: the program
+    /// whose descriptor owns the object `handle` refers to, when that
+    /// program is still installed and admits both generic apply roots; else
+    /// the most recently installed program that admits them. Every
+    /// executable template emits `__applyEntry`/`__applyValue` beside its
+    /// settled scaffold, so any installed program is normally a candidate —
+    /// preferring the object's own owner keeps a rooted apply within the
+    /// program whose code produced the closure whenever that is still live,
+    /// without depending on install order to matter for correctness.
+    fn hosting_program(&self, handle: PreparedHandle) -> Option<ProgramId> {
+        fn admits_apply_roots(facts: &ProgramFacts) -> bool {
+            facts.apply_entry.is_some() && facts.apply_value.is_some()
+        }
+        if let Some(owner) = self.machine.owner_of_handle(handle) {
+            if self.programs.get(&owner).is_some_and(admits_apply_roots) {
+                return Some(owner);
+            }
+        }
+        self.programs
+            .iter()
+            .rev()
+            .find(|&(_, facts)| admits_apply_roots(facts))
+            .map(|(id, _)| *id)
+    }
+
+    /// Apply a rooted `Int -> M a` closure `f` to `argument` through the
+    /// hosting program's `__applyEntry` root and finish the settled layer as
+    /// far as reading its `Done`/`Suspended` shape — the caller
+    /// ([`crate::session::resident::ResidentSession::run_rooted_entry_borrowed`])
+    /// finishes a `Done` value or parks a `Suspended` one exactly as an
+    /// ordinary prepared turn does. `f` is BORROWED: never released here,
+    /// whatever the outcome. `argument` crosses as a bare unboxed scalar,
+    /// matching `__applyEntry`'s `Int#` parameter.
+    pub(crate) fn run_rooted_entry(
+        &mut self,
+        f: PreparedHandle,
+        argument: i64,
+        realm: RealmId,
+    ) -> Result<(ProgramId, PreparedSettlement), PreparedRuntimeError> {
+        let program = self
+            .hosting_program(f)
+            .ok_or(PreparedRuntimeError::NoHostingProgram)?;
+        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+            return Err(PreparedRuntimeError::Cancelled);
+        }
+        let entry = self.apply_entry_of(program)?;
+        let batch = self
+            .machine
+            .run_entry_retained(
+                program,
+                entry,
+                &[
+                    PreparedInput::Managed(f),
+                    PreparedInput::Scalar(argument as u64),
+                ],
+                SETTLE_CALL,
+                realm,
+            )
+            .map_err(PreparedRuntimeError::Run)?;
+        let settlement = self.settle_batch(program, realm, batch)?;
+        Ok((program, settlement))
+    }
+
+    /// Apply one rooted Haskell function `f` to one rooted Haskell value `x`
+    /// through the hosting program's `__applyValue` root. Both handles are
+    /// BORROWED: neither is released here, whatever the outcome. See
+    /// [`Self::run_rooted_entry`] for the shared hosting-program and
+    /// finishing contract
+    /// ([`crate::session::resident::ResidentSession::run_rooted_application`]
+    /// is the caller).
+    pub(crate) fn run_rooted_application(
+        &mut self,
+        f: PreparedHandle,
+        x: PreparedHandle,
+        realm: RealmId,
+    ) -> Result<(ProgramId, PreparedSettlement), PreparedRuntimeError> {
+        let program = self
+            .hosting_program(f)
+            .ok_or(PreparedRuntimeError::NoHostingProgram)?;
+        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+            return Err(PreparedRuntimeError::Cancelled);
+        }
+        let entry = self.apply_value_of(program)?;
+        let batch = self
+            .machine
+            .run_entry_retained(
+                program,
+                entry,
+                &[PreparedInput::Managed(f), PreparedInput::Managed(x)],
+                SETTLE_CALL,
+                realm,
+            )
+            .map_err(PreparedRuntimeError::Run)?;
+        let settlement = self.settle_batch(program, realm, batch)?;
+        Ok((program, settlement))
+    }
+
     /// Park a suspension `program`'s settled layer produced under `realm`:
     /// read the `Union` layer of `request`, observe its payload through the
     /// machine observe path (the request the host reports, as on Core), read
@@ -2113,6 +2293,15 @@ impl PreparedEngine {
     #[must_use]
     pub fn handle_slot(&self, handle: ValueHandle) -> Option<tidepool_codegen::old_space::RootSlot> {
         self.machine.handle_slot(handle)
+    }
+
+    /// Look up a bare cross-engine [`ValueHandle`] (a [`crate::session::RootCustody`]'s
+    /// raw id) as this engine's own [`PreparedHandle`], when it is live in
+    /// this machine's ledger -- `settle_rooted_entry`/`settle_rooted_application`'s
+    /// resolution of a rooted apply's borrowed argument handles.
+    #[must_use]
+    pub fn prepared_handle_of(&self, handle: ValueHandle) -> Option<PreparedHandle> {
+        self.machine.prepared_handle_of(handle)
     }
 
     /// Release every handle in `handles`.
