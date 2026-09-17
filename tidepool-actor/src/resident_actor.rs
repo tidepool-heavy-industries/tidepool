@@ -872,26 +872,6 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     /// checkout and namespace — the same place the ancestor's own `Cmd.run`
     /// would run. Falls back to the actor itself when no such ancestor is
     /// known, and the host then reports the command unavailable.
-    fn native_command_owner(&self, actor: ActorRef) -> ActorRef {
-        let records = self.environment.actors.lock();
-        let mut next = Some(actor);
-        let mut visited = std::collections::HashSet::new();
-        while let Some(current) = next {
-            if !visited.insert(current) {
-                break;
-            }
-            let Some(record) = records.get(&current) else { break };
-            if record.interactive_policy_installed && record.terminal.is_none() {
-                return current;
-            }
-            next = record
-                .descriptor
-                .creator()
-                .or(record.descriptor.supervisor_parent());
-        }
-        actor
-    }
-
     fn notification_supervisor(&self, mut next: Option<ActorRef>) -> Option<ActorRef> {
         let records = self.environment.actors.lock();
         let mut visited = std::collections::HashSet::new();

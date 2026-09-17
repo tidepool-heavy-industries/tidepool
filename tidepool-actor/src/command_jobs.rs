@@ -249,12 +249,13 @@ fn validate_spec(spec: &CommandSpec) -> Result<(), CommandError> {
 }
 
 impl CommandJobs {
-    /// `native_owner` is the actor whose native application runs the job;
-    /// the job itself stays owned (status, wait, cancel) by `parent`.
+    /// The job is owned — started, observed, cancelled — by the exact actor
+    /// that raised it. Where it then *runs* is the deployment owner's
+    /// decision: an actor with a native application of its own runs it there,
+    /// and one without runs it in the host, inside its own custody.
     pub(crate) async fn start(
         &self,
         parent: &KernelContext,
-        native_owner: ActorRef,
         spec: CommandSpec,
     ) -> Result<(String, Arc<CommandBackendRequest>), CommandError> {
         validate_spec(&spec).map_err(|error| match error {
@@ -266,7 +267,7 @@ impl CommandJobs {
         let id = uuid::Uuid::new_v4().to_string();
         let (reply, receive) = oneshot::channel();
         let request = Arc::new(CommandBackendRequest {
-            owner: native_owner,
+            owner: parent.identity(),
             reply: Mutex::new(Some(reply)),
         });
         let shared = Arc::new(Shared {

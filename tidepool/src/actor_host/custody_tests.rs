@@ -1006,3 +1006,67 @@ async fn custody_missing_or_foreign_pane_never_clears_process_fence() {
         assert!(foreign.list_panes().await.unwrap().contains(&foreign_pane));
     }
 }
+
+/// Dogfood run 7: a record actor holding an integration worktree could read it
+/// and merge into it (merging is host-side) but `git reset --hard` inside it
+/// failed, because its commands ran in an interactive ancestor's sandbox where
+/// that worktree is mounted read-only. Commands now run in the host process,
+/// and this is the directory they run in: the actor's own custody, or the
+/// source checkout when it holds none.
+#[tokio::test]
+async fn a_resident_actor_s_commands_run_in_the_worktree_it_holds() {
+    let (_repo, _runtime, tree, bindings, admission) = custody_fixture();
+    let holder = ActorRef::first(tidepool_actor::ActorId(11));
+    let _custody = admission
+        .install_custody(holder, tree.id().as_str(), tidepool_actor::ActorRole::Coding)
+        .unwrap();
+    let authority = ActorWorktreeAuthority::new("custody-test", bindings);
+    let source = admission.manager.source_repository().to_owned();
+
+    let held = resident_command_boundary(&authority, &admission.manager, &source, holder);
+    assert_eq!(held.directory, tree.cwd());
+    assert!(held.writable, "its own worktree is writable to it");
+    let boundary = held.boundary.expect("a held worktree bounds cleanly");
+    let wrapped = boundary.wrap(
+        tidepool_node::BUBBLEWRAP_PROGRAM,
+        tidepool_node::ProcessInvocation {
+            program: "git".into(),
+            args: vec!["status".into()],
+        },
+    );
+    let writable_binds: Vec<&String> = wrapped
+        .args
+        .windows(3)
+        .filter(|window| window[0] == "--bind" && window[1] != "/")
+        .map(|window| &window[1])
+        .collect();
+    assert_eq!(
+        writable_binds,
+        [&tree.cwd().to_string_lossy().into_owned()],
+        "exactly one writable root, and it is this actor's own worktree: {wrapped:?}"
+    );
+
+    // An actor holding no custody gets no writable root at all: it has to
+    // allocate a worktree before it can change anything in the repository.
+    let without_custody = ActorRef::first(tidepool_actor::ActorId(12));
+    let unheld = resident_command_boundary(&authority, &admission.manager, &source, without_custody);
+    assert_eq!(unheld.directory, source);
+    assert!(!unheld.writable);
+    let wrapped = unheld
+        .boundary
+        .expect("the source checkout bounds cleanly")
+        .wrap(
+            tidepool_node::BUBBLEWRAP_PROGRAM,
+            tidepool_node::ProcessInvocation {
+                program: "git".into(),
+                args: vec!["status".into()],
+            },
+        );
+    assert!(
+        !wrapped
+            .args
+            .windows(3)
+            .any(|window| window[0] == "--bind" && window[1] != "/"),
+        "no writable repository root without custody: {wrapped:?}"
+    );
+}

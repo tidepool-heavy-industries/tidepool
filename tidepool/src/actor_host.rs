@@ -2462,19 +2462,35 @@ async fn run_interactive_applications(
                         }
                     }
                     LocalResidentDeployment::CommandBackend(request) => {
-                        // A resident owner without a native application of
-                        // its own (an operator workbench, or a record actor
-                        // whose creators are all resident) runs as the root:
-                        // the resident side already walked to the nearest
-                        // interactive creator, so what reaches here has none.
-                        let backend = deployments.iter().find(|app| app.actor == request.owner)
-                            .or_else(|| deployments.iter().find(|app| app.actor == root_identity))
-                            .and_then(|app| app.thread.clone())
-                            .zip(launch_context.config.command_resources.clone())
-                            .map(|(thread, resources)| Arc::new(commands::NativeCommandBackend::new(
-                                launch_context.backend.clone(), thread, resources, request.owner,
-                            )) as Arc<dyn tidepool_actor::command_jobs::CommandBackend>)
-                            .ok_or_else(|| tidepool_bridge_effects::CommandError::CommandUnavailable("command owner has no bound native application".into()));
+                        // An actor with an agent process of its own runs its
+                        // commands inside that process's sandbox. One without
+                        // — a record actor started from a notebook, or an
+                        // operator workbench — has no sandbox to run in, so it
+                        // runs here instead, in whatever worktree it holds
+                        // custody of. Borrowing an ancestor's sandbox, which
+                        // is what this did before, put the command somewhere
+                        // the actor's own worktree is mounted read-only.
+                        let backend = launch_context.config.command_resources.clone()
+                            .ok_or_else(|| tidepool_bridge_effects::CommandError::CommandUnavailable("this run has no command resource authority".into()))
+                            .and_then(|resources| {
+                                match deployments.iter().find(|app| app.actor == request.owner).and_then(|app| app.thread.clone()) {
+                                    Some(thread) => Ok(Arc::new(commands::NativeCommandBackend::new(
+                                        launch_context.backend.clone(), thread, resources, request.owner,
+                                    )) as Arc<dyn tidepool_actor::command_jobs::CommandBackend>),
+                                    None => {
+                                        let resolved = resident_command_boundary(
+                                            &worktree_authority,
+                                            &launch_context.worktrees,
+                                            &launch_context.config.workspace,
+                                            request.owner,
+                                        );
+                                        resolved.boundary.map_err(tidepool_bridge_effects::CommandError::CommandUnavailable)
+                                            .map(|boundary| Arc::new(commands::HostCommandBackend::new(
+                                                resources, request.owner, resolved.directory, boundary, resolved.writable,
+                                            )) as Arc<dyn tidepool_actor::command_jobs::CommandBackend>)
+                                    }
+                                }
+                            });
                         request.supply(backend);
                     }
                     LocalResidentDeployment::NotificationSend(command) => {
@@ -5099,6 +5115,61 @@ fn worktree_grant(role: tidepool_actor::ActorRole) -> ActorWorktreeGrant {
             ActorWorktreeGrant::default()
         }
     }
+}
+
+/// Where a command raised by an actor with no agent process of its own runs,
+/// and what it may write while it runs there.
+///
+/// Custody is exclusive, so an actor's bound worktree is unambiguous and is
+/// the only checkout it is entitled to write in; that worktree is both the
+/// working directory and the one writable root of the boundary the command is
+/// wrapped in. An actor holding no custody — an operator workbench — runs in
+/// the source checkout with nothing in the repository writable, and has to
+/// allocate a worktree before it can change anything. This is the same
+/// boundary [`workspace::prepare`] builds for an agent process, applied to a
+/// resident actor's single command; [`writable_repository_roots`] is the same
+/// decision for the process case.
+fn resident_command_boundary(
+    authority: &ActorWorktreeAuthority,
+    worktrees: &WorktreeManager,
+    source: &Path,
+    actor: ActorRef,
+) -> ResidentCommandBoundary {
+    let custody = authority
+        .bound_worktree(actor.into())
+        .and_then(|id| worktrees.registry().get(&id).ok().flatten())
+        .map(|receipt| receipt.cwd);
+    let directory = custody.clone().unwrap_or_else(|| source.to_owned());
+    let protected = [
+        source.to_owned(),
+        worktrees.managed_root().to_owned(),
+        worktrees.root_allocations().managed_root().to_owned(),
+    ];
+    // A boundary that cannot be built is not a reason to run unconfined: the
+    // command is refused instead, and the reason names the actor.
+    let boundary = tidepool_node::ProcessMountBoundary::new(
+        &directory,
+        protected,
+        custody.clone().into_iter().collect::<Vec<_>>(),
+    )
+    .map_err(|error| {
+        format!("no command boundary for actor {actor:?} in {directory:?}: {error}")
+    });
+    ResidentCommandBoundary {
+        directory,
+        writable: custody.is_some(),
+        boundary,
+    }
+}
+
+/// The resolved place a resident actor's commands run, and the boundary that
+/// confines them there.
+struct ResidentCommandBoundary {
+    directory: PathBuf,
+    /// Whether the working directory is this actor's own custody. False means
+    /// the whole repository is read-only to it.
+    writable: bool,
+    boundary: Result<tidepool_node::ProcessMountBoundary, String>,
 }
 
 /// The writable filesystem roots one actor's mount boundary grants.

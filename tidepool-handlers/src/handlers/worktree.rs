@@ -162,7 +162,10 @@ impl ActorWorktreeAuthority {
             .unwrap_or_default()
     }
 
-    fn bound_worktree(&self, principal: tidepool_repr::PrincipalId) -> Option<WorktreeId> {
+    /// The worktree this principal currently holds custody of, if any.
+    /// Custody is exclusive, so this is also where a command raised by an
+    /// actor with no sandbox of its own runs.
+    pub fn bound_worktree(&self, principal: tidepool_repr::PrincipalId) -> Option<WorktreeId> {
         let agent = WorktreePrincipal::exact_actor(
             &self.runtime,
             principal.identity,

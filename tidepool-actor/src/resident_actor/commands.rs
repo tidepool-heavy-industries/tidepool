@@ -61,8 +61,7 @@ where
                 // An inspection-only actor runs commands in its read-only
                 // project view; the mount, not this handler, prevents writes.
                 CommandsReq::CommandStartWith(spec) => answer!({
-                    let native_owner = self.native_command_owner(kernel.identity());
-                    match jobs.start(kernel, native_owner, spec).await {
+                    match jobs.start(kernel, spec).await {
                         Ok((id, request)) => {
                             if self
                                 .environment

@@ -110,10 +110,18 @@ Cmd.describe (preview "a path; not shell syntax")
 ```
 
 `Cmd.argv [program,arg1,arg2]` bypasses Bash. `Cmd.inDirectory` and
-`Cmd.withEnvironment` customize intent. The native owner resolves the directory
-at launch: omitted means its workspace; relative paths start there. Constructing
+`Cmd.withEnvironment` customize intent. An omitted directory means the actor's
+own workspace, and relative paths start there. For an actor with an agent
+process of its own that workspace is its sandbox; an actor started with
+`R.start` has no process and no sandbox, so its commands run in whatever
+worktree it holds custody of, or in the source checkout when it holds none —
+which is why such an actor can write in the worktree it was given
+(`git reset --hard` in its own checkout works) and nowhere else. Constructing
 a command does not snapshot inherited environment or location. `Cmd.describe`
 inspects intent without executing. Use `pwd` in a command when location is evidence.
+
+An actor with no process of its own also has no terminal: run its commands
+with piped or closed input, never `TerminalInput`.
 
 Ordinary commands use 256 MiB. Choose realistic explicit memory for builds/tests,
 e.g. `job <- Cmd.start (withMemory (GiB 8) [bash|cargo build|])`.
