@@ -24,7 +24,8 @@ after executable source. CPP and custom preprocessors are unavailable. Cells do
 not accept colon commands or `:{` / `:}` delimiters.
 
 Opaque functions are useful values. Ask hosted `lookup` for a name or use a
-`::type` query to search callable names. Query `doc` for the available guides or
+`::type` query to search callable names (wildcard unknown parts with `_`, e.g.
+`:: Cmd.Command -> _`). Query `doc` for the available guides or
 `doc workbench` for this one. The `status` tool defaults to `summary`; its
 `detailed`, `recovery`, `lineage`, `trace`, and `bindings` views answer runtime
 questions without disturbing the cell.

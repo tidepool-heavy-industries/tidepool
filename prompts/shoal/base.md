@@ -97,7 +97,8 @@ more detail.
 
 Start from the shared API guide and assignment. Discover specific missing facts
 with hosted `lookup`: a name returns its information, `::type` searches callable
-names, `doc` lists focused guides, and `doc <topic>` returns one. Use the
+names (wildcard unknown parts with `_`, e.g. `:: Cmd.Command -> _`), `doc` lists
+focused guides, and `doc <topic>` returns one. Use the
 `status` tool's `bindings` view only when a binding inventory is needed.
 Visibility does not grant runtime authority.
 

@@ -119,3 +119,34 @@ fn source_checkout_launch_has_process_custody_without_a_worktree_lease() {
         Err(scoped_custody::ScopedClaimError::AlreadyClaimed)
     ));
 }
+
+/// A launch that fails before `stage_supervisor` ever ran (admission timeout,
+/// worktree preparation failure, ...) leaves its process slot `Reserved`. No
+/// native process was ever spawned, so cleanup must report `Completed`
+/// regardless of the retirement's preserve/terminate disposition rather than
+/// claiming a process was "intentionally preserved".
+#[tokio::test]
+async fn retire_scoped_process_with_reserved_slot_reports_completed_for_either_disposition() {
+    for native_retirement in [NativeRetirement::Preserve, NativeRetirement::Terminate] {
+        let slot = Arc::new(Mutex::new(scoped_custody::ScopedProcessSlot::Reserved));
+        let outcome = retire_scoped_process(Some(slot), native_retirement).await;
+        assert!(
+            matches!(outcome, Some(CleanupComponentOutcome::Completed)),
+            "expected Completed for {native_retirement:?}, got {outcome:?}"
+        );
+    }
+}
+
+#[test]
+fn not_started_phase_names_pending_failed_and_abandoned_launches() {
+    assert_eq!(HostLaunchState::Pending.provider_not_started_phase(), "launching");
+    assert_eq!(
+        HostLaunchState::Failed("worktree preparation: disk full".into())
+            .provider_not_started_phase(),
+        "launch failed: worktree preparation: disk full"
+    );
+    assert_eq!(
+        HostLaunchState::Abandoned.provider_not_started_phase(),
+        "launch abandoned"
+    );
+}

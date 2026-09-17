@@ -261,7 +261,7 @@ launch.
 
 Branches use readable hierarchical paths such as
 `shoal/normalization/implementation/domain`, with deterministic numeric
-suffixes on collision. `BranchReceipt`, `me`, `listAgents`, and `status` retain
+suffixes on collision. `AdmissionReceipt`, `me`, `listAgents`, and `status` retain
 exact actor/worktree identities beneath those readable names.
 Request settlement also records the starting head and committed, staged,
 unstaged, and untracked submission evidence before response/watch readiness.

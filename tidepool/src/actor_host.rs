@@ -808,12 +808,26 @@ enum NativeRetirement {
     Terminate,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum HostLaunchState {
     Pending,
     Published,
     Abandoned,
-    Failed,
+    Failed(String),
+}
+
+impl HostLaunchState {
+    /// Phrase describing why the host cannot yet (or ever) hand off a
+    /// published application for this actor, for surfacing to a caller whose
+    /// delivery landed on an admitted actor with no provider running.
+    fn provider_not_started_phase(&self) -> String {
+        match self {
+            HostLaunchState::Pending => "launching".to_string(),
+            HostLaunchState::Failed(reason) => format!("launch failed: {reason}"),
+            HostLaunchState::Abandoned => "launch abandoned".to_string(),
+            HostLaunchState::Published => "provider retired".to_string(),
+        }
+    }
 }
 
 type InteractiveOwners = Arc<Mutex<HashMap<ActorRef, InteractiveApplicationOwner>>>;
@@ -1942,6 +1956,14 @@ async fn retire_scoped_process(
     native_retirement: NativeRetirement,
 ) -> Option<CleanupComponentOutcome> {
     let scope = scope?;
+    // The slot only leaves `Reserved` once `stage_supervisor` runs, immediately
+    // before the tmux native-process submission. A row still `Reserved` at
+    // retirement (admission timeout, workspace preparation failure, or any
+    // other error raised before that point) is certain to have never spawned
+    // a native process, so there is nothing to preserve or stop either way.
+    if matches!(*scope.lock(), scoped_custody::ScopedProcessSlot::Reserved) {
+        return Some(CleanupComponentOutcome::Completed);
+    }
     if native_retirement == NativeRetirement::Preserve {
         return Some(CleanupComponentOutcome::Failed {
             detail: "native process intentionally preserved; exact scope remains retained".into(),
@@ -2237,8 +2259,17 @@ async fn run_interactive_applications(
                             pane: pane_slot,
                             process: scope_slot,
                         };
+                        tracing::info!(
+                            actor = ?actor,
+                            worktree = matches!(workspace, ActorWorkspaceRequest::Worktree(_)),
+                            "actor launch started"
+                        );
+                        installation
+                            .runtime_observation
+                            .publish_launch_pending("preparing the workspace");
                         launches.spawn(async move {
                             let local_actor = installation.actor.clone();
+                            let launch_observation = installation.runtime_observation.clone();
                             let result = AssertUnwindSafe(async {
                                 let build_snapshot = if workspace_prepared { None } else {
                                     match installation.creator {
@@ -2263,6 +2294,10 @@ async fn run_interactive_applications(
                                     "interactive launch task panicked",
                                 ))
                             });
+                            if let Err(error) = &result {
+                                launch_observation
+                                    .publish_launch_pending(format!("launch failed: {}", error.detail));
+                            }
                             (local_actor, result)
                         });
                     }
@@ -2277,7 +2312,7 @@ async fn run_interactive_applications(
                                         owner.pending_activations.push(activation);
                                         continue;
                                     }
-                                    HostLaunchState::Failed | HostLaunchState::Abandoned => continue,
+                                    HostLaunchState::Failed(_) | HostLaunchState::Abandoned => continue,
                                     HostLaunchState::Published => {}
                                 }
                             }
@@ -2348,7 +2383,19 @@ async fn run_interactive_applications(
                         let target = delivery.target();
                         let Some(application) = deployments.iter().find(|app| app.actor == target) else {
                             if let Some(presentation) = delivery.begin() {
-                                presentation.not_presented("target application unavailable".into());
+                                let detail = match application_owners.lock().get(&target) {
+                                    // The host admitted this actor (it holds a
+                                    // launch-lifecycle row) but has not published
+                                    // an application for it yet, if ever.
+                                    Some(owner) => format!(
+                                        "actor {}@{} admitted; provider not started ({})",
+                                        target.id.0,
+                                        target.incarnation.0,
+                                        owner.launch.provider_not_started_phase()
+                                    ),
+                                    None => "target application unavailable".into(),
+                                };
+                                presentation.not_presented(detail);
                             }
                             continue;
                         };
@@ -2577,7 +2624,7 @@ async fn run_interactive_applications(
                     Some(Ok((local_actor, Err(error)))) => {
                         let actor = local_actor.identity();
                         if let Some(owner) = application_owners.lock().get_mut(&actor) {
-                            owner.launch = HostLaunchState::Failed;
+                            owner.launch = HostLaunchState::Failed(error.detail.clone());
                             owner.cancel();
                         }
                         if let Err(error) = apply_application_failure(
@@ -3076,10 +3123,17 @@ async fn launch_prepared_interactive_application(
     let runtime_observation = installation.runtime_observation.clone();
     let actor_identity = actor.identity();
     let _resource_start = match &config.command_resources {
-        Some(owner) => Some(tokio::select! {
-            result = owner.admit_actor() => result.map_err(|error| application_error(actor_identity, InteractiveOperation::LaunchProcess, error.to_string()))?,
-            _ = &mut cancelled => return Ok(None),
-        }),
+        Some(owner) => {
+            tracing::info!(actor = ?actor_identity, "actor waiting for resource admission");
+            runtime_observation.publish_launch_pending("waiting for memory admission");
+            let admitted = Some(tokio::select! {
+                result = owner.admit_actor() => result.map_err(|error| application_error(actor_identity, InteractiveOperation::LaunchProcess, error.to_string()))?,
+                _ = &mut cancelled => return Ok(None),
+            });
+            tracing::info!(actor = ?actor_identity, "actor resource admission granted");
+            runtime_observation.publish_launch_pending("starting the provider");
+            admitted
+        }
         None => None,
     };
     let workspace = worktree.as_ref().map_or_else(
@@ -8101,8 +8155,7 @@ mod tests {
             items.iter().all(|item| item["status"] == "committed"),
             "{documented:?}"
         );
-        assert_eq!(items[items.len() - 2]["output"], "True");
-        assert_eq!(items[items.len() - 1]["output"], "score=7");
+        assert_eq!(items[items.len() - 1]["output"], "[7]", "{documented:?}");
 
         let setup_policy = Arc::clone(&root_installation.policy);
         let submitted = tokio::spawn(async move {
@@ -8265,7 +8318,7 @@ mod tests {
         }
         let launch_receipt = dispatch_haskell_script(
             root_installation.policy.as_ref(),
-            "(responseLaunch (first3 workers), responseLaunch (second3 workers), responseLaunch (third3 workers))",
+            "(responseAdmission (first3 workers), responseAdmission (second3 workers), responseAdmission (third3 workers))",
         )
         .await;
         let launch_receipt = launch_receipt["items"][0]["output"]

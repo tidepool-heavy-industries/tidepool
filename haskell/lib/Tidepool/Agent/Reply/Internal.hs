@@ -37,8 +37,8 @@ module Tidepool.Agent.Reply.Internal
   , fillResponse
   , responseRequestId
   , responseActor
-  , responseLaunch
-  , withResponseLaunch
+  , responseAdmission
+  , withResponseAdmission
   , replyRequestId
   , readResponse
   , attemptReply
@@ -60,7 +60,7 @@ import Prelude
 import Tidepool.Duration (Duration)
 import Tidepool.Agent.Assignment (Label, SettlementReporting (..), labelText)
 import Tidepool.Agent.Ref (AgentRef)
-import Tidepool.Agent.Launch (BranchReceipt, allocatedPath)
+import Tidepool.Agent.Launch (AdmissionReceipt, allocatedPath)
 
 import Tidepool.Internal.ExitCell
   ( ExitCell
@@ -75,12 +75,12 @@ newtype RequestId = RequestId Int
 
 
 data Response result where
-  Response :: RequestId -> AgentRef -> Maybe BranchReceipt -> ExitCell pending (ResponseResult result) -> Response result
+  Response :: RequestId -> AgentRef -> Maybe AdmissionReceipt -> ExitCell pending (ResponseResult result) -> Response result
 
 instance Show (Response result) where
-  show (Response request actor launch _) =
+  show (Response request actor admission _) =
     "Response { request = " <> show request <> ", actor = " <> show actor
-      <> maybe "" (\receipt -> ", path = " <> show (allocatedPath receipt)) launch <> " }"
+      <> maybe "" (\receipt -> ", path = " <> show (allocatedPath receipt)) admission <> " }"
 
 newtype Reply result = Reply RequestId
   deriving (Show, Eq)
@@ -168,10 +168,17 @@ data ResponseResult result = ResponseResult
   deriving (Show, Eq)
 
 data ResponseState result
-  = ResponsePending
+  = -- | The target is presented with the request and has an observed
+    -- provider turn underway. Distinct from 'ResponseStarting', which covers
+    -- the admitted-but-not-yet-running interval.
+    ResponsePending
   | ResponseCancellationPending CancellationReason
   | ResponseReady (ResponseResult result)
   | ResponseUnavailable ResponseFailure
+  | -- | The target is admitted for this request but has no started provider
+    -- turn yet (queued, or presented but still idle). The 'Text' is a short
+    -- human-readable detail, e.g. what the target is waiting on.
+    ResponseStarting Text
   deriving (Show, Eq)
 
 data CancellationReason
@@ -214,6 +221,7 @@ data RawResponseObservation
   | RawResponseReady
   | RawResponseUnavailable ResponseFailure
   | RawResponseRejected ReplyError
+  | RawResponseStarting Text
 
 data RawReplyObservation
   = RawReplyOpen
@@ -282,11 +290,11 @@ responseRequestId (Response request _ _ _) = request
 responseActor :: Response result -> AgentRef
 responseActor (Response _ actor _ _) = actor
 
-responseLaunch :: Response result -> Maybe BranchReceipt
-responseLaunch (Response _ _ launch _) = launch
+responseAdmission :: Response result -> Maybe AdmissionReceipt
+responseAdmission (Response _ _ admission _) = admission
 
-withResponseLaunch :: BranchReceipt -> Response result -> Response result
-withResponseLaunch launch (Response request actor _ cell) = Response request actor (Just launch) cell
+withResponseAdmission :: AdmissionReceipt -> Response result -> Response result
+withResponseAdmission admission (Response request actor _ cell) = Response request actor (Just admission) cell
 
 replyRequestId :: Reply result -> RequestId
 replyRequestId (Reply request) = request
@@ -321,6 +329,7 @@ pollResponse response@(Response (RequestId request) _ _ _) = do
     RawResponseUnavailable failure -> ResponseUnavailable failure
     RawResponseRejected failure ->
       ResponseUnavailable (ResponseRejected failure)
+    RawResponseStarting detail -> ResponseStarting detail
 
 cancelRequest
   :: Member Replies effs

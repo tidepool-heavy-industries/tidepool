@@ -244,6 +244,12 @@ pub(crate) fn response_observation_value(
             "RawResponseUnavailable",
             vec![response_failure_value(failure, table)?],
         ),
+        Ok(ResponseObservation::Starting(detail)) => constructor(
+            table,
+            "Tidepool.Agent.Reply.Internal",
+            "RawResponseStarting",
+            vec![detail.to_value(table)?],
+        ),
         Err(error) => constructor(
             table,
             "Tidepool.Agent.Reply.Internal",

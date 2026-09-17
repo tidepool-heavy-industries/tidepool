@@ -13,7 +13,8 @@ each expression displays. Ordinary data types display without deriving; truncate
 output offers `cellDisplay.more`. Typecheck rejection changes nothing. Runtime failure retains
 its completed prefix and marks the suffix not run. Declarations and bindings persist.
 
-Use hosted `lookup` for names, `::type` queries, and documentation; use `status`
+Use hosted `lookup` for names, `::type` queries (wildcard unknown parts with `_`,
+e.g. `:: Cmd.Command -> _`), and documentation; use `status`
 for actor state. Activations expose `sessionInput`, `sessionReply`, and `respond`.
 Ending the model response ends the turn; watches and steering can wake it. Failed
 provider turns leave requests pending; inspect handles and receipts before action.

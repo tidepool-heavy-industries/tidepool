@@ -4,7 +4,7 @@ module Tidepool.Agent.Launch
   , GitBranchPrefix (..)
   , ForkRole (..)
   , ForkWorkspaceAccess (..)
-  , BranchReceipt (..)
+  , AdmissionReceipt (..)
   ) where
 
 import Data.Text (Text)
@@ -30,7 +30,7 @@ data ForkWorkspaceAccess
   | WriteForkWorktree
   deriving (Show, Eq)
 
-data BranchReceipt = BranchReceipt
+data AdmissionReceipt = AdmissionReceipt
   { requestedPath :: ActorPath
   , allocatedPath :: ActorPath
   , allocatedForkGroupPath :: ActorPath

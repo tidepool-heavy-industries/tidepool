@@ -220,6 +220,37 @@ fn actor_in_tree(
     false
 }
 
+/// Refines a bare `Pending` observation into `Starting` while the host is
+/// still launching the request target's provider application (the host's
+/// `launch_pending` phase on the target's runtime observation). A target with
+/// no launch in progress stays `Pending`.
+fn starting_observation<H, O>(
+    environment: &ResidentEnvironment<H, O>,
+    request: crate::RequestId,
+    observation: crate::ResponseObservation,
+) -> crate::ResponseObservation {
+    if observation != crate::ResponseObservation::Pending {
+        return observation;
+    }
+    let Some(target) = environment.requests.target_for(request) else {
+        return observation;
+    };
+    let phase = {
+        let records = environment.actors.lock();
+        let Some(record) = records.get(&target) else {
+            return observation;
+        };
+        record.runtime_observation.snapshot().launch_pending
+    };
+    match phase {
+        Some(phase) => crate::ResponseObservation::Starting(format!(
+            "actor {}@{} admitted; provider not started ({phase})",
+            target.id.0, target.incarnation.0
+        )),
+        None => observation,
+    }
+}
+
 impl<H, O> Clone for ResidentEnvironment<H, O> {
     fn clone(&self) -> Self {
         Self {
@@ -2865,7 +2896,10 @@ where
                 let observation = self
                     .environment
                     .requests
-                    .observe_response(context.actor, poll.request);
+                    .observe_response(context.actor, poll.request)
+                    .map(|observation| {
+                        starting_observation(&self.environment, poll.request, observation)
+                    });
                 self.environment
                     .runner
                     .resume_response_observation(context.clone(), poll.continuation, observation)

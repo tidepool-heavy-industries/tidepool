@@ -93,6 +93,11 @@ pub enum ResponseObservation {
     CancellationPending(CancellationReason),
     Ready,
     Unavailable(ResponseFailure),
+    /// The target is admitted for this request but has not yet started a
+    /// provider turn for it (still queued, or presented but idle). Produced
+    /// by refining a bare `Pending` against the target's runtime observation;
+    /// see `ResidentActor::starting_observation`.
+    Starting(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -983,6 +988,15 @@ impl RequestRegistry {
             }
         }
         reevaluate_watches(&mut state)
+    }
+
+    /// The request's target actor, for callers that need to correlate a
+    /// request with actor-level observation (e.g. runtime/provider status)
+    /// outside this registry. Does not check ownership: it is a lookup, not
+    /// an authorized observation.
+    pub(crate) fn target_for(&self, request: RequestId) -> Option<ActorRef> {
+        let state = self.state.lock();
+        state.requests.get(&request).map(|record| record.target)
     }
 
     pub(crate) fn observe_response(

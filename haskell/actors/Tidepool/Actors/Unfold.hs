@@ -62,7 +62,7 @@ module Tidepool.Actors.Unfold
   , childSited
   , childWithProgress
   , childWithProgressSited
-  , BranchReceipt (..)
+  , AdmissionReceipt (..)
   , ForkGroupHandle
   , forkGroupHandle
   , forkGroupGitBranchPrefix
@@ -90,11 +90,11 @@ import Prelude
 
 import qualified Tidepool.Actor as Actor
 import Tidepool.Agent.Reply (Replies, Response)
-import Tidepool.Agent.Reply.Internal (Progress (..), responseRequestId, responseLaunch, withResponseLaunch)
+import Tidepool.Agent.Reply.Internal (Progress (..), responseRequestId, responseAdmission, withResponseAdmission)
 import Tidepool.Agent.Assignment (Assignment (..), Label, NameError (..), labelText)
 import Tidepool.Agent.Launch
   ( ActorPath (..), GitBranchPrefix (..), ForkRole (..)
-  , ForkWorkspaceAccess (..), BranchReceipt (..)
+  , ForkWorkspaceAccess (..), AdmissionReceipt (..)
   )
 import Tidepool.Actors.Internal.Agent
   ( AgentRef
@@ -403,7 +403,7 @@ observeForkGroup group@(ForkGroupHandle groupId _) = do
 
 forkGroupHandle :: Response result -> Maybe ForkGroupHandle
 forkGroupHandle response = do
-  receipt <- responseLaunch response
+  receipt <- responseAdmission response
   pure (ForkGroupHandle (forkGroupIdentity receipt) (allocatedForkGroupPath receipt))
 
 forkGroupGitBranchPrefix :: ForkGroupHandle -> GitBranchPrefix
@@ -645,8 +645,8 @@ requestBranch site groupId (ForkGroupPath _ group) (Branch role _ _ options assi
   response <- requestWithSited @result @input site actor assigned
   observed <- lookupAgent actor
   let pair maybeId maybeInc = (,) <$> maybeId <*> maybeInc
-  pure (withResponseLaunch
-    (BranchReceipt
+  pure (withResponseAdmission
+    (AdmissionReceipt
         { requestedPath = ActorPath requested
         , allocatedPath = ActorPath allocated
         , allocatedForkGroupPath = ActorPath (allocatedGroupPath leaf allocated)

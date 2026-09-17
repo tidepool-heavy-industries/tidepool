@@ -107,7 +107,7 @@ module Tidepool.Actors.Shoal
   , Unfold
   , child
   , childWithProgress
-  , BranchReceipt (..)
+  , AdmissionReceipt (..)
   , ForkGroupHandle
   , forkGroupHandle
   , forkGroupGitBranchPrefix
@@ -122,7 +122,7 @@ module Tidepool.Actors.Shoal
   , planCleanup
   , executeCleanup
   , responseActor
-  , responseLaunch
+  , responseAdmission
   , UnfoldError (..)
   , attemptUnfold
   , unfold

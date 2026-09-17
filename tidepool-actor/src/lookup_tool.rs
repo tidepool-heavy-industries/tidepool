@@ -13,6 +13,9 @@ pub(crate) const LOOKUP_TOOL: &str = "lookup";
 const LOOKUP_DESCRIPTION: &str = "Look up names, Haskell types, or Shoal documentation. \
 Batch example: {\"queries\":[\"awaitSettled\",\":: Int -> Int\",\"doc workbench\"]}. \
 Prefix a type query with `::`; use `doc` for topics or `doc <topic>` for a topic. \
+Type search is Hoogle-like and needs a complete type: use `_` to wildcard an \
+unknown part and qualify types as they are imported, e.g. \
+`:: Cmd.Command -> _` finds functions from `Cmd.Command` to anything. \
 Callable results show current-row availability; `unknown` needs more type \
 information. Resource grants are checked when an operation executes. \
 A bare string is also accepted as one query. \
@@ -101,6 +104,12 @@ pub(crate) fn prepare(
                 let body = body.trim();
                 if body.is_empty() {
                     PreparedLookupKind::Rejected("type query after `::` is empty".into())
+                } else if body.ends_with("->") {
+                    PreparedLookupKind::Rejected(
+                        "type search needs a complete type; use `_` for unknown parts, \
+                         e.g. `:: T -> _`"
+                            .into(),
+                    )
                 } else {
                     PreparedLookupKind::Type(body.into())
                 }
@@ -388,6 +397,25 @@ mod tests {
             prepare(serde_json::json!("  ")).unwrap()[0].kind,
             PreparedLookupKind::Rejected(_)
         ));
+    }
+
+    #[test]
+    fn incomplete_type_query_is_rejected_with_a_wildcard_hint() {
+        let prepared = prepare(serde_json::json!({
+            "queries": [":: Cmd.Command ->", ":: Cmd.Command -> _"]
+        }))
+        .unwrap();
+        match &prepared[0].kind {
+            PreparedLookupKind::Rejected(diagnostic) => {
+                assert!(diagnostic.contains('_'));
+                assert!(diagnostic.contains("::"));
+            }
+            other => panic!("expected rejection, got {other:?}"),
+        }
+        assert_eq!(
+            prepared[1].kind,
+            PreparedLookupKind::Type("Cmd.Command -> _".into())
+        );
     }
 
     #[test]

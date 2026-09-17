@@ -153,7 +153,7 @@ safeHead = worktreeHead
 launchFacts
   :: Response result
   -> (Int, Int, ForkRole, ForkWorkspaceAccess, WorktreeReceipt)
-launchFacts worker = case responseLaunch worker of
+launchFacts worker = case responseAdmission worker of
   Nothing -> error "response was not created by child"
   Just receipt ->
     ( launchedActorId receipt

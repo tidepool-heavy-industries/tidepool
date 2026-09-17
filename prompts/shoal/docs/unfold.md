@@ -16,7 +16,9 @@ let sharedAfterUnfold = ("ready" :: Text)
 
 Each `Response a` contains its target actor and, on the launch request, its
 immutable launch/worktree receipt. The handles name admitted children; they do not mean
-that child inference has started. In this example both children can inspect
+that child inference has started. Do not describe an admitted child as running
+until `pollResponse` or status shows it started; a child that is admitted but
+not yet started reports `ResponseStarting`. In this example both children can inspect
 `sharedAfterUnfold`, although it was defined after `unfold`. Multiple unfolds
 in one block share its final scope; later parent tool calls cannot change it.
 The branch role narrows effects and native authority independently.

@@ -14,6 +14,7 @@ description = "Durable delivery and process substrate for interactive Tidepool a
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 tidepool-atomic-write.workspace = true
 tidepool-repr.workspace = true
 tokio = { workspace = true, features = ["process", "sync", "time", "macros", "rt", "net", "io-util"] }

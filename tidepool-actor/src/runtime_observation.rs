@@ -133,6 +133,9 @@ pub struct ActorRuntimeObservation {
     pub workspace: Option<ActorWorkspaceObservation>,
     pub launch_role: Option<crate::EffectiveRole>,
     pub launched_at_unix_ms: Option<i64>,
+    /// Set by the host while it launches this actor's provider application
+    /// (the current launch phase); cleared once the provider binds.
+    pub launch_pending: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -339,8 +342,15 @@ impl ActorRuntimeObservationHandle {
         self.inner.read().clone()
     }
 
+    /// Record the host's current launch phase for an actor whose provider
+    /// has not bound yet.
+    pub fn publish_launch_pending(&self, phase: impl Into<String>) {
+        self.inner.write().launch_pending = Some(phase.into());
+    }
+
     pub fn publish_provider_binding(&self, parent_thread: Option<String>, thread: String) {
         let mut observation = self.inner.write();
+        observation.launch_pending = None;
         observation.provider_parent_thread = parent_thread;
         observation.provider_thread = Some(thread);
     }

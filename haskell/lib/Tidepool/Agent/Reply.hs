@@ -27,7 +27,7 @@ module Tidepool.Agent.Reply
   , ReplyState (..)
   , requestId
   , responseActor
-  , responseLaunch
+  , responseAdmission
   , attemptReply
   , reply
   , pollResponse
@@ -74,7 +74,7 @@ import Tidepool.Agent.Reply.Internal
   , reply
   , responseRequestId
   , responseActor
-  , responseLaunch
+  , responseAdmission
   )
 
 requestId :: Response result -> RequestId

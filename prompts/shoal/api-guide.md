@@ -30,7 +30,7 @@ seeds children from that commit. It skips hooks and checks. Intermediate red
 or incomplete commits are legitimate; the parent's contract governs delivery.
 
 `child` returns a `Response result`. `responseActor` addresses its target.
-`responseLaunch` is `Just` only on the request created with that launch; later
+`responseAdmission` is `Just` only on the request created with that launch; later
 requests to the retained actor carry `Nothing`.
 
 Every assignment has a validated `Label`, typed `input`, optional `guidance`
@@ -59,9 +59,12 @@ inspectFull (fmap settledValue state)
 ```
 
 `lookup` searches names and types (`::type`) and ranks callable results by their
-availability in your effect row. `unknown` needs more type information; full
-signatures retain their constraints. `doc` lists topics and `doc <topic>` returns
-one guide. Resource grants are checked when an operation executes.
+availability in your effect row. Type search is Hoogle-like and needs a complete
+type: wildcard unknown parts with `_` and qualify types as they are imported,
+e.g. `:: Cmd.Command -> _` finds functions from `Cmd.Command` to anything.
+`unknown` needs more type information; full signatures retain their constraints.
+`doc` lists topics and `doc <topic>` returns one guide. Resource grants are
+checked when an operation executes.
 `status` defaults to `summary` and
 also provides `detailed`, `recovery`, `lineage`, `trace`, and `bindings` views.
 

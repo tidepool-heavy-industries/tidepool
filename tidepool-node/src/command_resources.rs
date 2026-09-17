@@ -63,6 +63,58 @@ impl CommandResourcePolicy {
         Ok(())
     }
 }
+/// Memory short by `needed - (available - pending)`. Formats in GiB for logs and errors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdmissionShortfall {
+    available: u64,
+    pending: u64,
+    headroom: u64,
+    start: u64,
+}
+impl AdmissionShortfall {
+    fn needed(&self) -> u64 {
+        self.headroom + self.start
+    }
+}
+impl std::fmt::Display for AdmissionShortfall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn gib(bytes: u64) -> f64 {
+            bytes as f64 / GIB as f64
+        }
+        write!(
+            f,
+            "{:.1} GiB available after {:.1} GiB pending actor starts; \
+             {:.1} GiB needed ({:.1} GiB headroom + {:.1} GiB start)",
+            gib(self.available.saturating_sub(self.pending)),
+            gib(self.pending),
+            gib(self.needed()),
+            gib(self.headroom),
+            gib(self.start),
+        )
+    }
+}
+
+/// Pure admission rule: only memory actually available counts, minus what other
+/// pending actor starts have already claimed. Idle command/nix pool budget is not
+/// reserved against — the pools stay capped by their own cgroup limits.
+fn actor_start_decision(
+    policy: &CommandResourcePolicy,
+    available: u64,
+    pending: u64,
+) -> Result<(), AdmissionShortfall> {
+    let needed = policy.machine_headroom_bytes + policy.actor_start_bytes;
+    if available.saturating_sub(pending) >= needed {
+        Ok(())
+    } else {
+        Err(AdmissionShortfall {
+            available,
+            pending,
+            headroom: policy.machine_headroom_bytes,
+            start: policy.actor_start_bytes,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum CommandResourceStatus {
@@ -436,37 +488,47 @@ impl CommandResources {
     }
 
     pub async fn admit_actor(self: &Arc<Self>) -> std::io::Result<ActorStartReservation> {
-        let deadline = tokio::time::Instant::now()
-            + Duration::from_secs(self.policy.actor_start_timeout_seconds);
+        let start = tokio::time::Instant::now();
+        let deadline = start + Duration::from_secs(self.policy.actor_start_timeout_seconds);
+        let mut logged_waiting = false;
+        let mut last_warn = start;
         loop {
             let available = read_counter(Path::new("/proc/meminfo"), "MemAvailable:")? * 1024;
-            let used = std::fs::read_to_string(self.root.join("memory.current"))?
-                .trim()
-                .parse::<u64>()
-                .map_err(|e| io_error(e.to_string()))?;
-            let nix_used = std::fs::read_to_string(
-                "/sys/fs/cgroup/system.slice/nix-daemon.service/memory.current",
-            )
-            .ok()
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .unwrap_or(0);
-            let unspent = self.policy.capacity().saturating_sub(used)
-                + self.policy.nix_memory_bytes.saturating_sub(nix_used);
-            {
+            let decision = {
                 let mut pending = self.actor_starts.lock();
-                if available.saturating_sub(unspent).saturating_sub(*pending)
-                    >= self.policy.machine_headroom_bytes + self.policy.actor_start_bytes
-                {
+                let decision = actor_start_decision(&self.policy, available, *pending);
+                if decision.is_ok() {
                     *pending += self.policy.actor_start_bytes;
+                }
+                decision
+            };
+            match decision {
+                Ok(()) => {
                     return Ok(ActorStartReservation {
                         owner: self.clone(),
                     });
                 }
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(io_error(
-                    "actor resource admission timed out; actor not started",
-                ));
+                Err(shortfall) => {
+                    let now = tokio::time::Instant::now();
+                    if !logged_waiting {
+                        tracing::info!(%shortfall, "actor admission waiting");
+                        logged_waiting = true;
+                        last_warn = now;
+                    } else if now.saturating_duration_since(last_warn) >= Duration::from_secs(30) {
+                        tracing::warn!(
+                            %shortfall,
+                            elapsed_secs = now.saturating_duration_since(start).as_secs(),
+                            "actor admission still waiting"
+                        );
+                        last_warn = now;
+                    }
+                    if now >= deadline {
+                        return Err(io_error(format!(
+                            "actor resource admission timed out after {}s; actor not started: {shortfall}",
+                            start.elapsed().as_secs(),
+                        )));
+                    }
+                }
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
@@ -478,5 +540,57 @@ pub struct ActorStartReservation {
 impl Drop for ActorStartReservation {
     fn drop(&mut self) {
         *self.owner.actor_starts.lock() -= self.owner.policy.actor_start_bytes;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy() -> CommandResourcePolicy {
+        CommandResourcePolicy {
+            machine_headroom_bytes: 6 * GIB,
+            actor_start_bytes: GIB,
+            ..CommandResourcePolicy::default()
+        }
+    }
+
+    #[test]
+    fn admits_when_available_minus_pending_covers_headroom_and_start() {
+        let policy = policy();
+        // Exactly headroom + start, no pending.
+        assert_eq!(actor_start_decision(&policy, 7 * GIB, 0), Ok(()));
+        // Comfortably over, with some pending already deducted.
+        assert_eq!(actor_start_decision(&policy, 10 * GIB, 2 * GIB), Ok(()));
+    }
+
+    #[test]
+    fn refuses_with_shortfall_numbers() {
+        let policy = policy();
+        let err = actor_start_decision(&policy, 3 * GIB + 200 * MIB, GIB).unwrap_err();
+        assert_eq!(
+            err,
+            AdmissionShortfall {
+                available: 3 * GIB + 200 * MIB,
+                pending: GIB,
+                headroom: 6 * GIB,
+                start: GIB,
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "2.2 GiB available after 1.0 GiB pending actor starts; \
+             7.0 GiB needed (6.0 GiB headroom + 1.0 GiB start)"
+        );
+    }
+
+    #[test]
+    fn pending_counts_against_availability() {
+        let policy = policy();
+        // Plenty raw available, but pending starts already claim it all.
+        assert!(actor_start_decision(&policy, 8 * GIB, 8 * GIB).is_err());
+        // One byte more pending than headroom+start allows tips it over.
+        assert_eq!(actor_start_decision(&policy, 14 * GIB, 7 * GIB), Ok(()));
+        assert!(actor_start_decision(&policy, 14 * GIB, 7 * GIB + 1).is_err());
     }
 }

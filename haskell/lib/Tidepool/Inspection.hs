@@ -208,6 +208,7 @@ instance WorkbenchDisplay (ResponseState a) where
   workbenchDisplay (ResponseUnavailable reason) =
     let (text, omitted) = workbenchDisplay reason
      in ("ResponseUnavailable · " <> text, omitted)
+  workbenchDisplay (ResponseStarting detail) = ("starting: " <> detail, False)
 
 instance WorkbenchDisplay (WatchState a) where
   workbenchDisplay WatchPending = ("WatchPending", False)
@@ -304,6 +305,7 @@ instance Display a => Display (ResponseState a) where
   displayTreePrec precedence (ResponseCancellationPending reason) = application precedence "ResponseCancellationPending" [displayTreePrec 11 reason]
   displayTreePrec precedence (ResponseReady value) = application precedence "ResponseReady" [displayTreePrec 11 value]
   displayTreePrec precedence (ResponseUnavailable reason) = application precedence "ResponseUnavailable" [displayTreePrec 11 reason]
+  displayTreePrec precedence (ResponseStarting detail) = application precedence "ResponseStarting" [displayTreePrec 11 detail]
 
 instance Display a => Display (WatchState a) where
   displayTree = displayTreePrec 0
