@@ -617,3 +617,48 @@ was green, because it appended to `src/help.rs` while the compiled module is
 both probes ran as the operator workbench, which holds no custody, so anything
 it tried to write was read-only — a reminder that the proxy is a participant
 with its own authority, not a view of someone else's.
+
+## Friction across every run so far (measured 2026-09-17)
+
+Each actor transcript from runs 1 through 7 was reduced to the moments the
+harness said no, paired with what the actor had just submitted: 207 failures
+across 57 transcripts, then classified by cause. The counts are what a model
+actually paid for, not what we guessed it would.
+
+| What went wrong | early | run 5 | run 6 | run 7 |
+|---|---|---|---|---|
+| a value of the wrong type or arity | 3 | 7 | 6 | 6 |
+| an engine or compiler defect | 5 | 2 | 0 | 10 |
+| a name guessed and not found | 2 | 5 | 1 | 4 |
+| an authority refused | 3 | 0 | 3 | 2 |
+| a budget or ceiling refused | 1 | 1 | 0 | 5 |
+| the actor's own program logic | 2 | 0 | 0 | 5 |
+| a resource unavailable or timed out | 0 | 2 | 0 | 3 |
+| a missing import or qualifier | 2 | 3 | 0 | 0 |
+| a type left ambiguous in the notebook | 0 | 2 | 6 | 0 |
+| a re-declaration in a later cell | 1 | 2 | 0 | 0 |
+
+Two things stand out.
+
+**Passing a value of the wrong type is the largest cost in every run, and it
+has not fallen.** Six in run 6 and six in run 7, after two waves of fixes
+aimed elsewhere. The shapes repeat: a seed where a spec was wanted, a string
+where a git ref was wanted, a tuple selector where a response was wanted, an
+invented constructor for a reply that has none. These are not careless: they
+are what an actor writes when the right shape is not visible at the call site.
+The next lever is there, not in more error wording — the error already says
+what was expected. Candidates: advice that names the smart constructor for an
+expected type, the way the notebook already advises on ambiguity; and a worked
+example per shape in the skill that the checks actually execute.
+
+**Engine defects cluster rather than spread.** Ten of run 7's were one bug
+hit repeatedly, and five of the early ones were another. A single engine
+defect on a hot path dominates a run's friction, which is the argument for
+exercising authored code once by hand before a tree depends on it.
+
+Notably absent after wave 3: the `IsString GitRef` family that cost run 6 six
+failures. Fixing a constructor's ergonomics removed the whole class.
+
+One measurement caveat: run 6 shows the fewest failures (27) but also did the
+least, since the review-and-merge code was not yet in use. Fewer failures is
+not yet evidence of a better harness.
