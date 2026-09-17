@@ -742,6 +742,9 @@ pub fn ambiguous_type_advice(message: &str, submitted: &str) -> Option<String> {
             "`{name}` has a signature but no equation in this cell item; {SPLIT_SIGNATURE_ADVICE}"
         ));
     }
+    if let Some(advice) = redeclared_type_advice(message) {
+        return Some(advice);
+    }
     if message.contains("Ambiguous type variable") {
         if message.contains("arising from the literal") || message.contains("IsString") {
             return Some(LITERAL_ANNOTATION_ADVICE.to_owned());
@@ -771,6 +774,63 @@ pub fn ambiguous_type_advice(message: &str, submitted: &str) -> Option<String> {
         && message.contains("The choice depends on the instantiation of");
     (unresolved_overlap || message.contains("ZonkAny"))
         .then(|| AMBIGUOUS_TYPE_ADVICE.to_owned())
+}
+
+/// Recognize GHC's `Ambiguous occurrence` diagnostic when the competing
+/// candidates include field/constructor selectors from two different cell
+/// generations (`Tidepool.Session.Lib.G<n>`). Each cell's declarations
+/// compile into their own `Tidepool.Session.Lib.G<n>` module, so re-running a
+/// `data` declaration a prior cell already installed leaves its selectors
+/// live in two generations at once, plus any bound value of the same name —
+/// GHC reports this as an ordinary ambiguous-occurrence error, which names a
+/// scope problem the model created, not a type it needs to add. A signature
+/// repairs nothing here, so this is a separate advice family from
+/// [`ambiguous_type_advice`]'s ambiguous-type shapes, called from it as one
+/// more recognized diagnostic.
+fn redeclared_type_advice(message: &str) -> Option<String> {
+    if !message.contains("Ambiguous occurrence") {
+        return None;
+    }
+    let occurrence = quoted_name_after(message, "Ambiguous occurrence")?;
+    let mut generations: Vec<(&str, &str)> = Vec::new();
+    for (position, _) in message.match_indices("Tidepool.Session.Lib.G") {
+        let rest = &message[position..];
+        let after_prefix = &rest["Tidepool.Session.Lib.G".len()..];
+        let digits_len = after_prefix
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .count();
+        if digits_len == 0 {
+            continue;
+        }
+        let module = &rest[.."Tidepool.Session.Lib.G".len() + digits_len];
+        let Some(after_module) = after_prefix[digits_len..].strip_prefix('.') else {
+            continue;
+        };
+        let type_name = after_module
+            .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+            .next()
+            .unwrap_or("");
+        if !type_name.is_empty() && !generations.contains(&(module, type_name)) {
+            generations.push((module, type_name));
+        }
+    }
+    let type_name = generations.first()?.1;
+    let modules = generations
+        .iter()
+        .filter(|(_, candidate)| *candidate == type_name)
+        .map(|(module, _)| *module)
+        .collect::<Vec<_>>();
+    if modules.len() < 2 {
+        return None;
+    }
+    Some(format!(
+        "`{occurrence}` is ambiguous because `{type_name}` was re-declared in this session \
+         ({} both define it); reuse the earlier `{type_name}` declaration instead of re-running \
+         it — never re-declare a type that already exists in this session — or rename this one \
+         and its fields if you meant a distinct type",
+        modules.join(" and ")
+    ))
 }
 
 /// The identifier GHC prints immediately after `prefix`, quoted as `‘name’` or,
@@ -1352,6 +1412,13 @@ pub fn assemble_opaque_expression_module(
 /// `;`), so it is rewritten to `let { <rest> }`; anything else is placed
 /// verbatim. Both branches guarantee a trailing newline so a template's own
 /// following text always starts on a fresh line.
+///
+/// Explicit braces disable GHC's layout algorithm entirely, so a multi-line
+/// `let` group (a signature on one line and its equation indented under it,
+/// or several equations at the same column) needs the `;` layout would have
+/// inserted between its items reproduced by hand — [`explicit_brace_let_body`]
+/// does that by comparing each continuation line's indentation against the
+/// first item's column, the same reference column GHC's own layout rule uses.
 pub fn place_turn_stmt(turn_text: &str) -> String {
     let trimmed = turn_text.trim_start();
     let let_rest = trimmed
@@ -1359,9 +1426,10 @@ pub fn place_turn_stmt(turn_text: &str) -> String {
         .filter(|r| r.starts_with(|c: char| c.is_whitespace()));
     match let_rest {
         Some(rest) if !rest.trim_start().starts_with('{') => {
+            let body = explicit_brace_let_body(rest);
             let mut out = String::from("let {");
-            out.push_str(rest);
-            if !rest.ends_with('\n') {
+            out.push_str(&body);
+            if !body.ends_with('\n') {
                 out.push('\n');
             }
             out.push_str(" }\n");
@@ -1375,6 +1443,44 @@ pub fn place_turn_stmt(turn_text: &str) -> String {
             out
         }
     }
+}
+
+/// Insert the `;` GHC's layout rule would have placed between items of a
+/// `let` group whose text (`rest`, everything after the `let` keyword) spans
+/// more than one line. The reference column is the column of the group's
+/// first token — 1-based, counting the 3 characters of `let` itself, since a
+/// raw turn has no leading indentation. A later line starting exactly at that
+/// column begins a new item in the group (layout would close the previous
+/// item and open the next with `;`); a line indented further is a
+/// continuation of the item above it (part of the same equation or a
+/// multi-line expression) and is left untouched. Only whitespace characters
+/// are inserted or removed nowhere — one `;` is spliced into an existing
+/// line — so the line count, and therefore [`turn_user_code_line_range`]'s
+/// offset math over the unmodified `turn_text`, is unaffected.
+fn explicit_brace_let_body(rest: &str) -> String {
+    let first_line = rest.split('\n').next().unwrap_or("");
+    let first_nonws = first_line
+        .char_indices()
+        .find(|(_, character)| !character.is_whitespace())
+        .map_or(first_line.len(), |(index, _)| index);
+    // 3 == "let".len(); +1 converts the 0-based byte offset to a 1-based column.
+    let reference_column = 3 + first_nonws + 1;
+
+    let mut out = String::with_capacity(rest.len() + 8);
+    for (index, line) in rest.split('\n').enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        let indent = line.len() - line.trim_start().len();
+        if index > 0 && !line.trim().is_empty() && indent + 1 == reference_column {
+            out.push_str(&line[..indent]);
+            out.push(';');
+            out.push_str(&line[indent..]);
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
 }
 
 /// Splice `turn_text` and `binders` into a template `source`. `{{BINDERS}}`
@@ -2574,6 +2680,45 @@ mod ambiguity_advice_tests {
             );
         }
     }
+
+    /// The exact GHC text observed against a live session (2026-09-17): a
+    /// later cell re-ran a `data Holder mode = Holder { probe :: ..., ... }`
+    /// declaration an earlier cell had already installed, and using `probe`
+    /// then finds it in both generations' selectors. The repair is reuse or
+    /// rename, not a signature.
+    const AMBIGUOUS_REDECLARED_FIELD: &str = "<cell>:24:9: error:\n    Ambiguous occurrence `probe'.\n    It could refer to\n       either the field `probe' of record `Tidepool.Session.Lib.G3.Holder',\n              imported from `Tidepool.Session.Lib.G3' at .../Tidepool.Session.Lib.G4.hs:51:1-30\n              (and originally defined in `Tidepool.Session.Lib.G2' at <cell>:4:71-75),\n           or the field `probe' of record `Tidepool.Session.Lib.G4.Holder',\n              defined at <cell>:4:71,\n           or `Tidepool.Session.Val.G25.probe',\n              imported from `Tidepool.Session.Val.G25' at .../Tidepool.Session.Lib.G4.hs:63:1-31.";
+
+    #[test]
+    fn a_redeclared_record_type_names_the_type_and_says_reuse_or_rename() {
+        let advice = ambiguous_type_advice(AMBIGUOUS_REDECLARED_FIELD, "probe holder").unwrap();
+        assert_eq!(
+            advice,
+            "`probe` is ambiguous because `Holder` was re-declared in this session \
+             (Tidepool.Session.Lib.G3 and Tidepool.Session.Lib.G4 both define it); reuse the \
+             earlier `Holder` declaration instead of re-running it — never re-declare a type \
+             that already exists in this session — or rename this one and its fields if you \
+             meant a distinct type"
+        );
+        assert_eq!(
+            render_cell_compile_error(&cell_error(AMBIGUOUS_REDECLARED_FIELD), "probe holder"),
+            advice
+        );
+    }
+
+    /// A plain single-generation ambiguous occurrence (e.g. a field name that
+    /// also happens to be an imported top-level value, with no second
+    /// `Tidepool.Session.Lib.G<n>` candidate) is not a redeclaration and GHC's
+    /// own text survives.
+    #[test]
+    fn an_ambiguous_occurrence_without_two_generations_is_left_alone() {
+        let message = "<cell>:1:1: error:\n    Ambiguous occurrence `probe'.\n    It could refer to\n       either the field `probe' of record `Tidepool.Session.Lib.G3.Holder',\n              defined at <cell>:4:71,\n           or `Tidepool.Session.Val.G25.probe',\n              imported from `Tidepool.Session.Val.G25' at .../Tidepool.Session.Lib.G4.hs:63:1-31.";
+        assert_eq!(ambiguous_type_advice(message, "probe holder"), None);
+        let rendered = render_cell_compile_error(&cell_error(message), "probe holder");
+        assert!(
+            rendered.contains("Ambiguous occurrence"),
+            "GHC's own text must survive: {rendered}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3165,6 +3310,32 @@ mod tests {
         let source = "{{TURN_STMT}}pure ({{BINDERS}})\n";
         let out = render_template(source, "let y = 2", &["y".to_string()]);
         assert_eq!(out, "let { y = 2\n }\npure (y)\n");
+    }
+
+    /// The exact two-line shape a model writes for a `let` binding with its
+    /// signature on its own line (dogfood run, 2026-09-17): explicit braces
+    /// disable layout, so without a hand-inserted `;` between the signature
+    /// and its equation GHC reads the continuation line as more of the
+    /// signature's type, not a second item in the group.
+    #[test]
+    fn render_template_turn_stmt_splits_signature_and_equation_on_separate_lines() {
+        let source = "{{TURN_STMT}}pure ({{BINDERS}})\n";
+        let turn_text = "let boxDefinition :: ActorSpec Box BoxEffects\n    boxDefinition = R.definition \"box\" (Actor.Selected knownEffects) Box { field = 1 }";
+        let out = render_template(source, turn_text, &["boxDefinition".to_string()]);
+        assert_eq!(
+            out,
+            "let { boxDefinition :: ActorSpec Box BoxEffects\n    ;boxDefinition = R.definition \"box\" (Actor.Selected knownEffects) Box { field = 1 }\n }\npure (boxDefinition)\n"
+        );
+    }
+
+    /// A continuation line indented past the group's reference column (a
+    /// multi-line expression, not a new item) gets no inserted `;`.
+    #[test]
+    fn render_template_turn_stmt_leaves_deeper_continuation_lines_alone() {
+        let source = "{{TURN_STMT}}pure ({{BINDERS}})\n";
+        let turn_text = "let total = 1\n             + 2";
+        let out = render_template(source, turn_text, &["total".to_string()]);
+        assert_eq!(out, "let { total = 1\n             + 2\n }\npure (total)\n");
     }
 
     #[test]
