@@ -18,6 +18,7 @@ pub mod fork;
 pub mod forks;
 pub mod green;
 pub mod introspection;
+pub mod jev;
 pub mod journal;
 pub mod notifications;
 pub mod read_state;
@@ -48,6 +49,7 @@ pub use fork::*;
 pub use forks::*;
 pub use green::*;
 pub use introspection::*;
+pub use jev::*;
 pub use journal::*;
 pub use notifications::*;
 pub use read_state::*;
@@ -83,6 +85,7 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         agent_control_decl(),
         commands_decl(),
         notifications_decl(),
+        jev_decl(),
         agent_inspection_decl(),
         agent_launch_decl(),
         forks_decl(),
@@ -104,6 +107,7 @@ pub(crate) const CURATED_EFFECTS: &[&str] = &[
     "AgentControl",
     "Commands",
     "Notifications",
+    "Jev",
     "AgentInspection",
     "AgentLaunch",
     "Forks",
@@ -231,6 +235,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "PollNotificationWith",
         ],
     ),
+    ("Jev", &["JevCallError", "JevAskWith"]),
     (
         "AgentInspection",
         &[

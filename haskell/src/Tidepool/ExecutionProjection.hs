@@ -1075,17 +1075,40 @@ projectExpr expected (StgCase scrutinee binder altType alts) = do
     [] | typePrimRep_maybe (varType binder) == Nothing -> pure NoSuccess
     _ -> Returns <$> repsForType (varType binder)
   projectedScrutinee <- projectExpr scrutineeResults scrutinee
-  kind <- projectCaseKind altType
+  kind <- reconcileIntegerCase scrutineeResults <$> projectCaseKind altType
   (identity, alternatives) <- withScope $ do
     identity <- bindValue binder
     alternatives <- mapM (projectAlt expected altType) alts
     pure (identity, alternatives)
-  pure (Case projectedScrutinee identity scrutineeResults kind alternatives)
+  pure (Case projectedScrutinee identity scrutineeResults kind
+    (map (retagIntegerPattern kind) alternatives))
 projectExpr expected (StgLet _ binding body) = withScope $
   Let <$> projectLocalGroup binding <*> projectExpr expected body
 projectExpr expected (StgLetNoEscape _ binding body) = withScope $
   LetJoins <$> projectJoinGroup binding <*> projectExpr expected body
 projectExpr expected (StgTick _ body) = projectExpr expected body
+
+-- | A case binder of type @Word#@ may be scrutinized with @Int#@ alternatives
+-- (and the reverse) once casts are erased. Same-width signed and unsigned
+-- integers share one bit pattern, so the case takes the scrutinee's
+-- representation and its literal patterns keep their bytes.
+reconcileIntegerCase :: ResultContract -> CaseKind -> CaseKind
+reconcileIntegerCase (Returns [actual]) (PrimitiveCase declared)
+  | sameWidthInteger actual declared = PrimitiveCase actual
+  where
+    sameWidthInteger (IntRep a) (WordRep b) = a == b
+    sameWidthInteger (WordRep a) (IntRep b) = a == b
+    sameWidthInteger _ _ = False
+reconcileIntegerCase _ kind = kind
+
+retagIntegerPattern :: CaseKind -> Alternative -> Alternative
+retagIntegerPattern (PrimitiveCase (WordRep bits))
+  (Alternative (LiteralPattern (IntLiteral width bytes)) binders body)
+  | width == bits = Alternative (LiteralPattern (WordLiteral width bytes)) binders body
+retagIntegerPattern (PrimitiveCase (IntRep bits))
+  (Alternative (LiteralPattern (WordLiteral width bytes)) binders body)
+  | width == bits = Alternative (LiteralPattern (IntLiteral width bytes)) binders body
+retagIntegerPattern _ alternative = alternative
 
 -- | GHC supplies the complete enumeration through the result type. Lower its
 -- zero-based tag to ordinary classified cases, never reconstruct a family from
@@ -1558,6 +1581,10 @@ internOperation op signature = do
           , ("isDoubleNaN", [FloatRep 64, VoidRep])
           , ("isDoubleInfinite", [FloatRep 64, VoidRep])
           , ("isDoubleNegativeZero", [FloatRep 64, VoidRep])
+          , ("isFloatDenormalized", [FloatRep 32, VoidRep])
+          , ("isFloatFinite", [FloatRep 32, VoidRep])
+          , ("isDoubleDenormalized", [FloatRep 64, VoidRep])
+          , ("isDoubleFinite", [FloatRep 64, VoidRep])
           ]
       , operationSignature == Signature arguments (Returns [IntRep 64]) ->
           pure (Schema.IntrinsicIdentity (Text.pack (unpackFS label)) Schema.CCall)

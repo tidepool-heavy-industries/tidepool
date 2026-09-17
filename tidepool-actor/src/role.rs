@@ -72,6 +72,7 @@ pub enum ActorEffectKey {
     WorktreeIntegration,
     Sleep,
     Notifications,
+    Jev,
     Commands,
     Console,
     Actor,
@@ -93,6 +94,7 @@ impl ActorEffectKey {
             Self::WorktreeIntegration => "WorktreeIntegration",
             Self::Sleep => "Sleep",
             Self::Notifications => "Notifications",
+            Self::Jev => "Jev",
             Self::Commands => "Commands",
             Self::Console => "Console",
             Self::Actor => "Actor",
@@ -137,6 +139,7 @@ impl EffectiveRole {
                 ActorEffectKey::WorktreeIntegration,
                 ActorEffectKey::Sleep,
                 ActorEffectKey::Notifications,
+                ActorEffectKey::Jev,
                 ActorEffectKey::Commands,
                 ActorEffectKey::Console,
                 ActorEffectKey::Actor,
@@ -165,6 +168,7 @@ impl EffectiveRole {
                 ActorEffectKey::BoundWorktree,
                 ActorEffectKey::Sleep,
                 ActorEffectKey::Notifications,
+                ActorEffectKey::Jev,
                 ActorEffectKey::Commands,
                 ActorEffectKey::Console,
                 ActorEffectKey::Actor,
@@ -194,6 +198,7 @@ impl EffectiveRole {
                 ActorEffectKey::WorktreeIntegration,
                 ActorEffectKey::Sleep,
                 ActorEffectKey::Notifications,
+                ActorEffectKey::Jev,
                 ActorEffectKey::Commands,
                 ActorEffectKey::Console,
                 ActorEffectKey::Actor,
@@ -233,6 +238,7 @@ impl EffectiveRole {
                 ActorEffectKey::WorktreeIntegration,
                 ActorEffectKey::Sleep,
                 ActorEffectKey::Notifications,
+                ActorEffectKey::Jev,
                 ActorEffectKey::Commands,
                 ActorEffectKey::Console,
                 ActorEffectKey::Actor,
@@ -503,7 +509,7 @@ mod tests {
     fn exact_effect_row_is_rendered_from_stable_keys() {
         assert_eq!(
             EffectiveRole::research().haskell_effects_type(),
-            "'[Replies, Watches, Forks, ActorContext, AgentInspection, AgentControl, BoundWorktree, Sleep, Notifications, Commands, Console, Actor]"
+            "'[Replies, Watches, Forks, ActorContext, AgentInspection, AgentControl, BoundWorktree, Sleep, Notifications, Jev, Commands, Console, Actor]"
         );
         let narrow = EffectiveRole::coding().with_effect_keys(vec![ActorEffectKey::Replies]);
         assert_eq!(narrow.haskell_effects_type(), "'[Replies]");

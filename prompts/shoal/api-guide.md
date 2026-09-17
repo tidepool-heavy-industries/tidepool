@@ -65,7 +65,8 @@ type: wildcard unknown parts with `_` and qualify types as they are imported,
 e.g. `:: Cmd.Command -> _` finds functions from `Cmd.Command` to anything.
 `unknown` needs more type information; full signatures retain their constraints.
 `doc` lists topics and `doc <topic>` returns one guide. Resource grants are
-checked when an operation executes.
+checked when an operation executes. See `doc jev` for the judgment-model
+effect available in every cell.
 `status` defaults to `summary` and
 also provides `detailed`, `recovery`, `lineage`, `trace`, and `bindings` views.
 

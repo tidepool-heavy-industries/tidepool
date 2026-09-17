@@ -128,6 +128,7 @@ struct ResidentEnvironment<H, O> {
     fork_workspaces: Option<crate::fork_workspace::SharedForkWorkspaceAdmission>,
     root_admission_closed: Arc<tokio::sync::RwLock<bool>>,
     launch_resolver: Option<crate::WorkerLaunchResolver>,
+    jev: crate::JevBackendHandle,
 }
 
 #[derive(Clone)]
@@ -264,6 +265,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             fork_workspaces: self.fork_workspaces.clone(),
             root_admission_closed: self.root_admission_closed.clone(),
             launch_resolver: self.launch_resolver.clone(),
+            jev: Arc::clone(&self.jev),
         }
     }
 }
@@ -1751,6 +1753,20 @@ where
                 self.environment
                     .runner
                     .resume_unit(context.clone(), continuation)
+                    .await
+            }),
+            ResidentActorBoundary::Jev {
+                continuation,
+                request,
+            } => Box::pin(async move {
+                let backend = Arc::clone(&self.environment.jev);
+                let answer = backend.ask(request).await;
+                if let Err(failure) = &answer {
+                    tracing::info!(actor = ?context.actor, ?failure, "jev call failed");
+                }
+                self.environment
+                    .runner
+                    .resume_value(context.clone(), continuation, answer)
                     .await
             }),
             ResidentActorBoundary::Sleep {
@@ -6465,6 +6481,11 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    /// Answer every actor's `Jev` requests with `backend` from now on.
+    pub fn set_jev_backend(&mut self, backend: crate::JevBackendHandle) {
+        self.environment.jev = backend;
+    }
+
     /// Observe whether this forest's one resident session can be considered
     /// for same-incarnation root reentry. The subsequent checkout remains the
     /// authoritative admission boundary.
@@ -6506,6 +6527,7 @@ where
             fork_workspaces,
             root_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
             launch_resolver,
+            jev: Arc::new(crate::jev::UnconfiguredJev),
         };
         (
             Self {

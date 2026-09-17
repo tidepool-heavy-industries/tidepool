@@ -41,6 +41,8 @@ module Tidepool.Aeson.Value
     -- * Decoding (primop anchor; the public decoder is
     --   'Tidepool.Aeson.FromJSON.eitherDecode')
   , eitherDecodeValue
+    -- * Encoding
+  , encodeValue
     -- * ToJSON class
   , ToJSON(..)
   , GToJSON(..)
@@ -56,6 +58,7 @@ import qualified Tidepool.Data.Text as T
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Char (chr, ord)
+import Data.String (IsString (..))
 import Tidepool.Aeson.Scientific
   ( Scientific, scientific, coefficient, base10Exponent
   , fromFloatDigits, toRealFloat, isFiniteDouble )
@@ -100,6 +103,10 @@ data Value
   | Bool !Bool
   | Null
   deriving (Eq, Ord, Show)
+
+-- | A string literal is a JSON string, as in aeson.
+instance IsString Value where
+  fromString = String . T.pack
 
 -- | Construct a JSON object from key-value pairs.
 object :: [Pair] -> Value
@@ -149,6 +156,49 @@ eitherDecodeValue :: Text -> Either Text Value
 eitherDecodeValue input = case jsonParseTopLevel input of
   Left err -> Left (T.pack err)
   Right v  -> Right v
+
+-- | Encode a 'Value' as compact RFC 8259 JSON text: no inserted whitespace,
+-- object members in the underlying 'Data.Map.Strict' key order, numbers via
+-- 'Scientific'\'s own 'Show' (already RFC-8259-shaped: full-digit integers,
+-- plain fixed-point fractions, never exponent form — see
+-- "Tidepool.Aeson.Scientific"), strings with control characters, quote, and
+-- backslash escaped (@\\uXXXX@ for other C0 controls). Total: every 'Value'
+-- constructed by this module's own smart constructors is representable.
+encodeValue :: Value -> Text
+encodeValue Null = T.pack "null"
+encodeValue (Bool True) = T.pack "true"
+encodeValue (Bool False) = T.pack "false"
+encodeValue (Number n) = T.pack (show n)
+encodeValue (String s) = encodeJsonString s
+encodeValue (Array xs) = T.pack "[" `T.append` T.intercalate (T.pack ",") (map encodeValue xs) `T.append` T.pack "]"
+encodeValue (Object kv) =
+  T.pack "{"
+    `T.append` T.intercalate (T.pack ",") (map encodePair (Map.toList kv))
+    `T.append` T.pack "}"
+  where
+    encodePair (k, v) = encodeJsonString k `T.append` T.pack ":" `T.append` encodeValue v
+
+encodeJsonString :: Text -> Text
+encodeJsonString s = T.pack "\"" `T.append` T.concatMap escapeJsonChar s `T.append` T.pack "\""
+
+escapeJsonChar :: Char -> Text
+escapeJsonChar c
+  | c == '"' = T.pack "\\\""
+  | c == '\\' = T.pack "\\\\"
+  | c == '\n' = T.pack "\\n"
+  | c == '\r' = T.pack "\\r"
+  | c == '\t' = T.pack "\\t"
+  | jsonIsControl c = T.pack "\\u" `T.append` hex4Of (ord c)
+  | otherwise = T.singleton c
+
+-- | Render a non-negative code point below 0x10000 as four lowercase hex
+-- digits (the only range 'escapeJsonChar' calls this for: C0 controls).
+hex4Of :: Int -> Text
+hex4Of n = T.pack [hexDigit ((n `div` 4096) `mod` 16), hexDigit ((n `div` 256) `mod` 16), hexDigit ((n `div` 16) `mod` 16), hexDigit (n `mod` 16)]
+  where
+    hexDigit d
+      | d < 10 = chr (48 + d)
+      | otherwise = chr (97 + d - 10)
 
 -- ---------------------------------------------------------------------------
 -- RFC 8259 JSON parser (recursive descent over 'Text').

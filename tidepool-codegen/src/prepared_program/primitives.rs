@@ -234,6 +234,10 @@ pub(super) enum IntegerKind {
     Compare(ir::condcodes::IntCC),
     Convert,
     Narrow,
+    /// Bit counts over the low `narrow_bits` bits of a word.
+    PopCount,
+    LeadingZeros,
+    TrailingZeros,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -389,6 +393,18 @@ fn fixed_quot_rem(signature: &Signature, signed: bool, bits: u8) -> Option<Integ
             result_bits: bits,
             narrow_bits: 0,
         })
+}
+
+/// GHC's `popCnt*#`/`clz*#`/`ctz*#`: a word in, a word count out, counted
+/// over the named low width.
+fn bit_count(signature: &Signature, width: u8, kind: IntegerKind) -> Option<IntegerOperation> {
+    unary_same(signature, word_rep(64), word_rep(64)).map(|_| IntegerOperation {
+        kind,
+        signed: false,
+        bits: 64,
+        result_bits: 64,
+        narrow_bits: width,
+    })
 }
 
 fn fixed_unary(
@@ -581,6 +597,18 @@ fn operation_for_name(name: &str, signature: &Signature) -> Option<IntegerOperat
         "or#" => generic_binary(signature, false, IntegerKind::Or),
         "xor#" => generic_binary(signature, false, IntegerKind::Xor),
         "not#" => generic_unary(signature, false, IntegerKind::Not),
+        "popCnt#" | "popCnt64#" => bit_count(signature, 64, IntegerKind::PopCount),
+        "popCnt32#" => bit_count(signature, 32, IntegerKind::PopCount),
+        "popCnt16#" => bit_count(signature, 16, IntegerKind::PopCount),
+        "popCnt8#" => bit_count(signature, 8, IntegerKind::PopCount),
+        "clz#" | "clz64#" => bit_count(signature, 64, IntegerKind::LeadingZeros),
+        "clz32#" => bit_count(signature, 32, IntegerKind::LeadingZeros),
+        "clz16#" => bit_count(signature, 16, IntegerKind::LeadingZeros),
+        "clz8#" => bit_count(signature, 8, IntegerKind::LeadingZeros),
+        "ctz#" | "ctz64#" => bit_count(signature, 64, IntegerKind::TrailingZeros),
+        "ctz32#" => bit_count(signature, 32, IntegerKind::TrailingZeros),
+        "ctz16#" => bit_count(signature, 16, IntegerKind::TrailingZeros),
+        "ctz8#" => bit_count(signature, 8, IntegerKind::TrailingZeros),
         "uncheckedShiftL#" => generic_shift(signature, false, IntegerKind::Shl),
         "uncheckedShiftRL#" => generic_shift(signature, false, IntegerKind::Shrl),
         "==#" => generic_compare(signature, true, IntCC::Equal),
@@ -709,6 +737,15 @@ pub(super) fn recognize_operation(
     if super::floating::recognize_decode_double_int64(&declaration.identity, signature) {
         return Some(PrimitiveOperation::DecodeDoubleInt64);
     }
+    if let Some((function, width)) =
+        super::floating::recognize_libm(&declaration.identity, signature)
+    {
+        return Some(PrimitiveOperation::Libm { function, width });
+    }
+    if let Some(signed) = super::floating::recognize_encode_double(&declaration.identity, signature)
+    {
+        return Some(PrimitiveOperation::EncodeDouble { signed });
+    }
     if super::lifetime::recognize_touch(&declaration.identity, signature) {
         return Some(PrimitiveOperation::Touch);
     }
@@ -717,6 +754,12 @@ pub(super) fn recognize_operation(
         && returns_exact(signature, &[RuntimeRep::Int(64)])
     {
         return Some(PrimitiveOperation::DoubleToInt);
+    }
+    if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "float2Int#")
+        && signature.arguments == [RuntimeRep::Float(32)]
+        && returns_exact(signature, &[RuntimeRep::Int(64)])
+    {
+        return Some(PrimitiveOperation::FloatToInt);
     }
     if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "indexCharOffAddr#")
         && signature.arguments == [RuntimeRep::Address, RuntimeRep::Int(64)]
@@ -815,8 +858,14 @@ pub(super) enum PrimitiveOperation {
     TextSearch(super::text_search::TextSearchOperation),
     Formatting(super::formatting::FormattingOperation),
     DecodeDoubleInt64,
+    EncodeDouble { signed: bool },
+    Libm {
+        function: super::floating::LibmFunction,
+        width: u8,
+    },
     Touch,
     DoubleToInt,
+    FloatToInt,
     IndexCharOffAddr,
     CopyAddrToByteArray,
     CStringLen,
@@ -1100,6 +1149,11 @@ pub(super) fn emit_operation(
         PrimitiveOperation::DoubleToInt => {
             super::fallible::emit_double_to_int(builder, vmctx, pipeline, arguments[0]).map(Some)
         }
+        PrimitiveOperation::FloatToInt => {
+            // Every f32 is exactly representable as f64.
+            let widened = builder.ins().fpromote(ir::types::F64, arguments[0]);
+            super::fallible::emit_double_to_int(builder, vmctx, pipeline, widened).map(Some)
+        }
         PrimitiveOperation::IndexCharOffAddr => super::static_bytes::emit_index_char(
             builder,
             pipeline,
@@ -1141,6 +1195,17 @@ pub(super) fn emit_operation(
         PrimitiveOperation::DecodeDoubleInt64 => {
             super::floating::emit_decode_double_int64(builder, pipeline, arguments[0]).map(Some)
         }
+        PrimitiveOperation::Libm { function, width } => {
+            super::floating::emit_libm(builder, pipeline, function, width, arguments).map(Some)
+        }
+        PrimitiveOperation::EncodeDouble { signed } => super::floating::emit_encode_double(
+            builder,
+            pipeline,
+            signed,
+            arguments[0],
+            arguments[1],
+        )
+        .map(Some),
         PrimitiveOperation::Touch => {
             super::lifetime::emit_touch(builder, pipeline, arguments[0]).map(Some)
         }
@@ -1243,6 +1308,24 @@ impl ScalarFamily for IntegerFamily {
                     }
                 } else {
                     builder.ins().ireduce(result_ty, arguments[0])
+                }
+            }
+            IntegerKind::PopCount | IntegerKind::LeadingZeros | IntegerKind::TrailingZeros => {
+                let width_ty = integer_type(operation.narrow_bits);
+                let operand = if operation.narrow_bits == operation.bits {
+                    arguments[0]
+                } else {
+                    builder.ins().ireduce(width_ty, arguments[0])
+                };
+                let count = match operation.kind {
+                    IntegerKind::PopCount => builder.ins().popcnt(operand),
+                    IntegerKind::LeadingZeros => builder.ins().clz(operand),
+                    _ => builder.ins().ctz(operand),
+                };
+                if operation.narrow_bits == operation.result_bits {
+                    count
+                } else {
+                    builder.ins().uextend(result_ty, count)
                 }
             }
             IntegerKind::Narrow => {
@@ -2422,6 +2505,32 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn bit_counts_use_the_named_width() {
+        for (name, input, expected) in [
+            ("popCnt#", u64::MAX, 64),
+            ("popCnt8#", 0x1ff, 8),
+            ("popCnt32#", 0xf_0000_0003, 2),
+            ("clz#", 1, 63),
+            ("clz8#", 0x100, 8),
+            ("clz16#", 0x80, 8),
+            ("ctz#", 0, 64),
+            ("ctz32#", 0x1_0000_0000, 32),
+            ("ctz8#", 0x40, 6),
+        ] {
+            let value = run_scalar(
+                name,
+                vec![RuntimeRep::Word(64)],
+                RuntimeRep::Word(64),
+                vec![word(64, input)],
+            );
+            assert!(
+                matches!(value, tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(n)) if n == expected),
+                "{name}({input:#x}) = {value:?}"
+            );
+        }
     }
 
     #[test]

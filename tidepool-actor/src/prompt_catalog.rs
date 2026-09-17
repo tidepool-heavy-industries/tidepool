@@ -91,6 +91,7 @@ pub(crate) fn workbench_doc(topic: &str) -> Result<&'static str, String> {
         "workbench" => Ok(include_str!("../../prompts/shoal/docs/workbench.md")),
         "request" | "requests" => Ok(include_str!("../../prompts/shoal/docs/request.md")),
         "unfold" | "fork" | "forks" => Ok(include_str!("../../prompts/shoal/docs/unfold.md")),
+        "jev" => Ok(include_str!("../../prompts/shoal/docs/jev.md")),
         "watch" | "watches" | "poll" => Ok(include_str!("../../prompts/shoal/docs/watch.md")),
         "deadline" | "deadlines" | "duration" => {
             Ok(include_str!("../../prompts/shoal/docs/deadline.md"))
@@ -102,7 +103,7 @@ pub(crate) fn workbench_doc(topic: &str) -> Result<&'static str, String> {
         "lineage" | "status" | "trace" => Ok(include_str!("../../prompts/shoal/docs/lineage.md")),
         "recovery" | "recover" => Ok(include_str!("../../prompts/shoal/docs/recovery.md")),
         "help" | "topics" => Ok(
-            "Shoal topics: tree, workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery. Use hosted `lookup` with `doc <topic>`.",
+            "Shoal topics: tree, workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery, jev. Use hosted `lookup` with `doc <topic>`.",
         ),
         other => Err(format!(
             "unknown Shoal documentation topic `{other}`; use hosted `lookup` with `doc`"

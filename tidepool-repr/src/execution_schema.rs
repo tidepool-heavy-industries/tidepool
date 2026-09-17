@@ -76,6 +76,15 @@ pub enum RuntimeRep {
     Float(u8),
 }
 
+impl RuntimeRep {
+    /// Same machine value: identical, or a same-width signed/unsigned pair.
+    #[must_use]
+    pub fn same_bits(self, other: Self) -> bool {
+        self == other
+            || matches!((self, other), (Self::Int(a), Self::Word(b)) | (Self::Word(a), Self::Int(b)) if a == b)
+    }
+}
+
 /// Known successful results, caller-chosen results, or authoritative evidence
 /// that saturation cannot return. `Returns([])` is a successful zero-result
 /// call, distinct from both other cases. Partial application still produces a
@@ -108,12 +117,24 @@ impl ResultContract {
         matches!(self, Self::NoSuccess) || self == demanded
     }
 
+    /// [`Self::satisfies`], also admitting a same-width signed/unsigned
+    /// integer in place of the demanded one: GHC erases `Int#`/`Word#`
+    /// coercions, and both share one bit pattern and machine type.
+    pub fn satisfies_physically(&self, demanded: &Self) -> bool {
+        self.satisfies(demanded)
+            || matches!((self, demanded), (Self::Returns(actual), Self::Returns(expected))
+                if actual.len() == expected.len()
+                    && actual.iter().zip(expected).all(|(a, e)| a.same_bits(*e)))
+    }
+
     /// Meet branches at a case continuation without inventing results for a
     /// nonreturning branch. Different successful representations are incompatible.
     pub fn merge_alternative(&self, other: &Self) -> Option<Self> {
         match (self, other) {
             (Self::NoSuccess, result) | (result, Self::NoSuccess) => Some(result.clone()),
             _ if self == other => Some(self.clone()),
+            // Same machine values under an erased Int#/Word# coercion.
+            _ if self.satisfies_physically(other) => Some(self.clone()),
             _ => None,
         }
     }

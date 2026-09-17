@@ -13,5 +13,6 @@ pub mod commands;
 pub mod console;
 pub mod forks;
 pub mod introspection;
+pub mod jev;
 pub mod notifications;
 pub mod sleep;

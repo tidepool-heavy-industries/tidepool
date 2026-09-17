@@ -753,7 +753,16 @@ impl<'w, 'p> Walker<'w, 'p> {
                     kind,
                     alternatives,
                     &mut children,
-                )?;
+                )
+                .map_err(|error| match error {
+                    ParseError::InvalidSignature(detail) => {
+                        ParseError::InvalidSignature(format!(
+                            "{detail}; scrutinee {}",
+                            self.describe_node(*scrutinee)
+                        ))
+                    }
+                    other => other,
+                })?;
             }
             ExprFrame::Let { bindings, body } => {
                 let actions = self.local_children(bindings, &mut children)?;
@@ -888,7 +897,7 @@ impl<'w, 'p> Walker<'w, 'p> {
         };
         if self.typed {
             if let Some(expected) = frame.expected {
-                if !actual.satisfies(&expected) {
+                if !actual.satisfies_physically(&expected) {
                     return Err(ParseError::InvalidSignature(format!(
                         "expression representations {actual:?} do not match expected {expected:?}"
                     )));
@@ -1039,6 +1048,26 @@ impl<'w, 'p> Walker<'w, 'p> {
         Ok(actions)
     }
 
+    /// A short rendering of one expression node for diagnostics: operation
+    /// nodes name their operation.
+    fn describe_node(&self, index: usize) -> String {
+        match self.tree.nodes.get(index) {
+            Some(ExprFrame::Operation { operation, .. }) => format!(
+                "operation {:?}",
+                self.validator
+                    .wire
+                    .operations
+                    .get(operation.0 as usize)
+                    .map(|declaration| &declaration.identity)
+            ),
+            Some(frame) => {
+                let rendered = format!("{frame:?}");
+                rendered.chars().take(200).collect()
+            }
+            None => "missing".into(),
+        }
+    }
+
     fn case_children(
         &mut self,
         binder: ValueId,
@@ -1082,11 +1111,12 @@ impl<'w, 'p> Walker<'w, 'p> {
                 if matches!(
                     rep,
                     RuntimeRep::Void | RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef
-                ) || scrutinee_reps.is_some_and(|reps| reps != [*rep])
+                ) || scrutinee_reps
+                    .is_some_and(|reps| !matches!(reps, [actual] if actual.same_bits(*rep)))
                 {
-                    return Err(ParseError::InvalidSignature(
-                        "primitive case scrutinee representation mismatch".into(),
-                    ));
+                    return Err(ParseError::InvalidSignature(format!(
+                        "primitive case scrutinee representation mismatch: case binder {binder:?} is {rep:?}, scrutinee returns {scrutinee_reps:?}"
+                    )));
                 }
             }
             CaseKind::MultiValue | CaseKind::Polymorphic => {

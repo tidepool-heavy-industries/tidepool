@@ -115,6 +115,7 @@ impl Driver {
             research_policy: defaults.research,
             root_launch_mode: InteractiveLaunchMode::Fresh,
             pane_environment: BTreeMap::new(),
+            jev: None,
         };
         let session = ModelFreeSession::start(&config, |admission| admission).await?;
         let installations =

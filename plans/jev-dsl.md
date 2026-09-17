@@ -432,6 +432,17 @@ Suggested continuation sequence:
    handler, then verify the normal resident call path once unrelated engine work
    permits it. Do not change engine internals to satisfy this handoff.
 
+### Current state and later work
+
+The `Jev` effect (`JevAskWith`, JSON text in and out) is available to every
+Shoal role. `haskell/lib/Jev/Core*` is vendored from `~/dev/jev-dsl` by
+`scripts/sync-jev-dsl.sh` (the source commit is in `haskell/lib/Jev/VENDORED`).
+`Jev.Operators` binds the operators to Tidepool's `Value` and the host transport.
+
+Later: make jev-dsl a nix flake input in the GHC package set, and drop the
+vendored copy and the sync script. Add a `[jev]` workspace config table
+(`base_url`, `timeout_ms`, `max_calls_per_run`) if the defaults stop fitting.
+
 ### Acceptance examples and checks to design
 
 - One-question call with nested structured instructions and criteria.

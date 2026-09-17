@@ -11,19 +11,25 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR");
     #[allow(clippy::expect_used, reason = "CARGO_MANIFEST_DIR")]
     let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    // The embed root is `haskell/lib` itself (not `haskell/lib/Tidepool`),
+    // so every top-level module namespace under it — `Tidepool.*` and
+    // `Jev.*` alike — is embedded with no per-namespace registration. A
+    // module's relative path under `haskell/lib` is its embedded path
+    // verbatim, matching the `-ihaskell/lib` GHC search root actors compile
+    // against.
     #[allow(
         clippy::expect_used,
-        reason = "haskell/lib/Tidepool must exist relative to the tidepool crate"
+        reason = "haskell/lib must exist relative to the tidepool crate"
     )]
     let stdlib_root = Path::new(&manifest)
-        .join("../haskell/lib/Tidepool")
+        .join("../haskell/lib")
         .canonicalize()
-        .expect("haskell/lib/Tidepool must exist relative to the tidepool crate");
+        .expect("haskell/lib must exist relative to the tidepool crate");
 
     emit_bundle(
         &stdlib_root,
-        "../haskell/lib/Tidepool",
-        "Tidepool/",
+        "../haskell/lib",
+        "",
         "EMBEDDED_STDLIB",
         "embedded_stdlib.rs",
     );

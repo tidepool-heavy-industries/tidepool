@@ -737,7 +737,14 @@ pub(super) fn emit_status_guard(builder: &mut FunctionBuilder<'_>, status: Value
     success
 }
 
+#[track_caller]
 fn unsupported(binding: ValueId, node: usize) -> CompileError {
+    if std::env::var_os("TIDEPOOL_PREPARED_DIAG").is_some() {
+        eprintln!(
+            "prepared emit rejected node {node} in {binding:?} at {}",
+            std::panic::Location::caller()
+        );
+    }
     CompileError::Unsupported(Unsupported::Expression { binding, node })
 }
 
@@ -1550,7 +1557,8 @@ fn atom_value(
         Atom::Rubbish(rep) => Some(*rep),
         Atom::Void => Some(RuntimeRep::Void),
     };
-    if actual != Some(expected) {
+    // Same-width Int/Word atoms share one machine value (erased coercions).
+    if !actual.is_some_and(|actual| actual.same_bits(expected)) {
         return Err(unsupported(owner, node));
     }
     match atom {

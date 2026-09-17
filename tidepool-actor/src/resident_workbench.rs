@@ -865,6 +865,10 @@ pub(crate) enum ResidentActorBoundary {
         continuation: ResidentHole,
         duration: Duration,
     },
+    Jev {
+        continuation: ResidentHole,
+        request: String,
+    },
     Command {
         continuation: ResidentHole,
         request: crate::generated::commands::CommandsReq,
@@ -1024,6 +1028,7 @@ impl ResidentActorBoundary {
         match self {
             Self::Completed => "program completion",
             Self::Sleep { .. } => "sleep",
+            Self::Jev { .. } => "jev",
             Self::Command { .. } => "command job",
             Self::Console { .. } => "print",
             Self::NotificationSend { .. } => "notify",
@@ -1152,6 +1157,7 @@ enum ResidentRequest {
     Sleep(crate::generated::sleep::SleepReq),
     Commands(crate::generated::commands::CommandsReq),
     Notifications(crate::generated::notifications::NotificationsReq),
+    Jev(crate::generated::jev::JevReq),
     Actor(crate::generated::actor::ActorReq),
     ActorContext(crate::generated::actor_context::ActorContextReq),
     AgentControl(crate::generated::agent_control::AgentControlReq),
@@ -1193,6 +1199,7 @@ impl ResidentRequest {
             crate::generated::notifications::NotificationsReq
         );
         try_member!(Self::Sleep, crate::generated::sleep::SleepReq);
+        try_member!(Self::Jev, crate::generated::jev::JevReq);
         try_member!(Self::Commands, crate::generated::commands::CommandsReq);
         try_member!(Self::Console, crate::generated::console::ConsoleReq);
         try_member!(Self::Actor, crate::generated::actor::ActorReq);
@@ -1244,6 +1251,7 @@ impl ResidentRequest {
     fn operation(&self) -> &'static str {
         match self {
             Self::Sleep(crate::generated::sleep::SleepReq::SleepWith(..)) => "sleep",
+            Self::Jev(crate::generated::jev::JevReq::JevAskWith(..)) => "jev",
             Self::Commands(_) => "command job",
             Self::Console(_) => "console output",
             Self::Notifications(crate::generated::notifications::NotificationsReq::NotifyWith(
@@ -3048,6 +3056,9 @@ where
                                 .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
                         ),
                     }),
+                    ResidentRequest::Jev(crate::generated::jev::JevReq::JevAskWith(request)) => {
+                        Ok(ResidentActorBoundary::Jev { continuation: hole, request })
+                    }
                     ResidentRequest::ActorContext(
                         crate::generated::actor_context::ActorContextReq::ActorContextWith,
                     ) => Ok(ResidentActorBoundary::ActorContext(hole)),

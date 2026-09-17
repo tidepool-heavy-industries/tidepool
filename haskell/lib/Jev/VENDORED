@@ -1,0 +1,8 @@
+Vendored from /home/inanna/dev/jev-dsl
+commit: cc18ac6cdb65bdacf5d5eaab6a37ad87120d9d03
+date: 2026-09-17T08:18:24Z
+files:
+  src/Jev/Core.hs
+  src/Jev/Core/Json.hs
+  src/Jev/Core/Contract.hs
+  src/Jev/Core/Schema.hs

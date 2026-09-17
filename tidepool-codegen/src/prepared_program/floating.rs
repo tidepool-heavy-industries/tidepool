@@ -24,9 +24,13 @@ fn classify_symbol(symbol: &str) -> Option<(u8, ClassificationKind)> {
         "isFloatNaN" => Some((32, ClassificationKind::NaN)),
         "isFloatInfinite" => Some((32, ClassificationKind::Infinite)),
         "isFloatNegativeZero" => Some((32, ClassificationKind::NegativeZero)),
+        "isFloatDenormalized" => Some((32, ClassificationKind::Denormalized)),
+        "isFloatFinite" => Some((32, ClassificationKind::Finite)),
         "isDoubleNaN" => Some((64, ClassificationKind::NaN)),
         "isDoubleInfinite" => Some((64, ClassificationKind::Infinite)),
         "isDoubleNegativeZero" => Some((64, ClassificationKind::NegativeZero)),
+        "isDoubleDenormalized" => Some((64, ClassificationKind::Denormalized)),
+        "isDoubleFinite" => Some((64, ClassificationKind::Finite)),
         _ => None,
     }
 }
@@ -84,15 +88,274 @@ pub(super) fn emit_decode_double_int64(
     ])
 }
 
+pub(super) const ENCODE_DOUBLE_INT_HOST: &str = "prepared_encode_double_int";
+pub(super) const ENCODE_DOUBLE_WORD_HOST: &str = "prepared_encode_double_word";
+
+/// ghc-bignum's `__int_encodeDouble` / `__word_encodeDouble`: `mantissa * 2^exp`,
+/// correctly rounded. `Some(signed)` for an exactly catalogued call.
+pub(super) fn recognize_encode_double(
+    identity: &OperationIdentity,
+    signature: &Signature,
+) -> Option<bool> {
+    let OperationIdentity::Intrinsic {
+        symbol,
+        convention: ForeignConvention::CCall,
+    } = identity
+    else {
+        return None;
+    };
+    let signed = match symbol.as_str() {
+        "__int_encodeDouble" => true,
+        "__word_encodeDouble" => false,
+        _ => return None,
+    };
+    let mantissa = if signed {
+        RuntimeRep::Int(64)
+    } else {
+        RuntimeRep::Word(64)
+    };
+    (signature.arguments == [mantissa, RuntimeRep::Int(64), RuntimeRep::Void]
+        && returns_exact(signature, &[RuntimeRep::Float(64)]))
+    .then_some(signed)
+}
+
+pub(super) extern "C" fn prepared_encode_double_int(mantissa: i64, exponent: i64) -> u64 {
+    tidepool_bignum::encode_double(mantissa, exponent).to_bits()
+}
+
+pub(super) extern "C" fn prepared_encode_double_word(mantissa: u64, exponent: i64) -> u64 {
+    tidepool_bignum::encode_double_word(mantissa, exponent).to_bits()
+}
+
+pub(super) fn emit_encode_double(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    signed: bool,
+    mantissa: Value,
+    exponent: Value,
+) -> Result<Vec<Value>, super::CompileError> {
+    let mut signature = ir::Signature::new(pipeline.isa.default_call_conv());
+    signature.params = vec![AbiParam::new(types::I64), AbiParam::new(types::I64)];
+    signature.returns = vec![AbiParam::new(types::I64)];
+    let name = if signed {
+        ENCODE_DOUBLE_INT_HOST
+    } else {
+        ENCODE_DOUBLE_WORD_HOST
+    };
+    let host = pipeline
+        .module
+        .declare_function(name, Linkage::Import, &signature)
+        .map_err(|error| crate::pipeline::PipelineError::Declaration(error.to_string()))?;
+    let host = pipeline.module.declare_func_in_func(host, builder.func);
+    let call = builder.ins().call(host, &[mantissa, exponent]);
+    let bits = builder.inst_results(call)[0];
+    Ok(vec![builder.ins().bitcast(types::F64, MemFlags::new(), bits)])
+}
+
+pub(super) const LIBM_HOST: &str = "prepared_float_libm";
+
+/// GHC's transcendental Double/Float primops, evaluated by Rust's `f64`/`f32`
+/// methods (the platform libm GHC itself calls).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(super) enum LibmFunction {
+    Exp = 0,
+    Expm1,
+    Log,
+    Log1p,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Sinh,
+    Cosh,
+    Tanh,
+    Asinh,
+    Acosh,
+    Atanh,
+    Power,
+}
+
+impl LibmFunction {
+    const ALL: [Self; 17] = [
+        Self::Exp,
+        Self::Expm1,
+        Self::Log,
+        Self::Log1p,
+        Self::Sin,
+        Self::Cos,
+        Self::Tan,
+        Self::Asin,
+        Self::Acos,
+        Self::Atan,
+        Self::Sinh,
+        Self::Cosh,
+        Self::Tanh,
+        Self::Asinh,
+        Self::Acosh,
+        Self::Atanh,
+        Self::Power,
+    ];
+
+    /// `(function, width)` for a GHC primop name.
+    fn of_primop(name: &str) -> Option<(Self, u8)> {
+        let (stem, width) = if let Some(stem) = name.strip_suffix("Double#") {
+            (stem, 64)
+        } else if let Some(stem) = name.strip_suffix("Float#") {
+            (stem, 32)
+        } else {
+            return match name {
+                "**##" => Some((Self::Power, 64)),
+                _ => None,
+            };
+        };
+        let function = match stem {
+            "exp" => Self::Exp,
+            "expm1" => Self::Expm1,
+            "log" => Self::Log,
+            "log1p" => Self::Log1p,
+            "sin" => Self::Sin,
+            "cos" => Self::Cos,
+            "tan" => Self::Tan,
+            "asin" => Self::Asin,
+            "acos" => Self::Acos,
+            "atan" => Self::Atan,
+            "sinh" => Self::Sinh,
+            "cosh" => Self::Cosh,
+            "tanh" => Self::Tanh,
+            "asinh" => Self::Asinh,
+            "acosh" => Self::Acosh,
+            "atanh" => Self::Atanh,
+            "power" => Self::Power,
+            _ => return None,
+        };
+        Some((function, width))
+    }
+
+    fn arity(self) -> usize {
+        if self == Self::Power {
+            2
+        } else {
+            1
+        }
+    }
+}
+
+/// `code` names a [`LibmFunction`]; operands and result are IEEE bits of
+/// `width` (32 or 64).
+pub(super) extern "C" fn prepared_float_libm(code: i64, width: i64, x: u64, y: u64) -> u64 {
+    let Some(function) = LibmFunction::ALL.get(code as usize).copied() else {
+        return f64::NAN.to_bits();
+    };
+    macro_rules! apply {
+        ($x:expr, $y:expr) => {
+            match function {
+                LibmFunction::Exp => $x.exp(),
+                LibmFunction::Expm1 => $x.exp_m1(),
+                LibmFunction::Log => $x.ln(),
+                LibmFunction::Log1p => $x.ln_1p(),
+                LibmFunction::Sin => $x.sin(),
+                LibmFunction::Cos => $x.cos(),
+                LibmFunction::Tan => $x.tan(),
+                LibmFunction::Asin => $x.asin(),
+                LibmFunction::Acos => $x.acos(),
+                LibmFunction::Atan => $x.atan(),
+                LibmFunction::Sinh => $x.sinh(),
+                LibmFunction::Cosh => $x.cosh(),
+                LibmFunction::Tanh => $x.tanh(),
+                LibmFunction::Asinh => $x.asinh(),
+                LibmFunction::Acosh => $x.acosh(),
+                LibmFunction::Atanh => $x.atanh(),
+                LibmFunction::Power => $x.powf($y),
+            }
+        };
+    }
+    if width == 32 {
+        let (x, y) = (f32::from_bits(x as u32), f32::from_bits(y as u32));
+        u64::from(apply!(x, y).to_bits())
+    } else {
+        let (x, y) = (f64::from_bits(x), f64::from_bits(y));
+        apply!(x, y).to_bits()
+    }
+}
+
+pub(super) fn emit_libm(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    function: LibmFunction,
+    width: u8,
+    arguments: &[Value],
+) -> Result<Vec<Value>, super::CompileError> {
+    let mut signature = ir::Signature::new(pipeline.isa.default_call_conv());
+    signature.params = vec![AbiParam::new(types::I64); 4];
+    signature.returns = vec![AbiParam::new(types::I64)];
+    let host = pipeline
+        .module
+        .declare_function(LIBM_HOST, Linkage::Import, &signature)
+        .map_err(|error| crate::pipeline::PipelineError::Declaration(error.to_string()))?;
+    let host = pipeline.module.declare_func_in_func(host, builder.func);
+    let (int_ty, float_ty) = if width == 32 {
+        (types::I32, types::F32)
+    } else {
+        (types::I64, types::F64)
+    };
+    let mut words = Vec::with_capacity(2);
+    for index in 0..2 {
+        let word = match arguments.get(index) {
+            Some(&operand) if index < function.arity() => {
+                let bits = builder.ins().bitcast(int_ty, MemFlags::new(), operand);
+                if width == 32 {
+                    builder.ins().uextend(types::I64, bits)
+                } else {
+                    bits
+                }
+            }
+            _ => builder.ins().iconst(types::I64, 0),
+        };
+        words.push(word);
+    }
+    let code = builder.ins().iconst(types::I64, function as i64);
+    let width_word = builder.ins().iconst(types::I64, i64::from(width));
+    let call = builder
+        .ins()
+        .call(host, &[code, width_word, words[0], words[1]]);
+    let bits = builder.inst_results(call)[0];
+    let bits = if width == 32 {
+        builder.ins().ireduce(types::I32, bits)
+    } else {
+        bits
+    };
+    Ok(vec![builder.ins().bitcast(float_ty, MemFlags::new(), bits)])
+}
+
+/// A catalogued transcendental primop with its exact signature.
+pub(super) fn recognize_libm(
+    identity: &OperationIdentity,
+    signature: &Signature,
+) -> Option<(LibmFunction, u8)> {
+    let OperationIdentity::PrimOp(name) = identity else {
+        return None;
+    };
+    let (function, width) = LibmFunction::of_primop(name)?;
+    (signature.arguments == vec![RuntimeRep::Float(width); function.arity()]
+        && returns_exact(signature, &[RuntimeRep::Float(width)]))
+    .then_some((function, width))
+}
+
 pub(super) struct FloatingFamily;
 
 #[derive(Clone, Copy)]
 pub(super) enum FloatingOperation {
     NearestDouble,
     Negate,
+    Unary(UnaryKind),
     Binary(BinaryKind),
     Compare(CompareKind),
     Convert { from_float: bool },
+    /// A 64-bit integer (signed or unsigned) to a float of `width` bits.
+    FromInteger { signed: bool, width: u8 },
     Classify { width: u8, kind: ClassificationKind },
 }
 
@@ -101,6 +364,15 @@ pub(super) enum ClassificationKind {
     NaN,
     Infinite,
     NegativeZero,
+    /// Subnormal: zero exponent bits, nonzero mantissa.
+    Denormalized,
+    Finite,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum UnaryKind {
+    Abs,
+    Sqrt,
 }
 
 #[derive(Clone, Copy)]
@@ -139,6 +411,8 @@ impl ScalarFamily for FloatingFamily {
             };
             let operation = match name.as_str() {
                 "negateDouble#" | "negateFloat#" => FloatingOperation::Negate,
+                "fabsDouble#" | "fabsFloat#" => FloatingOperation::Unary(UnaryKind::Abs),
+                "sqrtDouble#" | "sqrtFloat#" => FloatingOperation::Unary(UnaryKind::Sqrt),
                 "+##" | "-##" | "*##" | "/##" => FloatingOperation::Binary(match name.as_str() {
                     "+##" => BinaryKind::Add,
                     "-##" => BinaryKind::Sub,
@@ -173,6 +447,10 @@ impl ScalarFamily for FloatingFamily {
                         _ => CompareKind::Ge,
                     })
                 }
+                "int2Double#" => FloatingOperation::FromInteger { signed: true, width: 64 },
+                "word2Double#" => FloatingOperation::FromInteger { signed: false, width: 64 },
+                "int2Float#" => FloatingOperation::FromInteger { signed: true, width: 32 },
+                "word2Float#" => FloatingOperation::FromInteger { signed: false, width: 32 },
                 "float2Double#" => FloatingOperation::Convert { from_float: true },
                 "double2Float#" => FloatingOperation::Convert { from_float: false },
                 _ => return None,
@@ -183,13 +461,22 @@ impl ScalarFamily for FloatingFamily {
                 64
             };
             let valid = match operation {
-                FloatingOperation::Negate => {
+                FloatingOperation::Negate | FloatingOperation::Unary(_) => {
                     signature.arguments == [RuntimeRep::Float(width)]
                         && returns_exact(signature, &[RuntimeRep::Float(width)])
                 }
                 FloatingOperation::Compare(_) => {
                     signature.arguments == [RuntimeRep::Float(width), RuntimeRep::Float(width)]
                         && returns_exact(signature, &[RuntimeRep::Int(64)])
+                }
+                FloatingOperation::FromInteger { signed, width } => {
+                    signature.arguments
+                        == [if signed {
+                            RuntimeRep::Int(64)
+                        } else {
+                            RuntimeRep::Word(64)
+                        }]
+                        && returns_exact(signature, &[RuntimeRep::Float(width)])
                 }
                 FloatingOperation::Convert { from_float } => {
                     signature.arguments == [RuntimeRep::Float(if from_float { 32 } else { 64 })]
@@ -229,6 +516,16 @@ impl ScalarFamily for FloatingFamily {
         match operation {
             FloatingOperation::NearestDouble => vec![builder.ins().nearest(arguments[0])],
             FloatingOperation::Negate => vec![builder.ins().fneg(arguments[0])],
+            FloatingOperation::FromInteger { signed, width } => {
+                let ty = if width == 32 { types::F32 } else { types::F64 };
+                vec![if signed {
+                    builder.ins().fcvt_from_sint(ty, arguments[0])
+                } else {
+                    builder.ins().fcvt_from_uint(ty, arguments[0])
+                }]
+            }
+            FloatingOperation::Unary(UnaryKind::Abs) => vec![builder.ins().fabs(arguments[0])],
+            FloatingOperation::Unary(UnaryKind::Sqrt) => vec![builder.ins().sqrt(arguments[0])],
             FloatingOperation::Binary(kind) => {
                 let value = match kind {
                     BinaryKind::Add => builder.ins().fadd(arguments[0], arguments[1]),
@@ -276,6 +573,17 @@ impl ScalarFamily for FloatingFamily {
                         ClassificationKind::NegativeZero => {
                             builder.ins().icmp_imm(IntCC::Equal, bits, 0x8000_0000)
                         }
+                        ClassificationKind::Denormalized => {
+                            // magnitude - 1 wraps for zero, so one unsigned
+                            // compare selects 0 < magnitude < smallest normal.
+                            let below = builder.ins().iadd_imm(magnitude, -1);
+                            builder.ins().icmp_imm(IntCC::UnsignedLessThan, below, 0x007f_ffff)
+                        }
+                        ClassificationKind::Finite => builder.ins().icmp_imm(
+                            IntCC::UnsignedLessThan,
+                            magnitude,
+                            0x7f80_0000,
+                        ),
                     }
                 } else {
                     let bits = builder
@@ -296,6 +604,19 @@ impl ScalarFamily for FloatingFamily {
                         ClassificationKind::NegativeZero => {
                             builder.ins().icmp_imm(IntCC::Equal, bits, i64::MIN)
                         }
+                        ClassificationKind::Denormalized => {
+                            let below = builder.ins().iadd_imm(magnitude, -1);
+                            builder.ins().icmp_imm(
+                                IntCC::UnsignedLessThan,
+                                below,
+                                0x000f_ffff_ffff_ffff,
+                            )
+                        }
+                        ClassificationKind::Finite => builder.ins().icmp_imm(
+                            IntCC::UnsignedLessThan,
+                            magnitude,
+                            0x7ff0_0000_0000_0000,
+                        ),
                     }
                 };
                 vec![builder.ins().uextend(types::I64, result)]
@@ -483,6 +804,103 @@ mod tests {
     }
 
     #[test]
+    fn integer_to_float_conversions_respect_signedness() {
+        let values = run(
+            "word2Double#",
+            vec![RuntimeRep::Word(64)],
+            vec![RuntimeRep::Float(64)],
+            vec![Atom::Scalar(ScalarLiteral::Word {
+                bits: 64,
+                bytes: u64::MAX.to_be_bytes().to_vec(),
+            })],
+        );
+        assert!(matches!(values.as_slice(),
+            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitDouble(bits))]
+                if *bits == (u64::MAX as f64).to_bits()));
+        let values = run(
+            "int2Double#",
+            vec![RuntimeRep::Int(64)],
+            vec![RuntimeRep::Float(64)],
+            vec![Atom::Scalar(ScalarLiteral::Int {
+                bits: 64,
+                bytes: (-3_i64).to_be_bytes().to_vec(),
+            })],
+        );
+        assert!(matches!(values.as_slice(),
+            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitDouble(bits))]
+                if *bits == (-3.0_f64).to_bits()));
+    }
+
+    #[test]
+    fn transcendental_primops_call_the_host_libm() {
+        for (name, arguments, expected) in [
+            ("logDouble#", vec![std::f64::consts::E], 1.0_f64),
+            ("expDouble#", vec![0.0], 1.0),
+            ("**##", vec![2.0, 10.0], 1024.0),
+            ("atanDouble#", vec![0.0], 0.0),
+        ] {
+            let reps = vec![RuntimeRep::Float(64); arguments.len()];
+            let atoms = arguments.iter().map(|x| float(64, x.to_bits())).collect();
+            let values = run(name, reps, vec![RuntimeRep::Float(64)], atoms);
+            assert!(
+                matches!(values.as_slice(),
+                    [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitDouble(bits))]
+                        if (f64::from_bits(*bits) - expected).abs() < 1e-12),
+                "{name}: {values:?}"
+            );
+        }
+        let values = run(
+            "sqrtFloat#",
+            vec![RuntimeRep::Float(32)],
+            vec![RuntimeRep::Float(32)],
+            vec![float(32, u64::from(4.0_f32.to_bits()))],
+        );
+        assert!(matches!(values.as_slice(),
+            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitFloat(bits))]
+                if *bits == u64::from(2.0_f32.to_bits())));
+        let values = run(
+            "logFloat#",
+            vec![RuntimeRep::Float(32)],
+            vec![RuntimeRep::Float(32)],
+            vec![float(32, u64::from(1.0_f32.to_bits()))],
+        );
+        assert!(matches!(values.as_slice(),
+            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitFloat(bits))]
+                if *bits == u64::from(0.0_f32.to_bits())));
+    }
+
+    #[test]
+    fn ghc_fabs_and_sqrt_lower_natively() {
+        for (name, input, expected) in [
+            ("fabsDouble#", -2.5_f64, 2.5_f64),
+            ("fabsDouble#", -0.0, 0.0),
+            ("sqrtDouble#", 6.25, 2.5),
+        ] {
+            let values = run(
+                name,
+                vec![RuntimeRep::Float(64)],
+                vec![RuntimeRep::Float(64)],
+                vec![float(64, input.to_bits())],
+            );
+            assert!(
+                matches!(values.as_slice(),
+                    [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitDouble(bits))]
+                        if *bits == expected.to_bits()),
+                "{name}"
+            );
+        }
+        let values = run(
+            "fabsFloat#",
+            vec![RuntimeRep::Float(32)],
+            vec![RuntimeRep::Float(32)],
+            vec![float(32, u64::from((-1.5_f32).to_bits()))],
+        );
+        assert!(matches!(values.as_slice(),
+            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitFloat(bits))]
+                if *bits == u64::from(1.5_f32.to_bits())));
+    }
+
+    #[test]
     fn ghc_float_family_rejects_wrong_signatures() {
         assert!(FloatingFamily::recognize(
             &OperationIdentity::PrimOp("plusFloat#".into()),
@@ -542,6 +960,10 @@ mod tests {
             ("isDoubleNaN", 64),
             ("isDoubleInfinite", 64),
             ("isDoubleNegativeZero", 64),
+            ("isFloatDenormalized", 32),
+            ("isFloatFinite", 32),
+            ("isDoubleDenormalized", 64),
+            ("isDoubleFinite", 64),
         ] {
             let identity = OperationIdentity::Intrinsic {
                 symbol: name.into(),
@@ -602,6 +1024,16 @@ mod tests {
             ("isDoubleNaN", 64, 0x7ff8_0000_0000_0001, 1),
             ("isDoubleInfinite", 64, 0x7ff0_0000_0000_0000, 1),
             ("isDoubleNegativeZero", 64, 0x8000_0000_0000_0000, 1),
+            ("isFloatDenormalized", 32, 0x0000_0001, 1),
+            ("isFloatDenormalized", 32, 0x8000_0000, 0),
+            ("isFloatDenormalized", 32, 0x0080_0000, 0),
+            ("isFloatFinite", 32, 0x3f80_0000, 1),
+            ("isFloatFinite", 32, 0x7f80_0000, 0),
+            ("isDoubleDenormalized", 64, 0x800f_ffff_ffff_ffff, 1),
+            ("isDoubleDenormalized", 64, 0x0000_0000_0000_0000, 0),
+            ("isDoubleDenormalized", 64, 0x0010_0000_0000_0000, 0),
+            ("isDoubleFinite", 64, 0x3ff0_0000_0000_0000, 1),
+            ("isDoubleFinite", 64, 0x7ff8_0000_0000_0000, 0),
         ] {
             let values = run_identity(
                 OperationIdentity::Intrinsic {

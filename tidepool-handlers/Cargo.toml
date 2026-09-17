@@ -25,6 +25,9 @@ tidepool-worktree.workspace = true
 # PRD 18 lane 1: the Subagent handler drives the coupled-spawn saga — the
 # saga and backend seam live THERE, not here.
 tidepool-agent.workspace = true
+# Jev/System One handler: resolves TYPESAFE_API_KEY via the shared config/secrets
+# path resolver (see `tidepool-toolchain::paths::secrets_dir`).
+tidepool-toolchain.workspace = true
 inventory.workspace = true
 frunk.workspace = true
 # Native deps moved from tidepool/Cargo.toml
@@ -46,8 +49,12 @@ serde_json.workspace = true
 # matches the cache layer's blake3 choice (tidepool-runtime).
 blake3.workspace = true
 tracing.workspace = true
+thiserror.workspace = true
 # build_base_stack requires a tokio runtime (LlmHandler captures Handle::current())
-tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", "macros"] }
+# Jev/System One HTTP client: no redirects, no retries, streamed body with a
+# hard cap — mirrors `jev-integration/src/transport.rs`.
+reqwest.workspace = true
 
 [dev-dependencies]
 tidepool-testing.workspace = true

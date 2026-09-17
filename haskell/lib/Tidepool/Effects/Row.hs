@@ -22,6 +22,7 @@ import Tidepool.Effects.Core
   , Commands
   , Console
   , Notifications
+  , Jev
   , Sleep
   , Actor
   , AgentInspection
@@ -79,4 +80,5 @@ instance KnownEffect Sleep where effectWitness = EffectWitness EffectSleep
 instance KnownEffect Commands where effectWitness = EffectWitness EffectCommands
 instance KnownEffect Console where effectWitness = EffectWitness EffectConsole
 instance KnownEffect Notifications where effectWitness = EffectWitness EffectNotifications
+instance KnownEffect Jev where effectWitness = EffectWitness EffectJev
 instance KnownEffect Actor where effectWitness = EffectWitness EffectActor

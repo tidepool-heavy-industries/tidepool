@@ -976,6 +976,7 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
             workspace_inputs: Some(workspace_inputs),
             root_launch_mode,
             pane_environment: pane_environment(),
+            jev: None,
         },
         readiness_tx,
     )
@@ -1398,6 +1399,7 @@ fn pane_environment() -> std::collections::BTreeMap<String, String> {
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "GEMINI_API_KEY",
+        "TYPESAFE_API_KEY",
         "SSL_CERT_FILE",
         "NIX_SSL_CERT_FILE",
         "SSH_AUTH_SOCK",

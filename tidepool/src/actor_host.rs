@@ -11,6 +11,8 @@ mod commands;
 mod custody_tests;
 #[cfg(test)]
 mod documentation_tests;
+#[cfg(test)]
+mod jev_tests;
 mod host_incarnation;
 #[allow(dead_code)] // Full retained domain evidence is richer than current UI rendering.
 mod hosted_retirement;
@@ -402,6 +404,56 @@ pub struct ActorHostConfig {
     pub research_policy: tidepool_actor::ResearchPolicy,
     pub root_launch_mode: InteractiveLaunchMode,
     pub pane_environment: std::collections::BTreeMap<String, String>,
+    /// Answers actors' `Jev` requests; `None` uses the TypeSafe client with
+    /// the key from `TYPESAFE_API_KEY` or the secrets directory.
+    pub jev: Option<tidepool_actor::JevBackendHandle>,
+}
+
+/// The TypeSafe client as the forest's `Jev` backend.
+struct HostJev(tidepool_handlers::JevClient);
+
+impl tidepool_actor::JevBackend for HostJev {
+    fn ask(
+        &self,
+        request: String,
+    ) -> futures_util::future::BoxFuture<'_, Result<String, tidepool_actor::JevCallFailure>> {
+        use tidepool_actor::JevCallFailure as Failure;
+        use tidepool_handlers::JevFailure;
+        Box::pin(async move {
+            let body: serde_json::Value = serde_json::from_str(&request)
+                .map_err(|error| Failure::Malformed(format!("request is not JSON: {error}")))?;
+            match self.0.ask(body).await {
+                Ok(response) => Ok(response.to_string()),
+                Err(failure) => Err(match failure {
+                    JevFailure::Unconfigured => Failure::Unconfigured,
+                    JevFailure::CallCap => Failure::CallCap,
+                    JevFailure::Transport(detail) => Failure::Transport(detail),
+                    JevFailure::Timeout => Failure::Timeout,
+                    JevFailure::Http { status, body } => Failure::Http(i64::from(status), body),
+                    JevFailure::BodyLimit => Failure::BodyLimit,
+                    JevFailure::Malformed(detail) => Failure::Malformed(detail),
+                }),
+            }
+        })
+    }
+}
+
+fn jev_backend(config: &ActorHostConfig) -> tidepool_actor::JevBackendHandle {
+    if let Some(backend) = &config.jev {
+        return Arc::clone(backend);
+    }
+    match tidepool_handlers::JevClient::new(tidepool_handlers::JevConfig::default()) {
+        Ok(client) => {
+            if !client.configured() {
+                tracing::info!("jev: no TYPESAFE_API_KEY; Jev requests answer JevUnconfigured");
+            }
+            Arc::new(HostJev(client))
+        }
+        Err(error) => {
+            tracing::warn!(%error, "jev client unavailable; Jev requests answer JevUnconfigured");
+            tidepool_actor::unconfigured_jev()
+        }
+    }
 }
 
 fn worker_launch_resolver(config: &ActorHostConfig) -> tidepool_actor::WorkerLaunchResolver {
@@ -1319,6 +1371,8 @@ pub async fn run(
         host_incarnation.incarnation(),
         Some(worker_launch_resolver(&config)),
     );
+    let mut forest = forest;
+    forest.set_jev_backend(jev_backend(&config));
     let forest = Arc::new(forest);
     let (mut root_actor, mut root_task) = forest.admit_root(descriptor, outcome).await?;
     worktree_authority.install_grant(root_actor.identity().into(), ActorWorktreeGrant::Repository);
@@ -1604,6 +1658,7 @@ pub(crate) fn shoal_effect_declarations() -> Vec<tidepool_mcp::EffectDecl> {
         tidepool_mcp::actor_context_decl(),
         tidepool_mcp::agent_control_decl(),
         tidepool_mcp::notifications_decl(),
+        tidepool_mcp::jev_decl(),
         tidepool_mcp::commands_decl(),
         tidepool_mcp::agent_inspection_decl(),
         tidepool_mcp::agent_launch_decl(),
@@ -1806,6 +1861,7 @@ fn compile_root(
             .with_imports(WORKBENCH_SURFACE_MODULE)
             .with_imports("qualified Tidepool.Actor.Record as R")
             .with_imports("qualified Tidepool.Command as Cmd")
+            .with_imports("qualified Jev.Operators as J")
             .with_imports("Tidepool.Command (bash, withMemory, Memory(..))")
             .with_imports("qualified Tidepool.Actor as Actor")
             .with_default_quasiquoters()

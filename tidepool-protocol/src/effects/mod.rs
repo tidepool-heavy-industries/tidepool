@@ -36,6 +36,7 @@ pub mod fork;
 pub mod forks;
 pub mod green;
 pub mod introspection;
+pub mod jev;
 pub mod journal;
 pub mod notifications;
 pub mod read_state;
@@ -84,6 +85,7 @@ pub fn all() -> Vec<Effect> {
         agent_control::agent_control(),
         commands::commands(),
         notifications::notifications(),
+        jev::jev(),
         agent_inspection::agent_inspection(),
         agent_launch::agent_launch(),
         forks::forks(),

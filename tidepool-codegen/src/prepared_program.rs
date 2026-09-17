@@ -572,6 +572,18 @@ impl CompiledProgram {
                     floating::prepared_decode_double_int64 as *const u8,
                 ),
                 (
+                    floating::LIBM_HOST,
+                    floating::prepared_float_libm as *const u8,
+                ),
+                (
+                    floating::ENCODE_DOUBLE_INT_HOST,
+                    floating::prepared_encode_double_int as *const u8,
+                ),
+                (
+                    floating::ENCODE_DOUBLE_WORD_HOST,
+                    floating::prepared_encode_double_word as *const u8,
+                ),
+                (
                     "prepared_index_char",
                     static_bytes::prepared_index_char as *const u8,
                 ),

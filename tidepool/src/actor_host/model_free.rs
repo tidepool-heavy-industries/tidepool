@@ -53,6 +53,8 @@ impl ModelFreeSession {
             tidepool_actor::Incarnation::FIRST,
             Some(worker_launch_resolver(config)),
         );
+        let mut forest = forest;
+        forest.set_jev_backend(super::jev_backend(config));
         let forest = Arc::new(forest);
         let (actor, hosted) = forest.admit_root(descriptor, outcome).await?;
         authority.install_grant(actor.identity().into(), ActorWorktreeGrant::Repository);

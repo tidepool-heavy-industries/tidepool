@@ -64,6 +64,31 @@ pub(super) fn recognize(
         {
             Some(AddressOperation::ReadWideChar)
         }
+        // The pure `index*` forms read the same element without a state token.
+        "indexInt8OffAddr#"
+            if signature.arguments == [Address, Int(64)]
+                && returns_exact(signature, &[Int(8)]) =>
+        {
+            Some(AddressOperation::ReadInt8)
+        }
+        "indexWord32OffAddr#"
+            if signature.arguments == [Address, Int(64)]
+                && returns_exact(signature, &[Word(32)]) =>
+        {
+            Some(AddressOperation::ReadWord32)
+        }
+        "indexAddrOffAddr#"
+            if signature.arguments == [Address, Int(64)]
+                && returns_exact(signature, &[Address]) =>
+        {
+            Some(AddressOperation::ReadAddress)
+        }
+        "indexWideCharOffAddr#"
+            if signature.arguments == [Address, Int(64)]
+                && returns_exact(signature, &[Word(64)]) =>
+        {
+            Some(AddressOperation::ReadWideChar)
+        }
         "writeWord8OffAddr#"
             if signature.arguments == [Address, Int(64), Word(8), Void]
                 && returns_exact(signature, &[]) =>

@@ -29,6 +29,8 @@ mod generated;
 mod hosted_lifecycle;
 mod identity;
 mod interactive_session;
+mod jev;
+pub use jev::{unconfigured_jev, JevBackend, JevBackendHandle, JevCallFailure};
 mod kernel;
 mod lineage;
 mod local_actor;
