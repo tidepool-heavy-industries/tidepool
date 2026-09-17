@@ -28,12 +28,19 @@ pub fn agent_control() -> Effect {
                 "AgentStopControlOutcome",
                 vec![
                     variant("AgentStoppedNow", vec![]),
+                    variant("AgentStoppedRetaining", vec![HsType::Text]),
+                    variant("AgentStoppedReleasing", vec![]),
                     variant("AgentStopAlreadyStopped", vec![]),
                     variant("AgentStopUnavailable", vec![]),
                     variant("AgentStopUnauthorized", vec![]),
                     variant("AgentStopFailed", vec![HsType::Text]),
                 ],
-                &["Supervisor-owned retirement outcome for one exact actor incarnation."],
+                &[
+                    "Supervisor-owned retirement outcome for one exact actor incarnation.",
+                    "AgentStoppedNow: the actor is stopped and its host resources are released.",
+                    "AgentStoppedRetaining: stopped, but the named resources stay retained.",
+                    "AgentStoppedReleasing: stopped; release had not settled and a notice follows.",
+                ],
             ),
             sum(
                 "CleanupActorState",

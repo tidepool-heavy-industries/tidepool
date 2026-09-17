@@ -74,6 +74,7 @@ module Tidepool.Actors.Unfold
   , CleanupReceipt (..)
   , CleanupStepReceipt (..)
   , planCleanup
+  , planCleanupFor
   , executeCleanup
   , UnfoldError (..)
   , attemptUnfold
@@ -418,15 +419,36 @@ planCleanup
   -> Eff effs CleanupPlan
 planCleanup (ForkGroupHandle groupId _) = send (AgentInspectCleanupWith groupId)
 
+-- | Plan cleanup for a 'Response' directly, without first extracting its
+-- 'ForkGroupHandle'. A response admitted outside 'unfold' has no fork group;
+-- this returns a refusing plan rather than requiring the caller to unwrap
+-- 'forkGroupHandle' themselves.
+planCleanupFor
+  :: Member AgentInspection effs
+  => Response result
+  -> Eff effs CleanupPlan
+planCleanupFor response = case forkGroupHandle response of
+  Just handle -> planCleanup handle
+  Nothing -> pure CleanupPlan
+    { cleanupPlanGroup = 0
+    , cleanupPlanActors = []
+    , cleanupPlanPendingResponses = []
+    , cleanupPlanPendingWatches = []
+    , cleanupPlanRefusal = Just
+        "this response has no fork group: it was not admitted through unfold, so there is nothing to clean up"
+    }
+
 executeCleanup
   :: Member AgentControl effs
   => CleanupPlan
   -> Eff effs CleanupReceipt
-executeCleanup plan = send (AgentControlExecuteCleanupWith
-  (cleanupPlanGroup plan)
-  [ (cleanupActorId actor, cleanupActorIncarnation actor, cleanupActorRevision actor)
-  | actor <- cleanupPlanActors plan
-  ])
+executeCleanup plan = case cleanupPlanRefusal plan of
+  Just refusal -> pure (CleanupReceipt plan [CleanupBlocked refusal] False)
+  Nothing -> send (AgentControlExecuteCleanupWith
+    (cleanupPlanGroup plan)
+    [ (cleanupActorId actor, cleanupActorIncarnation actor, cleanupActorRevision actor)
+    | actor <- cleanupPlanActors plan
+    ])
 
 data Unfold (parent :: [Type -> Type]) result where
   PureU :: result -> Unfold parent result

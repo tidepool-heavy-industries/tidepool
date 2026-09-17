@@ -1,11 +1,16 @@
 `planCleanup` inspects a retained fork group and its exact descendants. It
 requires inspection authority; `executeCleanup` requires control authority.
-Given an existing `oneWorker`:
+Given an existing `oneWorker` (a `Response`), use `planCleanupFor`, which
+extracts the fork group itself and returns a refusing plan for a response
+that was never admitted through `unfold`:
 
 ```haskell
-cleanupPlan <- planCleanup (forkGroupHandle oneWorker)
+cleanupPlan <- planCleanupFor oneWorker
 cleanupPlan
 ```
+
+If you already hold a `ForkGroupHandle` (from `forkGroupHandle` or
+`observeForkGroup`), call `planCleanup` directly instead.
 
 Inspect this result, then execute in a separate hosted call:
 
@@ -36,6 +41,14 @@ interrupted, unknown, or stale provider observations. Cleanup rechecks this
 evidence immediately before retiring each live actor. For deliberate recovery
 of a failed or stuck worker, use explicit `stopAgent`; it is a control action,
 not a claim that the provider was idle.
+
+Stopping has two phases: the actor publishes its terminal state, then the
+host releases its process, pane, tool service, socket and workspace view.
+`stopAgent` and each `CleanupStoppedActor` step wait for the second phase.
+`StoppedNow` means both happened. `StoppedRetaining detail` means the actor is
+stopped but the named resources stay retained. `StoppedReleasing` means
+release had not settled within the wait; one later notice reports how it
+ended. No later notice follows `StoppedNow` or `StoppedRetaining`.
 
 Cleanup never deletes worktrees, branches, commits, build evidence, or user
 files. Dirty worktrees remain available after actor retirement. Use ordinary

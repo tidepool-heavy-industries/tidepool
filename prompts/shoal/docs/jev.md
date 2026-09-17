@@ -9,6 +9,15 @@ generates the action itself — a choice selects a payload you already built
 (a command, a line reference, a continuation), and the payload runs, never
 the model's wording.
 
+**Cost.** A call is cheap — about 200 ms — and the per-run cap is effectively
+unlimited. Call it per item, per file, per candidate, inside a loop; do not
+ration it the way you'd ration a model turn. Ten Jev calls that save one
+model turn are a win. One Jev-dense cell — a shell listing, a read per
+candidate, one packet, one round trip — that replaces a chain of five
+read-then-judge model turns is a much bigger one. Plan loops against the
+200 ms; prefer building one packet-rich cell over stepping through evidence
+by hand.
+
 The vendored library is `jev-dsl`, in scope qualified as `J`
 (`import qualified Jev.Operators as J`). The two packet operators `:=` and
 `:&` are also in scope unqualified; everything else is `J.`-qualified,
@@ -80,6 +89,18 @@ don't retry blindly.
   questions in the same packet range over the same alternatives; draw on it
   with `J.manyFrom`/`J.eachIn`/`J.askAbout` instead of repeating wording.
 
+## Calibration
+
+A mass of 1.0 with a single real contender usually means the pool was
+under-specified, not that the judgment is certain — a `choice` with one
+obviously-best alternative and a weak strawman lands near 1.0 every time.
+Give every pool a `defer_to_model` exit and at least one plausible rival
+written as its strongest case, not a token option. Read `J.contenders` and
+`J.confidence`, not only `J.chosen`: a lopsided mass at low confidence is a
+different claim than a lopsided mass at high confidence. When the result
+gates an action, gate on `J.accept policy answer`, not on a raw `chosen`. A
+judgment is still evidence, not authority.
+
 ## A worked cell
 
 Choosing which of several retained child results to inspect first, from a
@@ -132,6 +153,36 @@ fmap (\r -> let a = J.answers r in (fmap J.selectedKey (J.accept policy a.best),
 The last line keeps only plain values: the accepted key or the doubt, a
 relevance likelihood per file, and the likelihood under the premise.
 
+## A Jev-dense cell
+
+One shell command lists the candidates and one read per candidate gathers
+evidence, bound as ordinary values:
+
+```haskell
+listed <- Cmd.stdout <$> Cmd.run [bash|ls|]
+let names = either (const []) T.lines listed
+previews <- forM names $ \n ->
+  (n,) . either (const "") id . Cmd.stdout <$> Cmd.run (Cmd.withArguments [n] [bash|head -n 20 -- "$1"|])
+```
+
+Then one packet judges all of them and one round trip returns the shortlist:
+
+```haskell
+{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
+let files = J.pool #files [(n, String p, n) | (n, p) <- previews]
+let packet =
+      #files := files
+        :& #enough := J.noul "Is a 20-line preview enough to judge each file?"
+        :& #worth_reading := J.eachIn files (\r -> #keep := J.askAbout r "Worth reading in full for this review?" :& J.Nil)
+        :& J.Nil
+answer <- J.ask (J.state (object ["task" .= ("triage files before a focused review" :: Text)])) packet
+fmap (\r -> let a = J.answers r in (J.yes a.enough, [(k, J.yes s.keep) | (k, s) <- a.worth_reading])) answer
+```
+
+Two cells replace the several model turns it takes to read files one by one
+and judge each in turn, and only the shortlist, never the file text, reaches
+the model's own context.
+
 ## Patterns
 
 - **Locate, then edit.** Number the lines, hunks, or declarations
@@ -160,7 +211,7 @@ relevance likelihood per file, and the likelihood under the premise.
   still bound in the cell — nothing is recomputed, and a recurring handback
   is a signal to add the missing branch by hand.
 
-Cost and latency: a call is cheap, typically tens to a few hundred
-milliseconds and a small fraction of a cent at published rates. Prefer one
+A call costs a small fraction of a cent at published rates. Prefer one
 question-rich packet over several thin ones when the evidence for all of
-them is already at hand.
+them is already at hand — see Cost, above, for the loop-level version of
+this rule.

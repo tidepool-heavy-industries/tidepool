@@ -263,6 +263,9 @@ fn custody_event_description(event: &LocalResidentDeployment) -> String {
         LocalResidentDeployment::Retired { actor, terminal } => {
             format!("Retired {actor:?} {terminal:?}")
         }
+        LocalResidentDeployment::ReleaseAwait(request) => {
+            format!("ReleaseAwait {:?}", request.actor)
+        }
     }
 }
 

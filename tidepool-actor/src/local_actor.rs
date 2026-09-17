@@ -1300,7 +1300,9 @@ where
         }
         let child = state.context.children.lock().get(&cell.get_id()).cloned();
         let Some(child) = child else {
-            tracing::warn!(child = %cell.get_id(), "received lifecycle event for an unregistered linked child");
+            // Cleanup forgets a child before its supervisor's final lifecycle
+            // event can arrive; the late event carries nothing to act on.
+            tracing::debug!(child = %cell.get_id(), "received lifecycle event for an already forgotten child");
             return Ok(());
         };
         if child.terminal().get().is_none() {

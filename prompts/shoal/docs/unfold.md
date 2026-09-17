@@ -23,6 +23,17 @@ not yet started reports `ResponseStarting`. In this example both children can in
 in one block share its final scope; later parent tool calls cannot change it.
 The branch role narrows effects and native authority independently.
 
+`spawnWatched` admits and watches exactly one child; it cannot take the
+applicative pair above (`Unfold parent (Response a, Response b)` does not
+match its single-`Response` type). Admit several children with `unfold`
+directly, then join their settlements in one watch:
+
+```haskell
+joined <- watch "both-ready" $
+  (,) <$> awaitSettled (fst workers) <*> awaitSettled (snd workers)
+pollWatch joined
+```
+
 Assignment values, captured closures, and explicit worktree seeds keep their
 ordinary Haskell value semantics; they are not reevaluated at child startup.
 A later executable failure stops the block's suffix but preserves successful

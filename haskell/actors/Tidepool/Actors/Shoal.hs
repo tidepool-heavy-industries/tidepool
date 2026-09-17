@@ -120,6 +120,7 @@ module Tidepool.Actors.Shoal
   , CleanupStepReceipt (..)
   , AgentStopControlOutcome (..)
   , planCleanup
+  , planCleanupFor
   , executeCleanup
   , responseActor
   , responseAdmission

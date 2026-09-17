@@ -115,7 +115,50 @@ pub enum LocalResidentDeployment {
         actor: ActorRef,
         terminal: ActorTerminal,
     },
+    /// A supervisor stopped `actor` and waits for its interactive resources
+    /// (process, pane, tool service, socket, workspace view) to be released.
+    /// The host answers once its cleanup receipt exists; a dropped reply means
+    /// no host tracks resources for this actor.
+    ReleaseAwait(Arc<ReleaseAwait>),
 }
+
+/// One supervisor's wait for a stopped actor's release receipt. The host
+/// answers at most once; a dropped request answers nobody.
+pub struct ReleaseAwait {
+    pub actor: ActorRef,
+    reply: Mutex<Option<tokio::sync::oneshot::Sender<ResourceRelease>>>,
+}
+
+impl ReleaseAwait {
+    /// Deliver the host's answer. Returns false when the waiter is gone.
+    pub fn answer(&self, release: ResourceRelease) -> bool {
+        self.reply
+            .lock()
+            .take()
+            .is_some_and(|reply| reply.send(release).is_ok())
+    }
+}
+
+impl std::fmt::Debug for ReleaseAwait {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReleaseAwait").field("actor", &self.actor).finish_non_exhaustive()
+    }
+}
+
+/// Host-side outcome of releasing one stopped actor's interactive resources.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceRelease {
+    /// Every cleanup component settled.
+    Released,
+    /// The actor is stopped but some resources stay retained; the text names
+    /// each component and why.
+    Retained(String),
+}
+
+/// How long a stop waits for the host's release receipt before answering
+/// `StoppedReleasing`. Retirement usually settles in a few seconds; the
+/// workspace step may wait longer for a running host Git command.
+const RELEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
 struct ResidentEnvironment<H, O> {
     runner: ResidentActorRunner<H, O>,
@@ -129,6 +172,9 @@ struct ResidentEnvironment<H, O> {
     root_admission_closed: Arc<tokio::sync::RwLock<bool>>,
     launch_resolver: Option<crate::WorkerLaunchResolver>,
     jev: crate::JevBackendHandle,
+    /// Set by an actor host that answers `ReleaseAwait`; without one a stop
+    /// has no interactive resources to wait for.
+    release_tracked: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -266,6 +312,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             root_admission_closed: self.root_admission_closed.clone(),
             launch_resolver: self.launch_resolver.clone(),
             jev: Arc::clone(&self.jev),
+            release_tracked: Arc::clone(&self.release_tracked),
         }
     }
 }
@@ -864,6 +911,44 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 .environment
                 .deployments
                 .send(LocalResidentDeployment::Retired { actor, terminal });
+        }
+    }
+
+    /// Project a stop the supervisor just requested. The actor is already
+    /// terminal; the projection reports whether the host has also released
+    /// its interactive resources, so a receipt never reads as final while a
+    /// workspace view or process is still retained.
+    async fn stopped_projection(
+        &self,
+        actor: ActorRef,
+    ) -> crate::resident_workbench::AgentStopProjection {
+        use crate::resident_workbench::AgentStopProjection;
+        if !self
+            .environment
+            .release_tracked
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return AgentStopProjection::StoppedNow;
+        }
+        let (reply, release) = tokio::sync::oneshot::channel();
+        let request = Arc::new(ReleaseAwait {
+            actor,
+            reply: Mutex::new(Some(reply)),
+        });
+        if self
+            .environment
+            .deployments
+            .send(LocalResidentDeployment::ReleaseAwait(request))
+            .is_err()
+        {
+            return AgentStopProjection::StoppedNow;
+        }
+        match tokio::time::timeout(RELEASE_WAIT, release).await {
+            Ok(Ok(ResourceRelease::Released)) | Ok(Err(_)) => AgentStopProjection::StoppedNow,
+            Ok(Ok(ResourceRelease::Retained(detail))) => {
+                AgentStopProjection::StoppedRetaining(detail)
+            }
+            Err(_) => AgentStopProjection::StoppedReleasing,
         }
     }
 
@@ -2102,7 +2187,7 @@ where
                     {
                         Ok(terminal) => {
                             self.publish_retired(stop.target, terminal);
-                            crate::resident_workbench::AgentStopProjection::StoppedNow
+                            self.stopped_projection(stop.target).await
                         }
                         Err(error) => crate::resident_workbench::AgentStopProjection::Failed(
                             error.to_string(),
@@ -2285,7 +2370,7 @@ where
                         {
                             Ok(terminal) => {
                                 self.publish_retired(actor, terminal);
-                                AgentStopProjection::StoppedNow
+                                self.stopped_projection(actor).await
                             }
                             Err(error) => {
                                 stop_failed = true;
@@ -6486,6 +6571,15 @@ where
         self.environment.jev = backend;
     }
 
+    /// Declare that an actor host answers `LocalResidentDeployment::ReleaseAwait`.
+    /// From now on a stop reports `StoppedNow` only once that host has released
+    /// the actor's interactive resources.
+    pub fn track_resource_release(&self) {
+        self.environment
+            .release_tracked
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
     /// Observe whether this forest's one resident session can be considered
     /// for same-incarnation root reentry. The subsequent checkout remains the
     /// authoritative admission boundary.
@@ -6528,6 +6622,7 @@ where
             root_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
             launch_resolver,
             jev: Arc::new(crate::jev::UnconfiguredJev),
+            release_tracked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         (
             Self {

@@ -14,7 +14,9 @@ map score approved
 ```
 
 The cell summary counts declarations, statements, and expressions. Typecheck rejection
-installs no bindings and runs no effects. If a statement fails at runtime, its
+installs no bindings and runs no effects. A fully polymorphic expression (a bare
+`error "..."` or `undefined`) cannot be classified as pure or effectful; annotate
+it, e.g. `error "..." :: Text`. If a statement fails at runtime, its
 earlier bindings and completed effects remain committed and the suffix is marked
 not run. Inspect that receipt before deciding whether a new cell is new intent.
 

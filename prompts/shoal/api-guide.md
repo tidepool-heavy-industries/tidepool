@@ -96,7 +96,8 @@ Delegation at a glance:
   retained actor: `request`.
 - steer: `sendMessage` delivers a note; `updateRequest` clarifies the active
   request; `cancelRequest` withdraws a request (a queued one never starts) and
-  keeps the actor; `stopAgent` retires the actor.
+  keeps the actor; `stopAgent` retires the actor and waits for its resources
+  to release (`StoppedNow`), or says what stays retained.
 - inspect: `listAgents`, `lookupAgent`, `findAgentsByLabel`, `observeForkGroup`,
   `pollResponse`.
 - wait: `watch` with `awaitSettled` (combine with `<*>` for all-of) or

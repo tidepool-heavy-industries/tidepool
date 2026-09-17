@@ -136,6 +136,9 @@ inspectCleanup response = case forkGroupHandle response of
   Nothing -> pure Nothing
   Just group -> Just <$> planCleanup group
 
+inspectCleanupFor :: Response result -> Eff '[AgentInspection] CleanupPlan
+inspectCleanupFor = planCleanupFor
+
 runCleanup :: CleanupPlan -> Eff '[AgentControl] CleanupReceipt
 runCleanup = executeCleanup
 

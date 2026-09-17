@@ -12,7 +12,7 @@ pub fn agent_control_decl() -> crate::EffectDecl {
             "AgentControlExecuteCleanupWith :: Int -> [(Int, Int, Int)] -> AgentControl CleanupReceipt",
         ],
         type_defs: &[
-            "data AgentStopControlOutcome = AgentStoppedNow | AgentStopAlreadyStopped | AgentStopUnavailable | AgentStopUnauthorized | AgentStopFailed Text deriving (Show, Eq)",
+            "data AgentStopControlOutcome = AgentStoppedNow | AgentStoppedRetaining Text | AgentStoppedReleasing | AgentStopAlreadyStopped | AgentStopUnavailable | AgentStopUnauthorized | AgentStopFailed Text deriving (Show, Eq)",
             "data CleanupActorState = CleanupActorRunning | CleanupActorTerminal deriving (Show, Eq)",
             "data CleanupActorPlan = CleanupActorPlan { cleanupActorId :: Int, cleanupActorIncarnation :: Int, cleanupActorLabel :: Text, cleanupActorState :: CleanupActorState, cleanupActorRevision :: Int } deriving (Show, Eq)",
             "data CleanupPlan = CleanupPlan { cleanupPlanGroup :: Int, cleanupPlanActors :: [CleanupActorPlan], cleanupPlanPendingResponses :: [Int], cleanupPlanPendingWatches :: [Int], cleanupPlanRefusal :: Maybe Text } deriving (Show, Eq)",

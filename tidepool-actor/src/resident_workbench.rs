@@ -389,7 +389,13 @@ pub(crate) enum AgentForgetProjection {
 
 #[derive(Clone)]
 pub(crate) enum AgentStopProjection {
+    /// Stopped, and every host resource the actor held is released.
     StoppedNow,
+    /// Stopped, but the host retained resources; the text names them.
+    StoppedRetaining(String),
+    /// Stopped; the host's release had not settled within the wait, and a
+    /// notice will report it.
+    StoppedReleasing,
     AlreadyStopped,
     Unavailable,
     Unauthorized,
@@ -724,6 +730,10 @@ fn agent_stop_value(
 ) -> Result<Value, ResidentActorWorkbenchError> {
     let (name, fields) = match outcome {
         AgentStopProjection::StoppedNow => ("AgentStoppedNow", Vec::new()),
+        AgentStopProjection::StoppedRetaining(detail) => {
+            ("AgentStoppedRetaining", vec![detail.to_value(table)?])
+        }
+        AgentStopProjection::StoppedReleasing => ("AgentStoppedReleasing", Vec::new()),
         AgentStopProjection::AlreadyStopped => ("AgentStopAlreadyStopped", Vec::new()),
         AgentStopProjection::Unavailable => ("AgentStopUnavailable", Vec::new()),
         AgentStopProjection::Unauthorized => ("AgentStopUnauthorized", Vec::new()),
@@ -2599,7 +2609,7 @@ where
                         &name, budget.saturating_sub(fragment.output.iter().map(|text| text.chars().count()).sum::<usize>()), &fragment.presented,
                     ) {
                         Ok(text) => text,
-                        Err(error) => format!("Display failed: {error}\nValue remains bound as {name} (). Inspect a smaller field or projection; execution was not repeated."),
+                        Err(error) => format!("Display failed: {error}\nValue remains bound as {name}. Inspect a smaller field or projection; execution was not repeated."),
                     }
                 }
             };

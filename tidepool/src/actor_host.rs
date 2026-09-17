@@ -806,9 +806,9 @@ impl InteractiveCleanupReceipt {
             .any(|component| !matches!(component.outcome, CleanupComponentOutcome::Completed))
     }
 
-    fn render(&self) -> String {
-        let failures = self
-            .components
+    /// Components that did not settle, each named with its reason.
+    fn retained(&self) -> Vec<String> {
+        self.components
             .iter()
             .filter_map(|component| match &component.outcome {
                 CleanupComponentOutcome::Failed { detail } => {
@@ -820,17 +820,28 @@ impl InteractiveCleanupReceipt {
                 )),
                 CleanupComponentOutcome::Completed => None,
             })
-            .collect::<Vec<_>>();
-        if failures.is_empty() {
-            format!(
-                "Actor {:?} retired and all cleanup components settled.",
-                self.actor
-            )
+            .collect()
+    }
+
+    /// The answer a waiting supervisor receives for `stopAgent`/cleanup.
+    fn release(&self) -> tidepool_actor::ResourceRelease {
+        let retained = self.retained();
+        if retained.is_empty() {
+            tidepool_actor::ResourceRelease::Released
+        } else {
+            tidepool_actor::ResourceRelease::Retained(retained.join("; "))
+        }
+    }
+
+    fn render(&self) -> String {
+        let actor = format!("{}@{}", self.actor.id.0, self.actor.incarnation.0);
+        let retained = self.retained();
+        if retained.is_empty() {
+            format!("Actor {actor} is stopped and its resources are released.")
         } else {
             format!(
-                "Actor {:?} retired with degraded cleanup: {}. The permanent host and sibling actors remain available.",
-                self.actor,
-                failures.join("; ")
+                "Actor {actor} is stopped. Resources still retained: {}. Nothing is deleted: worktrees, branches and commits stay available. The host and sibling actors are unaffected.",
+                retained.join("; ")
             )
         }
     }
@@ -1373,6 +1384,7 @@ pub async fn run(
     );
     let mut forest = forest;
     forest.set_jev_backend(jev_backend(&config));
+    forest.track_resource_release();
     let forest = Arc::new(forest);
     let (mut root_actor, mut root_task) = forest.admit_root(descriptor, outcome).await?;
     worktree_authority.install_grant(root_actor.identity().into(), ActorWorktreeGrant::Repository);
@@ -2116,6 +2128,10 @@ async fn run_interactive_applications(
     let mut launches = JoinSet::new();
     let mut binding_discoveries = JoinSet::new();
     let mut retirements = JoinSet::new();
+    // Supervisors waiting for a stopped actor's release receipt. Served from
+    // the receipt slot when it already exists, else when retirement joins.
+    let mut release_waiters: HashMap<ActorRef, Vec<Arc<tidepool_actor::ReleaseAwait>>> =
+        HashMap::new();
     let mut notifications = JoinSet::new();
     let mut publication_retries = JoinSet::new();
     let mut process_observations = JoinSet::new();
@@ -2401,6 +2417,21 @@ async fn run_interactive_applications(
                                 &application_owners,
                                 &tmux,
                             );
+                        }
+                    }
+                    LocalResidentDeployment::ReleaseAwait(request) => {
+                        // `Retired` precedes this on the same channel, so an
+                        // owner row either already holds its receipt or has a
+                        // retirement in flight. An actor without a row never
+                        // held interactive resources.
+                        let actor = request.actor;
+                        let settled = match application_owners.lock().get(&actor) {
+                            None => Some(tidepool_actor::ResourceRelease::Released),
+                            Some(owner) => owner.retirement.lock().as_ref().map(InteractiveCleanupReceipt::release),
+                        };
+                        match settled {
+                            Some(release) => { request.answer(release); }
+                            None => release_waiters.entry(actor).or_default().push(request),
                         }
                     }
                     LocalResidentDeployment::CommandBackend(request) => {
@@ -2798,6 +2829,21 @@ async fn run_interactive_applications(
                         let degraded = receipt.degraded();
                         if degraded {
                             tracing::warn!(actor = ?receipt.actor, components = ?receipt.components, "interactive application cleanup degraded");
+                        } else {
+                            tracing::info!(actor = ?receipt.actor, "interactive application retired");
+                        }
+                        // A supervisor that received the release in its stop
+                        // receipt needs no notice. One that stopped waiting
+                        // (its reply dropped) is told either way, so a
+                        // `StoppedReleasing` receipt always gets its ending.
+                        let waiters = release_waiters.remove(&receipt.actor).unwrap_or_default();
+                        let waited = !waiters.is_empty();
+                        let mut answered = false;
+                        for waiter in waiters {
+                            answered |= waiter.answer(receipt.release());
+                        }
+                        let notify = if waited { !answered } else { degraded };
+                        if notify {
                             if let Some(supervisor) = supervisor {
                                 if let Some(application) = deployments.iter().find(|app| app.actor == supervisor) {
                                     notifications.spawn(publish_inbox_event_for(
@@ -2807,8 +2853,6 @@ async fn run_interactive_applications(
                                     ));
                                 }
                             }
-                        } else {
-                            tracing::info!(actor = ?receipt.actor, "interactive application retired");
                         }
                     }
                     Some(Err(error)) => {

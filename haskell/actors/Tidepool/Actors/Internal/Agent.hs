@@ -426,11 +426,18 @@ activationGuidance label (Just guidance) =
 
 -- | Observable result of asking one exact actor incarnation to retire.
 --
--- Retirement is supervisor-owned and mailbox ordered. 'StoppedNow' means the
--- exact incarnation published its terminal state before the operation
--- returned. Repeating the operation is harmless and returns 'AlreadyStopped'.
+-- Retirement is supervisor-owned and mailbox ordered. Stopping has two
+-- phases: the actor publishes its terminal state, then the host releases its
+-- interactive resources (process, pane, tool service, socket, workspace
+-- view). 'StoppedNow' means both happened before the operation returned.
+-- 'StoppedRetaining' means the actor is stopped but the named resources stay
+-- retained; 'StoppedReleasing' means release had not settled within the wait
+-- and a later notice reports it. Repeating the operation is harmless and
+-- returns 'AlreadyStopped'.
 data StopOutcome
   = StoppedNow
+  | StoppedRetaining Text
+  | StoppedReleasing
   | AlreadyStopped
   | StopUnavailable
   | StopUnauthorized
@@ -447,6 +454,8 @@ stopAgent (AgentRef target _) = do
   outcome <- send (AgentControlStopWith (actorAddress target))
   pure $ case outcome of
     AgentStoppedNow -> StoppedNow
+    AgentStoppedRetaining detail -> StoppedRetaining detail
+    AgentStoppedReleasing -> StoppedReleasing
     AgentStopAlreadyStopped -> AlreadyStopped
     AgentStopUnavailable -> StopUnavailable
     AgentStopUnauthorized -> StopUnauthorized

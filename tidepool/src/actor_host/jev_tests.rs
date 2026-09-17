@@ -161,6 +161,56 @@ async fn doc_jev_pool_example_sends_one_request() {
     campaign.hosted.await.unwrap();
 }
 
+/// The Jev-dense cell in `doc jev` judges every file of a bound preview list
+/// in one packet. The shell cell before it is not run here: the test campaign
+/// has no command backend, so the previews are bound directly.
+#[tokio::test]
+async fn doc_jev_dense_example_sends_one_request() {
+    let doc = include_str!("../../../prompts/shoal/docs/jev.md");
+    let section = doc
+        .split("## A Jev-dense cell")
+        .nth(1)
+        .expect("doc jev has the dense-cell section");
+    let cell = section
+        .split("```haskell\n")
+        .nth(2)
+        .and_then(|rest| rest.split("```").next())
+        .expect("the dense-cell section has a second Haskell cell");
+    // Pragmas must lead the cell; the bound previews follow them.
+    let (pragmas, body) = cell.split_once('\n').expect("the cell has a pragma line");
+    let cell = format!(
+        "{pragmas}\nlet previews = [(\"README.md\", \"# jev-dsl\\ntyped packets\"), (\"LICENSE\", \"MIT\")] :: [(Text, Text)]\n{body}"
+    );
+    let backend = Arc::new(FakeJev {
+        requests: Mutex::new(Vec::new()),
+        answer: Err(JevCallFailure::Unconfigured),
+    });
+    let campaign = campaign_with(Arc::clone(&backend)).await;
+    let result = dispatch_haskell_script(campaign.root_installation.policy.as_ref(), &cell).await;
+    assert_eq!(result["status"], "committed", "{result}");
+    let output = result["items"].as_array().unwrap().last().unwrap()["output"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(output.contains("no Jev endpoint is configured"), "{result}");
+    let requests = backend.requests.lock();
+    assert_eq!(requests.len(), 1);
+    let questions = &requests[0]["questions"];
+    // `enough` is a top-level cell; `worth_reading` is an `eachIn` over the
+    // pool, so each member flattens to a dotted wire key.
+    assert!(questions.get("enough").is_some(), "enough missing: {questions}");
+    let per_file = questions
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|k| k.starts_with("worth_reading."))
+        .count();
+    assert_eq!(per_file, 2, "one question per previewed file: {questions}");
+    drop(requests);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
 /// Haskell cell -> host effect -> live TypeSafe API -> typed answer. Opt-in:
 /// `TYPESAFE_API_KEY` must be set; run with `--ignored`.
 #[tokio::test]
