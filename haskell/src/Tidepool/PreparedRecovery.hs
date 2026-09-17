@@ -6,7 +6,9 @@ module Tidepool.PreparedRecovery
   , insertGroup
   ) where
 
+import Control.Exception (evaluate)
 import Control.Monad (foldM)
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import GHC.Core (CoreBind, Bind(..))
@@ -26,6 +28,7 @@ import Tidepool.PreparedStg
   (PreparedModule(..), RecoveredModuleFailure(..), prepareRecoveredBodies)
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
 import Tidepool.PreparedBuiltins (deferredFunction, wiredInErrorKind)
+import Tidepool.Timing (emitPhase, readTimingEnabled, timeSection)
 
 data RecoveryFailure
   = MissingImplementation Name FatIfaceMissing
@@ -70,20 +73,37 @@ data RecoveredClosure = RecoveredClosure
 recoverPreparedClosure :: HscEnv -> ProjectionContext -> [PreparedModule]
   -> IO RecoveredClosure
 recoverPreparedClosure env context home = do
+  timing <- readTimingEnabled
   cache <- newFatIfaceCache
+  -- Diagnostic split of 'prepared_recover' (flat sub-phases, summed over
+  -- rounds): reference collection, body lookup, defining-module preparation.
+  spent <- newIORef (0 :: Integer, 0 :: Integer, 0 :: Integer, 0 :: Integer, 0 :: Integer)
   let homeOwners = Set.fromList (map pmModule home)
+      charge f = modifyIORef' spent f
       go attempted groups prepared failures = do
         let modules = home ++ Map.elems prepared
-            pending = filter (\binder -> not (Set.member (varName binder) attempted)
+        (references, refsMs) <- timeSection
+          (evaluate (preparedTargetReferences context modules) >>= \refs -> length refs `seq` pure refs)
+        charge (\(r, l, p, n, d) -> (r + refsMs, l, p, n + 1, d))
+        let pending = filter (\binder -> not (Set.member (varName binder) attempted)
                 && typePrimRep_maybe (idType binder) /= Just [])
-              (preparedTargetReferences context modules)
+              references
         if null pending
-          then pure (RecoveredClosure modules failures)
+          then do
+            (refsTotal, lookupTotal, prepareTotal, rounds, preparedModules) <- readIORef spent
+            emitPhase timing "prepared_recover_refs" refsTotal
+            emitPhase timing "prepared_recover_lookup" lookupTotal
+            emitPhase timing "prepared_recover_prepare" prepareTotal
+            emitPhase timing "prepared_recover_rounds" rounds
+            emitPhase timing "prepared_recover_module_preparations" preparedModules
+            pure (RecoveredClosure modules failures)
           else do
-            (nextGroups, dirty, nextFailures) <- foldM
+            ((nextGroups, dirty, nextFailures), lookupMs) <- timeSection $ foldM
               (lookupOne cache homeOwners) (groups, Set.empty, failures) pending
-            (nextPrepared, finalFailures) <- foldM
+            ((nextPrepared, finalFailures), prepareMs) <- timeSection $ foldM
               (prepareOne nextGroups) (prepared, nextFailures) (Set.toAscList dirty)
+            charge (\(r, l, p, n, d) ->
+              (r, l + lookupMs, p + prepareMs, n, d + fromIntegral (Set.size dirty)))
             go (Set.union attempted (Set.fromList (map varName pending)))
               nextGroups nextPrepared finalFailures
       lookupOne _cacheRef homeOwnersRef (groups, dirty, failures) binder

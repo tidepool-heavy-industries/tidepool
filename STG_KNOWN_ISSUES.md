@@ -21,12 +21,26 @@ daemon. Architectural; not designed yet.
 ### Closure recovery recomputes everything each round
 Each recovery round rebuilds the top-identity map, dependency map and
 reachability closure over all modules (`PreparedRecovery.hs`,
-`selectPreparedTarget` in `ExecutionProjection.hs`), and inserts use O(n)
-appends. Top-level identity naming is quadratic in top binders and cubic for
-repeated occurrence names (`ExecutionProjection.hs`, `chooseOccurrence`).
-Signature, constructor and global interning use list lookups.
-Direction: an incremental worklist; accumulators with a final reverse; maps
-keyed by signature and `DataCon`.
+`selectPreparedTarget` in `ExecutionProjection.hs`). An actor turn takes
+about 37 rounds. Signature, constructor and global interning use list
+lookups.
+
+Measured on a warm daemon for one Shoal actor turn (`TIDEPOOL_TIMING=1`;
+the compiler log records every phase):
+
+| phase | before | after the spelling fix |
+|---|---|---|
+| `prepared_recover_refs` (37 rounds) | 18.6–31.6 s | 3.4–4.6 s |
+| `prepared_recover_prepare` | 1.4 s | 1.4–1.8 s |
+| `prepared_recover_lookup` | < 0.1 s | < 0.1 s |
+| GHC `core` | 3.5–5.5 s | unchanged |
+| whole request | 26–42 s | 15–16 s |
+
+The spelling fix replaced a per-entry list append in
+`assignTopIdentitySpellings`, which made each round quadratic in top
+binders.
+Direction: an incremental worklist so a round touches only the modules it
+added; maps keyed by signature and `DataCon`.
 
 ### Prepared requests still build the Core artifact
 A prepared turn also writes the closed Core translation and its metadata

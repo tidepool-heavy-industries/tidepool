@@ -462,6 +462,7 @@ prepareArtifacts :: FilePath -> HscEnv -> [PreparedModule] -> [String] -> [Strin
   -> Map.Map SymbolIdentity Word64 -> IO [PreparedArtifact]
 prepareArtifacts _ _ _ [] _ _ = pure []
 prepareArtifacts input hscEnv modules targets auxiliaryRoots retainedGenerations = do
+  timing <- readTimingEnabled
   formattingAuthority <- resolveFormattingAuthority hscEnv
   textAuthority <- resolveTextPackageUnit hscEnv
   source <- readFile input
@@ -492,14 +493,18 @@ prepareArtifacts input hscEnv modules targets auxiliaryRoots retainedGenerations
           , projectionFormattingAuthority = formattingAuthority
           , projectionTextUnit = textAuthority
           }
-    recovered <- recoverPreparedClosure hscEnv context modules
+    -- Three flat phases, one row each per target (see Tidepool.Timing).
+    -- Projection is pure and only forced to weak head normal form here, so
+    -- part of its cost lands in 'prepared_encode'; read the two together.
+    recovered <- timePhase timing "prepared_recover" (recoverPreparedClosure hscEnv context modules)
     reportRecoveryResiduals target (closureFailures recovered)
-    (program, constructors) <- case projectPreparedTargetWithConstructors context (closureModules recovered) of
-      -- A reachable polymorphic typed site is the author's source error.
-      Left (RejectedTypedSite message) -> throwIO (SourceRejection (T.unpack message))
-      Left failure -> ioError (userError ("prepared projection failed: " <> show failure))
-      Right projected -> pure projected
-    bytes <- evaluate (encodeWireProgram program)
+    (program, constructors) <- timePhase timing "prepared_project" $
+      case projectPreparedTargetWithConstructors context (closureModules recovered) of
+        -- A reachable polymorphic typed site is the author's source error.
+        Left (RejectedTypedSite message) -> throwIO (SourceRejection (T.unpack message))
+        Left failure -> ioError (userError ("prepared projection failed: " <> show failure))
+        Right projected -> evaluate projected
+    bytes <- timePhase timing "prepared_encode" (evaluate (encodeWireProgram program))
     pure (PreparedArtifact target bytes constructors)
 
 -- | Filter the standard prepared-turn auxiliary root names

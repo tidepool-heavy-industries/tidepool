@@ -454,9 +454,12 @@ buildTopUniqueIdentityMap topIdentityMap modules = listToUFM
 -- retained exactly; all original spellings reserve suffixes for internal tops.
 assignTopIdentitySpellings
   :: [(SymbolIdentity, Bool)] -> [SymbolIdentity]
-assignTopIdentitySpellings entries = snd (foldl allocateOne
-  (externalClaims, []) entries)
+assignTopIdentitySpellings entries = reverse (snd (foldl' allocateOne
+  (externalClaims, []) entries))
   where
+    -- The accumulator holds assigned spellings newest first; recovery calls
+    -- this once per round over the whole closure, so an append per entry
+    -- made each call quadratic in the number of tops.
     reserved :: Map (Text, Text, Text) (Set Text)
     reserved = Map.fromListWith Set.union
       [ (namespaceKey symbol, Set.singleton (symbolOccurrence symbol))
@@ -469,7 +472,7 @@ assignTopIdentitySpellings entries = snd (foldl allocateOne
       , external
       ]
     allocateOne (claimedByNamespace, assigned) (symbol, external)
-      | external = (claimedByNamespace, assigned <> [symbol])
+      | external = (claimedByNamespace, symbol : assigned)
       | otherwise =
           let key = namespaceKey symbol
               claimed = Map.findWithDefault Set.empty key claimedByNamespace
@@ -478,7 +481,7 @@ assignTopIdentitySpellings entries = snd (foldl allocateOne
                 claimed reservedNames
               nextClaimed = Set.insert occurrence claimed
           in (Map.insert key nextClaimed claimedByNamespace,
-              assigned <> [symbol { symbolOccurrence = occurrence }])
+              symbol { symbolOccurrence = occurrence } : assigned)
 
     chooseOccurrence :: Text -> Set Text -> Set Text -> Text
     chooseOccurrence original claimed reservedNames
@@ -486,10 +489,12 @@ assignTopIdentitySpellings entries = snd (foldl allocateOne
       | otherwise = case listToMaybe
           [ candidate | n <- [1 :: Int ..]
           , let candidate = original <> "." <> Text.pack (show n)
-          , candidate `Set.notMember` (claimed `Set.union` reservedNames)
+          , candidate `Set.notMember` blocked
           ] of
           Just value -> value
           Nothing -> original
+      where
+        blocked = claimed `Set.union` reservedNames
 
     namespaceKey symbol =
       (symbolUnit symbol, symbolModule symbol, symbolNamespace symbol)

@@ -177,6 +177,15 @@ pub const PHASE_TRANSLATE: &str = "translate";
 pub const PHASE_CBOR_ENCODE: &str = "cbor_encode";
 /// Writing `<target>.cbor` / `meta.cbor` / `asks.json`.
 pub const PHASE_WRITE: &str = "write";
+/// Prepared execution: recovering the closure of exact bodies the turn's
+/// prepared program reaches (`recoverPreparedClosure`), once per target.
+pub const PHASE_PREPARED_RECOVER: &str = "prepared_recover";
+/// Prepared execution: projecting the recovered closure to a prepared
+/// program, forced only to weak head normal form. Read it together with
+/// [`PHASE_PREPARED_ENCODE`]: laziness moves cost between the two.
+pub const PHASE_PREPARED_PROJECT: &str = "prepared_project";
+/// Prepared execution: encoding the projected program to its wire bytes.
+pub const PHASE_PREPARED_ENCODE: &str = "prepared_encode";
 /// Whole-process wall clock as the extract itself measures it.
 pub const PHASE_TOTAL: &str = "total";
 

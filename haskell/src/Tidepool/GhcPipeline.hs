@@ -816,28 +816,42 @@ runCompileCycle preparation mCache mMemoRef retained timing sessionT0 variant pa
           pure (all (\d -> Map.findWithDefault False d validMap) (directHomeDeps modSum))
         recordValidity modSum isValid =
           liftIO (modifyIORef' validThisCycleRef (Map.insert (ms_mod_name modSum) isValid))
+    -- Under TIDEPOOL_TIMING, name why a memoized module was recompiled.
+    let memoMiss modSum reason = when timing $ liftIO $ hPutStrLn stderr $
+          "tidepool-memo-miss module=" ++ moduleNameString (ms_mod_name modSum)
+            ++ " reason=" ++ reason
     let lookupValidMemo modSum = case mMemoRef of
           Nothing  -> pure Nothing
           Just ref -> do
             depsOk <- depsValidSoFar modSum
             if not depsOk || xopt LangExt.Cpp (ms_hspp_opts modSum)
-              then pure Nothing
-              else liftIO $ do
-                m <- readIORef ref
+              then do
+                memoMiss modSum (if depsOk then "cpp" else "dependency-miss:" ++ unwords
+                  [ moduleNameString d | d <- directHomeDeps modSum ])
+                pure Nothing
+              else do
+                m <- liftIO (readIORef ref)
                 case Map.lookup (ms_mod_name modSum) m of
-                  Nothing -> pure Nothing
+                  Nothing -> memoMiss modSum "absent" >> pure Nothing
                   Just entry -> do
-                    dependentFiles <- readIORef (tcg_dependent_files (mfTcGblEnv (gmeFront entry)))
+                    dependentFiles <- liftIO (readIORef (tcg_dependent_files (mfTcGblEnv (gmeFront entry))))
                     let cachedSummary = mfSummary (gmeFront entry)
+                        sameHash = ms_hs_hash cachedSummary == ms_hs_hash modSum
+                        sameRetained = gmeRetained entry == retainedFor modSum
                     -- Source hashes do not cover CPP includes or TH's
                     -- addDependentFile inputs. Recompile these modules until
                     -- the memo owns fingerprints for those dependencies.
-                    pure $ if null dependentFiles
+                    if null dependentFiles
                         && not (xopt LangExt.Cpp (ms_hspp_opts cachedSummary))
-                        && ms_hs_hash cachedSummary == ms_hs_hash modSum
-                        && gmeRetained entry == retainedFor modSum
-                      then Just entry
-                      else Nothing
+                        && sameHash
+                        && sameRetained
+                      then pure (Just entry)
+                      else do
+                        memoMiss modSum $ unwords
+                          [ "dependent-files=" ++ show (length dependentFiles)
+                          , "same-hash=" ++ show sameHash
+                          , "same-retained=" ++ show sameRetained ]
+                        pure Nothing
     (fronts, results, preparedModules, mReachable) <- case cpTier plan of
       OptimizeEveryModule -> do
         pairs <- forM summaries $ \modSum -> do
