@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Project.RoutingChecks (routing, messageDeltas, independentSources, twoLaneHandoff, notificationRetention, automaticReview, requestRecovery, candidateHistory, declaredRepair, forwardingFailure) where
+module Project.RoutingChecks (routing, handlerCall, messageDeltas, independentSources, twoLaneHandoff, notificationRetention, automaticReview, requestRecovery, candidateHistory, declaredRepair, forwardingFailure) where
 
 import Prelude hiding (readFile, writeFile)
 import Control.Monad (void)
@@ -194,6 +194,19 @@ reviewCycle failAfterAdmission automaticRepair = do
       (lastOutput rejected == "True")
     void $ turn owner "R.finish reviewBox"
   else pure ()
+
+-- A record-actor handler that calls another record actor and waits for the
+-- reply must be serviced while it waits: the integrator pattern in a project
+-- gate rests on exactly this (a gate's handler calls the integrator, whose
+-- one Call runs the whole merge and check).
+handlerCall :: Member RecipeCheck effects => Eff effects ()
+handlerCall = do
+  owner <- root
+  script owner "handler-call"
+  replied <- awaitOutput owner "state <- R.call (callerView (R.client caller)) ()\ninspectFull (callerReplies state)" (Text.isInfixOf "6")
+  check ("a handler awaiting another record actor's reply is serviced: " <> replied) ("[6]" `Text.isInfixOf` replied)
+  calls <- turn owner "state <- R.call (boxView (R.client box)) ()\ninspectFull (boxCalls state)"
+  check "the callee ran exactly once" (lastOutput calls == "1")
 
 forwardingFailure :: Member RecipeCheck effects => Eff effects ()
 forwardingFailure = do

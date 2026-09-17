@@ -336,6 +336,23 @@ search over the installed surface ("collect responses of the same result
 type", "settlement timestamp") that distinguishes documented, installed and
 callable here.
 
+Where the 30 to 107 s cells went (measured from the run-6 compiler log,
+620 daemon requests): each cell item costs one classification probe (~0 s),
+one extractor request (median 1.4 s, p90 2.2 s: GHC typecheck plus Core
+extraction of the item's module; the runtime's own "compile summary" of
+~110 ms is only the JIT step after that) and ~1.3 s of execution and
+observation before the next item starts. About 3.3 s per item, in series.
+A nine-item `case` extraction cell is therefore ~30 s by construction, and
+the whole run spent 859 s inside the extractor. Two consequences: fewer
+model turns do not shorten the loop unless cells get shorter too, and a
+gate actor compiled once from `.shoal/Project` pays this cost once per
+run instead of once per handler invocation. Engine follow-up (perf
+backlog): compile a multi-item cell as one module when no item depends on
+an observed value of an earlier one, while preserving the notebook's
+failure semantics explicitly: earlier committed items stay committed when a
+later item fails (Astra: the dependency condition establishes the batching
+opportunity, not equivalent preparation and failure behaviour).
+
 ## Wave 3 candidates (from Astra's review, 2026-09-17)
 
 - Ambiguous-type diagnostic: name the ambiguous binding or expression,
@@ -425,3 +442,42 @@ them. Primitive to confirm first: a record actor's `EffectProfile` must
 admit `Jev`, read-only `Commands` (git diff) and reviewer admission.
 Run-7 interview question: "Where did Sol still have to say the obvious next
 thing?"
+
+## Wave 3 landed (2026-09-17, before run 7)
+
+What shipped: `mergeAdvance` on `MergeRequest`; `IsString GitRef/BranchName`;
+one exclude writer (`ensure_shoal_local_exclude` no longer hides `.shoal/`);
+ambiguity advice that names the binding and the cell form; `R.withWorktree`;
+the coding role may allocate worktrees; a Rust/Haskell row parity test; the
+`shoal-orchestrate` skill; `shoal proxy`. The toy project's `.shoal/Project`
+carries `Gate.hs` (eight Jev seams, per-item Nouls, typed `J.handle` routing,
+bounded packets with truncation metadata, typed evidence failures) and
+`Reflex.hs` (the reflex table as data).
+
+Finding that reshaped the gate: integrate authority follows worktree custody
+(`ActorWorktreeAuthority::owns`), custody is exclusive, and a record actor
+started without a worktree resolves to the research role, whose ceiling has no
+`WorktreeIntegration`. A gate that merges by itself is refused at start. So
+merging is its own actor: the parent creates the integration worktree unbound,
+starts one `Integrator` holding it with `R.withWorktree`, and gates `R.call`
+it; the mailbox serialises merge-and-check. The integrator checks before it
+publishes (merge with `mergeAdvance = Nothing`, run `check.sh`, then
+`update-ref` on green; `reset --hard` on red), refuses on publication drift or
+when the publication branch is checked out elsewhere, and stays blocked until
+`reconcile`. Consequence for the source checkout: it must not sit on the
+publication branch during a run (`update-ref` would leave its index stale).
+
+Run-7 shape change: the root receives the feature as a goal plus standing rules
+and a two-stage sizing rule (Sol nodes, then Luna nodes and leaves) and writes
+its own contracts. Budgets are bounded depth and per-node width (`child_budget`
+clamps to parent depth minus one and inherited width); a gate without a
+worktree spends the research policy's one generation on its reviewers, so the
+tree recurses through nodes that hold worktrees, never through gates. Whether
+a node appears is an observation, not a pass condition. The root also writes
+`brief-8.md`, the first handoff artifact toward swarm-to-swarm iteration.
+
+Open: the extractor daemon left by a long recipes run and the embedded stdlib
+in a stale `shoal` binary both masked a `haskell/lib` edit once (`Not in scope:
+R.withWorktree`); `check-tui.sh` now rebuilds `shoal` and sets
+`TIDEPOOL_PRELUDE_DIR`. Several `documentation_tests` failed while `haskell/lib`
+was mid-edit; rerun after the commit.

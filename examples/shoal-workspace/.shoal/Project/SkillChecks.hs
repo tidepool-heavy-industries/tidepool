@@ -93,7 +93,7 @@ skills = do
   void $ example owner "shoal-jev" 1
   gated <- example owner "shoal-jev" 2
   check "the review gate resolves to an accepted key or a stated doubt"
-    (any (`Text.isInfixOf` output gated) ["jev unavailable", "hold", "all_present", "one_absent", "contradicts"])
+    (any (`Text.isInfixOf` output gated) ["jev unavailable", "hold", "all_present", "one_absent", "contradicts", "insufficient_evidence"])
   continued <- example owner "shoal-jev" 3
   check "the selected continuation is what runs, not a key string"
     (any (`Text.isInfixOf` output continued) ["jev unavailable", "would rerun", "reading the failure by hand"])
@@ -111,3 +111,39 @@ skills = do
   planned <- example owner "shoal-cleanup" 0
   check "the cleanup skill inspects a typed plan without retiring anything"
     ("Cleanup" `Text.isInfixOf` lastOutput planned)
+
+  -- The project-free record definition: no Project.Actors wrapper, the row
+  -- named in the cell and pinned by a signature on the definition.
+  tallied <- example owner "shoal-define-actors" 3
+  check "a record definition pins its own effect row without a project wrapper"
+    (lastOutput tallied == "1")
+
+  -- The workbench cells a model copies to get past the run-6 rejections:
+  -- where a signature goes, annotating a literal under ToJSON, and building
+  -- the worktree identity types. Blocks 10 and 11 read a file and run a
+  -- command, so they belong to the command material instead.
+  placed <- example owner "shoal-workbench" 7
+  check "a signature beside its equation installs both forms of binding"
+    ("high" `Text.isInfixOf` output placed && "lane 7" `Text.isInfixOf` output placed)
+  annotatedLiteral <- example owner "shoal-workbench" 8
+  check "an annotated literal settles an otherwise ambiguous encodable field"
+    ("src/app.rs" `Text.isInfixOf` output annotatedLiteral)
+  identities <- example owner "shoal-workbench" 9
+  check "branch and ref identities round-trip through their constructors"
+    ("integration/tags" `Text.isInfixOf` output identities
+      && "shoal/integration" `Text.isInfixOf` output identities)
+
+  -- The orchestrate skill is a pattern, not a library: its record and handlers
+  -- close over live children, so only the three cells a root can paste on
+  -- their own run here.
+  covered <- example owner "shoal-orchestrate" 2
+  check "the orchestration pattern settles coverage and ownership in code"
+    ("True" `Text.isInfixOf` output covered)
+  orchestrated <- example owner "shoal-orchestrate" 3
+  check "the orchestration gate offers an insufficient-evidence exit"
+    (any (`Text.isInfixOf` output orchestrated)
+      ["jev unavailable", "hold", "all_present", "item_missing", "conflicting", "insufficient_evidence"])
+  waked <- example owner "shoal-orchestrate" 4
+  check "the wake ledger renders one line per decision"
+    ("evidence_incomplete" `Text.isInfixOf` output waked
+      && "merged" `Text.isInfixOf` output waked)

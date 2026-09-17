@@ -9,8 +9,20 @@ Provision and attach:
 ```sh
 shoal operator --socket /path/to/run/operator/operator.sock new
 shoal operator --socket /path/to/run/operator/operator.sock list
-shoal-repl --socket /path/to/run/operator/operator.sock --session operator-42-1
 shoal operator --socket /path/to/run/operator/operator.sock stop operator-42-1
+```
+
+`shoal proxy` is the command-line client for this protocol: it resolves a
+Shoal session id to its live run, provisions (or reuses) one resident
+operator workbench per run in `<run_root>/operator/proxy.json`, and submits a
+cell to it.
+
+```sh
+shoal proxy run7 cell.hs
+echo 'listAgents' | shoal proxy run7 -
+shoal proxy run7 --actors
+shoal proxy run7 cell.hs --json
+shoal proxy run7 cell.hs --fresh
 ```
 
 `new` prints JSON containing `session` and `socket`. Use the returned ID verbatim.

@@ -126,10 +126,14 @@ Measured on 2026-09-17 (262 calls, `jev-1.13.0`):
   content questions per file on its hunks, files in parallel. State plus
   questions is capped at 32k tokens; a larger state is `Left (JevHttp 400
   …max_tokens_exceeded…)`, and a 30k whole diff already drops confidence.
-- A gate is an ordinary `choice` with three condition-descriptive options:
+- A gate is an ordinary `choice` with four condition-descriptive options:
   every named item is present; at least one named item is absent; the state
-  contradicts one of them (that last one hands back to the model). Name the
-  items. "Is the report sufficient?" measures nothing; "the report names a
+  contradicts one of them (that last one hands back to the model); and the
+  state lacks the field that would decide (`insufficient_evidence`: fetch
+  the field, never merge, never repair on it). Name the items, and write
+  the condition most likely to be missed into the "absent" option verbatim:
+  a gate cannot check a condition its options never name (run 6 accepted a
+  candidate at 0.90 whose empty-list case no option mentioned). "Is the report sufficient?" measures nothing; "the report names a
   target file, a duplication check, a scope, an acceptance criterion and its
   failure evidence" is a checklist Jev verifies field by field, and it moved
   confidence from 0.58 to 0.92 with zero variance on eight repeats.

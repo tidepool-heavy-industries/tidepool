@@ -9,6 +9,24 @@ same record supplies its definition and typed client. `R` is already imported as
 Keep project policy in Haskell. The existing runtime owns ordering, authority,
 request admission and lifetime.
 
+Availability of the names below:
+
+- **Shipped** — in every Shoal cell: `R.definition`, `R.start`, `R.client`,
+  `R.send`, `R.call`, `R.on`, `R.settlement`, `R.progress`, `R.lifecycle`,
+  `Cmd.completion`, `R.self`, `R.sender`, `R.finish`, `R.replace`,
+  `R.forwardResult`, `requestWithProgressInto`, `LocalEffects`, `ActorSpec`,
+  `Handler`, `Actor.Selected`, `knownEffects`, `Replies`, `Actor`,
+  `Notifications`.
+- **Example-only** — defined in `examples/shoal-workspace/.shoal/Project`, and
+  **not in scope in a fresh project**: `coordinationActor` and
+  `CoordinationEffects` (`Project.Actors`), `Outcome` and `Candidate`
+  (`Project.Types`). The examples here use them because this workspace ships
+  them; the last section writes the same actor without them, and a project
+  writes its own wrapper the same way in its own `.shoal`.
+
+Confirm a name with `lookup` before depending on it. A skill's example is
+evidence of a pattern, not proof that the name is installed for you.
+
 This executable example joins two differently typed inputs. No mailbox GADT or
 manual result casting is needed:
 
@@ -99,3 +117,58 @@ for later inspection. It does not retire the workers whose results were observed
 Use the parent's scoped cleanup separately. Actor-to-actor payloads should be
 typed values or compact actionable deltas, not narrated snapshots. Query only
 what the next engineering decision needs.
+
+## Without the example workspace
+
+`coordinationActor` is one line this workspace wrote for itself:
+
+```
+coordinationActor name = R.definition name (Actor.Selected knownEffects)
+type CoordinationEffects api = LocalEffects api '[Replies, Actor, Notifications]
+```
+
+In a fresh project, write the same two lines into your own `.shoal/Project`, or
+write the shipped call out in the cell. Either way the row must be **pinned by a
+signature**: `knownEffects` is polymorphic in the row, so `R.definition` on its
+own is ambiguous. Pin it with `:: ActorSpec MyActor MyEffects`, and give any
+separately bound handler helper its concrete
+`Handler (ActorState api) effects result` — GHC cannot recover the row from the
+record for a binding that sits outside it. A signature and its equation go in
+the **same** cell item; a signature alone installs nothing.
+
+```haskell
+{-# LANGUAGE DataKinds #-}
+import GHC.Generics (Generic)
+data Tally mode = Tally { tallyState :: mode :- State [Text], noted :: mode :- Call Text NoReply, noteCount :: mode :- Call () (R.Reply Int) } deriving Generic
+type TallyEffects = LocalEffects Tally '[Replies, Actor, Notifications]
+let recordNote :: Text -> Handler [Text] TallyEffects (); recordNote note = modify' (++ [note])
+let tallyDefinition = R.definition "tally" (Actor.Selected knownEffects) Tally
+      { tallyState = []
+      , noted = recordNote
+      , noteCount = \() -> gets length
+      } :: ActorSpec Tally TallyEffects
+tally <- R.start tallyDefinition
+R.send (noted (R.client tally)) "first finding"
+R.call (noteCount (R.client tally)) ()
+```
+
+A record actor may hold a worktree. `R.withWorktree tree spec` starts it
+holding a worktree the parent created and did not bind; custody is exclusive
+and integrate authority follows custody, so this is how an actor comes to own
+the tree it merges into. An actor with a worktree resolves to the coding role,
+one without resolves to research, and a row that needs `WorktreeIntegration`
+only sits under the first. The host admits at most one worktree per actor.
+
+```
+Right tree <- createWorktree (fromRef "shoal/integration" "integration")
+integrator <- R.start (R.withWorktree (worktreeId tree) integratorDefinition)
+```
+
+Add effects to the list as the handlers need them: `Forks` to admit a child,
+`Commands` to run one, `Jev` for a judgment. `Jev` and `Commands` are not
+re-exported by the workbench surface — a cell naming them needs
+`import Tidepool.Effects.Core (Jev, Commands)` before the row. The row is still
+checked against the launching actor's ceiling, so asking for more than the
+creator holds is refused at start, not silently granted. When the loop this
+record carries is implement → review → repair → merge, load `shoal-orchestrate`
+for the whole shape.

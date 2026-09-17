@@ -17,6 +17,23 @@ and reports omitted working files. A Git checkpoint failure stops the fork.
 Commit authored units with meaningful
 messages for integration and recovery.
 
+Worktrees. A child's launch receipt names its own checkout, and that path is not
+yours to read while the child lives: the directory is mid-edit and may not be
+the one your shell resolves. What you may use is the identity — the branch and
+the commit — resolved against the repository from your own view. After
+settlement the typed result carries the submitted commit and a typed observation
+of it (`responseWorktree`, `committedPaths`, `renderGitOid`); with the OID in
+hand, ordinary `git show`/`git diff` from your own working directory reads the
+content. `createWorktree`, `lookupWorktree`, `boundWorktree` and `listWorktrees`
+manage allocated checkouts; `worktreeBranch` and `worktreeHead` read one;
+`observeSubmission` types a child's submission; `tryMerge` with a `MergeRequest`
+integrates an exact source OID into a managed target worktree, and merges the
+OID rather than a branch label so a retained child branch cannot move between
+review and fold. `atRef (GitRef "…")` seeds a fork from a deliberate committed
+ref; `projectHead` and `boundHead` seed it from live source. A commit you cannot
+resolve means the child has not checkpointed it yet, not that the work is gone.
+Load `shoal-unfold` for the worked cells.
+
 One shared interface can support four branches: a pure test implementation,
 integration tests exercising the real implementation, the real implementation,
 and code using it. A testing branch may scaffold common fixtures and fork three

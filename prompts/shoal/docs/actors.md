@@ -34,6 +34,12 @@ failure and execution evidence; `R.progress p` publishes progress; and
 from retained current source state, not a replay of earlier history, and
 publications accepted while a handler is busy stay ordered.
 
+`R.withWorktree tree spec` starts the actor holding a worktree the parent
+created and did not bind. Custody is exclusive and integrate authority follows
+custody, so the actor that merges into a worktree is the actor that holds it;
+an actor with a worktree resolves to the coding role, one without to research.
+At most one worktree per actor.
+
 `R.finish handle` drains accepted work and returns `ActorExit state`; retain
 that value. It does not retire the workers whose results were observed — their
 cleanup is a separate, explicit decision.
@@ -41,5 +47,19 @@ cleanup is a separate, explicit decision.
 Route results, including their cleanup evidence, rather than waking a model to
 poll. Actor-to-actor payloads are typed values or compact deltas, not narrated
 snapshots; query only what the next engineering decision needs.
+
+`coordinationActor` above is not shipped: it is a one-line wrapper that
+`examples/shoal-workspace` wrote in its own `.shoal/Project/Actors.hs`, as
+`R.definition name (Actor.Selected knownEffects)` over
+`LocalEffects api '[Replies, Actor, Notifications]`. `Outcome` and `Candidate`
+are that workspace's types too. In a fresh project, write the same wrapper into
+your own `.shoal/Project`, or call `R.definition` directly and pin the row with
+`:: ActorSpec MyActor MyEffects` — `knownEffects` is polymorphic in the row and
+ambiguous without it. `Jev` and `Commands` are effect types from
+`Tidepool.Effects.Core` and need an import before a row can name them.
+
+When the record is carrying a whole implement → review → repair → merge loop,
+load `shoal-orchestrate`: the record, the seven conditions worth waking the
+owner for, and the decision ledger the owner reads with one call.
 
 skill: shoal-define-actors

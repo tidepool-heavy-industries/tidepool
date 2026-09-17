@@ -10,6 +10,15 @@ one Jev-dense cell that replaces five read-then-judge model rounds is a much
 bigger one. A judgment is evidence, not authority, and it never generates the
 action: a choice selects a payload you already built, and that payload runs.
 
+Everything named in this skill is **shipped**: `J.ask`, `J.ask1`, `J.choice`,
+`J.noul`, `J.score`, `J.pool`, `J.eachIn`, `J.askAbout`, `J.given`, `J.alt`,
+`J..|`, `J.many`, `J.manyFrom`, `J.accept`, `J.explain`, `J.handle`,
+`J.contenders`, `J.selectedKey`, `J.state`, `J.answers`, `J.resolvedModel`,
+`J.routing`, `J.spawning`, `J.merging`. The one exception is the **effect
+type** `Jev`, which a record actor's row must name and which is not re-exported
+by the workbench surface: `import Tidepool.Effects.Core (Jev)`. Nothing from
+`examples/shoal-workspace/.shoal/Project` appears here.
+
 `import qualified Jev.Operators as J` is in scope; `:=` and `:&` read
 unqualified. A cell that calls Jev leads with two pragmas:
 
@@ -90,12 +99,21 @@ branching on. `J.handle a.chosen handlers` eliminates a choice exhaustively.
 
 ## A gate is a checklist, not "is this enough"
 
-Write the gate as an ordinary three-option `choice`: every named item present,
-at least one named item absent, or the state contradicts one of them. Name the
-items. "Is the report sufficient?" measures nothing; the checklist form moved
-confidence from 0.58 to 0.92 with zero variance over eight repeats. A judgment
-noul works the same way — state the yes condition and the no condition in the
-question, or attach them with `J.about`.
+Write the gate as an ordinary four-option `choice`: every named item present,
+at least one named item absent, the state contradicts one of them, or the state
+does not carry what the checklist needs. Name the items. "Is the report
+sufficient?" measures nothing; the checklist form moved confidence from 0.58 to
+0.92 with zero variance over eight repeats. A judgment noul works the same way
+— state the yes condition and the no condition in the question, or attach them
+with `J.about`.
+
+The fourth option is the exit, and it is a **condition**, not "none of the
+above". Measured over four states whose offered options all described something
+else: with no exit Jev twice spread its mass (0.42, 0.50) and twice picked the
+least-wrong option confidently, once at 0.94; with a described exit it took the
+exit all four times; a bare "other" was weaker in every case and lost outright
+once. A model writing its own alternatives without an exit will sometimes get a
+confident wrong answer.
 
 ```haskell
 {-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
@@ -104,7 +122,8 @@ let testOutput = "PASS 14 tests, 0 failures" :: Text
 let gate = J.choice "Which of these describes the candidate?"
       (J.alt #all_present "The diff touches only the named paths, the test output shows every named check passing, and a reviewer recorded the scope those checks establish" ()
         J..| J.alt #one_absent "At least one of the named paths, the passing check output, or the recorded review scope is missing" ()
-        J..| J.alt #contradicts "All three are present, but the diff and the test output disagree about what was checked" ())
+        J..| J.alt #contradicts "All three are present, but the diff and the test output disagree about what was checked" ()
+        J..| J.alt #insufficient_evidence "The state does not carry what the checklist needs to be decided: a path named in `owned_paths` appears in no line of `diff_stat`, or `test_output` names none of the checks" ())
 answer <- J.ask1 (J.state (object ["owned_paths" .= (["src/Retry.hs", "tests/RetrySpec.hs"] :: [Text]), "diff_stat" .= diffStat, "test_output" .= testOutput, "review_scope" .= ("retry bounds only" :: Text)])) gate
 case answer of
   Left err -> "jev unavailable: " <> T.pack (show err)
@@ -115,6 +134,12 @@ case answer of
 for a diff nobody reviewed, or for anything that leaves a receipt. `J.explain`
 states in one line why the answer was accepted or doubted; put that in the
 notice you send, not the raw distribution.
+
+`insufficient_evidence` is not a verdict on the candidate — it says the packet
+was wrong. Treat it like `Left Doubt`: name the exact missing field, get that
+field (another git command, another read, a request back to the child), and ask
+again. Never merge on it, never repair on it, never fall through to the next
+branch as though a decision had been made.
 
 ## The payload is the continuation
 
@@ -169,7 +194,8 @@ same material in fallback form.
 ## Playbook (measured 2026-09-17, 365 calls, on a real Shoal run's candidates)
 
 1. State is an object with named fields; questions name the fields in backticks. Never paste a child's narration into an evidence field.
-2. Review gate, `J.merging`: state `{owned_paths, acceptance_checklist: [..], base, candidate, diff_stat, hunks, test_output}` (no `brief` prose: ablation showed the gate reads hunks and test output only, and the checklist already lives in the options; `diff_stat` stays for the `#covered` tripwire and the code coverage check), where `base` and `candidate` are the OIDs and `diff_stat`/`hunks` come from your own `git diff <base>..<candidate>` in your checkout, never from the child's report (the child's file list is a claim to check, not the evidence). Before sending, check coverage in code: every file in the stat has a hunk, and the stat's insertion and deletion counts equal the hunks' line counts; if either fails, do not ask the gate. Keep one tripwire Noul in the packet, `#covered := J.noul "Does `hunks` contain a hunk for every file named in `diff_stat`?"`, for any state assembled by hand. A confident `all_present` never means the evidence was complete: with every hunk removed and the stat intact the gate still said `all_present` at 0.62 to 0.82. Completeness is your job and it is a git command. One `J.choice "Which statement describes the candidate?"` with `#all_present "Every item of the checklist holds: <items joined by ;>."` (every option enumerates its conditions: shortening `item_missing` to "some checklist item does not hold" flipped a clean candidate from 0.86 to 0.54), `#item_missing "At least one item does not hold: a changed file outside the owned file, a failing or missing owned test, a deleted or weakened test, a remaining todo!(), or an implementation that does not match the goal."`, `#conflicting "The items are all present but contradict each other, for example the report claims a test passes that the test output shows failing."`. `J.accept J.merging a.gate`; on `Left`, the doubt names the checklist item to send back. On five real candidates plus five planted-bad ones: zero false accepts, no good candidate doubted at any policy.
+2. Review gate, `J.merging`: state `{owned_paths, acceptance_checklist: [..], base, candidate, diff_stat, hunks, test_output}` (no `brief` prose: ablation showed the gate reads hunks and test output only, and the checklist already lives in the options; `diff_stat` stays for the `#covered` tripwire and the code coverage check), where `base` and `candidate` are the OIDs and `diff_stat`/`hunks` come from your own `git diff <base>..<candidate>` in your checkout, never from the child's report (the child's file list is a claim to check, not the evidence). Before sending, check coverage in code: every file in the stat has a hunk, and the stat's insertion and deletion counts equal the hunks' line counts; if either fails, do not ask the gate. Keep one tripwire Noul in the packet, `#covered := J.noul "Does `hunks` contain a hunk for every file named in `diff_stat`?"`, for any state assembled by hand. A confident `all_present` never means the evidence was complete: with every hunk removed and the stat intact the gate still said `all_present` at 0.62 to 0.82. Completeness is your job and it is a git command. One `J.choice "Which statement describes the candidate?"` with `#all_present "Every item of the checklist holds: <items joined by ;>."` (every option enumerates its conditions: shortening `item_missing` to "some checklist item does not hold" flipped a clean candidate from 0.86 to 0.54), `#item_missing "At least one item does not hold: a changed file outside the owned file, a failing or missing owned test, a deleted or weakened test, a remaining todo!(), or an implementation that does not match the goal."`, `#conflicting "The items are all present but contradict each other, for example the report claims a test passes that the test output shows failing."`, and the exit `#insufficient_evidence "The state does not carry what the checklist needs to be decided: a file named in `diff_stat` has no hunk, or `test_output` names none of the required tests."`. `J.accept J.merging a.gate`; on `Left`, the doubt names the checklist item to send back; on `insufficient_evidence`, fetch the named field rather than deciding. On five real candidates plus five planted-bad ones: zero false accepts, no good candidate doubted at any policy.
+2b. **Write the likely-miss condition into `item_missing` verbatim.** Before the wave, name the condition this task is most likely to miss (the empty collection, the zero case, the already-present entry) and paste that sentence into the `item_missing` enumeration as one of its ways to fail. A condition the option never names is a condition the gate has nothing to check against: in a real run a candidate that handled "all items" and "some items" but not the empty list was accepted at 0.90, because the checklist item said "distinct styles for zero, all and partial" and no option named the empty case. The gate reads the option text, not your intent.
 3. Never ask "is this sufficient" or "does this need repair" (a bare Noul sat under 0.2 on everything). Ask the literal facts and derive the judgment in code.
 4. Per-child triage, one call for all children, `test_output` compacted to the `test …`, `panicked at` and `test result` lines: `#real := J.askAbout r "Does any test whose path is inside `owned_file`'s module fail in `test_output`?"`, `#scope := J.askAbout r "Does `files_changed` include any file other than `owned_file`?"`; `needs_repair = a.real.yes > 0.5 || a.scope.yes > 0.5`. Literal per-item questions were right at every pool size; judgment questions were wrong in isolation and drifted right only pooled.
 5. Report honesty is a tie-breaker at 0.20: `#honest := J.noul "Is every claim in `worker_report` supported by what `test_output` and `files_changed` actually show?"`. A terse "Done." sits near 0.4; a lie at 0.02. Gate on the literal `own_tests_pass` first.
@@ -187,3 +213,37 @@ same material in fallback form.
 17. Every call is worth a ledger row: the questions, the answers as above, `J.resolvedModel`, and the action taken.
 18. When Jev returns `Left`, fall back to reading in order and keep going; a recurring handback is a missing branch to write by hand.
 19. Jev is evidence, not authority: the checklist gate agreed with five fresh reviewers on five real candidates; it replaces the reviewer only where the checklist is the whole contract.
+20. Anchor a triage pool with two items whose answers you already know, carried verbatim beside the real ones: one clean item (own tests pass, the failures are all in other modules — expect `real_failure` near 0.15 and `scope_creep` near 0.02) and one genuinely failing item (one owned test fails among passes — expect `real_failure` near 0.97). If either drifts past 0.5, the pool is wrong before a real item has been read, and the cheapest fix is usually a missing field or a question that stopped being literal. Anchors cost two pool entries and catch the failure the answers themselves cannot show you.
+21. Every alternative set gets an exit written as a condition. Measured: without one, a misfit state was answered confidently wrong at 0.94; with a described exit the exit won every time; a bare "None of the above" was weaker in every case.
+
+## Jev inside an actor
+
+The same `J.ask` works inside a record actor's handler — the loop does not have
+to come back to a model to make a semantic decision. Add the effect type to the
+row (`import Tidepool.Effects.Core (Jev)`, then
+`LocalEffects MyActor '[Replies, Actor, Notifications, Jev]`) and call it from
+the handler exactly as in a cell. The row is checked against the launching
+actor's ceiling, so a handler cannot acquire judgment its creator does not have.
+
+Ledger every answer into the actor's own state as data — the key, the mass, the
+confidence, `J.resolvedModel`, and the action taken — and give the record one
+`Call` the owner reads the ledger through. A judgment nobody can inspect
+afterwards is the one failure mode that costs more than the turn it saved: the
+whole point of routing in Haskell is that the root can read what was decided
+without re-deriving it. `shoal-orchestrate` is that pattern written out.
+
+Not executable on its own: it needs a live child to observe.
+
+```haskell
+{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
+let classify :: Text -> Handler [(Text, Text)] MyEffects (); classify output = do
+      answer <- J.ask1 (J.state (object ["check_output" .= output]))
+        (J.choice "Which statement describes `check_output`?"
+          (J.alt #formatting "`check_output` contains a formatting diff and no test failure" ()
+            J..| J.alt #lint "`check_output` names a lint by its rule name and no test fails" ()
+            J..| J.alt #test_failure "`check_output` contains a line beginning `assertion` or `panicked at`" ()
+            J..| J.alt #insufficient_evidence "`check_output` is empty or does not name a tool, a rule or a test" ()))
+      case answer of
+        Left err -> modify' (++ [("jev_unavailable", T.pack (show err))])
+        Right a -> modify' (++ [(either (const "doubt") J.selectedKey (J.accept J.routing a), T.pack (show a.confidence))])
+```

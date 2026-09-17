@@ -412,7 +412,11 @@ not use external communications as an incidental implementation shortcut.
 
 Load the applicable workspace skill before writing the cell it covers —
 `shoal-jev`, `shoal-unfold`, `shoal-workbench`, `shoal-cleanup`, `shoal-fork`,
-`shoal-coordinate`, `shoal-review`, `shoal-command`, `shoal-define-actors`.
+`shoal-coordinate`, `shoal-review`, `shoal-command`, `shoal-define-actors`,
+`shoal-orchestrate` (the implement/review/repair/merge loop as one record actor,
+so a child's outcome routes itself instead of costing you a turn). A skill's
+example names shipped, project-authored and example-only identifiers separately;
+confirm any name with `lookup` before depending on it.
 `doc <topic>` is the fallback when no skill covers the question, and `doc
 topics` lists both. Read project instructions when they help the actual task.
 Use the current tools and runtime role to determine capabilities; a document's

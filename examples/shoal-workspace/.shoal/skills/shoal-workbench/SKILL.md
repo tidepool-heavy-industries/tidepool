@@ -10,6 +10,13 @@ mutually recursive and visible to every statement, but a declaration cannot
 depend on a binding a statement in the same cell introduces. Every expression
 displays its value; declarations and bindings persist into later cells.
 
+Everything named in this skill is **shipped**: it is in scope in any Shoal cell
+with no project module and no import. The two exceptions are marked where they
+appear — `Jev` and `Commands` (effect types from `Tidepool.Effects.Core`) need
+an import line. Names from `examples/shoal-workspace/.shoal/Project`, such as
+`coordinationActor`, `Outcome` and `Candidate`, are **example-only** and are
+not used here.
+
 ```haskell
 data Finding = Finding { findingPath :: Text, findingLine :: Int }
 render :: Finding -> Text
@@ -110,6 +117,94 @@ Cmd.describe (compare' "HEAD~1" "HEAD")
 
 `Cmd.describe` inspects the intent without executing. `Cmd.argv [program, a, b]`
 bypasses Bash entirely when no shell features are wanted.
+
+## A signature and its equation travel together
+
+A top-level declaration takes its signature on the line directly above the
+equation, in the **same cell item**. A signature alone in an item is compiled
+as a module with no binding: GHC says it "lacks an accompanying binding", the
+name is never installed, and the next item reports `Variable not in scope`.
+
+Inside a `let`, put both in one item — `let f :: T -> U; f x = …`, or the
+signature and the equation aligned at the same column of one `let` block.
+Splitting the signature onto its own `let` line loses the argument scope and
+produces a `Variable not in scope` for the argument, not for `f`. This is the
+fix for "this declaration's type is ambiguous; add a signature": the signature
+has to land on the binding, not beside it.
+
+```haskell
+severity :: Int -> Text
+severity n = if n > 2 then "high" else "low"
+let inline :: Int -> Text; inline n = "lane " <> T.pack (show n)
+map severity [1, 3 :: Int] <> map inline [7 :: Int]
+```
+
+Pin a polymorphic result the same way at the use site. `knownEffects` in an
+`R.definition` needs `:: ActorSpec MyActor MyEffects` on the definition, and a
+handler helper bound outside its record needs
+`:: … -> Handler MyState MyEffects ()`.
+
+## A bare literal under `ToJSON` needs its type
+
+`object [...]` accepts anything encodable, so a bare string literal has no type
+to settle on and the cell is rejected as ambiguous before it runs. Annotate the
+literal, not the call:
+
+```haskell
+let state = object ["owned_path" .= ("src/app.rs" :: Text), "changed" .= (2 :: Int)]
+state
+```
+
+The diagnostic for this reads the same as the one for an ambiguous function,
+but the fix is different: here nothing needs a signature, one literal needs
+`:: Text`.
+
+## Identity types come from their constructors
+
+A branch or a ref is a typed identity, not free `Text`. Construct it, and take
+the `Text` back out by matching:
+
+```haskell
+let onto = mkBranchName "integration/tags"
+let from = GitRef "shoal/integration"
+(case onto of BranchName b -> b, case from of GitRef ref -> ref)
+```
+
+`atRef (GitRef "shoal/integration")` is the deliberate committed seed for a
+fork; `projectHead` and `boundHead` are the live ones. If your build carries
+`IsString` for these types, a bare literal works too — the constructor form
+works either way.
+
+## Effectful reads bind with `<-`, never `let`
+
+`readFile :: FilePath -> Eff effs (Either FsError Text)` — `FilePath` is `Text`
+here, and the result is an action, so `let d = readFile p` binds the action,
+not the text, and every later use is a type error a `T.pack` cannot rescue.
+Bind it, and pattern-match the success in the bind:
+
+```haskell
+Right src <- readFile ".shoal/config.toml"
+T.take 200 src
+```
+
+A refutable bind like this fails the statement when the read fails, which is
+usually what you want in a cell; use `either` when the failure is a value you
+carry forward. Nothing here is ever `String`: `T.lines`, `T.splitOn`,
+`T.stripPrefix` do the path and output work.
+
+`Cmd.stdout` is `Either OutputIssue Text`, not `String` and not `Text`, so a
+command's output is `either (const "") id . Cmd.stdout <$> Cmd.run …`:
+
+```haskell
+out <- Cmd.stdout <$> Cmd.run (Cmd.withArguments ["HEAD"] [bash|git show --stat --oneline "$1"|])
+either (const "not visible from here") (T.take 2000) out
+```
+
+Bind first and project after. A long output truncates its display and offers
+`cellDisplay.more`, which reads the next retained page without rerunning the
+command — so the binding is what you keep, and the display is what you narrow.
+Extracting one field per statement out of a long value costs a statement each
+time; bind the value once and project in one expression.
 
 If a statement fails at runtime, its earlier bindings and completed effects stay
 committed and the suffix is marked not run — read that receipt before deciding
