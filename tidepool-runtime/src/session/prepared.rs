@@ -105,13 +105,15 @@ pub enum PreparedRuntimeError {
     /// The request and continuation were released; nothing was parked.
     #[error("the suspended request names typed site {site}, which no installed program declares")]
     UnknownSite { site: u64 },
-    /// A suspended request carries no typed site: an ordinary handled effect
-    /// (Print, a file read), which the prepared route does not answer yet.
-    /// The request and continuation were released; nothing was parked.
-    #[error(
-        "the prepared route does not yet answer ordinary handled effects (the request carries no typed site)"
-    )]
-    UntypedRequest,
+    /// A suspended request is not a constructor, so it names no site and no
+    /// verb. The request and continuation were released; nothing was parked.
+    #[error("the suspended request {constructor} names no typed site or verb")]
+    UntypedRequest { constructor: String },
+    /// A host-built answer was offered to a frame parked for an open-reply
+    /// request ([`UNSITED`]): there is no wire evidence to build it against,
+    /// so the frame re-enters only by handle. The frame stays parked.
+    #[error("the parked request has an open reply type and accepts only handle delivery")]
+    UnsitedAnswer,
     /// The turn suspended under `HandleOrError`, and the prepared route
     /// handles no effect yet, so every request is unhandled.
     #[error("the turn requested an effect under HandleOrError; the prepared route handles no effects yet")]
@@ -207,7 +209,8 @@ impl PreparedRuntimeError {
             | Self::ProjectionShape { .. }
             | Self::SiteConflict { .. }
             | Self::UnknownSite { .. }
-            | Self::UntypedRequest
+            | Self::UntypedRequest { .. }
+            | Self::UnsitedAnswer
             | Self::UnhandledRequest
             | Self::NoResumeEntry { .. }
             | Self::NoDecodeEntry { .. }
@@ -366,7 +369,9 @@ impl ProgramFacts {
             })
             .collect();
         let entry = prepared.entry();
-        let entry_module = tops.get(&entry).map(|(identity, _)| identity.module.clone());
+        let entry_module = tops
+            .get(&entry)
+            .map(|(identity, _)| identity.module.clone());
         let resume = entry_module.clone().and_then(|module| {
             tops.iter().find_map(|(id, (identity, _))| {
                 (identity.module == module && identity.occurrence == PREPARED_RESUME_TARGET)
@@ -856,6 +861,23 @@ fn type_nodes_equivalent(
     }
 }
 
+/// The site a frame parks under when its request has an open reply type.
+/// Zero is never a declared site (`check_sites` refuses it).
+const UNSITED: u64 = 0;
+
+/// A boxed or unboxed non-negative `Int` field: the leading site argument of
+/// an extractor-sited kernel request.
+fn site_field(field: &Value, table: &DataConTable) -> Option<u64> {
+    match field {
+        Value::Lit(Literal::LitInt(n)) => u64::try_from(*n).ok(),
+        Value::Con(id, inner) if table.name_of(*id) == Some("I#") => match inner.as_slice() {
+            [Value::Lit(Literal::LitInt(n))] => u64::try_from(*n).ok(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The typed site a suspended request names, read from the request's
 /// rendered payload: the protocol's sited helpers place the site id under the
 /// `typedSite` key of the request's JSON payload object
@@ -1226,12 +1248,9 @@ impl PreparedEngine {
         let mut imports = ImportBindings::new();
         for declaration in prepared.globals() {
             let identity = &declaration.identity;
-            let Some(entry) = resolve_prepared_import(
-                bindings,
-                index,
-                identity,
-                declaration.required_generation,
-            ) else {
+            let Some(entry) =
+                resolve_prepared_import(bindings, index, identity, declaration.required_generation)
+            else {
                 // Left absent: `link_program` reports the typed `MissingImport`.
                 continue;
             };
@@ -1454,7 +1473,7 @@ impl PreparedEngine {
     /// preferring the object's own owner keeps a rooted apply within the
     /// program whose code produced the closure whenever that is still live,
     /// without depending on install order to matter for correctness.
-    fn hosting_program(&self, handle: PreparedHandle) -> Option<ProgramId> {
+    pub(crate) fn hosting_program(&self, handle: PreparedHandle) -> Option<ProgramId> {
         fn admits_apply_roots(facts: &ProgramFacts) -> bool {
             facts.apply_entry.is_some() && facts.apply_value.is_some()
         }
@@ -1611,15 +1630,15 @@ impl PreparedEngine {
         // `payload`, exactly as `JitEffectMachine::run_suspendable_shared`
         // tenures the field's raw pointer on Core -- see
         // `Self::tenure_live_payload`.
-        let live_payload_root = match self.tenure_live_payload(payload, realm, park.live_payload, &request)
-        {
-            Ok(root) => root,
-            Err(error) => {
-                self.machine.release(payload);
-                self.machine.release(continuation);
-                return Err(PreparedRuntimeError::Run(error));
-            }
-        };
+        let live_payload_root =
+            match self.tenure_live_payload(payload, realm, park.live_payload, &request) {
+                Ok(root) => root,
+                Err(error) => {
+                    self.machine.release(payload);
+                    self.machine.release(continuation);
+                    return Err(PreparedRuntimeError::Run(error));
+                }
+            };
         self.machine.release(payload);
         // A request carrying a dynamic site names it; an ordinary effect
         // request is classified by its outer constructor through the verb
@@ -1628,21 +1647,34 @@ impl PreparedEngine {
             Some(site) => self
                 .sites
                 .get(&site)
-                .map(|witness| (site, *witness))
+                .map(|witness| (site, witness.owner))
                 .ok_or(PreparedRuntimeError::UnknownSite { site }),
             None => match &request {
-                Value::Con(host_id, _) => self
+                Value::Con(host_id, fields) => Ok(self
                     .verb_sites
                     .get(host_id)
                     .and_then(|witness| {
                         let row = self.programs.get(&witness.owner)?.sites.get(witness.row)?;
                         Some((row.site, *witness))
                     })
-                    .ok_or(PreparedRuntimeError::UntypedRequest),
-                _ => Err(PreparedRuntimeError::UntypedRequest),
+                    .or_else(|| {
+                        // Kernel requests of an extractor-sited verb
+                        // (`receiveSited`, `serveSited`) carry the site id as
+                        // their first `Int` field; the reply index is open,
+                        // so they have no synthetic row.
+                        let site = fields.first().and_then(|field| site_field(field, table))?;
+                        self.sites.get(&site).map(|witness| (site, *witness))
+                    })
+                    // An open-reply request (an actor `call`'s `result`)
+                    // has no wire evidence to build an answer against; it
+                    // parks unsited and re-enters only by handle, as on Core.
+                    .map_or((UNSITED, program), |(site, witness)| (site, witness.owner))),
+                _ => Err(PreparedRuntimeError::UntypedRequest {
+                    constructor: "a non-constructor value".to_owned(),
+                }),
             },
         };
-        let (site, witness) = match classified {
+        let (site, owner) = match classified {
             Ok(classified) => classified,
             Err(error) => {
                 self.machine.release(continuation);
@@ -1650,7 +1682,7 @@ impl PreparedEngine {
             }
         };
         let evidence = PreparedFrameEvidence {
-            owner: witness.owner,
+            owner,
             site,
             runner: program,
             resume_entry,
@@ -1908,6 +1940,9 @@ impl PreparedEngine {
             ExecutionError::UnknownContinuation(id),
         ))?;
         let site = evidence.site;
+        if site == UNSITED {
+            return Err(PreparedRuntimeError::UnsitedAnswer);
+        }
         // Copied out before the cancellation check below takes `self.machine`
         // mutably: `evidence` itself stays borrowed from it, so a field read
         // after that point would conflict.
@@ -1929,12 +1964,12 @@ impl PreparedEngine {
                 delivery: row.delivery,
             });
         }
-        let ctor_row = owner
-            .row_for(row.wire, constructor)
-            .ok_or(PreparedRuntimeError::AnswerConstructor {
+        let ctor_row = owner.row_for(row.wire, constructor).ok_or(
+            PreparedRuntimeError::AnswerConstructor {
                 site,
                 host_id: constructor,
-            })?;
+            },
+        )?;
         if ctor_row.fields.len() != prefix.len() + 1 {
             return Err(PreparedRuntimeError::AnswerShape {
                 site,
@@ -2007,6 +2042,9 @@ impl PreparedEngine {
         let (_, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
             ExecutionError::UnknownContinuation(id),
         ))?;
+        if evidence.site == UNSITED {
+            return Err(PreparedRuntimeError::UnsitedAnswer);
+        }
         let owner = self
             .programs
             .get(&evidence.owner)
@@ -2060,9 +2098,9 @@ impl PreparedEngine {
             AnswerPlan::Constructor { host_id, fields } => {
                 let mut resolved = Vec::with_capacity(fields.len());
                 for field in fields {
-                    resolved.push(self.resolve_json_leaves(
-                        site, runner, realm, field, table, produced,
-                    )?);
+                    resolved.push(
+                        self.resolve_json_leaves(site, runner, realm, field, table, produced)?,
+                    );
                 }
                 Ok(AnswerPlan::Constructor {
                     host_id,
@@ -2086,12 +2124,9 @@ impl PreparedEngine {
         table: &DataConTable,
     ) -> Result<PreparedHandle, PreparedRuntimeError> {
         let decode_entry = self.decode_entry_of(runner)?;
-        let owner = self
-            .programs
-            .get(&runner)
-            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
-                runner,
-            )))?;
+        let owner = self.programs.get(&runner).ok_or(PreparedRuntimeError::Run(
+            ExecutionError::UnknownProgram(runner),
+        ))?;
         let reject = |detail: &str| PreparedRuntimeError::AnswerRejected {
             site,
             detail: detail.to_string(),
@@ -2115,8 +2150,10 @@ impl PreparedEngine {
                 ))
             }
         };
-        let text_plan =
-            owner.lower_text(site, &Value::Lit(Literal::LitString(text.as_bytes().to_vec())))?;
+        let text_plan = owner.lower_text(
+            site,
+            &Value::Lit(Literal::LitString(text.as_bytes().to_vec())),
+        )?;
         if self.machine.realm_cancel_handle(realm).is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
         }
@@ -2298,12 +2335,21 @@ impl PreparedEngine {
         self.machine.discard_handle(handle)
     }
 
+    /// Move a live handle to another runtime resource scope
+    /// (`PreparedMachine::rehome_handle`).
+    pub fn rehome_handle(&mut self, handle: ValueHandle, owner: RealmId) -> bool {
+        self.machine.rehome_handle(handle, owner)
+    }
+
     /// The persistent root slot behind a retained handle, by its bare
     /// cross-engine [`ValueHandle`] id -- `ResidentSession::run_rooted_entry`'s
     /// slot lookup, which only ever holds a `RootCustody`'s raw id (see
     /// [`Self::discard_handle`]'s doc for the same shape).
     #[must_use]
-    pub fn handle_slot(&self, handle: ValueHandle) -> Option<tidepool_codegen::old_space::RootSlot> {
+    pub fn handle_slot(
+        &self,
+        handle: ValueHandle,
+    ) -> Option<tidepool_codegen::old_space::RootSlot> {
         self.machine.handle_slot(handle)
     }
 
@@ -2427,7 +2473,8 @@ impl PreparedEngine {
         let baseline_bytes = self.old_bytes_at_last_major;
         let current_bytes = self.machine.old_bytes_live();
         let grown = current_bytes.saturating_sub(baseline_bytes);
-        grown >= MAJOR_COLLECTION_GROWTH_BYTES || current_bytes.saturating_mul(2) >= baseline_bytes.saturating_mul(3)
+        grown >= MAJOR_COLLECTION_GROWTH_BYTES
+            || current_bytes.saturating_mul(2) >= baseline_bytes.saturating_mul(3)
     }
 
     /// Programs installed since the last successful major collection --

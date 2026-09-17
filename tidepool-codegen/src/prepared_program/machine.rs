@@ -1326,6 +1326,13 @@ impl<'code> PreparedMachine<'code> {
         true
     }
 
+    /// Move a live handle to another runtime resource scope; the root and the
+    /// handle id are unchanged. `false` for a handle this machine never
+    /// minted or already released.
+    pub fn rehome_handle(&mut self, handle: ValueHandle, owner: RealmId) -> bool {
+        self.handles.rehome_handle(handle, owner)
+    }
+
     /// Obtain a clone-able cancellation handle scoped to ONE runtime
     /// resource scope, lazily minting that scope's flag on first request.
     /// Cancelling this handle aborts only runs/calls made with `realm` --
@@ -1581,7 +1588,9 @@ impl<'code> PreparedMachine<'code> {
         let Some(root) = frame.live_payload_root.take() else {
             return Ok(None);
         };
-        let handle = self.handles.insert_handle(root, realm, RuntimeRep::LiftedRef);
+        let handle = self
+            .handles
+            .insert_handle(root, realm, RuntimeRep::LiftedRef);
         self.assert_rooting_receipt();
         Ok(Some(handle))
     }
@@ -5724,7 +5733,11 @@ mod tests {
             ))
         ));
         let observed = machine
-            .observe_handle(program_a, *handle_f, RunOptions::default().observation_budget)
+            .observe_handle(
+                program_a,
+                *handle_f,
+                RunOptions::default().observation_budget,
+            )
             .expect("a bare function observes to the closure sentinel, not an error");
         assert!(matches!(
             observed,
@@ -7360,11 +7373,13 @@ mod tests {
     /// the second's reads of that same address valid.
     #[test]
     fn shared_literal_content_gets_one_address_across_programs() {
-        let (mut machine, first) =
-            PreparedMachine::new(byte_top_program(), PreparedMachineOptions {
+        let (mut machine, first) = PreparedMachine::new(
+            byte_top_program(),
+            PreparedMachineOptions {
                 nursery_bytes: RunOptions::default().nursery_bytes,
-            })
-            .expect("first byte-top program installs");
+            },
+        )
+        .expect("first byte-top program installs");
         let first_address = machine
             .programs
             .get(&first)
@@ -7426,9 +7441,9 @@ mod tests {
         assert_eq!(receipt.programs, vec![first]);
         assert!(machine.programs.contains_key(&second));
         assert_eq!(
-            machine
-                .machine
-                .resolve_literal_bytes(|pool| pool.read_range(second_address, 9).map(<[u8]>::to_vec)),
+            machine.machine.resolve_literal_bytes(|pool| pool
+                .read_range(second_address, 9)
+                .map(<[u8]>::to_vec)),
             Some(b"residency".to_vec())
         );
     }

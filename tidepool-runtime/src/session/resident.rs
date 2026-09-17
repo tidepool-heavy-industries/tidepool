@@ -930,8 +930,13 @@ where
         nursery_size: usize,
         lib: Option<SessionLib>,
     ) -> Result<Self, JitError> {
-        let mut core = PersistentSession::new(lib, nursery_size, EngineKind::from_env());
-        core.bootstrap_if_needed(expr, &table)?;
+        let engine = EngineKind::from_env();
+        let mut core = PersistentSession::new(lib, nursery_size, engine);
+        // A prepared-route machine comes up from its first turn's prepared
+        // program; only the table seed applies here.
+        if engine == EngineKind::Core {
+            core.bootstrap_if_needed(expr, &table)?;
+        }
         core.seed_session_table(table);
         Ok(ResidentSession {
             core,
@@ -1419,7 +1424,8 @@ where
         } else {
             return Ok(None);
         };
-        Ok(handle.map(|handle| RootCustody::new(handle, Arc::clone(&self.custody_cleanup), provenance)))
+        Ok(handle
+            .map(|handle| RootCustody::new(handle, Arc::clone(&self.custody_cleanup), provenance)))
     }
 
     /// [`Self::live_payload_handle`]'s sibling for a result that must outlive
@@ -1488,9 +1494,12 @@ where
         self.settle_dropped_custody();
         let transfer = custody.into_transfer();
         let handle = transfer.handle;
-        let moved = match self.core.machine_mut() {
-            Some(machine) => machine.rehome_handle(handle, owner).map_err(resident_jit)?,
-            None => false,
+        let moved = if let Some(machine) = self.core.machine_mut() {
+            machine.rehome_handle(handle, owner).map_err(resident_jit)?
+        } else if let Some(engine) = self.core.prepared_mut() {
+            engine.rehome_handle(handle, owner)
+        } else {
+            false
         };
         if !moved {
             return Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
@@ -1506,10 +1515,13 @@ where
     pub fn discard_custody(&mut self, custody: RootCustody) -> bool {
         self.settle_dropped_custody();
         let transfer = custody.into_transfer();
-        let discarded = self
-            .core
-            .machine_mut()
-            .is_some_and(|machine| machine.discard_handle(transfer.handle));
+        let discarded = if let Some(machine) = self.core.machine_mut() {
+            machine.discard_handle(transfer.handle)
+        } else {
+            self.core
+                .prepared_mut()
+                .is_some_and(|engine| engine.discard_handle(transfer.handle))
+        };
         if discarded {
             transfer.commit();
         }
@@ -1573,10 +1585,8 @@ where
     /// Scoped read-only query: the binding `name` resolves to as seen FROM
     /// `scope` — its own frame first, then each ancestor up to its lexical
     /// root, so a child reads a parent's mounts and a local mount shadows an
-    /// inherited one. Independent of the mount seam ([`Self::mount_handle_in`]
-    /// resolves its own target internally — see that method's doc); this is
-    /// a plain existence/identity probe for callers that need to know what
-    /// `name` is bound to without mounting anything.
+    /// inherited one. A plain existence/identity probe for callers that need
+    /// to know what `name` is bound to without mounting anything.
     pub fn current_binding_in(
         &self,
         scope: ScopeId,
@@ -1591,102 +1601,6 @@ where
             BoundValue::Tier1Closure(_) | BoundValue::Prepared { .. } => ValueTier::Tier1Closure,
         };
         Some((entry.id, entry.module, tier, entry.type_display.clone()))
-    }
-
-    /// Redirect an ALREADY-MINTED value-plane binding for `name` to resolve
-    /// through `custody`'s tenured payload instead of whatever it was bound
-    /// to before — the mount seam: "a handle installed under
-    /// a name in a window's declaration scope", the closure-tenure-then-handle
-    /// delivery path points the other direction.
-    ///
-    /// **Atomic:** `name`'s current identity (`SessionVarId`/module/tier/type
-    /// display) is resolved INTERNALLY, at mount time, from the live
-    /// `(scope, name)` binding — never carried in by the caller. The idiom
-    /// producing that identity is unchanged: mint a real `Val.G<g>`
-    /// iface/`SessionVarId` cheaply by running an ordinary throwaway bind of
-    /// the mounted type under `name` in `scope` (its own tenured value is
-    /// thrown away), THEN call this to swap in the real value's root. GHC
-    /// never needs to see the real value — only its type, which the
-    /// throwaway bind already established correctly.
-    ///
-    /// The handle's root is adopted into the value plane under the existing
-    /// `SessionVarId` and module identity. No new interface is generated; only
-    /// the heap object behind the binding changes.
-    pub fn mount_handle(&mut self, name: &str, custody: RootCustody) -> Result<(), ResidentError> {
-        self.mount_handle_in(ScopeId::ROOT, name, custody)
-    }
-
-    /// Scoped [`Self::mount_handle`]. The target scope and binding are
-    /// validated before the handle root is adopted. On either validation
-    /// failure, custody is discarded immediately; no root waits for eventual
-    /// resource-scope cleanup and no unowned root can escape the registry.
-    pub fn mount_handle_in(
-        &mut self,
-        scope: ScopeId,
-        name: &str,
-        custody: RootCustody,
-    ) -> Result<(), ResidentError> {
-        self.settle_dropped_custody();
-        if !self.core.scope_tree().is_live(scope) {
-            self.discard_custody(custody);
-            return Err(SessionError::DeadScope(scope).into());
-        }
-        let resolved = self.core.resolve_in(scope, name).map(|entry| {
-            let tier = match entry.value {
-                BoundValue::Tier0Forced(_) => ValueTier::Tier0Data,
-                BoundValue::Tier1Closure(_) | BoundValue::Prepared { .. } => {
-                    ValueTier::Tier1Closure
-                }
-            };
-            (entry.id, entry.module, tier, entry.type_display.clone())
-        });
-        let (id, module, tier, type_display) = match resolved {
-            Some(v) => v,
-            None => {
-                self.discard_custody(custody);
-                return Err(SessionError::UnknownBinding {
-                    scope,
-                    name: name.to_string(),
-                }
-                .into());
-            }
-        };
-        let transfer = custody.into_transfer();
-        let provenance = Arc::clone(&transfer.provenance);
-        let handle = transfer.handle;
-        let slot = self
-            .core
-            .machine_mut()
-            .map(|machine| machine.take_handle_root(handle))
-            .transpose()
-            .map_err(resident_jit)?
-            .flatten()
-            .ok_or_else(|| {
-                ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
-                    "mount: handle is unknown to the machine (already released or never minted)"
-                        .into(),
-                ))))
-            })?;
-        transfer.commit();
-        let value = match tier {
-            ValueTier::Tier0Data => BoundValue::Tier0Forced(slot),
-            ValueTier::Tier1Closure => BoundValue::Tier1Closure(slot),
-        };
-        self.core.bind_replacing_decl_in(
-            scope,
-            BindingEntry {
-                name: BindingName(name.to_string()),
-                id,
-                module,
-                value,
-                type_display,
-                defining_expr: None,
-                // Overwritten by `bind_in` with `scope`; see `BindingEntry`.
-                scope,
-            },
-        )?;
-        self.binding_provenance.insert(id.raw(), provenance);
-        Ok(())
     }
 
     /// Install a rooted live value under a binder GHC has already compiled,
@@ -1729,6 +1643,9 @@ where
         self.core
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
+        if self.engine_kind() == EngineKind::Prepared {
+            return self.mount_compiled_binding_prepared(scope, binder, gen, custody);
+        }
         let transfer = custody.into_transfer();
         let provenance = Arc::clone(&transfer.provenance);
         let handle = transfer.handle;
@@ -1780,6 +1697,38 @@ where
             },
         )?;
         self.core.set_val_gen(gen);
+        self.binding_provenance.insert(binder.var_id, provenance);
+        Ok(())
+    }
+
+    /// The prepared arm of [`Self::mount_compiled_binding_in`]: the handle
+    /// becomes a prepared binding under the binder's value-module identity,
+    /// exactly as a prepared bind turn records it ([`Self::bind_prepared`]).
+    fn mount_compiled_binding_prepared(
+        &mut self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        gen: Generation,
+        custody: RootCustody,
+    ) -> Result<(), ResidentError> {
+        let transfer = custody.into_transfer();
+        let provenance = Arc::clone(&transfer.provenance);
+        let raw = transfer.handle;
+        let engine = self.core.require_prepared()?;
+        let located = engine
+            .prepared_handle_of(raw)
+            .and_then(|handle| Some((handle, engine.hosting_program(handle)?)));
+        let Some((handle, program)) = located else {
+            return Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
+                EffectError::Handler(
+                    "compiled binding mount received an unknown or already-consumed handle".into(),
+                ),
+            ))));
+        };
+        self.core.retract_in(scope, &binder.name)?;
+        // `bind_prepared` owns the handle from here, releasing it on failure.
+        transfer.commit();
+        self.bind_prepared(program, scope, gen, &[(binder, handle)])?;
         self.binding_provenance.insert(binder.var_id, provenance);
         Ok(())
     }
@@ -1885,8 +1834,9 @@ where
     /// Number of live [`ValueHandle`]s outstanding on this session's machine
     /// (0 before the machine is bootstrapped) — the mount seam's ownership-
     /// accounting read: a handle minted over a finalize payload
-    /// ([`Self::live_payload_handle`]) counts here until [`Self::mount_handle`]
-    /// (or an ordinary bind completion / realm close) releases it.
+    /// ([`Self::live_payload_handle`]) counts here until a compiled-binding mount
+    /// ([`Self::mount_compiled_binding_in`]), an ordinary bind completion, or
+    /// a realm close releases it.
     pub fn value_handle_count(&mut self) -> usize {
         self.settle_dropped_custody();
         self.core.value_handle_count()
@@ -3537,6 +3487,8 @@ where
             for handle in handles {
                 if let Some(machine) = self.core.machine_mut() {
                     machine.discard_handle(handle);
+                } else if let Some(engine) = self.core.prepared_mut() {
+                    engine.discard_handle(handle);
                 }
             }
             return Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
@@ -3551,6 +3503,8 @@ where
             for handle in handles {
                 if let Some(machine) = self.core.machine_mut() {
                     machine.discard_handle(handle);
+                } else if let Some(engine) = self.core.prepared_mut() {
+                    engine.discard_handle(handle);
                 }
             }
             return Err(SessionError::DeadScope(scope).into());
@@ -4240,68 +4194,6 @@ mod tests {
             .set_run_context(SessionRunContext::ROOT)
             .expect("ROOT is always live");
         assert_eq!(session.run_context(), SessionRunContext::ROOT);
-    }
-
-    /// A dead target scope rejects the mount and consumes custody without
-    /// creating a binding.
-    #[test]
-    fn mount_handle_in_rejects_a_dead_scope_without_leaking_custody() {
-        let mut session = bootstrap_trivial_session();
-        let scope = session.mint_scope(ScopeId::ROOT).expect("ROOT is live");
-        session.retire_scope(scope);
-
-        // An arbitrary handle id: the liveness check must short-circuit
-        // before this is ever resolved against the machine's handle
-        // registry, so it need not be a real, live-minted handle.
-        let custody = RootCustody::new(
-            ValueHandle(0),
-            Arc::clone(&session.custody_cleanup),
-            Arc::new(ProgramProvenance::default()),
-        );
-        let result = session.mount_handle_in(scope, "escapee", custody);
-
-        assert!(
-            matches!(
-                result,
-                Err(ResidentError::Session(SessionError::DeadScope(s))) if s == scope
-            ),
-            "expected a typed DeadScope error, got {result:?}"
-        );
-        assert_eq!(
-            session.binding_names_in(scope),
-            Vec::<String>::new(),
-            "a rejected mount must not have written a binding"
-        );
-    }
-
-    /// A missing target binding rejects the mount and consumes custody.
-    #[test]
-    fn mount_handle_in_rejects_a_missing_binding_without_leaking_custody() {
-        let mut session = bootstrap_trivial_session();
-        let scope = session.mint_scope(ScopeId::ROOT).expect("ROOT is live");
-
-        // Arbitrary, need not be live-minted — resolution fails before the
-        // handle registry is ever consulted.
-        let custody = RootCustody::new(
-            ValueHandle(0),
-            Arc::clone(&session.custody_cleanup),
-            Arc::new(ProgramProvenance::default()),
-        );
-        let result = session.mount_handle_in(scope, "nope", custody);
-
-        assert!(
-            matches!(
-                &result,
-                Err(ResidentError::Session(SessionError::UnknownBinding { scope: s, name }))
-                    if *s == scope && name == "nope"
-            ),
-            "expected a typed UnknownBinding error, got {result:?}"
-        );
-        assert_eq!(
-            session.binding_names_in(scope),
-            Vec::<String>::new(),
-            "a rejected mount must not have written a binding"
-        );
     }
 
     #[test]

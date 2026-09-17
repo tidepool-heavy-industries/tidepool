@@ -154,13 +154,12 @@ pub(super) fn append_exact_starts(
     let mut offset = *scanned_words;
     while offset < nursery.len() {
         let header = nursery[offset] as usize;
-        let descriptor =
-            registry
-                .get(&(header & !7))
-                .map(|metadata| &metadata.descriptor)
-                .ok_or(DescriptorTraceError::UnknownDescriptor {
-                    address: header & !7,
-                })?;
+        let descriptor = registry
+            .get(&(header & !7))
+            .map(|metadata| &metadata.descriptor)
+            .ok_or(DescriptorTraceError::UnknownDescriptor {
+                address: header & !7,
+            })?;
         let available = (nursery.len() - offset) * 8;
         let state = unsafe { descriptor.state(nursery.as_ptr().add(offset).cast(), available)? };
         if !matches!(
@@ -338,11 +337,12 @@ impl<'a> ObservationHeap<'a> {
                 .ok_or(DescriptorTraceError::InvalidManagedPointer { address })?
         };
         let header = unsafe { std::ptr::read(address as *const usize) };
-        let descriptor = self.descriptors.get(header & !7).ok_or(
-            DescriptorTraceError::UnknownDescriptor {
-                address: header & !7,
-            },
-        )?;
+        let descriptor =
+            self.descriptors
+                .get(header & !7)
+                .ok_or(DescriptorTraceError::UnknownDescriptor {
+                    address: header & !7,
+                })?;
         // Exact-start membership was proved by a validated immutable region,
         // retained arena, or nursery walk; all owners remain borrowed through
         // this observation.
@@ -653,6 +653,48 @@ impl ObservationHeap<'_> {
                             return Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitByteArray(
                                 bytes,
                             ))));
+                        }
+                        // `SmallArray#`/`Array#` observe as Core's bridge
+                        // does: `DataConId(0)` over the elements
+                        // (docs/core-shapes/audit-heap-bridge.md), the
+                        // wrapping constructor carrying the type context.
+                        ObjectKind::External(ExternalStorageKind::BoxedArray) => {
+                            let owner = self
+                                .external_owner
+                                .ok_or(ObservationFailure::Unobservable(descriptor.kind()))?;
+                            let handle = unsafe {
+                                descriptor.external_payload_slot(
+                                    object.cast_mut(),
+                                    descriptor.allocation_extent() as usize,
+                                )?
+                            };
+                            let published = unsafe { handle.read() };
+                            let view = owner
+                                .external_active_view(published, ExternalStorageKind::BoxedArray)
+                                .map_err(external_observation_error)?;
+                            let mut elements = Vec::new();
+                            elements.try_reserve_exact(view.logical_len).map_err(|_| {
+                                ObservationFailure::Integrity(
+                                    DescriptorTraceError::MetadataAllocation,
+                                )
+                            })?;
+                            // Reverse order for the LIFO worklist, as for
+                            // constructor fields above.
+                            for index in (0..view.logical_len).rev() {
+                                // SAFETY: the active view authenticated the
+                                // full slot span of `logical_len` elements.
+                                let word =
+                                    unsafe { published.add(8).cast::<*mut u8>().add(index).read() }
+                                        as usize;
+                                elements.push(ObservationSeed {
+                                    word,
+                                    rep: RuntimeRep::LiftedRef,
+                                });
+                            }
+                            return Ok(ObservationFrame::Constructor(
+                                tidepool_repr::DataConId(0),
+                                elements,
+                            ));
                         }
                         // A function, PAP, or (post-force, still-callable)
                         // function-typed object has no data `Value`

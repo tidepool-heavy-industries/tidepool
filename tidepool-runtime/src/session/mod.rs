@@ -251,13 +251,6 @@ pub enum SessionError {
         "staged declaration no longer matches this session's live declaration or value environment"
     )]
     StaleStagedDeclaration,
-    /// A mount ([`super::resident::ResidentSession::mount_handle_in`])
-    /// targeted a `(scope, name)` pair that resolves to no live binding — the
-    /// throwaway placeholder bind that mints the `name`'s identity was never
-    /// run in `scope`, or under a different name. Never the user's
-    /// declaration; a caller bug in the mount seam's two-step idiom.
-    #[error("no live binding for `{name}` in scope {scope:?} (the mount seam's placeholder bind must run first, under the same name)")]
-    UnknownBinding { scope: ScopeId, name: String },
     /// A durable source-recovery manifest was unreadable, from a future or
     /// retired schema, corrupt, or could not be published. This artifact is
     /// never silently reset: it is the authoritative record of which source

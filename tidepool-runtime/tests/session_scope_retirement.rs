@@ -103,9 +103,9 @@ fn tenure(core: &mut PersistentSession, label: &str, n: i64) -> RootSlot {
 
 /// The mount transit, spelled out: a handle is minted over a tenured root,
 /// then its root is adopted — ownership moving from the
-/// handle registry (class 2) to the value plane (class 3). This is exactly
-/// what `ResidentSession::mount_handle_in` does; done by hand here because a
-/// test cannot reach the machine through `ResidentSession`.
+/// handle registry (class 2) to the value plane (class 3). This is the
+/// Core arm of `ResidentSession::mount_compiled_binding_in`; done by hand
+/// here because a test cannot reach the machine through `ResidentSession`.
 fn mount(core: &mut PersistentSession, scope: ScopeId, name: &str, raw: u64, slot: RootSlot) {
     let machine = core.machine_mut().expect("bootstrapped");
     let handle = machine
