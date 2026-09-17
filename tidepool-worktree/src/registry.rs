@@ -71,6 +71,13 @@ pub enum WorktreeRecordStatus {
 pub struct WorktreeReceipt {
     pub worktree_id: WorktreeId,
     /// Absolute path of the managed working tree. Outside the source tree.
+    ///
+    /// Readable by the worktree's OWNER. A parent reads a child's commits
+    /// through the shared Git namespace (`git show <oid>`) and through typed
+    /// observation, not through this path: a running child's working files live
+    /// behind its own retained mount view, and they become readable at `cwd` to
+    /// anyone else only once [`crate::WorktreeManager::materialize_retired_view`]
+    /// has finalized the record at the child's retirement.
     pub cwd: PathBuf,
     pub branch: BranchName,
     /// The commit the managed branch was rooted at. For a snapshot creation
@@ -321,6 +328,20 @@ impl WorktreeRegistry {
                 Ok(WorktreeSummary { receipt, present })
             })
             .collect()
+    }
+
+    /// Every recorded receipt, WITHOUT deriving liveness.
+    ///
+    /// [`Self::list`] answers "what is retained, and is each one still there",
+    /// and the liveness half runs Git inside every recorded checkout — so one
+    /// worktree whose retained mount view is gone (a previous run's child whose
+    /// retirement failed) makes the whole listing fail. A caller that only
+    /// needs the RECORDS — which checkout is already registered as the source,
+    /// say — must not be held hostage by an unrelated worktree's filesystem.
+    /// Nothing is skipped or hidden here: a corrupt record still fails loud,
+    /// and `list` still reports the unavailable view to whoever asked about it.
+    pub(crate) fn receipts(&self) -> Result<Vec<WorktreeReceipt>, WorktreeError> {
+        self.read_receipts()
     }
 
     fn read_receipts(&self) -> Result<Vec<WorktreeReceipt>, WorktreeError> {

@@ -11,6 +11,16 @@
 // wrappers need the monomorphism restriction so their result binds specialize
 // against the surrounding `do` block. Declaration modules add NMR below so
 // authored top-level binds generalize.
+//
+// `ExtendedDefaultRules` is load-bearing but not total. It reaches every
+// generated module, the whole-cell check template included, alongside the
+// preamble's `default (...)` declaration — but GHC still defaults only a
+// variable whose constraint set carries one of its own standard classes
+// (numeric, `Show`, `Eq`, `Ord`), and a `default (...)` list can only name
+// `*`-kinded types. A variable constrained solely by `Render`, or one that is
+// higher-kinded, is therefore out of defaulting's reach no matter what is
+// listed; those diagnostics are rewritten for the model instead — see
+// `super::ambiguous_type_advice`.
 pub const EVAL_PRAGMAS: &str = "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, KindSignatures, RankNTypes, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, StandaloneDeriving, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}";
 
 /// [`EVAL_PRAGMAS`] plus `NoMonomorphismRestriction` for persistent

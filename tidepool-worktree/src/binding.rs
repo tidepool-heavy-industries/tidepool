@@ -35,6 +35,15 @@ impl AgentRef {
     /// Legacy callers may still provide their own opaque identity through
     /// `from_raw`; new actor bindings must use this constructor so a later
     /// incarnation cannot inherit the old one's resource authority.
+    ///
+    /// `runtime` must identify ONE host run and nothing wider. The binding
+    /// table is durable and per-project, so it outlives any single run, while
+    /// actor identities and incarnations restart from zero in each one — and a
+    /// degraded teardown deliberately retains its `Active` row rather than
+    /// manufacturing cleanup evidence. A `runtime` shared by two runs would
+    /// therefore let the next run's actor 0 inherit the previous run's retained
+    /// custody. The actor host passes its run id (see
+    /// `tidepool::actor_host::runtime_namespace`).
     pub fn exact_actor(runtime: &str, identity: u64, incarnation: u64) -> Self {
         Self(format!("actor:{runtime}:{identity}:{incarnation}"))
     }
@@ -434,5 +443,51 @@ impl BindingTable {
         self.bindings
             .iter()
             .find(|b| b.worktree() == worktree && b.state() == BindingState::Active)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        reason = "a failed setup step in a test is a test failure"
+    )]
+
+    use super::*;
+
+    /// A degraded teardown retains its row `Active` forever (see
+    /// `ActorWorkspaceCustody`'s drop). The next RUN's actors restart from the
+    /// same identities and incarnations, so the run id in the principal is the
+    /// only thing standing between them and the previous run's retained
+    /// custody — which is how a previous run's child worktree reached a later
+    /// run's root through `boundWorktree`.
+    #[test]
+    fn a_retained_row_from_another_run_is_not_custody_for_the_same_actor() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = WorktreeId::from_raw("wt-retained");
+        let previous_run = AgentRef::exact_actor("run-a", 2, 1);
+
+        let mut table = BindingTable::open(dir.path()).unwrap();
+        // Bound, then dropped WITHOUT settling: the degraded-cleanup shape.
+        let _retained = table.bind(&tree, &previous_run, 1).unwrap();
+        drop(_retained);
+        drop(table);
+
+        let table = BindingTable::open(dir.path()).unwrap();
+        assert_eq!(
+            table.active_for_agent(&previous_run),
+            Some(&tree),
+            "the retained row is still that run's own custody"
+        );
+        assert_eq!(
+            table.active_for_agent(&AgentRef::exact_actor("run-b", 2, 1)),
+            None,
+            "a later run's actor 2/1 must not inherit run-a's retained worktree"
+        );
+        assert_eq!(
+            table.current(&tree).map(Binding::agent),
+            Some(&previous_run),
+            "the retained row still names its holder, so rebinding fails loud"
+        );
     }
 }

@@ -649,6 +649,18 @@ impl RequestRegistry {
         outcome
     }
 
+    /// Whether the registry still holds this watch.
+    ///
+    /// Forgetting a watch (above) releases the state a notification describes,
+    /// so a notification computed before the release must not be delivered
+    /// afterwards: its owner would take the transition as an invitation to
+    /// poll an id the registry no longer knows, and be answered
+    /// `WatchUnavailable (WatchRejected ReplyStale)`. Publishers ask here
+    /// rather than each keeping their own forgotten-id set.
+    pub(crate) fn retains_watch(&self, watch: WatchId) -> bool {
+        self.state.lock().watches.contains_key(&watch)
+    }
+
     pub(crate) fn active_for_target(&self, target: ActorRef) -> Vec<(RequestId, String)> {
         let state = self.state.lock();
         let mut active = state
@@ -2827,6 +2839,39 @@ mod tests {
             registry.observe_response(owner, outside),
             Ok(ResponseObservation::Pending),
             "another campaign remains untouched"
+        );
+    }
+
+    /// A transition computed before cleanup can still be in a publisher's
+    /// hand after it. The publisher's guard is this lookup, so a forgotten
+    /// watch has no notice left to deliver while a live one still does.
+    #[test]
+    fn a_forgotten_watch_has_no_notice_left_to_publish() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+
+        let request = registry.reserve_labeled(owner, target, "work".into());
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
+        registry.begin_reply(target, request).unwrap();
+
+        // The settlement that makes the watch Ready is exactly the transition
+        // a publisher would be holding when cleanup runs.
+        let notifications = registry.finish_reply(request);
+        assert!(
+            notifications.iter().any(|notice| notice.watch == watch),
+            "the settled request must produce the watch transition under test"
+        );
+        assert!(registry.retains_watch(watch));
+
+        let targets = [target].into_iter().collect();
+        let outcome = registry.cleanup_campaign_metadata(owner, &targets);
+        assert_eq!(outcome.forgotten_watches, vec![watch]);
+        assert!(
+            !registry.retains_watch(watch),
+            "a notice for a forgotten watch must not be delivered"
         );
     }
 }

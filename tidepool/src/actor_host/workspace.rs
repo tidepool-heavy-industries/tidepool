@@ -304,12 +304,16 @@ impl WorkspaceLayout {
         let common =
             tidepool_worktree::git::inspect::git_common_dir(self.worktrees.git(), &host_path)
                 .map_err(io::Error::other)?;
+        // Distinct from the managed root below, which stays read-only: only the
+        // worktrees the ROOT allocated for itself are writable to it.
+        let root_worktrees = self.worktrees.root_allocations();
         let roots = writable_repository_roots(
             root,
             policy.workspace,
             &self.source_root,
             worktree.as_ref().map(|_| host_path.as_path()),
             &common,
+            root.then(|| root_worktrees.managed_root()),
         );
         let resource_root = self.resource_root(key);
         let native_policy = native_tool_policy(policy.native_tools);

@@ -498,6 +498,25 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
                         .map_err(error_to_wire),
                 );
             }
+            if let WorktreeReq::WorktreeCreate(spec) = &req {
+                // Repository authority is the root's. A worktree it allocates
+                // for ITSELF materializes in the root-owned directory, which is
+                // writable inside the root's own mount namespace — an
+                // integration checkout the root cannot build in is not a
+                // workspace. Children's worktrees (WorktreeCreateForActorPath,
+                // and the fork-admission path) keep landing under the managed
+                // root, which stays read-only to the root.
+                let result = (|| {
+                    let spec = spec_from_wire(spec.clone())?;
+                    self.inner
+                        .manager
+                        .root_allocations()
+                        .create(&spec)
+                        .map(|handle| handle_to_wire(&handle))
+                        .map_err(error_to_wire)
+                })();
+                return cx.respond(result);
+            }
             return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
         };
         let permitted_tree = match &req {

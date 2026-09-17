@@ -17,6 +17,14 @@ services its effects.
 - Use the vocabulary in `docs/GLOSSARY.md`, especially in model-facing text.
 - Keep history in git. Standing documentation describes the current system,
   not the sequence of changes that produced it.
+- Primitives, not helpers. When a dogfooding model hand-builds something (an
+  artifact collector, a review gate, a wave timer), the harness supplies the
+  missing piece: an OID on every settled reply, a Git that resolves it from
+  the parent's view, a worktree the parent can execute in, timestamps as
+  data, types that default. The model writes its own `collectArtifacts` in
+  three lines if it wants one. We do not ship `collectArtifacts`. Helpers
+  belong in a project's `.shoal`, written by the model, or in skills as
+  worked examples.
 
 ## Workspace map
 

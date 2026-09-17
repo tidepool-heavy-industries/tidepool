@@ -148,6 +148,9 @@ module Tidepool.Actors.Shoal
   , ProviderUsageSummary (..)
   , CacheBoundaryReason (..)
   , listAgents
+  , listAgentsFull
+  , AgentSummary (..)
+  , agentSummary
   , findAgentsByLabel
   , SwarmSnapshot (..)
   , UsageTotal (..)
@@ -292,6 +295,9 @@ import Tidepool.Actors.Internal.Agent
   , agentIdentity
   , observeAgent
   , listAgents
+  , listAgentsFull
+  , AgentSummary (..)
+  , agentSummary
   , findAgentsByLabel
   , AgentForgetOutcome (..)
   , forgetAgent

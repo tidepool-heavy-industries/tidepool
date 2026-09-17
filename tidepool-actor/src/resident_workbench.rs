@@ -720,6 +720,10 @@ fn agent_roster_value(
             cache_boundary.to_value(table)?,
             actor_int(entry.runtime.event_watermark)?.to_value(table)?,
             workbench_posture,
+            // The host already observes when this actor launched; a
+            // supervisor that has to derive "+4m50s since actor launch" from
+            // prose cannot subtract it from a settlement time.
+            entry.runtime.launched_at_unix_ms.to_value(table)?,
         ],
     )?)
 }

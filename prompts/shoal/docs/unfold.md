@@ -112,3 +112,5 @@ with an exhausted budget retains `Forks` in its row but cannot admit children.
 Width counts active or reserved descendants across the subtree; all ancestor
 ceilings also apply. Setting `maximum_depth = 0` disables research recursion.
 Configuration is loaded at host startup and does not change existing actors.
+
+skill: shoal-unfold

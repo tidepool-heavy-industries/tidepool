@@ -69,13 +69,13 @@ impl ActivationContract {
             .map_or_else(|| "\nThis request has no progress stream; `reportProgress` is unavailable. Request-local bindings from inherited history do not apply.".to_owned(), |ty| {
                 format!("\nProgress updates for this request: `reportProgress` accepts {ty}.")
             });
+        let reply_type = self.response.expected_type();
         format!(
-            "Request {}{}\n\nAssignment (available as `sessionInput :: {}`):\n\n{}\n\nReturn with `respond` (reply type {}):\n{}{}",
+            "Request {}{}\n\nAssignment (available as `sessionInput :: {}`):\n\n{}\n\nReturn with `respond` (reply type {reply_type}). It takes exactly one argument, the reply value itself: `respond (… :: {reply_type})`.\n{}{}",
             request.0,
             guidance.map(|text| format!(": {text}")).unwrap_or_default(),
             self.input_type,
             self.input_preview,
-            self.response.expected_type(),
             self.reply_preview,
             progress
         )
@@ -209,7 +209,7 @@ mod tests {
         );
         assert_eq!(
             activation.message,
-            "Request 11: Review this candidate.\n\nAssignment (available as `sessionInput :: Candidate`):\n\ncandidate\n\nReturn with `respond` (reply type Review):\ndata Review = Accepted | Rejected\nThis request has no progress stream; `reportProgress` is unavailable. Request-local bindings from inherited history do not apply."
+            "Request 11: Review this candidate.\n\nAssignment (available as `sessionInput :: Candidate`):\n\ncandidate\n\nReturn with `respond` (reply type Review). It takes exactly one argument, the reply value itself: `respond (… :: Review)`.\ndata Review = Accepted | Rejected\nThis request has no progress stream; `reportProgress` is unavailable. Request-local bindings from inherited history do not apply."
         );
         assert_eq!(activation.request, crate::RequestId(11));
     }

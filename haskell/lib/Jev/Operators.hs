@@ -2,11 +2,18 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ExplicitNamespaces #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE UndecidableInstances #-}
+-- The ToJSON instances for the answer types belong beside the monomorphic
+-- front, not beside the polymorphic core that must not depend on a JSON type.
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 -- | FOR AGENT USE AND REVIEW. The type-operator front over Tidepool's own
 -- 'Tidepool.Aeson.Value.Value' (there is no aeson package here). Ported
@@ -15,14 +22,22 @@
 --
 -- A packet is written once from its questions and its type is inferred:
 --
--- > a <- roundTrip transport jevLatest world
+-- > Right resp <- ask world
 -- >    ( #next    := choice "Most useful next step?"
 -- >                    (alt #rerun "Rerun the focused check" c .| alt #ask_model "Needs judgment" h .| many edges)
 -- >   :& #enough  := noul "Do the diagnostics establish the mechanism?"
 -- >   :& #breadth := score "How broadly would the fix alter behavior?"
 -- >                    (level #localized "…" .| level #adjacent "…" .| level #contract "…")
 -- >   :& Nil )
--- > handle (chosen a.next) (#rerun (\c -> …) .| #ask_model (\h -> …) .| onMany (\key e -> …))
+--
+-- Answers come back under the same labels and are plain records:
+--
+-- > a = answers resp
+-- > a.next.key          -- the chosen alternative's wire key
+-- > a.next.margin       -- how far ahead of the runner-up it is
+-- > a.enough.yes        -- the provider's probability
+-- > a.breadth.nearest   -- the level nearest the expectation
+-- > handle (chosen a.next) (#rerun (\c -> …) .| #ask_model (\h -> …) .| onMany (\k e -> …))
 -- > massAtOrAbove #adjacent a.breadth
 --
 -- Labels are wire ids verbatim. Duplicate labels, a missing label on
@@ -43,32 +58,36 @@ module Jev.Operators
     -- * Alternatives
   , alt, many, manyFrom, (.|), onMany
     -- * Rubrics
-  , level, massAtOrAbove, levelOf, expectation
+  , level, massAtOrAbove
     -- * Questions
   , noul, choice, score, each, pool, eachIn, askAbout, given, about, refKey, refPayload
-    -- * Answers
-  , yes, chosen, contenders, selectedKey, handle, accept, confidence, masses, Doubt (..), Policy (..)
+    -- * Answers, as fields: @a.next.key@, @a.enough.yes@
+    -- ('A' carries them: @yes@, @chosen@, @key@, @mass@, @margin@,
+    -- @confidence@, @masses@, @expectation@, @nearest@.)
+  , A (..)
+  , contenders, selectedKey, handle, accept, explain, Doubt (..), Policy (..)
+  , routing, spawning, merging
     -- * The operation
-  , jevLatest, request, decode, roundTrip, answers, usage, JevError (..)
+  , jevLatest, request, decode, roundTrip, answers, usage, Usage (..), resolvedModel, JevError (..)
     -- * The Shoal host operation — the documented path for actor code
   , ask, askWith, ask1
     -- * Types, for signatures only
   , type (::=), type (::>), type (:|:), Many, Offers, Handlers, Rubric
-  , Noul, Choice, Score, Each, Group, PoolDecl, Ref
-  , Q, A, Questions, Answers, type (:-), State, state, Model, Response, PrepError, DecodeError
+  , Noul, Choice, Score, Each, Group, PoolDecl, Ref, Selected
+  , Q, Questions, Answers, type (:-), State, state, Model, Response, PrepError, DecodeError
   , Schema, Alternatives
   ) where
 
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import GHC.TypeLits (KnownNat, KnownSymbol)
-import Tidepool.Aeson.Value (Value)
+import Tidepool.Aeson.Value (ToJSON (..), Value)
 import Jev.Tidepool ()
 import Jev.Host (jevTransport)
 import qualified Jev.Core as Core
 import Jev.Core
-  ( A, Alternatives, Choice, DecodeError, Doubt (..), Each, Group, JevError (..), Label, Many, Model, Noul
-  , Packet (..), Cell (..), PoolDecl, PrepError, Q, Score, type (:-), type (::=), type (::>), type (:|:), (++.), Policy (..)
+  ( A (..), Alternatives, Choice, DecodeError, Doubt (..), Each, Group, JevError (..), Label, Many, Model, Noul
+  , Packet (..), Cell (..), PoolDecl, PrepError, Q, Score, Selected, type (:-), type (::=), type (::>), type (:|:), (++.), Policy (..)
   )
 import Tidepool.Effects.Core (Jev)
 
@@ -144,38 +163,50 @@ state :: Value -> State
 state = Core.state
 
 -- Answers
-yes :: A Value Noul -> Double
-yes = Core.yes
+--
+-- 'yes', 'chosen', 'key', 'mass', 'margin', 'confidence', 'masses',
+-- 'expectation' and 'nearest' are the fields of the answer records
+-- themselves, re-exported here. Read them with record dot.
 
-chosen :: A Value (Choice alts) -> Core.Selected Value alts
-chosen = Core.chosen
-
-contenders :: Double -> A Value (Choice alts) -> [(Double, Core.Selected Value alts)]
+contenders :: Double -> A Value (Choice alts) -> [(Double, Selected Value alts)]
 contenders = Core.contenders
 
-selectedKey :: Alternatives alts => Core.Selected Value alts -> Text
+selectedKey :: Alternatives alts => Selected Value alts -> Text
 selectedKey = Core.selectedKey
 
-handle :: (Alternatives alts, Core.Match hs alts, hs ~ alts) => Core.Selected Value alts -> Handlers r hs -> r
+handle :: (Alternatives alts, Core.Match hs alts, hs ~ alts) => Selected Value alts -> Handlers r hs -> r
 handle = Core.handle
 
-accept :: Alternatives alts => Policy -> A Value (Choice alts) -> Either Doubt (Core.Selected Value alts)
+accept :: Alternatives alts => Policy -> A Value (Choice alts) -> Either Doubt (Selected Value alts)
 accept = Core.accept
 
-confidence :: Core.Judged e => A Value e -> Double
-confidence = Core.confidence
+-- | One line explaining why 'accept' returned what it did.
+explain :: Alternatives alts => Policy -> A Value (Choice alts) -> Text
+explain = Core.explain
 
-masses :: Core.Judged e => A Value e -> [(Text, Double)]
-masses = Core.masses
+-- | Read-only choices: which file, which skill.
+routing :: Policy
+routing = Policy 0.40 0.08 0.50
 
-expectation :: A Value (Score levels) -> Double
-expectation = Core.expectation
+-- | Starting a worker, or choosing an approach.
+spawning :: Policy
+spawning = Policy 0.55 0.20 0.70
+
+-- | Merging, stopping, anything with a receipt.
+merging :: Policy
+merging = Policy 0.70 0.40 0.85
 
 massAtOrAbove :: KnownNat (Core.Index l levels) => Label l -> A Value (Score levels) -> Double
 massAtOrAbove = Core.massAtOrAbove
 
-levelOf :: A Value (Score levels) -> Text
-levelOf = Core.levelOf
+-- | An answer is a ledger row: @toJSON a.next@.
+instance ToJSON (A Value Noul) where toJSON = Core.previewAnswer
+instance Alternatives alts => ToJSON (A Value (Choice alts)) where toJSON = Core.previewAnswer
+instance Core.Rubric levels => ToJSON (A Value (Score levels)) where toJSON = Core.previewAnswer
+
+-- | A whole answers packet is a ledger row too: @toJSON (answers resp)@.
+instance (Core.Unique fs, Core.PacketSchema Value fs) => ToJSON (Packet fs Answers) where
+  toJSON = Core.previewSchema
 
 -- The operation
 jevLatest :: Model
@@ -196,8 +227,18 @@ jev1 = Core.jev1
 answers :: Response s -> s Answers
 answers = Core.answers
 
-usage :: Response s -> Value
-usage = Core.usage
+-- | Token counts for one call. Missing or non-numeric fields read as 0.
+data Usage = Usage { inputTokens :: Int, outputTokens :: Int } deriving (Show, Eq)
+
+usage :: Response s -> Usage
+usage r = Usage (tokens "input_tokens") (tokens "output_tokens")
+  where
+    tokens :: Text -> Int
+    tokens k = maybe 0 round (Core.lookupKey k (Core.usage r) >>= Core.viewNumber)
+
+-- | The model the request resolved to, as reported by the response envelope.
+resolvedModel :: Response s -> Text
+resolvedModel = Core.responseModel
 
 -- The Shoal host operation. Actor code reaches Jev only through these:
 -- a packet or a question in, the host's Jev effect handles the transport.

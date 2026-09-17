@@ -53,3 +53,5 @@ ended. No later notice follows `StoppedNow` or `StoppedRetaining`.
 Cleanup never deletes worktrees, branches, commits, build evidence, or user
 files. Dirty worktrees remain available after actor retirement. Use ordinary
 Git and explicit repository operations for any later repository cleanup.
+
+skill: shoal-cleanup

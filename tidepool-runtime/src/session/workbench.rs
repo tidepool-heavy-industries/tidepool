@@ -890,6 +890,40 @@ mod tests {
         assert_eq!(template.matches("{{CELL_BODY}}").count(), 1);
     }
 
+    /// The cell's own pragmas are ADDITIVE. `{{CELL_PRAGMAS}}` is filled only
+    /// from the submitted cell's header, so the session dialect and the
+    /// preamble's `default (...)` declaration are the workbench's, not the
+    /// cell's, and both must survive template assembly — otherwise every
+    /// checked cell typechecks under weaker defaulting than the turn it is
+    /// checking.
+    #[test]
+    fn the_session_dialect_and_default_declaration_reach_every_checked_cell() {
+        let preamble = format!(
+            "{}\nmodule Expr where\nimport Tidepool.Prelude\ndefault (Int, Double, Text)\n",
+            crate::session::EVAL_PRAGMAS,
+        );
+        let template = resident_cell_check_template(&preamble, "ActorEffects", "");
+
+        let pragmas = template
+            .find("{{CELL_PRAGMAS}}")
+            .expect("the cell's own pragmas have a placeholder");
+        let dialect = template
+            .find("ExtendedDefaultRules")
+            .expect("the session dialect reaches the checked cell");
+        let module = template
+            .find("\nmodule ")
+            .expect("the template keeps a module header");
+        assert!(
+            dialect < pragmas && pragmas < module,
+            "the session LANGUAGE block must precede the cell's own pragmas, and both \
+             must precede the module header"
+        );
+        assert!(
+            template.contains("default (Int, Double, Text)"),
+            "the preamble's default declaration must survive into the checked cell"
+        );
+    }
+
     #[test]
     fn cell_source_and_tool_arguments_have_distinct_replay_identity() {
         let cell = WorkbenchRequest::from_cell_input("pure ()");

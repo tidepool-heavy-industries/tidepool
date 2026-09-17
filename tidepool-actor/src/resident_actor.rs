@@ -957,6 +957,13 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         notifications: impl IntoIterator<Item = crate::request::WatchNotification>,
     ) {
         for notification in notifications {
+            // A watch forgotten by campaign cleanup keeps no state to poll.
+            // Delivering a transition for it would send its owner to
+            // `pollWatch`, which can only answer `WatchUnavailable
+            // (WatchRejected ReplyStale)` — a notice about nothing.
+            if !self.environment.requests.retains_watch(notification.watch) {
+                continue;
+            }
             let _ = self
                 .environment
                 .deployments

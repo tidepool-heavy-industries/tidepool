@@ -1,6 +1,7 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FunctionalDependencies #-}
@@ -17,6 +18,9 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+-- 'key', 'mass' and 'margin' are answer fields, and this module binds all
+-- three as ordinary locals; the shadowing is deliberate and local.
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 
 -- | The agent-facing form: an anonymous, type-indexed packet of questions,
 -- alternatives and rubric levels as type-level chains of labels, pools as
@@ -44,8 +48,8 @@ module Jev.Core.Schema
   , noul, choice, score, each, pool, eachIn, askAbout, given, about
   , Ref (..), PoolUse, Worded (..)
     -- * Results
-  , selectedKey, contenders, handle, accept, Doubt (..), Policy (..), Judged (..)
-  , massAtOrAbove, levelOf
+  , selectedKey, contenders, handle, accept, explain, Doubt (..), Policy (..)
+  , massAtOrAbove
     -- * The operation
   , Schema (..), PacketSchema, Model (..), jevLatest
   , request, decode, Response (..), JevError (..), roundTrip, jev1
@@ -66,6 +70,7 @@ import GHC.Records (HasField (..))
 import GHC.TypeLits
 import Jev.Core.Contract
 import Jev.Core.Json
+import Numeric (showFFloat)
 
 -- ---------------------------------------------------------------------------
 -- Modes and the interpretation of a cell
@@ -309,21 +314,33 @@ type family IndexIn (l :: Symbol) (ls :: [Symbol]) :: Nat where
 type PoolUse v = (Text, v)   -- pool name, serialized {key: description}
 
 data instance Q v Noul = NoulQ (Instructions v) (Presence (Maybe (Criteria v))) [PoolUse v]
+
+-- | What the provider said about a proposition, in one field.
 newtype instance A v Noul = NoulA { yes :: Double }
 
 data instance Q v (Choice alts) = ChoiceQ (Instructions v) (Alts (Offer v) alts)
+
+-- | What the provider chose, with everything a caller judges it by. Read
+-- the fields with record dot: @a.next.key@, @a.next.margin@.
 data instance A v (Choice alts) = Chosen
-  { chosen :: Selected v alts
-  , ranked :: [(Double, Selected v alts)]
-  , chosenConfidence :: Double
-  , chosenMasses :: [(Text, Double)]
+  { chosen :: Selected v alts            -- ^ the winner, carrying its payload
+  , key :: Text                          -- ^ the winner's wire key
+  , mass :: Double                       -- ^ the winner's probability
+  , margin :: Double                     -- ^ winner minus runner-up; the mass when it stands alone
+  , confidence :: Double                 -- ^ the provider's own confidence
+  , masses :: [(Text, Double)]           -- ^ the full distribution, best first
+  , ranked :: [(Double, Selected v alts)] -- ^ every alternative as a selection, best first
   }
 
 data instance Q v (Score levels) = ScoreQ (Instructions v) (Alts (Level v) levels)
+
+-- | Where on the rubric the provider landed. Read with record dot:
+-- @a.urgency.nearest@, @a.urgency.expectation@.
 data instance A v (Score levels) = Scored
-  { expectation :: Double
-  , scoreMasses :: [(Text, Double)]
-  , scoreConfidence :: Double
+  { expectation :: Double        -- ^ the expected level index
+  , nearest :: Text              -- ^ the label of the level nearest the expectation
+  , confidence :: Double         -- ^ the provider's own confidence
+  , masses :: [(Text, Double)]   -- ^ the distribution, by level label, in level order
   }
 
 newtype instance Q v (Each s) = EachQ [(Text, s (Questions v))]
@@ -343,17 +360,40 @@ data Ref v (n :: Symbol) a = Ref
   , refUse :: PoolUse v
   }
 
--- | The provider's confidence and the full distribution, for any judged
--- endpoint.
-class Judged (e :: Type) where
-  confidence :: A v e -> Double
-  masses :: A v e -> [(Text, Double)]
-instance Judged (Choice alts) where
-  confidence = chosenConfidence
-  masses = chosenMasses
-instance Judged (Score levels) where
-  confidence = scoreConfidence
-  masses = scoreMasses
+-- Internal readers: 'confidence' and 'masses' are fields of two records, so
+-- the module names them by pattern rather than by an ambiguous selector.
+chosenMasses :: A v (Choice alts) -> [(Text, Double)]
+chosenMasses Chosen { masses = ms } = ms
+
+chosenConfidence :: A v (Choice alts) -> Double
+chosenConfidence Chosen { confidence = c } = c
+
+scoreMasses :: A v (Score levels) -> [(Text, Double)]
+scoreMasses Scored { masses = ms } = ms
+
+scoreConfidence :: A v (Score levels) -> Double
+scoreConfidence Scored { confidence = c } = c
+
+-- | Answers print as their own fields. Probabilities are shown to two
+-- decimals: they are a provider's judgment, not an exact quantity.
+instance Show (A v Noul) where
+  show a = "Noul {yes = " <> T.unpack (fmt2 (yes a)) <> "}"
+
+instance Show (A v (Choice alts)) where
+  show a@Chosen { key = k, mass = m, margin = g } =
+    "Choice {key = " <> show k <> ", mass = " <> T.unpack (fmt2 m) <> ", margin = " <> T.unpack (fmt2 g)
+      <> ", confidence = " <> T.unpack (fmt2 (chosenConfidence a)) <> ", masses = " <> T.unpack (showMasses (chosenMasses a)) <> "}"
+
+instance Show (A v (Score levels)) where
+  show a@Scored { nearest = l, expectation = e } =
+    "Score {nearest = " <> show l <> ", expectation = " <> T.unpack (fmt2 e)
+      <> ", confidence = " <> T.unpack (fmt2 (scoreConfidence a)) <> ", masses = " <> T.unpack (showMasses (scoreMasses a)) <> "}"
+
+fmt2 :: Double -> Text
+fmt2 x = T.pack (showFFloat (Just 2) x "")
+
+showMasses :: [(Text, Double)] -> Text
+showMasses ms = "[" <> T.intercalate ", " [T.pack (show k) <> " " <> fmt2 m | (k, m) <- ms] <> "]"
 
 -- ---------------------------------------------------------------------------
 -- Builders (all total; shapes are checked at preparation)
@@ -420,6 +460,11 @@ about kv = reword (extras kv)
 selectedKey :: Alternatives alts => Selected v alts -> Text
 selectedKey = altKeyOf
 
+-- | A selection reads its own wire key: @s.key@, the same field an answer
+-- carries.
+instance Alternatives alts => HasField "key" (Selected v alts) Text where
+  getField = altKeyOf
+
 -- | The fundamental eliminator: a selection (the chosen one, an accepted
 -- one, or a contender) against a handler per alternative in declaration
 -- order. A missing, extra, or misordered handler is a type error naming
@@ -450,23 +495,39 @@ accept :: Alternatives alts => Policy -> A v (Choice alts) -> Either Doubt (Sele
 accept policy a =
   let winner = altKeyOf (chosen a)
       mass = maybe 0 id (lookup winner (chosenMasses a))
-      runnerUp = [r | r@(k, _) <- sortOn (negate . snd) (chosenMasses a), k /= winner]
+      runnerUp = [r | r@(k, _) <- chosenMasses a, k /= winner]
   in if chosenConfidence a < minConfidence policy then Left (Unconfident (chosenConfidence a))
      else if mass < minMass policy then Left (Underweight mass)
      else case runnerUp of
        (k2, p2) : _ | mass - p2 < minMargin policy -> Left (NearTie (winner, mass) (k2, p2))
        _ -> Right (chosen a)
 
+-- | One line explaining why 'accept' returned what it did: which check
+-- passed or failed, and the numbers behind it. Two-decimal formatting.
+explain :: forall alts v. Alternatives alts => Policy -> A v (Choice alts) -> Text
+explain policy a@Chosen { mass = mass, margin = margin } =
+  let conf = chosenConfidence a
+      items = [("confidence" :: Text, conf, minConfidence policy), ("mass", mass, minMass policy), ("margin", margin, minMargin policy)]
+  in case accept policy a of
+    Right _ -> "accepted: " <> T.intercalate ", " [n <> " " <> fmt2 v <> " \8805 " <> fmt2 t | (n, v, t) <- items]
+    Left doubt ->
+      let (ctor, failedName, failedValue, floorValue) = case doubt of
+            Unconfident c -> ("Unconfident", "confidence" :: Text, c, minConfidence policy)
+            Underweight m -> ("Underweight", "mass", m, minMass policy)
+            NearTie (_, m) (_, m2) -> ("NearTie", "margin", m - m2, minMargin policy)
+          floorLine = failedName <> " " <> fmt2 failedValue <> " < " <> fmt2 floorValue <> " by " <> fmt2 (floorValue - failedValue)
+          rest = [n <> " " <> fmt2 v | (n, v, _) <- items, n /= failedName]
+      in "doubted (" <> ctor <> "): " <> floorLine <> "; " <> T.intercalate ", " rest
+
 -- | Mass at or beyond a level, by label.
 massAtOrAbove :: forall l levels v. KnownNat (Index l levels) => Label l -> A v (Score levels) -> Double
 massAtOrAbove _ a = sum [m | (i, m) <- zip [0 :: Integer ..] (map snd (scoreMasses a)), i >= natVal (Proxy @(Index l levels))]
 
--- | The level nearest the expectation.
-levelOf :: A v (Score levels) -> Text
-levelOf a = case drop (round (expectation a)) (map fst (scoreMasses a)) of
+-- | The label of the level nearest an expectation, over the levels in order.
+nearestLevel :: Double -> [Text] -> Text
+nearestLevel e ls = case drop (round e) ls of
   l : _ -> l
-  [] -> maybe "" fst (safeLast (scoreMasses a))
-  where safeLast xs = if null xs then Nothing else Just (last xs)
+  [] -> if null ls then "" else last ls
 
 -- ---------------------------------------------------------------------------
 -- Paths and compilation output
@@ -541,7 +602,7 @@ instance JsonValue v => Endpoint v Noul where
     NoulAnswer x <- parseNoul (encodePath p) v
     Right (NoulA x)
   unwrapA = id
-  previewA a = jObject [("noul", jNumber (yes a))]
+  previewA a = jObject [("yes", jNumber (yes a))]
 
 instance (JsonValue v, Alternatives alts) => Endpoint v (Choice alts) where
   compileQ p (ChoiceQ i0 offer) = do
@@ -565,13 +626,28 @@ instance (JsonValue v, Alternatives alts) => Endpoint v (Choice alts) where
     let keys = map fst alts
     winner <- maybe (Left (UnknownSelection key sel)) Right (altSelect offer sel)
     distribution key keys ms conf
-    let rankedAll = [(m, s) | (k, m) <- sortOn (negate . snd) ms, Just s <- [altSelect offer k]]
-    Right (Chosen winner rankedAll conf (sortOn (negate . snd) ms))
+    let best = sortOn (negate . snd) ms
+        rankedAll = [(m, s) | (k, m) <- best, Just s <- [altSelect offer k]]
+        winnerKey = altKeyOf winner
+        winnerMass = maybe 0 id (lookup winnerKey best)
+        runnerUp = [m | (k, m) <- best, k /= winnerKey]
+        winnerMargin = case runnerUp of { m : _ -> winnerMass - m; [] -> winnerMass }
+    Right Chosen
+      { chosen = winner
+      , key = winnerKey
+      , mass = winnerMass
+      , margin = winnerMargin
+      , confidence = conf
+      , masses = best
+      , ranked = rankedAll
+      }
   unwrapA = id
-  previewA a = jObject
-    [ ("chosen", jString (altKeyOf (chosen a)))
+  previewA a@Chosen { key = k, mass = m, margin = g } = jObject
+    [ ("key", jString k)
+    , ("mass", jNumber m)
+    , ("margin", jNumber g)
     , ("confidence", jNumber (chosenConfidence a))
-    , ("probabilities", jObject [(k, jNumber m) | (k, m) <- chosenMasses a])
+    , ("masses", jObject [(mk, jNumber mm) | (mk, mm) <- chosenMasses a])
     ]
 
 orDecode :: Either PrepError x -> Text -> Either DecodeError x
@@ -595,12 +671,13 @@ instance (JsonValue v, Rubric levels) => Endpoint v (Score levels) where
     checkLegend key (map snd entries) lg
     checkExpectation key (length labels) e
     let byIndex = [(l, maybe 0 id (lookup i ms)) | (i, l) <- zip indices labels]
-    Right (Scored e byIndex conf)
+    Right Scored { expectation = e, nearest = nearestLevel e labels, confidence = conf, masses = byIndex }
   unwrapA = id
-  previewA a = jObject
-    [ ("score", jNumber (expectation a))
+  previewA a@Scored { expectation = e, nearest = l } = jObject
+    [ ("nearest", jString l)
+    , ("expectation", jNumber e)
     , ("confidence", jNumber (scoreConfidence a))
-    , ("probabilities", jObject [(l, jNumber m) | (l, m) <- scoreMasses a])
+    , ("masses", jObject [(ml, jNumber m) | (ml, m) <- scoreMasses a])
     ]
 
 checkLegend :: JsonValue v => Text -> [v] -> [(Text, v)] -> Either DecodeError ()
@@ -805,6 +882,11 @@ data Response v s = Response
   , usage :: v
   , diagnostics :: [Text]
   }
+
+-- | A response prints as its answers: the packet's labels over each
+-- answer's own fields, nested packets nested.
+instance (Show v, Schema v s) => Show (Response v s) where
+  show r = show (previewSchema (answers r))
 
 -- | Decode a response body against the packet that produced the request.
 decode :: Schema v s => s (Questions v) -> v -> Either JevError (Response v s)

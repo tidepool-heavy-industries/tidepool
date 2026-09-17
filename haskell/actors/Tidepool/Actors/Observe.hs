@@ -22,7 +22,7 @@ import Data.Text (Text)
 import Data.List (nub)
 import Data.Maybe (isNothing)
 import Prelude
-import Tidepool.Actors.Internal.Agent (AgentRef, agentIdentity, listAgents)
+import Tidepool.Actors.Internal.Agent (AgentRef, agentIdentity, listAgentsFull)
 import Tidepool.Effects.Core
 
 newtype SwarmSnapshot = SwarmSnapshot { snapshotActors :: [AgentRosterEntry] }
@@ -48,7 +48,7 @@ data UsageDelta = UsageDelta
   } deriving (Show, Eq)
 
 snapshot :: Member AgentInspection effects => Eff effects SwarmSnapshot
-snapshot = SwarmSnapshot <$> listAgents
+snapshot = SwarmSnapshot <$> listAgentsFull
 
 shareObservation :: Member AgentInspection effects => AgentRef -> AgentRef -> Eff effects ObservationShareResult
 shareObservation recipient scope = send (AgentShareObservationWith (agentIdentity recipient) (agentIdentity scope))

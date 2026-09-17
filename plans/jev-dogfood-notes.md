@@ -165,3 +165,111 @@ Open, by time cost:
 Next run moves to `~/dev/shoal-evals/tui-test-app` (small Rust TUI, five
 stub modules, seconds-fast `check.sh`): the orchestration loop is the object
 of study, not the code.
+
+## Run 5 (04c058ee, tui-test-app)
+
+Sol low root, Luna children, three waves over `TASKS.md`. The whole loop
+ran end to end in about 17 minutes: five implementers admitted in one
+`unfold` (settled in 4m50s, four of five clean on the first pass), five
+fresh reviewers (all Accept in 75 s), Jev risk-ranked `tryMerge`s into
+`shoal/integration`, `check.sh` green on the integrated revision (verified
+by the operator: 18 of 18 tests), ten `AgentStoppedNow` stops with complete
+receipts. `main` untouched. Log: `~/dev/shoal-evals/tui-test-app/.shoal/
+dogfood-notes-run5.md`; observer: `~/.claude/jobs/4940a626/tmp/observer-run5.md`.
+
+Jev, 23 calls, all from the root:
+
+- One packet classified all five children's test outputs (saved four model
+  turns by Sol's count).
+- The reflex over the integrated `check.sh` output classified `pass` at 0.98.
+- `sufficient diff testOutput` as a bare Noul scored 0.47 to 0.54 on every
+  candidate: a vague judgment question, uninformative by construction. The
+  measured rule applies: ask condition-descriptive questions over named
+  fields, not "is this sufficient".
+- The artifact-only `J.accept` merge gate (0.70 / 0.40 / 0.85) accepted two
+  candidates and returned `Unconfident` for list 0.75, help 0.82, store
+  0.44. Sol inspected those diffs itself and merged on the reviewers'
+  verdicts; nothing broke. The two near the floor argue for `spawning`-level
+  confidence on a reviewed, test-passing diff; store at 0.44 is the case the
+  gate exists for and deserved a repair request or a second reviewer.
+- The risk `Score` for store came back "medium" with confidence 0.0; check
+  how a Score's confidence is derived when the mass is flat.
+
+Friction, new:
+
+- The root cannot read children's worktrees: `cargo test` from the
+  `WorktreeReceipt.cwd` paths failed with `could not find Cargo.toml`. By
+  construction (each actor sees its own mount); the docs should say that
+  artifacts travel in typed replies, which is what worked.
+- `Cmd.withArguments [commit, "--", file] [bash|git show --format=|]`: the
+  arguments became shell positionals, not git arguments; `"$1" -- "$2"` in
+  the quasiquote fixed it. A `doc` line on how `withArguments` binds.
+- Inferred `Text` where `Label` was required in the multi-child cell;
+  `Ambiguous type variable parent0 ... Contains Replies parent0` when
+  wrapping `child` in a helper; `Overlapping instances for Render (f0
+  Double)` on an ambiguous numeric in a displayed tuple (twice); a
+  `Cmd.OutputIssue -> String` vs `Text` slip. All "unresolved type variable
+  meets the wrapper" or String/Text: candidates for one `doc workbench`
+  paragraph and for defaulting in the cell templates.
+- The child-side `respond` signature took one child three tries (an extra
+  first argument, then a `Reply` wrapper).
+- No `doc` topic for record actors, so that pattern was skipped: the
+  skills gap from wave 2.
+- Sol wrote its log in three batches instead of incrementally; the
+  operator survey is the reliable record.
+
+## Wave 3 candidates (from Astra's review, 2026-09-17)
+
+- Ambiguous-type diagnostic: name the ambiguous binding or expression,
+  distinguish authored ambiguity from a generated-wrapper failure, and show
+  the annotation at the smallest useful location when derivable. "Add a
+  signature" alone still leaves the model guessing; a model dropping the
+  field is the signal the repair is dearer than abandoning it.
+- Cleanup: one operation that plans and executes and returns the typed
+  receipt, keeping `planCleanupFor`/`executeCleanup` for preview or
+  selective execution; it earns its place only if it owns target validation
+  and the plan-to-execute delta.
+- Gate evidence provenance: the parent's own `git diff <base>..<oid>` is
+  the evidence; the child's file list is a claim to check. Truncated hunks
+  or omitted files must be explicit in the state (E13/E14 on the laptop
+  measure this).
+- The strongest finding to preserve: a structured `Doubt` elicited useful
+  recovery from Sol without a prescribed workflow. Make missing evidence
+  similarly explicit.
+- E13/E14 (laptop, `plans/jev/addendum-E13-E14-provenance-2026-09-17.md`):
+  the gate's evidence must be the parent's own `git diff <base>..<oid>`;
+  a child-reported state passed a planted omitted-file case at 0.95 that
+  the parent-derived state failed at 1.00. With every hunk removed the gate
+  still accepted at 0.62 to 0.82: confidence measures the options in view,
+  not what is missing. Coverage is a code check before the packet is sent.
+- Ideas from the laptop worth a wave: field ablation as a gate diagnostic
+  (drop each state field, see what moves; a field that moves nothing is
+  unused or ignored); anchors (one known-good, one known-bad item) in every
+  judgment pool; replay the ledger against `jev-preview` before the alias
+  moves; a question linter (paraphrase delta over 0.1 marks a judgment
+  question); a code-keyed reflex over the notebook's own GHC errors (Label
+  vs Text, Render ambiguity, ZonkAny, String vs Text) with a suggested
+  rewrite attached to the cell error; contradiction "does A contradict B"
+  over commit message vs diff, brief vs implementation, doc vs code.
+
+## Wave 2 landed (after run 5)
+
+Five edit-only parcels, one compile: root allocations land in a root-owned
+`worktrees/root/` directory that is writable to the root at launch, and
+`register_source_checkout` scans registry records without deriving liveness
+(the run-4 stale-worktree fault; the binding key already carried the run id);
+ambiguous-type GHC diagnostics (`ZonkAny`, `Render (f0 …)`, bare `error`) are
+rewritten to "this declaration's type is ambiguous; add a signature"
+(defaulting cannot reach any of the three); no notice for a watch cleanup
+forgot; `listAgents` returns a ten-field `AgentSummary`, `listAgentsFull`
+the record; the child's activation message shows the concrete `respond`
+call; four skills (`shoal-jev`, `shoal-cleanup`, `shoal-unfold`,
+`shoal-workbench`) plus `doc actors`, `doc topics` lists skills; jev-dsl
+answers are record-dot fields with `Show`/`ToJSON`, `ask`/`ask1` primary,
+published at github.com/inanna-malick/jev-dsl; the vendored copy resynced.
+
+Not done: `responseSettledAt` (no clock in the `Replies` GADT and no Rust
+projection of `ResponseResult`; needs a small effect). Spot tests: 47 of 49
+pass; `typed_reply_settles…` (pre-existing Text quoting) and
+`activation_presents_prose…` (a long-Text display truncation assertion, same
+family, not verified against main) fail.

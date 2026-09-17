@@ -60,27 +60,33 @@ don't retry blindly.
   exit alternative — a no-match key, or a `defer_to_model`-style key when
   resolving needs judgment the packet can't supply. A `choice` without an
   exit still picks something; it can't say "none of these."
-- **`noul`** asks a yes/no likelihood question; read it with `J.yes`.
+- **`noul`** asks a yes/no likelihood question; read it as `a.thing.yes`.
 - **`score`** grades against an ordered rubric built from
-  `J.level #key "wording"` chained with `.|`; read with `J.levelOf`,
-  `J.expectation`, `J.massAtOrAbove`.
+  `J.level #key "wording"` chained with `.|`; read `.nearest`, `.expectation`
+  and `.confidence`, or `J.massAtOrAbove` for a movable threshold.
 - **Packets** are built as `#key := question :& ... :& J.Nil`; two packets
   join with `J.++.`. Nested packets flatten to dotted wire paths. A
   duplicate label is a compile error naming it.
 - **Reading answers** uses record dot on the `Answers` value: `a.next`,
-  `a.enough`, `a.children` (a list of `(key, subAnswers)`).
+  `a.enough`, `a.children` (a list of `(key, subAnswers)`). Each answer cell
+  carries its own fields: a choice has `.key`, `.mass`, `.margin`,
+  `.confidence` and `.masses`; a noul has `.yes`; a score has `.expectation`,
+  `.nearest`, `.masses` and `.confidence`; a `Selected` has `.key`. A whole
+  `Response` displays as an object of those fields, so ending a cell with the
+  bound `answer` shows every question's distribution without a projection.
 - **`J.handle`/`J.onMany`** eliminate a choice exhaustively, in the
   alternatives' declaration order — a handler list is an ordinary value, so
   bind it once and reuse it for the winner and for every contender.
 - **`J.contenders floor answer`** reads every alternative at or above a mass
   floor, best first, not just `J.chosen`; a near tie is itself a typed
   outcome worth branching on.
-- **`J.accept policy answer`** applies a
-  `J.Policy {J.minMass, J.minMargin, J.minConfidence}` (the fields are
-  qualified too) and returns the selection or a typed `J.Doubt`
-  (`NearTie`, `Underweight`, `Unconfident`). Set thresholds from what you
-  observe, not by guessing. `fmap J.selectedKey` turns an accepted selection
-  into plain `Text` for display or a later cell.
+- **`J.accept policy answer`** applies one of the three named policies —
+  `J.routing`, `J.spawning`, `J.merging` — and returns the selection or a
+  typed `J.Doubt` (`NearTie`, `Underweight`, `Unconfident`). Choose the
+  policy by what the answer authorizes, not by the question's wording.
+  `fmap J.selectedKey` turns an accepted selection into plain `Text`, and
+  `J.explain policy answer` states in one line why it was accepted or
+  doubted — put that in the notice, not the raw distribution.
 - Keys and wording are model-facing: name alternatives by what choosing them
   means (`use_witness`, `not_in_file`, `defer_to_model`), never `a`/`b`/a
   counter. State is structured JSON context, built once and reused across
@@ -97,17 +103,22 @@ Measured on 2026-09-17 (262 calls, `jev-1.13.0`):
   move it. If the 1.0 surprises you, the option you expected to compete is
   missing; add it. If it does not surprise you, the question was not worth
   asking.
-- Options describe; they never argue. "Despite existing coverage" and "the
-  report has not shown X" both steer the answer. Write what the option would
-  do, not why it is good or bad.
+- Options describe the condition that makes them apply, in terms of fields
+  the state has: "the report names a target file, a duplication check, a
+  scope and an acceptance criterion". Not the action ("launch the child
+  now", which flattens toward the prior) and not the argument ("despite
+  existing coverage", which steers). A condition turns the gate into a
+  checklist Jev verifies field by field.
 - Rivals come from evidence, not from your own shortlist, or the pool
   inherits your ranking.
 - Gate on confidence first. Over 42 labelled choices both wrong answers sat
   below 0.25 confidence; mass and margin floors added nothing below 0.85.
-  Defaults by stakes, as `J.Policy { J.minMass, J.minMargin, J.minConfidence }`:
-  routing (which file, which skill) 0.40 / 0.08 / 0.50; spawning a worker or
-  choosing an approach 0.55 / 0.20 / 0.70; merging, stopping, anything with
-  a receipt 0.70 / 0.40 / 0.85.
+  The three named policies are those measured thresholds, by stakes:
+  `J.routing` (which file, which skill) 0.40 / 0.08 / 0.50; `J.spawning`
+  (launching a worker, choosing an approach, accepting a reviewed diff)
+  0.55 / 0.20 / 0.70; `J.merging` (merging, stopping, anything with a
+  receipt, or a diff nobody reviewed) 0.70 / 0.40 / 0.85. Pick by stakes;
+  do not hand-tune a fourth.
 - Gate on the artifact, not the narration: a diff and test output, never
   the child's own report. With the artifact present a lying report moved no
   answer more than 0.08; with only the report, confidence fell to 0.07.
@@ -115,8 +126,18 @@ Measured on 2026-09-17 (262 calls, `jev-1.13.0`):
   content questions per file on its hunks, files in parallel. State plus
   questions is capped at 32k tokens; a larger state is `Left (JevHttp 400
   …max_tokens_exceeded…)`, and a 30k whole diff already drops confidence.
+- A gate is an ordinary `choice` with three condition-descriptive options:
+  every named item is present; at least one named item is absent; the state
+  contradicts one of them (that last one hands back to the model). Name the
+  items. "Is the report sufficient?" measures nothing; "the report names a
+  target file, a duplication check, a scope, an acceptance criterion and its
+  failure evidence" is a checklist Jev verifies field by field, and it moved
+  confidence from 0.58 to 0.92 with zero variance on eight repeats.
+- A judgment `noul` states both conditions in its question text, or attaches
+  them with `J.about`: what a yes means and what a no means, in the same
+  field terms. A bare "is this good enough" inherits the prior.
 
-Read `J.contenders` and `J.confidence`, not only `J.chosen`. When the result
+Read `J.contenders` and `a.confidence`, not only `a.key`. When the result
 gates an action, gate on `J.accept policy answer`. A judgment is still
 evidence, not authority.
 
@@ -139,7 +160,7 @@ pickChild results = do
     Left err -> do
       say ("jev unavailable (" <> show err <> "), falling back to reading in order")
       pure (fmap (\(_, _, r) -> r) (listToMaybe results))
-    Right a -> pure (J.handle (J.chosen a) (J.onMany (\_ payload -> payload)))
+    Right a -> pure (J.handle a.chosen (J.onMany (\_ payload -> payload)))
 ```
 
 A `Left` here is not fatal: the cell falls back to its own policy (read in
@@ -164,13 +185,14 @@ let packet =
         :& #per := J.eachIn files (\r -> #relevant := J.askAbout r "Is this file relevant to the timeout?" :& J.Nil)
         :& #fixed := J.given "The retry loop changed yesterday" (J.noul "Is the timeout already fixed?")
         :& J.Nil
-let policy = J.Policy { J.minMass = 0.5, J.minMargin = 0.2, J.minConfidence = 0.5 }
 answer <- J.ask (J.state (object ["failure" .= ("fetch times out after 3 retries" :: Text)])) packet
-fmap (\r -> let a = J.answers r in (fmap J.selectedKey (J.accept policy a.best), [(k, J.yes s.relevant) | (k, s) <- a.per], J.yes a.fixed)) answer
+fmap (\r -> let a = J.answers r in (fmap J.selectedKey (J.accept J.routing a.best), [(k, s.relevant.yes) | (k, s) <- a.per], a.fixed.yes)) answer
 ```
 
 The last line keeps only plain values: the accepted key or the doubt, a
-relevance likelihood per file, and the likelihood under the premise.
+relevance likelihood per file, and the likelihood under the premise. Ending
+the cell with the bound `answer` instead displays every distribution, which
+is what you want the first few times you write a packet.
 
 ## A Jev-dense cell
 
@@ -198,7 +220,7 @@ let packet =
         :& #worth_reading := J.eachIn files (\r -> #keep := J.askAbout r "Worth reading in full for this review?" :& J.Nil)
         :& J.Nil
 answer <- J.ask (J.state (object ["task" .= ("triage files before a focused review" :: Text)])) packet
-fmap (\r -> let a = J.answers r in (J.yes a.enough, [(k, J.yes s.keep) | (k, s) <- a.worth_reading])) answer
+fmap (\r -> let a = J.answers r in (a.enough.yes, [(k, s.keep.yes) | (k, s) <- a.worth_reading])) answer
 ```
 
 Two cells replace the several model turns it takes to read files one by one
@@ -237,3 +259,5 @@ A call costs a small fraction of a cent at published rates. Prefer one
 question-rich packet over several thin ones when the evidence for all of
 them is already at hand — see Cost, above, for the loop-level version of
 this rule.
+
+skill: shoal-jev

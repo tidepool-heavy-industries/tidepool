@@ -45,3 +45,5 @@ existential declarations require an authored instance when structural display
 is needed.
 Declarations and bindings persist between cells. Earlier closures retain the
 definitions they captured; rebinding a name does not rewrite them.
+
+skill: shoal-workbench

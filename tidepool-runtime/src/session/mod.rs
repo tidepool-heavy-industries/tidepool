@@ -90,7 +90,8 @@ pub use workbench::{
 };
 
 pub use turn::{
-    assemble_bind_module, assemble_display_expression_module, assemble_expression_module,
+    ambiguous_type_advice, assemble_bind_module, assemble_display_expression_module,
+    assemble_expression_module,
     assemble_inspection_module, assemble_opaque_expression_module, check_cell, classify_block,
     enable_no_monomorphism_restriction, insert_preamble_imports, place_turn_stmt,
     prepared_scaffold_binding, render_cell_compile_error, render_template,
@@ -100,7 +101,8 @@ pub use turn::{
     CellSourceSpan, CheckedBinderPin, CompiledTurn, DeclarationReceipt, DeclarationSource,
     ExpressionLift, LocatedImport, LocatedPragma, PragmaKind, PreparedTurn, SourcePrologue,
     TemplateSelector, TurnClassification, TurnCode, TurnFailure, TurnKind, TurnRequest, TurnResult,
-    TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE, PREPARED_SCAFFOLD_TARGET,
+    TurnTemplate, ValueTier, AMBIGUOUS_TYPE_ADVICE, DECL_TEMPLATE_SOURCE,
+    PREPARED_SCAFFOLD_TARGET,
 };
 
 /// Host-visible reentry state for one resident session.

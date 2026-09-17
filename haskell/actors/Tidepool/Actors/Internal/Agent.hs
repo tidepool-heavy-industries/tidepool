@@ -43,7 +43,10 @@ module Tidepool.Actors.Internal.Agent
   , agentBoundWorktree
   , observeAgent
   , lookupAgent
+  , AgentSummary (..)
+  , agentSummary
   , listAgents
+  , listAgentsFull
   , findAgentsByLabel
   , AgentForgetOutcome (..)
   , forgetAgent
@@ -111,6 +114,7 @@ import Tidepool.Effects.Core
   , AgentStopControlOutcome (..)
   , AgentInspection (..)
   , AgentLaunch (..)
+  , AgentDisposition (..)
   , AgentRosterEntry (..)
   , AgentRosterState (..)
   , Forks (..)
@@ -188,13 +192,54 @@ rosterAgentState entry = case rosterState entry of
   RosterFailed summary -> AgentFailed summary
   RosterCancelled summary -> AgentCancelled summary
 
-listAgents :: Member AgentInspection effs => Eff effs [AgentRosterEntry]
-listAgents = send AgentListWith
+-- | What a supervisor reads when it asks who is out there: identity, what
+-- model it asked for and what answered, whether the actor is running, what it
+-- is doing, what it is doing it in, and when it started.
+--
+-- A roster entry carries everything the host observes, usage samples and
+-- provider threading included. Five of those fill a screen, so the list view
+-- is this projection and the whole record stays one 'lookupAgent' away.
+data AgentSummary = AgentSummary
+  { summaryActorId :: Int
+  , summaryIncarnation :: Int
+  , summaryLabel :: Text
+  , summaryRequestedModel :: Maybe Text
+  , summaryConfirmedModel :: Maybe Text
+  , summaryState :: AgentRosterState
+  , summaryDisposition :: Maybe AgentDisposition
+  , summaryCurrentRequests :: [Int]
+  , summaryBoundWorktree :: Maybe Text
+  , summaryLaunchedAtUnixMs :: Maybe Int
+  }
+  deriving (Show, Eq)
+
+agentSummary :: AgentRosterEntry -> AgentSummary
+agentSummary entry = AgentSummary
+  { summaryActorId = rosterActorId entry
+  , summaryIncarnation = rosterActorIncarnation entry
+  , summaryLabel = rosterLabel entry
+  , summaryRequestedModel = rosterRequestedModel entry
+  , summaryConfirmedModel = rosterConfirmedModel entry
+  , summaryState = rosterState entry
+  , summaryDisposition = rosterDisposition entry
+  , summaryCurrentRequests = rosterCurrentRequests entry
+  , summaryBoundWorktree = rosterBoundWorktree entry
+  , summaryLaunchedAtUnixMs = rosterLaunchedAtUnixMs entry
+  }
+
+listAgents :: Member AgentInspection effs => Eff effs [AgentSummary]
+listAgents = map agentSummary <$> listAgentsFull
+
+-- | The unprojected roster. Callers that fold over the host's full
+-- observation (usage totals, provider threading, context parentage) take this
+-- one; a supervisor reading the roster takes 'listAgents'.
+listAgentsFull :: Member AgentInspection effs => Eff effs [AgentRosterEntry]
+listAgentsFull = send AgentListWith
 
 -- | Every visible actor carrying this label, retired incarnations included,
 -- so a reused or ambiguous label shows all its matches.
 findAgentsByLabel :: Member AgentInspection effs => Text -> Eff effs [AgentRosterEntry]
-findAgentsByLabel label = filter ((== label) . rosterLabel) <$> listAgents
+findAgentsByLabel label = filter ((== label) . rosterLabel) <$> listAgentsFull
 
 data AgentForgetOutcome
   = AgentForgotten

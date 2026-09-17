@@ -186,6 +186,7 @@ pub fn agent_inspection() -> Effect {
                             "rosterWorkbenchPosture",
                             HsType::Named("AgentWorkbenchPosture"),
                         ),
+                        field("rosterLaunchedAtUnixMs", HsType::maybe(HsType::Int)),
                     ],
                 },
                 json: JsonInstance::None,

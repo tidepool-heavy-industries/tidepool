@@ -426,6 +426,38 @@ impl WorktreeManager {
         &self.worktree_root
     }
 
+    /// Directory name, under [`Self::managed_root`], holding the worktrees the
+    /// root actor allocates for its OWN use. Children's worktrees are read-only
+    /// to the root; the root's own are not, and the two therefore cannot share
+    /// one directory when a single read-only bind covers the whole managed root.
+    pub const ROOT_ALLOCATION_DIR: &'static str = "root";
+
+    /// The same manager, materializing new worktrees under `worktree_root`
+    /// instead of this one's.
+    ///
+    /// Registry, Git, and source repository are SHARED: a worktree created
+    /// through the returned manager is an ordinary registered worktree, so
+    /// lookup, observation, merge, retirement, and materialization all reach it
+    /// exactly as they reach any other. Only the directory the checkout lands
+    /// in differs.
+    #[must_use]
+    pub fn with_worktree_root(&self, worktree_root: impl Into<PathBuf>) -> Self {
+        Self {
+            git: self.git.clone(),
+            registry: self.registry.clone(),
+            worktree_root: worktree_root.into(),
+            source_repository: self.source_repository.clone(),
+        }
+    }
+
+    /// The manager that materializes the ROOT actor's own allocations, in a
+    /// directory distinct from every child's so it can be made writable to the
+    /// root without also opening children's checkouts to it.
+    #[must_use]
+    pub fn root_allocations(&self) -> Self {
+        self.with_worktree_root(self.worktree_root.join(Self::ROOT_ALLOCATION_DIR))
+    }
+
     /// Repository used by [`WorktreeSource::CurrentRepository`].
     pub fn source_repository(&self) -> &Path {
         &self.source_repository
@@ -455,16 +487,16 @@ impl WorktreeManager {
                     path: source.clone(),
                     detail: error.to_string(),
                 })?;
-        if let Some(receipt) = self
-            .registry
-            .list_with_git(&self.git)?
-            .into_iter()
-            .find_map(|summary| {
-                (summary.receipt.origin == WorktreeOrigin::SourceCheckout
-                    && summary.receipt.cwd.canonicalize().ok().as_ref() == Some(&canonical_source))
-                .then_some(summary.receipt)
-            })
-        {
+        // Records only — see `WorktreeRegistry::receipts`. Asking whether THIS
+        // checkout is already registered must not depend on the filesystem
+        // health of every other retained worktree: a previous run's child whose
+        // retirement failed left a `Mounted` receipt whose view this process
+        // never installed, and deriving liveness for it turned the root's own
+        // `boundWorktree` into `StorageFailure ... requires filesystem recovery`.
+        if let Some(receipt) = self.registry.receipts()?.into_iter().find(|receipt| {
+            receipt.origin == WorktreeOrigin::SourceCheckout
+                && receipt.cwd.canonicalize().ok().as_ref() == Some(&canonical_source)
+        }) {
             return Ok(WorktreeHandle::from_receipt(receipt));
         }
 

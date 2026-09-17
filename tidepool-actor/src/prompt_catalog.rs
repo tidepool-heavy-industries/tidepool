@@ -92,6 +92,7 @@ pub(crate) fn workbench_doc(topic: &str) -> Result<&'static str, String> {
         "request" | "requests" => Ok(include_str!("../../prompts/shoal/docs/request.md")),
         "unfold" | "fork" | "forks" => Ok(include_str!("../../prompts/shoal/docs/unfold.md")),
         "jev" => Ok(include_str!("../../prompts/shoal/docs/jev.md")),
+        "actors" | "actor" | "record" => Ok(include_str!("../../prompts/shoal/docs/actors.md")),
         "watch" | "watches" | "poll" => Ok(include_str!("../../prompts/shoal/docs/watch.md")),
         "deadline" | "deadlines" | "duration" => {
             Ok(include_str!("../../prompts/shoal/docs/deadline.md"))
@@ -103,7 +104,8 @@ pub(crate) fn workbench_doc(topic: &str) -> Result<&'static str, String> {
         "lineage" | "status" | "trace" => Ok(include_str!("../../prompts/shoal/docs/lineage.md")),
         "recovery" | "recover" => Ok(include_str!("../../prompts/shoal/docs/recovery.md")),
         "help" | "topics" => Ok(
-            "Shoal topics: tree, workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery, jev. Use hosted `lookup` with `doc <topic>`.",
+            "Shoal topics: tree, workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors. Use hosted `lookup` with `doc <topic>`.\n\
+             Load the skill first where one exists; a topic is the fallback. Workspace skills: shoal-jev (judgment-model packets and gates), shoal-unfold (multi-child unfolds and reading a child's commit), shoal-workbench (cells that typecheck the first time), shoal-cleanup (retiring workers and groups), shoal-fork, shoal-coordinate, shoal-review, shoal-command, shoal-define-actors.",
         ),
         other => Err(format!(
             "unknown Shoal documentation topic `{other}`; use hosted `lookup` with `doc`"
@@ -143,6 +145,24 @@ mod tests {
             .contains("retained handles"));
         assert!(workbench_doc("lineage").unwrap().contains("trace"));
         assert!(workbench_doc("recovery").unwrap().contains("recovery"));
+        assert!(workbench_doc("actors").unwrap().contains("R.settlement"));
+        // Every topic with a workspace skill names it on its last line, and the
+        // topic listing names the skills beside the topics.
+        for (topic, skill) in [
+            ("actors", "shoal-define-actors"),
+            ("cleanup", "shoal-cleanup"),
+            ("jev", "shoal-jev"),
+            ("unfold", "shoal-unfold"),
+            ("workbench", "shoal-workbench"),
+        ] {
+            let body = workbench_doc(topic).unwrap();
+            assert_eq!(
+                body.trim_end().lines().last(),
+                Some(format!("skill: {skill}").as_str()),
+                "`doc {topic}` must end by naming {skill}"
+            );
+            assert!(workbench_doc("topics").unwrap().contains(skill));
+        }
         assert_eq!(hosted_prompt_fingerprint().len(), 64);
         assert!(workbench_doc("missing").is_err());
     }

@@ -80,7 +80,7 @@ inspect :: AgentRef -> Eff ActorEffects AgentObservation
 inspect = observeAgent
 
 inspectAll :: Eff ActorEffects [AgentRosterEntry]
-inspectAll = listAgents
+inspectAll = listAgentsFull
 
 inspectSelf :: Eff ActorEffects ActorContextInfo
 inspectSelf = actorContext

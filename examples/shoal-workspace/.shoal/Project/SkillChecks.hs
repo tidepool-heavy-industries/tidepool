@@ -71,3 +71,43 @@ skills = do
   void $ turn (checkActor interface) "respond (Produced found)"
   void $ turn (checkActor consumer) "respond (Produced found)"
   void $ turn owner "drained <- finishWork router\nlet Just group = forkGroupHandle interface\nreleased <- releaseGroup group\ninspectFull released"
+
+  -- The workbench skill's cells are the ones a model copies verbatim; each
+  -- must typecheck and run with no surrounding context. Block 4 reads files
+  -- and block 6 describes a command, so both need a command owner and are
+  -- exercised by the shoal-command material instead.
+  void $ example owner "shoal-workbench" 0
+  converted <- example owner "shoal-workbench" 1
+  check "the workbench skill renders an Int into Text with T.pack . show"
+    ("retry budget 3 exhausted" `Text.isInfixOf` output converted)
+  annotated <- example owner "shoal-workbench" 2
+  check "an annotated polymorphic binding installs without being forced"
+    ("annotated" `Text.isInfixOf` output annotated)
+  void $ example owner "shoal-workbench" 3
+  void $ example owner "shoal-workbench" 5
+
+  -- The Jev skill's packets must compile against the real operators and
+  -- resolve to a typed value whether or not an endpoint is configured. Block 0
+  -- gathers previews with commands; the packet that judges them is block 1.
+  void $ turn owner "let previews = [(\"README.md\", \"# jev-dsl\\ntyped packets\"), (\"LICENSE\", \"MIT\")] :: [(Text, Text)]"
+  void $ example owner "shoal-jev" 1
+  gated <- example owner "shoal-jev" 2
+  check "the review gate resolves to an accepted key or a stated doubt"
+    (any (`Text.isInfixOf` output gated) ["jev unavailable", "hold", "all_present", "one_absent", "contradicts"])
+  continued <- example owner "shoal-jev" 3
+  check "the selected continuation is what runs, not a key string"
+    (any (`Text.isInfixOf` output continued) ["jev unavailable", "would rerun", "reading the failure by hand"])
+  void $ example owner "shoal-jev" 4
+
+  -- The unfold skill's launch and watch cells are the published doc examples;
+  -- these two read a child's identity and its submission without touching the
+  -- child's own checkout.
+  void $ example owner "shoal-unfold" 2
+  observedSubmission <- example owner "shoal-unfold" 3
+  check "a settled child is inspected through its typed submission evidence"
+    (not (Text.null (output observedSubmission)))
+
+  -- Cleanup is inspected before it is executed; the plan is a value.
+  planned <- example owner "shoal-cleanup" 0
+  check "the cleanup skill inspects a typed plan without retiring anything"
+    ("Cleanup" `Text.isInfixOf` lastOutput planned)

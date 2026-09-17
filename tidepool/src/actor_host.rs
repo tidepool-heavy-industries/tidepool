@@ -1628,18 +1628,36 @@ fn actor_worktree_resources_at(
 ) -> Result<(WorktreeManager, BindingTable), tidepool_worktree::WorktreeError> {
     let registry = WorktreeRegistry::open(root.join("registry"))?;
     let worktree_root = root.join("worktrees");
-    std::fs::create_dir_all(&worktree_root).map_err(|error| {
-        tidepool_worktree::WorktreeError::StorageFailure {
-            path: worktree_root.clone(),
-            detail: error.to_string(),
-        }
-    })?;
+    // The root's own allocation directory exists before ANY launch: a mount
+    // boundary canonicalizes each writable root it is given, and the root's
+    // namespace is fixed at launch, so a directory created later would be
+    // unreachable to the process that needs to build in it.
+    for directory in [
+        &worktree_root,
+        &worktree_root.join(WorktreeManager::ROOT_ALLOCATION_DIR),
+    ] {
+        std::fs::create_dir_all(directory).map_err(|error| {
+            tidepool_worktree::WorktreeError::StorageFailure {
+                path: directory.clone(),
+                detail: error.to_string(),
+            }
+        })?;
+    }
     Ok((
         WorktreeManager::new(GitCli::new(), registry, worktree_root, workspace),
         BindingTable::open_with_timeout(root.join("bindings"), Duration::from_secs(10))?,
     ))
 }
 
+/// The run id, as the durable principal and resource namespace for ONE host run.
+///
+/// `run_root` is `.../shoal/runs/<run id>`, so its file name IS the run id the
+/// host loop was launched with. Every principal spelled with this namespace
+/// (see [`tidepool_worktree::AgentRef::exact_actor`]) is therefore unreachable
+/// from any other run — which matters because the binding table is durable and
+/// per-project while actor identities restart from zero in each run, and a
+/// degraded teardown retains its `Active` row rather than manufacturing
+/// cleanup evidence.
 fn runtime_namespace(run_root: &Path) -> String {
     run_root
         .file_name()
@@ -5068,17 +5086,30 @@ fn worktree_grant(role: tidepool_actor::ActorRole) -> ActorWorktreeGrant {
     }
 }
 
+/// The writable filesystem roots one actor's mount boundary grants.
+///
+/// `root_worktrees` is the directory the ROOT's own allocations materialize in
+/// (`WorktreeManager::root_allocations`). The root has to be able to BUILD in a
+/// worktree it allocated for itself — running the project's check script in an
+/// integration worktree is ordinary root work — and the mount namespace is
+/// fixed at launch, so that directory is granted up front. Children's worktrees
+/// stay under the managed root, which is read-only to everyone including the
+/// root: the root reads a child's work through the shared Git namespace and
+/// typed observation, never by writing in the child's checkout.
 fn writable_repository_roots(
     root: bool,
     workspace_access: tidepool_actor::WorkspaceAccess,
     source: &Path,
     worker_worktree: Option<&Path>,
     git_common_dir: &Path,
+    root_worktrees: Option<&Path>,
 ) -> Vec<PathBuf> {
     let mut writable = if root {
         // Integration advances the source HEAD; child coding happens only in
         // the exact linked worktree granted to that child.
-        vec![source.to_path_buf()]
+        let mut writable = vec![source.to_path_buf()];
+        writable.extend(root_worktrees.map(Path::to_path_buf));
+        writable
     } else if workspace_access == tidepool_actor::WorkspaceAccess::WritableBound {
         worker_worktree.map(Path::to_path_buf).into_iter().collect()
     } else {
@@ -6242,6 +6273,7 @@ mod tests {
                 source,
                 None,
                 common,
+                None,
             ),
             vec![source.to_path_buf(), common.to_path_buf()]
         );
@@ -6252,6 +6284,7 @@ mod tests {
                 source,
                 Some(worker),
                 common,
+                None,
             ),
             vec![worker.to_path_buf(), common.to_path_buf()]
         );
@@ -6262,8 +6295,53 @@ mod tests {
                 source,
                 Some(worker),
                 common,
+                None,
             ),
             Vec::<PathBuf>::new()
+        );
+    }
+
+    /// The root has to be able to run the project's own build in a worktree it
+    /// allocated for itself. Children's worktrees are a different directory and
+    /// stay read-only to the root.
+    #[test]
+    fn the_root_may_build_in_its_own_worktrees_but_not_in_a_child_s() {
+        let source = Path::new("/source");
+        let common = Path::new("/source/.git");
+        let managed = Path::new("/state/actor-worktrees/p/worktrees");
+        let root_worktrees = managed.join(WorktreeManager::ROOT_ALLOCATION_DIR);
+
+        let writable = writable_repository_roots(
+            true,
+            tidepool_actor::WorkspaceAccess::WritableBound,
+            source,
+            None,
+            common,
+            Some(&root_worktrees),
+        );
+        assert!(
+            writable.contains(&root_worktrees),
+            "the root's own allocations are writable to it: {writable:?}"
+        );
+        assert!(
+            root_worktrees.starts_with(managed),
+            "the root directory must nest inside the managed root, which is the boundary's read-only root"
+        );
+        assert!(
+            !writable.iter().any(|path| path == managed),
+            "a child's worktree stays read-only to the root: {writable:?}"
+        );
+        assert!(
+            !writable_repository_roots(
+                false,
+                tidepool_actor::WorkspaceAccess::WritableBound,
+                source,
+                Some(&managed.join("wt-child")),
+                common,
+                Some(&root_worktrees),
+            )
+            .contains(&root_worktrees),
+            "a child never receives the root's allocation directory"
         );
     }
 

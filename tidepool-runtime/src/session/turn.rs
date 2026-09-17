@@ -682,6 +682,43 @@ impl From<std::io::Error> for TurnFailure {
     }
 }
 
+/// The one sentence a model gets when a submitted binding's type never became
+/// concrete. It names the repair (a signature) rather than the compiler
+/// artifact the ambiguity leaked as.
+pub const AMBIGUOUS_TYPE_ADVICE: &str =
+    "this declaration's type is ambiguous; add a signature (e.g. `:: Text`)";
+
+/// Recognize a GHC diagnostic that only ever means "this type never became
+/// concrete", so the model is told to add a signature instead of being handed
+/// a compiler-internal name or an instance-resolution trace.
+///
+/// Defaulting already runs on every generated module — the workbench preamble
+/// carries `ExtendedDefaultRules` ([`super::EVAL_PRAGMAS`]) and a
+/// `default (Int, Double, Text)` declaration, and both survive into the
+/// whole-cell check template. Neither shape below is reachable by defaulting:
+///
+/// * `GHC.Types.ZonkAny` is what GHC zonks an ungeneralized metavariable to.
+///   It reaches source when a checked binder's post-zonk type is replanted
+///   into the staged wrapper ([`run_turn_pinned`]), and the wrapper then
+///   fails with `Not in scope: type constructor or class GHC.Types.ZonkAny`.
+///   The type is already gone by then; no default list can name it.
+/// * An overlap that GHC itself reports as depending on the instantiation of
+///   a unification variable. Defaulting under `ExtendedDefaultRules` still
+///   requires the ambiguous variable's constraint set to carry one of GHC's
+///   own standard classes (numeric, `Show`, `Eq`, `Ord`); a solitary `Render`
+///   or `TidepoolCellExpression` constraint never qualifies, and a
+///   higher-kinded variable (`Render (f0 Double)`) cannot be named by a
+///   `default (...)` list at all, which lists only `*`-kinded types.
+#[must_use]
+pub fn ambiguous_type_advice(message: &str) -> Option<&'static str> {
+    // GHC emits this hint exactly when the overlapping-instance choice hangs
+    // on a variable it has not instantiated — the ground-head overlaps a real
+    // instance conflict produces carry no such line.
+    let unresolved_overlap = message.contains("Overlapping instances for")
+        && message.contains("The choice depends on the instantiation of");
+    (unresolved_overlap || message.contains("ZonkAny")).then_some(AMBIGUOUS_TYPE_ADVICE)
+}
+
 /// Render a failed resident turn against the submitted input unit rather than
 /// the generated wrapper module. Diagnostics from other files retain their
 /// original coordinates.
@@ -703,7 +740,7 @@ pub fn render_turn_compile_error(
         .unwrap_or_else(|| "Expr.hs".into());
     let (line_offset, col_indent) = turn_user_code_offset(source).unwrap_or((0, 0));
     let user_lines = turn_user_code_line_range(source, turn_text);
-    crate::diag::render_diagnostics(
+    let rendered = crate::diag::render_diagnostics(
         diagnostics,
         &crate::diag::RenderOpts {
             anchor: &anchor,
@@ -714,7 +751,8 @@ pub fn render_turn_compile_error(
             drop_foreign_gen_warnings_except: None,
             source,
         },
-    )
+    );
+    ambiguous_type_advice(&rendered).map_or(rendered, ToOwned::to_owned)
 }
 
 /// Render whole-cell diagnostics against the submitted cell coordinates.
@@ -725,7 +763,7 @@ pub fn render_cell_compile_error(error: &CompileError, cell_text: &str) -> Strin
     let CompileError::Diagnostics(diagnostics) = error else {
         return crate::classify_compile(error).message;
     };
-    crate::diag::render_diagnostics(
+    let rendered = crate::diag::render_diagnostics(
         diagnostics,
         &crate::diag::RenderOpts {
             anchor: "<cell>",
@@ -736,7 +774,8 @@ pub fn render_cell_compile_error(error: &CompileError, cell_text: &str) -> Strin
             drop_foreign_gen_warnings_except: None,
             source: cell_text,
         },
-    )
+    );
+    ambiguous_type_advice(&rendered).map_or(rendered, ToOwned::to_owned)
 }
 
 /// Locate submitted turn text within one of the shared wrapper templates.
@@ -2281,6 +2320,63 @@ fn parse_classify_export_item(v: &serde_json::Value) -> Result<ExportItem, Compi
             methods: children()?,
         }),
         _ => Err(malformed("unknown tag or arity")),
+    }
+}
+
+#[cfg(test)]
+mod ambiguity_advice_tests {
+    use super::{ambiguous_type_advice, render_cell_compile_error, AMBIGUOUS_TYPE_ADVICE};
+    use crate::CompileError;
+
+    /// Exactly the GHC texts observed in dogfood runs 4 and 5, not paraphrases:
+    /// a replanted binder type that leaked the zonker's own name, a displayed
+    /// tuple whose element stayed a higher-kinded variable, and a bare
+    /// `error "..."` cell whose only constraint is the check template's own
+    /// expression class.
+    const ZONK_ANY: &str = "<cell>:1:1: error: [GHC-76037]\n    Not in scope: type constructor or class \u{2018}GHC.Types.ZonkAny\u{2019}";
+    const HIGHER_KINDED_RENDER: &str = "<cell>:3:5: error: [GHC-43085]\n    \u{2022} Overlapping instances for Render (f0 Double)\n        arising from a use of \u{2018}render\u{2019}\n      Matching instance:\n        instance [overlappable] Show a => Render a -- Defined in \u{2018}Tidepool.Render\u{2019}\n      (The choice depends on the instantiation of \u{2018}f0\u{2019}\n       To pick the first instance above, use IncoherentInstances\n       when compiling the other instance declarations)";
+    const BARE_ERROR_CELL: &str = "<cell>:1:1: error: [GHC-43085]\n    \u{2022} Overlapping instances for TidepoolCellExpression value0\n        arising from a use of \u{2018}__tidepoolCellExpression\u{2019}\n      Matching instances:\n        instance [overlappable] TidepoolCellPure value => TidepoolCellExpression value\n        instance [overlapping] (effects ~ ActorEffects) => TidepoolCellExpression (Eff effects value)\n      (The choice depends on the instantiation of \u{2018}value0\u{2019}\n       To pick the first instance above, use IncoherentInstances\n       when compiling the other instance declarations)";
+
+    fn cell_error(message: &str) -> CompileError {
+        CompileError::Diagnostics(vec![crate::diag::ExtractDiag {
+            span: None,
+            severity: crate::diag::DiagnosticSeverity::Error,
+            message: message.to_owned(),
+        }])
+    }
+
+    #[test]
+    fn every_unresolved_type_variable_shape_asks_for_a_signature() {
+        for message in [ZONK_ANY, HIGHER_KINDED_RENDER, BARE_ERROR_CELL] {
+            assert_eq!(
+                ambiguous_type_advice(message),
+                Some(AMBIGUOUS_TYPE_ADVICE),
+                "unresolved-type-variable diagnostic was not recognized: {message}"
+            );
+            assert_eq!(
+                render_cell_compile_error(&cell_error(message), "firstReview = \\(a,_,_) -> a"),
+                AMBIGUOUS_TYPE_ADVICE,
+                "the model-facing cell message still carried GHC's text"
+            );
+        }
+    }
+
+    /// A ground overlap is a real instance conflict the author must resolve,
+    /// and an ordinary mismatch already names the two types. Neither is
+    /// repaired by a signature, so neither is rewritten.
+    #[test]
+    fn diagnostics_that_name_concrete_types_are_left_alone() {
+        let ground_overlap = "<cell>:1:1: error: [GHC-43085]\n    \u{2022} Overlapping instances for Render Text\n      Matching instances:\n        instance Render Text\n        instance [overlappable] Show a => Render a";
+        let mismatch = "<cell>:1:1: error: [GHC-83865]\n    \u{2022} Couldn't match type \u{2018}Int\u{2019} with \u{2018}Text\u{2019}";
+        for message in [ground_overlap, mismatch] {
+            assert_eq!(ambiguous_type_advice(message), None);
+            let rendered = render_cell_compile_error(&cell_error(message), "x = 1");
+            assert_ne!(rendered, AMBIGUOUS_TYPE_ADVICE);
+            assert!(
+                rendered.contains("Render Text") || rendered.contains("Couldn't match type"),
+                "GHC's own text must survive: {rendered}"
+            );
+        }
     }
 }
 
