@@ -13,9 +13,11 @@ shared contract and the integration with their parent.
 let group = batch "corpus" "fanout"
 let domainLabel = "domain" :: Label
 let consumerLabel = "consumer-tests" :: Label
+let domainPlan = "Add the shared item type and its tests." :: Text
+let consumerPlan = "Update the readers of that type." :: Text
 workers <- unfold group $
-  (,) <$> child @Report (coding projectHead (assignment domainLabel domainPlan))
-      <*> child @Report (withEffort Medium (coding projectHead (assignment consumerLabel consumerPlan)))
+  (,) <$> child @(Outcome Candidate) (coding projectHead (assignment domainLabel domainPlan))
+      <*> child @(Outcome Candidate) (withEffort Medium (coding projectHead (assignment consumerLabel consumerPlan)))
 let sharedAfterUnfold = ("ready" :: Text)
 ```
 
