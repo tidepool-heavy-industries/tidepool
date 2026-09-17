@@ -87,6 +87,21 @@ async fn resident_cleanup_case(fail_hook: bool) {
     let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let session_root = tempfile::tempdir().expect("session root");
+    let lib = SessionLib::open(
+        session,
+        session_root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .expect("declaration plane")
+    .with_validation_include(include.clone());
+    let mut machine = ResidentSession::unbootstrapped(
+        NoHandlers,
+        TestSink,
+        include.clone(),
+        DEFAULT_NURSERY_SIZE,
+        Some(lib),
+    );
+    let retained = machine.prepared_retained();
     let compiled = match run_turn(HaskellTurnRequest {
         turn_text: if fail_hook {
             include_str!("resident_local_actor/policy_failed_hook.hs")
@@ -100,30 +115,13 @@ async fn resident_cleanup_case(fail_hook: bool) {
         gen: 1,
         verdict: None,
         target: None,
-        prepared: None,
+        prepared: machine.prepared_turn_request(&retained),
     })
     .expect("compile resident policy")
     {
         TurnResult::Expr { compiled, .. } => compiled,
         other => panic!("policy should be an expression, got {other:?}"),
     };
-    let lib = SessionLib::open(
-        session,
-        session_root.path(),
-        ModuleEnv::standalone_default(),
-    )
-    .expect("declaration plane")
-    .with_validation_include(include.clone());
-    let mut machine = ResidentSession::bootstrap(
-        &compiled.expr,
-        compiled.table.clone(),
-        NoHandlers,
-        TestSink,
-        include.clone(),
-        DEFAULT_NURSERY_SIZE,
-        Some(lib),
-    )
-    .expect("resident machine");
     machine.set_effect_execution(
         EffectRunPolicy::SuspendAll,
         LivePayloadPolicy::HASKELL_EFFECT_VALUE,
