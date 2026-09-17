@@ -69,3 +69,29 @@ Open:
   `candidate_workspace_runs_its_own_model_free_recipes` fail on recipe type
   drift (`GitOid` vs `GitRef`, the `coding` signature); unrelated to this
   work and not yet checked against `main`.
+
+## Run 3 (3ad454f7)
+
+A research child triaged a test gap with Jev and read files through shell
+commands; the root gated the hand-off with `J.accept`; a coding child added
+`refKey`/`refPayload` coverage on a branch with `check.sh` green. A typed
+`error` cell showed its message. The research child's cleanup settled.
+
+Fixed after the run:
+
+- Retirement failed with "Git operation active during retirement" when the
+  root read the child's branch at the same moment; the capture now waits up
+  to 60 s for running host Git commands (`GitCli::capture_within`).
+
+Open:
+
+- A bare `error "..."` cell fails to typecheck (overlapping
+  `TidepoolCellExpression` instances for an ambiguous result); it needs a
+  type annotation.
+- After a display failure the notice reads `Value remains bound as
+  observation50 ()`; the `()` is not the value's type.
+- Jev reports mass and confidence 1.0 for subjective prioritisation.
+- The root's top request across all runs: help choosing `J.Policy`
+  thresholds from the distribution and the stakes, with a short rationale
+  for acceptance or doubt.
+- Wall-clock is dominated by children's full `nix-shell --run ./check.sh`.

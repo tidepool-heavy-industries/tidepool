@@ -55,6 +55,10 @@ pub enum DirtyPolicy {
     AllowDirtySnapshot,
 }
 
+/// How long retirement waits for running host Git commands.
+#[cfg(target_os = "linux")]
+const RETIREMENT_GIT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl WorktreeSpec {
     pub fn from_current_repository(label: impl Into<String>) -> Self {
         Self {
@@ -275,11 +279,17 @@ impl WorktreeManager {
             path: visible.to_owned(),
             detail: error.to_string(),
         };
-        let _capture = self.git.try_capture().ok_or_else(|| {
-            failure(std::io::Error::other(
-                "Git operation active during retirement",
-            ))
-        })?;
+        // Retirement waits out ordinary host Git traffic (a parent inspecting
+        // this branch); only a Git operation that outlasts the wait retains
+        // the workspace.
+        let _capture = self
+            .git
+            .capture_within(RETIREMENT_GIT_WAIT)
+            .ok_or_else(|| {
+                failure(std::io::Error::other(
+                    "Git operation still active after waiting for retirement",
+                ))
+            })?;
         let mut receipt = self
             .registry
             .get(id)?

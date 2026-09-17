@@ -75,6 +75,15 @@ impl GitCli {
         self.admission.try_lock()
     }
 
+    /// [`Self::try_capture`], waiting up to `timeout` for running host Git
+    /// commands to finish.
+    pub fn capture_within(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Option<parking_lot::ReentrantMutexGuard<'_, ()>> {
+        self.admission.try_lock_for(timeout)
+    }
+
     /// Bind host Git operations to the same mounted filesystem as its owner.
     /// Environment scrubbing and failure receipts remain at this entry point.
     #[cfg(target_os = "linux")]
@@ -651,6 +660,25 @@ pub mod inspect {
 
 #[cfg(test)]
 mod admission_tests {
+
+    #[test]
+    fn capture_within_waits_for_a_running_capture() {
+        let repo = crate::testing::TestRepo::init().unwrap();
+        let git = repo.git().clone();
+        let holder = git.clone();
+        let (held, ready) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let _capture = holder.try_capture().unwrap();
+            held.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        });
+        ready.recv().unwrap();
+        assert!(git.try_capture().is_none());
+        assert!(git
+            .capture_within(std::time::Duration::from_secs(10))
+            .is_some());
+        thread.join().unwrap();
+    }
 
     #[test]
     fn source_capture_excludes_host_git_mutation_and_allows_its_own_reads() {
