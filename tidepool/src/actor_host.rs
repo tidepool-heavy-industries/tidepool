@@ -2478,16 +2478,17 @@ async fn run_interactive_applications(
                                         launch_context.backend.clone(), thread, resources, request.owner,
                                     )) as Arc<dyn tidepool_actor::command_jobs::CommandBackend>),
                                     None => {
-                                        let resolved = resident_command_boundary(
-                                            &worktree_authority,
-                                            &launch_context.worktrees,
-                                            &launch_context.config.workspace,
+                                        Ok(Arc::new(commands::HostCommandBackend::new(
+                                            resources,
                                             request.owner,
-                                        );
-                                        resolved.boundary.map_err(tidepool_bridge_effects::CommandError::CommandUnavailable)
-                                            .map(|boundary| Arc::new(commands::HostCommandBackend::new(
-                                                resources, request.owner, resolved.directory, boundary, resolved.writable,
-                                            )) as Arc<dyn tidepool_actor::command_jobs::CommandBackend>)
+                                            resident_command_roots(
+                                                &worktree_authority,
+                                                &launch_context.worktrees,
+                                                &launch_context.config.workspace,
+                                                request.owner,
+                                            ),
+                                        ))
+                                            as Arc<dyn tidepool_actor::command_jobs::CommandBackend>)
                                     }
                                 }
                             });
@@ -5121,55 +5122,58 @@ fn worktree_grant(role: tidepool_actor::ActorRole) -> ActorWorktreeGrant {
 /// and what it may write while it runs there.
 ///
 /// Custody is exclusive, so an actor's bound worktree is unambiguous and is
-/// the only checkout it is entitled to write in; that worktree is both the
-/// working directory and the one writable root of the boundary the command is
-/// wrapped in. An actor holding no custody — an operator workbench — runs in
-/// the source checkout with nothing in the repository writable, and has to
+/// the only checkout it is entitled to write in. It is granted alongside the
+/// repository's shared git directory, because publishing a checked revision
+/// means moving a ref and a linked worktree keeps its refs there; an actor
+/// holding no custody — an operator workbench — gets neither, and has to
 /// allocate a worktree before it can change anything. This is the same
 /// boundary [`workspace::prepare`] builds for an agent process, applied to a
 /// resident actor's single command; [`writable_repository_roots`] is the same
 /// decision for the process case.
-fn resident_command_boundary(
+///
+/// The boundary itself is built per command rather than once, because it
+/// carries the working directory: a command that names its own directory has
+/// to be wrapped in a boundary rooted there, or the wrapper's `--chdir` puts
+/// it somewhere else than it asked for.
+fn resident_command_roots(
     authority: &ActorWorktreeAuthority,
     worktrees: &WorktreeManager,
     source: &Path,
     actor: ActorRef,
-) -> ResidentCommandBoundary {
+) -> ResidentCommandRoots {
     let custody = authority
         .bound_worktree(actor.into())
         .and_then(|id| worktrees.registry().get(&id).ok().flatten())
         .map(|receipt| receipt.cwd);
-    let directory = custody.clone().unwrap_or_else(|| source.to_owned());
-    let protected = [
-        source.to_owned(),
-        worktrees.managed_root().to_owned(),
-        worktrees.root_allocations().managed_root().to_owned(),
-    ];
-    // A boundary that cannot be built is not a reason to run unconfined: the
-    // command is refused instead, and the reason names the actor.
-    let boundary = tidepool_node::ProcessMountBoundary::new(
-        &directory,
-        protected,
-        custody.clone().into_iter().collect::<Vec<_>>(),
-    )
-    .map_err(|error| {
-        format!("no command boundary for actor {actor:?} in {directory:?}: {error}")
-    });
-    ResidentCommandBoundary {
-        directory,
-        writable: custody.is_some(),
-        boundary,
+    let mut writable = Vec::new();
+    if let Some(worktree) = &custody {
+        writable.push(worktree.clone());
+        // A linked worktree's refs and objects live in the source
+        // repository's git directory, so a publication is a write there.
+        writable.push(source.join(".git"));
+    }
+    ResidentCommandRoots {
+        directory: custody.clone().unwrap_or_else(|| source.to_owned()),
+        protected: vec![
+            source.to_owned(),
+            worktrees.managed_root().to_owned(),
+            worktrees.root_allocations().managed_root().to_owned(),
+        ],
+        writable,
+        custody: custody.is_some(),
     }
 }
 
-/// The resolved place a resident actor's commands run, and the boundary that
-/// confines them there.
-struct ResidentCommandBoundary {
+/// The roots a resident actor's commands are confined to, and the directory
+/// they run in when they do not name one.
+#[derive(Clone)]
+struct ResidentCommandRoots {
     directory: PathBuf,
-    /// Whether the working directory is this actor's own custody. False means
-    /// the whole repository is read-only to it.
-    writable: bool,
-    boundary: Result<tidepool_node::ProcessMountBoundary, String>,
+    protected: Vec<PathBuf>,
+    writable: Vec<PathBuf>,
+    /// Whether this actor holds a worktree. False means nothing in the
+    /// repository is writable to it.
+    custody: bool,
 }
 
 /// The writable filesystem roots one actor's mount boundary grants.

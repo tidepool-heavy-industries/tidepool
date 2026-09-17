@@ -335,13 +335,7 @@ const PAGE_BYTES: u64 = 64 * 1024;
 pub(super) struct HostCommandBackend {
     resources: Arc<CommandResourceClient>,
     actor: String,
-    directory: std::path::PathBuf,
-    boundary: tidepool_node::ProcessMountBoundary,
-    /// Whether `directory` is this actor's own custody. When it is not, the
-    /// boundary grants nothing writable in the repository, and a command that
-    /// tries to change the checkout is refused by the mount rather than by a
-    /// check somewhere above.
-    writable: bool,
+    roots: super::ResidentCommandRoots,
     running: parking_lot::Mutex<Option<Arc<HostCommand>>>,
     cancelled: watch::Sender<bool>,
     ready: watch::Sender<OutputReadiness>,
@@ -351,16 +345,12 @@ impl HostCommandBackend {
     pub(super) fn new(
         resources: Arc<CommandResourceClient>,
         actor: tidepool_actor::ActorRef,
-        directory: std::path::PathBuf,
-        boundary: tidepool_node::ProcessMountBoundary,
-        writable: bool,
+        roots: super::ResidentCommandRoots,
     ) -> Self {
         Self {
             resources,
             actor: format!("{}-{}", actor.id.0, actor.incarnation.0),
-            directory,
-            boundary,
-            writable,
+            roots,
             running: parking_lot::Mutex::new(None),
             cancelled: watch::channel(false).0,
             ready: watch::channel(OutputReadiness::Pending).0,
@@ -413,13 +403,33 @@ impl HostCommandBackend {
         };
         phase.send_replace(CommandStatus::CommandStarting);
         // An explicitly requested directory wins; otherwise the command runs
-        // in whatever custody this actor holds. Either way the boundary is the
-        // same: naming a directory does not widen what may be written there.
+        // in whatever custody this actor holds. The boundary is rebuilt around
+        // that directory because the wrapper carries its own `--chdir`: a
+        // boundary rooted elsewhere would silently run the command elsewhere.
+        // Naming a directory never widens what may be written there, and one
+        // outside the actor's reach is refused rather than quietly redirected.
         let directory = match &spec.directory {
             Some(requested) => std::path::PathBuf::from(requested),
-            None => self.directory.clone(),
+            None => self.roots.directory.clone(),
         };
-        tracing::debug!(actor = %self.actor, ?directory, writable = self.writable,
+        let boundary = tidepool_node::ProcessMountBoundary::new(
+            &directory,
+            self.roots.protected.clone(),
+            self.roots.writable.clone(),
+        )
+        .map_err(|error| {
+            format!(
+                "this actor cannot run a command in {}: {error}; it may run in {}{}",
+                directory.display(),
+                self.roots.directory.display(),
+                if self.roots.custody {
+                    " and write there"
+                } else {
+                    ", and holds no worktree to write in"
+                }
+            )
+        })?;
+        tracing::debug!(actor = %self.actor, ?directory, custody = self.roots.custody,
             argv = ?spec.argv, "resident actor command");
         let command = Arc::new(
             HostCommand::spawn(HostCommandSpec {
@@ -428,7 +438,7 @@ impl HostCommandBackend {
                 environment: &spec.environment,
                 stdin,
                 cgroup: Some(cgroup),
-                boundary: Some(&self.boundary),
+                boundary: Some(&boundary),
             })
             .map_err(detail)?,
         );
