@@ -20,25 +20,16 @@ import Tidepool.Agent.Reply.Internal
   ( Progress (..)
   , ProgressState
   , RawResponseObservation (..)
+  , Replies (..)
   , RequestId (..)
   , Response (..)
   , ResponseFailure
   , ResponseResult
   , readResponse
   )
-import Tidepool.Effects.Core (ActorKernel (..), CommandResult)
+import Tidepool.Effects.Core (ActorKernel (..), ActorLifecycle (..), CommandResult)
 import Tidepool.Command.Types (Job (..))
 import Tidepool.Internal.ActorRef (ActorRef (..))
-
--- | Runtime lifecycle facts. Live does not imply application readiness;
--- completion does not assert resource cleanup or acceptance of delivered work.
-data ActorLifecycle
-  = ActorLive
-  | ActorPaused Text
-  | ActorFinished Text
-  | ActorFailed Text
-  | ActorCancelled Text
-  deriving (Eq, Show)
 
 data Source (protocol :: Type -> Type) where
   CommandSource :: Job -> (CommandResult -> protocol ()) -> Source protocol
@@ -77,20 +68,34 @@ lifecycleSource = LifecycleSource
 commandSource :: Job -> (CommandResult -> protocol ()) -> Source protocol
 commandSource = CommandSource
 
+-- Each source kind's entry asks for its delivered input with a request whose
+-- reply type is closed: the runtime answers a host-built value only against
+-- the reply type the request constructor declares, so a shared entry over a
+-- bare @event@ variable could never be answered. Progress and settlement
+-- entries read their request cells through the ordinary 'Replies'
+-- observation verbs; the runtime answers those with the delivered event
+-- rather than with a live poll.
 installSource :: Member ActorKernel effs => Source protocol -> Eff effs ()
 installSource (CommandSource (Job job) project) =
-  send (ActorInstallCommandSourceWith job (sourceEntry project))
+  send (ActorInstallCommandSourceWith job (sourceEntry ActorCommandInputWith project))
 installSource (ProgressSource (Progress (RequestId request)) project) =
-  send (ActorInstallProgressSourceWith request (sourceEntry project))
+  send (ActorInstallProgressSourceWith request
+    (sourceEntry (ObserveProgressWith request) project))
 installSource (SettlementSource response@(Response (RequestId request) _ _ _) project) =
   send (ActorInstallSettlementSourceWith request
-    (sourceEntry (project . settledResponse response)))
+    (sourceEntry (ObserveResponseWith request) (project . settledResponse response)))
 installSource (LifecycleSource (ActorRef actor incarnation _) project) =
-  send (ActorInstallLifecycleSourceWith (actor, incarnation) (sourceEntry project))
+  send (ActorInstallLifecycleSourceWith (actor, incarnation)
+    (sourceEntry ActorLifecycleInputWith project))
 
-sourceEntry :: (event -> protocol ()) -> Int -> Eff '[ActorKernel] ()
-sourceEntry project _ = do
-  event <- send ActorSourceInputWith
+sourceEntry
+  :: Member input '[ActorKernel, Replies]
+  => input event
+  -> (event -> protocol ())
+  -> Int
+  -> Eff '[ActorKernel, Replies] ()
+sourceEntry input project _ = do
+  event <- send input
   send (ActorReplyWith 0 (project event))
 
 settledResponse

@@ -109,10 +109,11 @@ pub enum PreparedRuntimeError {
     /// verb. The request and continuation were released; nothing was parked.
     #[error("the suspended request {constructor} names no typed site or verb")]
     UntypedRequest { constructor: String },
-    /// A host-built answer was offered to a frame parked for an open-reply
-    /// request ([`UNSITED`]): there is no wire evidence to build it against,
-    /// so the frame re-enters only by handle. The frame stays parked.
-    #[error("the parked request has an open reply type and accepts only handle delivery")]
+    /// A host-built answer with fields was offered to a frame parked for an
+    /// open-reply request ([`UNSITED`]): there is no wire evidence to build
+    /// it against, so the frame re-enters only by handle or with a
+    /// field-less constructor. The frame stays parked.
+    #[error("the parked request has an open reply type and accepts only handle or field-less constructor delivery")]
     UnsitedAnswer,
     /// The turn suspended under `HandleOrError`, and the prepared route
     /// handles no effect yet, so every request is unhandled.
@@ -2043,7 +2044,18 @@ impl PreparedEngine {
             ExecutionError::UnknownContinuation(id),
         ))?;
         if evidence.site == UNSITED {
-            return Err(PreparedRuntimeError::UnsitedAnswer);
+            // A field-less constructor is the one host-built answer an
+            // open-reply frame accepts: it has no payload for wire evidence
+            // to shape, so building it needs only the constructor's own
+            // interned descriptor (`Nothing` closing a stateful actor's
+            // receive on drain). Anything with a field re-enters by handle.
+            return match value {
+                Value::Con(host_id, fields) if fields.is_empty() => Ok(AnswerPlan::Constructor {
+                    host_id: *host_id,
+                    fields: Vec::new(),
+                }),
+                _ => Err(PreparedRuntimeError::UnsitedAnswer),
+            };
         }
         let owner = self
             .programs

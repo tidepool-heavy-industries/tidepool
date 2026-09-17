@@ -1344,8 +1344,11 @@ impl ResidentRequest {
                 crate::generated::actor_kernel::ActorKernelReq::ActorInstallLifecycleSourceWith(..),
             ) => "install lifecycle source",
             Self::ActorKernel(
-                crate::generated::actor_kernel::ActorKernelReq::ActorSourceInputWith,
-            ) => "source input",
+                crate::generated::actor_kernel::ActorKernelReq::ActorLifecycleInputWith,
+            ) => "lifecycle source input",
+            Self::ActorKernel(
+                crate::generated::actor_kernel::ActorKernelReq::ActorCommandInputWith,
+            ) => "command source input",
             Self::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorReadyWith) => {
                 "ready"
             }
@@ -3873,33 +3876,56 @@ where
         entry: Arc<RootCustody>,
         event: crate::request::sources::SourceEvent,
     ) -> Result<crate::MailboxValue, ResidentActorWorkbenchError> {
-        let realm = RealmId::fresh();
-        let hole =
-            self.access
-                .with_machine(context.clone(), move |session, _, _| {
-                    let outcome = session
-                        .run_rooted_entry_borrowed("actor_source", &entry, 0, realm, None)
-                        .map_err(ResidentActorWorkbenchError::Resident)?;
-                    let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(
-                            "source mapper did not request its input".into(),
-                        ));
-                    };
-                    if session.parked_realm(&hole) != Some(realm)
-                        || !matches!(
-                        ResidentRequest::decode(&request, session.data_con_table())?,
-                        ResidentRequest::ActorKernel(
-                            crate::generated::actor_kernel::ActorKernelReq::ActorSourceInputWith
-                        )
-                    ) {
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(
-                            "source mapper crossed an unexpected boundary".into(),
-                        ));
-                    }
-                    Ok(hole)
-                })
-                .await?;
+        use crate::generated::actor_kernel::ActorKernelReq;
         use crate::request::sources::SourceEvent;
+        let realm = RealmId::fresh();
+        let (hole, input) = self
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                let outcome = session
+                    .run_rooted_entry_borrowed("actor_source", &entry, 0, realm, None)
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "source mapper did not request its input".into(),
+                    ));
+                };
+                if session.parked_realm(&hole) != Some(realm) {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "source mapper crossed an unexpected boundary".into(),
+                    ));
+                }
+                let input = ResidentRequest::decode(&request, session.data_con_table())?;
+                Ok((hole, input))
+            })
+            .await?;
+        // Each source kind's mapper asks for its input with the request whose
+        // declared reply type is the event (`Tidepool.Actor.Source.sourceEntry`):
+        // the host-built answer below is validated against that type, so a
+        // mapper of another kind cannot be fed this event.
+        let input_matches_event = match &event {
+            SourceEvent::Command(_) => matches!(
+                input,
+                ResidentRequest::ActorKernel(ActorKernelReq::ActorCommandInputWith)
+            ),
+            SourceEvent::Lifecycle(_) => matches!(
+                input,
+                ResidentRequest::ActorKernel(ActorKernelReq::ActorLifecycleInputWith)
+            ),
+            SourceEvent::Progress(_) | SourceEvent::ProgressClosed => matches!(
+                input,
+                ResidentRequest::Replies(RepliesReq::ObserveProgressWith(_))
+            ),
+            SourceEvent::Settled(_) => matches!(
+                input,
+                ResidentRequest::Replies(RepliesReq::ObserveResponseWith(_))
+            ),
+        };
+        if !input_matches_event {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "source mapper requested the input of another source kind".into(),
+            ));
+        }
         let outcome = match event {
             SourceEvent::Command(event) => self.resume_value(context.clone(), hole, event).await?,
             SourceEvent::Lifecycle(event) => {
@@ -3921,7 +3947,7 @@ where
                             }
                         };
                         let value =
-                            qualified_constructor(table, "Tidepool.Actor.Source", name, fields)?;
+                            qualified_constructor(table, "Tidepool.Effects.Core", name, fields)?;
                         session
                             .resume(hole, value)
                             .map_err(ResidentActorWorkbenchError::Resident)
@@ -4025,7 +4051,8 @@ where
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallSettlementSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallLifecycleSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallCommandSourceWith(..)
-                    | crate::generated::actor_kernel::ActorKernelReq::ActorSourceInputWith => {
+                    | crate::generated::actor_kernel::ActorKernelReq::ActorLifecycleInputWith
+                    | crate::generated::actor_kernel::ActorKernelReq::ActorCommandInputWith => {
                         return Err(ResidentActorWorkbenchError::ActorProtocol("source boundary escaped its mapping or installation".into()));
                     }
                 };
@@ -4093,7 +4120,8 @@ where
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallSettlementSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallLifecycleSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallCommandSourceWith(..)
-                    | crate::generated::actor_kernel::ActorKernelReq::ActorSourceInputWith => {
+                    | crate::generated::actor_kernel::ActorKernelReq::ActorLifecycleInputWith
+                    | crate::generated::actor_kernel::ActorKernelReq::ActorCommandInputWith => {
                         return Ok(None)
                     }
                 };

@@ -28,5 +28,6 @@ pub enum ActorKernelReq {
     ActorInstallSettlementSourceWith(i64, tidepool_bridge::Value),
     ActorInstallCommandSourceWith(String, tidepool_bridge::Value),
     ActorInstallLifecycleSourceWith((i64, i64), tidepool_bridge::Value),
-    ActorSourceInputWith,
+    ActorLifecycleInputWith,
+    ActorCommandInputWith,
 }

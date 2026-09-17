@@ -5,8 +5,48 @@
 //! phases of hidden mailbox settlement cross here. Authored actor rows and
 //! model workbenches never contain `ActorKernel`.
 
-use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, Verb};
+use crate::schema::{
+    Arg, Effect, HandlingClass, JsonInstance, Polymorphism, RustBinding, SumVariant, TypeDef,
+    TypeShape, VariantFields, Verb, WireDerives,
+};
 use crate::HsType;
+
+/// Runtime lifecycle facts a lifecycle source delivers. Live does not imply
+/// application readiness; completion does not assert resource cleanup or
+/// acceptance of delivered work. Haskell-only: the host builds these values
+/// by constructor name when it answers `ActorLifecycleInputWith`.
+fn actor_lifecycle() -> TypeDef {
+    let text = |ctor: &'static str| SumVariant {
+        ctor,
+        fields: VariantFields::Positional(vec![HsType::Text]),
+        doc: &[],
+    };
+    TypeDef {
+        name: "ActorLifecycle",
+        wire_rust: None,
+        core_module: Some("Tidepool.Effects.Core"),
+        shape: TypeShape::Sum {
+            variants: vec![
+                SumVariant {
+                    ctor: "ActorLive",
+                    fields: VariantFields::Positional(Vec::new()),
+                    doc: &[],
+                },
+                text("ActorPaused"),
+                text("ActorFinished"),
+                text("ActorFailed"),
+                text("ActorCancelled"),
+            ],
+        },
+        json: JsonInstance::None,
+        derives: WireDerives(&[]),
+        domain: None,
+        doc: &[
+            "Runtime lifecycle facts. Live does not imply application readiness; ",
+            "completion does not assert resource cleanup or acceptance of delivered work.",
+        ],
+    }
+}
 
 /// The private control effect used by the trusted actor wrappers.
 #[must_use]
@@ -27,7 +67,7 @@ pub fn actor_kernel() -> Effect {
         default_row_args: &[],
         helpers_row_polymorphic: true,
         extra_imports: &["import Tidepool.Actor"],
-        type_defs: Vec::new(),
+        type_defs: vec![actor_lifecycle()],
         foreign_types: &[],
         errors: None,
         verbs: vec![
@@ -142,11 +182,27 @@ pub fn actor_kernel() -> Effect {
                     rust: RustBinding::Path("(i64, i64)"),
                 },
             ),
+            // A source mapper asks for its delivered input with a request
+            // whose reply type is CLOSED: the prepared route answers a
+            // request from the host only against the reply type its
+            // constructor declares (a bare type variable has no answer row),
+            // so each source kind names its own input verb. Progress and
+            // settlement sources reuse the `Replies` observation verbs, whose
+            // reply types already live beside the request cells they read.
             Verb {
-                ctor: "ActorSourceInputWith",
-                method: "actor_source_input_with",
+                ctor: "ActorLifecycleInputWith",
+                method: "actor_lifecycle_input_with",
                 args: vec![],
-                ret: HsType::Var("event"),
+                ret: HsType::Named("ActorLifecycle"),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+            Verb {
+                ctor: "ActorCommandInputWith",
+                method: "actor_command_input_with",
+                args: vec![],
+                ret: HsType::Named("CommandResult"),
                 errors: None,
                 handling: HandlingClass::Actor,
                 extract: None,

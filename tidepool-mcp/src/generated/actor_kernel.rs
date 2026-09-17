@@ -16,9 +16,12 @@ pub fn actor_kernel_decl() -> crate::EffectDecl {
             "ActorInstallSettlementSourceWith :: Int -> (Int -> Eff sourceEffs ()) -> ActorKernel ()",
             "ActorInstallCommandSourceWith :: Text -> (Int -> Eff sourceEffs ()) -> ActorKernel ()",
             "ActorInstallLifecycleSourceWith :: (Int, Int) -> (Int -> Eff sourceEffs ()) -> ActorKernel ()",
-            "ActorSourceInputWith :: ActorKernel event",
+            "ActorLifecycleInputWith :: ActorKernel ActorLifecycle",
+            "ActorCommandInputWith :: ActorKernel CommandResult",
         ],
-        type_defs: &[],
+        type_defs: &[
+            "data ActorLifecycle = ActorLive | ActorPaused Text | ActorFinished Text | ActorFailed Text | ActorCancelled Text deriving (Show, Eq)",
+        ],
         extra_imports: &[
             "import Tidepool.Actor",
         ],
