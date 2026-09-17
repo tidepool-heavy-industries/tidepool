@@ -46,7 +46,10 @@ fn fixtures_dir() -> std::path::PathBuf {
 /// Was `#[ignore]`d pending the tenure-then-resume fix — see
 /// `MinimalWatchListHarness.hs`'s module doc for the bisection and
 /// `nested_async_repro.rs` for the full mechanism writeup. Fix:
-/// `tidepool-runtime/tests/tenure_resume_gc_repro.rs`'s module doc.
+/// `OldSpace::tenure` folds a real minor collection over every root
+/// category into every tenure call that actually evacuates something — see
+/// `run_minor_collection_for_tenure_fixup`'s doc in
+/// `tidepool-codegen/src/host_fns/gc.rs`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn minimal_watch_list_round_trips() {
     support::require_extract();

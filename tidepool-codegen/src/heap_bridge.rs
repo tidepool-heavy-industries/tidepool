@@ -141,9 +141,9 @@ enum ClosurePolicy {
 /// instead of an error. Used ONLY on the `Finalize` suspend path
 /// (self-iterating-harness W4): the finalized value may be a closure, which has
 /// no data `Value` representation, so it is passed by REFERENCE (the raw heap
-/// pointer stays live in the suspended session, applied via `run_child`) while
-/// this bridge produces a `Value` shell the classifier reads the leading `site`
-/// field out of.
+/// pointer stays live in the suspended session and is delivered as a handle)
+/// while this bridge produces a `Value` shell the classifier reads the
+/// leading `site` field out of.
 ///
 /// # Safety
 ///

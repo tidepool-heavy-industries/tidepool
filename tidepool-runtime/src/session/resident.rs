@@ -40,17 +40,14 @@
 //! [`SessionRunContext`] that pairs its heap-resource and lexical scopes; the
 //! request routing is selected independently of the Haskell effect row.
 //!
-//! # Child runs
+//! # Nested runs
 //!
-//! With the registry, a "child" is just an ordinary fragment run while
-//! frames are parked — the machine is never slot-suspended, so nothing is
-//! special about it. [`ResidentSession::run_child`] keeps its value-shaped
-//! signature (a fork answer IS a value): a child that suspends is aborted
-//! wholesale (its throwaway realm closed) rather than parked, because this
-//! API cannot carry a hole; suspension-capable turns go through
-//! [`ResidentSession::run`]. `!Send` `RootSlot`s never cross the eval-thread
-//! boundary: parked completions are projected in-thread to `Send` data, a
-//! bind's tenured root riding out as a [`ValueHandle`].
+//! With the registry, a nested fragment run against a suspended session is
+//! just an ordinary fragment run while frames are parked — the machine is
+//! never slot-suspended, so nothing is special about it. `!Send` `RootSlot`s
+//! never cross the eval-thread boundary: parked completions are projected
+//! in-thread to `Send` data, a bind's tenured root riding out as a
+//! [`ValueHandle`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
@@ -62,7 +59,7 @@ use parking_lot::Mutex;
 use tidepool_bridge::Value;
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue, PreparedOrigin};
 use tidepool_codegen::emit::ExternalEnv;
-use tidepool_codegen::jit_machine::{FuncId, JitEffectMachine};
+use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_codegen::prepared_program::{PreparedHandle, ProgramId};
 use tidepool_repr::execution_schema::SymbolIdentity;
 
@@ -184,12 +181,12 @@ impl Default for SessionRunContext {
 ///
 /// The session creates custody when a finalized value leaves a parked frame.
 /// Consuming operations may deliver it once, adopt it into a binding, move it
-/// to another resource scope, discard it, or turn it into a repeatable
-/// [`RootedValueRef`]. Raw [`ValueHandle`] access stays inside this module, so
-/// external callers cannot duplicate an ownership token through a numeric ID.
-/// Dropping custody queues its root for release at the next mutable entry into
-/// its originating session; resource-scope or machine teardown remains the
-/// final cleanup backstop if the session is never entered again.
+/// to another resource scope, or discard it. Raw [`ValueHandle`] access stays
+/// inside this module, so external callers cannot duplicate an ownership
+/// token through a numeric ID. Dropping custody queues its root for release
+/// at the next mutable entry into its originating session; resource-scope or
+/// machine teardown remains the final cleanup backstop if the session is
+/// never entered again.
 ///
 #[must_use = "custody must be delivered, mounted, retained, or deliberately discarded"]
 #[derive(Debug)]
@@ -201,18 +198,6 @@ pub struct RootCustody {
 
 // Custody must remain exclusive.
 static_assertions::assert_not_impl_any!(RootCustody: Clone, Copy);
-
-/// Cloneable reference to a live value whose root remains owned by a runtime
-/// resource scope.
-///
-/// This may be delivered repeatedly, but cannot be adopted, discarded, or
-/// passed to raw machine APIs. Those ownership transitions require
-/// [`RootCustody`] and a [`ResidentSession`].
-#[derive(Debug, Clone)]
-pub struct RootedValueRef {
-    handle: ValueHandle,
-    provenance: Arc<ProgramProvenance>,
-}
 
 impl RootCustody {
     /// Wrap a handle minted by the resident session.
@@ -243,19 +228,6 @@ impl RootCustody {
             provenance: Arc::clone(&self.provenance),
             committed: false,
         }
-    }
-
-    /// Convert exclusive custody into a repeatable reference while leaving
-    /// cleanup responsibility with the handle's current resource scope.
-    #[must_use]
-    pub fn into_rooted_ref(self) -> RootedValueRef {
-        let transfer = self.into_transfer();
-        let rooted = RootedValueRef {
-            handle: transfer.handle,
-            provenance: Arc::clone(&transfer.provenance),
-        };
-        transfer.commit();
-        rooted
     }
 }
 
@@ -544,20 +516,6 @@ pub enum ResidentError {
     /// by numeric coincidence.
     #[error("root custody belongs to a different resident session")]
     ForeignCustody,
-    /// A `run_child`/`apply_finalized` was attempted with no parked frame — a
-    /// child run reads a suspended parent's world by construction.
-    #[error("session has no parked continuation; a child run requires a suspended parent")]
-    NotSuspended,
-    /// A VALUE-SHAPED child run ([`ResidentSession::run_child`]) suspended:
-    /// its signature cannot carry a hole, so the child was ABORTED (its
-    /// throwaway realm closed) rather than parked. Not a machine limitation
-    /// anymore (the registry parks children fine) — a policy of this one
-    /// API; drive suspension-capable turns through [`ResidentSession::run`].
-    #[error(
-        "child run suspended; the value-shaped run_child aborts a suspending child — \
-         drive suspension-capable turns through run()"
-    )]
-    ChildSuspended,
     /// A `resume`/`abort` referenced a continuation id that is not among this
     /// session's parked holes. Atomic validate-before-consume: no parked
     /// frame is touched.
@@ -945,7 +903,7 @@ where
     /// [`Self::bootstrap`] on an explicit engine route, for a caller that must
     /// pin its route rather than read the ambient default — this crate's own
     /// Core-JIT-internals test suites (`resident_session.rs`,
-    /// `green_thread_representation.rs`, `tenure_resume_gc_repro.rs`), which
+    /// `green_thread_representation.rs`), which
     /// drive `compile_session`/`add_function`/suspend-resume mechanics the
     /// prepared engine does not share.
     #[allow(clippy::too_many_arguments)]
@@ -1766,41 +1724,6 @@ where
         Ok(())
     }
 
-    /// Deliver an already-session-owned root into a parked continuation
-    /// WITHOUT consuming custody — the REPEAT-delivery case.
-    ///
-    /// [`Self::resume_handle`]'s custody token guards a change of OWNER, not a
-    /// delivery: at the machine layer a resume is a scope-owned BORROW (same
-    /// as `observe_handle`), and the root is released by its owning realm's
-    /// scope exit, never by a delivery. A green thread's result is exactly
-    /// that shape — the root is minted under the SESSION's realm at settle
-    /// time (see [`Self::live_payload_handle_owned_by`]) and may then be read
-    /// more than once: `poll` then `wait`, or two waiters joined on one
-    /// thread. Each of those is another borrow of one root, not a second
-    /// transfer of one custody.
-    ///
-    /// Use [`Self::resume_handle`] wherever the delivery IS the transfer (the
-    /// finalize seam). Reach for this only when an owner already exists and
-    /// outlives every delivery.
-    pub fn resume_handle_borrowed(
-        &mut self,
-        hole: ResidentHole,
-        handle: RootedValueRef,
-    ) -> Result<ResidentOutcome, ResidentError> {
-        let seed = hole.seed();
-        let cont_id = match hole {
-            ResidentHole::Plain(hole) => hole.id,
-            ResidentHole::Binding(hole) => hole.id,
-            ResidentHole::ProjectedBinding(hole) => hole.id,
-        };
-        self.reenter(
-            &cont_id,
-            ResumeInput::Handle(handle.handle),
-            seed,
-            Some(&handle.provenance),
-        )
-    }
-
     /// Borrow a retained value as the final field of a typed constructor.
     /// The caller keeps custody alive through resumption; the resulting heap
     /// value has ordinary Haskell reachability independent of that root.
@@ -1887,20 +1810,6 @@ where
 
     pub fn heap_stats(&self) -> Option<tidepool_codegen::jit_machine::HeapStats> {
         self.core.heap_stats()
-    }
-
-    /// Test/debug-only passthrough to
-    /// [`JitEffectMachine::force_gc_for_test`] — forces a real minor
-    /// collection against the session's retained heap without running any
-    /// compiled code, for diagnosing whether a collection landing between a
-    /// suspend-time tenure and a later resume corrupts a parked frame's own
-    /// reference into what tenuring evacuated. No-op (does nothing) before
-    /// the machine bootstraps.
-    #[doc(hidden)]
-    pub fn force_gc_for_test(&mut self) {
-        if let Some(m) = self.core.machine_mut() {
-            m.force_gc_for_test();
-        }
     }
 
     /// The CURRENT value-plane binding names (newest gen per name) — what a
@@ -2724,239 +2633,20 @@ where
         Ok(resident_outcome)
     }
 
-    /// Run a nested child turn against this suspended session: add
-    /// `expr` as a fragment referencing the suspended parent's session bindings
-    /// (via `external_env`, zero-copy against the same retained heap), then drive
-    /// it through an ordinary fragment run while the parent's
-    /// stowed continuation is GC-rooted. The session STAYS suspended on the same
-    /// hole afterward — the child does not consume the parent's continuation.
-    ///
-    /// Requires the session to be suspended (a child needs a suspended parent);
-    /// an idle session is rejected with [`ResidentError::NotSuspended`]. A child
-    /// that itself suspends is rejected ([`ResidentError::ChildSuspended`])
-    /// because this value-returning API has no continuation handle to return.
-    pub fn run_child(
-        &mut self,
-        name_hint: &str,
-        expr: &CoreExpr,
-        table: &DataConTable,
-        external_env: &ExternalEnv,
-    ) -> Result<EvalResult, ResidentError> {
-        let func_id = self.prepare_child_fragment(name_hint, expr, table, external_env)?;
-        // `parked` is untouched throughout — the parent's frames stay parked
-        // and rooted across the child run (that is the registry's whole
-        // point; nothing here is a special "child window" anymore).
-        //
-        // A THROWAWAY realm: this API's value-shaped signature cannot carry a
-        // hole, so a child that suspends is ABORTED wholesale (its realm
-        // closed) rather than parked. Suspension-capable turns are `run`'s
-        // job. The shared issuer keeps it distinct from every caller scope.
-        let child_realm = RealmId::fresh();
-        let principal = self.run_context.principal;
-        let effect_policy = self.core.effect_policy();
-        let live_payload = self.core.live_payload_policy();
-        let outcome = self.on_eval_thread(move |engine, table, handlers, captured| {
-            let machine = engine.require_core()?;
-            let run = SuspensionRun::fragment(
-                func_id,
-                table,
-                effect_policy,
-                child_realm,
-                ParkKind::Plain,
-            )
-            .with_live_payload(live_payload)
-            .with_principal(principal);
-            machine
-                .run_until_suspension(run, handlers, captured)
-                .and_then(|o| project_parked(machine, o, child_realm))
-        })?;
-        match outcome {
-            ParkedRun::CompletedValue { value, .. } => {
-                let _ = self.captured.drain();
-                Ok(EvalResult::new(
-                    value,
-                    self.core.session_table().clone(),
-                    Vec::new(),
-                ))
-            }
-            ParkedRun::CompletedProject { .. } => {
-                unreachable!("a value-returning child run cannot complete as a projection")
-            }
-            ParkedRun::Suspended { .. } => {
-                // Scope exit for the throwaway realm — the child's park (and
-                // any finalized payload it tenured) must not outlive this
-                // call.
-                if let Some(m) = self.core.machine_mut() {
-                    let _ = m.close_realm(child_realm);
-                }
-                Err(ResidentError::ChildSuspended)
-            }
-        }
-    }
-
-    /// Pure sibling of [`Self::run_child`]. Use it for fragments that produce a
-    /// boxed value directly rather than an `Eff` `Val`/`E` tree.
-    pub fn run_child_pure(
-        &mut self,
-        name_hint: &str,
-        expr: &CoreExpr,
-        table: &DataConTable,
-        external_env: &ExternalEnv,
-    ) -> Result<EvalResult, ResidentError> {
-        let func_id = self.prepare_child_fragment(name_hint, expr, table, external_env)?;
-        let value = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
-            let machine = engine.require_core()?;
-            // Plain pure entry: on the parked path the machine is never
-            // slot-suspended, so the L7-guarded plain entries serve child
-            // fragments directly (the realm suites run fragments over parked
-            // frames the same way).
-            machine.run_fragment_pure(func_id)
-        })?;
-        let _ = self.captured.drain();
-        Ok(EvalResult::new(
-            value,
-            self.core.session_table().clone(),
-            Vec::new(),
-        ))
-    }
-
-    /// Shared child-run prelude: requires a suspended parent, merges `table`
-    /// into the accumulated session table (monotone), and adds `expr` as a
-    /// child fragment on THIS thread (env is `!Send`) — module accretion is
-    /// inert for the parent, a fresh FuncId, the stowed continuation
-    /// untouched. Shared by [`Self::run_child`]/[`Self::run_child_pure`].
-    fn prepare_child_fragment(
-        &mut self,
-        name_hint: &str,
-        expr: &CoreExpr,
-        table: &DataConTable,
-        external_env: &ExternalEnv,
-    ) -> Result<FuncId, ResidentError> {
-        if self.parked.is_empty() {
-            return Err(ResidentError::NotSuspended);
-        }
-        self.core
-            .merge_table(table)
-            .map_err(ResidentError::TableCollision)?;
-        // Lazy boot (see `run_with_sites`'s comment). A child run requires a
-        // parked parent, so in practice the machine is always already live by
-        // the time this is reachable — kept for symmetry with
-        // `run_with_sites`/`run_bind_with_sites` and because
-        // `bootstrap_if_needed` is a no-op once live.
-        self.core
-            .bootstrap_if_needed(expr, table)
-            .map_err(ResidentError::Bootstrap)?;
-        self.core
-            .add_child_fragment_session(name_hint, expr, external_env)
-            .map_err(ResidentError::AddFunction)
-    }
-
-    /// Apply a `finalize`d closure BY REFERENCE (self-iterating-harness W4) to a
-    /// boxed `Int` argument, returning the (data) result. The finalized value —
-    /// a closure of type `Int -> Int`, say — was tenured into old-space at
-    /// suspend time and its persistent root slot stashed on the machine
-    /// ([`JitEffectMachine::take_parked_live_payload_root`]); this seeds that slot into a
-    /// per-call [`ExternalEnv`] and drives a synthesized `App(Var, arg)`
-    /// fragment against the SAME suspended heap via [`Self::run_child_pure`] —
-    /// the closure is never bridged to a data `Value`, never leaves the heap.
-    /// Proves the "code as a value" round-trip: an answerer `finalize`s a
-    /// function and the harness runs it in place.
-    ///
-    /// The argument crosses as a BARE unboxed `Lit`, not a hand-built
-    /// `Con(I#, [lit])`: `App`'s argument-boxing (`ensure_heap_ptr`) allocates
-    /// a plain `TAG_LIT` heap object, carrying no `DataConId` at all, so no
-    /// wrapper-constructor id needs to match anything — the closure's own
-    /// `case x of I# n#` was ALREADY compiled Lit-tolerant (`emit_data_dispatch`'s
-    /// wrapper-alt path, `tidepool-codegen/src/emit/case.rs`) against its OWN
-    /// defining compile's table, which is unrelated to `run_table` here. The
-    /// gap this closed was one layer up: [`Self::run_child`] drives its
-    /// fragment through the freer-simple `Val`/`E` decode every `Eff`
-    /// computation's calling convention expects, and this `App` is a bare,
-    /// non-monadic application — [`Self::run_child_pure`] skips that decode.
-    ///
-    /// Errors if the session is not suspended on a closure-valued finalize (no
-    /// finalized root was stashed).
-    pub fn apply_finalized(
-        &mut self,
-        arg: i64,
-        run_table: Option<&DataConTable>,
-    ) -> Result<EvalResult, ResidentError> {
-        // A child (this apply is one) requires a parked parent — the
-        // finalize suspension's own frame (top of the stack: apply follows
-        // the suspension that stashed the payload).
-        let Some(&(_, frame_id)) = self.parked.last() else {
-            return Err(ResidentError::NotSuspended);
-        };
-        // Take the finalized closure's persistent root slot off the parked
-        // frame. It stays a registered GC root (release is the owning realm's
-        // scope exit), so referencing it by slot address below is GC-safe
-        // across the child run.
-        let slot = self
-            .core
-            .machine_mut()
-            .map(|m| m.take_parked_live_payload_root(frame_id))
-            .transpose()
-            .map_err(resident_jit)?
-            .flatten()
-            .ok_or_else(|| {
-                ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
-                    "no finalized closure to apply (session is not suspended on a \
-                     closure-valued finalize)"
-                        .into(),
-                ))))
-            })?;
-
-        // Synthesize `App(Var(FINALIZED_VAR), arg)`. FINALIZED_VAR is any
-        // VarId not otherwise bound in this childless fragment — the JIT Var-miss
-        // arm keys the external override on ExternalEnv MEMBERSHIP, not the id's
-        // tag, so a plain id resolves through the seeded slot.
-        const FINALIZED_VAR: tidepool_repr::VarId = tidepool_repr::VarId(0xF4_0000_0001);
-        let mut b = tidepool_repr::TreeBuilder::new();
-        let f = b.push(tidepool_repr::CoreFrame::Var(FINALIZED_VAR));
-        // Pass the argument as a BARE unboxed `Lit` (see this fn's doc): App's
-        // argument-boxing allocates a plain `TAG_LIT` object with no
-        // `DataConId`, which the closure's own Lit-tolerant `I#` case alt
-        // accepts directly.
-        let arg_node = b.push(tidepool_repr::CoreFrame::Lit(
-            tidepool_repr::Literal::LitInt(arg),
-        ));
-        let _app = b.push(tidepool_repr::CoreFrame::App {
-            fun: f,
-            arg: arg_node,
-        });
-        let expr = b.build();
-
-        let mut env = ExternalEnv::new();
-        env.insert(FINALIZED_VAR, slot.addr());
-
-        // The compile table this fragment merges into the accumulated session
-        // table (monotone) — the suspend turn's table when known, so the
-        // closure's own defining constructors are visible session-wide. Falls
-        // back to the accumulated session table.
-        let table = run_table
-            .cloned()
-            .unwrap_or_else(|| self.core.session_table().clone());
-        // PURE, not `run_child`: `App(Var, arg)` applies the closure directly —
-        // it is not an `Eff` computation, so it must not go through the
-        // freer-simple `Val`/`E` decode `run_child` drives (see
-        // `run_child_pure`'s doc for why that decode misfires on a plain
-        // result).
-        self.run_child_pure("apply_finalized", &expr, &table, &env)
-    }
-
     /// Apply a handle-rooted entry closure to an integer and run it as a new
     /// suspension-capable top-level computation under `realm`.
     ///
-    /// Unlike [`Self::run_child`] and [`Self::run_child_pure`], this operation
-    /// has a suspension-shaped result: a parked frame joins the ordinary
-    /// continuation registry and can be resumed by identity in any order.
+    /// This operation has a suspension-shaped result: a parked frame joins
+    /// the ordinary continuation registry and can be resumed by identity in
+    /// any order.
     ///
     /// `entry` is a `ValueHandle` over a tenured `Int -> M a` closure. It is
-    /// applied through the same
-    /// `App(Var, Lit)` synthesis [`Self::apply_finalized`] uses. The argument
-    /// crosses as a bare unboxed `Lit`, so it does not depend on a caller-owned
-    /// wrapper-constructor id. Execution goes through the canonical
-    /// suspension entry and registry.
+    /// applied through an `App(Var, Lit)` synthesis: `FINALIZED_VAR` (any
+    /// `VarId` not otherwise bound in the fragment) resolves through an
+    /// `ExternalEnv`-seeded slot over the entry's root, and the argument
+    /// crosses as a bare unboxed `Lit`, so it does not depend on a
+    /// caller-owned wrapper-constructor id. Execution goes through the
+    /// canonical suspension entry and registry.
     ///
     /// **`realm` is the thread's, and it propagates.** `resume_continuation` replays
     /// a frame's OWN realm, so every later suspension of this thread parks under
@@ -3015,12 +2705,10 @@ where
                 ),
             ))))
         })?;
-        // `App(Var(ROOTED_ENTRY_VAR), argument)`. Same shape and reasoning as
-        // `apply_finalized`: the Var-miss arm keys the external override on
-        // ExternalEnv MEMBERSHIP, and the argument rides as a bare `Lit` whose
-        // plain `TAG_LIT` object the closure's own Lit-tolerant `I#` alt
-        // accepts. Distinct id from `apply_finalized`'s so the two can never be
-        // confused in a trace.
+        // `App(Var(ROOTED_ENTRY_VAR), argument)`: the Var-miss arm keys the
+        // external override on ExternalEnv MEMBERSHIP, and the argument rides
+        // as a bare `Lit` whose plain `TAG_LIT` object the closure's own
+        // Lit-tolerant `I#` alt accepts.
         const ROOTED_ENTRY_VAR: tidepool_repr::VarId = tidepool_repr::VarId(0xF4_0000_0002);
         let mut b = tidepool_repr::TreeBuilder::new();
         let f = b.push(tidepool_repr::CoreFrame::Var(ROOTED_ENTRY_VAR));

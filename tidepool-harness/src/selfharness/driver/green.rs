@@ -391,7 +391,7 @@ impl SelfHarnessDriver {
                 // wire path is for an `askUser` submission's `FromJSON`
                 // decode) and NOT a bare `Value::Lit` (unboxed; only
                 // tolerated by the JIT's OWN synthesized `App` in
-                // `apply_finalized`/`run_rooted_entry`, not by arbitrary compiled
+                // `run_rooted_entry`, not by arbitrary compiled
                 // Haskell that pattern-matches `case x of I# n#`).
                 let tid_value = tid
                     .to_value(table)

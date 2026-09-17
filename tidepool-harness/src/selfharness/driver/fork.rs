@@ -1495,8 +1495,7 @@ impl SelfHarnessDriver {
     /// Drive ONE
     /// fork child as a full ATTACHED WINDOW on the shared session. A child
     /// on the window pump can explore across rounds, present operator
-    /// forms, and answer with a REAL `finalize @T` —
-    /// `ResidentError::ChildSuspended` is unreachable from here.
+    /// forms, and answer with a REAL `finalize @T`.
     ///
     /// The attach ladder: transcript forked from the LIVE parent's
     /// checkpoint (`register_fork_child_with_card` — the multi-round

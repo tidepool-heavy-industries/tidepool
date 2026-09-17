@@ -14,7 +14,7 @@
 //! - `{typedSite, fork:true}` → `runLLMTurnFork`: PARK. The parent stays
 //!   suspended; a child answerer node is registered (transcript forked at the
 //!   checkpoint) and, once forced, drives its own turn loop to produce a typed
-//!   answer that `run_child`s against the parent and resumes it. The parent's
+//!   answer that is delivered against the parent and resumes it. The parent's
 //!   continuation takes `Either InvocationExit T` — a forked window is a
 //!   BRANCH POSITION, and its abnormal exit is folded as
 //!   data there rather than as an exception over its siblings (see

@@ -4,8 +4,10 @@
 //! structural half — is
 //! `tidepool-runtime/tests/green_thread_representation.rs`'s
 //! `a_green_thread_can_fork_another_green_thread`. Read the two together;
-//! neither means much alone. Fix:
-//! `tidepool-runtime/tests/tenure_resume_gc_repro.rs`'s module doc.
+//! neither means much alone. Fix: `OldSpace::tenure` now folds a real minor
+//! collection over every root category into every tenure call that actually
+//! evacuates something — see `run_minor_collection_for_tenure_fixup`'s doc
+//! in `tidepool-codegen/src/host_fns/gc.rs`.
 //!
 //! # What fails
 //!
@@ -145,9 +147,7 @@ fn fixtures_dir() -> std::path::PathBuf {
 /// full diagnosis (tag 255 / FORWARDED, a parked frame's own reference into
 /// a nursery object that a sibling tenure evacuated). Fixed by folding a
 /// real minor collection into `OldSpace::tenure` itself
-/// (`run_minor_collection_for_tenure_fixup`, `tidepool-codegen/src/host_fns/gc.rs`)
-/// — see `tidepool-runtime/tests/tenure_resume_gc_repro.rs`'s module doc for
-/// the isolated repro and mechanism.
+/// (`run_minor_collection_for_tenure_fixup`, `tidepool-codegen/src/host_fns/gc.rs`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_green_thread_body_can_fork_another_green_thread() {
     support::require_extract();

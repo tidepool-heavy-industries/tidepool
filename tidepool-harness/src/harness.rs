@@ -17,16 +17,17 @@
 //! # Scheduler (thin, TARGET §4)
 //!
 //! One parent + one live child. A fork PARKS the parent (it is suspended);
-//! the child answerer runs its own turn loop, and its final answer eval runs
-//! via [`ResidentSession::run_child`] against the parent's suspended machine
-//! (same heap, GC-rooted), then resumes the parent. Child evals run only while
+//! the child answerer runs its own turn loop, and its final answer is
+//! delivered into the parent's awaiting hole via
+//! [`ResidentSession::resume_handle`] against the parent's suspended machine
+//! (same heap, GC-rooted). Child evals run only while
 //! the parent is parked — which it is, by construction (a fork suspends). No
 //! preemption, no work-stealing: inference-bound fan sizes make starvation a
 //! non-issue for R0.
 //!
 //! # Sync core, async driver
 //!
-//! The resident-session calls (`run`/`run_child`/`resume`) are synchronous and
+//! The resident-session calls (`run`/`resume`) are synchronous and
 //! block (they spawn their own eval thread internally). The provider calls are
 //! async. The turn-driving methods here are `async`; they `spawn_blocking` the
 //! resident-session steps so the tokio reactor is never blocked.
@@ -2644,8 +2645,8 @@ impl Harness {
     /// tree's own state name (`Cancelled`; a `Suspended` node has no
     /// `node_done` transition — that one is reserved for a turn that ran to
     /// completion from `Running`) reads that way. The caller is expected to
-    /// `run_child` the returned `Value` into the OUTER (Harness-monad)
-    /// session to resolve the parent `runLLMTurn` hole, zero-copy.
+    /// deliver the returned `Value` into the OUTER (Harness-monad)
+    /// session to resolve the parent `runLLMTurn` hole.
     ///
     /// Errors if `node` has no live session, isn't suspended, or its pending
     /// hole isn't `Finalize`-routed.
@@ -2891,50 +2892,6 @@ impl Harness {
         // functions — must route through the handle-delivery path exactly
         // like a top-level closure.
         tidepool_codegen::heap_bridge::field_contains_closure_sentinel(&pending.raw_request, 1)
-    }
-
-    /// Apply a `finalize`d CLOSURE by reference:
-    /// `node` must be suspended on a `finalize @(Int -> Int) f` hole whose value
-    /// was kept LIVE in the shared heap (never deep-forced). This runs `f arg`
-    /// in place against that same suspended heap — the "code as a value"
-    /// round-trip — and returns the (data) result `Value`. The node stays
-    /// suspended on its finalize hole afterward (the apply is a non-consuming
-    /// child run against the suspended machine); the caller terminates it via
-    /// [`Self::take_finalized_value`] when done.
-    pub async fn apply_finalized_closure(
-        &self,
-        node: NodeId,
-        arg: i64,
-    ) -> Result<Value, HarnessError> {
-        // Require the node to be suspended on a Finalize hole — the resident
-        // session's parked continuation is what makes the child run (the apply)
-        // legal, and the finalized closure's root was stashed on suspend.
-        let is_finalize = matches!(
-            self.pending_suspension(node).map(|c| c.routing),
-            Some(SuspensionRouting::Finalize { .. })
-        );
-        if !is_finalize {
-            return Err(HarnessError::RoutingMismatch {
-                node,
-                routing: "Finalize",
-                actual: format!("{:?}", self.pending_suspension(node).map(|c| c.routing)),
-            });
-        }
-        // The suspend turn's table, passed through so the apply fragment's
-        // compile merges the closure's own defining constructors into the
-        // accumulated session table (see `ResidentSession::apply_finalized`'s
-        // doc for why no `I#`-id matching is needed here).
-        let suspend_table = self.node_pending(node).map(|p| p.suspend_table);
-        let checkout = self.checkout_child_waiting(node).await?;
-        let out = self
-            .run_checked_out(node, checkout, move |mut session| {
-                let out = session.apply_finalized(arg, suspend_table.as_ref());
-                (session, out)
-            })
-            .await?;
-        self.flush_effects(node)?;
-        out.map(|r| r.into_value())
-            .map_err(|e| HarnessError::Resident(e.to_string()))
     }
 
     /// Reopen a `Done` answerer node (`Done` → `Running`) for another turn —
@@ -3363,33 +3320,13 @@ impl Harness {
         .map_err(|error| HarnessError::from_checkout(node, error))
     }
 
-    async fn checkout_child_waiting(
-        &self,
-        node: NodeId,
-    ) -> Result<Checkout<'_, Session>, HarnessError> {
-        let sid = self
-            .tree
-            .session_of(node)
-            .ok_or(HarnessError::NoSession(node))?;
-        if self.tree.node_owns_session(node) {
-            self.tree.registry().checkout_child(sid)
-        } else {
-            self.tree
-                .registry()
-                .checkout_wait(sid, CheckoutRequest::Child, Self::CHECKOUT_WAIT_BUDGET)
-                .await
-        }
-        .map_err(|error| HarnessError::from_checkout(node, error))
-    }
-
     /// Run `f` against `checkout`'s machine on the blocking pool, then
     /// restore it based on the machine's OWN post-call state — the session's
     /// full reported hole SET (`parked_holes()`), never a guess from `f`'s
     /// domain result — correct whether the resident call completed,
     /// suspended, parked additional holes, or errored (an errored
     /// `run`/`resume` still leaves the session in a well-defined parked
-    /// state; `run_child` never changes the target's parked holes either
-    /// way).
+    /// state).
     ///
     /// On a `JoinError` (the blocking task panicked — the machine went with
     /// it), the checkout has nothing left to restore: retire the node via

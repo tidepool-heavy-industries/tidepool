@@ -2081,8 +2081,8 @@ fn notebook_either_decode_renders_the_same_on_both_engines() {
 /// fresh Core fragment). One closure never suspends (a `Done` settlement);
 /// a second asks and is resumed exactly like an ordinary turn's suspension.
 /// Core's own rooted-entry contract is covered exhaustively elsewhere
-/// (`tenure_resume_gc_repro.rs`, `green_thread_representation.rs`, both
-/// hand-built `CoreExpr` programs); this GHC-driven notebook has no minting
+/// (`green_thread_representation.rs`, a hand-built `CoreExpr` program);
+/// this GHC-driven notebook has no minting
 /// surface for a Core-bound value's custody (Core tenures a binding's root
 /// straight into the binding table, never the handle registry
 /// `prepared_binding_handle` reads -- see `notebook_handle_delivery`'s same

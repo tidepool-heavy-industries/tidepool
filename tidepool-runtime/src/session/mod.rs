@@ -72,7 +72,7 @@ pub use supervisor::{GraceOutcome, TurnSupervisor};
 
 pub use resident::{
     ProgramProvenance, ProgramProvenanceError, ResidentError, ResidentHole, ResidentOutcome,
-    ResidentSession, RootCustody, RootedValueRef, SessionRunContext,
+    ResidentSession, RootCustody, SessionRunContext,
 };
 
 pub use view::{hide_preamble_exports, SessionCompileView, SourceImports};
