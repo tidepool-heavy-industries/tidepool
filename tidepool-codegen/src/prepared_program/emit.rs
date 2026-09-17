@@ -1061,6 +1061,7 @@ fn emit_case_dispatch(
             values.insert(*binder, value);
         }
     }
+    let first_scrutinee = scrutinee.first().copied();
     let invalid = builder.create_block();
     if alternatives.is_empty() {
         // A successful scrutinee in an empty case is an impossible normal
@@ -1175,11 +1176,14 @@ fn emit_case_dispatch(
     let trap = pipeline
         .module
         .declare_func_in_func(case_trap, builder.func);
-    builder.ins().call(trap, &[vmctx]);
-    let status = builder.ins().iconst(
-        types::I32,
-        crate::prepared_control::CallStatus::IntegrityFailure as i64,
-    );
+    // Only an algebraic scrutinee is a reference the trap may inspect.
+    let inspected = match (kind, first_scrutinee) {
+        (CaseKind::Algebraic(_), Some(value)) => value,
+        _ => builder.ins().iconst(types::I64, 0),
+    };
+    let owner_word = builder.ins().iconst(types::I64, owner.0 as i64);
+    let call = builder.ins().call(trap, &[vmctx, inspected, owner_word]);
+    let status = builder.inst_results(call)[0];
     crate::alloc::emit_prepared_failure_return(builder, status);
     Ok(())
 }

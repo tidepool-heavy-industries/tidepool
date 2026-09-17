@@ -46,6 +46,13 @@ pub enum RuntimeError {
     Undefined,
     #[error("case trap: scrutinee constructor not among case alternatives (tag mismatch; diagnostics on server stderr)")]
     CaseTrap,
+    /// An intact constructor reached a prepared `case` with no alternative
+    /// and no default for it. Nothing was written, so only this call fails.
+    #[error("case miss: constructor {constructor:?} reached a case in compiled value {owner} that has no alternative for it (a compiler defect; the session remains usable)")]
+    CaseMiss {
+        constructor: tidepool_repr::DataConId,
+        owner: u64,
+    },
     #[error("bad pointer in JIT runtime (diagnostics on server stderr)")]
     BadPointer,
     #[error("forced type metadata (should be dead code)")]
@@ -146,6 +153,7 @@ impl RuntimeError {
             | Self::BlackHole
             | Self::UserErrorMsg(_)
             | Self::UnresolvedCallee
+            | Self::CaseMiss { .. }
             | Self::Cancelled => MachineDisposition::Reusable,
         }
     }

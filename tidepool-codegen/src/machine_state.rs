@@ -325,6 +325,12 @@ pub struct MachineState {
     /// `Enter` can force an imported thunk through the program that knows how
     /// to run it. Same lifetime contract as `prepared_callables`.
     prepared_enters: RefCell<HashMap<usize, *const u8>>,
+    /// Constructor descriptor header -> constructor identity, for every
+    /// constructor an installed program declares. A prepared case miss reads
+    /// its scrutinee's header here: a known constructor is an intact object
+    /// the case did not expect (the call fails, the machine stays usable);
+    /// anything else is an integrity failure.
+    prepared_constructors: RefCell<HashMap<usize, tidepool_repr::DataConId>>,
     /// The one permanent, append-only literal-bytes pool for this machine:
     /// the sole authority for literal `Addr#` bytes, consulted by
     /// observation and by every address primitive before the ledger. Every
@@ -397,6 +403,7 @@ impl MachineState {
             external_freed_objects: Cell::new(0),
             prepared_callables: RefCell::new(HashMap::new()),
             prepared_enters: RefCell::new(HashMap::new()),
+            prepared_constructors: RefCell::new(HashMap::new()),
             interned_bytes: RefCell::new(Arc::new(
                 crate::prepared_program::static_bytes::PinnedBytes::empty(),
             )),
@@ -1319,11 +1326,42 @@ impl MachineState {
         self.prepared_enters.borrow_mut().extend(enters);
     }
 
+    /// Record constructor headers an installed program declares; see
+    /// `prepared_constructors`. Interned constructor headers are shared, so a
+    /// repeated header keeps its identity.
+    pub(crate) fn register_prepared_constructors(
+        &self,
+        constructors: impl IntoIterator<Item = (usize, tidepool_repr::DataConId)>,
+    ) {
+        let mut known = self.prepared_constructors.borrow_mut();
+        for (header, identity) in constructors {
+            known.entry(header).or_insert(identity);
+        }
+    }
+
+    /// Forget constructor headers a retired program owned.
+    pub(crate) fn retire_prepared_constructors(&self, headers: &[usize]) {
+        let mut known = self.prepared_constructors.borrow_mut();
+        for header in headers {
+            known.remove(header);
+        }
+    }
+
+    /// Classify a prepared case miss by its scrutinee's header word.
+    pub(crate) fn prepared_constructor_at(&self, header: usize) -> Option<tidepool_repr::DataConId> {
+        self.prepared_constructors
+            .try_borrow()
+            .ok()?
+            .get(&header)
+            .copied()
+    }
+
     /// Machine-teardown path (`Drop for PreparedMachine`): drop every raw
     /// code pointer before the pipelines they point into are freed.
     pub(crate) fn clear_prepared_entries(&self) {
         self.prepared_callables.borrow_mut().clear();
         self.prepared_enters.borrow_mut().clear();
+        self.prepared_constructors.borrow_mut().clear();
     }
 
     /// Program retirement: drop the call and enter rows one program owned,

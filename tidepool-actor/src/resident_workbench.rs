@@ -1529,6 +1529,14 @@ pub enum ResidentActorWorkbenchError {
     CompileInfrastructure(String),
     #[error("resident workbench execution failed: {0}")]
     Resident(#[from] ResidentError),
+    /// An earlier cell hit an integrity failure; this actor's machine refuses
+    /// all further execution.
+    #[error(
+        "this actor's Haskell machine was lost to an earlier integrity failure (reported by that \
+         cell); no further cells can run here. Restart the session: declarations are replayed, \
+         live values are lost"
+    )]
+    MachineLost,
     #[error("resident workbench task panicked or was cancelled: {0}")]
     Join(tokio::task::JoinError),
     #[error("could not mount the typed completion input: {0}")]
@@ -1976,6 +1984,11 @@ where
         .into();
         self.access
             .with_machine(context, move |session, context, _| {
+                if session.machine_disposition()
+                    == Some(tidepool_codegen::jit_machine::MachineDisposition::Unavailable)
+                {
+                    return Err(ResidentActorWorkbenchError::MachineLost);
+                }
                 let candidate_module = session.next_declaration_module().ok_or_else(|| {
                     ResidentActorWorkbenchError::CompileInfrastructure(
                         "resident cell session has no declaration plane".into(),

@@ -864,6 +864,17 @@ impl<'code> PreparedMachine<'code> {
                 .map(|(&k, v)| (k, v.clone())),
         );
 
+        self.machine.register_prepared_constructors(
+            compiled
+                .descriptor_registry
+                .iter()
+                .filter_map(|(&header, metadata)| match &metadata.meaning {
+                    super::DescriptorMeaning::Constructor(observation) => {
+                        Some((header, observation.identity))
+                    }
+                    _ => None,
+                }),
+        );
         // Last step: register this program's cross-program call/enter
         // resolution entries. Nothing after this point can fail, so no
         // rollback path needs to touch these registrations.
@@ -1231,6 +1242,8 @@ impl<'code> PreparedMachine<'code> {
             self.descriptor_registry.remove(header);
             self.header_owners.remove(header);
         }
+        self.machine
+            .retire_prepared_constructors(&installed.owned_headers);
         self.machine
             .retire_prepared_descriptors(&installed.owned_headers, &installed.statics);
         // 4. Stack maps, by identity.
@@ -5260,6 +5273,109 @@ mod tests {
             ))]
         ));
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+        assert!(machine.release(*handle_a));
+    }
+
+    /// A case that has no alternative for an intact constructor fails its own
+    /// call with a reusable `CaseMiss`; the machine keeps running programs.
+    #[test]
+    fn case_miss_on_an_intact_constructor_leaves_the_machine_reusable() {
+        let (mut machine, program_a) = PreparedMachine::new(
+            s3_field_producer_program(),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("A installs");
+        let call = PreparedCallOptions {
+            observation_budget: RunOptions::default().observation_budget,
+            collect_before_observation: false,
+        };
+        let produced = machine
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("A produces its retained Field(99)");
+        let [PreparedResult::Managed(handle_a)] = produced.values.as_slice() else {
+            panic!("A must return one managed constructor");
+        };
+        let mut imports = ImportBindings::new();
+        imports.insert(s3_field_producer_identity(), *handle_a);
+
+        let mut wire = testing::wire_program();
+        wire.signatures[0] = Signature {
+            arguments: vec![],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+        };
+        wire.globals = vec![GlobalDecl {
+            identity: s3_field_producer_identity(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: true,
+            required_generation: None,
+        }];
+        wire.expressions.nodes = vec![
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]),
+            ExprFrame::Case {
+                scrutinee: 0,
+                binder: ValueId(49),
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+                kind: CaseKind::Algebraic(testing::identity("S3Import", "Field")),
+                alternatives: vec![],
+            },
+        ];
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Function {
+            signature: SignatureId(0),
+            parameters: vec![],
+            captures: vec![],
+            body: 1,
+        };
+        let prepared = testing::prepare(wire).expect("case-miss consumer fixture");
+        let mut machine_imports = MachineImports::default();
+        machine_imports.values.insert(
+            s3_field_producer_identity(),
+            ImportedValue {
+                identity: s3_field_producer_identity(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                evaluated: true,
+                generation: 0,
+            },
+        );
+        let linked =
+            link_program(prepared, &machine_imports).expect("case-miss consumer fixture links");
+        let compiled = machine
+            .compile_for_install(&linked)
+            .expect("case-miss consumer fixture compiles");
+        let program_b = machine
+            .install_program(compiled, imports)
+            .expect("B installs, importing A's Field");
+
+        let error = match machine.run_entry(program_b, ValueId(0), &[], call, RealmId::ROOT) {
+            Err(error) => error,
+            Ok(_) => panic!("a case with no alternative for Field cannot succeed"),
+        };
+        match error {
+            ExecutionError::Runtime(failure) => {
+                assert!(
+                    matches!(
+                        failure.cause,
+                        RuntimeError::CaseMiss {
+                            constructor: tidepool_repr::DataConId(960),
+                            ..
+                        }
+                    ),
+                    "{failure:?}"
+                );
+                assert_eq!(failure.disposition, MachineDisposition::Reusable);
+            }
+            other => panic!("expected a runtime case miss, got {other:?}"),
+        }
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+        machine
+            .run_entry_retained(program_a, ValueId(0), &[], call, RealmId::ROOT)
+            .expect("the machine still runs programs after a case miss");
         assert!(machine.release(*handle_a));
     }
 

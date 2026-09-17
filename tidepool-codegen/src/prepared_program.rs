@@ -191,12 +191,33 @@ pub(crate) enum DescriptorMeaning {
     Pap,
 }
 
-/// Prepared descriptor mismatches are compiler-contract failures. The JIT can
-/// only report them through a host boundary; the machine owns first-cause
-/// precedence and turns the recorded cause into the entry status.
-unsafe extern "C" fn prepared_case_trap(vmctx: *mut crate::context::VMContext) {
+/// A prepared case matched none of its alternatives. `scrutinee` is the
+/// tagged reference of an algebraic case (0 for any other case kind); `owner`
+/// names the compiled value. A scrutinee whose header is a known constructor
+/// is an intact object the case did not expect: the dispatch read it and
+/// wrote nothing, so the call fails as a reusable `CaseMiss` and unwinding
+/// restores thunk headers as for any language failure. Anything else is an
+/// integrity failure. Returns the resulting entry status.
+unsafe extern "C" fn prepared_case_trap(
+    vmctx: *mut crate::context::VMContext,
+    scrutinee: u64,
+    owner: u64,
+) -> i32 {
     let machine = unsafe { crate::machine_state::machine_state(vmctx) };
-    machine.set_first_cause(crate::host_fns::RuntimeError::CaseTrap);
+    let object = scrutinee & !7;
+    let constructor = if object < crate::host_fns::MIN_VALID_ADDR {
+        None
+    } else {
+        // SAFETY: generated code passes a nonzero scrutinee only for an
+        // algebraic case, whose value is a managed reference in this call.
+        let header = unsafe { std::ptr::read(object as *const usize) };
+        machine.prepared_constructor_at(header)
+    };
+    machine.set_first_cause(match constructor {
+        Some(constructor) => crate::host_fns::RuntimeError::CaseMiss { constructor, owner },
+        None => crate::host_fns::RuntimeError::CaseTrap,
+    });
+    machine.prepared_call_status() as i32
 }
 
 unsafe extern "C" fn prepared_bad_state(vmctx: *mut crate::context::VMContext) -> i32 {
@@ -612,6 +633,9 @@ impl CompiledProgram {
             .map_err(|error| PipelineError::Declaration(error.to_string()))?;
         let mut case_trap_signature = ir::Signature::new(pipeline.isa.default_call_conv());
         case_trap_signature.params.push(AbiParam::new(types::I64));
+        case_trap_signature.params.push(AbiParam::new(types::I64));
+        case_trap_signature.params.push(AbiParam::new(types::I64));
+        case_trap_signature.returns.push(AbiParam::new(types::I32));
         let case_trap = pipeline
             .module
             .declare_function("prepared_case_trap", Linkage::Import, &case_trap_signature)

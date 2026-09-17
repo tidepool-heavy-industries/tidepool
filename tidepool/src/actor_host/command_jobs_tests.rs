@@ -632,6 +632,31 @@ async fn command_result_pages_retained_stdout_without_launching_again() {
 }
 
 #[tokio::test]
+async fn cancelled_command_result_projects_and_later_cells_still_run() {
+    let mut campaign = TestCampaign::start().await;
+    committed(&campaign, "job <- Cmd.start [bash|sleep 30|]").await;
+    let backend = TestCommands::new();
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    committed(&campaign, "Cmd.cancel job").await;
+    committed(&campaign, "cancelled <- Cmd.await job").await;
+    let projected = committed(
+        &campaign,
+        "(Cmd.commandResult cancelled, Cmd.stdout cancelled)",
+    )
+    .await;
+    let text = projected.to_string();
+    assert!(!text.contains("Display failed"), "{text}");
+    assert!(text.contains("CommandCancelled"), "{text}");
+    let later = committed(&campaign, "1 + 1").await;
+    assert_eq!(later["items"][0]["output"], "2", "{later}");
+    assert_eq!(backend.specs.lock().len(), 1);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn failed_command_display_retains_result_without_reexecution() {
     let mut campaign = TestCampaign::start().await;
     committed(&campaign, "job <- Cmd.start [bash|printf result|]").await;
