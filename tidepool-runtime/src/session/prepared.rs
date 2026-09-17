@@ -115,10 +115,17 @@ pub enum PreparedRuntimeError {
     /// field-less constructor. The frame stays parked.
     #[error("the parked request has an open reply type and accepts only handle or field-less constructor delivery")]
     UnsitedAnswer,
-    /// The turn suspended under `HandleOrError`, and the prepared route
-    /// handles no effect yet, so every request is unhandled.
-    #[error("the turn requested an effect under HandleOrError; the prepared route handles no effects yet")]
+    /// The turn suspended under `HandleOrError`. The prepared route parks
+    /// nothing under that policy: handled effects are answered from the
+    /// parked frame ([`crate::session::ResidentSession`] offers every parked
+    /// request to the session's handler stack), so a run that must not park
+    /// cannot be handled either.
+    #[error("the turn requested an effect under HandleOrError; the prepared route parks nothing under that policy")]
     UnhandledRequest,
+    /// The session's effect handler stack claimed a parked request and then
+    /// failed. The frame was aborted; nothing stays parked.
+    #[error("effect handler for `{constructor}` failed: {detail}")]
+    Handler { constructor: String, detail: String },
     /// The program that produced a suspension admits no resume entry, so its
     /// continuation could never be re-entered. Every turn template defines
     /// the entry; this is a stale or foreign artifact, never a user error.
@@ -227,6 +234,9 @@ impl PreparedRuntimeError {
             | Self::CrossRealmArgument { .. } => PreparedFailureKind::Rejected,
             Self::Cancelled => PreparedFailureKind::Cancelled,
             Self::Compile(_) => PreparedFailureKind::Rejected,
+            // A handler fault is this turn's own failure: the machine stays
+            // reusable, exactly as Core reports a handler `EffectError`.
+            Self::Handler { .. } => PreparedFailureKind::Language,
             Self::Run(error) => match error {
                 ExecutionError::MissingEntry(_)
                 | ExecutionError::Unsupported(_)

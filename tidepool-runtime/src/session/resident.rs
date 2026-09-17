@@ -69,7 +69,7 @@ use super::turn::{PreparedTurn, TurnCode};
 use tidepool_codegen::suspension::{
     ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput, SuspensionRun, ValueHandle,
 };
-use tidepool_effect::dispatch::DispatchEffect;
+use tidepool_effect::dispatch::{request_constructor, DispatchEffect, EffectContext, Response};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::{
@@ -654,19 +654,23 @@ enum SettlePlan {
 /// a completed value is prepared under `plan`, a suspension is parked under
 /// `park`. The invocation's realm cancel flag governs the run and any forcing
 /// observation.
-fn settle_prepared(
+fn settle_prepared<H: DispatchEffect<O>, O>(
     engine: &mut ResidentEngine,
     program: ProgramId,
     realm: RealmId,
     plan: SettlePlan,
     park: ParkPolicy,
     table: &DataConTable,
+    handlers: &mut H,
+    captured: &O,
 ) -> Result<PreparedRun, PreparedRuntimeError> {
     let engine = engine
         .require_prepared()
         .map_err(|_| PreparedRuntimeError::WrongEngine)?;
     let settlement = engine.run_settled(program, realm)?;
-    finish_prepared(engine, program, realm, plan, park, table, settlement)
+    finish_prepared(
+        engine, program, realm, plan, park, table, handlers, captured, settlement,
+    )
 }
 
 /// Apply a rooted `Int -> M a` closure to `argument` through the shared
@@ -675,13 +679,15 @@ fn settle_prepared(
 /// arm of [`ResidentSession::run_rooted_entry_borrowed`]. `entry` is a bare
 /// cross-engine handle; BORROWED throughout (never released on any path,
 /// success or failure), matching the Core rooted path's own borrow contract.
-fn settle_rooted_entry(
+fn settle_rooted_entry<H: DispatchEffect<O>, O>(
     engine: &mut ResidentEngine,
     entry: ValueHandle,
     argument: i64,
     realm: RealmId,
     park: ParkPolicy,
     table: &DataConTable,
+    handlers: &mut H,
+    captured: &O,
 ) -> Result<(ProgramId, PreparedRun), PreparedRuntimeError> {
     let engine = engine
         .require_prepared()
@@ -697,6 +703,8 @@ fn settle_rooted_entry(
         SettlePlan::Observe,
         park,
         table,
+        handlers,
+        captured,
         settlement,
     )?;
     Ok((program, run))
@@ -705,13 +713,15 @@ fn settle_rooted_entry(
 /// [`settle_rooted_entry`], but applying one rooted value to another through
 /// `__applyValue` — the prepared-route arm of
 /// [`ResidentSession::run_rooted_application`]. Both handles are BORROWED.
-fn settle_rooted_application(
+fn settle_rooted_application<H: DispatchEffect<O>, O>(
     engine: &mut ResidentEngine,
     function: ValueHandle,
     argument: ValueHandle,
     realm: RealmId,
     park: ParkPolicy,
     table: &DataConTable,
+    handlers: &mut H,
+    captured: &O,
 ) -> Result<(ProgramId, PreparedRun), PreparedRuntimeError> {
     let engine = engine
         .require_prepared()
@@ -730,37 +740,103 @@ fn settle_rooted_application(
         SettlePlan::Observe,
         park,
         table,
+        handlers,
+        captured,
         settlement,
     )?;
     Ok((program, run))
 }
 
+/// The bridge value a handler's [`Response`] delivers as a host-built
+/// answer. A list response arrives as a flat item vector so that no deep
+/// spine exists on the handler side; the answer plan walks the rebuilt spine
+/// iteratively per row, and the spine's own `Drop` is the bridge `Value`'s
+/// (frame-based, not recursive).
+fn response_value(response: Response) -> Value {
+    match response {
+        Response::Complete(value) => value,
+        Response::List {
+            items,
+            cons_id,
+            nil_id,
+        } => items
+            .into_iter()
+            .rev()
+            .fold(Value::Con(nil_id, Vec::new()), |rest, item| {
+                Value::Con(cons_id, vec![item, rest])
+            }),
+    }
+}
+
 /// The one completion routine for a settled layer, whichever entry produced
-/// it (the initial scaffold or a resume): a suspension is parked with the
-/// run's policy and reported as Core reports one; a completed value is
-/// prepared per binder tier.
-fn finish_prepared(
+/// it (the initial scaffold or a resume): a completed value is prepared per
+/// binder tier; a suspension is parked with the run's policy, then offered to
+/// the session's handler stack exactly as Core's `HandleOrSuspend` drive
+/// does. A handler that claims the request answers the parked frame through
+/// the host-answer path and the resumed layer is finished here in turn; a
+/// request no handler claims is reported parked, as Core reports one.
+#[allow(clippy::too_many_arguments)]
+fn finish_prepared<H: DispatchEffect<O>, O>(
     engine: &mut super::prepared::PreparedEngine,
-    program: ProgramId,
-    realm: RealmId,
+    mut program: ProgramId,
+    mut realm: RealmId,
     plan: SettlePlan,
     park: ParkPolicy,
     table: &DataConTable,
-    settlement: PreparedSettlement,
+    handlers: &mut H,
+    captured: &O,
+    mut settlement: PreparedSettlement,
 ) -> Result<PreparedRun, PreparedRuntimeError> {
-    let handle = match settlement {
-        PreparedSettlement::Done { value } => value,
-        PreparedSettlement::Suspended {
-            request,
-            continuation,
-        } => {
-            let parked =
-                engine.park_suspension(program, realm, park, request, continuation, table)?;
+    let handle = loop {
+        let (request, continuation) = match settlement {
+            PreparedSettlement::Done { value } => break value,
+            PreparedSettlement::Suspended {
+                request,
+                continuation,
+            } => (request, continuation),
+        };
+        let parked = engine.park_suspension(program, realm, park, request, continuation, table)?;
+        // `SuspendAll` parks without consulting handlers; `HandleOrError`
+        // never reaches here (`park_suspension` refuses it). The handler
+        // stack sees the observed request, the run's principal and the
+        // session's output sink, as on Core.
+        let response = if park.effect_policy == EffectRunPolicy::SuspendAll {
+            None
+        } else {
+            let cx = EffectContext::with_principal(table, park.principal, captured);
+            match handlers.dispatch(&parked.request, &cx) {
+                Ok(response) => response,
+                Err(error) => {
+                    let constructor = request_constructor(&parked.request, table);
+                    // The frame cannot be re-entered by anyone else: release it.
+                    let _ = engine.abort_parked(parked.id);
+                    return Err(PreparedRuntimeError::Handler {
+                        constructor,
+                        detail: error.to_string(),
+                    });
+                }
+            }
+        };
+        let Some(response) = response else {
             return Ok(PreparedRun::Suspended {
                 id: parked.id,
                 request: parked.request,
             });
-        }
+        };
+        let answer = response_value(response);
+        let resumed = match engine.resume_with_answer(parked.id, &answer, table) {
+            Ok(resumed) => resumed,
+            Err(error) => {
+                // A refusal before the take leaves the frame parked; a
+                // handled request has no other owner, so drop it here rather
+                // than leak it. A failure after the take already consumed it.
+                let _ = engine.abort_parked(parked.id);
+                return Err(error);
+            }
+        };
+        program = resumed.runner;
+        realm = resumed.realm;
+        settlement = resumed.settlement;
     };
     let observe =
         |engine: &mut super::prepared::PreparedEngine, handle: PreparedHandle| match engine
@@ -2101,8 +2177,10 @@ where
             live_payload: self.core.live_payload_policy(),
         };
         let run_exec_started = std::time::Instant::now();
-        let ran = self.on_eval_thread(move |engine, table, _handlers, _captured| {
-            Ok(settle_prepared(engine, program, realm, plan, park, table))
+        let ran = self.on_eval_thread(move |engine, table, handlers, captured| {
+            Ok(settle_prepared(
+                engine, program, realm, plan, park, table, handlers, captured,
+            ))
         })?;
         timing::record_stage(
             timing::NO_NODE,
@@ -2848,9 +2926,9 @@ where
             effect_policy: self.core.effect_policy(),
             live_payload: self.core.live_payload_policy(),
         };
-        let ran = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
+        let ran = self.on_eval_thread(move |engine, _table, handlers, captured| {
             Ok(settle_rooted_entry(
-                engine, entry, argument, realm, park, &table,
+                engine, entry, argument, realm, park, &table, handlers, captured,
             ))
         })?;
         let (program, run) = ran?;
@@ -2876,9 +2954,9 @@ where
             effect_policy: self.core.effect_policy(),
             live_payload: self.core.live_payload_policy(),
         };
-        let ran = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
+        let ran = self.on_eval_thread(move |engine, _table, handlers, captured| {
             Ok(settle_rooted_application(
-                engine, function, argument, realm, park, &table,
+                engine, function, argument, realm, park, &table, handlers, captured,
             ))
         })?;
         let (program, run) = ran?;
@@ -3521,7 +3599,7 @@ where
             effect_policy: self.core.effect_policy(),
             live_payload: self.core.live_payload_policy(),
         };
-        let resumed = self.on_eval_thread(move |engine, table, _handlers, _captured| {
+        let resumed = self.on_eval_thread(move |engine, table, handlers, captured| {
             let engine = engine.require_prepared()?;
             let outcome = match input {
                 ResumeInput::Answer(value) => engine.resume_with_answer(frame_id, &value, table),
@@ -3544,6 +3622,8 @@ where
                     plan,
                     park,
                     table,
+                    handlers,
+                    captured,
                     resumed.settlement,
                 )
                 .map(|run| (runner, run))

@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
+use tidepool_effect::{request_constructor, DispatchEffect, EffectContext, EffectError, Response};
 use tidepool_repr::{
     execution_schema::{Group, TypeNode},
     Generation, SessionId,
@@ -24,8 +25,8 @@ use tidepool_testing::eval_harness;
 /// A minimal notebook over one resident session: it tracks the value
 /// generation and the bound value modules a later turn imports, exactly as
 /// the actor workbench's compile view does.
-struct Notebook {
-    session: ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
+struct Notebook<H = frunk::HNil> {
+    session: ResidentSession<H, tidepool_mcp::CapturedOutput>,
     preamble: String,
     effect_stack: String,
     include: Vec<PathBuf>,
@@ -42,6 +43,14 @@ struct Notebook {
 
 impl Notebook {
     fn new(engine: EngineKind) -> Self {
+        Self::with_handlers(engine, frunk::HNil)
+    }
+}
+
+impl<H: DispatchEffect<tidepool_mcp::CapturedOutput> + Send> Notebook<H> {
+    /// A notebook whose session carries `handlers`: the effect handler stack
+    /// every turn's eval thread offers a parked request to.
+    fn with_handlers(engine: EngineKind, handlers: H) -> Self {
         eval_harness::require_extract();
         let decls = tidepool_mcp::standard_decls();
         let preamble = tidepool_mcp::build_preamble(&decls, false);
@@ -64,7 +73,7 @@ impl Notebook {
         include.push(lib.include_dir().to_path_buf());
         let session = ResidentSession::unbootstrapped_on(
             engine,
-            frunk::HNil,
+            handlers,
             tidepool_mcp::CapturedOutput::new(),
             include.clone(),
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
@@ -1534,7 +1543,7 @@ fn notebook_end_to_end_on_prepared_stg() {
     notebook_end_to_end(EngineKind::Prepared);
 }
 
-impl Notebook {
+impl<H: DispatchEffect<tidepool_mcp::CapturedOutput> + Send> Notebook<H> {
     /// Run `text` (an expression or single-binder bind turn) to the
     /// suspension of an ordinary effect request: one that carries no
     /// `typedSite`, so the prepared route must classify it by its request
@@ -1597,6 +1606,109 @@ impl Notebook {
 /// site: `say` takes a host-built `()` and `readFile` takes either side of
 /// `Either FsError Text`. `kvGet`'s `Value`-carrying reply is covered
 /// separately by `notebook_value_answers`.
+/// A handler stack that answers every Console `Print` with `()` and leaves
+/// every other request unhandled, counting what it answered.
+#[derive(Clone, Default)]
+struct AnswerPrint {
+    answered: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl DispatchEffect<tidepool_mcp::CapturedOutput> for AnswerPrint {
+    fn dispatch(
+        &mut self,
+        request: &tidepool_bridge::Value,
+        cx: &EffectContext<'_, tidepool_mcp::CapturedOutput>,
+    ) -> Result<Option<Response>, EffectError> {
+        if request_constructor(request, cx.table()).rsplit('.').next() != Some("Print") {
+            return Ok(None);
+        }
+        self.answered
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        cx.respond(()).map(Some)
+    }
+}
+
+/// An ordinary effect the session's handler stack claims never surfaces as
+/// a suspension: the parked frame is answered from the handler's response on
+/// the eval thread and the turn completes, as Core's `HandleOrSuspend` drive
+/// completes it. A request no handler claims still parks.
+fn notebook_handled_ordinary_effects(engine: EngineKind) {
+    use tidepool_bridge::ToCore;
+
+    let handlers = AnswerPrint::default();
+    let answered = handlers.answered.clone();
+    let mut notebook = Notebook::with_handlers(engine, handlers);
+    let handles_before = notebook.session.value_handle_count();
+
+    let rendered = notebook
+        .expression("say \"hi\" >> say \"there\" >> pure (42 :: Int)")
+        .to_string();
+    assert!(
+        rendered.contains("42"),
+        "{engine:?}: the handled say turn completed with {rendered}"
+    );
+    assert_eq!(
+        answered.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "{engine:?}: both Print requests reached the handler stack"
+    );
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    assert_eq!(notebook.session.stowed_roots_count(), 0, "{engine:?}");
+    assert_eq!(
+        notebook.session.value_handle_count(),
+        handles_before,
+        "{engine:?}: the handled say turn leaked a value handle"
+    );
+
+    // A request the stack declines still parks, and its resume runs the
+    // rest of the turn, including a later handled `say`.
+    let (hole, request, binder) = notebook.suspend_ordinary(
+        engine,
+        "c <- readFile \"notes.txt\" >>= \\t -> say (either (const \"failed\") id t) >> pure t",
+    );
+    assert!(
+        request.to_string().contains("notes.txt"),
+        "{engine:?}: the FsRead request rendered as {request}"
+    );
+    assert_eq!(notebook.session.parked_count(), 1, "{engine:?}");
+    let binder = binder.expect("a bind turn");
+    let table = notebook.last_table.clone().expect("the ask turn's table");
+    let right_id = notebook.constructor("Right");
+    let text = "contents"
+        .to_string()
+        .to_value(&table)
+        .expect("Text answer");
+    notebook.resume_bind(
+        hole,
+        &binder,
+        tidepool_bridge::Value::Con(right_id, vec![text]),
+    );
+    assert_eq!(
+        answered.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "{engine:?}: the say after the resumed readFile reached the handler stack"
+    );
+    assert_eq!(notebook.session.parked_count(), 0, "{engine:?}");
+    assert_eq!(notebook.session.stowed_roots_count(), 0, "{engine:?}");
+    let rendered = notebook
+        .expression("either (const \"failed\") id c")
+        .to_string();
+    assert!(
+        rendered.contains("contents"),
+        "{engine:?}: the bound answer rendered as {rendered}"
+    );
+}
+
+#[test]
+fn notebook_handled_ordinary_effects_on_core() {
+    notebook_handled_ordinary_effects(EngineKind::Core);
+}
+
+#[test]
+fn notebook_handled_ordinary_effects_on_prepared_stg() {
+    notebook_handled_ordinary_effects(EngineKind::Prepared);
+}
+
 fn notebook_ordinary_effects(engine: EngineKind) {
     use tidepool_bridge::{ToCore, Value};
 
