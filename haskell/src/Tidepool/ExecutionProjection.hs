@@ -8,6 +8,10 @@ module Tidepool.ExecutionProjection
   , preparedTargetReferences
   , preparedModuleReferenceFacts
   , combinePreparedTargetReferences
+  , preparedModuleReachFacts
+  , preparedSeedUniques
+  , reachableTopUniques
+  , topBinders
   , projectLiteralAtomForTest
   , assignTopIdentitySpellings
   , resolveTextPackageUnit
@@ -20,7 +24,7 @@ import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
 import Data.IntMap.Strict qualified as IntMap
 import Data.List (find)
-import Data.Maybe (isJust, isNothing, listToMaybe)
+import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Tidepool.PreparedBuiltins
   ( DeferredFunction(..), deferredFunction, wiredInErrorKind )
 import Data.Map.Strict (Map)
@@ -56,9 +60,9 @@ import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (fieldOcc_maybe, occNameString)
 import GHC.Types.RepType
   (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
-import GHC.Types.Unique.Set (elementOfUniqSet, mkUniqSet, nonDetEltsUniqSet)
+import GHC.Types.Unique.Set (UniqSet, addOneToUniqSet, elementOfUniqSet, emptyUniqSet, mkUniqSet, nonDetEltsUniqSet)
 import GHC.Types.Unique (Unique, getKey)
-import GHC.Types.Unique.FM (UniqFM, listToUFM, lookupUFM)
+import GHC.Types.Unique.FM (UniqFM, listToUFM, listToUFM_C, lookupUFM)
 import GHC.Types.Var (Id, varName, varType, varUnique)
 import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
 import GHC.Types.Var.Set (dVarSetElems, isEmptyVarSet)
@@ -70,7 +74,7 @@ import GHC.Types.PkgQual (PkgQual(OtherPkg))
 import GHC.Unit.State (lookupPackageName)
 import GHC.Unit.Types (Module, Unit, unitString)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
-import Tidepool.ExecutionIR (topBindingReferences)
+import Tidepool.ExecutionIR (topBindingReferenceUniques, topBindingReferences)
 import Tidepool.ExecutionSchema
 import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
@@ -305,26 +309,22 @@ preparedModuleReferenceFacts context prepared = Map.fromList
           (pmModule prepared) (pmTagSigs prepared) (recoveryReferences context binding))
   ]
 
--- | Cross-module combination for 'preparedTargetReferences'. Each module is
--- paired with its own 'preparedModuleReferenceFacts' (possibly memoized by the
--- caller); pairing by position rather than by 'Module' keeps two prepared
--- copies of one owner distinct. A group contributes when
--- 'selectPreparedTarget' kept it reachable; groups are walked in module and
--- binding order, so the result equals recomputing the facts over the
--- selected bindings.
+-- | Cross-module combination for 'preparedTargetReferences': the external
+-- value references of every binding group @kept@ selects. Each module is
+-- paired with its own 'preparedModuleReferenceFacts' (possibly memoized by
+-- the caller); pairing by position keeps two prepared copies of one owner
+-- distinct. Groups are walked in module and binding order, so the result
+-- equals recomputing the facts over the kept bindings.
 combinePreparedTargetReferences :: ProjectionContext
-  -> [(PreparedModule, Map Word64 [Id])] -> [Id]
-combinePreparedTargetReferences context entries =
+  -> (CgStgTopBinding -> Bool) -> [(PreparedModule, Map Word64 [Id])] -> [Id]
+combinePreparedTargetReferences context kept entries =
   let modules = map fst entries
-      (_, selected) = selectPreparedTarget context modules
-      kept = mkUniqSet [varUnique binder | prepared <- selected
-        , (binding, _) <- pmBindings prepared, binder <- topBinders binding]
       defined = mkUniqSet [varUnique binder | prepared <- modules
         , (binding, _) <- pmBindings prepared, binder <- topBinders binding]
       referenced = [ binder | (prepared, facts) <- entries
         , (binding, _) <- pmBindings prepared
+        , kept binding
         , firstBinder : _ <- [topBinders binding]
-        , elementOfUniqSet (varUnique firstBinder) kept
         , binder <- Map.findWithDefault [] (getKey (varUnique firstBinder)) facts
         , isExternalName (varName binder)
         , isNothing (nullaryWorkerConstructor binder)
@@ -338,8 +338,62 @@ combinePreparedTargetReferences context entries =
 -- map is always computed before filtering. Recovery uses Ids, never occurrence
 -- strings or the imported-only annotations returned by stg2stg.
 preparedTargetReferences :: ProjectionContext -> [PreparedModule] -> [Id]
-preparedTargetReferences context modules = combinePreparedTargetReferences context
-  [(prepared, preparedModuleReferenceFacts context prepared) | prepared <- modules]
+preparedTargetReferences context modules =
+  combinePreparedTargetReferences context keep
+    [(prepared, preparedModuleReferenceFacts context prepared) | prepared <- modules]
+  where
+    (_, selected) = selectPreparedTarget context modules
+    reachable = mkUniqSet [varUnique binder | prepared <- selected
+      , (binding, _) <- pmBindings prepared, binder <- topBinders binding]
+    keep binding = any ((`elementOfUniqSet` reachable) . varUnique) (topBinders binding)
+
+-- | Per-module, round-invariant reachability input for recovery: every
+-- individual top in binding order with the raw uniques its body mentions
+-- (none for a top 'skippedFromRecovery' leaves unrecovered, as in
+-- 'selectPreparedTarget').
+preparedModuleReachFacts :: ProjectionContext -> PreparedModule -> [(Id, [Unique])]
+preparedModuleReachFacts context prepared =
+  [ (binder, if skippedFromRecovery context binder then []
+      else topBindingReferenceUniques (pmModule prepared) single)
+  | (binding, _) <- pmBindings prepared
+  , (binder, single) <- individualTops binding
+  ]
+
+-- | Tops of the home modules whose identity is the entry or an auxiliary
+-- root. Recovered modules never share a home module's identity namespace, so
+-- home spellings, and therefore these seeds, do not change as recovery adds
+-- modules.
+preparedSeedUniques :: ProjectionContext -> [PreparedModule] -> UniqSet Unique
+preparedSeedUniques context home = mkUniqSet
+  [ varUnique binder
+  | prepared <- home
+  , (binding, _) <- pmBindings prepared
+  , binder <- topBinders binding
+  , Just symbol <- [lookupVarEnv identities binder]
+  , symbol == projectionEntry context || symbol `elem` projectionAuxiliaryRoots context
+  ]
+  where
+    identities = buildTopIdentityMap home
+
+-- | 'selectPreparedTarget''s reachable closure over top uniques instead of
+-- assigned identities (tops and identities correspond one to one within a
+-- closure): the tops reachable from @seeds@ through references to other tops
+-- of the given modules.
+reachableTopUniques :: UniqSet Unique -> [[(Id, [Unique])]] -> UniqSet Unique
+reachableTopUniques seeds modules = close emptyUniqSet (nonDetEltsUniqSet seeds)
+  where
+    topLevel = mkUniqSet [varUnique binder | facts <- modules, (binder, _) <- facts]
+    dependencies :: UniqFM Unique [Unique]
+    dependencies = listToUFM_C (++)
+      [ (varUnique binder, filter (`elementOfUniqSet` topLevel) references)
+      | facts <- modules
+      , (binder, references) <- facts
+      ]
+    close visited [] = visited
+    close visited (unique : pending)
+      | unique `elementOfUniqSet` visited = close visited pending
+      | otherwise = close (addOneToUniqSet visited unique)
+          (fromMaybe [] (lookupUFM dependencies unique) <> pending)
 
 -- A registered replacement has no source-body dependencies. Split recursive
 -- groups for this fact query so unrelated siblings retain their own references.

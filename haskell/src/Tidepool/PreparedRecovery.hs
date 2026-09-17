@@ -6,24 +6,28 @@ module Tidepool.PreparedRecovery
   , insertGroup
   ) where
 
-import Control.Exception (evaluate)
-import Control.Monad (foldM)
+import Control.Exception (evaluate, throwIO)
+import Control.Monad (foldM, unless, when)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Data.Word (Word64)
+import Data.Maybe (isJust)
+import GHC.Types.Unique.Set (elementOfUniqSet)
+import System.Environment (lookupEnv)
 import GHC.Core (CoreBind, Bind(..))
 import GHC.Driver.Env (HscEnv)
 import GHC.Types.Id (idType)
 import GHC.Types.Name (Name, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.RepType (typePrimRep_maybe)
-import GHC.Types.Var (Id, varName)
+import GHC.Types.Var (Id, varName, varUnique)
 import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (Module, unitString)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.ExecutionProjection
-  (ProjectionContext, combinePreparedTargetReferences, preparedModuleReferenceFacts)
+  ( ProjectionContext, combinePreparedTargetReferences, preparedModuleReachFacts
+  , preparedModuleReferenceFacts, preparedSeedUniques, preparedTargetReferences
+  , reachableTopUniques, topBinders )
 import Tidepool.FatIface (FatIfaceCache, FatIfaceMissing, OwnerInterfaceCache)
 import Tidepool.PreparedStg
   (PreparedModule(..), RecoveredModuleFailure(..), prepareRecoveredBodies)
@@ -84,21 +88,32 @@ recoverPreparedClosure :: HscEnv -> FatIfaceCache -> OwnerInterfaceCache
   -> ProjectionContext -> [PreparedModule] -> IO RecoveredClosure
 recoverPreparedClosure env cache ownerCache context home = do
   timing <- readTimingEnabled
-  -- Per-module reference facts ('preparedModuleReferenceFacts') are pure in
-  -- 'context' and a module's own bindings. Home modules never change during
-  -- this call; a recovered module's entry is dropped when 'prepareOne'
-  -- replaces it.
-  let homeFacts = [(prepared, preparedModuleReferenceFacts context prepared) | prepared <- home]
+  -- Per-module facts (external references per group, raw references per
+  -- top) are pure in 'context' and a module's own bindings. Home modules
+  -- never change during this call; a recovered module's entry is dropped
+  -- when 'prepareOne' replaces it. Reachability runs over top uniques from
+  -- the home seeds; 'TIDEPOOL_RECOVERY_CHECK' compares every round against
+  -- the identity-based 'preparedTargetReferences'.
+  checking <- isJust <$> lookupEnv "TIDEPOOL_RECOVERY_CHECK"
+  let factsOf prepared =
+        (preparedModuleReferenceFacts context prepared, preparedModuleReachFacts context prepared)
+      homeFacts = [(prepared, factsOf prepared) | prepared <- home]
+      seeds = preparedSeedUniques context home
   factsMemo <- newIORef Map.empty
-  let factsFor :: PreparedModule -> IO (Map.Map Word64 [Id])
-      factsFor prepared = do
+  let factsFor prepared = do
         memo <- readIORef factsMemo
         case Map.lookup (pmModule prepared) memo of
           Just hit -> pure hit
           Nothing -> do
-            let fresh = preparedModuleReferenceFacts context prepared
+            let fresh = factsOf prepared
             modifyIORef' factsMemo (Map.insert (pmModule prepared) fresh)
             pure fresh
+      roundReferences modules recovered =
+        let entries = homeFacts ++ recovered
+            reachable = reachableTopUniques seeds [reach | (_, (_, reach)) <- entries]
+            kept binding = any ((`elementOfUniqSet` reachable) . varUnique) (topBinders binding)
+        in combinePreparedTargetReferences context kept
+             [(prepared, references) | (prepared, (references, _)) <- entries]
   -- Diagnostic split of 'prepared_recover' (flat sub-phases, summed over
   -- rounds): reference collection, body lookup, defining-module preparation.
   spent <- newIORef (0 :: Integer, 0 :: Integer, 0 :: Integer, 0 :: Integer, 0 :: Integer)
@@ -108,8 +123,14 @@ recoverPreparedClosure env cache ownerCache context home = do
         let modules = home ++ Map.elems prepared
         (references, refsMs) <- timeSection $ do
           recovered <- mapM (\m -> (,) m <$> factsFor m) (Map.elems prepared)
-          evaluate (combinePreparedTargetReferences context (homeFacts ++ recovered))
-            >>= \refs -> length refs `seq` pure refs
+          refs <- evaluate (roundReferences modules recovered)
+          _ <- evaluate (length refs)
+          when checking $ do
+            let expected = preparedTargetReferences context modules
+            unless (map varUnique refs == map varUnique expected) $
+              throwIO (userError ("recovery reachability diverged from identity selection: "
+                ++ show (length refs) ++ " vs " ++ show (length expected) ++ " references"))
+          pure refs
         charge (\(r, l, p, n, d) -> (r + refsMs, l, p, n + 1, d))
         let pending = filter (\binder -> not (Set.member (varName binder) attempted)
                 && typePrimRep_maybe (idType binder) /= Just [])

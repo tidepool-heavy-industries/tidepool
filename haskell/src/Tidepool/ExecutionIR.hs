@@ -15,6 +15,7 @@ module Tidepool.ExecutionIR
   , PreparedInventory(..)
   , inventoryPreparedModule
   , topBindingReferences
+  , topBindingReferenceUniques
   , renderPreparedInventory
   ) where
 
@@ -171,6 +172,15 @@ topBindingReferences modul topLevel binding =
     ]
  where
   scope = Scope modul topLevel emptyUniqSet emptyUniqSet
+
+-- | Every unique a top binding's body mentions, before any top-level filter:
+-- 'topBindingReferences' is this list restricted to @topLevel@.
+topBindingReferenceUniques :: Module -> CgStgTopBinding -> [Unique]
+topBindingReferenceUniques modul binding =
+  let Acc _dependencies _ _ _ references = walkTop scope binding
+  in map fst references
+ where
+  scope = Scope modul emptyUniqSet emptyUniqSet emptyUniqSet
 
 inventoryExactFacts :: Module -> PreparedFacts -> Set PreparedFact
 inventoryExactFacts modul facts = Set.fromList
