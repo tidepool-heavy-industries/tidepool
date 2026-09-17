@@ -142,6 +142,7 @@ type ShoalRoot = ResidentActorRoot<ShoalHandlerStack, CapturedOutput>;
 #[derive(Clone)]
 struct ActorForkWorkspaceAdmission {
     worktrees: Arc<Mutex<ActorWorktreeHandler>>,
+    authority: ActorWorktreeAuthority,
     manager: WorktreeManager,
     bindings: Arc<Mutex<BindingTable>>,
     runtime: String,
@@ -302,8 +303,15 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
         &self,
         actor: ActorRef,
         worktree: &str,
+        role: tidepool_actor::ActorRole,
     ) -> Result<Arc<dyn tidepool_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
-        self.bind_workspace(actor, worktree, None, None)
+        let custody = self.bind_workspace(actor, worktree, None, None)?;
+        // Custody alone lets the actor inspect its tree; the grant is what
+        // lets a coding-role holder merge into it. Interactive actors are
+        // granted again at `PolicyInstalled` with the same value.
+        self.authority
+            .install_grant(actor.into(), worktree_grant(role));
+        Ok(custody)
     }
 
     fn admit(
@@ -378,6 +386,7 @@ fn fork_workspace_admission(
         runtime,
         native,
         manager: worktrees.clone(),
+        authority: authority.clone(),
         worktrees: Arc::new(Mutex::new(ActorWorktreeHandler::new(
             WorktreeHandler::from_manager(worktrees),
             authority,
@@ -2453,7 +2462,13 @@ async fn run_interactive_applications(
                         }
                     }
                     LocalResidentDeployment::CommandBackend(request) => {
+                        // A resident owner without a native application of
+                        // its own (an operator workbench, or a record actor
+                        // whose creators are all resident) runs as the root:
+                        // the resident side already walked to the nearest
+                        // interactive creator, so what reaches here has none.
                         let backend = deployments.iter().find(|app| app.actor == request.owner)
+                            .or_else(|| deployments.iter().find(|app| app.actor == root_identity))
                             .and_then(|app| app.thread.clone())
                             .zip(launch_context.config.command_resources.clone())
                             .map(|(thread, resources)| Arc::new(commands::NativeCommandBackend::new(

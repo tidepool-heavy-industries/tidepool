@@ -51,13 +51,13 @@ The gate sends the root a message for exactly these, and for nothing else:
 
 Everything else — collecting artifacts, starting a review, relaying findings,
 re-reviewing, merging a clean candidate — happens without a turn. Each wake
-names the ledger entry that produced it, so the root's first act is a read, not
+names the decision that produced it, so the root's first act is a read, not
 an investigation.
 
 ## The record
 
 One `State`, one `Event` per child whose settlement drives the loop, one `Call`
-the root reads the ledger through. The row is `Selected`, pinned by a signature
+the root reads the state through. The row is `Selected`, pinned by a signature
 on `gateFor` — `knownEffects` alone is ambiguous.
 
 Not executable on its own: it closes over a live `implementer` response.
@@ -69,8 +69,8 @@ import Tidepool.Effects.Core (Jev, Commands)
 data Contract = Contract { ownedPaths :: [Text], requiredTests :: [Text], likelyMiss :: Text, baseOid :: Text, onto :: BranchName, integrationTree :: WorktreeId, rootRef :: AgentRef }
 data Wake = Wake { wakeReason :: Text, wakeSeam :: Text, wakeDetail :: Text }
 instance Show Wake where show w = T.unpack (wakeReason w <> " [" <> wakeSeam w <> "] " <> wakeDetail w)
-data GateState = GateState { gateContract :: Contract, gateEvidence :: [(Text, Text)], gateLedger :: [Wake], gateRepairs :: Int }
-instance Show GateState where show s = unlines (map show (gateLedger s))
+data GateState = GateState { gateContract :: Contract, gateEvidence :: [(Text, Text)], gateDecisions :: [Wake], gateRepairs :: Int }
+instance Show GateState where show s = unlines (map show (gateDecisions s))
 type GateEffects = LocalEffects Gate '[Replies, Watches, Forks, ActorContext, AgentInspection, BoundWorktree, Notifications, Jev, Commands, Actor]
 data Gate mode = Gate
   { gateStateField :: mode :- State GateState
@@ -80,7 +80,7 @@ data Gate mode = Gate
   } deriving Generic
 ```
 
-`gateView` is the root's one call. `Show GateState` is the compact ledger: one
+`gateView` is the root's one call. `Show GateState` is the decision list: one
 line per decision, so reading the whole state costs one short display.
 
 ## The handlers
@@ -224,7 +224,7 @@ was wrong, so the handler's reply is to name the exact missing field and send
 it back — to the child with `updateRequest` when the child can supply it, to
 the root as wake 2 when it cannot. Never merge on it and never repair on it.
 
-The other seams take the same shape, each ledgered, each with the exit, each
+The other seams take the same shape, each recorded in the state, each with the exit, each
 under a named policy: unmatched check output → `J.routing` over the reflex
 classes; reviewer findings → `J.routing` over
 `{addresses_named_checklist_item, contract_change_needed, style_only,
@@ -233,7 +233,7 @@ over both texts, escalating on a repeat instead of a third repair; which
 evidence the reviewer's brief needs → `J.routing`; admitting a reviewer at all
 → `J.spawning`; the merge gate above → `J.merging`.
 
-## The ledger is the wake
+## The state is the wake
 
 Every Jev call and every routing decision appends one `Wake`. The root reads
 the whole loop with one `R.call (gateView (R.client gate)) ()`.
@@ -241,8 +241,8 @@ the whole loop with one `R.call (gateView (R.client gate)) ()`.
 ```haskell
 data Wake = Wake { wakeReason :: Text, wakeSeam :: Text, wakeDetail :: Text }
 instance Show Wake where show w = T.unpack (wakeReason w <> " [" <> wakeSeam w <> "] " <> wakeDetail w)
-let ledger = [Wake "evidence_incomplete" "coverage" "src/store.rs named in the stat has no hunk", Wake "merged" "merge" "def4560 onto integration/tags"] :: [Wake]
-map (T.pack . show) ledger
+let decisions = [Wake "evidence_incomplete" "coverage" "src/store.rs named in the stat has no hunk", Wake "merged" "merge" "def4560 onto integration/tags"] :: [Wake]
+map (T.pack . show) decisions
 ```
 
 Keep the detail short and literal. A wake that needs the root to reconstruct

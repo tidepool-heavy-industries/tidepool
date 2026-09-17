@@ -249,9 +249,12 @@ fn validate_spec(spec: &CommandSpec) -> Result<(), CommandError> {
 }
 
 impl CommandJobs {
+    /// `native_owner` is the actor whose native application runs the job;
+    /// the job itself stays owned (status, wait, cancel) by `parent`.
     pub(crate) async fn start(
         &self,
         parent: &KernelContext,
+        native_owner: ActorRef,
         spec: CommandSpec,
     ) -> Result<(String, Arc<CommandBackendRequest>), CommandError> {
         validate_spec(&spec).map_err(|error| match error {
@@ -263,7 +266,7 @@ impl CommandJobs {
         let id = uuid::Uuid::new_v4().to_string();
         let (reply, receive) = oneshot::channel();
         let request = Arc::new(CommandBackendRequest {
-            owner: parent.identity(),
+            owner: native_owner,
             reply: Mutex::new(Some(reply)),
         });
         let shared = Arc::new(Shared {

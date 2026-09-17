@@ -144,6 +144,6 @@ skills = do
     (any (`Text.isInfixOf` output orchestrated)
       ["jev unavailable", "hold", "all_present", "item_missing", "conflicting", "insufficient_evidence"])
   waked <- example owner "shoal-orchestrate" 4
-  check "the wake ledger renders one line per decision"
+  check "recorded decisions render one line each"
     ("evidence_incomplete" `Text.isInfixOf` output waked
       && "merged" `Text.isInfixOf` output waked)

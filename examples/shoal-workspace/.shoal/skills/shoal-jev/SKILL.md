@@ -72,6 +72,16 @@ project what the next decision needs. `J.contenders floor a` reads every
 alternative above a mass floor, best first; a near tie is a typed outcome worth
 branching on. `J.handle a.chosen handlers` eliminates a choice exhaustively.
 
+`J.accept policy a` returning `Right` means the **winning key cleared the
+floors**, whatever that key is: a confident `item_missing` is a `Right`. Never
+treat `Right _` as approval; dispatch on the key with `J.handle`, and let only
+the one alternative that means "proceed" proceed. A gate is a screen, not a
+verdict: measured, it passed three planted semantic defects at 0.92 to 0.97 that
+per-clause questions then named at 0.90 to 0.99, so the mandatory reviewer and
+the per-item Nouls stay even when the gate says `all_present`. Ride one
+known-answer Noul (a canary) in every hand-assembled packet; a canary miss
+means the packet is broken, not the candidate.
+
 ## Calibration (measured, 262 calls)
 
 - A mass of 1.0 means no option in the pool competes. Rewording does not move
@@ -210,7 +220,7 @@ same material in fallback form.
 14. Keep a dense cell under about 30 compact items; six full test outputs already exceed the 32k state cap.
 15. Literal questions are stable across phrasings (under 0.03); judgment questions move up to 0.45. Pair only `honest` and `stuck` and take the minimum.
 16. Read `a.key`, `a.mass`, `a.margin`, `a.confidence`, `a.masses`; `a.yes`; `a.expectation`, `a.nearest`. A bare `answer` displays. No projection lambdas.
-17. Every call is worth a ledger row: the questions, the answers as above, `J.resolvedModel`, and the action taken.
+17. Every call is worth one recorded decision in the actor's state: the questions, the answers as above, `J.resolvedModel`, and the action taken.
 18. When Jev returns `Left`, fall back to reading in order and keep going; a recurring handback is a missing branch to write by hand.
 19. Jev is evidence, not authority: the checklist gate agreed with five fresh reviewers on five real candidates; it replaces the reviewer only where the checklist is the whole contract.
 20. Anchor a triage pool with two items whose answers you already know, carried verbatim beside the real ones: one clean item (own tests pass, the failures are all in other modules — expect `real_failure` near 0.15 and `scope_creep` near 0.02) and one genuinely failing item (one owned test fails among passes — expect `real_failure` near 0.97). If either drifts past 0.5, the pool is wrong before a real item has been read, and the cheapest fix is usually a missing field or a question that stopped being literal. Anchors cost two pool entries and catch the failure the answers themselves cannot show you.
@@ -225,9 +235,9 @@ row (`import Tidepool.Effects.Core (Jev)`, then
 the handler exactly as in a cell. The row is checked against the launching
 actor's ceiling, so a handler cannot acquire judgment its creator does not have.
 
-Ledger every answer into the actor's own state as data — the key, the mass, the
+Record every answer in the actor's own state as data — the key, the mass, the
 confidence, `J.resolvedModel`, and the action taken — and give the record one
-`Call` the owner reads the ledger through. A judgment nobody can inspect
+`Call` the owner reads the state through. A judgment nobody can inspect
 afterwards is the one failure mode that costs more than the turn it saved: the
 whole point of routing in Haskell is that the root can read what was decided
 without re-deriving it. `shoal-orchestrate` is that pattern written out.

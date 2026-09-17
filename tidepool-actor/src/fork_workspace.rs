@@ -101,10 +101,15 @@ pub type ForkWorkspaceAdmissionFuture<'a> = Pin<
 pub trait ForkWorkspaceAdmission: Send + Sync + 'static {
     /// Install custody before executing the child entry. This is separate from
     /// provider readiness; implementations must fail closed on stale ownership.
+    /// `role` is the actor's resolved role: an actor that holds a worktree
+    /// without a native application (a record actor started with a worktree)
+    /// never sees a policy installation, so the worktree grant that goes with
+    /// its role is installed here, alongside custody.
     fn install_custody(
         &self,
         actor: ActorRef,
         worktree: &str,
+        role: crate::ActorRole,
     ) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError>;
 
     /// Prepare the workspace before child bootstrap. Async native admission

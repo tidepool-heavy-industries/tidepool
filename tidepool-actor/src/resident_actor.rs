@@ -866,6 +866,32 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             )));
     }
 
+    /// The actor whose native application services this actor's commands.
+    /// A record actor has no native process of its own; its commands run as
+    /// the nearest creator (or supervisor) that does, in that ancestor's
+    /// checkout and namespace — the same place the ancestor's own `Cmd.run`
+    /// would run. Falls back to the actor itself when no such ancestor is
+    /// known, and the host then reports the command unavailable.
+    fn native_command_owner(&self, actor: ActorRef) -> ActorRef {
+        let records = self.environment.actors.lock();
+        let mut next = Some(actor);
+        let mut visited = std::collections::HashSet::new();
+        while let Some(current) = next {
+            if !visited.insert(current) {
+                break;
+            }
+            let Some(record) = records.get(&current) else { break };
+            if record.interactive_policy_installed && record.terminal.is_none() {
+                return current;
+            }
+            next = record
+                .descriptor
+                .creator()
+                .or(record.descriptor.supervisor_parent());
+        }
+        actor
+    }
+
     fn notification_supervisor(&self, mut next: Option<ActorRef>) -> Option<ActorRef> {
         let records = self.environment.actors.lock();
         let mut visited = std::collections::HashSet::new();
@@ -3605,9 +3631,10 @@ where
                     let admission = admission.clone();
                     let actor = context.actor;
                     let worktree = worktree.clone();
+                    let role = self.descriptor.effective_role().role();
                     self.worktree_custody = Some(
                         tokio::task::spawn_blocking(move || {
-                            admission.install_custody(actor, &worktree)
+                            admission.install_custody(actor, &worktree, role)
                         })
                         .await
                         .map_err(ResidentActorWorkbenchError::Join)?

@@ -60,6 +60,6 @@ ambiguous without it. `Jev` and `Commands` are effect types from
 
 When the record is carrying a whole implement → review → repair → merge loop,
 load `shoal-orchestrate`: the record, the seven conditions worth waking the
-owner for, and the decision ledger the owner reads with one call.
+owner for, and the decisions kept in its state that the owner reads with one call.
 
 skill: shoal-define-actors

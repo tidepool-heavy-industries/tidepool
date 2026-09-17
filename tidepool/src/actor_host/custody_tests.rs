@@ -38,7 +38,7 @@ async fn custody_admission_waits_for_git_without_blocking_the_runtime() {
     let (_repo, _runtime, tree, _bindings, admission) = custody_fixture();
     let owner = ActorRef::first(tidepool_actor::ActorId(7));
     let _custody = admission
-        .install_custody(owner, tree.id().as_str())
+        .install_custody(owner, tree.id().as_str(), tidepool_actor::ActorRole::Coding)
         .unwrap();
     let (entered, ready) = oneshot::channel();
     let (release, released) = oneshot::channel();
@@ -88,10 +88,10 @@ fn custody_is_exact_and_released_only_after_last_owner() {
     let (_repo, _runtime, tree, bindings, admission) = custody_fixture();
     let actor = ActorRef::first(tidepool_actor::ActorId(7));
     let custody = admission
-        .install_custody(actor, tree.id().as_str())
+        .install_custody(actor, tree.id().as_str(), tidepool_actor::ActorRole::Coding)
         .unwrap();
     assert!(admission
-        .install_custody(actor, tree.id().as_str())
+        .install_custody(actor, tree.id().as_str(), tidepool_actor::ActorRole::Coding)
         .is_err());
     for other in [
         ActorRef::first(tidepool_actor::ActorId(8)),
@@ -101,7 +101,7 @@ fn custody_is_exact_and_released_only_after_last_owner() {
         },
     ] {
         assert!(admission
-            .install_custody(other, tree.id().as_str())
+            .install_custody(other, tree.id().as_str(), tidepool_actor::ActorRole::Coding)
             .is_err());
     }
     let host = custody.clone();
@@ -111,7 +111,7 @@ fn custody_is_exact_and_released_only_after_last_owner() {
     assert!(bindings.lock().current(tree.id()).is_none());
     assert!(tree.cwd().join("README.md").exists());
     let rebound = admission
-        .install_custody(actor, tree.id().as_str())
+        .install_custody(actor, tree.id().as_str(), tidepool_actor::ActorRole::Coding)
         .unwrap();
     drop(rebound);
     assert!(bindings.lock().current(tree.id()).is_none());
@@ -124,6 +124,7 @@ fn custody_retains_binding_when_process_cleanup_is_uncertain() {
         .install_custody(
             ActorRef::first(tidepool_actor::ActorId(7)),
             tree.id().as_str(),
+            tidepool_actor::ActorRole::Coding,
         )
         .unwrap();
     custody.process_may_exist();
@@ -136,7 +137,7 @@ fn custody_rejects_missing_worktrees_without_binding() {
     let (_repo, _runtime, _tree, bindings, admission) = custody_fixture();
     let actor = ActorRef::first(tidepool_actor::ActorId(7));
     for tree in ["../outside", "wt-absent"] {
-        assert!(admission.install_custody(actor, tree).is_err());
+        assert!(admission.install_custody(actor, tree, tidepool_actor::ActorRole::Coding).is_err());
         assert!(bindings
             .lock()
             .current(&WorktreeId::from_raw(tree))
@@ -178,6 +179,7 @@ impl ForkWorkspaceAdmission for DelayedCustody {
         &self,
         _actor: ActorRef,
         _worktree: &str,
+        _role: tidepool_actor::ActorRole,
     ) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
         Err(ForkWorkspaceAdmissionError {
             detail: "admitted child must consume its owned preparation".into(),
@@ -992,6 +994,7 @@ async fn custody_missing_or_foreign_pane_never_clears_process_fence() {
             .install_custody(
                 ActorRef::first(tidepool_actor::ActorId(7)),
                 tree.id().as_str(),
+                tidepool_actor::ActorRole::Coding,
             )
             .unwrap();
         custody.process_may_exist();
