@@ -17,6 +17,7 @@ module Tidepool.Actors.Role
   , WorktreeAllocation
   , WorktreeIntegration
   , Forks
+  , Jev
   , EffectWitness
   , Effects
   , KnownEffect (effectWitness)
@@ -43,6 +44,7 @@ import Tidepool.Effects.Core
   , AgentLaunch
   , BoundWorktree
   , Forks
+  , Jev
   , WorktreeAllocation
   , WorktreeIntegration
   , WorktreeRegistry
@@ -54,20 +56,20 @@ import Tidepool.Effects.Row
 -- are supplied by their owner modules. Actor supplies typed Haskell actor
 -- execution; workspace operations retain their separate capabilities.
 
-type CoreEffects = '[Replies, Watches, ActorContext, Notifications, Commands, Actor]
-type ResearchLeafEffects = '[Replies, Watches, ActorContext, BoundWorktree, Notifications, Commands, Actor]
+type CoreEffects = '[Replies, Watches, ActorContext, Notifications, Jev, Commands, Actor]
+type ResearchLeafEffects = '[Replies, Watches, ActorContext, BoundWorktree, Notifications, Jev, Commands, Actor]
 type ResearchEffects =
   '[ Replies, Watches, Forks, ActorContext
-   , AgentInspection, AgentControl, BoundWorktree, Notifications, Commands, Actor
+   , AgentInspection, AgentControl, BoundWorktree, Notifications, Jev, Commands, Actor
    ]
 type CodingEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentInspection, AgentControl, BoundWorktree
-   , WorktreeIntegration, Notifications, Commands, Actor
+   , WorktreeIntegration, Notifications, Jev, Commands, Actor
    ]
 type IntegrationEffects =
   '[ Replies, Watches, ActorContext
-   , AgentInspection, BoundWorktree, WorktreeIntegration, Notifications, Commands, Actor
+   , AgentInspection, BoundWorktree, WorktreeIntegration, Notifications, Jev, Commands, Actor
    ]
 
 -- | Capabilities installed for the interactive root incarnation.
@@ -75,5 +77,5 @@ type ActorEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentLaunch, AgentInspection, AgentControl
    , BoundWorktree, WorktreeRegistry, WorktreeAllocation
-   , WorktreeIntegration, Notifications, Commands, Actor
+   , WorktreeIntegration, Notifications, Jev, Commands, Actor
    ]

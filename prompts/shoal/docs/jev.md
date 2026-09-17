@@ -10,8 +10,11 @@ generates the action itself — a choice selects a payload you already built
 the model's wording.
 
 The vendored library is `jev-dsl`, in scope qualified as `J`
-(`import qualified Jev.Operators as J`). A cell that calls it needs two
-pragmas, cell-local:
+(`import qualified Jev.Operators as J`). The two packet operators `:=` and
+`:&` are also in scope unqualified; everything else is `J.`-qualified,
+including `J.Nil`, `J..|` and `J.++.`. A packet or offer bound in one cell
+and reused in a later one keeps its inferred type. A cell that calls Jev
+needs two pragmas, cell-local:
 
 ```haskell
 {-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
@@ -82,8 +85,6 @@ handback exit and one `choice` over the children:
 
 ```haskell
 {-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
-
-import qualified Jev.Operators as J
 
 pickChild :: [(Text, Text, Response Report)] -> Eff effects (Maybe (Response Report))
 pickChild results = do

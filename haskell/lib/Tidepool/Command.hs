@@ -25,6 +25,7 @@ module Tidepool.Command
     withStdin,
     withTerminal,
     start,
+    tryStart,
     run,
     await,
     Observation (..),
@@ -118,7 +119,11 @@ checked :: Either CommandError a -> a
 checked = either (error . show) id
 
 start :: (Member Commands effects) => Command -> Eff effects Job
-start (Command spec) = Job . checked <$> send (CommandStartWith spec)
+start = fmap checked . tryStart
+
+-- | Start a command, returning the refusal instead of failing the cell.
+tryStart :: (Member Commands effects) => Command -> Eff effects (Either CommandError Job)
+tryStart (Command spec) = fmap Job <$> send (CommandStartWith spec)
 
 -- | Run and observe for up to 30 seconds, returning a completed result.
 -- If still running, the interactive workbench stops the enclosing computation

@@ -90,6 +90,41 @@ async fn jev_call_failure_is_a_typed_left() {
     campaign.hosted.await.unwrap();
 }
 
+/// Offers and packets bound in one statement are retained for later ones,
+/// and the packet operators read unqualified.
+#[tokio::test]
+async fn retained_packet_bindings_reach_a_later_statement() {
+    let backend = Arc::new(FakeJev {
+        requests: Mutex::new(Vec::new()),
+        answer: Ok(serde_json::json!({
+            "model": "jev-1.13.0",
+            "answers": {
+                "place": {"type": "choice", "choice": "line_12",
+                          "probabilities": {"line_4": 0.1, "line_12": 0.9}, "confidence": 0.9},
+                "enough": {"type": "noul", "noul": 0.8}
+            },
+            "usage": {}
+        })
+        .to_string()),
+    });
+    let campaign = campaign_with(Arc::clone(&backend)).await;
+    let result = dispatch_haskell_script(
+        campaign.root_installation.policy.as_ref(),
+        r#"{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
+let offers = J.alt #line_4 "if attempts > 3" (4 :: Int) J..| J.alt #line_12 "if elapsed > timeout" 12
+let packet = #place := J.choice "Which line begins the retry-timeout branch?" offers :& #enough := J.noul "Is the branch visible?" :& J.Nil
+answer <- J.ask (J.state (String "retry loop in fetch")) packet
+either (const 0) (\r -> J.handle (J.chosen (J.answers r).place) (#line_4 id J..| #line_12 id)) answer"#,
+    )
+    .await;
+    assert_eq!(result["status"], "committed", "{result}");
+    let items = result["items"].as_array().unwrap();
+    assert_eq!(items.last().unwrap()["output"], "12", "{result}");
+    assert_eq!(backend.requests.lock().len(), 1);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
 /// Haskell cell -> host effect -> live TypeSafe API -> typed answer. Opt-in:
 /// `TYPESAFE_API_KEY` must be set; run with `--ignored`.
 #[tokio::test]

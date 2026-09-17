@@ -110,11 +110,12 @@ tools =
     }
 
 -- Validate observation options before starting a process or sending input.
-observation :: Int -> Maybe Int -> Maybe Int -> Cmd.Observation
+-- An invalid option is reported as text; nothing is started or sent.
+observation :: Int -> Maybe Int -> Maybe Int -> Either Text Cmd.Observation
 observation defaultWait wait limit
-  | milliseconds < 0 || milliseconds > 30000 = error "yield_time_ms must be 0..30000"
-  | bytes < 1024 || bytes > 32768 = error "max_output_bytes must be 1024..32768"
-  | otherwise = Cmd.Observation milliseconds bytes
+  | milliseconds < 0 || milliseconds > 30000 = Left "Rejected · nothing started or sent · yield_time_ms must be 0..30000"
+  | bytes < 1024 || bytes > 32768 = Left "Rejected · nothing started or sent · max_output_bytes must be 1024..32768"
+  | otherwise = Right (Cmd.Observation milliseconds bytes)
   where
     milliseconds = fromMaybe defaultWait wait
     bytes = fromMaybe 32768 limit
@@ -132,7 +133,8 @@ execute
       max_output_bytes = limit
     } =
     case observation 30000 wait limit of
-      options@Cmd.Observation {} -> do
+      Left rejection -> pure rejection
+      Right options -> do
         let command =
               maybe id Cmd.inDirectory directory $
                 Cmd.withEnvironment (maybe [] Map.toList env) $
@@ -142,14 +144,20 @@ execute
               if fromMaybe False terminal
                 then Cmd.withTerminal
                 else if fromMaybe False pipe then Cmd.withStdin else id
-        retained <- Cmd.start command
-        _ <- Cmd.observe options retained
-        pure ""
+        started <- Cmd.tryStart command
+        case started of
+          Left Cmd.CommandUnauthorized ->
+            pure "Rejected · command not started · this actor's role does not run commands; use its native read tools"
+          Left issue -> pure $ "Rejected · command not started · " <> T.pack (show issue)
+          Right retained -> do
+            _ <- Cmd.observe options retained
+            pure ""
 
 writeInput :: (Member Cmd.Commands effects) => WriteInput -> Eff effects Text
 writeInput WriteInput {session_id = key, chars = input, close_stdin = close, yield_time_ms = wait, max_output_bytes = limit} =
   case observation 250 wait limit of
-    options@Cmd.Observation {} -> do
+    Left rejection -> pure rejection
+    Right options -> do
       let text = fromMaybe "" input
           eof = fromMaybe False close
       receipt <- case (T.null text, eof) of
@@ -172,7 +180,8 @@ writeInput WriteInput {session_id = key, chars = input, close_stdin = close, yie
 cancelRetained :: (Member Cmd.Commands effects) => CancelCommand -> Eff effects Text
 cancelRetained CancelCommand {session_id = key, yield_time_ms = wait, max_output_bytes = limit} =
   case observation 250 wait limit of
-    options@Cmd.Observation {} -> do
+    Left rejection -> pure rejection
+    Right options -> do
       receipt <- send (CommandCancelWith key)
       case receipt of
         Left issue -> pure $ "session_id: " <> key <> "\nCancellation unconfirmed: " <> T.pack (show issue) <> "\nInspect the same job; do not start a replacement."
@@ -185,7 +194,8 @@ cancelRetained CancelCommand {session_id = key, yield_time_ms = wait, max_output
 readRetained :: (Member Cmd.Commands effects) => ReadOutput -> Eff effects Text
 readRetained ReadOutput {session_id = key, stream = selected, offset = position, max_output_bytes = limit} =
   case observation 0 (Just 0) (Just (fromMaybe 8192 limit)) of
-    Cmd.Observation {outputBytes = budget} -> do
+    Left rejection -> pure rejection
+    Right Cmd.Observation {outputBytes = budget} -> do
       let selectedStream = case selected of
             Just Stderr -> Cmd.Stderr
             _ -> Cmd.Stdout

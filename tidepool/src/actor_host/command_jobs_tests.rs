@@ -276,7 +276,14 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
     )
     .await
     .unwrap();
-    assert_eq!(invalid["status"], "rejected", "{invalid}");
+    assert_eq!(invalid["status"], "committed", "{invalid}");
+    assert!(
+        invalid["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("nothing started or sent · yield_time_ms must be 0..30000"),
+        "{invalid}"
+    );
     let running = tokio::spawn(call(
         "exec_command",
         serde_json::json!({

@@ -33,6 +33,14 @@ impl SocketDirectory {
         self.state = State::RetainedUnconfirmed;
     }
 
+    /// Exact process termination and hosted-work settlement are established;
+    /// the directory has no remaining user.
+    pub(super) fn work_settled(&mut self) {
+        if self.state == State::RetainedUnconfirmed {
+            self.state = State::Unsubmitted;
+        }
+    }
+
     pub(super) fn release(mut self) -> std::io::Result<()> {
         if self.state != State::Unsubmitted {
             return Err(std::io::Error::other(format!(

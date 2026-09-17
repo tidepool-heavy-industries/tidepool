@@ -1862,6 +1862,11 @@ fn compile_root(
             .with_imports("qualified Tidepool.Actor.Record as R")
             .with_imports("qualified Tidepool.Command as Cmd")
             .with_imports("qualified Jev.Operators as J")
+            .with_imports("Jev.Operators (Cell ((:=)), Packet ((:&)))")
+            .with_imports("qualified Jev.Core")
+            .with_imports("qualified Jev.Core.Contract")
+            .with_imports("qualified Jev.Core.Schema")
+            .with_imports("qualified Jev.Core.Json")
             .with_imports("Tidepool.Command (bash, withMemory, Memory(..))")
             .with_imports("qualified Tidepool.Actor as Actor")
             .with_default_quasiquoters()
@@ -4652,10 +4657,6 @@ async fn retire_interactive_application(
         component: CleanupComponent::Delivery,
         outcome: delivery_outcome,
     });
-    components.push(CleanupComponentReceipt {
-        component: CleanupComponent::Socket,
-        outcome: socket_cleanup_outcome(deployment.socket_directory),
-    });
     let quiescent = exact_process_stopped
         && components
             .iter()
@@ -4666,6 +4667,14 @@ async fn retire_interactive_application(
                 )
             })
             .all(|component| matches!(component.outcome, CleanupComponentOutcome::Completed));
+    let mut socket_directory = deployment.socket_directory;
+    if quiescent {
+        socket_directory.work_settled();
+    }
+    components.push(CleanupComponentReceipt {
+        component: CleanupComponent::Socket,
+        outcome: socket_cleanup_outcome(socket_directory),
+    });
     let build_outcome = if quiescent {
         match deployment
             .active_workspace
@@ -4722,9 +4731,9 @@ async fn retire_interactive_application(
                 }
             }
         } else {
-            // Pane removal (including an absent/non-owned pane) is not a process reap.
             CleanupComponentOutcome::Failed {
-                detail: "custody retained: tmux cannot prove exact process termination".into(),
+                detail: "custody retained: the workspace view was not retired (see BuildResource)"
+                    .into(),
             }
         }
     } else {

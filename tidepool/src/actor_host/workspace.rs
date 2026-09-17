@@ -89,6 +89,10 @@ impl std::ops::Deref for ActiveWorkspace {
     }
 }
 
+fn step_error(step: &str, error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{step}: {error}"))
+}
+
 impl PreparedWorkspace {
     /// Called only with exact native/process and hosted cleanup established.
     pub(super) async fn retire(&self, active: &MountNamespace) -> io::Result<()> {
@@ -106,13 +110,20 @@ impl PreparedWorkspace {
                     .materialize_retired_view(&id, &active, Path::new(ACTOR_PROJECT_ROOT))
                     .map_err(io::Error::other)?;
             }
-            active.detach_retired_tree(Path::new(ACTOR_PROJECT_ROOT))?;
-            prepared.detach_retired_tree(Path::new(ACTOR_PROJECT_ROOT))
+            active
+                .detach_retired_tree(Path::new(ACTOR_PROJECT_ROOT))
+                .map_err(|error| step_error("detaching the active view", error))?;
+            prepared
+                .detach_retired_tree(Path::new(ACTOR_PROJECT_ROOT))
+                .map_err(|error| step_error("detaching the prepared view", error))
         })
         .await
         .map_err(io::Error::other)??;
         for resource in self.source.iter().chain(self.build.iter()) {
-            resource.retire().await?;
+            resource
+                .retire()
+                .await
+                .map_err(|error| step_error("retiring an overlay resource", error))?;
         }
         Ok(())
     }
