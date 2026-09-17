@@ -64,7 +64,8 @@ import Tidepool.ExtractRequest (InspectionRequest(..), WorkerRequest(..), worker
 import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
 import Tidepool.Session
   ( SessionScope(..), scaffoldTargetName, preparedScaffoldTargetName, preparedResumeTargetName
-  , preparedDecodeTargetName, scaffoldOutputBase )
+  , preparedDecodeTargetName, preparedApplyEntryTargetName, preparedApplyValueTargetName
+  , scaffoldOutputBase )
 import Tidepool.SessionArtifacts
   ( mkBoundBinders, parseValModule )
 import Tidepool.Translate
@@ -511,7 +512,9 @@ prepareArtifacts input hscEnv modules targets auxiliaryRoots retainedGenerations
 standardAuxiliaryRoots :: [CoreBind] -> [String]
 standardAuxiliaryRoots binds =
   [ name
-  | name <- [preparedResumeTargetName, preparedDecodeTargetName]
+  | name <- [ preparedResumeTargetName, preparedDecodeTargetName
+            , preparedApplyEntryTargetName, preparedApplyValueTargetName
+            ]
   , name `Set.member` topLevelNames
   ]
   where

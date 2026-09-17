@@ -36,6 +36,7 @@ import GHC.Core.DataCon
   , dataConTag, dataConTyCon, dataConOrigResTy, dataConImplBangs, HsImplBang(..)
   , isMarkedStrict, isUnboxedTupleDataCon )
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
+import GHC.Core.TyCo.FVs (tyCoVarsOfType)
 import GHC.Core.Type (splitFunTys, splitTyConApp_maybe)
 import GHC.Core.TyCon qualified as GHC
 import GHC.Data.FastString (fsLit, unpackFS)
@@ -58,7 +59,7 @@ import GHC.Types.Unique (Unique)
 import GHC.Types.Unique.FM (UniqFM, listToUFM, lookupUFM)
 import GHC.Types.Var (Id, varName, varType, varUnique)
 import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
-import GHC.Types.Var.Set (dVarSetElems)
+import GHC.Types.Var.Set (dVarSetElems, isEmptyVarSet)
 import GHC.Unit.Env (ue_units)
 import GHC.Unit.Info (PackageName(..))
 import GHC.Unit.Module (mkModuleName, moduleName, moduleNameString, moduleUnit)
@@ -567,17 +568,29 @@ lowerPreparedEvidence context modules = do
 -- a zero-arity CAF) has an STG result type that is the whole function arrow
 -- rather than its codomain, and 'TypePolicy.classifyType' refuses a function
 -- type outright.
+-- | An auxiliary root's answer type is skipped for evidence interning when
+-- it still carries a free type variable after 'splitFunTys' (a genuinely
+-- polymorphic root like 'Tidepool.Session.preparedApplyEntryTargetName'/
+-- 'Tidepool.Session.preparedApplyValueTargetName', whose settled result is
+-- whatever the applied closure returns, not one concrete turn's type).
+-- 'TypePolicy.internType'/'classifyType' has no node for an unresolved type
+-- variable, so interning one would fail the whole projection rather than
+-- leaving the root's own evidence merely absent. Every OTHER auxiliary root
+-- ('preparedResumeTargetName', 'preparedDecodeTargetName') is compiled
+-- concretely per turn and is unaffected by this filter.
 lowerAuxiliaryRootEvidence :: ProjectionContext -> [PreparedModule] -> Int -> P [TypeNode]
 lowerAuxiliaryRootEvidence context modules base = do
   let roots = Set.fromList (projectionAuxiliaryRoots context)
   topSymbolMap <- gets topSymbols
   let answerTypes =
-        [ snd (splitFunTys (varType binder))
+        [ answerType
         | prepared <- modules
         , (binding, _) <- pmBindings prepared
         , binder <- topBinders binding
         , Just symbol <- [lookupVarEnv topSymbolMap binder]
         , symbol `Set.member` roots
+        , let answerType = snd (splitFunTys (varType binder))
+        , isEmptyVarSet (tyCoVarsOfType answerType)
         ]
       (graphRoots, builder) = runState
         (traverse TypePolicy.internType answerTypes)

@@ -71,6 +71,8 @@ module Tidepool.Session
   , preparedScaffoldTargetName
   , preparedResumeTargetName
   , preparedDecodeTargetName
+  , preparedApplyEntryTargetName
+  , preparedApplyValueTargetName
   , scaffoldOutputBase
   , evalUserBinder
   ) where
@@ -367,6 +369,28 @@ preparedResumeTargetName = "__resume"
 -- Projected as an auxiliary root beside 'preparedResumeTargetName'.
 preparedDecodeTargetName :: String
 preparedDecodeTargetName = "__decodeValue"
+
+-- | The scaffold-reserved generic apply entry a prepared turn admits beside
+-- 'preparedResumeTargetName' and 'preparedDecodeTargetName':
+-- @__applyEntry f n = settle (f (I# n))@, the entry the host enters to apply
+-- a rooted @Int -> M a@ closure to a bare unboxed argument (actor program
+-- start, shutdown hooks, actor source, and green-thread bodies) without a
+-- Core fragment to compile it into. Polymorphic in the settled result, so it
+-- is not admitted as auxiliary-root evidence
+-- ('Tidepool.ExecutionProjection.lowerAuxiliaryRootEvidence' excludes any
+-- root whose result type has free type variables). Projected as an auxiliary
+-- root beside 'preparedDecodeTargetName'.
+preparedApplyEntryTargetName :: String
+preparedApplyEntryTargetName = "__applyEntry"
+
+-- | The scaffold-reserved generic apply entry a prepared turn admits beside
+-- 'preparedApplyEntryTargetName': @__applyValue f x = settle (f x)@, the
+-- entry the host enters to apply a rooted handler closure to a rooted
+-- request value (both retained Haskell values, neither bridged) without a
+-- Core fragment to compile it into. Same polymorphism and evidence-interning
+-- exclusion as 'preparedApplyEntryTargetName'.
+preparedApplyValueTargetName :: String
+preparedApplyValueTargetName = "__applyValue"
 
 -- | Base name of the CBOR file(s) every Rust caller reads for the scaffold
 -- target (@result.cbor@), and the Haskell binder name the ONE-SHOT eval
