@@ -1560,11 +1560,24 @@ impl<'code> PreparedMachine<'code> {
         &mut self,
         id: ContinuationId,
     ) -> Result<Option<ValueHandle>, ExecutionError> {
+        self.take_live_payload_handle_owned_by(id, None)
+    }
+
+    /// [`Self::take_live_payload_handle`] with the minted handle owned by
+    /// `owner` instead of the frame's own realm (`None`): a payload that must
+    /// outlive the parked frame's realm, such as a green thread's completion
+    /// value owned by the session's realm, mirroring Core's
+    /// `mint_handle_from_root(slot, realm)`.
+    pub fn take_live_payload_handle_owned_by(
+        &mut self,
+        id: ContinuationId,
+        owner: Option<RealmId>,
+    ) -> Result<Option<ValueHandle>, ExecutionError> {
         self.ensure_handle_access()?;
         let Some(frame) = self.handles.continuation_mut(id) else {
             return Ok(None);
         };
-        let realm = frame.realm;
+        let realm = owner.unwrap_or(frame.realm);
         let Some(root) = frame.live_payload_root.take() else {
             return Ok(None);
         };

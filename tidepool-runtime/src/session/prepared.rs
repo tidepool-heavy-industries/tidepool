@@ -1765,6 +1765,18 @@ impl PreparedEngine {
             .map_err(PreparedRuntimeError::Run)
     }
 
+    /// [`Self::live_payload_handle`] with the handle owned by `realm` rather
+    /// than the frame's own realm (see `PreparedMachine::take_live_payload_handle_owned_by`).
+    pub fn live_payload_handle_owned_by(
+        &mut self,
+        id: ContinuationId,
+        realm: RealmId,
+    ) -> Result<Option<ValueHandle>, PreparedRuntimeError> {
+        self.machine
+            .take_live_payload_handle_owned_by(id, Some(realm))
+            .map_err(PreparedRuntimeError::Run)
+    }
+
     /// Re-enter the frame parked under `id` with `answer`, a handle the
     /// caller has already validated against the frame's site evidence and
     /// retained under the frame's realm: take the frame, enter the runner's

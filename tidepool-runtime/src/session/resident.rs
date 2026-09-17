@@ -1441,18 +1441,25 @@ where
             return Ok(None);
         };
         let provenance = self.parked_provenance.get(&id).cloned().unwrap_or_default();
-        let Some(machine) = self.core.machine_mut() else {
+        // Whichever engine this session runs, as in `live_payload_handle`.
+        let handle = if let Some(machine) = self.core.machine_mut() {
+            let Some(slot) = machine
+                .take_parked_live_payload_root(id)
+                .map_err(resident_jit)?
+            else {
+                return Ok(None);
+            };
+            machine
+                .mint_handle_from_root(slot, realm)
+                .map_err(resident_jit)?
+        } else if let Some(engine) = self.core.prepared_mut() {
+            match engine.live_payload_handle_owned_by(id, realm)? {
+                Some(handle) => handle,
+                None => return Ok(None),
+            }
+        } else {
             return Ok(None);
         };
-        let Some(slot) = machine
-            .take_parked_live_payload_root(id)
-            .map_err(resident_jit)?
-        else {
-            return Ok(None);
-        };
-        let handle = machine
-            .mint_handle_from_root(slot, realm)
-            .map_err(resident_jit)?;
         tracing::debug!(
             hole,
             frame = ?id,
