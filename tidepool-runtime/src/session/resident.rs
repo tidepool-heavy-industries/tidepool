@@ -2167,7 +2167,15 @@ where
             // Core bind path does.
             self.core.set_val_gen(*generation);
         }
+        let install_prepared_started = std::time::Instant::now();
         let program = self.core.install_prepared(prepared.clone())?;
+        timing::record_stage(
+            timing::NO_NODE,
+            timing::NO_ROUND,
+            timing::STAGE_INSTALL_PREPARED,
+            install_prepared_started.elapsed(),
+            0,
+        );
         let realm = self.run_context.resource_scope;
         let lexical_scope = self.run_context.lexical_scope;
         let plan = settle_plan_of(&mode);

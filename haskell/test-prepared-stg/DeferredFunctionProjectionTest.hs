@@ -31,6 +31,7 @@ import Tidepool.ExecutionSchema
 import Tidepool.GhcPipeline
   ( PipelineResult(prHscEnv), PipelineSelection(PreparedStg)
   , PreparedPipelineResult(..), runPipelineSelected )
+import Tidepool.FatIface (newFatIfaceCache, newOwnerInterfaceCache)
 import Tidepool.PreparedBuiltins (DeferredFunction(..), deferredFunction)
 import Tidepool.PreparedRecovery (RecoveredClosure(..), recoverPreparedClosure)
 import Tidepool.PreparedStg (PreparedModule)
@@ -74,7 +75,9 @@ expectations =
 verifyImported :: PreparedPipelineResult -> Expected -> IO ()
 verifyImported prepared expected = do
   let context = fixtureContext (expectedTarget expected)
-  closure <- recoverPreparedClosure (prHscEnv (pprPipelineResult prepared)) context
+  cache <- newFatIfaceCache
+  ownerCache <- newOwnerInterfaceCache
+  closure <- recoverPreparedClosure (prHscEnv (pprPipelineResult prepared)) cache ownerCache context
     (pprModules prepared)
   let references = preparedTargetReferences context (closureModules closure)
   binder <- case filter (matches expected) references of
@@ -155,7 +158,9 @@ verifyLookalikes prepared = mapM_ verify
 verifyWorkerLookalike :: PreparedPipelineResult -> IO ()
 verifyWorkerLookalike prepared = do
   let context = fixtureContext "decodeStackEntriesLookalike"
-  closure <- recoverPreparedClosure (prHscEnv (pprPipelineResult prepared)) context
+  cache <- newFatIfaceCache
+  ownerCache <- newOwnerInterfaceCache
+  closure <- recoverPreparedClosure (prHscEnv (pprPipelineResult prepared)) cache ownerCache context
     (pprModules prepared)
   program <- projectOrFail context (closureModules closure)
   let matching =

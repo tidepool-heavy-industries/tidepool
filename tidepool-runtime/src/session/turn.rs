@@ -1623,7 +1623,16 @@ fn read_prepared_program(output_dir: &Path) -> Result<PreparedProgram, CompileEr
     if !path.exists() {
         return Err(CompileError::MissingOutput(path));
     }
+    let prepared_read_start = std::time::Instant::now();
     let bytes = std::fs::read(&path)?;
+    let prepared_read_bytes = bytes.len() as u64;
+    timing::record_stage(
+        timing::NO_NODE,
+        timing::NO_ROUND,
+        timing::STAGE_PREPARED_READ,
+        prepared_read_start.elapsed(),
+        prepared_read_bytes,
+    );
     let requirements = tidepool_toolchain::prepared_artifact::production_requirements()
         .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     parse_program(&bytes, &requirements, DecodeLimits::default())

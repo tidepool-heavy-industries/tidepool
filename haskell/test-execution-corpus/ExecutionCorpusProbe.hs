@@ -39,6 +39,7 @@ import Tidepool.ExecutionProjection
   , preparedTopIdentities, projectPreparedTarget )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..) )
+import Tidepool.FatIface (newFatIfaceCache, newOwnerInterfaceCache)
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PipelineResult(..), PreparedPipelineResult(..)
   , runPipelineSelected )
@@ -220,8 +221,10 @@ projectOneIdentity prepared formattingAuthority textAuthority outputDir index se
       unavailable residuals reason = unavailableTargetInventory name residuals reason
       reject residuals inventory reason = pure
         (Record name Nothing residuals (Rejected reason), inventory)
+  cache <- newFatIfaceCache
+  ownerCache <- newOwnerInterfaceCache
   recovered <- trySync (recoverPreparedClosure
-    (prHscEnv (pprPipelineResult prepared)) context (pprModules prepared))
+    (prHscEnv (pprPipelineResult prepared)) cache ownerCache context (pprModules prepared))
   case recovered of
     Left failure -> let reason = "target " <> show (symbolOccurrence selected) <> " recovery failed: " <> show failure
       in reject [] (unavailable [] reason) reason

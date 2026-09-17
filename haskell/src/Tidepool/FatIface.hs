@@ -7,12 +7,15 @@
 -- PIT (Package Interface Table) cache. The PIT replaces mi_extra_decls with
 -- a panic thunk to save memory, so loadSysInterface can't be used here.
 module Tidepool.FatIface
-  ( FatIfaceCache, newFatIfaceCache, lookupFatIface
+  ( FatIfaceCache, newFatIfaceCache, lookupFatIface, evictFatIfaceMatching
   , FatIfaceLookup(..), FatIfaceMissing(..), lookupFatIfaceExact
   , ExactInterfaceFailure(..), readExactInterface
+  , OwnerInterfaceCache, newOwnerInterfaceCache, lookupOwnerInterface
+  , cacheOwnerInterface, evictOwnerInterfaceMatching
   ) where
 
 import GHC.Core (CoreBind, Bind(..))
+import GHC.Core.TyCon (TyCon)
 import GHC.Driver.Env (HscEnv, hsc_NC, hsc_dflags)
 import GHC.Types.Name (Name, nameModule_maybe)
 import GHC.Types.Var (varName)
@@ -28,9 +31,10 @@ import GHC.Tc.Utils.Monad (initIfaceCheck, initIfaceLcl)
 import GHC.Types.TypeEnv (emptyTypeEnv)
 import GHC.Data.Maybe (MaybeErr(..))
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
-import GHC.Unit.Module.Location (ModLocation(ml_hi_file))
+import GHC.Unit.Module.Location (ModLocation, ml_hi_file)
 
-import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
+import Control.Concurrent.MVar
+  (MVar, modifyMVar, modifyMVar_, newMVar, readMVar)
 import Control.Exception
   ( SomeAsyncException, SomeException, displayException, fromException, throwIO, try )
 import Control.Monad.IO.Class (liftIO)
@@ -85,6 +89,15 @@ newtype FatIfaceCache = FatIfaceCache (MVar (Map.Map Module FatIfaceModule))
 -- | Create an empty cache.
 newFatIfaceCache :: IO FatIfaceCache
 newFatIfaceCache = FatIfaceCache <$> newMVar Map.empty
+
+-- | Drop every cached module outcome whose 'Module' key matches the given
+-- predicate. Used by the resident daemon to invalidate a request's own
+-- target module and every @Tidepool.Session.*@ module between requests,
+-- whose @.hi@ files can change underneath an otherwise daemon-lifetime
+-- cache; library modules are stable while the daemon lives.
+evictFatIfaceMatching :: FatIfaceCache -> (Module -> Bool) -> IO ()
+evictFatIfaceMatching (FatIfaceCache cacheRef) stale =
+  modifyMVar_ cacheRef (pure . Map.filterWithKey (\modl _ -> not (stale modl)))
 
 -- | Look up a Name's CoreBind from the fat interface of its defining module.
 -- For NonRec bindings, returns the single binding.
@@ -246,3 +259,35 @@ renderReadInterfaceError failure = case failure of
   HiModuleNameMismatchWarn path expected actual ->
     path ++ ": expected " ++ showSDocUnsafe (ppr expected)
       ++ ", found " ++ showSDocUnsafe (ppr actual)
+
+-- | Daemon-lifetime cache of an owner module's already-read-and-typechecked
+-- defining interface: its 'ModIface', the 'ModLocation' 'readExactInterface'
+-- resolved it at, and the 'TyCon's 'typecheckIface' produced. Recovered-body
+-- preparation ('Tidepool.PreparedStg.prepareRecoveredBodies') reads and
+-- typechecks an owner's interface at most once per cache lifetime; only
+-- successful outcomes are cached; a failure is retried on the next lookup
+-- rather than pinned, since the interface read may simply not have been
+-- attempted with the right toolchain state yet.
+newtype OwnerInterfaceCache =
+  OwnerInterfaceCache (MVar (Map.Map Module (ModIface, ModLocation, [TyCon])))
+
+newOwnerInterfaceCache :: IO OwnerInterfaceCache
+newOwnerInterfaceCache = OwnerInterfaceCache <$> newMVar Map.empty
+
+lookupOwnerInterface :: OwnerInterfaceCache -> Module
+  -> IO (Maybe (ModIface, ModLocation, [TyCon]))
+lookupOwnerInterface (OwnerInterfaceCache cacheRef) owner =
+  Map.lookup owner <$> readMVar cacheRef
+
+cacheOwnerInterface :: OwnerInterfaceCache -> Module
+  -> (ModIface, ModLocation, [TyCon]) -> IO ()
+cacheOwnerInterface (OwnerInterfaceCache cacheRef) owner value =
+  modifyMVar_ cacheRef (pure . Map.insert owner value)
+
+-- | Drop every cached owner whose 'Module' key matches the given predicate.
+-- See 'evictFatIfaceMatching': the same request-boundary invalidation
+-- applies here, for the same reason (a target or @Tidepool.Session.*@
+-- module's @.hi@ file can change between requests).
+evictOwnerInterfaceMatching :: OwnerInterfaceCache -> (Module -> Bool) -> IO ()
+evictOwnerInterfaceMatching (OwnerInterfaceCache cacheRef) stale =
+  modifyMVar_ cacheRef (pure . Map.filterWithKey (\owner _ -> not (stale owner)))

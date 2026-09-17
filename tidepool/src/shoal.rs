@@ -557,6 +557,12 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     compiler_launch
         .environment
         .extend(selected_environment.clone());
+    // Timing lines are debug-level and cheap (log_compile_timing in
+    // tidepool-extract-cmd/src/daemon.rs forwards them to the compiler log);
+    // keep phase timing on unconditionally for Shoal runs.
+    compiler_launch
+        .environment
+        .insert(tidepool_runtime::timing::TIMING_ENV.into(), "1".into());
     let scoped_compiler = slice.scope(slice.verified_command(
         &executable,
         tidepool_node::ProcessInvocation {

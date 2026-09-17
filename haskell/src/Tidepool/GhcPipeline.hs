@@ -14,6 +14,7 @@ module Tidepool.GhcPipeline
   , checkCellInstances
     -- * Resident session
   , withResidentPipeline, withResidentPipelineSelected
+  , registerResidentEvictionHook
   ) where
 
 import GHC hiding (typeKind)
@@ -98,6 +99,7 @@ import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef,
 import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName, takeFileName)
 import System.IO (hPutStrLn, stderr, readFile')
+import System.IO.Unsafe (unsafePerformIO)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, when)
 import Data.Data (Data, cast, gmapQ)
@@ -1141,7 +1143,8 @@ withResidentPipelineSelected baseIncludes useCompiler = do
           reflectGhc
             (residentCompileOne (selectionKind selection) cache memoRef retainedRef dflags' baseImportPaths timing purpose mscope path extraIncludes buildProductsDir)
             session)
-          `finally` (sanitizeMemo targetModName' memoRef >> writeIORef retainedRef Set.empty)
+          `finally` (sanitizeMemo targetModName' memoRef >> runResidentEvictionHooks targetModName'
+                       >> writeIORef retainedRef Set.empty)
         pure (selectCompileResult selection compiled)
 
 -- | One resident-session compile cycle, against the ALREADY-OPEN session
@@ -1190,6 +1193,34 @@ sanitizeMemo :: ModuleName -> IORef GutsMemo -> IO ()
 sanitizeMemo targetModName' memoRef =
   modifyIORef' memoRef $ Map.filterWithKey $ \mn _ ->
     mn /= targetModName' && isNothing (parseSessionModule (moduleNameString mn))
+
+-- | Registered eviction hooks for daemon-lifetime caches this module knows
+-- nothing about (e.g. 'Tidepool.FatIface.OwnerInterfaceCache' and
+-- 'Tidepool.FatIface.FatIfaceCache', hoisted to daemon lifetime by
+-- app/Main.hs around 'withResidentPipelineSelected'). A hook decides for
+-- itself, from the request's target 'ModuleName', which of its own cache
+-- entries to drop -- the same request-boundary invalidation 'sanitizeMemo'
+-- performs for 'GutsMemo', run at the same point in the resident cycle.
+-- A global 'IORef' (rather than a new parameter on 'withResidentPipelineSelected')
+-- keeps every existing caller of that function -- including test suites this
+-- change must not touch -- source-compatible; an unregistered hook list is a
+-- no-op, matching today's behavior exactly.
+{-# NOINLINE residentEvictionHooks #-}
+residentEvictionHooks :: IORef [ModuleName -> IO ()]
+residentEvictionHooks = unsafePerformIO (newIORef [])
+
+-- | Register a hook to run at every resident request boundary, alongside
+-- 'sanitizeMemo'. Intended to be called once, before entering
+-- 'withResidentPipelineSelected', by the daemon entry point that owns the
+-- cache being registered (see app/Main.hs).
+registerResidentEvictionHook :: (ModuleName -> IO ()) -> IO ()
+registerResidentEvictionHook hook =
+  modifyIORef' residentEvictionHooks (hook :)
+
+runResidentEvictionHooks :: ModuleName -> IO ()
+runResidentEvictionHooks targetModName' = do
+  hooks <- readIORef residentEvictionHooks
+  mapM_ ($ targetModName') hooks
 
 -- | Record target-module warnings for successful results and target-module
 -- errors for the late load barrier. GHC can report a fatal warning from

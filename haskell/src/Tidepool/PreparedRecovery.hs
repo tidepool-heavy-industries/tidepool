@@ -11,6 +11,7 @@ import Control.Monad (foldM)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
+import Data.Word (Word64)
 import GHC.Core (CoreBind, Bind(..))
 import GHC.Driver.Env (HscEnv)
 import GHC.Types.Id (idType)
@@ -22,8 +23,8 @@ import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (Module, unitString)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.ExecutionProjection
-  (ProjectionContext, preparedTargetReferences)
-import Tidepool.FatIface (FatIfaceMissing, newFatIfaceCache)
+  (ProjectionContext, combinePreparedTargetReferences, preparedModuleReferenceFacts)
+import Tidepool.FatIface (FatIfaceCache, FatIfaceMissing, OwnerInterfaceCache)
 import Tidepool.PreparedStg
   (PreparedModule(..), RecoveredModuleFailure(..), prepareRecoveredBodies)
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
@@ -70,11 +71,34 @@ data RecoveredClosure = RecoveredClosure
 -- | Reprepare only defining modules whose exact body set grows. Attempted
 -- names include typed failures, so unavailable bodies terminate the worklist
 -- without a retry limit. New CorePrep references re-enter this same loop.
-recoverPreparedClosure :: HscEnv -> ProjectionContext -> [PreparedModule]
-  -> IO RecoveredClosure
-recoverPreparedClosure env context home = do
+--
+-- 'cache' (fat-interface Core, keyed by defining module) and 'ownerCache'
+-- (an owner's already-read-and-typechecked defining interface; see
+-- 'Tidepool.PreparedStg.prepareRecoveredBodies') are both caller-owned so a
+-- resident daemon can hoist them to daemon lifetime across requests, with
+-- eviction at the request boundary for a request's own target module and any
+-- @Tidepool.Session.*@ module (see 'Tidepool.GhcPipeline.registerResidentEvictionHook'
+-- and its call site in app/Main.hs); a one-shot invocation instead passes a
+-- fresh cache created just for this call.
+recoverPreparedClosure :: HscEnv -> FatIfaceCache -> OwnerInterfaceCache
+  -> ProjectionContext -> [PreparedModule] -> IO RecoveredClosure
+recoverPreparedClosure env cache ownerCache context home = do
   timing <- readTimingEnabled
-  cache <- newFatIfaceCache
+  -- Per-module reference facts ('preparedModuleReferenceFacts') are pure in
+  -- 'context' and a module's own bindings. Home modules never change during
+  -- this call; a recovered module's entry is dropped when 'prepareOne'
+  -- replaces it.
+  let homeFacts = [(prepared, preparedModuleReferenceFacts context prepared) | prepared <- home]
+  factsMemo <- newIORef Map.empty
+  let factsFor :: PreparedModule -> IO (Map.Map Word64 [Id])
+      factsFor prepared = do
+        memo <- readIORef factsMemo
+        case Map.lookup (pmModule prepared) memo of
+          Just hit -> pure hit
+          Nothing -> do
+            let fresh = preparedModuleReferenceFacts context prepared
+            modifyIORef' factsMemo (Map.insert (pmModule prepared) fresh)
+            pure fresh
   -- Diagnostic split of 'prepared_recover' (flat sub-phases, summed over
   -- rounds): reference collection, body lookup, defining-module preparation.
   spent <- newIORef (0 :: Integer, 0 :: Integer, 0 :: Integer, 0 :: Integer, 0 :: Integer)
@@ -82,8 +106,10 @@ recoverPreparedClosure env context home = do
       charge f = modifyIORef' spent f
       go attempted groups prepared failures = do
         let modules = home ++ Map.elems prepared
-        (references, refsMs) <- timeSection
-          (evaluate (preparedTargetReferences context modules) >>= \refs -> length refs `seq` pure refs)
+        (references, refsMs) <- timeSection $ do
+          recovered <- mapM (\m -> (,) m <$> factsFor m) (Map.elems prepared)
+          evaluate (combinePreparedTargetReferences context (homeFacts ++ recovered))
+            >>= \refs -> length refs `seq` pure refs
         charge (\(r, l, p, n, d) -> (r + refsMs, l, p, n + 1, d))
         let pending = filter (\binder -> not (Set.member (varName binder) attempted)
                 && typePrimRep_maybe (idType binder) /= Just [])
@@ -130,13 +156,17 @@ recoverPreparedClosure env context home = do
               UnsupportedBodyCapability name ->
                 (groups, dirty, failures ++ [UnsupportedExternalCapability name])
       prepareOne groups (prepared, failures) owner = do
-        result <- prepareRecoveredBodies env owner (Map.findWithDefault [] owner groups)
-        pure $ case result of
-          Right modul ->
-            ( Map.insert owner modul prepared
-            , filter (not . preparationFailureFor owner) failures
-            )
-          Left failure -> (prepared, failures ++ [DefiningPreparationFailure failure])
+        result <- prepareRecoveredBodies env ownerCache owner (Map.findWithDefault [] owner groups)
+        case result of
+          Right modul -> do
+            -- The module's pmBindings just changed; the memoized per-module
+            -- reference facts for 'owner' (see 'factsFor' above) are stale.
+            modifyIORef' factsMemo (Map.delete owner)
+            pure
+              ( Map.insert owner modul prepared
+              , filter (not . preparationFailureFor owner) failures
+              )
+          Left failure -> pure (prepared, failures ++ [DefiningPreparationFailure failure])
   go Set.empty Map.empty Map.empty []
 
 preparationFailureFor :: Module -> RecoveryFailure -> Bool

@@ -21,7 +21,7 @@ import System.IO (hPutStrLn, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding
 import qualified System.Info as SystemInfo
 
 import GHC.Types.SourceError (SourceError)
-import GHC (moduleName, moduleNameString, moduleUnit)
+import GHC (Module, ModuleName, moduleName, moduleNameString, moduleUnit)
 import GHC.Driver.Env (HscEnv)
 import GHC.Unit.Types (unitString)
 import GHC.Core (Bind(..), CoreBind)
@@ -46,7 +46,8 @@ import Tidepool.Artifacts
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..)
   , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..), dumpCore
-  , withResidentPipelineSelected, CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances )
+  , withResidentPipelineSelected, CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances
+  , registerResidentEvictionHook )
 import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), projectPreparedTargetWithConstructors, resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
@@ -65,7 +66,10 @@ import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, ru
 import Tidepool.Session
   ( SessionScope(..), scaffoldTargetName, preparedScaffoldTargetName, preparedResumeTargetName
   , preparedDecodeTargetName, preparedApplyEntryTargetName, preparedApplyValueTargetName
-  , scaffoldOutputBase )
+  , scaffoldOutputBase, parseSessionModule )
+import Tidepool.FatIface
+  ( FatIfaceCache, newFatIfaceCache, evictFatIfaceMatching
+  , OwnerInterfaceCache, newOwnerInterfaceCache, evictOwnerInterfaceMatching )
 import Tidepool.SessionArtifacts
   ( mkBoundBinders, parseValModule )
 import Tidepool.Translate
@@ -98,6 +102,43 @@ type Compiler =
   -> Maybe FilePath
   -> IO result
 
+-- | Prepared-recovery caches ('recoverPreparedClosure'), threaded alongside
+-- 'Compiler' into every call site that can reach 'prepareArtifacts'. In the
+-- resident daemon ('main''s @--worker-loop-v1@ branch) these are created
+-- ONCE, before 'withResidentPipelineSelected' boots its session, and an
+-- eviction hook registered via 'registerResidentEvictionHook' drops each
+-- request's own target module and any @Tidepool.Session.*@ module from both
+-- caches at the same request boundary 'sanitizeMemo' cleans the compile
+-- memo -- library modules stay warm for the daemon's lifetime (it restarts on
+-- a toolchain stamp change). The one-shot (non-daemon) path instead builds a
+-- fresh 'RecoveryCaches' per invocation via 'freshRecoveryCaches', since
+-- 'main' runs that branch exactly once per process anyway.
+data RecoveryCaches = RecoveryCaches
+  { rcFatIface :: FatIfaceCache
+  , rcOwnerIface :: OwnerInterfaceCache
+  }
+
+freshRecoveryCaches :: IO RecoveryCaches
+freshRecoveryCaches = RecoveryCaches <$> newFatIfaceCache <*> newOwnerInterfaceCache
+
+-- | True for a 'Module' whose cached recovery state must not survive past
+-- this request: the request's own target module, or any
+-- @Tidepool.Session.*@ module (both mirror 'Tidepool.GhcPipeline.sanitizeMemo''s
+-- own predicate for 'GutsMemo', over the same 'ModuleName').
+staleRecoveryModule :: ModuleName -> Module -> Bool
+staleRecoveryModule targetModName' owner =
+  moduleName owner == targetModName'
+    || isJust (parseSessionModule (moduleNameString (moduleName owner)))
+
+-- | Install the daemon-lifetime 'RecoveryCaches'' eviction into
+-- 'Tidepool.GhcPipeline''s resident request boundary. Call exactly once,
+-- before entering 'withResidentPipelineSelected'.
+registerRecoveryCacheEviction :: RecoveryCaches -> IO ()
+registerRecoveryCacheEviction caches =
+  registerResidentEvictionHook $ \targetModName' -> do
+    evictFatIfaceMatching (rcFatIface caches) (staleRecoveryModule targetModName')
+    evictOwnerInterfaceMatching (rcOwnerIface caches) (staleRecoveryModule targetModName')
+
 data LocatedCellRejection = LocatedCellRejection CellSourceSpan String
   deriving Show
 instance Exception LocatedCellRejection
@@ -120,29 +161,37 @@ main = do
     then do
       hSetBinaryMode stdin True
       hSetBinaryMode stdout True
+      -- Daemon-lifetime recovery caches: created ONCE per daemon process,
+      -- before the resident session boots, and evicted at each request
+      -- boundary by the hook registered here (see 'RecoveryCaches').
+      caches <- freshRecoveryCaches
+      registerRecoveryCacheEviction caches
       withResidentPipelineSelected [] $ \compiler ->
         WorkerServer.runWorkerLoop
-          (\cwd argv -> setCurrentDirectory cwd >> runWorkerInvocation compiler argv)
+          (\cwd argv -> setCurrentDirectory cwd >> runWorkerInvocation compiler caches argv)
     else do
       hSetEncoding stdout utf8
-      runWorkerInvocation runPipelineSessionSelected rawWorkerRequest >>= exitWith
+      -- One-shot path: 'main' runs this branch exactly once per process, so
+      -- a cache created here is already "fresh per invocation".
+      caches <- freshRecoveryCaches
+      runWorkerInvocation runPipelineSessionSelected caches rawWorkerRequest >>= exitWith
 
 -- | Decode a Rust worker request and run one compilation. Direct and daemon transports use
 -- the same versioned payload and therefore the same dispatch path.
 runWorkerInvocation
-  :: Compiler -> [String] -> IO ExitCode
-runWorkerInvocation compiler rawWorkerRequest = do
+  :: Compiler -> RecoveryCaches -> [String] -> IO ExitCode
+runWorkerInvocation compiler caches rawWorkerRequest = do
   parsedWorkerRequest <- case workerRequestFromArgv rawWorkerRequest of
     Left err -> hPutStrLn stderr err >> pure Nothing
     Right (Just request) -> pure (Just request)
     Right Nothing -> hPutStrLn stderr "worker requires a versioned request" >> pure Nothing
   case parsedWorkerRequest of
     Nothing -> pure (ExitFailure 2)
-    Just request -> runParsedInvocation compiler request
+    Just request -> runParsedInvocation compiler caches request
 
 runParsedInvocation
-  :: Compiler -> WorkerRequest -> IO ExitCode
-runParsedInvocation compiler parsedWorkerRequest = do
+  :: Compiler -> RecoveryCaches -> WorkerRequest -> IO ExitCode
+runParsedInvocation compiler caches parsedWorkerRequest = do
   -- Read once per invocation (see Tidepool.Timing) and thread down;
   -- TIDEPOOL_TIMING is diagnostic-only and never touches stdout/the emitted
   -- files — see the module doc there and tidepool-harness/src/timing.rs.
@@ -155,12 +204,12 @@ runParsedInvocation compiler parsedWorkerRequest = do
   args <- if requestHarnessProfile parsedWorkerRequest
             then spliceHarnessProfilePragma parsedWorkerRequest
             else pure parsedWorkerRequest
-  dispatch compiler timing args
+  dispatch compiler caches timing args
 
 -- | Dispatch one decoded worker request.
 dispatch
-  :: Compiler -> Bool -> WorkerRequest -> IO ExitCode
-dispatch compiler timing args =
+  :: Compiler -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
+dispatch compiler caches timing args =
   case requestFiles args of
     [] -> reportDiags (Left (toException (userError "worker request contains no input")))
     (file : _)
@@ -169,11 +218,11 @@ dispatch compiler timing args =
         | requestClassify args                    -> runClassifyMode timing args
         | not (null (requestInspections args))    -> runInspectionMode compiler args file
         -- A turn may also carry session fields, so it precedes session dispatch.
-        | requestTurn args                        -> runTurnMode compiler args file
+        | requestTurn args                        -> runTurnMode compiler caches args file
         -- Multi-target compilation may also carry a stable-value scope.
-        | not (null (requestTargets args))        -> timePhase timing "total" (processFile compiler timing args file)
+        | not (null (requestTargets args))        -> timePhase timing "total" (processFile compiler caches timing args file)
         -- Normal one-shot extraction.
-        | otherwise                           -> timePhase timing "total" (processFile compiler timing args file)
+        | otherwise                           -> timePhase timing "total" (processFile compiler caches timing args file)
 
 runInspectionMode :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode
 runInspectionMode compiler args _path = do
@@ -273,8 +322,8 @@ scopeFromWorkerRequest args = SessionScope
   }
 
 processFile
-  :: Compiler -> Bool -> WorkerRequest -> FilePath -> IO ExitCode
-processFile compiler timing args path = do
+  :: Compiler -> RecoveryCaches -> Bool -> WorkerRequest -> FilePath -> IO ExitCode
+processFile compiler caches timing args path = do
   let mOutDir = requestOutDir args
       mTarget = requestTarget args
   hPutStrLn stderr $ "Processing: " ++ path
@@ -308,7 +357,7 @@ processFile compiler timing args path = do
     let preparedTargets = case requestTargets args of
           targets@(_ : _) -> targets
           [] -> maybe [] pure mTarget
-    preparedArtifacts <- prepareArtifacts path hscEnv (pprModules prepared) preparedTargets
+    preparedArtifacts <- prepareArtifacts caches path hscEnv (pprModules prepared) preparedTargets
       (standardAuxiliaryRoots binds) (requestRetainedGenerations args)
     let preparedConstructors = concatMap paConstructors preparedArtifacts
 
@@ -458,10 +507,10 @@ data PreparedArtifact = PreparedArtifact
 
 -- Project before writing either engine's artifacts so the shared constructor
 -- table includes exactly the GHC constructors admitted by prepared execution.
-prepareArtifacts :: FilePath -> HscEnv -> [PreparedModule] -> [String] -> [String]
+prepareArtifacts :: RecoveryCaches -> FilePath -> HscEnv -> [PreparedModule] -> [String] -> [String]
   -> Map.Map SymbolIdentity Word64 -> IO [PreparedArtifact]
-prepareArtifacts _ _ _ [] _ _ = pure []
-prepareArtifacts input hscEnv modules targets auxiliaryRoots retainedGenerations = do
+prepareArtifacts _ _ _ _ [] _ _ = pure []
+prepareArtifacts caches input hscEnv modules targets auxiliaryRoots retainedGenerations = do
   timing <- readTimingEnabled
   formattingAuthority <- resolveFormattingAuthority hscEnv
   textAuthority <- resolveTextPackageUnit hscEnv
@@ -496,7 +545,8 @@ prepareArtifacts input hscEnv modules targets auxiliaryRoots retainedGenerations
     -- Three flat phases, one row each per target (see Tidepool.Timing).
     -- Projection is pure and only forced to weak head normal form here, so
     -- part of its cost lands in 'prepared_encode'; read the two together.
-    recovered <- timePhase timing "prepared_recover" (recoverPreparedClosure hscEnv context modules)
+    recovered <- timePhase timing "prepared_recover"
+      (recoverPreparedClosure hscEnv (rcFatIface caches) (rcOwnerIface caches) context modules)
     reportRecoveryResiduals target (closureFailures recovered)
     (program, constructors) <- timePhase timing "prepared_project" $
       case projectPreparedTargetWithConstructors context (closureModules recovered) of
@@ -564,8 +614,8 @@ reportRecoveryResiduals target failures =
 -- so it reaches 'TBind' with empty binders and an empty bound-binder list,
 -- same shape a caller already handles for any other zero-binder bind.
 runTurnMode
-  :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode
-runTurnMode compiler args path = do
+  :: Compiler -> RecoveryCaches -> WorkerRequest -> FilePath -> IO ExitCode
+runTurnMode compiler caches args path = do
   timing <- readTimingEnabled
   hPutStrLn stderr $ "Processing (turn): " ++ path
   res <- timePhase timing "total" $ try $ do
@@ -660,7 +710,7 @@ runTurnMode compiler args path = do
         -- cannot select a Core template fallback. Its entry is the settled
         -- scaffold, and its constructors join the shared metadata before write.
         preparedArtifacts <- if requestPreparedTurn args
-          then prepareArtifacts compiledPath hscEnv preparedModules
+          then prepareArtifacts caches compiledPath hscEnv preparedModules
                  [preparedScaffoldTargetName] (standardAuxiliaryRoots binds) (requestRetainedGenerations args)
           else pure []
         asksSites <- writeWholeModuleClosed timing outDir hscEnv binds (prTyCons result)

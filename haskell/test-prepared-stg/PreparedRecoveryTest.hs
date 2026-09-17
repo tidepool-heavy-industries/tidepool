@@ -29,6 +29,7 @@ import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), Group(..), HeapBinding(..)
   , GlobalDecl(..), HeapRhs(..), SymbolIdentity(..), TargetDescriptor(..)
   , TopBinding(..), WireProgram(..) )
+import Tidepool.FatIface (newFatIfaceCache, newOwnerInterfaceCache)
 import Tidepool.PreparedRecovery
   ( RecoveryFailure(..), RecoveredClosure(..), insertGroup
   , recoverPreparedClosure )
@@ -76,7 +77,10 @@ main = do
           , projectionFormattingAuthority = Nothing
           , projectionTextUnit = Nothing
           }
-    closure <- liftIO $ recoverPreparedClosure hsc context modules
+    closure <- liftIO $ do
+      cache <- newFatIfaceCache
+      ownerCache <- newOwnerInterfaceCache
+      recoverPreparedClosure hsc cache ownerCache context modules
     liftIO $ assert (any recoveredFst (closureModules closure))
       "closure did not retain the newly prepared defining module for fst"
     liftIO $ assert (all (not . namedResidual) (closureFailures closure))
@@ -161,7 +165,9 @@ main = do
         found -> ioError (userError
           ("expected one hiddenText entry, got " ++ show found))
       let hiddenContext = context { projectionEntry = hiddenEntry }
-      closure <- recoverPreparedClosure hsc hiddenContext [hidden]
+      cache <- newFatIfaceCache
+      ownerCache <- newOwnerInterfaceCache
+      closure <- recoverPreparedClosure hsc cache ownerCache hiddenContext [hidden]
       let isTextShow owner = moduleNameString (moduleName owner) == "Data.Text.Show"
           preparedTextShow = [ prepared
             | prepared <- closureModules closure, isTextShow (pmModule prepared) ]

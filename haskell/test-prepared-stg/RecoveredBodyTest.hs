@@ -33,7 +33,8 @@ import Tidepool.ExecutionSchema
   , Signature(..), SignatureId(..), SymbolIdentity(..), TargetDescriptor(..)
   , TopBinding(..), ValueRef(..), WireProgram(..) )
 import Tidepool.FatIface
-  ( FatIfaceLookup(..), newFatIfaceCache, lookupFatIfaceExact )
+  ( FatIfaceLookup(..), newFatIfaceCache, lookupFatIfaceExact
+  , newOwnerInterfaceCache )
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PreparedPipelineResult(..)
   , PipelineResult(prHscEnv), runPipelineSelected )
@@ -88,12 +89,13 @@ main = do
         ++ intercalate ", " (map (showSDocUnsafe . ppr . idName) references))
     let fstIds = filter isFst references
     cache <- liftIO newFatIfaceCache
+    ownerCache <- liftIO newOwnerInterfaceCache
     recovered <- liftIO $ recoverFirst hsc cache fstIds
     case recovered of
       (fstId, ExactBody owner body origin) -> do
         liftIO $ assert (origin == InterfaceUnfolding || origin == FatInterfaceGroup)
           "exact recovery returned an unknown body origin"
-        preparedResult <- liftIO $ prepareRecoveredBodies hsc owner (bindList body)
+        preparedResult <- liftIO $ prepareRecoveredBodies hsc ownerCache owner (bindList body)
         recoveredModule <- case preparedResult of
           Left failure -> liftIO $ ioError (userError
             ("defining-context preparation failed: " ++ show failure))
@@ -216,12 +218,13 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
       ("expected one defining semigroup reference, got " ++ show (length found)
         ++ ": " ++ intercalate ", " (map renderId found)))
   cache <- liftIO newFatIfaceCache
+  ownerCache <- liftIO newOwnerInterfaceCache
   lookupResult <- liftIO $ recoverExactBody hsc cache semigroupId
   (owner, body) <- case lookupResult of
     ExactBody owner group _ -> pure (owner, group)
     other -> liftIO $ ioError (userError
       ("semigroup reference was not recovered exactly: " ++ showLookup' other))
-  recovered <- liftIO $ prepareRecoveredBodies hsc owner (bindList body)
+  recovered <- liftIO $ prepareRecoveredBodies hsc ownerCache owner (bindList body)
   recoveredModule <- case recovered of
     Right value -> pure value
     Left failure -> liftIO $ ioError (userError
@@ -240,7 +243,7 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
       ("$fMonoidProduct1 was not recovered exactly: " ++ showLookup' other))
   liftIO $ assert (productOneOwner == owner)
     "$fMonoidProduct1 defining owner changed during recovery"
-  productOnePrepared <- liftIO $ prepareRecoveredBodies hsc productOneOwner
+  productOnePrepared <- liftIO $ prepareRecoveredBodies hsc ownerCache productOneOwner
     (bindList productOneBody)
   productOneModule <- case productOnePrepared of
     Right value -> pure value
@@ -251,7 +254,7 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
   liftIO $ assert (any isStimes allReferences)
     ("stimesMonoid1 dependency disappeared from references: "
       ++ intercalate ", " (map renderId allReferences))
-  sourceHome <- liftIO $ prepareRecoveredBodies hsc (pmModule prepared) []
+  sourceHome <- liftIO $ prepareRecoveredBodies hsc ownerCache (pmModule prepared) []
   case sourceHome of
     Left RecoveredModuleInterfaceFailure{} -> pure ()
     Left failure -> liftIO $ ioError (userError
@@ -306,7 +309,9 @@ assertRecoveredKindRep root = do
         , projectionFormattingAuthority = Nothing
         , projectionTextUnit = Nothing
         }
-  closure <- recoverPreparedClosure (prHscEnv pipeline) context home
+  cache <- newFatIfaceCache
+  ownerCache <- newOwnerInterfaceCache
+  closure <- recoverPreparedClosure (prHscEnv pipeline) cache ownerCache context home
   let modules = closureModules closure
       references = preparedTargetReferences context modules
   identities <- case preparedTopIdentities modules of

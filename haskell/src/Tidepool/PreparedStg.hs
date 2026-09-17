@@ -55,7 +55,9 @@ import GHC.Utils.Outputable (ppr, showSDocUnsafe, text)
 import Tidepool.EffectSchema (YieldSite)
 import Tidepool.PreparedSites (PreparedSite, SiteRejection)
 import Tidepool.TypePolicy (TypeGraph(..))
-import Tidepool.FatIface (ExactInterfaceFailure(..), readExactInterface)
+import Tidepool.FatIface
+  ( ExactInterfaceFailure(..), readExactInterface
+  , OwnerInterfaceCache, lookupOwnerInterface, cacheOwnerInterface )
 import Tidepool.PreparedFacts (PreparedFacts, extractPreparedFacts)
 
 -- | Typed, pre-CorePrep input to the prepared pipeline.
@@ -198,25 +200,44 @@ recoveredSubsetScope owner bindings =
 -- through the same owner as source modules.  In particular, this does not
 -- manufacture a 'ModSummary' for a package module (whose source path may be
 -- absent) or attach the group to the caller's module.
-prepareRecoveredBodies :: HscEnv -> Module -> [CoreBind]
+--
+-- The interface read ('readExactInterface') and typecheck
+-- ('loadDefiningDetails') are the expensive, owner-only part of this call and
+-- do not depend on 'bindings'; a daemon-lifetime 'OwnerInterfaceCache' lets a
+-- re-preparation of the same owner (a later recovery round finds more of its
+-- bindings) skip straight to 'prepareRecoveredModule', which still runs the
+-- CorePrep/coreToStg/stg2stg pipeline over the (possibly larger) group list
+-- every call, unchanged from before. Only a successful read+typecheck is
+-- cached; see 'OwnerInterfaceCache'.
+prepareRecoveredBodies :: HscEnv -> OwnerInterfaceCache -> Module -> [CoreBind]
   -> IO (Either RecoveredModuleFailure PreparedModule)
-prepareRecoveredBodies hscEnv owner bindings = do
-  exact <- readExactInterface hscEnv owner
-  case exact of
-    Left (ExactInterfaceFinderFailure reason) ->
-      pure (Left (RecoveredModuleFinderFailure owner reason))
-    Left (ExactInterfaceReadFailure reason) ->
-      pure (Left (RecoveredModuleInterfaceFailure owner reason))
-    Right (iface, location) -> do
-      details <- trySynchronous (loadDefiningDetails hscEnv iface)
-      case details of
-        Left reason -> pure (Left (RecoveredModuleInterfaceFailure owner reason))
-        Right tycons -> do
-          prepared <- trySynchronous (prepareRecoveredModule hscEnv
-            (RecoveredModuleInput owner location tycons bindings))
-          pure $ case prepared of
-            Left reason -> Left (RecoveredModulePreparationFailure owner reason)
-            Right value -> Right value
+prepareRecoveredBodies hscEnv ownerCache owner bindings = do
+  cached <- lookupOwnerInterface ownerCache owner
+  resolved <- case cached of
+    Just hit -> pure (Right hit)
+    Nothing -> do
+      exact <- readExactInterface hscEnv owner
+      case exact of
+        Left (ExactInterfaceFinderFailure reason) ->
+          pure (Left (RecoveredModuleFinderFailure owner reason))
+        Left (ExactInterfaceReadFailure reason) ->
+          pure (Left (RecoveredModuleInterfaceFailure owner reason))
+        Right (iface, location) -> do
+          details <- trySynchronous (loadDefiningDetails hscEnv iface)
+          case details of
+            Left reason -> pure (Left (RecoveredModuleInterfaceFailure owner reason))
+            Right tycons -> do
+              let hit = (iface, location, tycons)
+              cacheOwnerInterface ownerCache owner hit
+              pure (Right hit)
+  case resolved of
+    Left failure -> pure (Left failure)
+    Right (_iface, location, tycons) -> do
+      prepared <- trySynchronous (prepareRecoveredModule hscEnv
+        (RecoveredModuleInput owner location tycons bindings))
+      pure $ case prepared of
+        Left reason -> Left (RecoveredModulePreparationFailure owner reason)
+        Right value -> Right value
   where
     loadDefiningDetails :: HscEnv -> ModIface -> IO [TyCon]
     loadDefiningDetails env iface = do

@@ -122,6 +122,10 @@ pub const STAGE_ASKS_PARSE: &str = "asks_parse";
 pub const STAGE_JIT_CODEGEN: &str = "jit_codegen";
 /// Running the compiled fragment on the machine (to completion or suspension).
 pub const STAGE_RUN_EXEC: &str = "run_exec";
+/// Installing a prepared STG program into the resident machine.
+pub const STAGE_INSTALL_PREPARED: &str = "install_prepared";
+/// Reading the `.prepared.cbor` sidecar off disk.
+pub const STAGE_PREPARED_READ: &str = "prepared_read";
 
 /// Every Rust-side stage, in pipeline order — the attribution table's row order.
 pub const RUST_STAGES: &[&str] = &[
@@ -133,6 +137,8 @@ pub const RUST_STAGES: &[&str] = &[
     STAGE_ASKS_PARSE,
     STAGE_JIT_CODEGEN,
     STAGE_RUN_EXEC,
+    STAGE_INSTALL_PREPARED,
+    STAGE_PREPARED_READ,
 ];
 
 // ---------------------------------------------------------------------------

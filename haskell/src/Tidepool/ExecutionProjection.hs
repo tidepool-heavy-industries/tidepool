@@ -6,13 +6,15 @@ module Tidepool.ExecutionProjection
   , projectPreparedTargetWithConstructors
   , preparedTopIdentities
   , preparedTargetReferences
+  , preparedModuleReferenceFacts
+  , combinePreparedTargetReferences
   , projectLiteralAtomForTest
   , assignTopIdentitySpellings
   , resolveTextPackageUnit
   , TextUnitAuthority(..)
   ) where
 
-import Control.Monad (foldM, forM, unless)
+import Control.Monad (foldM, forM, forM_, unless)
 import Control.Monad.State.Strict
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
@@ -55,7 +57,7 @@ import GHC.Types.Name.Occurrence (fieldOcc_maybe, occNameString)
 import GHC.Types.RepType
   (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
 import GHC.Types.Unique.Set (elementOfUniqSet, mkUniqSet, nonDetEltsUniqSet)
-import GHC.Types.Unique (Unique)
+import GHC.Types.Unique (Unique, getKey)
 import GHC.Types.Unique.FM (UniqFM, listToUFM, lookupUFM)
 import GHC.Types.Var (Id, varName, varType, varUnique)
 import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
@@ -272,18 +274,58 @@ projectPreparedTargetWithConstructors context modules =
        message : _ -> Left (RejectedTypedSite (Text.pack message))
        [] -> projectPreparedWithTopSymbols context selected identities
 
--- | Exact external value references of the selected top closure. The identity
--- map is always computed before filtering. Recovery uses Ids, never occurrence
--- strings or the imported-only annotations returned by stg2stg.
-preparedTargetReferences :: ProjectionContext -> [PreparedModule] -> [Id]
-preparedTargetReferences context modules =
-  let (_, selected) = selectPreparedTarget context modules
+-- | The per-module, round-invariant part of 'preparedTargetReferences'.
+--
+-- For EVERY one of a module's own top-level binding groups -- unfiltered by
+-- reachability, since 'selectPreparedTarget''s reachable set can grow round
+-- to round as more of the closure is discovered, but a binding group's OWN
+-- contributed references never do for a fixed 'context' -- this computes the
+-- external value Ids that group's body refers to, via the same
+-- 'recoveryReferences' + 'extractPreparedFacts' pipeline
+-- 'preparedTargetReferences' used inline. Only the 'preparedReferencedIds'
+-- field is ever read from 'extractPreparedFacts' downstream (by
+-- 'combinePreparedTargetReferences'), and that field's 'Monoid' instance is
+-- plain list append over the traversal, so computing it one binding group at
+-- a time and concatenating in the module's own binding order reproduces
+-- exactly what computing it over the whole (possibly reachability-filtered)
+-- list would -- this is what lets 'combinePreparedTargetReferences' apply
+-- 'selectPreparedTarget''s filter AFTER this lookup instead of before it.
+--
+-- Keyed by the 'Unique' key of each group's first top binder (a module's
+-- groups have disjoint binders). The result depends only on 'context' and the
+-- module's own 'pmBindings', so a caller may memoize it until that
+-- 'PreparedModule' is replaced.
+preparedModuleReferenceFacts :: ProjectionContext -> PreparedModule
+  -> Map Word64 [Id]
+preparedModuleReferenceFacts context prepared = Map.fromList
+  [ (getKey (varUnique firstBinder), entryReferences)
+  | (binding, _) <- pmBindings prepared
+  , firstBinder : _ <- [topBinders binding]
+  , let entryReferences = preparedReferencedIds (extractPreparedFacts
+          (pmModule prepared) (pmTagSigs prepared) (recoveryReferences context binding))
+  ]
+
+-- | Cross-module combination for 'preparedTargetReferences'. Each module is
+-- paired with its own 'preparedModuleReferenceFacts' (possibly memoized by the
+-- caller); pairing by position rather than by 'Module' keeps two prepared
+-- copies of one owner distinct. A group contributes when
+-- 'selectPreparedTarget' kept it reachable; groups are walked in module and
+-- binding order, so the result equals recomputing the facts over the
+-- selected bindings.
+combinePreparedTargetReferences :: ProjectionContext
+  -> [(PreparedModule, Map Word64 [Id])] -> [Id]
+combinePreparedTargetReferences context entries =
+  let modules = map fst entries
+      (_, selected) = selectPreparedTarget context modules
+      kept = mkUniqSet [varUnique binder | prepared <- selected
+        , (binding, _) <- pmBindings prepared, binder <- topBinders binding]
       defined = mkUniqSet [varUnique binder | prepared <- modules
         , (binding, _) <- pmBindings prepared, binder <- topBinders binding]
-      referenced = [ binder | prepared <- selected
-        , binder <- preparedReferencedIds (extractPreparedFacts
-            (pmModule prepared) (pmTagSigs prepared)
-            (concatMap (recoveryReferences context . fst) (pmBindings prepared)))
+      referenced = [ binder | (prepared, facts) <- entries
+        , (binding, _) <- pmBindings prepared
+        , firstBinder : _ <- [topBinders binding]
+        , elementOfUniqSet (varUnique firstBinder) kept
+        , binder <- Map.findWithDefault [] (getKey (varUnique firstBinder)) facts
         , isExternalName (varName binder)
         , isNothing (nullaryWorkerConstructor binder)
         , not (elementOfUniqSet (varUnique binder) defined)
@@ -291,6 +333,13 @@ preparedTargetReferences context modules =
         -- its defining module's source into this program's recovery closure.
         , isNothing (retainedGenerationOf context binder) ]
   in Map.elems (Map.fromList [(idSymbol "value" binder, binder) | binder <- referenced])
+
+-- | Exact external value references of the selected top closure. The identity
+-- map is always computed before filtering. Recovery uses Ids, never occurrence
+-- strings or the imported-only annotations returned by stg2stg.
+preparedTargetReferences :: ProjectionContext -> [PreparedModule] -> [Id]
+preparedTargetReferences context modules = combinePreparedTargetReferences context
+  [(prepared, preparedModuleReferenceFacts context prepared) | prepared <- modules]
 
 -- A registered replacement has no source-body dependencies. Split recursive
 -- groups for this fact query so unrelated siblings retain their own references.
@@ -1011,7 +1060,20 @@ projectTagToEnum [argument] resultType = do
 projectTagToEnum _ _ = failRepresentation "tagToEnum# requires exactly one argument"
 
 projectCaseKind :: AltType -> P CaseKind
-projectCaseKind (AlgAlt tycon) = pure (AlgebraicCase (nameSymbol "type" (GHC.tyConName tycon)))
+projectCaseKind (AlgAlt tycon) = do
+  -- Prepared dispatch recognizes a scrutinee by the descriptors its program
+  -- declares for the family, so declare the whole family: a constructor the
+  -- alternatives do not name (a host answer's, another program's) must reach
+  -- the default rather than look like a foreign object. A constructor with
+  -- no prepared layout cannot be built anywhere and stays undeclared.
+  forM_ (GHC.tyConDataCons tycon) $ \constructor -> do
+    attempted <- tryRepresentation (internConstructor constructor)
+    case attempted of
+      Right _ -> pure ()
+      Left (InvalidPreparedRepresentation _) -> pure ()
+      Left (InvalidPreparedLayout _) -> pure ()
+      Left failure -> lift (Left failure)
+  pure (AlgebraicCase (nameSymbol "type" (GHC.tyConName tycon)))
 projectCaseKind (PrimAlt rep) = PrimitiveCase <$> projectRep rep
 projectCaseKind (MultiValAlt _) = pure MultiValueCase
 projectCaseKind PolyAlt = pure PolymorphicCase
