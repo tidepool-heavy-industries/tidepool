@@ -481,3 +481,139 @@ in a stale `shoal` binary both masked a `haskell/lib` edit once (`Not in scope:
 R.withWorktree`); `check-tui.sh` now rebuilds `shoal` and sets
 `TIDEPOOL_PRELUDE_DIR`. Several `documentation_tests` failed while `haskell/lib`
 was mid-edit; rerun after the commit.
+
+## Run 7 (9333c8f3, tui-test-app, Sol medium root, goal-plus-rules)
+
+Launched 13:20 PDT 2026-09-17 from `52f374627`; base `e8547e7`. The root
+chose one Sol node (`ForkBudget 2 3`) for the whole tags feature; the node ran
+one app.rs leaf, then a store leaf and a Luna node (`ForkBudget 1 2`), which
+ran a UI leaf. Eleven interactive actors started, two never admitted. Three
+integrators, one per level, each on its own worktree, none started by the
+root. Nothing merged upward: `shoal/integration` and the root's integration
+worktree stayed at base; the Sol node's integrator stopped at its first merge
+(`90a8246`); the UI node's is at `4610b5e`, blocked. Five Sonnet analyses
+over the codex rollouts, inboxes, host log, git, and a rebuilt product are in
+`~/.claude/jobs/4940a626/tmp/run7-evidence/reports/`.
+
+What the tree produced: tag model, tags panel with sorted counts and filter,
+status segment, `--tag` startup filter, persistence round-trip with legacy
+files (store leaf `620a56d`, fully green, 40 tests). Missing outright: adding a
+tag from the detail panel (`DetailPanel::handle_key` is still the stub, no
+input state, the named test does not exist). `4610b5e` passes 43 tests but
+`./check.sh` is red on `field_reassign_with_default` at `app.rs:293`, inside a
+test written by the app.rs leaf, so the UI leaf could not fix it in its files.
+
+Engine and host findings, all reproduced live:
+
+1. `R.start (gateFor …)` failed seven times across three actors with the
+   rubbish-atom emitter gap (root-caused and fixed in `emit.rs`, uncommitted
+   at run time). Every level then ran the review/merge loop by hand: the root
+   waited; the Sol and Luna nodes each did mechanical `git diff`, a fresh
+   reviewer per candidate, and `R.call (integrate …)` into their own
+   integrator, never a bare `git merge`. The Sol node told its child in
+   advance that the gate would fail and how to run the loop by hand.
+2. A record actor's commands run inside its nearest native ancestor's
+   sandbox (the wave-3 `native_command_owner` fix). That sandbox mounts only
+   the ancestor's own worktree writable, so the integrator's `git reset --hard`
+   after a red check could not move the integration worktree and it stayed
+   at `4610b5e` with `rollback_failed`. Reads, `tryMerge` (host-side) and
+   `check.sh` all worked, which is what made it look like a git problem.
+   Probe from the proxy: `worktrees/` is `ro`, `worktrees/root` is `rw`.
+   Fix: a record actor's command boundary must be its own custody, not the
+   ancestor's. Also `Gate.hs` swallows the reset's exit code and stderr in
+   the block reason.
+3. The descendant ceiling counts the whole subtree: with `ForkBudget 2 3`
+   the Sol node's three slots were its store leaf, its UI node, and the UI
+   node's leaf, so it could not admit the store reviewer, and the UI node's
+   own reviewer was refused with the same message naming "a coordinator's
+   ceiling, maximum 3" although its budget was `1 2`. Four refusals; one
+   `planCleanupFor` refused (`no confirmed idle provider turn`). The tree
+   deadlocked on this: root waits on node, node waits on UI node, UI node
+   waits on a reviewer it cannot admit.
+4. Memory admission: two reviewers waited 300 s for `7.0 GiB` headroom while
+   my recipes verification compiled on the same box and were never started.
+   Their settlement watches fired `Ready` with `Left (ResponseTargetFailed …)`
+   at the same millisecond, so "review ready" meant "reviewer gave up"; the
+   UI node retried at low effort, which does not address memory. The last
+   twelve minutes of the run were this. Operator error on my side; the
+   harness-side finding is that a failed start settles a watch like a reply.
+5. Stand-down did not propagate: the root acknowledged and waited on its
+   node's settlement; the node and the UI node kept admitting reviewers and
+   leaves until the operator messaged them directly.
+6. Notebook: `unfold "run7/wave1"` → `No instance for IsString ForkGroupPath`
+   (root); `WorktreeSeed` vs `WorktreeSpec`, guessed `SomeResponse` (Sol
+   node); wrong branch ref twice and `Right x <- createWorktree …` crashing
+   the cell on `Left` (UI node); a leaf tried to `watch` its own settlement
+   through an inherited parent binding → `Unauthorized`;
+   `planCleanupFor` on a `request` response refused (no fork group).
+
+Coordination findings:
+
+- Every child assignment was hand-typed prose repeating the typed `Contract`
+  built beside it (owned paths, tests, likely-miss). `renderAssignment ::
+  Contract -> Text` is missing, not hypothetical.
+- The Sol node's first app.rs "repair" went out two minutes after a reviewer
+  accepted the candidate with "no defect"; it was scope the node added after
+  reading consumers. The second repair was a real reviewer finding
+  (`tag_selected` unreachable without `ActivePanel::Tags`). The node then
+  landed a deliberately red scaffold and sequenced the UI node to turn it
+  green: split contracts are the working pattern, and the integrator must
+  take a set of candidates.
+- Of the Sol node's eight turns, three carried decisions; five were watch
+  fires → poll → fixed next step. Reviewers took 17–26 s each, never built,
+  and two of three restated the implementer's reply. Reviewer 44's `cargo
+  check` failed on a read-only checkout.
+- The app.rs leaf changed design (a `Filter::Tag` variant to an `Option`
+  field) when the variant broke files it did not own and never said so; the
+  "stop and say so" rule has no typed reply shape a Luna would use.
+- `reportOutput` fields are summaries, not literal output; every reply's
+  paths matched `git show --stat`.
+
+Operator notes: the proxy bisected the gate bug live and probed the sandbox
+mounts; killing a stray extractor worker restarted the run's compiler
+daemon for one request (no cell lost). Interviews with the root, both nodes
+and the store leaf follow in `.shoal/dogfood-notes-run7.md`.
+
+## Dry run before run 8 (2026-09-17, no models, driven from the proxy)
+
+The authored review-and-merge code had never executed once: run 7's prepared
+emitter rejected it seven times. Before rewriting it, and before another model
+tree depends on it, it was driven by hand from `shoal proxy` in a scratch
+session against a scratch branch. No LLM took part, so every result below is
+deterministic.
+
+What the dry run established:
+
+1. `gateFor` now compiles on the prepared route. This is the run-7 blocker,
+   confirmed fixed against a live session rather than inferred from a test.
+2. Merging a green candidate publishes it: `Integrated`, and the publication
+   branch advanced to the checked head.
+3. Merging a genuinely red candidate rolls back: `IntegrationRed`, the
+   integration worktree back at `before`, clean, and the publication branch
+   untouched. This is the case run 7 could not reach.
+
+Three defects it found, all fixed here, none of which a test had caught:
+
+1. **A command ignored the directory it named.** The mount wrapper carries its
+   own working directory, so a boundary built once around the actor's default
+   worktree overrode every `inDirectory`, silently. The check and the
+   publication both ran in the source checkout. The boundary is now built per
+   command, rooted where that command asked to run.
+2. **Publication needs the shared git directory.** A linked worktree keeps its
+   refs in the source repository's `.git`, so `update-ref` is a write there. The
+   first boundary left it read-only and the merge actor reported "the branch
+   moved underneath the merge" with an empty detail — a confident, wrong cause,
+   because `Gate.hs` reads a failed command's stdout and git writes to stderr.
+   The directory is granted with custody now; reading stderr in `Gate.hs` is
+   still owed.
+3. **A failed pattern bind said nothing useful.** `Right tree <- …` on a `Left`
+   produced three layers of engine wrapper around a line number inside a
+   generated module. It now names the bind and how to see the value. The
+   concise fallible bind stays the right thing to write in a throwaway cell.
+
+Two observations about the method itself. My first "deliberately red" candidate
+was green, because it appended to `src/help.rs` while the compiled module is
+`src/panels/help.rs`; the merge actor was right and the probe was wrong. And
+both probes ran as the operator workbench, which holds no custody, so anything
+it tried to write was read-only — a reminder that the proxy is a participant
+with its own authority, not a view of someone else's.
