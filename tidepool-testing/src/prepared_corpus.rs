@@ -1264,6 +1264,7 @@ mod tests {
             uint(0),
             array([]),
             array([]),
+            array([]),
         ])
     }
 
