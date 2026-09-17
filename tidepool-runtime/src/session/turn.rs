@@ -776,6 +776,72 @@ pub fn ambiguous_type_advice(message: &str, submitted: &str) -> Option<String> {
         .then(|| AMBIGUOUS_TYPE_ADVICE.to_owned())
 }
 
+/// GHC's `MonadFail` desugaring for a refutable bind in a `do` block, as it
+/// reaches a cell: an exception whose text points at the generated wrapper.
+const DO_BLOCK_PATTERN_FAILURE: &str = "Pattern match failure in 'do' block at ";
+
+/// Turn a runtime failure that is really a user-level mistake into a cell-level
+/// message about the cell.
+///
+/// A refutable bind — `Right handle <- createWorktree …` — desugars to
+/// `fail`, which raises. The concise form is the right thing to write in a
+/// throwaway cell, so this does not discourage it; what reaches the reader is
+/// the problem. Today that is "prepared execution failed: Haskell exception
+/// raised: Pattern match failure in 'do' block at /tmp/…/Expr.hs:78:1-10":
+/// three layers of engine detail and a location inside a generated wrapper the
+/// reader never wrote, and no mention of which bind or what it was given. The
+/// bind is recovered from the submitted cell rather than from the wrapper's
+/// coordinates, and the reader is told how to see the value if they want it.
+#[must_use]
+pub fn runtime_failure_advice(message: &str, cell_text: &str) -> Option<String> {
+    if !message.contains(DO_BLOCK_PATTERN_FAILURE) {
+        return None;
+    }
+    let binds = refutable_binds(cell_text);
+    let Some((line, pattern, bound)) = binds.first() else {
+        return Some(
+            "a pattern bind did not match, so the cell stopped there; \
+             bind that value plainly to see what it was"
+                .to_owned(),
+        );
+    };
+    let name = bound.as_deref().unwrap_or("result");
+    let where_ = if binds.len() == 1 {
+        format!("`{pattern}` on line {line}")
+    } else {
+        format!("a pattern bind, first `{pattern}` on line {line},")
+    };
+    Some(format!(
+        "{where_} did not match, so the cell stopped there; the value is not \
+         shown, so bind it plainly (`{name} <- …`) to see what it was"
+    ))
+}
+
+/// Lines of `cell_text` that bind through a refutable constructor pattern,
+/// as (1-based line, the pattern as written, the last name it binds).
+fn refutable_binds(cell_text: &str) -> Vec<(usize, String, Option<String>)> {
+    cell_text
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let (left, _) = line.split_once("<-")?;
+            let pattern = left.trim();
+            let mut words = pattern.split_whitespace();
+            // A constructor pattern starts with an upper-case name; a plain
+            // binder or a tuple does not, and neither can fail to match.
+            let head = words.next()?;
+            if !head.starts_with(char::is_uppercase) {
+                return None;
+            }
+            let bound = words
+                .last()
+                .filter(|word| word.starts_with(char::is_lowercase))
+                .map(str::to_owned);
+            Some((index + 1, pattern.to_owned(), bound))
+        })
+        .collect()
+}
+
 /// Recognize GHC's `Ambiguous occurrence` diagnostic when the competing
 /// candidates include field/constructor selectors from two different cell
 /// generations (`Tidepool.Session.Lib.G<n>`). Each cell's declarations
@@ -2546,8 +2612,9 @@ fn parse_classify_export_item(v: &serde_json::Value) -> Result<ExportItem, Compi
 #[cfg(test)]
 mod ambiguity_advice_tests {
     use super::{
-        ambiguous_type_advice, render_cell_compile_error, AMBIGUOUS_TYPE_ADVICE,
-        LITERAL_ANNOTATION_ADVICE, SPLIT_SIGNATURE_ADVICE,
+        ambiguous_type_advice, refutable_binds, render_cell_compile_error,
+        runtime_failure_advice, AMBIGUOUS_TYPE_ADVICE, LITERAL_ANNOTATION_ADVICE,
+        SPLIT_SIGNATURE_ADVICE,
     };
     use crate::CompileError;
 
@@ -2703,6 +2770,54 @@ mod ambiguity_advice_tests {
             render_cell_compile_error(&cell_error(AMBIGUOUS_REDECLARED_FIELD), "probe holder"),
             advice
         );
+    }
+
+    /// The exact text a cell gets today for `Right handle <- createWorktree …`
+    /// when the worktree does not exist. Three layers of engine detail and a
+    /// location in a generated wrapper; the reader wrote neither.
+    const DO_BLOCK_FAILURE: &str = "prepared execution failed: Haskell exception raised: Pattern match failure in 'do' block at /tmp/nix-shell.FG8yXG/.tmpdKgy0W/Expr.hs:78:1-10";
+
+    #[test]
+    fn a_failed_pattern_bind_names_the_bind_and_says_to_inspect_the_value() {
+        let cell = "Right tree <- createWorktree (fromRef (GitRef \"shoal/dry8\") \"merge\")\ntree";
+        assert_eq!(
+            runtime_failure_advice(DO_BLOCK_FAILURE, cell).unwrap(),
+            "`Right tree` on line 1 did not match, so the cell stopped there; \
+             the value is not shown, so bind it plainly (`tree <- …`) to see what it was"
+        );
+    }
+
+    #[test]
+    fn several_refutable_binds_name_the_first_without_claiming_which_failed() {
+        let cell = "x <- pure 1\nJust a <- pure Nothing\nRight b <- pure (Left 2)";
+        let advice = runtime_failure_advice(DO_BLOCK_FAILURE, cell).unwrap();
+        assert!(advice.starts_with("a pattern bind, first `Just a` on line 2,"), "{advice}");
+    }
+
+    /// A cell with no refutable bind at all still gets the recovery, because
+    /// the failing bind may be inside a `where` or a helper this cell called.
+    #[test]
+    fn a_pattern_failure_with_nothing_to_point_at_still_says_what_to_do() {
+        let advice = runtime_failure_advice(DO_BLOCK_FAILURE, "runEverything").unwrap();
+        assert!(advice.contains("bind that value plainly"), "{advice}");
+    }
+
+    /// Every other runtime failure keeps its own words.
+    #[test]
+    fn an_unrelated_runtime_failure_is_left_alone() {
+        assert_eq!(
+            runtime_failure_advice("prepared execution failed: division by zero", "1 `div` 0"),
+            None
+        );
+    }
+
+    /// A tuple or plain binder cannot fail to match, so neither is offered as
+    /// the culprit.
+    #[test]
+    fn only_constructor_patterns_count_as_refutable() {
+        assert!(refutable_binds("(a, b) <- pure (1, 2)").is_empty());
+        assert!(refutable_binds("value <- pure 1").is_empty());
+        assert_eq!(refutable_binds("Just v <- pure Nothing").len(), 1);
     }
 
     /// A plain single-generation ambiguous occurrence (e.g. a field name that

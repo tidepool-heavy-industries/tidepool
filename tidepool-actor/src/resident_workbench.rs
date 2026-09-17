@@ -1882,6 +1882,8 @@ where
                     session,
                     context,
                     1,
+                    // A tool invocation has no submitted cell to point at.
+                    String::new(),
                     WorkbenchDisplay::Tool,
                     Vec::new(),
                     outcome,
@@ -2515,7 +2517,15 @@ where
             } else {
                 WorkbenchDisplay::Binding(names)
             };
-            start_fragment_settlement(session, context, block.ordinal, display, warnings, outcome)
+            start_fragment_settlement(
+                session,
+                context,
+                block.ordinal,
+                block.source.clone(),
+                display,
+                warnings,
+                outcome,
+            )
         }
         TurnResult::Expr { .. } => Err(ResidentActorWorkbenchError::ActorProtocol(
             "workbench expression compiled without its observation binding".into(),
@@ -2527,6 +2537,7 @@ fn start_fragment_settlement<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     input_ordinal: usize,
+    cell_text: String,
     display: WorkbenchDisplay,
     warnings: Vec<String>,
     outcome: Result<ResidentOutcome, ResidentError>,
@@ -2549,7 +2560,7 @@ where
             outcome,
         ),
         Err(ResidentError::Run(error)) => Ok(ResidentWorkbenchStep::Rejected(
-            render_runtime_rejection(input_ordinal, &error),
+            render_runtime_rejection(input_ordinal, &error, &cell_text),
         )),
         // A prepared-route Haskell failure is the same user-level rejection Core
         // reports as `ResidentError::Run`; integrity and infrastructure failures
@@ -2557,8 +2568,10 @@ where
         Err(ResidentError::Prepared(error))
             if error.kind() == tidepool_runtime::session::PreparedFailureKind::Language =>
         {
-            Ok(ResidentWorkbenchStep::Rejected(format!(
-                "<cell item {input_ordinal}>: runtime error: {error}"
+            Ok(ResidentWorkbenchStep::Rejected(render_cell_runtime_failure(
+                input_ordinal,
+                &error.to_string(),
+                &cell_text,
             )))
         }
         Err(error) => Err(ResidentActorWorkbenchError::Resident(error)),
@@ -2568,6 +2581,7 @@ where
 fn render_runtime_rejection(
     input_ordinal: usize,
     error: &tidepool_runtime::RuntimeError,
+    cell_text: &str,
 ) -> String {
     use tidepool_codegen::{jit_machine::JitError, yield_type::YieldError};
     let detail = match error {
@@ -2576,6 +2590,14 @@ fn render_runtime_rejection(
         }
         _ => error.to_string(),
     };
+    render_cell_runtime_failure(input_ordinal, &detail, cell_text)
+}
+
+/// One rendering for every route's user-level runtime failure, so a mistake
+/// a cell made reads the same whichever engine reported it.
+fn render_cell_runtime_failure(input_ordinal: usize, detail: &str, cell_text: &str) -> String {
+    let detail = tidepool_runtime::session::runtime_failure_advice(detail, cell_text)
+        .unwrap_or_else(|| detail.to_owned());
     format!("<cell item {input_ordinal}>: runtime error: {detail}")
 }
 
@@ -6686,13 +6708,13 @@ mod request_tests {
             RuntimeError::PatternMatchFailure("Expr.hs:35:7-55|Just x".into()),
         )));
         assert_eq!(
-            render_runtime_rejection(4, &error),
+            render_runtime_rejection(4, &error, ""),
             "<cell item 4>: runtime error: pattern match failure: Expr.hs:35:7-55|Just x"
         );
         let error =
             tidepool_runtime::RuntimeError::Jit(JitError::InvalidSuspensionState("missing"));
         assert_eq!(
-            render_runtime_rejection(2, &error),
+            render_runtime_rejection(2, &error, ""),
             "<cell item 2>: runtime error: invalid suspension state: missing"
         );
     }
