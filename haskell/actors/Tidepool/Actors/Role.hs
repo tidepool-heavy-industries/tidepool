@@ -39,8 +39,6 @@ import Tidepool.Effects.Core
   , AgentControl
   , Notifications
   , Commands
-  , Console
-  , Sleep
   , Actor
   , AgentInspection
   , AgentLaunch
@@ -60,19 +58,19 @@ import Tidepool.Effects.Row
 
 type CoreEffects = '[Replies, Watches, ActorContext, Notifications, Jev, Commands, Actor]
 type ResearchLeafEffects = '[Replies, Watches, ActorContext, BoundWorktree, Notifications, Jev, Commands, Actor]
--- The research and coding rows mirror `EffectiveRole::research()` and
--- `EffectiveRole::coding()` in `tidepool-actor/src/role.rs`; a parity test
--- there reads this file and fails when the two drift.
+-- What a child DECLARES, which is a subset of the role ceiling in
+-- `tidepool-actor/src/role.rs`. The ceiling may be wider: it is a maximum, not
+-- a request, and every effect named here must have a handler installed in each
+-- environment that launches such a child (the recipe-check environment among
+-- them). A test in `role.rs` checks the subset direction, not equality.
 type ResearchEffects =
   '[ Replies, Watches, Forks, ActorContext
-   , AgentInspection, AgentControl, BoundWorktree
-   , Sleep, Notifications, Jev, Commands, Console, Actor
+   , AgentInspection, AgentControl, BoundWorktree, Notifications, Jev, Commands, Actor
    ]
 type CodingEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentInspection, AgentControl, BoundWorktree
-   , WorktreeAllocation, WorktreeIntegration
-   , Sleep, Notifications, Jev, Commands, Console, Actor
+   , WorktreeAllocation, WorktreeIntegration, Notifications, Jev, Commands, Actor
    ]
 type IntegrationEffects =
   '[ Replies, Watches, ActorContext

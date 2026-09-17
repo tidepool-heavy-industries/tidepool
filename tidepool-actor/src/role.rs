@@ -549,41 +549,48 @@ mod tests {
         );
     }
 
-    /// `Tidepool.Actors.Role` spells the research and coding rows as Haskell
-    /// type aliases; the Rust ceilings are the authority. Read the Haskell
-    /// source at compile time and compare, so the next drift fails here.
+    /// `Tidepool.Actors.Role` spells what a child DECLARES; the roles here are
+    /// the ceilings those declarations must sit under. The two are different
+    /// things — a ceiling is a maximum, not a request — so this checks the
+    /// subset direction. Equality would be wrong and was: widening a ceiling
+    /// and mirroring it into the Haskell alias made children demand effects
+    /// whose handlers the recipe-check environment does not install.
     #[test]
-    fn haskell_role_aliases_match_the_rust_ceilings() {
+    fn haskell_declared_rows_sit_under_the_rust_ceilings() {
         let source = include_str!("../../haskell/actors/Tidepool/Actors/Role.hs");
-        fn alias(source: &str, name: &str) -> String {
+        fn declared(source: &str, name: &str) -> Vec<String> {
             let start = source
                 .find(&format!("type {name} ="))
                 .unwrap_or_else(|| panic!("alias {name} missing from Role.hs"));
             let body = &source[start + format!("type {name} =").len()..];
-            let end = body.find("]").expect("alias closes") + 1;
-            body[..end].chars().filter(|c| !c.is_whitespace()).collect()
+            let end = body.find(']').expect("alias closes");
+            body[..end]
+                .replace(['\'', '[', '\n'], " ")
+                .split(',')
+                .map(|name| name.trim().to_owned())
+                .filter(|name| !name.is_empty())
+                .collect()
         }
         for (name, role) in [
             ("ResearchEffects", EffectiveRole::research()),
             ("CodingEffects", EffectiveRole::coding()),
+            ("IntegrationEffects", EffectiveRole::integration()),
         ] {
-            let rust: String = role
-                .haskell_effects_type()
-                .chars()
-                .filter(|c| !c.is_whitespace())
+            let ceiling: Vec<&str> = role
+                .effect_keys()
+                .iter()
+                .map(|effect| effect.haskell_name())
                 .collect();
-            assert_eq!(alias(source, name), rust, "{name} drifted from the Rust row");
+            for effect in declared(source, name) {
+                assert!(
+                    ceiling.contains(&effect.as_str()),
+                    "{name} declares {effect}, which is outside the {:?} ceiling",
+                    role.role()
+                );
+            }
         }
     }
 
-    /// The rows a project's own `.shoal` actors declare. The gate routes
-    /// settled replies, admits reviewers, runs mechanical evidence commands,
-    /// asks Jev, and wakes the root; it holds no worktree, so a record actor
-    /// started with `ActorRole::Inherited` resolves it to `research`. The
-    /// integrator holds the merge target and merges into it; worktree custody
-    /// is exclusive and integrate authority follows custody, so its row only
-    /// sits under a ceiling that comes with a worktree (`coding`), never under
-    /// `research`.
     #[test]
     fn a_project_gate_row_sits_under_every_ceiling_the_root_can_start_it_with() {
         let gate = vec![
