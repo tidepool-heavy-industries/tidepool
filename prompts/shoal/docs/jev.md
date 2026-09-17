@@ -91,15 +91,34 @@ don't retry blindly.
 
 ## Calibration
 
-A mass of 1.0 with a single real contender usually means the pool was
-under-specified, not that the judgment is certain — a `choice` with one
-obviously-best alternative and a weak strawman lands near 1.0 every time.
-Give every pool a `defer_to_model` exit and at least one plausible rival
-written as its strongest case, not a token option. Read `J.contenders` and
-`J.confidence`, not only `J.chosen`: a lopsided mass at low confidence is a
-different claim than a lopsided mass at high confidence. When the result
-gates an action, gate on `J.accept policy answer`, not on a raw `chosen`. A
-judgment is still evidence, not authority.
+Measured on 2026-09-17 (262 calls, `jev-1.13.0`):
+
+- A mass of 1.0 means no option in the pool competes. Rewording does not
+  move it. If the 1.0 surprises you, the option you expected to compete is
+  missing; add it. If it does not surprise you, the question was not worth
+  asking.
+- Options describe; they never argue. "Despite existing coverage" and "the
+  report has not shown X" both steer the answer. Write what the option would
+  do, not why it is good or bad.
+- Rivals come from evidence, not from your own shortlist, or the pool
+  inherits your ranking.
+- Gate on confidence first. Over 42 labelled choices both wrong answers sat
+  below 0.25 confidence; mass and margin floors added nothing below 0.85.
+  Defaults by stakes, as `J.Policy { J.minMass, J.minMargin, J.minConfidence }`:
+  routing (which file, which skill) 0.40 / 0.08 / 0.50; spawning a worker or
+  choosing an approach 0.55 / 0.20 / 0.70; merging, stopping, anything with
+  a receipt 0.70 / 0.40 / 0.85.
+- Gate on the artifact, not the narration: a diff and test output, never
+  the child's own report. With the artifact present a lying report moved no
+  answer more than 0.08; with only the report, confidence fell to 0.07.
+- Diff review: file questions on `git diff --stat` (a thousand tokens),
+  content questions per file on its hunks, files in parallel. State plus
+  questions is capped at 32k tokens; a larger state is `Left (JevHttp 400
+  …max_tokens_exceeded…)`, and a 30k whole diff already drops confidence.
+
+Read `J.contenders` and `J.confidence`, not only `J.chosen`. When the result
+gates an action, gate on `J.accept policy answer`. A judgment is still
+evidence, not authority.
 
 ## A worked cell
 
@@ -156,7 +175,10 @@ relevance likelihood per file, and the likelihood under the premise.
 ## A Jev-dense cell
 
 One shell command lists the candidates and one read per candidate gathers
-evidence, bound as ordinary values:
+evidence, bound as ordinary values. Keep each preview short (`T.take 2000`)
+and bind the previews, not the whole files: every bound value is observed,
+and six 220-line files exhausted the notebook's observation budget before
+the Jev call in run 4.
 
 ```haskell
 listed <- Cmd.stdout <$> Cmd.run [bash|ls|]

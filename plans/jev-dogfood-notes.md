@@ -82,16 +82,86 @@ Fixed after the run:
 - Retirement failed with "Git operation active during retirement" when the
   root read the child's branch at the same moment; the capture now waits up
   to 60 s for running host Git commands (`GitCli::capture_within`).
+- `stopAgent` and each cleanup stop step wait for the host's release receipt
+  (`ad4028072`). `StoppedNow` is final; `StoppedRetaining`/`StoppedReleasing`
+  say otherwise, and only the latter is followed by a notice. The receipt
+  separates "actor is stopped" from the retained components.
+- `planCleanupFor` plans from a `Response`; the `doc cleanup` example had the
+  exact type error the root hit. `doc unfold` shows two children with `<*>`
+  and one watch over both.
+- The display-failure notice no longer prints `()` as the value's type.
+- `doc jev`: Cost (Jev is cheap, be Jev-dense), Calibration (a 1.0 mass with
+  one contender means an under-specified pool) and a two-cell Jev-dense
+  example compiled by a test.
+
+Decided, not fixed:
+
+- A bare `error "..."` cell is fully polymorphic; GHC cannot classify it as
+  pure or effectful and defaulting does not apply to a custom class. `doc
+  workbench` says to annotate it. Only `error`/`undefined` have that type.
+- A cumulative Jev usage counter: dropped. Jev is cheap enough that the
+  model should not meter it; `J.usage` per response remains.
+- `J.explain` (policy rationale): a DSL addition, so it is a run-4 task for
+  Sol, who owns the DSL design.
 
 Open:
 
-- A bare `error "..."` cell fails to typecheck (overlapping
-  `TidepoolCellExpression` instances for an ambiguous result); it needs a
-  type annotation.
-- After a display failure the notice reads `Value remains bound as
-  observation50 ()`; the `()` is not the value's type.
-- Jev reports mass and confidence 1.0 for subjective prioritisation.
-- The root's top request across all runs: help choosing `J.Policy`
-  thresholds from the distribution and the stakes, with a short rationale
-  for acceptance or doubt.
+- Jev reports mass and confidence 1.0 for subjective prioritisation
+  (provider-side; the doc pattern mitigates).
 - Wall-clock is dominated by children's full `nix-shell --run ./check.sh`.
+- `typed_reply_settles_response_and_wakes_registered_watch` fails on
+  `EchoReport cache` vs `EchoReport "cache"`: a Text inside a Show'd record
+  renders unquoted. Pre-existing; likely the same cause as run 1's
+  character-list display.
+
+## Run 4 (4ee4280b)
+
+Sol low root, Luna children (`withModel (Literal "gpt-5.6-luna")`). Task:
+review-and-merge the three branches from runs 1-3 into `shoal/integration`
+through fresh Luna reviewers, a `J.accept` gate and `tryMerge`; the run was
+stopped after that task to save quota (the polish and DSL tasks were the
+wrong tier for Sol). Log: `~/dev/jev-dsl/.shoal/dogfood-notes-run4.md`;
+observer notes: `~/.claude/jobs/4940a626/tmp/observer-run4.md`.
+
+Verified: six stops, all `AgentStoppedNow`, no later release notice, final
+roster root-only; `planCleanupFor`/`executeCleanup` on three groups; three
+children admitted in one applicative `unfold` with one `watch`; `tryMerge`
+fast-forward and two merge commits; a Luna checker's `check.sh` green on the
+integrated revision. The Jev gate refused the reviewers' compact summaries
+(confidence 0.26 to 0.34) and accepted the evidence packets (0.67 to 0.89):
+gate on the artifact, not the narration.
+
+Open, by time cost:
+
+- The root's `boundWorktree` returned `Left (StorageFailure ".../worktrees/
+  wt-02a87edd-.../.git" "mounted worktree ... requires filesystem
+  recovery")`. That worktree id is run 3's coding child, whose retirement
+  had failed; a stale retained worktree from an earlier run reached the
+  next run's root binding. Investigate custody carry-over across runs.
+- A worktree the root allocated with `createWorktree` is read-only to the
+  root's own commands (`dist-newstyle: createDirectory: permission denied
+  (Read-only file system)`), so the root could not run `check.sh` on the
+  integrated revision and spent 13 minutes on a Luna checker instead.
+  Decide whether root-allocated integration worktrees should be writable.
+- Inferred selector declarations (`firstReview = \(a,_,_) -> a` without a
+  signature) fail in the generated wrapper with `Not in scope: type
+  constructor or class GHC.Types.ZonkAny`. Same family as run 1's
+  `Jev.Core.Schema` import gap: an inferred type the wrapper cannot name.
+  Either import it or reject the declaration with a message that says to
+  add a signature.
+- A cell that bound six 220-line file previews failed with `observation
+  budget 100000 exhausted` before its Jev call. `doc jev` now says to bind
+  short previews; consider not observing bindings the cell never displays.
+- `listAgents` renders a full roster record per actor, usage observations
+  included; five actors fill a screen. A compact default view.
+- A watch forgotten by cleanup still delivered a `Pending → Ready` notice
+  afterwards; `pollWatch` then answered `WatchUnavailable (WatchRejected
+  ReplyStale)`. Suppress notices for forgotten watches.
+- Sol's asks: `tryMerge` targeting a named branch directly; typed tuple
+  selectors for multi-child responses; an `explain` for `J.accept`
+  (handed to the DSL owner); a `reviewGate` helper bundling policy, packet
+  and rationale.
+
+Next run moves to `~/dev/shoal-evals/tui-test-app` (small Rust TUI, five
+stub modules, seconds-fast `check.sh`): the orchestration loop is the object
+of study, not the code.
