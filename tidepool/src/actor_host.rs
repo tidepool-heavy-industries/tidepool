@@ -335,8 +335,12 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
                 worktrees
                     .lock()
                     .authorize_fork_workspace(owner.into(), actor_path, spec, dirty_policy)
+                    // The worktree's own sentence, not a struct dump: "source
+                    // repository is dirty: … commit or stash first, or call
+                    // allowDirtySnapshot" is exactly what the forking actor
+                    // needs, and Debug throws the remedy away.
                     .map_err(|error| ForkWorkspaceAdmissionError {
-                        detail: format!("{error:?}"),
+                        detail: tidepool_handlers::render_worktree_error(&error),
                     })
             })
             .await
@@ -360,7 +364,7 @@ impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
                             detail: format!("workspace preparation task failed: {error}"),
                         })?
                         .map_err(|error| ForkWorkspaceAdmissionError {
-                            detail: format!("{error:?}"),
+                            detail: tidepool_handlers::render_worktree_error(&error),
                         })?;
                     (handle, None, None)
                 }

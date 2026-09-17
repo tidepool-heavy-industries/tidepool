@@ -1796,3 +1796,72 @@ mod tests {
         }
     }
 }
+
+/// What a worktree refusal says to whoever asked for the worktree.
+///
+/// The wire enum is generated and carries only doc comments, so a caller that
+/// formats it with `Debug` hands the reader a Rust struct dump — which is what
+/// the fork-a-child-into-a-worktree path did, on the busiest path in the
+/// harness, discarding the remedy every one of these failures has. The
+/// sentences match `Tidepool.Worktree.renderWorktreeError`, which says the same
+/// things to the Haskell surface.
+#[must_use]
+pub fn render_worktree_error(error: &WorktreeError) -> String {
+    match error {
+        WorktreeError::SourceDirty(summary) => format!(
+            "source repository is dirty: {} staged, {} unstaged, {} untracked; commit or stash \
+             those changes, or call allowDirtySnapshot on the spec to snapshot the source as it \
+             stands",
+            summary.staged.len(),
+            summary.unstaged.len(),
+            summary.untracked.len()
+        ),
+        WorktreeError::NotARepository(path) => format!("not a git repository: {path}"),
+        WorktreeError::WorktreeLost(id) => format!(
+            "managed worktree {} is registered but missing on disk",
+            id.raw
+        ),
+        WorktreeError::DirtySubmoduleUnsupported(path) => {
+            format!("a dirty submodule is not supported: {path}")
+        }
+        WorktreeError::SourceOperationInProgress(kind) => format!(
+            "source repository has an operation in progress: {kind:?}; finish or abort it first \
+             — there is no snapshot override for this one, because a tree captured mid-operation \
+             is not the tree anyone meant"
+        ),
+        WorktreeError::WorktreeBusy(id, holder) => format!(
+            "worktree {} is already bound to agent {holder}; custody is exclusive, so wait for \
+             that agent to release it or allocate another worktree",
+            id.raw
+        ),
+        WorktreeError::SubmissionUnstable(id) => format!(
+            "worktree {} kept changing while its submission was observed; let the actor writing \
+             in it settle, then observe again",
+            id.raw
+        ),
+        WorktreeError::WorktreeUnauthorized(id) => format!(
+            "this actor holds no binding for worktree {}; only the actor that holds custody may \
+             act on it",
+            id.raw
+        ),
+        WorktreeError::WorktreeAuthorityDenied(detail) => {
+            format!("worktree authority denied: {detail}")
+        }
+        WorktreeError::GitFailure(receipt) => format!(
+            "git {} failed: {}",
+            receipt.git_args.join(" "),
+            receipt.git_stderr.trim()
+        ),
+        WorktreeError::WorktreeNotRegistered(id) => format!(
+            "no worktree is registered with id {}; the id is stale or mistyped, and nothing was \
+             lost",
+            id.raw
+        ),
+        WorktreeError::InvalidRegistryRoot(root, detail) => format!(
+            "registry root {root} must live outside every source repository: {detail}"
+        ),
+        WorktreeError::StorageFailure(path, detail) => {
+            format!("Tidepool's own storage failed at {path}: {detail}")
+        }
+    }
+}

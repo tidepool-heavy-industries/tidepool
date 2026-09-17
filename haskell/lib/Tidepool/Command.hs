@@ -36,6 +36,7 @@ module Tidepool.Command
     stdout,
     stderr,
     failure,
+    renderCommandError,
     readStdout,
     decodeWith,
     asJSON,
@@ -117,8 +118,30 @@ data DecodeIssue e = OutputProblem OutputIssue | DecodeProblem e
 data OutputPage = OutputPage {pageJob :: Job, pageStream :: CommandStream, pageDetails :: CommandPage}
   deriving (Eq, Show)
 
+-- | The convenience form of a command operation: a refusal ends the cell.
+--
+-- Every one of these has a @try@ sibling that returns the refusal as a value,
+-- which is what to reach for when a refusal is an ordinary outcome. When the
+-- cell does end here, it ends saying what was refused and what to do, rather
+-- than showing a bare constructor: @CommandUnauthorized@ alone told a reader
+-- nothing about which authority was missing.
 checked :: Either CommandError a -> a
-checked = either (error . show) id
+checked = either (error . T.unpack . renderCommandError) id
+
+-- | What a refused command says, in words rather than a constructor.
+renderCommandError :: CommandError -> Text
+renderCommandError failure = case failure of
+  CommandUnauthorized ->
+    "this actor may not run commands: its effect row does not include Commands, \
+    \or its role does not grant them"
+  CommandUnavailable detail ->
+    "no command service is available to this actor: " <> detail
+  CommandInvalid detail -> "the command itself is not runnable: " <> detail
+  CommandOutputPending ->
+    "the command has not opened its output streams yet; await it, or observe it later"
+  CommandInputRejected detail -> "input was not sent: " <> detail
+  CommandInputAcceptedCloseUnconfirmed detail ->
+    "input was sent but closing the stream is unconfirmed: " <> detail
 
 start :: (Member Commands effects) => Command -> Eff effects Job
 start = fmap checked . tryStart
