@@ -254,12 +254,18 @@ async fn resident_cleanup_case(fail_hook: bool) {
         })
         .await
         .expect("spawn and await child");
-    assert_eq!(spawned, serde_json::json!({"started": !fail_hook}));
+    // Q2-B (aad9f184b): a failed shutdown hook never rewrites the exit kind
+    // the actor itself requested by completing normally. The child's own
+    // program ran to completion regardless of `fail_hook`, so `awaitExit`
+    // sees `Completed` both times and the hook's failure surfaces only as
+    // this actor's own (parent's) cleanup confirmation below, never as the
+    // child's reported exit kind.
+    assert_eq!(spawned, serde_json::json!({"started": true}));
     let child_retired = deployments.recv().await.expect("child retirement");
     assert!(matches!(
         child_retired,
         LocalResidentDeployment::Retired { ref terminal, .. }
-            if terminal.kind == if fail_hook { tidepool_actor::ActorExitKind::Failed } else { tidepool_actor::ActorExitKind::Completed }
+            if terminal.kind == tidepool_actor::ActorExitKind::Completed
     ));
     let finished = policy
         .dispatch_boxed(ToolInvocation {
