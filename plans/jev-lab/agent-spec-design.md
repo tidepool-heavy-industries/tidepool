@@ -63,6 +63,45 @@ The reverse direction matters as much: a tool's implementation is ordinary sourc
 the agent can import into a cell and exercise directly, without going through the
 tool boundary to test it.
 
+## How the spec is found
+
+By convention, because configuration cannot express it. `[haskell] tools`
+(`tidepool/src/shoal/workspace.rs:24`, wired at
+`tidepool/src/actor_host.rs:2046-2051`) is one workspace-global key resolved once
+at composition-root construction and threaded identically into every actor. It
+names one entry point for the whole run, which is exactly what a spec per
+checkout is not.
+
+An actor resolves its spec in this order, and stops at the first that exists:
+
+1. `AgentSpec.agentSpec` in the actor's own checkout, if `AgentSpec.hs` is
+   present in a declared source root;
+2. the workspace's `[haskell] spec` key, when a workspace wants another name;
+3. the existing `[haskell] tools` entry point;
+4. the built-in default.
+
+In the shipped example workspace `[haskell] source_roots = ["."]` under `.shoal`,
+so `.shoal/AgentSpec.hs` is module `AgentSpec` with no new path resolution and no
+new source root. A checkout without the file behaves exactly as today, so
+adopting a spec is adding one file.
+
+Two obligations follow from discovery being implicit:
+
+- **The resolved path and module are reported.** Status and the reload receipt
+  name which of the four rules matched and the file it came from. A model must
+  never have to guess which spec is live, and a spec that was not found because
+  it sits outside a declared source root must say so rather than silently
+  falling through to the default.
+- **The discovered module joins the checked closure.** The reload's typecheck
+  covers everything reachable from the configured module list plus the driver
+  (`plans/jev-lab/source-reload-design.md`). A spec found by convention is not in
+  that list, so the reload adds it, and a spec that fails to compile fails its
+  own reload instead of surfacing later at an unrelated call.
+
+One file per checkout, one `agentSpec` export. A worktree agent has its own
+checkout and therefore its own spec; the root's checkout holds the root's. No
+role dimension inside the file, because the checkout already supplies it.
+
 ## What the existing code already guarantees
 
 `prepare_tools` (`tidepool-actor/src/resident_workbench.rs:1864-1982`) compiles
