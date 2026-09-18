@@ -2158,12 +2158,52 @@ impl<'code> PreparedMachine<'code> {
     /// fields through program `id`'s force adapter under the value's own
     /// realm cancel flag. The handle stays retained: forcing may evaluate and
     /// move the graph it roots, and the handle's root slot follows the move.
-    /// `budget` bounds observed nodes and copied payload bytes together.
+    /// `budget` bounds observed nodes and copied payload bytes together, and
+    /// exhausting it fails the whole observation.
     pub fn observe_handle(
         &mut self,
         id: ProgramId,
         handle: PreparedHandle,
         budget: usize,
+    ) -> Result<Value, ExecutionError> {
+        self.observe_handle_with(
+            id,
+            handle,
+            budget,
+            crate::heap_bridge::BudgetPolicy::Complete,
+        )
+    }
+
+    /// [`Self::observe_handle`], but an exhausted budget CUTS instead of
+    /// failing: the walk stops where the budget ran out and
+    /// [`crate::heap_bridge::oversize_cut`] stands in for each subtree it did
+    /// not read. What comes back is a SELECTION of the value, never the whole
+    /// of it, and [`crate::heap_bridge::contains_oversize_sentinel`] is how a
+    /// caller tells the two apart. Every other observation failure — an
+    /// unauthenticated address, a descriptor integrity error, an unobservable
+    /// object kind — still fails, because each of those says something is
+    /// actually wrong rather than merely large. The handle stays retained
+    /// either way, so the value the cut omitted remains reachable.
+    pub fn observe_handle_bounded(
+        &mut self,
+        id: ProgramId,
+        handle: PreparedHandle,
+        budget: usize,
+    ) -> Result<Value, ExecutionError> {
+        self.observe_handle_with(
+            id,
+            handle,
+            budget,
+            crate::heap_bridge::BudgetPolicy::Bounded,
+        )
+    }
+
+    fn observe_handle_with(
+        &mut self,
+        id: ProgramId,
+        handle: PreparedHandle,
+        budget: usize,
+        policy: crate::heap_bridge::BudgetPolicy,
     ) -> Result<Value, ExecutionError> {
         self.ensure_handle_access()?;
         let (word, realm) = self
@@ -2209,6 +2249,7 @@ impl<'code> PreparedMachine<'code> {
                     rep: handle.rep,
                 }],
                 budget,
+                policy,
             )
         };
         self.machine.end_prepared_call();
@@ -2788,6 +2829,7 @@ impl<'code> InstalledProgram<'code> {
             old_space,
             &seeds,
             options.observation_budget,
+            crate::heap_bridge::BudgetPolicy::Complete,
         ) {
             Ok(values) => values,
             Err(ExecutionError::Observation(error @ super::ObservationFailure::Integrity(_))) => {

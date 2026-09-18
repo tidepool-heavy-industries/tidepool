@@ -2297,6 +2297,22 @@ impl PreparedEngine {
             .map_err(PreparedRuntimeError::Run)
     }
 
+    /// [`Self::observe`] under the same budget, but a budget that runs out
+    /// CUTS the walk instead of failing it: the result is a bounded SELECTION
+    /// carrying `tidepool_codegen::heap_bridge::OVERSIZE_SENTINEL` wherever a
+    /// subtree was left unread. Use it where a display-sized limit must not
+    /// discard work that already ran; the handle stays retained, so the part
+    /// the cut omitted is still reachable through the binding.
+    pub fn observe_bounded(
+        &mut self,
+        program: ProgramId,
+        handle: PreparedHandle,
+    ) -> Result<Value, PreparedRuntimeError> {
+        self.machine
+            .observe_handle_bounded(program, handle, RunOptions::default().observation_budget)
+            .map_err(PreparedRuntimeError::Run)
+    }
+
     /// The managed fields of one constructor layer of a retained value,
     /// each retained as its own handle under `realm`, without forcing. The
     /// pattern-bind lane reads a settled tuple this way: the extractor

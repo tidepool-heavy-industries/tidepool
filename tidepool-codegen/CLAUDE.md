@@ -76,6 +76,12 @@ allows a closure or other opaque heap value to move between parked
 continuations without serialization. Observation may bridge a closure as the
 documented sentinel; delivery uses the heap pointer itself.
 
+Observation has two budget contracts, chosen by the caller through
+`heap_bridge::BudgetPolicy`: `Complete` fails the whole decode when the budget
+runs out, and `Bounded` stops there and leaves `OVERSIZE_SENTINEL` at the cut.
+A bounded result is a selection, never the whole value; the value itself stays
+reachable through its retained handle.
+
 `close_realm` releases a runtime resource scope's frames, handles, and
 cancellation state while leaving siblings untouched. Unknown handles and
 continuation IDs are typed errors.

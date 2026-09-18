@@ -110,6 +110,72 @@ pub const CLOSURE_SENTINEL: DataConId = DataConId(u64::MAX);
 /// materializing it whole.
 pub const OVERSIZE_SENTINEL: DataConId = DataConId(u64::MAX - 1);
 
+/// What a heap-to-[`Value`] decode does when its observation budget runs out.
+///
+/// The budget is a DISPLAY bound, not a statement about the value: the value
+/// is live in the heap either way, and on the prepared route it is already
+/// retained behind a handle before any decode begins. So there are two
+/// defensible answers, and the caller picks:
+///
+/// * [`BudgetPolicy::Complete`] — the historical contract. A decode either
+///   produces the whole value or fails. Every existing caller keeps it, and
+///   its behaviour is unchanged to the byte.
+/// * [`BudgetPolicy::Bounded`] — PARTIAL materialization. The walk proceeds
+///   until the budget is spent and then stops, putting [`oversize_cut`] where
+///   the undecoded subtree would have been. What comes back is a SELECTION,
+///   never the whole, and [`contains_oversize_sentinel`] says so.
+///
+/// A bounded decode is read-only, exactly as a complete one is: it copies
+/// payload bytes out and follows managed edges, and it neither retains a heap
+/// object nor moves one. Under `Bounded` it also stops FORCING once the budget
+/// is spent, so a cut costs nothing beyond the walk that had already happened.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BudgetPolicy {
+    /// An exhausted budget fails the whole decode.
+    #[default]
+    Complete,
+    /// An exhausted budget cuts the walk and marks the cut.
+    Bounded,
+}
+
+impl BudgetPolicy {
+    /// Whether an exhausted budget cuts rather than fails.
+    #[must_use]
+    pub fn cuts(self) -> bool {
+        matches!(self, BudgetPolicy::Bounded)
+    }
+}
+
+/// The ONE construction site for the [`OVERSIZE_SENTINEL`] marker a bounded
+/// decode leaves at its cut. Childless, like [`CLOSURE_SENTINEL`], so
+/// [`contains_oversize_sentinel`] can key on the constructor id alone.
+#[must_use]
+pub fn oversize_cut() -> Value {
+    Value::Con(OVERSIZE_SENTINEL, Vec::new())
+}
+
+/// Whether `value` carries an [`OVERSIZE_SENTINEL`] cut anywhere inside it —
+/// the predicate that tells a truncated subtree from a real one, and therefore
+/// tells a SELECTION from a whole value.
+///
+/// Iterative, over an explicit worklist rather than the call stack: a cut sits
+/// at the frontier of the walk that ran out of budget, which for a long list is
+/// tens of thousands of `Con` cells deep, and a recursive scan would be the one
+/// thing on this path that could still overflow.
+#[must_use]
+pub fn contains_oversize_sentinel(value: &Value) -> bool {
+    let mut pending = vec![value];
+    while let Some(node) = pending.pop() {
+        if let Value::Con(id, fields) = node {
+            if *id == OVERSIZE_SENTINEL {
+                return true;
+            }
+            pending.extend(fields.iter());
+        }
+    }
+    false
+}
+
 /// Deep scan: whether `v` — or anything nested inside a `Con`'s fields — is
 /// the [`CLOSURE_SENTINEL`] placeholder. The ONE construction site
 /// ([`heap_to_value_inner`]'s `ClosurePolicy::Substitute` arm, below) always

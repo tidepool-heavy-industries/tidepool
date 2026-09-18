@@ -309,6 +309,7 @@ impl<'code> PreparedInvocation<'code> {
             &self.old_space,
             &result_seeds,
             budget,
+            crate::heap_bridge::BudgetPolicy::Complete,
         ) {
             Ok(values) => values,
             Err(ExecutionError::Observation(error @ super::ObservationFailure::Integrity(_))) => {

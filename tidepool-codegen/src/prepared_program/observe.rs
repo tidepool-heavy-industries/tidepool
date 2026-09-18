@@ -85,6 +85,19 @@ impl ObservationBudget {
             .ok_or(ObservationFailure::BudgetExceeded { limit: self.limit })?;
         Ok(())
     }
+
+    /// Spend the budget down to nothing, so every later step of a BOUNDED walk
+    /// cuts too instead of paying for a partial subtree that can never be
+    /// completed. Only a [`crate::heap_bridge::BudgetPolicy::Bounded`] decode
+    /// calls this, and only where a `Complete` one would have failed.
+    pub(super) fn exhaust(&mut self) {
+        self.remaining = 0;
+    }
+
+    /// The failure a `Complete` decode reports here.
+    pub(super) fn exceeded(&self) -> ObservationFailure {
+        ObservationFailure::BudgetExceeded { limit: self.limit }
+    }
 }
 
 pub(super) enum ObservationFrame<X> {
@@ -518,6 +531,44 @@ impl ObservationHeap<'_> {
         layout: &StorageLayout,
         budget: usize,
     ) -> Result<Vec<Value>, ObservationFailure> {
+        self.observe_results_under(
+            words,
+            reps,
+            layout,
+            budget,
+            crate::heap_bridge::BudgetPolicy::Complete,
+        )
+    }
+
+    /// [`Self::observe_results`] under
+    /// [`crate::heap_bridge::BudgetPolicy::Bounded`]: an exhausted budget cuts
+    /// the walk and marks the cut instead of failing the whole observation.
+    #[cfg(test)]
+    pub fn observe_results_bounded(
+        &self,
+        words: &[u64],
+        reps: &[RuntimeRep],
+        layout: &StorageLayout,
+        budget: usize,
+    ) -> Result<Vec<Value>, ObservationFailure> {
+        self.observe_results_under(
+            words,
+            reps,
+            layout,
+            budget,
+            crate::heap_bridge::BudgetPolicy::Bounded,
+        )
+    }
+
+    #[cfg(test)]
+    fn observe_results_under(
+        &self,
+        words: &[u64],
+        reps: &[RuntimeRep],
+        layout: &StorageLayout,
+        budget: usize,
+        policy: crate::heap_bridge::BudgetPolicy,
+    ) -> Result<Vec<Value>, ObservationFailure> {
         let mut budget = ObservationBudget {
             remaining: budget,
             limit: budget,
@@ -531,7 +582,7 @@ impl ObservationHeap<'_> {
                 _,
             >(
                 seed,
-                |seed| self.expand(seed, &mut budget),
+                |seed| self.expand(seed, &mut budget, policy),
                 |frame| match frame {
                     ObservationFrame::Leaf(value) => Ok(value),
                     ObservationFrame::Constructor(identity, fields) => {
@@ -546,16 +597,37 @@ impl ObservationHeap<'_> {
         Ok(results)
     }
 
+    /// One expansion step of the ONE heap reader, under `policy`.
+    ///
+    /// `Complete` is the historical contract: an exhausted budget is an error
+    /// and nothing partial is produced. `Bounded` instead stops at the point
+    /// the budget runs out and returns
+    /// [`crate::heap_bridge::oversize_cut`] in place of the subtree it did not
+    /// read — the caller then holds a SELECTION, and
+    /// [`crate::heap_bridge::contains_oversize_sentinel`] tells it so. Either
+    /// way this is a read: it copies payload bytes out, follows managed edges,
+    /// and neither retains nor moves a heap object.
     pub(super) fn expand(
         &self,
         mut seed: ObservationSeed,
         budget: &mut ObservationBudget,
+        policy: crate::heap_bridge::BudgetPolicy,
     ) -> Result<ObservationFrame<ObservationSeed>, ObservationFailure> {
+        // An exhausted budget under `Bounded`: cut here. `exhaust` keeps the
+        // budget at zero so every sibling still on the worklist cuts as well,
+        // which is what bounds the rest of the walk.
+        macro_rules! spent {
+            () => {{
+                if !policy.cuts() {
+                    return Err(budget.exceeded());
+                }
+                budget.exhaust();
+                return Ok(ObservationFrame::Leaf(crate::heap_bridge::oversize_cut()));
+            }};
+        }
         loop {
             if budget.remaining == 0 {
-                return Err(ObservationFailure::BudgetExceeded {
-                    limit: budget.limit,
-                });
+                spent!();
             }
             budget.remaining -= 1;
 
@@ -578,7 +650,9 @@ impl ObservationHeap<'_> {
                             pool.logical_suffix(seed.word).map(<[u8]>::len)
                         })
                         .ok_or_else(unauthenticated)?;
-                    budget.charge_bytes(length)?;
+                    if budget.charge_bytes(length).is_err() {
+                        spent!();
+                    }
                     let bytes = owner
                         .resolve_literal_bytes(|pool| {
                             pool.logical_suffix(seed.word).map(<[u8]>::to_vec)
@@ -646,7 +720,14 @@ impl ObservationHeap<'_> {
                             let view = owner
                                 .external_active_view(published, ExternalStorageKind::Bytes)
                                 .map_err(external_observation_error)?;
-                            budget.charge_bytes(view.logical_len)?;
+                            // A `Text` is `Text ByteArray# off len`: a small
+                            // slice of a large value shares the WHOLE backing
+                            // array, and materializing it copies all of it. So
+                            // this is the charge a bounded view most often
+                            // cannot afford, and the cut lands here.
+                            if budget.charge_bytes(view.logical_len).is_err() {
+                                spent!();
+                            }
                             let bytes = owner
                                 .copy_external_bytes(published)
                                 .map_err(external_observation_error)?;
@@ -1176,6 +1257,172 @@ mod tests {
         assert!(
             matches!(values.as_slice(), [Value::Lit(Literal::LitByteArray(bytes))] if bytes == b"abc")
         );
+    }
+
+    /// The budget bounds DISPLAY, not the value: where a complete walk fails
+    /// outright, a bounded one keeps everything it could afford and puts the
+    /// oversize cut exactly where it stopped. The part that fitted is the real
+    /// value, not a stub, and the cut says the result is a selection.
+    #[test]
+    fn a_bounded_walk_keeps_what_it_can_afford_and_cuts_where_it_stops() {
+        use crate::heap_bridge::contains_oversize_sentinel;
+
+        let statics = statics();
+        let (nursery, descriptors, constructors, depth) = constructor_chain(8, false);
+        let root = nursery.as_ptr() as usize | usize::from(descriptors[0].tag());
+        let reps = [RuntimeRep::LiftedRef];
+        let layout = StorageLayout::for_reps(&target(), &reps).unwrap();
+        let heap = ObservationHeap::new(&nursery, &statics, descriptors, &constructors).unwrap();
+
+        // `depth` parents, the leaf constructor, and the leaf's scalar: one
+        // budget unit each, as `observes_deep_constructors...` pins.
+        let whole = heap
+            .observe_results(&[root as u64], &reps, &layout, depth + 2)
+            .unwrap();
+        assert!(!contains_oversize_sentinel(&whole[0]));
+        assert_eq!(whole[0].node_count(), depth + 2);
+
+        // One unit short. The complete contract fails; nothing is produced.
+        assert!(matches!(
+            heap.observe_results(&[root as u64], &reps, &layout, depth + 1),
+            Err(ObservationFailure::BudgetExceeded { limit }) if limit == depth + 1
+        ));
+
+        // The bounded walk produces the same chain with its last, unaffordable
+        // step replaced by the cut.
+        let bounded = heap
+            .observe_results_bounded(&[root as u64], &reps, &layout, depth + 1)
+            .unwrap();
+        assert!(contains_oversize_sentinel(&bounded[0]));
+        let mut node = &bounded[0];
+        for _ in 0..depth {
+            let Value::Con(identity, children) = node else {
+                panic!("the affordable prefix must still be the real chain: {node:?}")
+            };
+            assert_eq!(*identity, DataConId(10));
+            node = &children[0];
+        }
+        let Value::Con(identity, fields) = node else {
+            panic!("expected the leaf constructor: {node:?}")
+        };
+        assert_eq!(*identity, DataConId(20));
+        assert!(
+            matches!(&fields[0], Value::Con(id, cut) if *id == crate::heap_bridge::OVERSIZE_SENTINEL && cut.is_empty()),
+            "the cut belongs exactly where the budget ran out, got {fields:?}"
+        );
+    }
+
+    /// The charge a bounded view most often cannot afford is a payload COPY,
+    /// not a node count: a `Text` is `Text ByteArray# off len`, so a small
+    /// window onto a large value still drags its whole backing array across.
+    /// A bounded walk cuts there instead of failing.
+    #[test]
+    fn a_bounded_walk_cuts_a_payload_it_cannot_afford_to_copy() {
+        let machine = crate::machine_state::MachineState::new();
+        let descriptor =
+            Arc::new(ObjectDescriptor::external(ExternalStorageKind::Bytes, &target()).unwrap());
+        let mut nursery = vec![0_u64; descriptor.allocation_extent() as usize / 8];
+        let object = nursery.as_mut_ptr().cast::<u8>();
+        let payload = machine
+            .allocate_external_storage(ExternalStorageKind::Bytes, 3)
+            .unwrap();
+        machine.store_external_bytes(payload, 0, b"abc").unwrap();
+        unsafe {
+            descriptor.initialize_header(object);
+            descriptor
+                .external_payload_slot(object, descriptor.allocation_extent() as usize)
+                .unwrap()
+                .write(payload);
+        }
+        let static_region = statics();
+        let constructors = BTreeMap::new();
+        let mut heap = ObservationHeap::new(
+            &nursery,
+            &static_region,
+            vec![descriptor.clone()],
+            &constructors,
+        )
+        .unwrap();
+        heap.external_owner = Some(&machine);
+        let encoded = object as usize | usize::from(descriptor.tag());
+        let reps = [RuntimeRep::UnliftedRef];
+        let layout = StorageLayout::for_reps(&target(), &reps).unwrap();
+
+        // One node plus three payload bytes is what this costs.
+        assert!(matches!(
+            heap.observe_results(&[encoded as u64], &reps, &layout, 3),
+            Err(ObservationFailure::BudgetExceeded { limit: 3 })
+        ));
+        let cut = heap
+            .observe_results_bounded(&[encoded as u64], &reps, &layout, 3)
+            .unwrap();
+        assert!(
+            matches!(&cut[0], Value::Con(id, fields) if *id == crate::heap_bridge::OVERSIZE_SENTINEL && fields.is_empty()),
+            "an unaffordable payload must cut, not half-copy: {:?}",
+            cut[0]
+        );
+        // With the budget for it, the bounded walk reads the payload whole and
+        // reports no cut at all.
+        let whole = heap
+            .observe_results_bounded(&[encoded as u64], &reps, &layout, 4)
+            .unwrap();
+        assert!(!crate::heap_bridge::contains_oversize_sentinel(&whole[0]));
+        assert!(
+            matches!(&whole[0], Value::Lit(Literal::LitByteArray(bytes)) if bytes == b"abc"),
+            "{:?}",
+            whole[0]
+        );
+    }
+
+    /// The oversize cut is what tells a SELECTION from a whole value, so the
+    /// scan must find it wherever a bounded walk can leave it: at the root,
+    /// behind a non-`Con` sibling, and at the frontier of a spine long enough
+    /// that a recursive scan would be the thing that overflows. A value with
+    /// no cut must answer `false` — that is the answer that lets a caller
+    /// present a result as complete.
+    #[test]
+    fn an_oversize_cut_is_found_at_any_depth_and_is_absent_from_a_whole_value() {
+        use crate::heap_bridge::{
+            contains_closure_sentinel, contains_oversize_sentinel, oversize_cut, CLOSURE_SENTINEL,
+            OVERSIZE_SENTINEL,
+        };
+
+        let cut = oversize_cut();
+        assert!(
+            matches!(&cut, Value::Con(id, fields) if *id == OVERSIZE_SENTINEL && fields.is_empty()),
+            "the cut must be a childless sentinel Con, got {cut:?}"
+        );
+        assert!(contains_oversize_sentinel(&cut));
+        // The two reserved markers mean different things and must not answer
+        // for each other.
+        assert!(!contains_closure_sentinel(&cut));
+        assert!(!contains_oversize_sentinel(&Value::Con(
+            CLOSURE_SENTINEL,
+            Vec::new()
+        )));
+
+        // A cut in the second field, past a `Lit` the scan must step over
+        // rather than stop at.
+        let nested = Value::Con(
+            DataConId(7),
+            vec![
+                Value::Lit(Literal::LitInt(41)),
+                Value::Con(DataConId(8), vec![oversize_cut()]),
+            ],
+        );
+        assert!(contains_oversize_sentinel(&nested));
+
+        // Where a bounded walk of a long list actually leaves its cut.
+        let spine = |tail: Value| {
+            (0..100_000).fold(tail, |rest, index| {
+                Value::Con(DataConId(9), vec![Value::Lit(Literal::LitInt(index)), rest])
+            })
+        };
+        assert!(contains_oversize_sentinel(&spine(oversize_cut())));
+        assert!(!contains_oversize_sentinel(&spine(Value::Con(
+            DataConId(10),
+            Vec::new()
+        ))));
     }
 
     #[test]
