@@ -7,9 +7,18 @@ on this page is what happens around those two.
 ## What you need
 
 Linux, with Nix, systemd user services on cgroup v2, Bubblewrap and tmux. Shoal
-drives a pinned Tidepool fork of the Codex client as each agent's interface, so
-authenticate that client before starting model work. For Jev, put a TypeSafe
-key in `TYPESAFE_API_KEY` before launching.
+drives a pinned Tidepool fork of the Codex client as each agent's interface.
+After cloning Tidepool, authenticate that exact client and check its status:
+
+```bash
+nix develop .#shoal -c bash -lc '"$TIDEPOOL_INTERACTIVE_CODEX_BIN" login'
+nix develop .#shoal -c bash -lc '"$TIDEPOOL_INTERACTIVE_CODEX_BIN" login status'
+```
+
+Both commands select the same executable as the production wrapper rather than
+whichever `codex` happens to be on `PATH`. They use Codex's normal user
+configuration and do not print credentials. For Jev, put a TypeSafe key in
+`TYPESAFE_API_KEY` before launching.
 
 Agents run shell commands as you. Read
 [what Shoal does not protect you from](../README.md#what-it-does-not-protect-you-from)
@@ -24,6 +33,34 @@ before it executes anything and records the limits it found in
 `resource-budget.json` in the run directory. `[launch] systemd_slice` in the
 workspace config names a different slice.
 
+For example, on a workstation where a 12 GiB ceiling leaves enough memory for
+the desktop and Nix daemon:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cat >~/.config/systemd/user/swarm.slice <<'EOF'
+[Unit]
+Description=Shoal aggregate resource boundary
+
+[Slice]
+MemoryHigh=8G
+MemoryMax=12G
+MemorySwapMax=4G
+EOF
+
+systemctl --user daemon-reload
+systemctl --user start swarm.slice
+systemctl --user show swarm.slice \
+  --property=LoadState,ControlGroup,MemoryHigh,MemoryMax,MemorySwapMax
+```
+
+Those values are illustrative, not universal defaults. Choose a nonzero
+`MemoryHigh` no greater than `MemoryMax`, leave memory for the rest of the
+machine, and choose a finite nonzero `MemorySwapMax`. Shoal refuses an unloaded
+slice, unlimited values, and invalid ordering rather than launching without an
+aggregate boundary. After editing the unit, repeat `daemon-reload` and restart
+the slice when no run is using it.
+
 ## Build
 
 ```bash
@@ -34,7 +71,8 @@ nix build .#shoal
 ```
 
 The flake declares the public `tidepool.cachix.org` binary cache. Follow the
-[cache trust setup](../README.md#the-binary-cache) so Nix can use it. Artifacts
+[cache trust setup](../README.md#the-binary-cache), especially on a multi-user
+Nix installation where an ordinary user's flake-provided public key is ignored. Artifacts
 missing from the cache build locally; rebuilding the patched GHC toolchain
 and its Haskell dependencies can take a long time. Cache availability does
 not imply that every checkout's complete build is already published.

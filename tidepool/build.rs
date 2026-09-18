@@ -83,10 +83,9 @@ fn emit_scaffold_package(repository: PathBuf) {
         ".shoal/Project/Tools.hs".to_owned(),
         repository.join(".shoal/Project/Tools.hs"),
     ));
-    // The worked-example watchdog: a set of monitors a parent may install on
-    // the children it spawns. The starter `AgentSpec.hs` does not turn it on
-    // (its slot keeps abstaining); the module ships so a project can adopt it
-    // by writing one `afterTool` line.
+    // The starter watchdog: the agent spec installs its conservative defaults
+    // on children while leaving the root silent. The module also ships so a
+    // project can compose or replace those heuristics in ordinary Haskell.
     entries.push((
         ".shoal/Project/Watchdog.hs".to_owned(),
         repository.join(".shoal/Project/Watchdog.hs"),

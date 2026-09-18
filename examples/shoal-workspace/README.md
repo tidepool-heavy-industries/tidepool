@@ -1,17 +1,27 @@
 # A project-specific Shoal workbench
 
-For current development, this repository's `examples/shoal-workspace/.shoal` is
-the single authoring location for the curated prompts, helpers and usage guides.
-Iterate and check them here. Next-run preparation must copy the selected canonical
-package into the target workspace automatically before startup; do not hand-edit
-the installed copy to curate another variant. The target's original-root `.shoal`
-is the runtime materialization selected for that swarm. This source ownership is
-separate from its frozen runtime authority. No copy or activation is needed during
-prompt review, and updating this package does not authorize a paused run to resume.
+This is the extended Tidepool development workspace: orchestration modules,
+prompts, recipe checks and usage guides beyond the minimal package created for
+a new project. It is not a directory to copy as a starter. Run `shoal new` in
+the target repository instead.
 
-`shoal new` writes these skills and the accompanying `.agents/skills` links into
-a project; this directory is the source they are embedded from, so preparing a
-different repository is that command rather than a copy. The links use Codex's
+The minimal scaffold is deliberately assembled from maintained sources:
+`tidepool/src/shoal/scaffold.rs` owns its configuration; the repository-root
+`.shoal` owns the starter agent spec, tools and watchdog; and this example owns
+the Jev facade and skills. Tests compare the embedded Haskell byte for byte
+with those owners. The extended modules, prompts and checks in this directory
+are not all installed by `shoal new`.
+
+For current development, iterate on extended prompts, helpers and usage guides
+here. Next-run preparation must copy the selected canonical package into the
+target workspace automatically before startup; do not hand-edit an installed
+copy to curate another variant. The target's original-root `.shoal` is the
+runtime materialization selected for that swarm. This source ownership is
+separate from its frozen runtime authority. Updating this package does not
+authorize a paused run to resume.
+
+`shoal new` writes the skills and accompanying `.agents/skills` links from this
+example into a project. The links use Codex's
 ordinary repository skill discovery and point into the canonical `.shoal/skills`;
 no Shoal-specific loader is involved. This repository already tracks those links
 at its root. Skills cover forking,
