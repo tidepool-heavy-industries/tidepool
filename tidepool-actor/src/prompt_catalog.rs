@@ -93,6 +93,29 @@ pub(crate) struct PromptArtifact {
 /// workbench, tests, and a workspace with no `[haskell] modules`; in that
 /// case the topics list and unknown-topic error are unchanged from before
 /// workspace modules existed.
+/// The skills a Shoal workspace ships, named so an unknown topic can point at
+/// the one that answers it. These are the same names the `topics` body lists.
+const SHIPPED_SKILLS: [&str; 10] = [
+    "shoal-jev",
+    "shoal-orchestrate",
+    "shoal-unfold",
+    "shoal-workbench",
+    "shoal-cleanup",
+    "shoal-fork",
+    "shoal-coordinate",
+    "shoal-review",
+    "shoal-command",
+    "shoal-define-actors",
+];
+
+/// A topic naming a shipped skill, either bare (`command`) or in full
+/// (`shoal-command`).
+fn skill_for_topic(topic: &str) -> Option<&'static str> {
+    SHIPPED_SKILLS
+        .into_iter()
+        .find(|skill| *skill == topic || skill.strip_prefix("shoal-") == Some(topic))
+}
+
 pub(crate) fn workbench_doc(
     topic: &str,
     workspace_modules: &[String],
@@ -147,7 +170,21 @@ pub(crate) fn workbench_doc(
         }
         other => {
             let mut message = format!(
-                "unknown Shoal documentation topic `{other}`; topics: tree (worktree), workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors; `doc topics` lists the workspace skills"
+                "unknown Shoal documentation topic `{other}`"
+            );
+            // A topic that names a shipped skill is the most likely thing the
+            // asker actually wanted, and the seat's own rule is to load the
+            // skill before falling back to a topic. Saying so costs one line
+            // and saves a search; a live lead asked `doc command` while
+            // `shoal-command` sat unmentioned, then spent four lookup rounds
+            // guessing names.
+            if let Some(skill) = skill_for_topic(other) {
+                message.push_str(&format!(
+                    "; the `{skill}` skill covers this — load it first, a topic is the fallback"
+                ));
+            }
+            message.push_str(
+                "; topics: tree (worktree), workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors; `doc topics` lists the workspace skills"
             );
             if !workspace_modules.is_empty() {
                 message.push_str(&format!(
@@ -214,6 +251,30 @@ mod tests {
         }
         assert_eq!(hosted_prompt_fingerprint().len(), 64);
         assert!(workbench_doc("missing", &[]).is_err());
+    }
+
+    #[test]
+    fn an_unknown_topic_naming_a_shipped_skill_says_so() {
+        // A live lead asked `doc command` while `shoal-command` — whose whole
+        // subject is running commands — went unmentioned, then spent four
+        // lookup rounds guessing constructor names.
+        let refusal = workbench_doc("command", &[]).unwrap_err();
+        assert!(
+            refusal.contains("`shoal-command` skill covers this"),
+            "{refusal}"
+        );
+        assert!(refusal.starts_with("unknown Shoal documentation topic `command`"));
+
+        // The full name works too, and so does every other shipped skill that
+        // is not already a topic in its own right.
+        for topic in ["shoal-command", "review", "coordinate", "orchestrate"] {
+            let refusal = workbench_doc(topic, &[]).unwrap_err();
+            assert!(refusal.contains("skill covers this"), "`doc {topic}`: {refusal}");
+        }
+
+        // A topic that names nothing still refuses plainly, with no skill line.
+        let missing = workbench_doc("missing", &[]).unwrap_err();
+        assert!(!missing.contains("skill covers this"), "{missing}");
     }
 
     #[test]

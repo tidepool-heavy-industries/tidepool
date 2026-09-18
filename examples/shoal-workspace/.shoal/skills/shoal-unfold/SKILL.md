@@ -94,6 +94,15 @@ for them: define the result type so the artifact is a value, and let the Git
 identity carry anything too large to be one. A typed reply is evidence of
 execution, not of integration; verify the submitted commit before merging.
 
+**Say so in the assignment.** A child that is not told to commit may not. Three
+children were once given the same assignment — write one passing test — and one
+of them committed; the other two ran their tests green, replied that they were
+done, and left the work uncommitted in a worktree nobody looked at again. Their
+branches were still at the base commit, which only surfaced as `AlreadyContained`
+at merge time, four exercises later. End every assignment with the sentence that
+makes the reply true: commit your change to your own branch before replying, and
+name the commit in your reply.
+
 Assignment values and explicit worktree seeds keep ordinary Haskell value
 semantics and are not reevaluated at startup. A later failure in the cell stops
 its suffix but preserves the unfolds that already succeeded. `doc unfold` holds
