@@ -306,10 +306,16 @@ fn prepared_session_residency_stays_bounded_across_many_turns() {
 /// first major collection is always gated by the install count alone --
 /// see that function's doc), so this first runs exactly `N` tiny turns to
 /// land on a collection boundary and establish a nonzero `old_bytes`
-/// baseline. Binding a 200,000-element list then promotes well past the
-/// 1 MiB / 50% growth threshold; a following turn or two should fold that
-/// promotion into `old_bytes` even though only one or two programs have
-/// installed since the baseline -- far short of `N`.
+/// baseline. The bind below then FORCES a 200,000-element list's whole
+/// spine (`length ys \`seq\` ys`) before returning it, so the list is
+/// actually built rather than left as an unevaluated `enumFromTo` thunk --
+/// tenured prepared bindings are kept exactly as given, never deep-forced
+/// (`ResidentSession::current_binding_in`'s doc), so an unforced `pure
+/// [1..200000]` binds a thunk of a few words and never promotes anything.
+/// The forced list is well past the 1 MiB / 50% growth threshold; a
+/// following turn or two should fold that promotion into `old_bytes` even
+/// though only one or two programs have installed since the baseline --
+/// far short of `N`.
 #[test]
 fn prepared_session_large_promotion_triggers_an_early_major_collection() {
     let mut notebook = Notebook::new(EngineKind::Prepared);
@@ -322,7 +328,7 @@ fn prepared_session_large_promotion_triggers_an_early_major_collection() {
         .old_bytes()
         .expect("the prepared route reports old-space bytes");
 
-    notebook.bind("xs <- pure [1..200000 :: Int]");
+    notebook.bind("xs <- (let ys = [1..200000 :: Int] in seq (length ys) (pure ys))");
 
     let mut collected_within = None;
     for i in 0..2 {

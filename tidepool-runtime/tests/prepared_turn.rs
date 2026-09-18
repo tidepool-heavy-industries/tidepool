@@ -540,11 +540,15 @@ fn notebook_suspension(engine: EngineKind) {
     let roots_before = notebook.session.persistent_roots_count();
     let (_, hole) = notebook.suspend_ask(engine, "b", "(runLLMTurn @Bool \"q\" :: M Bool)");
 
-    // On the prepared route every installed program's heap tops stay rooted
-    // until program retirement lands (the residency wave), so the abort is
-    // measured against the roots present just before it: it must release
-    // exactly what the frame owned and nothing else. Core, which retires no
-    // programs, returns to the pre-turn count.
+    // `Notebook::compile` bumps `generation` on every turn, so this ask
+    // installs a fresh per-generation program. On the prepared route every
+    // installed program's heap tops stay rooted until program retirement
+    // lands (the residency wave), so `roots_before` is not a safe baseline
+    // for what abort must give back: it includes roots this ask's own
+    // install pins permanently. Measure against the count taken right after
+    // the ask parks instead -- abort must release exactly what THIS frame
+    // owns and leave every other root (including the fresh install's)
+    // alone. Core, which retires no programs, returns to the pre-turn count.
     let roots_before_abort = notebook.session.persistent_roots_count();
     let aborted = notebook
         .session
@@ -574,14 +578,26 @@ fn notebook_suspension(engine: EngineKind) {
             );
             roots_before
         }
-        // The parked continuation's slot returns to the persistent list at
-        // take and is released with the handle: net zero.
-        EngineKind::Prepared => roots_before_abort,
+        // `take_parked` moves the continuation's own slot from the stowed
+        // list back to the persistent list, and `release` (called right
+        // after, in `abort_parked`) then deregisters it: net zero for the
+        // continuation itself. But this ask's live-payload policy is
+        // `LivePayloadPolicy::HASKELL_EFFECT_VALUE` (`ValueField(1)`), so
+        // `tenure_live_payload` additionally tenured the query-text field as
+        // its own persistent root when the frame parked (see
+        // `PreparedEngine::park_suspension`); `take_parked` deregisters that
+        // root too, since an unclaimed live payload is no longer externally
+        // reachable once the frame is taken. So abort releases exactly one
+        // root net: the tenured live payload, not the continuation.
+        EngineKind::Prepared => roots_before_abort - 1,
     };
+    let roots_after_abort = notebook.session.persistent_roots_count();
     assert_eq!(
-        notebook.session.persistent_roots_count(),
-        expected_roots,
-        "{engine:?}: the aborted turn leaked a persistent root"
+        roots_after_abort, expected_roots,
+        "{engine:?}: abort should release exactly the frame's own roots and nothing \
+         else (left = {roots_after_abort} actual after abort, right = {expected_roots} \
+         expected); more roots than expected means the abort leaked a persistent root, \
+         fewer means it over-released a root it did not own",
     );
 
     // The session stays usable after the abort.
