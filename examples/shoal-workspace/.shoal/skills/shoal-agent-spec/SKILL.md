@@ -206,7 +206,16 @@ noted call result
             )
 ```
 
-A tool body asks the same way, with the same constraint. When Jev cannot
+A tool body asks the same way, with the same constraint. Two things go wrong
+in module code that rarely go wrong in a cell:
+
+- **One packet per call, not one ask per item.** A `forM` of `J.ask1` over forty
+  files is forty sequential requests. `J.each` over the files inside one
+  `J.ask` is one request and answers in about the same time as a single ask.
+- **`Left` is not no.** `J.ask` answers `Left` when Jev could not be reached or
+  the packet was refused. A body that treats every non-yes as irrelevant turns
+  an outage into a confident wrong answer. Say that Jev was unavailable, and in
+  a tool fall back to the unfiltered result. When Jev cannot
 answer, abstain: a slot that fails is reported to you on every call, and one
 that abstains is not.
 
