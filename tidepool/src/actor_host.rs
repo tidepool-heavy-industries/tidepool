@@ -5025,6 +5025,19 @@ async fn run_turn_observer(
         if !initialized {
             seen.extend(turns.iter().map(|turn| turn.turn.clone()));
             last_seen = turns.last().map(|turn| turn.turn.clone());
+            let recorded = tokio::select! {
+                biased;
+                _ = &mut shutdown => return,
+                result = policy.record_turn_baseline_boxed(thread_id.clone(), last_seen.clone()) => result,
+            };
+            if let Err(error) = recorded {
+                tracing::warn!(
+                    ?actor,
+                    %thread_id,
+                    %error,
+                    "after-turn observer could not expose its non-replay baseline"
+                );
+            }
             initialized = true;
             tracing::info!(
                 ?actor,
@@ -5034,28 +5047,23 @@ async fn run_turn_observer(
             );
             continue;
         }
-        let start = match last_seen.as_deref() {
-            None => 0,
-            Some(cursor) => match turns.iter().position(|turn| turn.turn == cursor) {
-                Some(index) => index + 1,
-                None => {
-                    tracing::warn!(
-                        ?actor,
-                        %thread_id,
-                        %cursor,
-                        "after-turn cursor fell outside provider snapshot; advancing without replay"
-                    );
-                    seen.extend(turns.iter().map(|turn| turn.turn.clone()));
-                    last_seen = turns.last().map(|turn| turn.turn.clone());
-                    continue;
-                }
-            },
-        };
-        for turn in turns.into_iter().skip(start) {
-            let turn_id = turn.turn.clone();
-            if !seen.insert(turn_id.clone()) {
+        let unseen = match completed_turns_after(last_seen.as_deref(), &seen, &turns) {
+            Ok(unseen) => unseen,
+            Err(cursor) => {
+                tracing::warn!(
+                    ?actor,
+                    %thread_id,
+                    %cursor,
+                    "after-turn cursor fell outside provider snapshot; advancing without replay"
+                );
+                seen.extend(turns.iter().map(|turn| turn.turn.clone()));
+                last_seen = turns.last().map(|turn| turn.turn.clone());
                 continue;
             }
+        };
+        for turn in unseen {
+            let turn_id = turn.turn.clone();
+            seen.insert(turn_id.clone());
             let observed = tokio::select! {
                 biased;
                 _ = &mut shutdown => return,
@@ -5078,6 +5086,26 @@ async fn run_turn_observer(
             }
         }
     }
+}
+
+fn completed_turns_after(
+    cursor: Option<&str>,
+    seen: &std::collections::BTreeSet<String>,
+    turns: &[tidepool_actor::ConversationTurn],
+) -> Result<Vec<tidepool_actor::ConversationTurn>, String> {
+    let start = match cursor {
+        None => 0,
+        Some(cursor) => turns
+            .iter()
+            .position(|turn| turn.turn == cursor)
+            .map(|index| index + 1)
+            .ok_or_else(|| cursor.to_owned())?,
+    };
+    Ok(turns[start..]
+        .iter()
+        .filter(|turn| !seen.contains(&turn.turn))
+        .cloned()
+        .collect())
 }
 
 /// Observe source drift for `actor` on the same 10-second cadence
@@ -6557,6 +6585,64 @@ mod tests {
     }
 
     use super::*;
+
+    fn completed_turn(id: &str) -> tidepool_actor::ConversationTurn {
+        tidepool_actor::ConversationTurn {
+            turn: id.into(),
+            started_at: None,
+            completed_at: None,
+            items: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn after_turn_cursor_excludes_baseline_enumerates_all_new_turns_and_deduplicates() {
+        let baseline = vec![completed_turn("before"), completed_turn("baseline")];
+        let seen = baseline
+            .iter()
+            .map(|turn| turn.turn.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        let later = vec![
+            completed_turn("before"),
+            completed_turn("baseline"),
+            completed_turn("one"),
+            completed_turn("two"),
+        ];
+        let unseen = completed_turns_after(Some("baseline"), &seen, &later).unwrap();
+        assert_eq!(
+            unseen
+                .iter()
+                .map(|turn| turn.turn.as_str())
+                .collect::<Vec<_>>(),
+            ["one", "two"]
+        );
+
+        let seen = seen
+            .into_iter()
+            .chain(["one".to_owned(), "two".to_owned()])
+            .collect();
+        assert!(completed_turns_after(Some("baseline"), &seen, &later)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn after_turn_empty_baseline_accepts_first_completion_and_missing_cursor_is_a_gap() {
+        let turns = vec![completed_turn("first"), completed_turn("second")];
+        let unseen = completed_turns_after(None, &Default::default(), &turns).unwrap();
+        assert_eq!(
+            unseen
+                .iter()
+                .map(|turn| turn.turn.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        assert_eq!(
+            completed_turns_after(Some("missing"), &Default::default(), &turns),
+            Err("missing".into())
+        );
+    }
     use tidepool_agent::{
         AgentBackendError, InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture,
     };

@@ -129,7 +129,8 @@ agentSpec = defaultSpec
   }}
 
 reviewed :: TurnObservation -> Eff effects Annotation
-reviewed _ = pure (Abstained (T.pack "{marker}"))
+reviewed observation =
+  pure (Abstained (T.pack "{marker}:" <> turnIdentity (turnObservationTurn observation)))
 "#
     )
 }
@@ -282,12 +283,20 @@ async fn after_turn_observation_uses_the_hot_reloaded_spec_revision() {
         }],
     };
     policy
+        .record_turn_baseline_boxed("thread".into(), Some("baseline-turn".into()))
+        .await
+        .unwrap();
+    policy
         .observe_turn_boxed("thread".into(), turn("turn-one"))
         .await
         .unwrap();
     let first = status(policy.as_ref()).await;
+    assert!(
+        first.contains("after-turn baseline: thread=thread completion=baseline-turn"),
+        "{first}"
+    );
     assert!(first.contains("after-turn#1 turn-one"), "{first}");
-    assert!(first.contains("abstained: first"), "{first}");
+    assert!(first.contains("abstained: first:turn-one"), "{first}");
 
     std::fs::write(authored.join("AgentSpec.hs"), turn_spec_module("second")).unwrap();
     let receipt = reload(policy.as_ref()).await;
@@ -298,7 +307,7 @@ async fn after_turn_observation_uses_the_hot_reloaded_spec_revision() {
         .unwrap();
     let second = status(policy.as_ref()).await;
     assert!(second.contains("after-turn#2 turn-two"), "{second}");
-    assert!(second.contains("abstained: second"), "{second}");
+    assert!(second.contains("abstained: second:turn-two"), "{second}");
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();

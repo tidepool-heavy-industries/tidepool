@@ -196,6 +196,11 @@ pub enum KernelMessage {
         turn: tidepool_model::ConversationTurn,
         reply: RpcReplyPort<Result<(), KernelInvocationFailure>>,
     },
+    AfterTurnBaseline {
+        thread: String,
+        turn: Option<String>,
+        reply: RpcReplyPort<Result<(), KernelInvocationFailure>>,
+    },
     ReconcileWorkbenchCancellation {
         invocation: Option<tidepool_tool::ToolInvocationContext>,
         execution: tidepool_runtime::session::WorkbenchExecutionId,
@@ -247,6 +252,7 @@ impl KernelMessage {
             Self::Tool { .. } => "Tool",
             Self::Workbench { .. } => "Workbench",
             Self::AfterTurn { .. } => "AfterTurn",
+            Self::AfterTurnBaseline { .. } => "AfterTurnBaseline",
             Self::ReconcileWorkbenchCancellation { .. } => "ReconcileWorkbenchCancellation",
             Self::ReconcileWorkbenchBoundary { .. } => "ReconcileWorkbenchBoundary",
             Self::ToolCompleted { .. } => "ToolCompleted",
@@ -303,6 +309,11 @@ impl std::fmt::Debug for KernelMessage {
                 .debug_struct("AfterTurn")
                 .field("thread", thread)
                 .field("turn", &turn.turn)
+                .finish_non_exhaustive(),
+            Self::AfterTurnBaseline { thread, turn, .. } => formatter
+                .debug_struct("AfterTurnBaseline")
+                .field("thread", thread)
+                .field("turn", turn)
                 .finish_non_exhaustive(),
             Self::ReconcileWorkbenchCancellation { execution, .. } => formatter
                 .debug_tuple("ReconcileWorkbenchCancellation")

@@ -79,6 +79,9 @@ module Tidepool.Agent.Contract
   , ToolCall (..)
   , ToolResult (..)
   , TurnObservation (..)
+  , ConversationTurn (..)
+  , ConversationRole (..)
+  , TurnItem (..)
   , ResultHandle
   , Annotation (..)
   , annotationToJson
@@ -97,10 +100,15 @@ import GHC.Generics
 import GHC.TypeLits (TypeError, ErrorMessage (..))
 import Tidepool.Inspection (Display (..))
 import Tidepool.Aeson.Value (Value (..), ToJSON (..), encodeValue, object, (.=))
-import Tidepool.Aeson.FromJSON (FromJSON (..), Result (..), fromJSON, withObject, (.:), (.:?), (.!=))
+import Tidepool.Aeson.FromJSON (FromJSON (..), Result (..), fromJSON, withObject, withText, (.:), (.:?), (.!=))
 import Tidepool.Aeson.Schema (JsonSchema (..))
 import Control.Monad.Freer (Eff, Member, raise, send)
-import Tidepool.Effects.Core (AgentTools (..))
+import Tidepool.Effects.Core
+  ( AgentTools (..)
+  , ConversationRole (..)
+  , ConversationTurn (..)
+  , TurnItem (..)
+  )
 
 -- ---------------------------------------------------------------------------
 -- Endpoint algebra and server interpretation
@@ -646,8 +654,38 @@ instance FromJSON AfterToolInput where
 -- conversation schema already owned by the runtime.
 data TurnObservation = TurnObservation
   { turnObservationThread :: Text
-  , turnObservationTurn :: Value
+  , turnObservationTurn :: ConversationTurn
   }
+
+instance FromJSON ConversationRole where
+  parseJSON = withText "ConversationRole" $ \role -> case role of
+    "system" -> pure RoleSystem
+    "developer" -> pure RoleDeveloper
+    "user" -> pure RoleUser
+    "assistant" -> pure RoleAssistant
+    _ -> Error ("unknown conversation role: " ++ T.unpack role)
+
+instance FromJSON TurnItem where
+  parseJSON = withObject "TurnItem" $ \o -> do
+    kind <- o .: T.pack "kind"
+    case kind :: Text of
+      "message" -> TurnMessage <$> (o .: T.pack "role") <*> (o .: T.pack "text")
+      "toolCall" ->
+        TurnToolCall
+          <$> (o .: T.pack "call")
+          <*> (o .: T.pack "tool")
+          <*> (o .: T.pack "arguments")
+      "toolResult" ->
+        TurnToolResult <$> (o .: T.pack "call") <*> (o .: T.pack "output")
+      _ -> Error ("unknown turn item kind: " ++ T.unpack kind)
+
+instance FromJSON ConversationTurn where
+  parseJSON = withObject "ConversationTurn" $ \o ->
+    ConversationTurn
+      <$> (o .: T.pack "identity")
+      <*> (o .:? T.pack "startedAt")
+      <*> (o .:? T.pack "completedAt")
+      <*> (o .: T.pack "items")
 
 instance FromJSON TurnObservation where
   parseJSON = withObject "TurnObservation" $ \o ->
@@ -713,6 +751,8 @@ data AgentSpec tools effects = AgentSpec
     afterTool :: Maybe (ToolCall -> ToolResult -> Eff effects Annotation)
   , -- | Applied after a completed provider turn. Its answer is retained as
     -- observation only and is never inserted into the provider conversation.
+    -- @Pruned@ has no turn-level meaning and the runtime records it as a slot
+    -- failure; use @NoAnnotation@, @Abstained@, or @Annotated@.
     afterTurn :: Maybe (TurnObservation -> Eff effects Annotation)
   }
 

@@ -718,6 +718,9 @@ pub struct ResidentKernelBehavior<H, O> {
     /// Completed-turn System 1 observations. Their answers never enter the
     /// provider conversation; status is the passive inspection path.
     after_turn: crate::after_tool::AfterToolLog,
+    /// Exact provider thread and completed turn captured as the observer's
+    /// non-replay baseline. `None` turn means the baseline was an empty log.
+    after_turn_baseline: Option<(String, Option<String>)>,
     /// Set while the after-tool slot is running. A slot's own effects and tool
     /// use never trigger a slot, so a broken slot can never block its own
     /// repair.
@@ -745,6 +748,42 @@ struct PendingForkPublication {
     releases: Vec<(ActorRef, tidepool_codegen::scope::ScopeId)>,
     unused_scopes: Vec<tidepool_codegen::scope::ScopeId>,
     published: bool,
+}
+
+fn completed_turn_json(turn: &tidepool_model::ConversationTurn) -> serde_json::Value {
+    let items = turn.items.iter().map(|item| match item {
+        tidepool_model::TurnItem::Message { role, text } => serde_json::json!({
+            "kind": "message",
+            "role": match role {
+                tidepool_model::Role::System => "system",
+                tidepool_model::Role::Developer => "developer",
+                tidepool_model::Role::User => "user",
+                tidepool_model::Role::Assistant => "assistant",
+            },
+            "text": text,
+        }),
+        tidepool_model::TurnItem::ToolCall {
+            call,
+            tool,
+            arguments,
+        } => serde_json::json!({
+            "kind": "toolCall",
+            "call": call,
+            "tool": tool,
+            "arguments": arguments,
+        }),
+        tidepool_model::TurnItem::ToolResult { call, output } => serde_json::json!({
+            "kind": "toolResult",
+            "call": call,
+            "output": output,
+        }),
+    });
+    serde_json::json!({
+        "identity": turn.turn,
+        "startedAt": turn.started_at,
+        "completedAt": turn.completed_at,
+        "items": items.collect::<Vec<_>>(),
+    })
 }
 
 #[derive(Clone)]
@@ -1294,6 +1333,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             spec_installs: 0,
             after_tool: crate::after_tool::AfterToolLog::default(),
             after_turn: crate::after_tool::AfterToolLog::default(),
+            after_turn_baseline: None,
             after_tool_active: false,
             forest_control: false,
             pending_program: None,
@@ -1760,8 +1800,15 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 rows => format!("\n  after-turn:\n    {}", rows.join("\n    ")),
             },
         };
+        let after_turn_baseline = match (view, &self.after_turn_baseline) {
+            (StatusView::Concise, _) | (_, None) => String::new(),
+            (_, Some((thread, turn))) => format!(
+                "\n  after-turn baseline: thread={thread} completion={} (eligible completions are strictly after this capture)",
+                turn.as_deref().unwrap_or("(none)")
+            ),
+        };
         let status = format!(
-            "{current}{failure}{spec}{after_tool}{after_turn}\n  {workspace}\n  deadlines: [{}]\nactors:\n{}",
+            "{current}{failure}{spec}{after_tool}{after_turn_baseline}{after_turn}\n  {workspace}\n  deadlines: [{}]\nactors:\n{}",
             requests
                 .deadlines
                 .iter()
@@ -5645,7 +5692,10 @@ where
         let dispatch = Arc::clone(&tools.dispatch);
         let provenance = tools.provenance();
         let turn_id = turn.turn.clone();
-        let payload = serde_json::json!({ "thread": thread, "turn": turn });
+        let payload = serde_json::json!({
+            "thread": thread,
+            "turn": completed_turn_json(&turn),
+        });
         let ordinal = self.after_turn.begin();
         let started = std::time::Instant::now();
         let workbench = self.environment.runner.application_workbench();
@@ -5665,9 +5715,9 @@ where
                 Disposition::Abstained(reason)
             }
             Ok(Ok(crate::after_tool::Annotation::Annotated(_))) => Disposition::Annotated,
-            Ok(Ok(crate::after_tool::Annotation::Pruned { handle, .. })) => {
-                Disposition::Pruned(handle)
-            }
+            Ok(Ok(crate::after_tool::Annotation::Pruned { .. })) => Disposition::Failed(
+                "after-turn slots cannot prune a completed conversation turn".into(),
+            ),
             Ok(Err(error)) => Disposition::Failed(error.to_string()),
             Err(_) => {
                 if let Err(error) = workbench
@@ -7539,6 +7589,17 @@ where
             }
             self.run_after_turn_observation(kernel, thread, turn).await
         })
+    }
+
+    fn record_turn_baseline(
+        &mut self,
+        kernel: &KernelContext,
+        thread: String,
+        turn: Option<String>,
+    ) -> Result<(), KernelInvocationFailure> {
+        self.after_turn_baseline = Some((thread, turn));
+        let _ = kernel;
+        Ok(())
     }
 
     fn reconcile_workbench_cancellation(

@@ -601,6 +601,18 @@ pub trait KernelBehavior: Send + 'static {
         })
     }
 
+    fn record_turn_baseline(
+        &mut self,
+        context: &KernelContext,
+        _thread: String,
+        _turn: Option<String>,
+    ) -> Result<(), KernelInvocationFailure> {
+        Err(KernelInvocationFailure::Rejected {
+            actor: context.identity,
+            detail: "actor has no completed-turn observer".into(),
+        })
+    }
+
     fn reconcile_workbench_cancellation(
         &self,
         execution: tidepool_runtime::session::WorkbenchExecutionId,
@@ -1240,6 +1252,16 @@ where
                     .behavior
                     .observe_completed_turn(&state.context, thread, turn)
                     .await;
+                let _ = reply.send(outcome);
+            }
+            KernelMessage::AfterTurnBaseline {
+                thread,
+                turn,
+                reply,
+            } => {
+                let outcome = state
+                    .behavior
+                    .record_turn_baseline(&state.context, thread, turn);
                 let _ = reply.send(outcome);
             }
             KernelMessage::ReconcileWorkbenchCancellation {
