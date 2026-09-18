@@ -219,6 +219,75 @@ in module code that rarely go wrong in a cell:
 answer, abstain: a slot that fails is reported to you on every call, and one
 that abstains is not.
 
+## Watching a child's tool calls
+
+`Project.Watchdog` is an `afterTool` slot for a PARENT to install on a child it
+spawns: the same `ToolCall -> ToolResult -> Eff effects Annotation` shape as any
+other slot, so it composes or replaces like any other. A `Heuristic` is one
+yes/no question, the likelihood at or above which it trips, and what tripping
+does:
+
+```haskell
+data Heuristic = Heuristic
+  { heuristicName :: Text
+  , heuristicQuestion :: Text
+  , heuristicFloor :: Double
+  , heuristicOutcome :: Outcome
+  }
+
+data Outcome = Advise Text | Escalate Text
+```
+
+`Project.Watchdog` ships ready-made: `repeatingItself`, `guessingInsteadOfReading`,
+`ignoringAFailure`, `outOfScope`, `destructiveCommand`, plus `stayWithin path`
+and `preferTool situation toolName` for the ones you parametrize yourself. A set
+of heuristics is an ordinary `[Heuristic]`, so sets compose with `(<>)`:
+`coreHeuristics = [repeatingItself, destructiveCommand]`, and
+`codingHeuristics = coreHeuristics <> [ignoringAFailure, outOfScope, guessingInsteadOfReading]`
+is the wider set for a coding child. Add your own by consing onto whichever list.
+
+What a parent actually writes is one `afterTool` line and a function from a
+child's own path to its heuristics:
+
+```haskell
+agentSpec = defaultSpec
+  { specTools = Tools.tools
+  , afterTool = Just (Watchdog.watchBy monitorsFor)
+  }
+
+monitorsFor :: Text -> [Watchdog.Heuristic]
+monitorsFor path
+  | "review-child" `T.isInfixOf` path = Watchdog.codingHeuristics
+  | otherwise = []
+```
+
+`watchBy` reads its own `contextActorPath` — the calling child's path — picks
+heuristics with `heuristicsFor path`, and asks Jev one packet built from the
+finished call's name and arguments and the result's output. `watchWith
+heuristics` installs the same list for every child, skipping the lookup. A
+child whose path matches no heuristics (including the root, which has none)
+abstains before ever asking Jev.
+
+A tripped heuristic does one of two things:
+
+| Outcome | The child sees | The parent sees |
+|---|---|---|
+| `Advise text` | `text`, `Annotated` on its own result | nothing |
+| `Escalate reason` | a short record naming which heuristics escalated | one message: `reason`, plus the child's actor address |
+
+An `Advise` costs the parent nothing — it never leaves the child. An
+`Escalate` reaches the parent as one native message naming `reason` and the
+child's `contextActorId`, `contextActorIncarnation`, and `contextActorPath`,
+so the parent can address that child directly; a monitor never corrects the
+child itself. When a call trips several heuristics at once, every `Advise`
+folds into one annotation and every `Escalate` reaches the parent in one
+message. The arguments Jev sees are whatever the call carried, so a tool that
+exposes its own free-text field — `exec_command`'s optional `intent` — feeds a
+heuristic's judgment along with everything else in the call.
+
+Needs `Member Jev effects, Member ActorContext effects, Member Notifications
+effects` on the slot and on `agentSpec`, same as any other effect a slot uses.
+
 ## Reload
 
 `reload_agent_spec` publishes your source layer, recompiles the spec, and swaps
@@ -235,3 +304,8 @@ the implementations between calls. The receipt says where it stopped:
   implementation it started with.
 
 Reload is yours alone. It never changes a child's or a parent's spec.
+
+A slot is ordinary Haskell, so a cell can exercise it directly against
+hand-built `ToolCall`/`ToolResult` values, with no `reload_agent_spec` and no
+real tool call — call `noted call result` (or `Watchdog.watchBy monitorsFor
+call result`) the same way you would call any other function.
