@@ -33,6 +33,10 @@ answering with six exact types including
 `mergeInto :: WorktreeId -> Maybe BranchName -> ActorSpec Merge MergeEffects`.
 What it still does not give is a worked invocation.
 
+(That signature is quoted as the lead saw it. `mergeInto` has since gained a
+third argument, the check command, so that it cannot silently run a
+workspace-wide suite; `.shoal/plans/INSTALLED.md` carries the current one.)
+
 **Jev works cold, and the numbers are right.** Asked to adapt whichever lab
 example asks several questions in one request, the lead picked
 `12-termination.hs`, kept its shape, rewrote every question for this
