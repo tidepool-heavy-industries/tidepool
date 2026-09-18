@@ -390,3 +390,135 @@ routing on diagnostics alone was the mistake.
 
 **Outcome: interesting failure**, and it retires the idea of a cheap
 diagnostics-only escalation trigger.
+
+---
+
+## B8c. The routing failure was my wording. Retract B8 and B8b.
+
+Asked whether the earlier negatives proved anything about the pattern or only
+about my execution, I re-read my own alternatives and found the defect I had
+already measured two experiments earlier.
+
+The original four alternatives:
+
+- `mechanical`: "`check_output` names a lint rule or shows a formatting diff, and the repair it asks for is fully determined by the diagnostic text."
+- `needs_writing`: "`check_output` reports missing code that has to be written..."
+- `needs_intent`: "**`check_output` reports a conflict that two different repairs would both resolve**, and the diagnostic text does not say which was meant."
+- `unreadable`: "`check_output` contains no compiler diagnostic naming a file and a line."
+
+Three describe what the output contains. The third describes a property of the
+repair space, which is not a thing a reader can check against the text. That is
+exactly the mixed-vocabulary defect from A1b, where the odd alternative sat at
+0.01.
+
+Rewritten so all four describe contents, `needs_intent` becoming "`check_output`
+names one definition and several sites that call it, and reports that the two
+disagree". Nothing else changed: same fixtures, same state, same policy.
+
+| fixture | original wording | uniform wording |
+|---|---|---|
+| `4610b5e` lint | `mechanical` m 0.95 c 0.93 — right | `mechanical` m 0.96 c 0.95 — right |
+| `f726882` missing arms | `needs_writing` m 0.98 c 0.97 — right | `needs_writing` m 0.86 c 0.80 — right |
+| `53ad43c` two repairs compete | `mechanical` m 0.86 c 0.81 — **wrong** | `needs_intent` **m 1.00 c 1.00** — right |
+
+**Three-way branching works on our workload.** The case that needed a person is
+identified at mass 1.00 and confidence 1.00, from the diagnostics alone.
+
+### What this retracts
+
+**B8's conclusion is withdrawn.** I wrote that a confidence floor cannot detect
+ambiguity absent from the evidence. The ambiguity was in the evidence and the
+alternative describing it was unaskable as written.
+
+**B8b's conclusion is withdrawn too.** I wrote that whether a failure admits two
+repairs is a property of the change rather than of its diagnostics, and that a
+program must fetch the diff before it can know to ask a person. The uniform
+wording answers it from diagnostics alone at 1.00. B8b's own two questions were
+counterfactual ("would reverting fix this?") rather than about what the text
+contains, which is a second form of the same error: asking about an outcome the
+state cannot witness instead of a fact the state carries.
+
+### What survives, and is now the strongest finding in the survey
+
+**Every alternative in a choice must describe the same kind of thing, and that
+thing must be something a reader can check against the state.** Measured three
+times now:
+
+| case | odd alternative | uniform alternative |
+|---|---|---|
+| completion inside a fetch menu | 0.01 | 0.39 |
+| the ambiguous failure, routed | wrong at 0.86 | right at 1.00 |
+| our own question wordings, linted | 0.20 | 0.45 |
+
+The cost of getting this wrong is not a weak signal that you notice. It is a
+confident wrong answer that clears every policy floor.
+
+**Outcome: worked**, and it converts two earlier interesting failures into
+evidence for one rule.
+
+---
+
+## Audit of the positives (Astra's request)
+
+Two claims in this notebook overstated what the runs showed.
+
+### The shadow test's "false accept" was a misrouted non-merge, not an approval
+
+Situation S6 is a candidate carrying no diff at all. Ground truth said the gate
+should answer `insufficient_evidence`, meaning the packet lacks what it needs.
+It answered `item_missing` at mass 0.91, margin 0.82, confidence 0.88, clearing
+every floor of `merging`.
+
+Calling that a false accept overstates the harm, and our own skill file says so
+plainly: `Right` from `J.accept` means the winning key cleared the floors, never
+that the candidate was approved, and you dispatch on the key. Both keys are
+non-merge outcomes. **The candidate is not merged under either answer.**
+
+What the error actually costs: `item_missing` sends a repair request to the
+child, while `insufficient_evidence` sends the parent to fetch the diff. So the
+real consequence is a wasted round trip and a child blamed for an artifact the
+parent failed to collect. That is worth fixing and is not a merge of bad code.
+
+The finding that survives unchanged: the tripwire noul read 0.48 against 0.87
+to 0.93 elsewhere, and the gate ignored it. That signal was present and unused.
+
+### The dispatcher fed its own truncations back into its state
+
+`dispatch` returned `T.take 700` of whatever it fetched, and the loop appended
+exactly that string to `observations`. Step two fetched the definition's diff,
+already cut to 1200 characters, and the 700-character record of it ends
+mid-line at `-pub fn load(path: impl AsR`.
+
+**So the decisive evidence never entered the state.** The line adding
+`limit: usize` and the line using it in the body were both past the cut. Step
+three was asked whether `observations` settled the author's purpose while
+holding a diff that stopped before the change.
+
+This reverses my reading of A1's first sub-failure. I recorded the completion
+option staying at 0.01 to 0.08 as a wording defect. It is at least as likely
+that **the answers were correct**: the state did not contain what the
+completion option described, because my own code had removed it.
+
+The same applies to A1b. Its state was built from a fresh fetch cut at 900
+characters, which reaches the line adding the parameter but probably not the
+line using it, and the option's first conjunct, a commit message naming the new
+parameter, is false of a message that reads "Cap the number of items load
+returns". Both conjuncts were unsupported. A 0.21 answer to a conjunction whose
+parts are not in the state is a correct answer.
+
+**Revised verdict on autonomous termination: not yet tested.** The runs so far
+asked a completion question about evidence the program had truncated away. The
+experiment to run is the loop with untruncated observations and a completion
+condition that is true of the state when it is reached.
+
+This is finding 4 of the survey happening inside the survey's own first
+experiment, which is the most pointed illustration of it available.
+
+### Scope of the wording conclusion
+
+Uniform, content-shaped alternatives fixed **this** routing failure on **these
+three fixtures**. That is a repair demonstrated on one program, not a general
+law about Jev. Missing evidence remains a separate and independent failure
+mode, and the audit above shows it was operating in this very notebook at the
+same time. Two distinct causes were in play, and fixing one does not retire the
+other.
