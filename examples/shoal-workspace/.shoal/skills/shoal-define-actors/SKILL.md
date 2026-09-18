@@ -137,7 +137,6 @@ record for a binding that sits outside it. A signature and its equation go in
 the **same** cell item; a signature alone installs nothing.
 
 ```haskell
-{-# LANGUAGE DataKinds #-}
 import GHC.Generics (Generic)
 data Tally mode = Tally { tallyState :: mode :- State [Text], noted :: mode :- Call Text NoReply, noteCount :: mode :- Call () (R.Reply Int) } deriving Generic
 type TallyEffects = LocalEffects Tally '[Replies, Actor, Notifications]

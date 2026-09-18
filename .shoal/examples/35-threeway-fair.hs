@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
 -- Was the routing failure a fact about confidence, or my own wording?
 -- The original `needs_intent` alternative described a property of the repair
 -- space while its three siblings described the contents of `check_output`.

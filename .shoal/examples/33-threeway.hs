@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
 -- Three-way branching. One judgment, three destinations chosen by confidence:
 -- code acts, a model is briefed, or a person is asked. Each branch does real
 -- read-only work, so the routing is not a label but a different program.

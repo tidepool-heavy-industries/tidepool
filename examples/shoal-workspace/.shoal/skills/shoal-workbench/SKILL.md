@@ -88,7 +88,6 @@ A line starting at the name's column begins a new binding and fails to parse.
 This bites hardest on `:&` packet chains and on record updates:
 
 ```haskell
-{-# LANGUAGE OverloadedLabels #-}
 let packet =
       #enough := J.noul "Is the preview enough to judge the file?"
         :& #next := J.choice "Which file first?"

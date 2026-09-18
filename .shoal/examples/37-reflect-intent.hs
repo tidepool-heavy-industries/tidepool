@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
 -- Contextual investigation with simulated Reflect output.
 --
 -- Real matched fixture, all three pieces from the same past run:

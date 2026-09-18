@@ -20,11 +20,7 @@ by the workbench surface: `import Tidepool.Effects.Core (Jev)`. Nothing from
 `examples/shoal-workspace/.shoal/Project` appears here.
 
 `import qualified Jev.Operators as J` is in scope; `:=` and `:&` read
-unqualified. A cell that calls Jev leads with two pragmas:
-
-```
-{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
-```
+unqualified.
 
 `J.ask1 state question` asks one; `J.ask state packet` asks a whole packet in
 one round trip. Both return `Either J.JevError _`. Read the error and fall back
@@ -46,7 +42,6 @@ previews <- forM names $ \n ->
 ```
 
 ```haskell
-{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
 let files = J.pool #files [(n, String p, n) | (n, p) <- previews]
 let packet =
       #files := files
@@ -112,7 +107,6 @@ in the real packet. The synthetic example below illustrates reading a selection;
 it does not authorize a merge or establish semantic correctness from a diff stat.
 
 ```haskell
-{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
 let diffStat = "src/Retry.hs | 24 ++++--\ntests/RetrySpec.hs | 31 +++++" :: Text
 let testOutput = "PASS 14 tests, 0 failures" :: Text
 let gate = J.choice "Which of these describes the candidate?"
@@ -144,7 +138,6 @@ Build the prepared continuations, let Jev select one, and run the selection.
 The wording is model-facing; the payload is yours.
 
 ```haskell
-{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
 let failing = "session::retry_is_bounded" :: Text
 let continuations =
       J.alt #inspect_by_hand "The output names neither a single test nor a target" (pure ("reading the failure by hand" :: Text))
@@ -161,7 +154,6 @@ next
 A pool declares one candidate set for several questions in the same packet:
 
 ```haskell
-{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
 let candidates = [("retry", "src/Retry.hs: retry loop and backoff" :: Text), ("fetch", "src/Fetch.hs: HTTP client and timeouts")]
 let files = J.pool #files [(k, String d, k) | (k, d) <- candidates]
 let packet =
@@ -235,7 +227,6 @@ without re-deriving it. `shoal-orchestrate` is that pattern written out.
 Not executable on its own: it needs a live child to observe.
 
 ```haskell
-{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
 let classify :: Text -> Handler [(Text, Text)] MyEffects (); classify output = do
       answer <- J.ask1 (J.state (object ["check_output" .= output]))
         (J.choice "Which statement describes `check_output`?"

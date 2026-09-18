@@ -31,8 +31,9 @@ async fn campaign_with(backend: Arc<FakeJev>) -> TestCampaign {
     .await
 }
 
-const CELL: &str = r#"{-# LANGUAGE OverloadedLabels #-}
-answer <- J.ask1 (J.state (String "retry loop in fetch; timeout branch at line 12"))
+/// No `LANGUAGE` pragma: `OverloadedLabels` is in the cell dialect
+/// (`session::dialect::EVAL_PRAGMAS`), so `#not_here` needs no ceremony.
+const CELL: &str = r#"answer <- J.ask1 (J.state (String "retry loop in fetch; timeout branch at line 12"))
   (J.choice "Which line begins the retry-timeout branch?"
      (J.alt #not_here "The branch is not in this file" (0 :: Int)
         J..| J.many [("line-4", "if attempts > 3", 4), ("line-12", "if elapsed > timeout", 12)]))
@@ -110,8 +111,13 @@ async fn retained_packet_bindings_reach_a_later_statement() {
     let campaign = campaign_with(Arc::clone(&backend)).await;
     let result = dispatch_haskell_script(
         campaign.root_installation.policy.as_ref(),
-        r#"{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
-let offers = J.alt #line_4 "if attempts > 3" (4 :: Int) J..| J.alt #line_12 "if elapsed > timeout" 12
+        // No `LANGUAGE` pragma. This is the load-bearing case: the packet
+        // needs `OverloadedLabels` and `(J.answers r).place` needs
+        // `OverloadedRecordDot`, and the latter is deliberately absent from
+        // `DECL_TEMPLATE_SOURCE`, the parse-only template GHC uses to pick a
+        // cell item's shape. If template selection ever starts needing it,
+        // this test is where that shows up.
+        r#"let offers = J.alt #line_4 "if attempts > 3" (4 :: Int) J..| J.alt #line_12 "if elapsed > timeout" 12
 let packet = #place := J.choice "Which line begins the retry-timeout branch?" offers :& #enough := J.noul "Is the branch visible?" :& J.Nil
 answer <- J.ask (J.state (String "retry loop in fetch")) packet
 either (const 0) (\r -> J.handle (J.chosen (J.answers r).place) (#line_4 id J..| #line_12 id)) answer"#,
@@ -176,10 +182,12 @@ async fn doc_jev_dense_example_sends_one_request() {
         .nth(2)
         .and_then(|rest| rest.split("```").next())
         .expect("the dense-cell section has a second Haskell cell");
-    // Pragmas must lead the cell; the bound previews follow them.
-    let (pragmas, body) = cell.split_once('\n').expect("the cell has a pragma line");
+    // The cell leads with nothing to hoist past — the dialect supplies its
+    // extensions — so the bound previews simply go first. Prepending after a
+    // presumed pragma line instead would shift `let files` above this binding,
+    // where `previews` resolves to Control.Lens's, not the list.
     let cell = format!(
-        "{pragmas}\nlet previews = [(\"README.md\", \"# jev-dsl\\ntyped packets\"), (\"LICENSE\", \"MIT\")] :: [(Text, Text)]\n{body}"
+        "let previews = [(\"README.md\", \"# jev-dsl\\ntyped packets\"), (\"LICENSE\", \"MIT\")] :: [(Text, Text)]\n{cell}"
     );
     let backend = Arc::new(FakeJev {
         requests: Mutex::new(Vec::new()),
@@ -228,8 +236,7 @@ async fn live_jev_from_a_haskell_cell() {
     .await;
     let result = dispatch_haskell_script(
         campaign.root_installation.policy.as_ref(),
-        r#"{-# LANGUAGE OverloadedLabels #-}
-answer <- J.ask1 (J.state (String "A cat is sitting on a warm windowsill in the sun."))
+        r#"answer <- J.ask1 (J.state (String "A cat is sitting on a warm windowsill in the sun."))
   (J.choice "Where is the cat?"
      (J.alt #windowsill "On a windowsill" (1 :: Int)
         J..| J.alt #roof "On a roof" 2

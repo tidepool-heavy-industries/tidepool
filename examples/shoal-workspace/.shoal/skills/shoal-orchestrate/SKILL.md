@@ -73,7 +73,6 @@ on `gateFor` — `knownEffects` alone is ambiguous.
 Not executable on its own: it closes over a live `implementer` response.
 
 ```haskell
-{-# LANGUAGE DataKinds #-}
 import GHC.Generics (Generic)
 import Tidepool.Effects.Core (Jev, Commands)
 data Contract = Contract { ownedPaths :: [Text], requiredTests :: [Text], likelyMiss :: Text, baseOid :: Text, onto :: BranchName, integrationTree :: WorktreeId, rootRef :: AgentRef }
@@ -216,7 +215,6 @@ the gate has nothing to check against, and that is exactly how a run-6
 candidate was accepted at 0.90 while missing the empty-list case.
 
 ```haskell
-{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
 let items = "every changed file is inside the owned paths; every required test name appears passing in the check output; the empty-list case of the new filter is handled" :: Text
 let gate = J.choice "Which statement describes the candidate?"
       (J.alt #all_present ("Every item of the checklist holds: " <> items) ()

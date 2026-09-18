@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
 -- Why did the dispatcher never stop? Four forms of the same stop question,
 -- one request, one identical state that already contains everything needed.
 --   full     : the original menu, completion written with concrete vocabulary

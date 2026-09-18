@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
 import Tidepool.Effects.Core (Jev, Commands)
 
 sh :: Member Commands effs => [Text] -> Eff effs Text

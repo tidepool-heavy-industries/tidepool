@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
 -- A typed action dispatcher, asked about a real change in this repository.
 --
 -- Commit 7a48345d6 changed `update_request` so that a success carries its

@@ -20,12 +20,7 @@ The vendored library is `jev-dsl`, in scope qualified as `J`
 (`import qualified Jev.Operators as J`). The two packet operators `:=` and
 `:&` are also in scope unqualified; everything else is `J.`-qualified,
 including `J.Nil`, `J..|` and `J.++.`. A packet or offer bound in one cell
-and reused in a later one keeps its inferred type. A cell that calls Jev
-needs two pragmas, cell-local:
-
-```haskell
-{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
-```
+and reused in a later one keeps its inferred type.
 
 ## The call
 
@@ -127,8 +122,6 @@ Choosing which of several retained child results to inspect first, from a
 handback exit and one `choice` over the children:
 
 ```haskell
-{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
-
 pickChild :: [(Text, Text, Response Report)] -> Eff effects (Maybe (Response Report))
 pickChild results = do
   let ctx = J.state (object ["failing_check" .= "test-target actor retry"])
@@ -156,7 +149,6 @@ name; a line that starts at the name's column begins a new binding and
 fails to parse.
 
 ```haskell
-{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
 let candidates = [("retry", "src/Retry.hs: retry loop and backoff" :: Text), ("fetch", "src/Fetch.hs: HTTP client and timeouts")]
 let files = J.pool #files [(k, String d, k) | (k, d) <- candidates]
 let packet =
@@ -191,7 +183,6 @@ previews <- forM names $ \n ->
 Then one packet judges all of them and one round trip returns the shortlist:
 
 ```haskell
-{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
 let files = J.pool #files [(n, String p, n) | (n, p) <- previews]
 let packet =
       #files := files

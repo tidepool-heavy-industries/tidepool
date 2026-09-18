@@ -3,7 +3,10 @@
 Use ordinary Haskell in notebook cells. One cell may contain
 declarations, bindings, and expressions; declarations are mutually recursive
 and visible throughout the cell. The default scope is `Tidepool.Actors.Shoal`; workspace
-modules such as `Project.Work` provide project policy.
+modules such as `Project.Work` provide project policy. The cell dialect already
+enables the usual extensions — `OverloadedLabels`, `OverloadedRecordDot`,
+`DataKinds`, `TypeApplications` and the rest — so a cell needs no `LANGUAGE`
+pragma; a standalone `.hs` module in the workspace still declares its own.
 
 ```haskell
 let task = "Remove the stale path and report the focused check." :: Text
@@ -185,7 +188,6 @@ reading aid, not a conclusion about the code. The task is an argument so intent
 travels with the evidence. Every command argument comes from code or Git output.
 
 ```haskell
-{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
 import Tidepool.Effects.Core (Jev, Commands)
 inspectRecentChanges :: (Member Jev effects, Member Commands effects) => Text -> Eff effects Text
 inspectRecentChanges task = do
