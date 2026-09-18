@@ -586,6 +586,80 @@ impl ShoalSourceReload {
         ))
     }
 
+    /// This caller's source layer, active vs. the latest observed on-disk
+    /// capture, and which modules' digests differ between them — row 1 of
+    /// the what-is-live status view (`tidepool_actor::SourceLayerDrift`).
+    /// Same read `status` answers; wired directly for the actor-runtime
+    /// observation channel, since that channel's type has no place for
+    /// `status`'s `SrRevision` wire pair and cannot compute a diff without
+    /// duplicating `SourceRevision::changed_since`.
+    pub(crate) fn drift(
+        &self,
+        caller: PrincipalId,
+    ) -> std::result::Result<tidepool_actor::SourceLayerDrift, tidepool_handlers::SourceError> {
+        let _one_at_a_time = self.gate.lock();
+        let (active, disk) = match self.scope(caller) {
+            ActorSourceScope::Run | ActorSourceScope::RunReadOnly => {
+                let active = self.layer.ensure_active(&self.frozen).map_err(unreadable)?;
+                let disk = self
+                    .layer
+                    .capture_from_workspace(&self.frozen, &self.workspace)
+                    .map_err(unreadable)?;
+                (active, disk)
+            }
+            ActorSourceScope::Checkout(checkout) => {
+                let active = checkout
+                    .layer
+                    .ensure_active_from(self.frozen.identity(), &checkout.roots)
+                    .map_err(unreadable)?;
+                let disk = checkout
+                    .layer
+                    .capture_from_roots(self.frozen.identity(), &checkout.roots)
+                    .map_err(unreadable)?;
+                (active, disk)
+            }
+        };
+        let disk = if disk.revision().identity == active.identity {
+            active.clone()
+        } else {
+            disk.revision().clone()
+        };
+        let changed_modules = disk.changed_since(&active);
+        Ok(tidepool_actor::SourceLayerDrift {
+            active_identity: active.identity,
+            active_generation: active.generation,
+            disk_identity: disk.identity,
+            disk_generation: disk.generation,
+            changed_modules,
+        })
+    }
+
+    /// Frozen workspace modules whose digest differs from the same module
+    /// read live off disk right now — row 3 of the what-is-live status view.
+    /// The frozen capture ([`super::workspace::FrozenWorkspace`]) is the
+    /// run's immutable floor; this is independent of any layer republished
+    /// in front of it ([`Self::drift`]), so a clean answer here does not
+    /// imply a clean answer there or the reverse.
+    pub(crate) fn frozen_drift(&self) -> Result<tidepool_actor::FrozenSourceDrift> {
+        let frozen_modules = manifest_of_roots(self.frozen.captured_source_roots());
+        let config = self.frozen.config()?;
+        let live_roots = super::workspace::resolve_source_roots(&self.workspace, &config.haskell)?;
+        let live_modules = manifest_of_roots(&live_roots);
+        let frozen = SourceRevision {
+            identity: String::new(),
+            generation: 0,
+            modules: frozen_modules,
+        };
+        let live = SourceRevision {
+            identity: String::new(),
+            generation: 0,
+            modules: live_modules,
+        };
+        Ok(tidepool_actor::FrozenSourceDrift {
+            changed_modules: live.changed_since(&frozen),
+        })
+    }
+
     fn status_of(
         &self,
         active: SourceRevision,
@@ -696,15 +770,15 @@ fn revision_include_paths(directory: &Path, roots: usize) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Every module a captured revision provides, by module name, first root
-/// wins — exactly the shadowing GHC applies across the same include roots in
-/// the same order.
-fn revision_modules(directory: &Path, roots: usize) -> Vec<(String, String)> {
+/// Every module `roots` provide, by module name, first root wins — exactly
+/// the shadowing GHC applies across the same include roots in the same
+/// order. Shared by a captured revision directory (whose roots are
+/// `directory/0`, `directory/1`, …, via [`revision_modules`]) and a live,
+/// uncaptured root list alike (e.g. [`ShoalSourceReload::frozen_drift`]).
+fn manifest_of_roots(roots: &[PathBuf]) -> Vec<(String, String)> {
     let mut modules: BTreeMap<String, String> = BTreeMap::new();
-    for index in 0..roots {
-        for (relative, digest) in
-            tidepool_runtime::cache::source_root_manifest(&directory.join(index.to_string()))
-        {
+    for root in roots {
+        for (relative, digest) in tidepool_runtime::cache::source_root_manifest(root) {
             let Some(module) = module_name(&relative) else {
                 continue;
             };
@@ -712,6 +786,14 @@ fn revision_modules(directory: &Path, roots: usize) -> Vec<(String, String)> {
         }
     }
     modules.into_iter().collect()
+}
+
+/// Every module a captured revision provides, by module name, first root
+/// wins — exactly the shadowing GHC applies across the same include roots in
+/// the same order.
+fn revision_modules(directory: &Path, roots: usize) -> Vec<(String, String)> {
+    let root_paths: Vec<PathBuf> = (0..roots).map(|index| directory.join(index.to_string())).collect();
+    manifest_of_roots(&root_paths)
 }
 
 /// `Project/Types.hs` names `Project.Types`. Boot files describe an existing
@@ -1086,6 +1168,40 @@ mod tests {
         assert_eq!(work(&status.active), before);
         assert_ne!(work(&status.disk), before);
         assert_eq!(status.disk.generation, 0, "an unpublished snapshot");
+        drop(run);
+    }
+
+    /// `drift` answers the same question `status` does, plus the module a
+    /// caller would otherwise have to diff out by hand: unedited, it reports
+    /// checked-and-identical (equal identities, no changed modules); edited,
+    /// it names exactly the module that changed.
+    #[test]
+    fn drift_names_a_changed_module_and_reports_identical_when_unedited() {
+        let (project, run, reload) = cooperating_pair();
+        let unedited = reload.drift(PrincipalId::SYSTEM).unwrap();
+        assert_eq!(unedited.active_identity, unedited.disk_identity);
+        assert!(unedited.changed_modules.is_empty());
+
+        write_work(project.path(), "evidenceValue + 0 `seq` evidenceValue");
+        let edited = reload.drift(PrincipalId::SYSTEM).unwrap();
+        assert_ne!(edited.active_identity, edited.disk_identity);
+        assert_eq!(edited.changed_modules, vec!["Project.Work".to_string()]);
+        drop(run);
+    }
+
+    /// `frozen_drift` compares the run's immutable floor to what the same
+    /// roots hold on disk right now, independent of the layer `drift`
+    /// reports on: editing a file changes this even though nothing has been
+    /// reloaded or republished.
+    #[test]
+    fn frozen_drift_names_a_module_edited_on_disk_after_the_freeze() {
+        let (project, run, reload) = cooperating_pair();
+        let unedited = reload.frozen_drift().unwrap();
+        assert!(unedited.changed_modules.is_empty());
+
+        write_work(project.path(), "evidenceValue + 0 `seq` evidenceValue");
+        let edited = reload.frozen_drift().unwrap();
+        assert_eq!(edited.changed_modules, vec!["Project.Work".to_string()]);
         drop(run);
     }
 }

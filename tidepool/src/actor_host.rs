@@ -1366,6 +1366,10 @@ struct InteractiveFleet {
     bindings: Arc<Mutex<BindingTable>>,
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
     worktree_authority: ActorWorktreeAuthority,
+    /// `None` when the run has no frozen workspace to compare against, in
+    /// which case source drift is never observed (see
+    /// `run_delivery_pump`'s usage poll).
+    source_layers: Option<Arc<crate::shoal::source::ShoalSourceReload>>,
 }
 
 #[derive(Clone)]
@@ -1520,6 +1524,7 @@ pub async fn run(
             bindings,
             readiness: readiness.clone(),
             worktree_authority: worktree_authority.clone(),
+            source_layers,
         },
         shutdown_rx,
         root_config_rx,
@@ -2331,6 +2336,7 @@ async fn run_interactive_applications(
         bindings,
         readiness,
         worktree_authority,
+        source_layers,
     } = fleet;
     let base_prompt = FrozenBasePrompt::materialize_selected(
         &run_root,
@@ -2349,7 +2355,7 @@ async fn run_interactive_applications(
         run_root,
         tmux: tmux.clone(),
         backend: Arc::clone(&backend),
-        worktrees,
+        worktrees: worktrees.clone(),
         bindings: Arc::clone(&bindings),
     };
     let mut deployments: Vec<InteractiveDeployment> = Vec::new();
@@ -3017,6 +3023,8 @@ async fn run_interactive_applications(
                             Arc::clone(&deployment.update_reconciliations),
                             deployment.workspace.clone(),
                             deployment.runtime_observation.clone(),
+                            source_layers.clone(),
+                            worktrees.clone(),
                             stop_delivery,
                         ));
                         tracing::info!(
@@ -4727,6 +4735,8 @@ async fn run_delivery_pump(
     reconciliations: Arc<Mutex<BTreeMap<String, PendingUpdateReconciliation>>>,
     workspace: PathBuf,
     runtime_observation: tidepool_actor::ActorRuntimeObservationHandle,
+    source_layers: Option<Arc<crate::shoal::source::ShoalSourceReload>>,
+    worktrees: WorktreeManager,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut health = tokio::time::interval(Duration::from_secs(1));
@@ -4769,9 +4779,106 @@ async fn run_delivery_pump(
                         tracing::debug!(actor = ?actor, %error, "provider observation unavailable");
                     }
                 }
+                poll_source_drift(actor, &runtime_observation, source_layers.as_ref(), &worktrees).await;
             }
         }
     }
+}
+
+/// Observe source drift for `actor` on the same 10-second cadence
+/// `usage_poll` already pays for provider observation, rather than a new
+/// timer: reading a source layer's disk revision or a checkout's dirty
+/// files is real filesystem and Git work, and the status view this feeds
+/// (`ResidentKernelBehavior::live_status_text`) must stay cheap on every
+/// call.
+///
+/// Each of the three rows is observed independently, and a row this actor
+/// has nothing to observe for (no source service on the run, no assigned
+/// worktree) is simply left unpublished rather than published as clean —
+/// `ActorRuntimeObservation::source_drift` distinguishes "not observed" from
+/// "checked, identical" for exactly this reason. All filesystem and Git work
+/// runs on a blocking thread; nothing here runs on the async executor.
+async fn poll_source_drift(
+    actor: ActorRef,
+    runtime_observation: &tidepool_actor::ActorRuntimeObservationHandle,
+    source_layers: Option<&Arc<crate::shoal::source::ShoalSourceReload>>,
+    worktrees: &WorktreeManager,
+) {
+    let worktree_id = runtime_observation
+        .snapshot()
+        .workspace
+        .and_then(|workspace| workspace.worktree_id);
+    let source_layers = source_layers.cloned();
+    let worktrees = worktrees.clone();
+    let caller = tidepool_repr::PrincipalId::from(actor);
+    let (layer, frozen, checkout) = tokio::task::spawn_blocking(move || {
+        let layer = source_layers.as_ref().and_then(|layers| {
+            layers
+                .drift(caller)
+                .inspect_err(|error| {
+                    tracing::debug!(?actor, ?error, "source layer drift unavailable");
+                })
+                .ok()
+        });
+        let frozen = source_layers.as_ref().and_then(|layers| {
+            layers
+                .frozen_drift()
+                .inspect_err(|error| {
+                    tracing::debug!(?actor, %error, "frozen workspace drift unavailable");
+                })
+                .ok()
+        });
+        let checkout = worktree_id.and_then(|id| {
+            checkout_git_drift(&worktrees, &id)
+                .inspect_err(|error| {
+                    tracing::debug!(?actor, worktree = %id, %error, "checkout drift unavailable");
+                })
+                .ok()
+        });
+        (layer, frozen, checkout)
+    })
+    .await
+    .unwrap_or_default();
+    if let Some(layer) = layer {
+        runtime_observation.publish_source_layer_drift(layer);
+    }
+    if let Some(frozen) = frozen {
+        runtime_observation.publish_frozen_source_drift(frozen);
+    }
+    if let Some(checkout) = checkout {
+        runtime_observation.publish_checkout_git_drift(checkout);
+    }
+}
+
+/// The checkout's Git head and dirty files, via [`GitCli`] — the sole
+/// sanctioned way to invoke git in this repository. There is no recorded
+/// build revision for the running binary to compare `head` against; see
+/// `tidepool_actor::CheckoutGitDrift`.
+fn checkout_git_drift(
+    worktrees: &WorktreeManager,
+    worktree_id: &str,
+) -> std::result::Result<tidepool_actor::CheckoutGitDrift, String> {
+    let handle = worktrees
+        .lookup(&WorktreeId::from_raw(worktree_id))
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("worktree {worktree_id:?} is not allocated"))?;
+    let git = worktrees.git();
+    let head = git
+        .try_run(handle.cwd(), &["rev-parse", "HEAD"])
+        .map_err(|error| error.to_string())?
+        .trimmed()
+        .to_owned();
+    let dirty = tidepool_worktree::git::inspect::dirty_summary(git, handle.cwd())
+        .map_err(|error| error.to_string())?;
+    let mut dirty_files: Vec<String> = dirty
+        .staged
+        .into_iter()
+        .chain(dirty.unstaged)
+        .chain(dirty.untracked)
+        .collect();
+    dirty_files.sort();
+    dirty_files.dedup();
+    Ok(tidepool_actor::CheckoutGitDrift { head, dirty_files })
 }
 
 fn prepare_owner_notification(
