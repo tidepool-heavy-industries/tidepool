@@ -1,0 +1,165 @@
+# The agent spec and its System 1 slots
+
+Each checkout carries one Haskell module that defines an agent's tools and its
+System 1 slots. The agent edits it with ordinary file tools and asks for a
+reload. Answers `~/dev/tidepool-astra/plans/agent-spec.md` and the interview that
+followed it.
+
+The editable source is the development interface. Retained compiled functions are
+the execution mechanism. Nothing compiles per tool call or per turn.
+
+## Why
+
+A tool whose schema never changes but whose implementation acquires
+context-sensitive retrieval, Jev judgments and prepared follow-ups is already a
+large change in what an agent can do. That is the whole of this design; dynamic
+schemas are not part of it.
+
+Four motives, in the order they carry weight:
+
+1. **System 1.** Routine semantic judgments are answered by Jev inside tools and
+   slots, so the frontier model is interrupted only for the unresolved case.
+2. **After-tool helpers.** A slot runs when a tool finishes and attaches useful
+   evidence to that result, selected against the agent's recent turns. This is
+   `evidence-pruning-pattern.md` made standing, rather than a cell the model must
+   remember to write.
+3. **More slots follow.** After-tool and after-turn are the first two. Because
+   slots fire often, they are precompiled.
+4. **A kit that compounds.** The module is workspace source, so the next session
+   inherits it.
+
+## Shape
+
+    the actor's checkout                .shoal/AgentSpec.hs
+      → explicit reload                 (never on file save)
+      → one compile                     declarations + retained handlers
+      → invoked at supported events     tool calls, and later triggers
+
+A reload is two distinct acts, and conflating them was the one real error in the
+original spec:
+
+- **publishing a source revision** — the checkout's source layer moves;
+- **activating a spec** — one actor swaps the retained values it dispatches on.
+
+An actor that has not activated a published revision is still running the old
+one, truthfully, and says so.
+
+## What the existing code already guarantees
+
+`prepare_tools` (`tidepool-actor/src/resident_workbench.rs:1864-1982`) compiles
+one fragment, reads the declared schemas out of the `AgentToolsInstallWith`
+suspension it produces, and retains the parked continuation as an
+`Arc<RootCustody>`. Declarations and dispatcher are two products of one compile,
+so a schema can never advertise a handler from another revision. A call clones
+that `Arc` (`tidepool-actor/src/resident_actor.rs:4555-4592`), so a call already
+accepted keeps its implementation with no further mechanism.
+
+`SourceLayer` (`tidepool/src/shoal/source.rs`) captures source by content
+identity, typechecks a candidate, publishes by one `rename(2)` of a symlink, and
+returns a rejection as a value.
+
+Reflect resolves with the executing actor and nothing else
+(`resident_actor.rs:2104-2124`) and excludes only the turn currently executing
+(`tidepool-agent/src/interactive.rs:630-634`). A slot running in actor A's
+resident machine therefore reads A's own completed turns, including the one that
+just ended.
+
+One handler runs at a time per actor, structurally
+(`haskell/lib/Tidepool/Event.hs:240-248`,
+`haskell/lib/Tidepool/Actor.hs:378-391`).
+
+## The four gaps
+
+1. The tool record installs once behind `policy_installed`
+   (`resident_actor.rs` ~3616) and `compiled_tools` is never reassigned.
+2. The source layer is one per run and root-only, so a child in a worktree has
+   no layer to reload.
+3. The Codex bridge registers tools once and serves them read-only
+   (`tidepool/src/host_dynamic_tools.rs:1-7`, `:190-252`).
+4. Nothing diffs two sets of declarations. Prompt fingerprints answer equality
+   only (`tidepool-actor/src/prompt_catalog.rs:65-75`).
+
+## Reload
+
+1. Reload the actor's own checkout layer. A failed typecheck ends here as
+   `ReloadRejected`: edited files stay on disk, the previous graph stays active,
+   and the receipt names both revisions and carries the diagnostics.
+2. Compile the install fragment against the new revision.
+3. Compare new declarations against active ones by name, description, input
+   schema, output schema, kind and order. **Any difference refuses the reload**
+   and returns the diff. The old record stays active.
+4. Otherwise swap the `Arc` between calls.
+
+Gap 3 is why step 3 refuses rather than asks. The bridge cannot accept a changed
+tool list mid-session, so no confirmation flag could make one work; a schema
+change takes effect at the actor's next incarnation. The declaration comparison
+is what makes `Tidepool.Agent.Contract`'s standing requirement — that the
+declared surface stay stable — true by construction rather than by convention.
+
+Reload is scoped to the actor that asked. It never upgrades children. A child
+reloads the same snapshot itself if it wants it.
+
+## Slots
+
+A slot is a retained function the runtime applies at a supported event. Slots do
+not share one input and output contract; they share System 1 modules.
+
+**After-tool**, the first slot. At the tool-result boundary, after the result
+exists and before it is returned, apply the retained slot to the call and its
+result in the actor's own resident machine.
+
+    NoAnnotation | Annotate Text | Pruned Text Handle
+
+- **Annotate or prune, never rewrite.** A pruned view says it is a selection and
+  the full result stays addressable by its handle. The annotation is attributed
+  as derived context, distinct from the tool's own output, so an observation is
+  never mistaken for a judgment.
+- **Five minute timeout.** Past thirty seconds the annotation carries the elapsed
+  time, reported through the existing progress and result path. Slowness never
+  causes an inference of its own.
+- **On timeout or failure the original result is delivered**, with one compact
+  failure line and a reference. Completed effects are not rolled back, and a
+  repeated failure does not fill the conversation with copies of one diagnostic.
+- **No recursion.** A slot's own effects and tool use never trigger a slot, and
+  the reload and status tools are never annotated, so a broken slot cannot block
+  its own repair.
+- Each annotation records the source revision the slot was compiled from.
+
+**After-turn** comes later and only if a pushed signal exists. Turn completion
+for a hosted actor is polled every ten seconds today
+(`tidepool/src/actor_host.rs:4703-4711`); a discrete `turn/completed`
+notification exists on the Codex process boundary
+(`tidepool-agent/src/backend/codex/process.rs:811-827`) but is projected only
+into the headless one-shot seam. Whether it is reachable on the interactive path
+is an open investigation, and the slot is not built on the poll.
+
+### Where idle-time output waits, and how it enters
+
+It waits in the actor's own `DurableInbox` on a stream of its own, published with
+`publish_latest` (`tidepool-node/src/inbox.rs:368-375`), which already dedups by
+a monotonic `(stream, revision)` watermark — the mechanism used today for
+`ProviderTurnFailed`. Only the newest unconsumed output is delivered; a
+superseded one is dropped before it is ever sent.
+
+It enters through the existing delivery pump, which renders pending events and
+pushes them with the next message (`actor_host.rs:4354-4434`). Nothing already
+sent is mutated, so the prompt prefix is untouched and no replay occurs. No
+extra model turn is caused: output waits for a turn that was going to happen.
+Output that arrives too late to be consumed is not erased; it is associated with
+the turn that triggered it and the revision that produced it, so the next
+eligible inference can use it or see that it is stale.
+
+`InteractiveAgentBackend::present_update`
+(`tidepool-agent/src/interactive.rs:604-619`) documents a boundary-safe
+insertion and has no production caller. It is the alternative if the pump's
+batching proves too coarse.
+
+## Not part of this
+
+- Automatic reload on file save.
+- Changing a tool schema or description within a live actor.
+- A second scheduler, registry or tool protocol.
+- Automatic migration of changed state types.
+- Replacing a pinned dependency without a declared override.
+- A mandatory catalogue of reflexes. The authored program decides how much
+  retrieval, judgment and action is useful.
