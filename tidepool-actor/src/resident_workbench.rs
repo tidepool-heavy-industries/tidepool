@@ -323,6 +323,14 @@ impl ActorWorkbenchSource {
         self
     }
 
+    /// The import block every cell of this workbench compiles against, before
+    /// a session view adds its own declaration and value modules. The compiler
+    /// warm-up reads it so the graph it primes is the graph a cell reaches.
+    #[must_use]
+    pub fn workbench_import_text(&self) -> String {
+        self.workbench_imports.template_text()
+    }
+
     /// Additional shared imports must enter declaration compilation as well as
     /// expression templates, so bindings keep the same vocabulary after a fork.
     #[must_use]

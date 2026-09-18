@@ -8,6 +8,8 @@
 mod command_jobs_tests;
 mod commands;
 #[cfg(test)]
+mod compiler_warmup_tests;
+#[cfg(test)]
 mod custody_tests;
 #[cfg(test)]
 mod documentation_tests;
@@ -1437,6 +1439,26 @@ pub async fn run(
         worktree_authority.clone(),
         source_layers.as_ref(),
     )?;
+    // The agent client takes tens of seconds to boot and a reader takes longer
+    // still to write anything, so the run's first-touch compile cost is paid
+    // here, in the background, instead of inside the first cell. A failure
+    // costs the run nothing it was going to have anyway.
+    {
+        let haskell_root = config.haskell_root.clone();
+        let workspace_inputs = config.workspace_inputs.clone();
+        let warm_root = run_root.clone();
+        let workbench_imports = source.workbench_import_text();
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = warm_compiler(
+                &haskell_root,
+                workspace_inputs.as_ref(),
+                &warm_root,
+                &workbench_imports,
+            ) {
+                tracing::warn!(%error, "compiler warm-up did not complete");
+            }
+        });
+    }
     let (descriptor, machine, outcome) = root.into_parts();
     let (forest, deployments) = ResidentForest::new_with_launch_resolver(
         source,
@@ -1922,12 +1944,20 @@ struct CandidateSources<'a> {
     extra_modules: &'a [String],
 }
 
-fn compile_driver(
+/// The preamble and include list one driver compile reads. Shared by the
+/// driver compile itself and by the compiler warm-up, which needs the same
+/// module graph without producing a driver.
+struct DriverSources {
+    preamble: String,
+    include: Vec<PathBuf>,
+}
+
+fn driver_sources(
     haskell_root: &Path,
     inputs: Option<&crate::shoal::workspace::FrozenWorkspace>,
     run_root: &Path,
     candidate: Option<CandidateSources<'_>>,
-) -> Result<CompiledShoalDriver, Box<dyn std::error::Error>> {
+) -> Result<DriverSources, Box<dyn std::error::Error>> {
     let declarations = shoal_effect_declarations();
     let effects = tidepool_mcp::ensure_effects_module(&declarations)?;
     let mut include = effects.include_paths().to_vec();
@@ -1985,6 +2015,17 @@ fn compile_driver(
             }
         }
     }
+    Ok(DriverSources { preamble, include })
+}
+
+fn compile_driver(
+    haskell_root: &Path,
+    inputs: Option<&crate::shoal::workspace::FrozenWorkspace>,
+    run_root: &Path,
+    candidate: Option<CandidateSources<'_>>,
+) -> Result<CompiledShoalDriver, Box<dyn std::error::Error>> {
+    let DriverSources { preamble, include } =
+        driver_sources(haskell_root, inputs, run_root, candidate)?;
     let templates = resident_workbench_templates(&preamble, DRIVER_EFFECTS, "");
     let include_refs: Vec<_> = include.iter().map(PathBuf::as_path).collect();
     let session_root = run_root.join("haskell-session");
@@ -2017,6 +2058,77 @@ fn compile_driver(
         include,
         compiled,
     })
+}
+
+/// The statement the warm-up compiles. It binds a name so the compile is a
+/// BIND turn — the only turn kind that mints a `Tidepool.Session.Val.G<g>`
+/// interface — and it reaches nothing, because what this compile is for is the
+/// module graph around it, not its own body.
+const WARMUP_BIND: &str = "__tidepoolWarmup <- pure ()";
+
+/// Pay a run's first-touch compile cost before the first cell asks for it.
+///
+/// The compiler daemon memoizes each home module's optimized Core for its
+/// lifetime, but which modules a cycle is allowed to memoize depends on the
+/// tier it runs under (`Tidepool.GhcPipeline.runCompileCycle`). A cycle with
+/// no injected session values runs `OptimizeCoreReachable`, which memoizes
+/// only the modules the target's Core actually references; a façade module
+/// (`Tidepool.Aeson`), a compile-time-only module (`Tidepool.QQ.*`), or an
+/// unused workspace module is never Core-reachable, so it is never memoized —
+/// and because a memo hit also requires every direct home import to have hit
+/// this cycle, one such module invalidates its whole reverse-dependency
+/// closure. That is why the first several compiles of a run each re-optimize
+/// `Tidepool.Effects.Core` and `Tidepool.Prelude` from scratch.
+///
+/// A cycle WITH injected session values runs `OptimizeEveryModule`, which
+/// memoizes every module in the graph and ends the cascade for the daemon's
+/// lifetime. A bind turn writes its value interface during COMPILATION
+/// (`Tidepool.SessionArtifacts.mkBoundBinders`), so two compiles — one to mint
+/// the interface, one to inject it — reach that tier without running a single
+/// instruction of the program.
+///
+/// Both compiles are ordinary turn compiles through the one compiler path,
+/// against a scratch session root of their own, and neither installs anything
+/// into any actor's scope.
+#[tracing::instrument(name = "compiler_warmup", level = "info", skip_all)]
+pub(crate) fn warm_compiler(
+    haskell_root: &Path,
+    inputs: Option<&crate::shoal::workspace::FrozenWorkspace>,
+    run_root: &Path,
+    workbench_imports: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // The memo being warmed belongs to a resident compiler daemon's worker. A
+    // run without one spawns a fresh worker per compile and keeps nothing
+    // between them, so there is nothing here to warm and the two compiles
+    // would be pure cost.
+    if std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).is_none() {
+        tracing::debug!("no compiler daemon; nothing to warm");
+        return Ok(());
+    }
+    let DriverSources { preamble, include } = driver_sources(haskell_root, inputs, run_root, None)?;
+    let templates = resident_workbench_templates(&preamble, DRIVER_EFFECTS, workbench_imports);
+    let include_refs: Vec<_> = include.iter().map(PathBuf::as_path).collect();
+    let session_root = run_root.join("compiler-warmup");
+    std::fs::create_dir_all(&session_root)?;
+    let minted = tidepool_repr::SessionModule::val(tidepool_repr::Generation(1));
+    let warm = |gen: u64, inject: &[String]| {
+        run_turn(HaskellTurnRequest {
+            turn_text: WARMUP_BIND,
+            templates: &templates,
+            include: &include_refs,
+            session_root: &session_root,
+            inject_modules: inject,
+            gen,
+            verdict: None,
+            target: None,
+            // A warm-up links against nothing: it exists to fill the daemon's
+            // module memo, and has no live bindings of its own.
+            prepared: PreparedTurn::first_turn(),
+        })
+    };
+    warm(minted.gen().0, &[])?;
+    warm(minted.gen().next().0, &[minted.module_name()])?;
+    Ok(())
 }
 
 fn compile_root(
