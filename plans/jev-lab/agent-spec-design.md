@@ -23,7 +23,7 @@ Four motives, in the order they carry weight:
    evidence to that result, selected against the agent's recent turns. This is
    `evidence-pruning-pattern.md` made standing, rather than a cell the model must
    remember to write.
-3. **More slots follow.** After-tool and after-turn are the first two. Because
+3. **More slots follow.** After-tool is the first. Because
    slots fire often, they are precompiled.
 4. **A kit that compounds.** The module is workspace source, so the next session
    inherits it.
@@ -173,24 +173,37 @@ not share one input and output contract; they share System 1 modules.
 exists and before it is returned, apply the retained slot to the call and its
 result in the actor's own resident machine.
 
-    NoAnnotation | Annotate Text | Pruned Text Handle
+    NoAnnotation | Abstain Reason | Annotate Text | Pruned Text Handle
 
 - **Annotate or prune, never rewrite.** A pruned view says it is a selection and
   the full result stays addressable by its handle. The annotation is attributed
   as derived context, distinct from the tool's own output, so an observation is
   never mistaken for a judgment.
-- **Five minute timeout.** Past thirty seconds the annotation carries the elapsed
-  time, reported through the existing progress and result path. Slowness never
-  causes an inference of its own.
+- **Finding nothing to say is silent.** A slot that judges a result unprunable,
+  or simply finds nothing worth adding, returns the original unchanged and
+  records its reason in the receipt. It does not announce a refusal. The model
+  never asked for a judgment on this result, and honesty does not require every
+  internal non-decision to occupy its context. A slot that *failed* rather than
+  abstained is different: the original is preserved and a concise warning appears
+  where the failure could change how the result is read.
+- **The result waits for the slot**, up to five minutes. The point is not to
+  spend an inference before the evidence arrives: a result delivered early with
+  its annotation following could send the model investigating, or acting, just
+  before the thing it needed appears. Past thirty seconds the elapsed time is
+  reported through the existing progress path, which never wakes the model.
+  There is deliberately no second late-delivery route in the first cut. If
+  waiting proves routinely wasteful, that is a policy to revisit once use shows
+  it.
 - **On timeout or failure the original result is delivered**, with one compact
-  failure line and a reference. Completed effects are not rolled back, and a
-  repeated failure does not fill the conversation with copies of one diagnostic.
+  failure line and a reference. Work the slot already completed is preserved
+  rather than silently replayed, effects are not rolled back, and a repeated
+  failure does not fill the conversation with copies of one diagnostic.
 - **No recursion.** A slot's own effects and tool use never trigger a slot, and
   the reload and status tools are never annotated, so a broken slot cannot block
   its own repair.
 - Each annotation records the source revision the slot was compiled from.
 
-**After-turn** comes later. There is no protocol notification to hang it on: the
+**After-turn** is deferred. There is no protocol notification to hang it on: the
 `turn/completed` JSON-RPC notification (`process.rs:811-827`) is read only while a
 caller is blocked inside the headless one-shot seam, and the interactive path
 never spawns that subprocess at all. This is a Codex-only question by
@@ -209,33 +222,41 @@ A torn write is safe by the existing reader's own rule: a partial tail becomes
 readable on a later read, so skipping it can withhold a turn but never invent
 one. A detector that finds no complete record simply waits for the next write.
 
-So the after-turn slot is built on a rollout tail rather than a protocol push,
-delivering through a new `Source` variant beside `LifecycleSource`
-(`haskell/lib/Tidepool/Actor/Source.hs:34-47`). That variant is generated from
-`tidepool-protocol/src/effects/actor_kernel.rs`, so the plumbing is the schema,
-`Source.hs`, the four match sites in `tidepool-actor/src/resident_workbench.rs`,
-and one new detector. The one thing not to do is hang it on the ten-second poll.
+It is **not built in the first cut**, on Astra's own withdrawal of it as a
+requirement once the cost was known: a rollout tail is a new lifecycle detector,
+and after-tool already supplies a frequent, owned boundary where the same
+context-sensitive work improves what the model receives. Building the detector
+only to satisfy the earlier proposal would be the wrong reason.
 
-### Where idle-time output waits, and how it enters
+What would earn it: a concrete case the after-tool slot cannot serve, most
+likely investigation in the gap between user turns, where no tool call is running
+to attach to. If that case arrives, the route above is the one to take, and the
+answer to where its output waits is already settled. It waits in the actor's own
+`DurableInbox` on a stream published with `publish_latest`
+(`tidepool-node/src/inbox.rs:368-375`), which dedups by a monotonic
+`(stream, revision)` watermark, so only the newest unconsumed output survives. It
+enters through the delivery pump that already renders pending events with the
+next message (`actor_host.rs:4354-4434`): nothing sent is mutated, no replay
+occurs, and no extra model turn is caused, because the output waits for a turn
+that was going to happen anyway.
 
-It waits in the actor's own `DurableInbox` on a stream of its own, published with
-`publish_latest` (`tidepool-node/src/inbox.rs:368-375`), which already dedups by
-a monotonic `(stream, revision)` watermark — the mechanism used today for
-`ProviderTurnFailed`. Only the newest unconsumed output is delivered; a
-superseded one is dropped before it is ever sent.
+## What an invocation records
 
-It enters through the existing delivery pump, which renders pending events and
-pushes them with the next message (`actor_host.rs:4354-4434`). Nothing already
-sent is mutated, so the prompt prefix is untouched and no replay occurs. No
-extra model turn is caused: output waits for a turn that was going to happen.
-Output that arrives too late to be consumed is not erased; it is associated with
-the turn that triggered it and the revision that produced it, so the next
-eligible inference can use it or see that it is stale.
+Dispatch clones a retained tool record, so the identity of *that record* is known
+at the moment of the call and costs nothing to carry. A completed tool call and a
+slot invocation both record it: the installed record and the source revision it
+was built from.
 
-`InteractiveAgentBackend::present_update`
-(`tidepool-agent/src/interactive.rs:604-619`) documents a boundary-safe
-insertion and has no production caller. It is the alternative if the pump's
-batching proves too coarse.
+That is the honest claim and the limit of it. It says which installed record
+served the call. It does not say that every function reachable through that call
+belongs to one revision, which would be a different and possibly false claim. The
+distinction is the same honesty limit the source reload work already observed,
+and reopening comprehensive closure provenance is not part of this.
+
+It lives in inspectable receipts, not in repeated model-facing text. If the
+narrow identity turns out to need real new tracking rather than a field carried
+from install, it is deferred — better absent than stamped with whichever revision
+happened to be active when the call finished.
 
 ## Not part of this
 
