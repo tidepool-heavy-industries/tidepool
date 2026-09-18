@@ -4709,21 +4709,28 @@ where
             })?;
             let queries = prepared
                 .iter()
-                .filter_map(|query| match &query.kind {
+                .flat_map(|query| match &query.kind {
                     crate::lookup_tool::PreparedLookupKind::Name(name) => {
-                        Some(InspectionQuery::Info(name.clone()))
+                        vec![InspectionQuery::Info(name.clone())]
                     }
-                    crate::lookup_tool::PreparedLookupKind::Module(module) => {
-                        Some(InspectionQuery::Browse {
-                            module: module.clone(),
+                    // Only GHC knows whether `Cmd.RunResult` is a name in this
+                    // scope or a module. Both interpretations go out in this
+                    // batch, in this order, and `lookup_response` picks per
+                    // result: the worker isolates rejection per query, so a
+                    // module browse still costs one round trip and a qualified
+                    // name is no longer answered `no match` for being dotted.
+                    crate::lookup_tool::PreparedLookupKind::Qualified(name) => vec![
+                        InspectionQuery::Info(name.clone()),
+                        InspectionQuery::Browse {
+                            module: name.clone(),
                             expanded: false,
-                        })
-                    }
+                        },
+                    ],
                     crate::lookup_tool::PreparedLookupKind::Type(query) => {
-                        Some(InspectionQuery::TypeSearch(query.clone()))
+                        vec![InspectionQuery::TypeSearch(query.clone())]
                     }
-                    crate::lookup_tool::PreparedLookupKind::Doc(_) => None,
-                    crate::lookup_tool::PreparedLookupKind::Rejected(_) => None,
+                    crate::lookup_tool::PreparedLookupKind::Doc(_) => Vec::new(),
+                    crate::lookup_tool::PreparedLookupKind::Rejected(_) => Vec::new(),
                 })
                 .collect::<Vec<_>>();
             let (inspected, live_modules) = if queries.is_empty() {
@@ -7262,8 +7269,8 @@ fn lookup_response(
     workspace_modules: &[String],
 ) -> crate::lookup_tool::LookupResponse {
     use crate::lookup_tool::{
-        LookupEntry, LookupEntryKind, LookupOrigin, LookupOutcome, LookupResult, MatchQuality,
-        PreparedLookupKind,
+        LookupEntry, LookupEntryKind, LookupInterpretation, LookupOrigin, LookupOutcome,
+        LookupResult, MatchQuality, PreparedLookupKind,
     };
 
     const MATCH_LIMIT: usize = 20;
@@ -7316,7 +7323,9 @@ fn lookup_response(
                 ),
                 Some(InspectionResult::NotFound { .. }) => LookupResult {
                     query: prepared.query,
-                    outcome: LookupOutcome::NotFound,
+                    outcome: LookupOutcome::NotFound {
+                        attempted: vec![LookupInterpretation::Name],
+                    },
                 },
                 Some(InspectionResult::Rejected { diagnostic }) => LookupResult {
                     query: prepared.query,
@@ -7335,8 +7344,12 @@ fn lookup_response(
                     },
                 },
             },
-            PreparedLookupKind::Module(_) => match inspected.next() {
-                Some(InspectionResult::Browse { entries, .. }) => LookupResult::found(
+            // The batch carried `Info` then `Browse` for this one query, so the
+            // name answer is taken when GHC has one and the module browse is
+            // read only when it does not. Both results are consumed either way,
+            // which is what keeps the remaining queries aligned.
+            PreparedLookupKind::Qualified(_) => match (inspected.next(), inspected.next()) {
+                (Some(InspectionResult::Info { entries, .. }), _) => LookupResult::found(
                     prepared.query,
                     entries
                         .into_iter()
@@ -7344,32 +7357,31 @@ fn lookup_response(
                         .collect(),
                     MATCH_LIMIT,
                 ),
-                Some(InspectionResult::ModuleNotFound { .. }) => LookupResult {
-                    query: prepared.query,
-                    outcome: LookupOutcome::NotFound,
-                },
-                Some(InspectionResult::Rejected { diagnostic }) => LookupResult {
-                    query: prepared.query,
-                    outcome: LookupOutcome::Rejected { diagnostic },
-                },
-                Some(other) => LookupResult {
-                    query: prepared.query,
-                    outcome: LookupOutcome::Rejected {
-                        diagnostic: format!("lookup worker returned unexpected result: {other:?}"),
-                    },
-                },
-                None => LookupResult {
-                    query: prepared.query,
-                    outcome: LookupOutcome::Rejected {
-                        diagnostic: "lookup worker omitted a result".into(),
-                    },
-                },
+                (Some(InspectionResult::Ambiguous { entries, .. }), _) => LookupResult::ambiguous(
+                    prepared.query,
+                    entries
+                        .into_iter()
+                        .map(|entry| info_lookup_entry(entry, live_modules))
+                        .collect(),
+                    MATCH_LIMIT,
+                ),
+                (_, Some(InspectionResult::Browse { entries, .. })) => LookupResult::found(
+                    prepared.query,
+                    entries
+                        .into_iter()
+                        .map(|entry| info_lookup_entry(entry, live_modules))
+                        .collect(),
+                    MATCH_LIMIT,
+                ),
+                (by_name, by_module) => unresolved_qualified(prepared.query, by_name, by_module),
             },
             PreparedLookupKind::Type(_) => match inspected.next() {
                 Some(InspectionResult::TypeMatches { matches, .. }) if matches.is_empty() => {
                     LookupResult {
                         query: prepared.query,
-                        outcome: LookupOutcome::NotFound,
+                        outcome: LookupOutcome::NotFound {
+                            attempted: vec![LookupInterpretation::TypeSearch],
+                        },
                     }
                 }
                 Some(InspectionResult::TypeMatches { matches, .. }) => LookupResult::found(
@@ -7433,6 +7445,38 @@ fn lookup_response(
             origin: lookup_origin(entry.module.as_deref(), live_modules),
             quality: MatchQuality::Exact,
             availability: entry.availability,
+        }
+    }
+
+    /// Neither interpretation of a dotted capitalized query produced entries.
+    /// A miss reports both attempts, so a reader is never left guessing which
+    /// question was asked; a real diagnostic from either side outranks it,
+    /// because a failed query is not evidence the name does not exist.
+    fn unresolved_qualified(
+        query: String,
+        by_name: Option<InspectionResult>,
+        by_module: Option<InspectionResult>,
+    ) -> LookupResult {
+        let diagnostic = [by_name, by_module]
+            .into_iter()
+            .find_map(|result| match result {
+                Some(
+                    InspectionResult::NotFound { .. } | InspectionResult::ModuleNotFound { .. },
+                ) => None,
+                Some(InspectionResult::Rejected { diagnostic }) => Some(diagnostic),
+                Some(other) => Some(format!(
+                    "lookup worker returned unexpected result: {other:?}"
+                )),
+                None => Some("lookup worker omitted a result".into()),
+            });
+        LookupResult {
+            query,
+            outcome: match diagnostic {
+                Some(diagnostic) => LookupOutcome::Rejected { diagnostic },
+                None => LookupOutcome::NotFound {
+                    attempted: vec![LookupInterpretation::Name, LookupInterpretation::Module],
+                },
+            },
         }
     }
 
@@ -7531,6 +7575,16 @@ mod tests {
         );
     }
 
+    fn info_entry(name: &str, module: &str, kind: &str, display: &str) -> InfoEntry {
+        InfoEntry {
+            name: name.into(),
+            module: Some(module.into()),
+            kind: kind.into(),
+            display: display.into(),
+            availability: InspectionAvailability::Available,
+        }
+    }
+
     #[test]
     fn module_shaped_lookup_renders_a_browse_result() {
         let prepared = crate::lookup_tool::prepare(serde_json::json!({
@@ -7539,21 +7593,26 @@ mod tests {
         .unwrap();
         assert_eq!(
             prepared[0].kind,
-            crate::lookup_tool::PreparedLookupKind::Module("Project.Investigate".into())
+            crate::lookup_tool::PreparedLookupKind::Qualified("Project.Investigate".into())
         );
         let response = lookup_response(
             prepared,
-            vec![InspectionResult::Browse {
-                module: "Project.Investigate".into(),
-                expanded: false,
-                entries: vec![InfoEntry {
-                    name: "investigate".into(),
-                    module: Some("Project.Investigate".into()),
-                    kind: "value".into(),
-                    display: "investigate :: FilePath -> IO ()".into(),
-                    availability: InspectionAvailability::Available,
-                }],
-            }],
+            // The same batch carried both interpretations: no name, a module.
+            vec![
+                InspectionResult::NotFound {
+                    query: "Project.Investigate".into(),
+                },
+                InspectionResult::Browse {
+                    module: "Project.Investigate".into(),
+                    expanded: false,
+                    entries: vec![info_entry(
+                        "investigate",
+                        "Project.Investigate",
+                        "value",
+                        "investigate :: FilePath -> IO ()",
+                    )],
+                },
+            ],
             &[],
             &[],
         );
@@ -7567,26 +7626,298 @@ mod tests {
             .contains("investigate :: FilePath -> IO ()"));
     }
 
+    /// The defect this path exists for: `Cmd.CommandResult` is a qualified type
+    /// and was answered `no match` because its spelling was read as a module.
     #[test]
-    fn unresolved_module_shaped_lookup_is_a_clean_no_match_not_an_error() {
+    fn qualified_lookup_answers_the_name_when_no_such_module_exists() {
+        let prepared = crate::lookup_tool::prepare(serde_json::json!({
+            "queries": ["Cmd.CommandResult"]
+        }))
+        .unwrap();
+        let response = lookup_response(
+            prepared,
+            vec![
+                InspectionResult::Info {
+                    query: "Cmd.CommandResult".into(),
+                    entries: vec![info_entry(
+                        "CommandResult",
+                        "Tidepool.Command",
+                        "type",
+                        "data CommandResult",
+                    )],
+                },
+                InspectionResult::ModuleNotFound {
+                    module: "Cmd.CommandResult".into(),
+                },
+            ],
+            &[],
+            &[],
+        );
+        assert_eq!(
+            response.render_text(),
+            "Cmd.CommandResult\n  data CommandResult"
+        );
+    }
+
+    /// A name that is both a type and a value answers with both entries; the
+    /// module interpretation of the same batch must not displace either.
+    #[test]
+    fn qualified_lookup_keeps_every_entry_of_an_ambiguous_name() {
+        let prepared = crate::lookup_tool::prepare(serde_json::json!({
+            "queries": ["Cmd.RunResult"]
+        }))
+        .unwrap();
+        let response = lookup_response(
+            prepared,
+            vec![
+                InspectionResult::Ambiguous {
+                    query: "Cmd.RunResult".into(),
+                    entries: vec![
+                        info_entry(
+                            "RunResult",
+                            "Tidepool.Command",
+                            "type",
+                            "data RunResult = RunResult",
+                        ),
+                        info_entry(
+                            "RunResult",
+                            "Tidepool.Command",
+                            "constructor",
+                            "RunResult :: Int -> RunResult",
+                        ),
+                    ],
+                },
+                InspectionResult::ModuleNotFound {
+                    module: "Cmd.RunResult".into(),
+                },
+            ],
+            &[],
+            &[],
+        );
+        let crate::lookup_tool::LookupOutcome::Ambiguous { matches, .. } =
+            &response.results[0].outcome
+        else {
+            panic!("expected ambiguous, got {:?}", response.results[0].outcome);
+        };
+        assert_eq!(matches.len(), 2, "{matches:?}");
+        let rendered = response.render_text();
+        assert!(
+            rendered.contains("data RunResult = RunResult"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("RunResult :: Int -> RunResult"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn unresolved_module_shaped_lookup_reports_both_interpretations_it_tried() {
         let prepared = crate::lookup_tool::prepare(serde_json::json!({
             "queries": ["No.Such.Module"]
         }))
         .unwrap();
         let response = lookup_response(
             prepared,
-            vec![InspectionResult::ModuleNotFound {
-                module: "No.Such.Module".into(),
-            }],
+            vec![
+                InspectionResult::NotFound {
+                    query: "No.Such.Module".into(),
+                },
+                InspectionResult::ModuleNotFound {
+                    module: "No.Such.Module".into(),
+                },
+            ],
             &[],
             &[],
         );
         assert_eq!(response.results.len(), 1);
         assert_eq!(
             response.results[0].outcome,
-            crate::lookup_tool::LookupOutcome::NotFound
+            crate::lookup_tool::LookupOutcome::NotFound {
+                attempted: vec![
+                    crate::lookup_tool::LookupInterpretation::Name,
+                    crate::lookup_tool::LookupInterpretation::Module,
+                ],
+            }
         );
-        assert_eq!(response.render_text(), "No.Such.Module\n  no match");
+        assert_eq!(
+            response.render_text(),
+            "No.Such.Module\n  no match: not in scope as a name, and no module of that name"
+        );
+    }
+
+    /// Queries answered locally consume no compiler result and a dotted
+    /// capitalized query consumes exactly two, so a mixed batch stays aligned:
+    /// every query must land on the results issued for it and no other.
+    #[test]
+    fn a_mixed_batch_keeps_each_query_on_its_own_results() {
+        let prepared = crate::lookup_tool::prepare(serde_json::json!({
+            "queries": [
+                "doc topics", "", "Cmd.CommandResult", "Project.Investigate",
+                "Cmd.CommandExited", "Unknown.Module"
+            ]
+        }))
+        .unwrap();
+        let response = lookup_response(
+            prepared,
+            vec![
+                InspectionResult::Info {
+                    query: "Cmd.CommandResult".into(),
+                    entries: vec![info_entry(
+                        "CommandResult",
+                        "Tidepool.Command",
+                        "type",
+                        "data CommandResult",
+                    )],
+                },
+                InspectionResult::ModuleNotFound {
+                    module: "Cmd.CommandResult".into(),
+                },
+                InspectionResult::NotFound {
+                    query: "Project.Investigate".into(),
+                },
+                InspectionResult::Browse {
+                    module: "Project.Investigate".into(),
+                    expanded: false,
+                    entries: vec![info_entry(
+                        "investigate",
+                        "Project.Investigate",
+                        "value",
+                        "investigate :: FilePath -> IO ()",
+                    )],
+                },
+                InspectionResult::Ambiguous {
+                    query: "Cmd.CommandExited".into(),
+                    entries: vec![info_entry(
+                        "CommandExited",
+                        "Tidepool.Command",
+                        "constructor",
+                        "CommandExited :: Int -> CommandOutcome",
+                    )],
+                },
+                InspectionResult::ModuleNotFound {
+                    module: "Cmd.CommandExited".into(),
+                },
+                InspectionResult::NotFound {
+                    query: "Unknown.Module".into(),
+                },
+                InspectionResult::ModuleNotFound {
+                    module: "Unknown.Module".into(),
+                },
+            ],
+            &[],
+            &[],
+        );
+        let queries: Vec<&str> = response
+            .results
+            .iter()
+            .map(|result| result.query.as_str())
+            .collect();
+        assert_eq!(
+            queries,
+            [
+                "doc topics",
+                "",
+                "Cmd.CommandResult",
+                "Project.Investigate",
+                "Cmd.CommandExited",
+                "Unknown.Module"
+            ]
+        );
+        assert!(matches!(
+            response.results[1].outcome,
+            crate::lookup_tool::LookupOutcome::Rejected { .. }
+        ));
+        assert!(matches!(
+            response.results[4].outcome,
+            crate::lookup_tool::LookupOutcome::Ambiguous { .. }
+        ));
+        assert_eq!(
+            response.results[5].outcome,
+            crate::lookup_tool::LookupOutcome::NotFound {
+                attempted: vec![
+                    crate::lookup_tool::LookupInterpretation::Name,
+                    crate::lookup_tool::LookupInterpretation::Module,
+                ],
+            }
+        );
+        let rendered = response.render_text();
+        assert!(
+            rendered.contains("Cmd.CommandResult\n  data CommandResult"),
+            "{rendered}"
+        );
+        assert!(
+            rendered
+                .contains("Project.Investigate\n  [available] investigate :: FilePath -> IO ()"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Cmd.CommandExited\n  CommandExited :: Int -> CommandOutcome"),
+            "{rendered}"
+        );
+    }
+
+    /// One query's inspection failing is not the batch failing: the results
+    /// that resolved are still rendered, in their own places.
+    #[test]
+    fn a_failed_query_leaves_the_rest_of_the_batch_rendered() {
+        let prepared = crate::lookup_tool::prepare(serde_json::json!({
+            "queries": ["awaitSettled", "Broken.Query", "Project.Investigate"]
+        }))
+        .unwrap();
+        let response = lookup_response(
+            prepared,
+            vec![
+                InspectionResult::Info {
+                    query: "awaitSettled".into(),
+                    entries: vec![info_entry(
+                        "awaitSettled",
+                        "Tidepool.Agent.Watch",
+                        "value",
+                        "awaitSettled :: Int",
+                    )],
+                },
+                InspectionResult::NotFound {
+                    query: "Broken.Query".into(),
+                },
+                InspectionResult::Rejected {
+                    diagnostic: "inspection unavailable".into(),
+                },
+                InspectionResult::NotFound {
+                    query: "Project.Investigate".into(),
+                },
+                InspectionResult::Browse {
+                    module: "Project.Investigate".into(),
+                    expanded: false,
+                    entries: vec![info_entry(
+                        "investigate",
+                        "Project.Investigate",
+                        "value",
+                        "investigate :: FilePath -> IO ()",
+                    )],
+                },
+            ],
+            &[],
+            &[],
+        );
+        assert_eq!(response.results.len(), 3);
+        assert!(matches!(
+            response.results[1].outcome,
+            crate::lookup_tool::LookupOutcome::Rejected { .. }
+        ));
+        let rendered = response.render_text();
+        assert!(
+            rendered.contains("[available] awaitSettled :: Int"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("error: inspection unavailable"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("investigate :: FilePath -> IO ()"),
+            "{rendered}"
+        );
     }
 
     #[test]

@@ -16,9 +16,9 @@ Prefix a type query with `::`; use `doc` for topics or `doc <topic>` for a topic
 Type search is Hoogle-like and needs a complete type: use `_` to wildcard an \
 unknown part and qualify types as they are imported, e.g. \
 `:: Cmd.Command -> _` finds functions from `Cmd.Command` to anything. \
-A dotted capitalized name, e.g. `Project.Investigate`, browses that module's \
-exports instead of looking up one identifier; see `doc topics` for the \
-workspace's own modules. \
+A dotted capitalized query, e.g. `Cmd.RunResult` or `Project.Investigate`, is \
+resolved first as a qualified name and, only when no such name is in scope, \
+browsed as a module's exports; see `doc topics` for the workspace's own modules. \
 Callable results show current-row availability: `polymorphic` fits your row and \
 its remaining constraint is decided by the call site, so it is usable; `unknown` \
 needs more type information. Resource grants are checked when an operation \
@@ -42,19 +42,22 @@ pub(crate) struct PreparedLookup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PreparedLookupKind {
     Name(String),
-    Module(String),
+    /// Dotted and capitalized throughout: `Cmd.RunResult` is a qualified type
+    /// or constructor, `Project.Investigate` is a module, and the spelling
+    /// alone does not say which. Resolved as a name first and browsed as a
+    /// module only when no such name is in scope.
+    Qualified(String),
     Type(String),
     Doc(String),
     Rejected(String),
 }
 
-/// A dotted, capitalized identifier such as `Project.Investigate` names a
-/// module and is browsed rather than looked up by name. A qualified value or
-/// constructor reference (`Cmd.run`, `Data.Text.pack`) has a lowercase-led
-/// final segment and is left as a `Name` query exactly as before; so does a
-/// bare capitalized word (`Maybe`) with no dot at all, since that is how a
-/// type or constructor is already found today.
-fn looks_like_module(candidate: &str) -> bool {
+/// Dotted with every segment capitalized. That is the spelling a module has,
+/// and equally the spelling a qualified type or constructor has (`Cmd.RunResult`,
+/// `Maybe.Just`), so it cannot be classified here — only GHC knows which names
+/// the turn's scope carries. A lowercase-led final segment (`Cmd.run`) is a
+/// plain `Name` query, and so is a bare capitalized word (`Maybe`).
+fn is_dotted_capitalized(candidate: &str) -> bool {
     let mut segments = 0;
     for segment in candidate.split('.') {
         segments += 1;
@@ -155,8 +158,8 @@ pub(crate) fn prepare(
                         PreparedLookupKind::Rejected("documentation query accepts one topic".into())
                     }
                 }
-            } else if looks_like_module(trimmed) {
-                PreparedLookupKind::Module(trimmed.into())
+            } else if is_dotted_capitalized(trimmed) {
+                PreparedLookupKind::Qualified(trimmed.into())
             } else {
                 PreparedLookupKind::Name(trimmed.into())
             };
@@ -283,6 +286,43 @@ fn availability_label(availability: InspectionAvailability) -> &'static str {
     }
 }
 
+/// How a query was put to GHC. A miss reports these so the reader can tell
+/// "this does not exist" from "this was never asked that way".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LookupInterpretation {
+    Name,
+    Module,
+    TypeSearch,
+}
+
+impl LookupInterpretation {
+    /// What this interpretation reports when it finds nothing.
+    fn miss(self) -> &'static str {
+        match self {
+            Self::Name => "not in scope as a name",
+            Self::Module => "no module of that name",
+            Self::TypeSearch => "no value with that type",
+        }
+    }
+}
+
+/// A bare `no match` hides which question was asked. A live lead read one for
+/// `Cmd.CommandResult`, which had been classified as a module and never tried
+/// as a name, and spent a turn investigating whether the type existed at all.
+/// Every miss names the interpretations that produced it.
+fn describe_misses(attempted: &[LookupInterpretation]) -> String {
+    let misses = attempted
+        .iter()
+        .map(|interpretation| interpretation.miss())
+        .collect::<Vec<_>>();
+    match misses.as_slice() {
+        [] => "nothing was looked up".into(),
+        [only] => (*only).into(),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(crate) enum LookupOutcome {
@@ -290,7 +330,9 @@ pub(crate) enum LookupOutcome {
         matches: Vec<LookupEntry>,
         truncated: bool,
     },
-    NotFound,
+    NotFound {
+        attempted: Vec<LookupInterpretation>,
+    },
     Ambiguous {
         matches: Vec<LookupEntry>,
         truncated: bool,
@@ -388,7 +430,9 @@ impl LookupResponse {
                         }
                         lines.join("\n")
                     }
-                    LookupOutcome::NotFound => "  no match".into(),
+                    LookupOutcome::NotFound { attempted } => {
+                        format!("  no match: {}", describe_misses(attempted))
+                    }
                     LookupOutcome::Rejected { diagnostic } => {
                         format!(
                             "  error: {}",
@@ -473,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn dotted_capitalized_query_is_a_module_lookup_and_other_names_are_unchanged() {
+    fn dotted_capitalized_query_is_a_qualified_lookup_and_other_names_are_unchanged() {
         let prepared = prepare(serde_json::json!({
             "queries": [
                 "Project.Investigate",
@@ -486,14 +530,14 @@ mod tests {
         .unwrap();
         assert_eq!(
             prepared[0].kind,
-            PreparedLookupKind::Module("Project.Investigate".into())
+            PreparedLookupKind::Qualified("Project.Investigate".into())
         );
         assert_eq!(
             prepared[1].kind,
-            PreparedLookupKind::Module("Tidepool.Actor.Record".into())
+            PreparedLookupKind::Qualified("Tidepool.Actor.Record".into())
         );
-        // A qualified value (lowercase-led final segment) is a Name query,
-        // exactly as before module detection existed.
+        // A qualified value (lowercase-led final segment) is a plain Name
+        // query: it cannot be a module, so nothing is browsed for it.
         assert_eq!(prepared[2].kind, PreparedLookupKind::Name("Cmd.run".into()));
         assert_eq!(
             prepared[3].kind,
@@ -696,7 +740,9 @@ mod tests {
                 },
                 LookupResult {
                     query: "missing".into(),
-                    outcome: LookupOutcome::NotFound,
+                    outcome: LookupOutcome::NotFound {
+                        attempted: vec![LookupInterpretation::Name],
+                    },
                 },
             ],
         };
@@ -704,6 +750,43 @@ mod tests {
         assert!(rendered.find("awaitSettled").unwrap() < rendered.find("NotInScope").unwrap());
         assert!(rendered.contains("awaitSettled :: Int"));
         assert!(rendered.contains("error: Not in scope"));
-        assert!(rendered.ends_with("missing\n  no match"));
+        assert!(rendered.ends_with("missing\n  no match: not in scope as a name"));
+    }
+
+    #[test]
+    fn a_missing_qualified_query_names_both_interpretations_it_was_given() {
+        // The exact shape that cost a live lead a turn: it read `no match` for
+        // `Cmd.CommandResult`, could not tell the query had been browsed as a
+        // module and never tried as a name, and went looking for the type.
+        let response = LookupResponse {
+            results: vec![LookupResult {
+                query: "Cmd.CommandResult".into(),
+                outcome: LookupOutcome::NotFound {
+                    attempted: vec![LookupInterpretation::Name, LookupInterpretation::Module],
+                },
+            }],
+        };
+        assert_eq!(
+            response.render_text(),
+            "Cmd.CommandResult\n  no match: not in scope as a name, and no module of that name"
+        );
+        assert_eq!(
+            serde_json::to_value(&response).unwrap()["results"][0]["outcome"],
+            serde_json::json!({"status": "not_found", "attempted": ["name", "module"]})
+        );
+        // One interpretation reports only its own miss; a type query says which
+        // search came back empty.
+        assert_eq!(
+            LookupResponse {
+                results: vec![LookupResult {
+                    query: ":: Int -> Cmd.RunResult".into(),
+                    outcome: LookupOutcome::NotFound {
+                        attempted: vec![LookupInterpretation::TypeSearch],
+                    },
+                }],
+            }
+            .render_text(),
+            ":: Int -> Cmd.RunResult\n  no match: no value with that type"
+        );
     }
 }

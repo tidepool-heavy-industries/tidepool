@@ -315,6 +315,10 @@ async fn hosted_lookup_and_status_use_actor_owned_views() {
     );
     let preamble =
         insert_preamble_imports(&preamble, "Tidepool.Actors.Shoal (assignment, request)");
+    // A qualified alias whose members are a type and a constructor, alongside
+    // the module it aliases: the three dotted capitalized shapes a lookup has
+    // to tell apart.
+    let preamble = insert_preamble_imports(&preamble, "qualified Data.Maybe as Maybe");
     let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let root = tempfile::tempdir().unwrap();
@@ -360,6 +364,41 @@ async fn hosted_lookup_and_status_use_actor_owned_views() {
         .await
         .unwrap();
     let policy = super::ResidentInteractivePolicy::local(actor);
+
+    // A qualified type, a qualified constructor, a real module, and a dotted
+    // capitalized query that is none of those. The first two used to be read as
+    // modules and answered `no match`; the last must say what it tried.
+    let qualified = policy
+        .dispatch_boxed(lookup_invocation(
+            &["Maybe.Maybe", "Maybe.Just", "Data.Maybe", "Maybe.Nope"],
+            "qualified-lookup",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(qualified["status"], "committed", "{qualified}");
+    let qualified_output = qualified["items"][0]["output"].as_str().unwrap();
+    let section = |query: &str| {
+        qualified_output
+            .split("\n\n")
+            .find(|section| section.starts_with(&format!("{query}\n")))
+            .unwrap_or_else(|| panic!("no section for {query}: {qualified_output}"))
+            .to_owned()
+    };
+    assert!(
+        section("Maybe.Maybe").contains("data Maybe"),
+        "{qualified_output}"
+    );
+    assert!(section("Maybe.Just").contains("Just"), "{qualified_output}");
+    assert!(
+        section("Data.Maybe").contains("fromMaybe"),
+        "{qualified_output}"
+    );
+    assert_eq!(
+        section("Maybe.Nope"),
+        "Maybe.Nope\n  no match: not in scope as a name, and no module of that name",
+        "{qualified_output}"
+    );
+    assert!(!qualified_output.contains("error:"), "{qualified_output}");
 
     let response = policy
         .dispatch_boxed(invocation(

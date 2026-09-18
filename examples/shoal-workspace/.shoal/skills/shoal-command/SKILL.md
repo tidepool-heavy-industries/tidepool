@@ -165,8 +165,23 @@ or longer-lived evidence. Partial text is diagnostic data, not complete JSON.
 to the owning TUI. Retain the job for `Cmd.sendInput`, `Cmd.closeInput` and
 `Cmd.resize`. PTYs use terminal EOF input instead of `closeInput`.
 `Cmd.completion job :: R.EventSource Cmd.CommandResult` supplies one retained
-terminal event, including attachment after completion. Load `shoal-define-actors`
-for custom routing. Captured handles do not transfer authority; finish collectors
-when their remaining obligations are settled.
+terminal event, including attachment after completion. To continue automatically:
+
+1. Capture the original job in the handler; the event contains outcome and
+   cleanup, not the job or captured output.
+2. Read retained stdout with `Cmd.readStdout job`; include `Commands` in the
+   handler's effect row. Handle `Left` explicitly rather than substituting empty
+   evidence. `Cmd.stdout` accepts `Cmd.RunResult`, not the completion payload.
+3. `Cmd.readStdout` requires successful completion and answers
+   `Left (Cmd.Unsuccessful outcome)` for anything else, so a failed command's
+   diagnostic output is read with `Cmd.readOutput`/`Cmd.next` instead, retaining
+   outcome and cleanup separately.
+4. Interpret the available evidence and execute the prepared follow-up in that
+   handler. Preserve outcome and cleanup separately from a semantic judgment;
+   stdout alone is not a complete diagnostic bundle for commands using stderr.
+5. Retain the result and finish the collector when its obligations are settled.
+
+Use `shoal-define-actors` for handler construction. Captured handles do not
+transfer authority.
 
 For project-authored direct tools, see [Defining compiled tools](references/hosted-tools.md).
