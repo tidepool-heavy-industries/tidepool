@@ -3,11 +3,9 @@ own reasoning. Use it for the small semantic decisions that come up inside a
 cell — routing, triage, relevance, whether the evidence you have already
 answers the question, or which of several prepared continuations to take.
 Every role may call it; calls run in tens to hundreds of milliseconds. A
-judgment is evidence, not authority: it never substitutes for review, for a
-check, or for your own decision to merge, stop, or steer. It also never
-generates the action itself — a choice selects a payload you already built
-(a command, a line reference, a continuation), and the payload runs, never
-the model's wording.
+judgment is evidence, not authority: code and the task's policy determine which
+checks, reviews, and permissions an action requires. A choice selects a payload you already built
+(a command, a line reference, a continuation); code runs that payload.
 
 **Cost.** A call is cheap — about 200 ms — and the per-run cap is effectively
 unlimited. Call it per item, per file, per candidate, inside a loop; do not
@@ -95,55 +93,33 @@ don't retry blindly.
   questions in the same packet range over the same alternatives; draw on it
   with `J.manyFrom`/`J.eachIn`/`J.askAbout` instead of repeating wording.
 
-## Calibration
+## Evidence, intent, and uncertainty
 
-Measured on 2026-09-17 (262 calls, `jev-1.13.0`):
+Include task intent when it changes the answer. The same diagnostic can require
+updating callers or restoring a definition. Keep authoritative artifacts separate
+from reports, and use code for known completeness and ownership checks.
 
-- A mass of 1.0 means no option in the pool competes. Rewording does not
-  move it. If the 1.0 surprises you, the option you expected to compete is
-  missing; add it. If it does not surprise you, the question was not worth
-  asking.
-- Options describe the condition that makes them apply, in terms of fields
-  the state has: "the report names a target file, a duplication check, a
-  scope and an acceptance criterion". Not the action ("launch the child
-  now", which flattens toward the prior) and not the argument ("despite
-  existing coverage", which steers). A condition turns the gate into a
-  checklist Jev verifies field by field.
-- Rivals come from evidence, not from your own shortlist, or the pool
-  inherits your ranking.
-- Gate on confidence first. Over 42 labelled choices both wrong answers sat
-  below 0.25 confidence; mass and margin floors added nothing below 0.85.
-  The three named policies are those measured thresholds, by stakes:
-  `J.routing` (which file, which skill) 0.40 / 0.08 / 0.50; `J.spawning`
-  (launching a worker, choosing an approach, accepting a reviewed diff)
-  0.55 / 0.20 / 0.70; `J.merging` (merging, stopping, anything with a
-  receipt, or a diff nobody reviewed) 0.70 / 0.40 / 0.85. Pick by stakes;
-  do not hand-tune a fourth.
-- Gate on the artifact, not the narration: a diff and test output, never
-  the child's own report. With the artifact present a lying report moved no
-  answer more than 0.08; with only the report, confidence fell to 0.07.
-- Diff review: file questions on `git diff --stat` (a thousand tokens),
-  content questions per file on its hunks, files in parallel. State plus
-  questions is capped at 32k tokens; a larger state is `Left (JevHttp 400
-  …max_tokens_exceeded…)`, and a 30k whole diff already drops confidence.
-- A gate is an ordinary `choice` with four condition-descriptive options:
-  every named item is present; at least one named item is absent; the state
-  contradicts one of them (that last one hands back to the model); and the
-  state lacks the field that would decide (`insufficient_evidence`: fetch
-  the field, never merge, never repair on it). Name the items, and write
-  the condition most likely to be missed into the "absent" option verbatim:
-  a gate cannot check a condition its options never name (run 6 accepted a
-  candidate at 0.90 whose empty-list case no option mentioned). "Is the report sufficient?" measures nothing; "the report names a
-  target file, a duplication check, a scope, an acceptance criterion and its
-  failure evidence" is a checklist Jev verifies field by field, and it moved
-  confidence from 0.58 to 0.92 with zero variance on eight repeats.
-- A judgment `noul` states both conditions in its question text, or attaches
-  them with `J.about`: what a yes means and what a no means, in the same
-  field terms. A bare "is this good enough" inherits the prior.
+Write alternatives as comparable conditions on the supplied state. Include a
+described exit when none may fit. A mass of 1.0 means no offered alternative
+competes; inadequate evidence or options can still produce that result.
 
-Read `J.contenders` and `a.confidence`, not only `a.key`. When the result
-gates an action, gate on `J.accept policy answer`. A judgment is still
-evidence, not authority.
+J.accept returns the accepted winning selection, whatever it means. A confident
+item_missing is a Right too. Dispatch with J.handle, and handle doubt and service
+failure explicitly. Confidence does not establish evidence coverage or authority.
+Use the named policies as starting points and evaluate the resulting behavior
+for your actual task and consequences.
+
+Bundle independent and speculative questions over the same state. They cannot
+see one another's answers. A second call is useful when a previous answer leads
+to new evidence. Keep raw judgments available for inspection and reuse.
+
+Preserve full evidence or recoverable references. Excerpts need scope and source
+addresses. A display budget must not silently delete the fact a judgment needs.
+Use Cmd.quiet and small output projections to keep large retained values out of
+the conversation.
+
+See shoal-jev for worked patterns. Historical lab results apply to their fixtures;
+they are not universal rules about question wording, thresholds, or pool size.
 
 ## A worked cell
 
@@ -201,10 +177,9 @@ is what you want the first few times you write a packet.
 ## A Jev-dense cell
 
 One shell command lists the candidates and one read per candidate gathers
-evidence, bound as ordinary values. Keep each preview short (`T.take 2000`)
-and bind the previews, not the whole files: every bound value is observed,
-and six 220-line files exhausted the notebook's observation budget before
-the Jev call in run 4.
+evidence, bound as ordinary values. Use bounded previews when suitable, retain their paths for expansion, and use
+Cmd.quiet when gathering evidence for code. Keep complete results available where
+needed; display limits and evidence completeness are different contracts.
 
 ```haskell
 listed <- Cmd.stdout <$> Cmd.run [bash|ls|]

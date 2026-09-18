@@ -748,6 +748,9 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     assert_eq!(reply["status"], "replied", "{reply}");
     campaign.await_watch_ready().await;
     let success = committed(root.as_ref(), guide_examples.next().unwrap()).await;
+    // Define the command/Jev composition through the production workbench. Do not
+    // call a live provider: this check proves the published surface compiles.
+    committed(root.as_ref(), guide_examples.next().unwrap()).await;
     assert!(guide_examples.next().is_none(), "untested guide example");
     assert_eq!(
         success["items"][1]["output"],

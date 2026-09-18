@@ -1,247 +1,209 @@
-# Shoal implementation handoff
+# Next: use Shoal, and program how you work
 
-## Objective and execution mode
+Outlook for the next resident agents, 2026-09-17. This replaces the old
+implementation handoff. Exact APIs and availability belong to the installed
+session guide and owning source; this document supplies direction, not signatures.
 
-Build a powerful, composable Shoal foundation and a usable orchestration package
-in workspace Haskell and Markdown. Astra authors the architecture, plan tree,
-shared language, and working recipes. Sol leads execute declared components and
-activate Astra specialists at explicitly tagged obligations. The human requests
-ordinary Astra RSI engagements to improve the next swarm's working definitions.
+## The ambition
 
-Use **one Astra at Medium working sequentially** to implement, review, and check
-the system. Do not delegate its implementation or review or build it through a
-Shoal development tree. The builder's user-directed goal loop is distinct from
-the product actors: native Codex goals remain disabled on all Shoal nodes.
+You have a persistent Haskell interaction surface. Use it to write programs as
+work unfolds: combine commands, evidence, Jev judgments, typed actions, and child
+agents in cells that accomplish something substantial before returning to you.
+All agents share this language for expressing work. Useful definitions can become
+project code another agent reads, runs, and improves.
 
-The [vision](plans/next/planned-swarm.md) owns the operating model;
-the [workspace design](plans/next/workspace-pilot.md) owns customization and
-context packaging; the [Haskell reference](plans/next/sol-worker-routing.md)
-contains broader interface sketches. Exact implemented signatures belong in the
-[shipped API guide](prompts/shoal/api-guide.md) and checked source.
-The [workspace package](examples/shoal-workspace/README.md) is the single authoring
-location for the current curated prompts/helpers, GHCi examples and example plan
-tree. Next-run preparation copies its selected definitions into the target's
-original-root `.shoal`; do not hand-curate installed variants. The [curation review](plans/next/evidence/workbench-curation.md)
-records the responsibility audit and checks for the [workbench curation plan](plans/next/package-curation.md).
+We want dramatically more useful activity from the same frontier-model budget.
+**10× is the ambition, not a measured result.** A promising route is replacing
+whole read-understand-decide-invoke turns with authored code containing cheap
+semantic judgments. That saves attention and context as well as calls, and may
+make larger useful trees affordable.
 
-Curation replaced the fixed worker procession with independent workbench
-operations, one reviewed revision, source-bearing tasks and explicit accepted
-decisions. Prompts teach starting and continuing implementation, review, repair,
-questions and requested RSI. Portable candidate checks execute both repair
-relationships, cumulative attention, decision propagation to a fresh consumer,
-failed routing/steering and checked customization through an explicit new swarm.
-All seven curation steps are complete. The fixed build and installed package
-passed 43 recipe assertions using the packaged compiler daemon; the application
-readiness record pins the executable, source and definition identity. Cold standalone
-checking has substantial startup overhead, recorded in the review. A live application
-run has since produced accepted preparation and is explicitly paused; finished
-feature acceptance and adoption of the next prompt package remain open.
+A followup that handles 30% of otherwise necessary turns could be valuable even
+if every other case returns to the model. That percentage is an illustration,
+not a target or finding. Count authoring effort, mistakes, and repeated work too.
 
-The current RSI work is prompt/document curation from `shoal-repl-live-20260907`,
-isolated in `/home/inanna/dev/shoal-repl-live-20260907`. Its integrated product source
-is `f6d90983e2ad34b7fed3e0bd0a3884b8c9a7299c`: contract and terminal regression,
-with four component readbacks awaiting correction/release. The human paused every
-active worker for a separately owned messaging fix. Do not restart it from this
-handoff. [Plan readback adoption](plans/next/plan-readback.md) tracks the outstanding
-release and candidate prompting. The [composition guide](examples/shoal-workspace/.shoal/plans/composition.md)
-teaches recursive fork/join and local integration loops through Git and graph
-concepts. The canonical prompt pass is checked; [its review](plans/next/evidence/prompt-rsi.md)
-records 43 passing assertions, compiled new examples and the remaining launch
-preparation for the proposed Tidepool dogfood tasks. The older
-`/home/inanna/dev/shoal-repl` session remains separate.
+The immediate aim is a compelling, usable repo people can explore themselves:
+Haskell as an agent interface, Jev as programmable semantic intelligence, and a
+few powerful examples that really ran. Publication is README-first. Working
+capability and a clear invitation matter more than a staged demonstration.
 
-## Architecture and settled boundaries
+## The next sessions
 
-| Layer | Responsibility |
-|---|---|
-| Rust runtime | Processes, provider integration, scheduling, authority, custody, persistence, observations |
-| General Haskell surface | Worker construction, typed interaction, dependencies, routing, inspection |
-| Workspace Haskell and prompts | Context builders, model placement, review/repair, questions, reporting, project behavior |
-| Markdown plan tree | Current architecture, decomposition, assignments, dependencies, acceptance, amendments |
+The initial solo Sol and Sol-with-Luna runs have happened. The user will launch
+and drive an Astra session in this repository for hands-on collaborative design
+and self-improvement. Start there; do not repeat the earlier dogfood sequence or
+hand execution to a coordinator and go idle. Consult the latest run findings for
+specific remaining friction and verification limits.
 
-A substantial change in collaboration should normally be expressible by editing
-workspace Haskell and prompts. Add runtime behavior when a real composition
-exposes a missing capability or ownership invariant. Build the Haskell consumer
-alongside each primitive extension.
+Use real work to explore. Write a useful cell, inspect its behavior together, and
+change the program or supporting surface. Delegate bounded work when helpful.
+Fix blockers with focused checks, preserve exact failing cells, and coordinate
+expensive builds so they do not starve a live session.
 
-- Keep normal interactive Codex TUIs for every worker and for human steering.
-  No replacement viewer, new operator-input protocol, or controller/service
-  migration is required. Preserve conversation when hosted coordination fails.
-- TOML owns core configuration: module/source lists, prompt references, metadata,
-  defaults, and explicit CLI overrides. Haskell composes behavior; Markdown
-  supplies authored prose. Do not introduce a second configuration loader.
-- One authoritative `.shoal` at the original workspace root supplies the swarm.
-  Managed-checkout copies are candidate source. Track authored files in the
-  main repository and exclude runtime artifacts; nested Git is optional future
-  storage, not a prerequisite.
-- Freeze selected configuration, prompt bytes, modules and library identity for
-  all collaborating roots and descendants. Activate edits only at an explicit
-  swarm boundary. Task data, plan amendments and local Haskell compositions
-  remain live over the fixed interfaces.
-- Project role names and behavioral prompts belong in Haskell compositions.
-  Existing Rust role presets are a tolerated compatibility boundary. Runtime
-  capability checks remain authoritative; no new Rust role for each workflow.
-- Keep model selection, context ancestry, supervision, result ownership,
-  workspace access and pane placement distinct. Use existing owners for each.
-- Markdown remains the plan. Ordinary project functions connect declared work;
-  no plan compiler, second scheduler, universal workflow engine or duplicate
-  task/response registry is required.
-- Make spending visible and steerable. Do not kill useful in-flight specialists
-  at a token target or introduce a new budget governor.
-- RSI is an ordinary human-requested Astra engagement that edits/checks source.
-  No RSI lifecycle, approval/adoption subsystem, or mandatory implementation tree.
-- Fable, comparative model evaluations and self-hosting acceptance campaigns are
-  outside this work. Do not replace or restart unrelated user services.
+Before launch, inspect the selected workspace core/root overrides and frozen
+prompt files. NEXT.md is an opening brief to read, not automatically loaded model
+instructions. The installed API guide owns signatures; pending worker commits do
+not establish that a capability exists in the running binary.
 
-## Current implementation
+There is no required tree depth, Jev-call quota, or mandatory procession of
+patterns. Start from the task and the installed guide. Keep useful examples close
+at hand; do not spend the session guessing imports and signatures.
 
-The implemented foundation includes:
+## The opportunity to notice while working
 
-- Frozen TOML-selected modules and Markdown prompts, source integrity checks,
-  stable selection identity and pinned Haskell library identity. `Shoal.Workspace`
-  exposes captured resources to Haskell. Authored `.shoal` files are trackable.
-- `withInstructions` selects persistent behavior in Haskell independently of
-  model, request guidance and runtime authority. The example uses Markdown
-  prompts selected by `[prompts.files]`; Rust retains the shared authority facts.
-- Independent `withModel` and `withContext` selection through TUI launch.
-  Selected contexts have fresh transcripts and isolated local bindings; inherited
-  contexts preserve the completed-call boundary. Both load the frozen modules.
-- `withLifetime SwarmOwned` admits a selected-context independent root from a
-  top-level actor through ordinary `unfold`. It outlives its creator and retains
-  peer requests; swarm shutdown closes root admission and retires it. Default
-  workers remain supervised. Creation, supervision and context ancestry are
-  separate observations. `shareObservation` grants scoped creation-tree visibility
-  without stop authority; snapshots, host graphs and status share this policy.
-- Watch-owned `route`, `listRoutes`, `pollRoute` and `forgetRoute`, with automatic callbacks,
-  selected-worker admission, retained failures and scoped callback child cleanup.
-  Failed callbacks emit one exceptional owner notification; successful callbacks
-  do not wake the model merely to relay success.
-- `snapshot`, `subtree` and `swarmUsage` over existing observations, including
-  requested/observed models, received request/coordination-event counts and
-  compactions when known. Usage is observed thread usage, not a billing ledger.
-  Totals select compatible cumulative observations across resumed incarnations.
-  `usageByRequestedModel` groups by launch selection without claiming billing
-  attribution. `usageDelta` separates comparable increases, newly visible history,
-  disappeared observations and source/counter discontinuities.
-- Codex `4372d1a1cf9952178aff25bafdb7e3a6de49b491`: completion acknowledgments run on
-  an ordered background queue with 60-second attempts. Exhausted failures disable
-  hosted tools while preserving the TUI conversation and other tools.
-- Workspace startup compiles the selected frozen modules before replacing a
-  healthy swarm. Status-publication errors leave the running host active.
-- Host/actor coordination failures preserve native panes and retained resource
-  custody. Intentional retirement remains separate. Root recovery requires an
-  observed dead pane before resuming the retained conversation; unknown or live
-  native execution never triggers a competing resume.
+One direction to explore is typed slots for live heuristics: install a Haskell
+handler for an available event, revise or replace it as evidence changes, and
+remove it when the task ends. A handler can ask Jev and execute a prepared
+follow-up, keeping routine cases out of model turns. Save useful handlers in
+project code for a later run or another agent to adapt.
 
-The authored operating package composes this foundation:
+Use the Codex-hook survey to establish which events are available. Before-inference
+context contribution and after-tool follow-ups are candidates, not promises.
+Start with one useful event/handler pair from observed friction. Reuse the actor
+and subscription owner; make lifetime, replacement, failure, and self-triggering
+behavior explicit before relying on it unattended.
 
-- Responsibility-specific context builders and a Markdown plan tree declare
-  dependencies, recipients, discretion, exact seeds and a tagged Astra slot.
-  `previewBranch` resolves static host instructions, model selection, effort,
-  frozen definition/module identity and context/lifetime through the same host
-  selector as native worker launch. Admission-time paths and request orientation
-  remain explicit later facts; preview does not reserve runtime capacity.
-- Repair and specialist-answer compositions preserve request ownership,
-  the waiting obligation, exact evidence and useful retained workers.
-- The selected workspace owner/core/lead prompts teach the planned Sol model;
-  the generic shipped API still supports inherited recursive work. Project
-  review retains candidate checks/gates and the exact implementer, and local
-  repair uses a distinct request without closing the review or replacing the
-  original candidate response. Integration accepts a distinct reviewed input;
-  the routed implementation/review/integration chain now executes under a Sol
-  lead and settles its original request automatically. A tagged specialist answers
-  against the revised source while the owning review stays open. Typed plan
-  proposals now retain exact commits and affected obligations; a separate direct
-  incorporation request returns the resulting head and checks without closing
-  the original review.
-- `Project.Plan` supplies component lanes and the declared expert placement.
-  `Project.Observe` projects existing handles into plan/definition/actor/outcome
-  evidence and selected RSI context. The deterministic delivery cycle exercises
-  local integration, an ordinary RSI worker, its customization commit, current
-  prompt retention and compilation of the next frozen selection.
-- `shoal check --workspace PATH` compiles authored customization through the same
-  frozen-source compiler as startup, without actors or providers. `--recipes`
-  additionally executes the candidate's `[haskell].checks` entry points through
-  the existing resident driver in isolated Git repositories. The check-only
-  Tidepool.Check effect supplies turns, activations, source operations and native
-  presentation seams; package Haskell chooses the workflow. Native actors do not
-  receive that effect. The recipes check their own source fixtures, not app behavior.
+When you are about to read an output and issue an obvious followup, ask:
 
-## Use on the chosen project
+**Could I have attached this response to the original operation?**
 
-The next human-selected task may be a standalone application or deliberate
-Tidepool dogfooding. The canonical prompts are project-neutral; the new goal's
-plan supplies source scope, model placements, dependencies and acceptance. Use a
-fixed running Shoal selection and make changes in the assigned source checkout;
-source development does not hot-replace the harness or release a paused run.
+A useful cell can run work, assemble its evidence, ask Jev which described
+condition holds, and execute a prepared continuation. You already have the
+intention and relevant values in scope when you write it. Capture them there.
 
-Fresh application actors receive the authored prompts/API guide, project modules,
-selected plan branches and relevant target-project source. They must not depend
-on the builder's transcript, implementation handoff, or knowledge accumulated
-while reading Shoal internals. Ordinary investigation of the target application
-is expected. A need to inspect the harness implementation merely to learn how to
-use it is a guidance/API finding, not a successful substitute for the package.
+Examples to adapt when the task calls for them:
 
-Distill discovered usage knowledge into the owning prompt, API or helper. Check
-it, then supply the revision through the explicit next-swarm boundary. Do not
-make an acceptance run succeed by privately tutoring it with implementation lore.
-Runtime diagnosis belongs to its explicit owner. In a deliberate Tidepool task,
-that can be part of the agreed goal; it was outside the paused application's scope.
+- A search result lacks the relevant definition: fetch the enclosing declaration.
+- A child reply omits a required artifact: request that artifact specifically.
+- A failed check needs repair: gather the relevant source and supply a focused
+  Luna assignment with the failure, task intent, and ownership boundaries.
+- Two cheap reads both look useful: fetch both and reconsider with their contents.
+- New steering changes some assignments: identify affected children and prepare
+  the corresponding updates, following the session's communication authority.
+- A worker repeats unsuccessful actions: examine what changed and offer useful
+  context or assistance. Code excludes ordinary waiting on pending work.
 
-Product acceptance requires a useful multi-lane application change: Sol leads
-execute an Astra-authored plan, a tagged Astra specialist contributes hard work,
-review and repair retain exact evidence, and partial results integrate while
-independent work continues. Questions and failed routes reach the right owner
-without model polling loops or routine Astra relay. An ordinary requested RSI engagement
-then prepares a checked workspace improvement consumed by the next swarm.
+Each continuation can be temporary and task-specific. It need not become a
+framework feature. Return unexpected situations with their evidence intact.
+Preserve identities and check current state before applying delayed actions.
 
-## Verification and checkpoint discipline
+## Several ways to see the same opportunity
 
-Use the smallest owning checks in the repository Nix/toolchain environment;
-compile changed consumers and execute normal, unavailable, failure and cleanup
-paths. Exercise the actual project recipes through deterministic resident fixtures.
-Use focused checks during development and relevant broad boundaries at integration.
-Run `just fixtures-check` after extractor translation or serialization changes.
-Run appropriate formatting and `git diff --check`; inspect the final diff for
-duplicated policy, stale callers, magic-string control flow and obsolete comments.
+These are competing lenses. Use whichever exposes the useful operation.
 
-Separate implementation readiness from live product acceptance. A compile-only
-recipe does not establish a working delivery chain, and deterministic fixtures
-do not prove that fresh Sols can use the supplied guidance. Keep unperformed
-acceptance visible. Follow the user's goal scope for implementation and later
-application runs; this handoff does not itself start a paid swarm.
+| Lens | Question to ask | Useful result |
+| --- | --- | --- |
+| Semantic branching | Which described condition holds? | Execute an authored typed action |
+| Active reading | Can I answer yet; what observation would help? | Gather evidence toward an explicit question |
+| Intent interpretation | What instruction governs this artifact? | Choose a repair consistent with the actual task |
+| Attention allocation | What deserves a model's attention now? | Select excerpts, interruptions, or review targets |
+| Feedback control | Did the last intervention help? | Continue, change approach, wait, or request assistance |
+| Editorial perspective | How will this surface read to this audience? | Improve an error, name, example, or report |
 
-Current curation evidence is recorded in the [review](plans/next/evidence/workbench-curation.md):
-14 focused integration tests, the portable package recipes, a candidate-only
-context defect/repair proof, schema-generation checks and the fixed build.
-The installed application readiness record owns exact executable and definition
-identities. Earlier foundation checks cover committed-ref custody, independent
-lifetimes, native failure preservation and the frozen interface; their detailed
-historical reports do not substitute for current package acceptance.
-Fresh-model use has exposed guidance and substrate findings. Preparation is
-integrated; the finished application feature and next-package live use remain
-unaccepted. Candidate checks are separate from that product evidence.
+A weak answer does not always call for escalation. It may call for better
+alternatives, another artifact, the assignment, both cheap reads, or waiting for
+new evidence. Sometimes disagreement is the useful output.
 
-Snapshot comparison checks execute resumed-thread deduplication, model-selection
-groups, partial and missing observations, and counter/source discontinuities.
-Ordinary value bindings also shadow imported default vocabulary consistently in
-the resident workbench; qualified names remain available.
+Particularly promising combinations:
 
-Independent-root checks cover retained peer requests after creator retirement,
-inherited-context and supervised-escape refusals, observation-only sharing across
-snapshots/host graphs/status, stale recipients and closed swarm admission. The
-existing native operator graph consumer and published guide signatures pass.
+- **Investigation:** intent + active reading + typed actions. Gather evidence
+  until the destination question resolves, or name what remains unresolved.
+- **Contextual output:** current task + recent history + excerpt selection.
+  Present a useful view while keeping original evidence addressable.
+- **Child assistance:** trajectory + bounded interventions. Handle an ordinary
+  interruption without making the parent reconstruct the situation.
 
-Evidence recorded for `42e27421`: focused resident acceptance, ownership,
-configuration, protocol and usage checks passed; production compilation and all
-217 fixture semantic tests passed. The exact pinned Codex release build and
-host-tools contract passed. Codex's six focused completion tests and scoped
-Clippy passed; its full TUI suite had 20 failures out of 4,282 executed tests.
-Tidepool strict Clippy retained known pre-existing diagnostics. These are
-baseline results, not checks of future edits or acceptance of the unfinished
-live planned-Sol application feature.
+These save different work: investigation, reading, and interruption handling.
 
-The [previous-wave closeout](plans/next/evidence/wave-closeout.md) retains older
-source/check evidence. Its service migration, dispatch tree and observer goals
-are not current implementation requirements. Git retains earlier detailed logs
-and superseded handoffs.
+## Context is an input your programs should be able to use
+
+The Reflect direction is access to your own last N completed conversation turns,
+including tool interactions, as a list. Check the installed effect's availability
+and signature. Where available, bind that history once and compose it with Jev
+through ordinary Haskell. JSON tool payloads can remain JSON.
+
+Use separate fields for current instructions, ordered history, and repository
+artifacts. A failed build does not tell you whether a signature change was
+intentional; the assignment may. History can also contain obsolete instructions
+and abandoned plans, so supplying more of it does not automatically resolve intent.
+An operator proxy must not silently substitute somebody else's conversation.
+
+Likewise, command outputs should flow into programs as values. Keep complete
+observations distinct from their display previews. If the installed surface
+forces copying, loses stderr or exit status, or truncates the only available
+value, preserve the failing example and report the missing capability.
+
+## Start with the examples, then change them
+
+Read [Try these first](plans/jev-lab/breadth/TRY-THESE.md) and
+[Recognizing fit](plans/jev-lab/breadth/RECOGNIZING-FIT.md). Consult the
+[TypeSafe cookbooks](https://docs.typesafe.ai/llms.txt) for current patterns;
+explore their advanced compositions as well as simple classification. The lab
+is evidence and worked code, not a list of universal laws.
+
+The most useful entry points are:
+
+- `10-dispatch.hs` / `11-dispatch-loop.hs`: typed alternatives carry real
+  commands; three investigation steps executed without an intervening model
+  turn. **These examples truncate their own evidence to 700 characters. Fix that
+  before adapting them. Autonomous termination was not demonstrated.**
+- `33-threeway.hs` / `35-threeway-fair.hs`: the same routing problem before and
+  after repairing the alternatives. A confident error became a correct answer
+  on the tested fixture. Debug the semantic program before rejecting the pattern.
+- `32-traverse-content.hs`: repository navigation supplied with actual branch
+  contents, rather than asking filenames to stand in for evidence.
+- `37-reflect-intent.hs`: simulated history supplies intent missing from the
+  artifacts. Superseded instructions remain an open failure in those examples.
+
+The lab's [unrun ideas](plans/jev-lab/breadth/NOT-RUN.md) are a menu. Pick one
+when it helps your task; finishing the survey is not a prerequisite for use.
+
+## A few contracts worth keeping straight
+
+- Code owns exact answers already exposed by authoritative representations:
+  exit status, set intersections, IDs, pending work, and resource authority.
+  Jev supplies interpretation where it changes an action, ordering, or view.
+- Include the evidence and intention the question actually requires. Confidence
+  cannot certify that you supplied them. Preserve original outputs and addresses
+  for omitted material; a count of hidden entries is not a way to inspect them.
+- Bundle independent questions over the same state, including useful speculative
+  branch questions. Consume only the applicable answers. Fetching new evidence
+  or depending on an earlier answer may require another request.
+- Choice compares alternatives, Noul asks independent conditions, and Score
+  describes degree on a rubric. Select the primitive for the question's meaning.
+- `J.accept` accepts the selected answer under a policy. It does not mean
+  “approve the candidate.” Handle the accepted alternative explicitly.
+- Questions and action mappings are editable code. Keep alternatives comparable,
+  describe an unresolved case, and inspect the actual supplied state on failure.
+  A confident wrong result can be a wording or evidence bug.
+- Partial success is useful. Distinguish an unresolved question from exhausted
+  execution budget and from service failure. Bound loops and preserve progress.
+
+## Improve the surface during the work
+
+Try a small useful continuation on the actual task. Keep its cell and outcome.
+If it works again, save the definition in project Haskell with a runnable example
+and explain what evidence it expects. Another agent can use or improve that code.
+Files, Git, and frequent restarts are enough for the first experiments in sharing;
+there is no need to build a live distribution system first.
+
+A shareable semantic component includes the question, the evidence construction,
+and the continuation it controls. Preserve a normal case and the failure that
+motivated its latest repair. Test resulting behavior, not exact probabilities.
+Promote patterns into skills when the lesson helps author new programs.
+
+When the interface gets in your way, capture the exact cell, error, and intended
+operation. Fix the owning mechanism within your assignment, or send the finding
+to its owner. Keep useful work moving; do not quietly accumulate workaround
+layers or invent unavailable APIs.
+
+The practical interview is short:
+
+- Where did you still have to say the obvious next thing?
+- Which program let you skip a turn without doing the work again later?
+- What context did your program need that you already had?
+- Which definition would you give the next agent?
+
+Use the answers to shape the next session. We are iterating on a tool with its
+users. The exciting milestone is an agent doing ambitious work while making its
+own way of working more powerful.

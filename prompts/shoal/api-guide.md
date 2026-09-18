@@ -104,7 +104,7 @@ Delegation at a glance:
   `pollResponse`.
 - wait: `watch` with `awaitSettled` (combine with `<*>` for all-of) or
   `awaitAnySettled` (wake when any settles).
-- launch options: `withContext (Selected render)` starts a fresh conversation
+- launch options: `withContext (selected render)` starts a fresh conversation
   with only the rendered input; `withModel`, `withEffort`; `previewBranch`
   shows the resolved launch before admission.
 - finish: `tryMerge` integrates a submission; `planCleanup` and
@@ -135,7 +135,77 @@ pollResponse :: Member Replies effects => Response result -> Eff effects (Respon
 ```
 
 `Map.`, `Set.`, and `T.` provide maps, sets, and text. `Cmd.` provides command
-composition; `R.` provides record actors. `traverse`, `for`, `forM`, `forM_`,
+composition; `R.` provides record actors; `J.` provides Jev. `bash`, `withMemory`,
+`MiB`, `GiB`, and the packet operators `:=`, `:&`, and `Nil` are in scope.
+`traverse`, `for`, `forM`, `forM_`,
 and `for_` are already in scope. Use a type application such as `request @Report`
 when the result type is otherwise unconstrained; later statements in the same
 cell can often determine it.
+
+Reusable effectful helpers should declare their `Member` constraints, as in
+the example below. The workbench may be unable to retain an inferred polymorphic
+effect row: an ambiguous `effects0` or `parent0` is a reason to name that row in
+a signature, not to duplicate the helper's body at every call site. For a fork
+helper, start from the `unfold`/`child` signatures above and the effects it uses.
+
+## Find a capability when you need it
+
+| Intended operation | Starting surface | Load for the next step |
+| --- | --- | --- |
+| Feed command evidence into a program | `Cmd.run`, `Cmd.quiet`, `Cmd.stdout` | `shoal-command`: stderr, complete output, paging, completion events |
+| Judge evidence and select an action | `J.ask1`, `J.choice`, `J.accept`, `J.handle` | `shoal-jev`: packets, pools, speculative questions |
+| React without another model turn | Record actors through `R.*` | `shoal-define-actors`: state, installed event sources, handlers |
+| Delegate and collect typed replies | `spawnWatched`, `unfold`, `watch` | `shoal-unfold`; `shoal-cleanup` when retiring the work |
+| Reuse a project-authored function | `doc topics`, module/name lookup | The installed module's exports and worked example |
+| Inspect a partial failure or old handle | The cell receipt, `status` recovery view | `doc recovery`, `shoal-workbench` |
+
+Load more detail when the intended operation needs it. For example, moving from
+a short foreground command to an unattended long check is the point to read
+the command-completion pattern. A new effect such as conversation reflection
+needs an installed signature; a plan or worker report does not make it callable.
+
+## Commands, judgments, and prepared follow-ups
+
+Use `Cmd.run` when command results should feed code. `Cmd.stdout result` returns
+complete successful stdout or an explicit issue; it does not silently truncate
+or turn a nonzero exit into success. Use `Cmd.quiet` to retain data without routine
+command display. For failed commands, inspect the outcome and stderr through the
+output API; load `shoal-command` for paging and completeness contracts.
+
+This helper reads recent commit subjects, asks which might explain a task, and
+fetches the selected commit's stat without another model turn. Selection is a
+reading aid, not a conclusion about the code. The task is an argument so intent
+travels with the evidence. Every command argument comes from code or Git output.
+
+```haskell
+{-# LANGUAGE OverloadedLabels, OverloadedRecordDot #-}
+import Tidepool.Effects.Core (Jev, Commands)
+inspectRecentChanges :: (Member Jev effects, Member Commands effects) => Text -> Eff effects Text
+inspectRecentChanges task = do
+      listed <- Cmd.quiet (Cmd.run (Cmd.argv ["git", "log", "-8", "--format=%H%x09%s"]))
+      case Cmd.stdout listed of
+        Left issue -> pure ("Cannot read history: " <> T.pack (show issue))
+        Right history -> do
+          let rows = map (T.breakOn "\t") (T.lines history)
+              offers = J.alt #unresolved "No listed subject explains the task, or subjects lack the deciding detail" ()
+                J..| J.many [(oid, String (T.drop 1 subject), Cmd.argv ["git", "show", "--stat", "--oneline", oid]) | (oid, subject) <- rows]
+          answer <- J.ask1 (J.state (object ["task" .= (task :: Text), "recent_history" .= history]))
+            (J.choice "Which listed commit subject identifies a change worth inspecting for `task`?" offers)
+          case answer of
+            Left err -> pure ("Jev unavailable: " <> T.pack (show err))
+            Right a -> case J.accept J.routing a of
+              Left _ -> pure ("Needs inspection: " <> J.explain J.routing a)
+              Right selection -> J.handle selection
+                (#unresolved (\() -> pure "The listed subjects do not resolve what to read; inspect broader history or source.")
+                  J..| J.onMany (\_ command -> do
+                    result <- Cmd.quiet (Cmd.run command)
+                    pure (either (\issue -> "Cannot read selected commit: " <> T.pack (show issue)) id (Cmd.stdout result))))
+```
+
+Call `inspectRecentChanges "Which recent change could explain the command output regression?"`
+with your actual question. The helper is defined by the cell, not a shipped API.
+Keep the returned evidence if another judgment needs it. For several independent
+questions over one state, use `J.ask` with a packet and read fields from `J.answers`.
+`J.accept` checks the winner's distribution; handle its selected alternative,
+doubt, and transport failure separately. A confident unresolved answer remains
+unresolved. Use `shoal-jev` for pools, speculative questions, and other patterns.

@@ -1,8 +1,8 @@
 Send raw Haskell as a notebook cell. GHC checks it before effects. Declarations
 are mutually recursive and visible to statements; later statements see earlier
 bindings. Declarations and bindings persist. Typecheck rejection runs no effects.
-Runtime failure retains its prefix and stops the suffix. An exact retry returns
-its receipt. Imports persist; leading pragmas are cell-local. No colon commands.
+Runtime failure retains its prefix and stops the suffix. Read its receipt before
+submitting new intent. Imports persist; leading pragmas are cell-local. No colon commands.
 
 Read the activation; use `inspectFull sessionInput` for omitted prose. Hosted
 `lookup` answers names, `:: T -> _` searches callables, and `doc` finds guides.
