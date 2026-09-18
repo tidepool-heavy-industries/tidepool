@@ -2145,6 +2145,36 @@ where
         context: crate::ActorSessionContext,
         cell_source: String,
     ) -> Result<(CellCheck, PreparedCell), ResidentActorWorkbenchError> {
+        // Pre-GHC source-order check (astra-fix-waves.md Wave 4 / proposal 5,
+        // stage one): a lexical scan of the raw cell, before any compile
+        // round trip, catches a declaration whose free names reach an
+        // earlier statement's binder — a shape GHC either rejects
+        // confusingly or, worse, silently mis-resolves against an in-scope
+        // import. Routed through the exact same `CellCheck` rejection path a
+        // real GHC-detected cell failure uses, so every downstream renderer
+        // (`cell_check_rejection`, `render_cell_compile_rejection`) needs no
+        // changes to present it.
+        if let Some(collision) =
+            tidepool_runtime::session::detect_hoisted_declaration_collision(&cell_source)
+        {
+            return Err(cell_check_error(
+                tidepool_runtime::session::CellCheckFailure {
+                    error: CompileError::Diagnostics(vec![tidepool_runtime::diag::ExtractDiag {
+                        span: Some(tidepool_runtime::diag::DiagSpan {
+                            file: "<cell>".to_string(),
+                            start_line: collision.declaration_line as u32,
+                            start_col: 1,
+                            end_line: collision.declaration_line as u32,
+                            end_col: 1,
+                        }),
+                        severity: tidepool_runtime::diag::DiagnosticSeverity::Error,
+                        message: collision.message(),
+                    }]),
+                    items: None,
+                },
+                &cell_source,
+            ));
+        }
         let response = self.response.clone();
         let request = self.request;
         let type_modules = Arc::clone(&self.type_modules);

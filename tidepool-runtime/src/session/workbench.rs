@@ -610,6 +610,411 @@ pub fn classify_workbench_item(source: &str) -> Result<WorkbenchItem, String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Pre-GHC source-order detection (astra-fix-waves.md Wave 4 / proposal 5,
+// stage one only — NOT source-order execution, which is a later experiment).
+//
+// A notebook cell is split into units and its declaration-kind units are
+// hoisted above its statement-kind units once GHC assembles the checked
+// module, so a declaration written after a statement cannot see that
+// statement's bindings. Left alone this either fails with a confusing GHC
+// error, or — worse — silently resolves the same bare name to something else
+// already in scope (an import). [`detect_hoisted_declaration_collision`]
+// catches the shape lexically, before the cell ever reaches GHC.
+//
+// This is a SOURCE-LEVEL APPROXIMATION, not a real parse, and deliberately
+// not built on `tidepool_repr::free_vars`: that engine computes free
+// variables over `CoreExpr`, GHC's own post-typecheck Core, which does not
+// exist yet at this point in the pipeline (a raw notebook cell is exactly
+// what GHC has not seen). The approximation below is biased throughout
+// toward a MISSED detection over a FALSE rejection: ambiguous shapes (a
+// pattern-binding LHS, an operator definition, anything inside a
+// pragma/import/data/class/instance header) fall through to `Other` and are
+// never flagged.
+// ---------------------------------------------------------------------------
+
+/// A pre-GHC-detected hazard: a cell's declaration unit references a name
+/// that an EARLIER statement unit in the same cell binds. See
+/// [`detect_hoisted_declaration_collision`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceOrderCollision {
+    pub declaration_name: String,
+    pub declaration_line: usize,
+    pub binder_name: String,
+    pub statement_line: usize,
+}
+
+impl SourceOrderCollision {
+    /// Model-facing rejection text: names the declaration, the binding it
+    /// appears to want, why it can't see it, and the two ways to fix it.
+    #[must_use]
+    pub fn message(&self) -> String {
+        format!(
+            "declaration `{decl}` (line {decl_line}) uses `{binder}`, but `{binder}` is bound \
+             by an earlier statement in this cell (line {stmt_line}). This cell's declarations \
+             are hoisted above its statements, so `{decl}` cannot see `{binder}` there — GHC \
+             will either reject `{binder}` as out of scope, or, if a same-named import is also \
+             in scope, silently bind `{decl}` to that import instead. Put `{decl}`'s declaration \
+             before the statement that binds `{binder}`, or write it as `let {decl} = ...` \
+             inside a statement instead of a top-level declaration.",
+            decl = self.declaration_name,
+            decl_line = self.declaration_line,
+            binder = self.binder_name,
+            stmt_line = self.statement_line,
+        )
+    }
+}
+
+/// Detect a same-cell declaration/statement source-order hazard by lexical
+/// scan, without invoking GHC. Returns the FIRST collision found in source
+/// order (a declaration's free name reaching an earlier statement's binder);
+/// later collisions in the same cell are left for the next round after the
+/// first is fixed.
+#[must_use]
+pub fn detect_hoisted_declaration_collision(cell_source: &str) -> Option<SourceOrderCollision> {
+    let units = split_source_units(cell_source);
+    let mut statement_binders: Vec<(&str, usize)> = Vec::new();
+    for unit in &units {
+        match classify_source_unit(&unit.text) {
+            SourceUnitShape::Statement { binders } => {
+                for binder in binders {
+                    statement_binders.push((binder, unit.start_line));
+                }
+            }
+            SourceUnitShape::Declaration { name, params, body } => {
+                let bound_locally: std::collections::HashSet<&str> =
+                    params.into_iter().chain(std::iter::once(name)).collect();
+                for free_name in lowercase_identifier_tokens(body) {
+                    if bound_locally.contains(free_name) {
+                        continue;
+                    }
+                    if let Some(&(binder, statement_line)) = statement_binders
+                        .iter()
+                        .find(|(binder, _)| *binder == free_name)
+                    {
+                        return Some(SourceOrderCollision {
+                            declaration_name: name.to_string(),
+                            declaration_line: unit.start_line,
+                            binder_name: binder.to_string(),
+                            statement_line,
+                        });
+                    }
+                }
+            }
+            SourceUnitShape::Other => {}
+        }
+    }
+    None
+}
+
+/// One line-based approximation of a cell's top-level lexical unit: starts at
+/// column 1, and gathers any immediately following indented lines as
+/// continuations. This is NOT GHC's own layout algorithm — the compiler's
+/// real split happens only during the whole-cell check (`CellAnalysisItem`,
+/// in `super::turn`) — but for cells written the way this harness's models
+/// actually write them (one statement/declaration per column-1 line) it
+/// matches exactly, and where it doesn't, the failure mode is to merge lines
+/// into one bigger unit rather than invent a boundary, so no unit is ever
+/// split in a way that could create a false collision.
+struct SourceUnit {
+    start_line: usize,
+    text: String,
+}
+
+fn split_source_units(cell_source: &str) -> Vec<SourceUnit> {
+    let mut units: Vec<SourceUnit> = Vec::new();
+    for (offset, raw_line) in cell_source.lines().enumerate() {
+        let line_no = offset + 1;
+        let without_comment = strip_line_comment(raw_line);
+        if without_comment.trim().is_empty() {
+            continue;
+        }
+        let is_top_level = !raw_line.starts_with(' ') && !raw_line.starts_with('\t');
+        if is_top_level || units.is_empty() {
+            units.push(SourceUnit {
+                start_line: line_no,
+                text: without_comment.trim_end().to_string(),
+            });
+        } else {
+            let last = units.last_mut().expect("just checked units is non-empty");
+            last.text.push('\n');
+            last.text.push_str(without_comment.trim_end());
+        }
+    }
+    units
+}
+
+/// Cut a `--` line comment, respecting a double-quoted string literal so a
+/// `--` inside one is never mistaken for a comment marker.
+fn strip_line_comment(line: &str) -> &str {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut chars = line.char_indices().peekable();
+    while let Some((idx, c)) = chars.next() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '-' if chars.peek().map(|&(_, next)| next) == Some('-') => return &line[..idx],
+            _ => {}
+        }
+    }
+    line
+}
+
+/// The policy-free lexical shape of one source unit, for
+/// [`detect_hoisted_declaration_collision`] only — deliberately separate from
+/// [`WorkbenchItem`], which is the real (GHC-authoritative-pending)
+/// classification every frontend uses to dispatch a unit; this one exists
+/// only to drive a conservative, local, pre-GHC heuristic.
+enum SourceUnitShape<'a> {
+    /// A monadic bind (`pat <- expr`) or a `let pat = expr` statement. Not
+    /// hoisted — sequential, so a later unit CAN see its binder(s).
+    Statement { binders: Vec<&'a str> },
+    /// A top-level function/pattern binding (`name args.. = body`). Hoisted
+    /// above every statement once GHC assembles the checked cell.
+    Declaration {
+        name: &'a str,
+        params: Vec<&'a str>,
+        body: &'a str,
+    },
+    /// A pragma/import/data/class/instance header, a bare expression
+    /// statement (no binder), or any LHS shape ambiguous enough that
+    /// misreading it risks a false rejection (e.g. a tuple or constructor
+    /// pattern binding). Not interesting to this check.
+    Other,
+}
+
+/// Mirrors `classify_workbench_item`'s `DECLARATION_PREFIXES` list, kept as
+/// its own copy so this heuristic stays in its own region of the file.
+const CONSERVATIVE_DECLARATION_PREFIXES: &[&str] = &[
+    "data ", "newtype ", "type ", "class ", "instance ", "infixl ", "infixr ", "infix ",
+    "foreign ", "import ", "default ", "{-# ",
+];
+
+fn classify_source_unit(text: &str) -> SourceUnitShape<'_> {
+    let trimmed = text.trim_start();
+    if trimmed.is_empty() {
+        return SourceUnitShape::Other;
+    }
+    if CONSERVATIVE_DECLARATION_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+    {
+        return SourceUnitShape::Other;
+    }
+    if let Some(rest) = trimmed.strip_prefix("let ") {
+        let pattern = split_at_top_level_eq(rest).map_or(rest, |(lhs, _)| lhs);
+        return SourceUnitShape::Statement {
+            binders: lowercase_identifier_tokens(pattern),
+        };
+    }
+    if let Some((pattern, _)) = split_at_top_level(trimmed, "<-") {
+        return SourceUnitShape::Statement {
+            binders: lowercase_identifier_tokens(pattern),
+        };
+    }
+    if let Some((head, body)) = split_at_top_level_eq(trimmed) {
+        let head_trimmed = head.trim_start();
+        if head_trimmed.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') {
+            let mut head_tokens = lowercase_identifier_tokens(head).into_iter();
+            if let Some(name) = head_tokens.next() {
+                let params: Vec<&str> = head_tokens.collect();
+                return SourceUnitShape::Declaration { name, params, body };
+            }
+        }
+    }
+    SourceUnitShape::Other
+}
+
+/// Find the first occurrence of `needle` at paren/bracket/brace nesting
+/// depth 0 and outside a string literal.
+fn split_at_top_level<'a>(text: &'a str, needle: &str) -> Option<(&'a str, &'a str)> {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut idx = 0usize;
+    while idx < text.len() {
+        let c = text[idx..].chars().next().expect("idx is a char boundary");
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            idx += c.len_utf8();
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && text[idx..].starts_with(needle) {
+            return Some((&text[..idx], &text[idx + needle.len()..]));
+        }
+        idx += c.len_utf8();
+    }
+    None
+}
+
+/// Like [`split_at_top_level`] specialized to a bare assignment `=`: skips
+/// `==`, `/=`, `<=`, `>=`, and `=>` so a comparison or constraint arrow is
+/// never mistaken for a binding.
+fn split_at_top_level_eq(text: &str) -> Option<(&str, &str)> {
+    let indices: Vec<(usize, char)> = text.char_indices().collect();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (position, &(byte_idx, c)) in indices.iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            '=' if depth == 0 => {
+                let prev = position.checked_sub(1).map(|prior| indices[prior].1);
+                let next = indices.get(position + 1).map(|&(_, c)| c);
+                let composite = matches!(prev, Some('=' | '/' | '<' | '>' | '!'))
+                    || matches!(next, Some('=' | '>'));
+                if !composite {
+                    let after = byte_idx + c.len_utf8();
+                    return Some((&text[..byte_idx], &text[after..]));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Every lowercase-leading identifier "root" referenced in `text`, skipping
+/// string-literal contents and Haskell keywords. For a dotted run whose
+/// first segment starts uppercase (a qualified reference, e.g. `Cmd.run`,
+/// `Control.Lens.previews`), the run names nothing local and contributes
+/// nothing; otherwise the run's first segment is the candidate — covering
+/// both a bare name (`previews`) and the base of record-dot access
+/// (`job.exitCode` contributes `job`). This is a lexical approximation, not
+/// a parse: good enough to bias toward flagging a real collision without
+/// inventing one that isn't syntactically there.
+fn lowercase_identifier_tokens(text: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut idx = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    while idx < text.len() {
+        let c = text[idx..].chars().next().expect("idx is a char boundary");
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            idx += c.len_utf8();
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+            idx += c.len_utf8();
+            continue;
+        }
+        if c.is_ascii_alphabetic() || c == '_' {
+            let first_start = idx;
+            let first_end = consume_identifier(text, first_start);
+            let first_segment = &text[first_start..first_end];
+            let starts_upper = first_segment.starts_with(|ch: char| ch.is_ascii_uppercase());
+            let mut run_end = first_end;
+            while text[run_end..].starts_with('.') {
+                let after_dot = run_end + 1;
+                let Some(next_char) = text.get(after_dot..).and_then(|s| s.chars().next()) else {
+                    break;
+                };
+                if !(next_char.is_ascii_alphabetic() || next_char == '_') {
+                    break;
+                }
+                run_end = consume_identifier(text, after_dot);
+            }
+            if !starts_upper && first_segment != "_" && !is_haskell_keyword(first_segment) {
+                tokens.push(first_segment);
+            }
+            idx = run_end;
+            continue;
+        }
+        idx += c.len_utf8();
+    }
+    tokens
+}
+
+fn consume_identifier(text: &str, start: usize) -> usize {
+    let mut end = start;
+    for c in text[start..].chars() {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '\'' {
+            end += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    end
+}
+
+fn is_haskell_keyword(token: &str) -> bool {
+    matches!(
+        token,
+        "do" | "let"
+            | "in"
+            | "if"
+            | "then"
+            | "else"
+            | "case"
+            | "of"
+            | "where"
+            | "import"
+            | "module"
+            | "instance"
+            | "class"
+            | "data"
+            | "type"
+            | "newtype"
+            | "deriving"
+            | "infixl"
+            | "infixr"
+            | "infix"
+            | "foreign"
+            | "default"
+            | "qualified"
+            | "as"
+            | "hiding"
+            | "mdo"
+            | "rec"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// End pre-GHC source-order detection.
+// ---------------------------------------------------------------------------
+
 /// Build the canonical templates for a resident actor workbench. GHC selects
 /// declaration, bind, or expression. Expressions first try the two
 /// single-evaluation Haskell-display lifts, then opaque-display counterparts
@@ -1243,5 +1648,74 @@ mod tests {
             ["let findings =\n  [ missing\n  ]"],
             "a failed definition must not execute the later reply"
         );
+    }
+
+    // -- pre-GHC source-order detection (Wave 4 / proposal 5, stage one) --
+
+    #[test]
+    fn declaration_after_statement_referencing_its_binder_is_rejected() {
+        let cell = "job <- Cmd.run \"ls\"\nresultText = describe job\n";
+        let hit = detect_hoisted_declaration_collision(cell)
+            .expect("a declaration reaching an earlier statement's binder must be flagged");
+        assert_eq!(hit.declaration_name, "resultText");
+        assert_eq!(hit.declaration_line, 2);
+        assert_eq!(hit.binder_name, "job");
+        assert_eq!(hit.statement_line, 1);
+        let message = hit.message();
+        assert!(message.contains("resultText"), "{message}");
+        assert!(message.contains("job"), "{message}");
+        assert!(message.contains("hoisted"), "{message}");
+        assert!(message.contains("let resultText"), "{message}");
+    }
+
+    /// The same declaration, moved before the statement it referenced, is
+    /// accepted: `detect_hoisted_declaration_collision` only ever flags a
+    /// free name reaching a statement that is textually EARLIER — moving the
+    /// declaration first removes that earlier statement entirely.
+    #[test]
+    fn declaration_placed_first_is_accepted() {
+        let cell = "resultText = describe job\njob <- Cmd.run \"ls\"\n";
+        assert_eq!(detect_hoisted_declaration_collision(cell), None);
+    }
+
+    /// A declaration whose only reachable name is an import (never a same-
+    /// cell statement binder) is accepted — this detector never reasons
+    /// about imports at all, only about earlier same-cell statement binders.
+    #[test]
+    fn declaration_resolving_only_to_an_import_is_accepted() {
+        let cell = "import Control.Lens (previews)\n\nsummary = previews id someList\n";
+        assert_eq!(detect_hoisted_declaration_collision(cell), None);
+    }
+
+    /// The silent-shadow case: `previews` is bound by an earlier statement
+    /// AND separately importable. The declaration referencing it is still
+    /// rejected — silently binding to the import instead would be worse.
+    #[test]
+    fn silent_shadow_by_an_in_scope_import_is_still_rejected() {
+        let cell = "import Control.Lens (previews)\n\nprevious <- computePreviews\nsummary = previous\n";
+        let hit = detect_hoisted_declaration_collision(cell)
+            .expect("a same-named import must not suppress the rejection");
+        assert_eq!(hit.declaration_name, "summary");
+        assert_eq!(hit.binder_name, "previous");
+        assert_eq!(hit.statement_line, 3);
+        assert_eq!(hit.declaration_line, 4);
+    }
+
+    /// A declaration's own parameter is a local binding, not a free
+    /// reference — even when it shares a name with an earlier statement's
+    /// binder, this must not be flagged (a false rejection is worse than a
+    /// missed one).
+    #[test]
+    fn declarations_own_parameter_shadows_an_earlier_statement_binder() {
+        let cell = "job <- Cmd.run \"ls\"\ndescribeJob job = show job\n";
+        assert_eq!(detect_hoisted_declaration_collision(cell), None);
+    }
+
+    /// A bare expression statement binds no name, so a later declaration
+    /// referencing an unrelated free name is accepted.
+    #[test]
+    fn expression_statement_binds_nothing_so_a_later_declaration_is_accepted() {
+        let cell = "putStrLn \"starting\"\nsummary = describe otherThing\n";
+        assert_eq!(detect_hoisted_declaration_collision(cell), None);
     }
 }
