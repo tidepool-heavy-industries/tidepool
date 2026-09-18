@@ -1012,6 +1012,94 @@ pub struct PreparedEngine {
     /// refusal). The prepared route's analogue of
     /// `JitEffectMachine::heap_stats`'s `gc_count` -- see [`Self::heap_stats`].
     major_collections: u64,
+    /// Package-defined tops already installed on this machine, offered to
+    /// every later turn as executable imports (see [`CodeExport`] and
+    /// [`exportable_code_tops`]). Grows once, on the turns that first reach
+    /// a package definition, and is never invalidated: a package's code
+    /// cannot change under a live session.
+    code_exports: BTreeMap<SymbolIdentity, CodeExport>,
+}
+
+/// One installed package top a later turn may import instead of projecting
+/// its own copy of the body.
+///
+/// `handle` roots the top's value on this machine ([`PreparedMachine::retain_top`]),
+/// which also keeps its defining program -- and therefore its code -- alive
+/// for as long as anything can import it. `entry` is the PRODUCER's own
+/// signature for the top, so [`link_program`] compares a later turn's
+/// declared entry evidence against the real callable rather than against an
+/// echo of itself.
+#[derive(Clone)]
+struct CodeExport {
+    handle: PreparedHandle,
+    entry: Option<Signature>,
+}
+
+/// The generation every code export is offered at. Package code is fixed for
+/// the life of a process -- a different package set is a different extractor
+/// deployment, which the toolchain fingerprint already refuses to mix -- so
+/// there is nothing for a generation to distinguish, and every turn is told
+/// the same number it will be handed back at install.
+const CODE_EXPORT_GENERATION: u64 = 0;
+
+/// GHC's unit id for everything compiled from source in this session: the
+/// turn target, the session decl/value planes, the workspace source layer,
+/// and the Tidepool library modules on the include path. All of it can
+/// differ from one turn to the next, so none of it is ever exported.
+const HOME_UNIT: &str = "main";
+
+/// Which of `prepared`'s own tops later turns may import rather than project
+/// a body for: the ones an INSTALLED PACKAGE defines.
+///
+/// A package's unit id (`ghc-internal`, `text-2.1.2-2594`, ...) names a
+/// built, content-versioned package in the compiler's package database. Its
+/// unfoldings cannot change while one session runs, so a top recovered from
+/// one is the same code this turn, next turn, and after a source reload --
+/// which is exactly what makes it safe to hand a later turn the already
+/// compiled copy. Everything under [`HOME_UNIT`] is excluded for the
+/// opposite reason.
+///
+/// Byte tops (GHC `StgTopStringLit`) are excluded: they have no managed
+/// value to retain. A constructor top is excluded unless its result is a
+/// lifted reference, because that is the only representation
+/// [`PreparedMachine::retain_top`] mints a handle for and a representation
+/// disagreement at link time would fail the turn rather than fall back.
+fn exportable_code_tops(
+    prepared: &PreparedProgram,
+) -> Vec<(SymbolIdentity, ValueId, Option<Signature>)> {
+    let signature = |id: tidepool_repr::execution_schema::SignatureId| {
+        prepared.signatures().get(id.0 as usize).cloned()
+    };
+    let mut exports = Vec::new();
+    for group in prepared.bindings() {
+        let tops = match group {
+            Group::NonRecursive(top) => std::slice::from_ref(top),
+            Group::Recursive(tops) => tops.as_slice(),
+        };
+        for top in tops {
+            if top.identity.unit == HOME_UNIT || top.identity.namespace != "value" {
+                continue;
+            }
+            let entry = match &top.binding.rhs {
+                HeapRhs::Bytes(_) => continue,
+                HeapRhs::Constructor { constructor, .. } => {
+                    let lifted = prepared
+                        .constructors()
+                        .get(constructor.0 as usize)
+                        .is_some_and(|row| row.result_rep == RuntimeRep::LiftedRef);
+                    if !lifted {
+                        continue;
+                    }
+                    None
+                }
+                HeapRhs::Function { signature: id, .. } | HeapRhs::Thunk { signature: id, .. } => {
+                    signature(*id)
+                }
+            };
+            exports.push((top.identity.clone(), top.binding.id, entry));
+        }
+    }
+    exports
 }
 
 /// How many programs may install between major collections before one runs
@@ -1103,6 +1191,7 @@ impl PreparedEngine {
     /// binding exists before the machine does.
     pub fn bootstrap(prepared: PreparedProgram) -> Result<(Self, ProgramId), PreparedRuntimeError> {
         let facts = ProgramFacts::of(&prepared);
+        let exports = exportable_code_tops(&prepared);
         let linked = link_program(prepared, &MachineImports::default())?;
         let compiled = CompiledProgram::compile(&linked).map_err(PreparedRuntimeError::Compile)?;
         let (machine, program) = PreparedMachine::new(
@@ -1121,11 +1210,13 @@ impl PreparedEngine {
             installs_since_major: 0,
             old_bytes_at_last_major: 0,
             major_collections: 0,
+            code_exports: BTreeMap::new(),
         };
         // The first program can conflict only with itself.
         let plan = engine.plan_evidence(&facts)?;
         engine.programs.insert(program, facts);
         engine.publish_evidence(program, plan);
+        engine.publish_code_exports(program, exports);
         // Held live across the install-to-first-run gap; the turn's
         // bind/complete path (`resident.rs`) unpins it once the run's
         // outcome is bound, released or parked.
@@ -1224,6 +1315,49 @@ impl PreparedEngine {
         })
     }
 
+    /// Offer `program`'s package tops to every later turn as executable
+    /// imports, so the next turn's projection drops their bodies instead of
+    /// handing this machine a second copy to compile.
+    ///
+    /// Called only after `program` is installed and published, so a refused
+    /// install offers nothing. An identity already exported keeps its
+    /// existing handle: the first program to define it stays the one every
+    /// later turn imports, and no second root is taken for it. A top that
+    /// will not retain (no managed value at its slot) is simply not offered
+    /// -- later turns keep projecting their own body for it, exactly as
+    /// before -- so this can lose a speedup but never a program.
+    fn publish_code_exports(
+        &mut self,
+        program: ProgramId,
+        exports: Vec<(SymbolIdentity, ValueId, Option<Signature>)>,
+    ) {
+        for (identity, value, entry) in exports {
+            if self.code_exports.contains_key(&identity) {
+                continue;
+            }
+            let Ok(handle) = self.machine.retain_top(program, value) else {
+                continue;
+            };
+            self.code_exports
+                .insert(identity, CodeExport { handle, entry });
+        }
+    }
+
+    /// Every package top this machine already carries, as the extractor
+    /// wants them: `(identity, generation)` pairs whose bodies the next
+    /// turn's projection drops in favour of a declared global.
+    pub(crate) fn code_export_retentions(&self) -> impl Iterator<Item = (SymbolIdentity, u64)> + '_ {
+        self.code_exports
+            .keys()
+            .map(|identity| (identity.clone(), CODE_EXPORT_GENERATION))
+    }
+
+    /// How many package tops later turns can import instead of recompiling.
+    #[must_use]
+    pub fn code_export_count(&self) -> usize {
+        self.code_exports.len()
+    }
+
     /// Make `program` the canonical owner of the planned rows and verb
     /// entries.
     fn publish_evidence(&mut self, program: ProgramId, plan: EvidencePlan) {
@@ -1269,7 +1403,27 @@ impl PreparedEngine {
             let Some(entry) =
                 resolve_prepared_import(bindings, index, identity, declaration.required_generation)
             else {
-                // Left absent: `link_program` reports the typed `MissingImport`.
+                // Not a session value binding: it may be a package top an
+                // earlier turn already installed and this turn was told to
+                // import (see `code_exports`). Absent from both: left out,
+                // and `link_program` reports the typed `MissingImport`.
+                if let Some(export) = self.code_exports.get(identity).cloned() {
+                    let evaluated = self
+                        .machine
+                        .handle_is_evaluated(export.handle)
+                        .map_err(PreparedRuntimeError::Run)?;
+                    values.values.insert(
+                        identity.clone(),
+                        ImportedValue {
+                            identity: identity.clone(),
+                            rep: export.handle.rep(),
+                            entry_signature: export.entry,
+                            evaluated,
+                            generation: CODE_EXPORT_GENERATION,
+                        },
+                    );
+                    imports.insert(identity.clone(), export.handle);
+                }
                 continue;
             };
             let BoundValue::Prepared { handle, origin, .. } = &entry.value else {
@@ -1294,6 +1448,7 @@ impl PreparedEngine {
         }
         let resolve_imports_ms = lap();
         let import_count = imports.len();
+        let exports = exportable_code_tops(&prepared);
         let facts = ProgramFacts::of(&prepared);
         // Site evidence is checked before anything is compiled or published:
         // a conflicting duplicate leaves the machine, its programs and the
@@ -1324,6 +1479,7 @@ impl PreparedEngine {
         );
         self.programs.insert(program, facts);
         self.publish_evidence(program, plan);
+        self.publish_code_exports(program, exports);
         // Held live across the install-to-first-run gap; the turn's
         // bind/complete path (`resident.rs`) unpins it once the run's
         // outcome is bound, released or parked.

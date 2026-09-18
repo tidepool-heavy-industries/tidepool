@@ -1571,6 +1571,13 @@ where
         self.core.codegen_totals()
     }
 
+    /// How many package tops this session's machine can hand a later turn
+    /// instead of recompiling; `None` on the Core route or before bootstrap.
+    #[must_use]
+    pub fn code_export_count(&self) -> Option<usize> {
+        self.core.code_export_count()
+    }
+
     /// Prepared old-space bytes as of the last successful between-turn
     /// collection, or `None` on the Core route or before the machine has
     /// bootstrapped.
