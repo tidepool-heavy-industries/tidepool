@@ -87,8 +87,10 @@ main = do
     fail ("alpha-equivalent constrained signature was not exact: " ++ show numMatches)
   unless (hasAvailability "candidatePlain" Available numMatches) $
     fail ("constrained query lost usable plain candidate: " ++ show numMatches)
-  unless (hasAvailability "candidateNum" Unknown plainMatches) $
-    fail ("plain query lost unresolved constrained candidate: " ++ show plainMatches)
+  -- `Num b => b -> b` is usable against `a -> a`; the instance comes from the
+  -- call site. It ranks below an unconstrained match and above an unknown.
+  unless (hasAvailability "candidateNum" Polymorphic plainMatches) $
+    fail ("plain query lost call-site constrained candidate: " ++ show plainMatches)
   unless ("candidateMismatch" `notElem` map typeMatchName plainMatches) $
     fail ("repeated query variable accepted Int -> Bool: " ++ show plainMatches)
   unless (isExact "candidateRank" rankMatches) $

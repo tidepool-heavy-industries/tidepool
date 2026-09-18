@@ -98,7 +98,16 @@ data TypeMatchQuality
   | TypeMatchUsable
   deriving (Eq, Ord, Show)
 
-data Availability = Available | Unknown | Unavailable
+-- | How a callable relates to the asking actor's effect row.
+--
+-- `Polymorphic` means the row fits and every closed constraint solves, but some
+-- constraint stays open because the call site decides it. That is a usable
+-- name, not an uncertain one, and it used to be reported as `Unknown`.
+--
+-- The constructor order is the ranking: `Ord` is the sort key for type search
+-- here and for `availability_rank` in the lookup tool, so a new constructor's
+-- position is behaviour. The wire value is the constructor name itself.
+data Availability = Available | Polymorphic | Unknown | Unavailable
   deriving (Eq, Ord, Show)
 
 data TypeMatch = TypeMatch
@@ -283,9 +292,19 @@ availabilityFor context output predicates = do
     else if length closed == length finalPredicates
       then pure False
       else solvePredicates context closed
+  -- A predicate that is open only because it is polymorphic is not evidence
+  -- against a callable: the call site supplies the instantiation and discharges
+  -- it. `R.start` and `R.client` read `unknown` for exactly this reason while
+  -- the shipped guidance called them available in every cell, and both worked
+  -- first time. Say which of the two it is rather than collapsing them.
+  let openPredicates = length finalPredicates - length closed
   pure $ if rowDecision == Unavailable || not closedSolved
     then Unavailable
-    else if allSolved && rowDecision == Available then Available else Unknown
+    else if allSolved && rowDecision == Available
+      then Available
+      else if rowDecision == Available && openPredicates > 0
+        then Polymorphic
+        else Unknown
 
 solvePredicates :: AvailabilityContext -> [Type] -> IO Bool
 solvePredicates context predicates =

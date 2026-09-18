@@ -169,6 +169,9 @@ pub struct InfoEntry {
 #[serde(rename_all = "snake_case")]
 pub enum InspectionAvailability {
     Available,
+    /// The row fits and every closed constraint solves; a constraint stays open
+    /// only because the call site decides it. Usable, not uncertain.
+    Polymorphic,
     Unavailable,
     Unknown,
 }
@@ -177,6 +180,7 @@ impl InspectionAvailability {
     fn decode(value: &CborValue, what: &str) -> Result<Self, CompileError> {
         match text(value, what)? {
             "Available" => Ok(Self::Available),
+            "Polymorphic" => Ok(Self::Polymorphic),
             "Unavailable" => Ok(Self::Unavailable),
             "Unknown" => Ok(Self::Unknown),
             other => Err(invalid(format!("unknown {what} {other:?}"))),
@@ -1105,6 +1109,7 @@ mod tests {
         };
         for (encoded_name, expected) in [
             ("Available", InspectionAvailability::Available),
+            ("Polymorphic", InspectionAvailability::Polymorphic),
             ("Unavailable", InspectionAvailability::Unavailable),
             ("Unknown", InspectionAvailability::Unknown),
         ] {

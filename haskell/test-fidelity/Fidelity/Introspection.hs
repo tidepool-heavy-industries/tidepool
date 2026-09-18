@@ -46,8 +46,11 @@ checks = do
         check "named allowed effect is available" (infoAvailabilityFor "allowed" results == Just Available),
         check "named forbidden effect is unavailable" (infoAvailabilityFor "forbidden" results == Just Unavailable),
         check "fixed wrong output row is unavailable" (infoAvailabilityFor "fixedWrongRow" results == Just Unavailable),
-        check "unresolved input effect remains unknown" (infoAvailabilityFor "polymorphic" results == Just Unknown),
-        check "unresolved non-row predicate remains unknown" (infoAvailabilityFor "requiresShow" results == Just Unknown),
+        -- An input row the call site supplies, and a class constraint the call
+        -- site discharges, are both usable as written. Reporting them as
+        -- unknown told an agent to look for an alternative that did not exist.
+        check "unresolved input effect is call-site polymorphic" (infoAvailabilityFor "polymorphic" results == Just Polymorphic),
+        check "unresolved non-row predicate is call-site polymorphic" (infoAvailabilityFor "requiresShow" results == Just Polymorphic),
         check "captured type receives availability" (lastTypeAvailability results == Just Available)
       ]) ++ standalone
 

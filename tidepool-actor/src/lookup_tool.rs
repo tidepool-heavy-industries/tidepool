@@ -19,8 +19,10 @@ unknown part and qualify types as they are imported, e.g. \
 A dotted capitalized name, e.g. `Project.Investigate`, browses that module's \
 exports instead of looking up one identifier; see `doc topics` for the \
 workspace's own modules. \
-Callable results show current-row availability; `unknown` needs more type \
-information. Resource grants are checked when an operation executes. \
+Callable results show current-row availability: `polymorphic` fits your row and \
+its remaining constraint is decided by the call site, so it is usable; `unknown` \
+needs more type information. Resource grants are checked when an operation \
+executes. \
 A bare string is also accepted as one query. \
 Each query reports independently in deterministic text, so one bad query does \
 not hide other results.";
@@ -213,8 +215,9 @@ pub(crate) struct LookupEntry {
 fn availability_rank(availability: InspectionAvailability) -> u8 {
     match availability {
         InspectionAvailability::Available => 0,
-        InspectionAvailability::Unknown => 1,
-        InspectionAvailability::Unavailable => 2,
+        InspectionAvailability::Polymorphic => 1,
+        InspectionAvailability::Unknown => 2,
+        InspectionAvailability::Unavailable => 3,
     }
 }
 
@@ -274,6 +277,7 @@ fn is_span_coordinate(text: &str) -> bool {
 fn availability_label(availability: InspectionAvailability) -> &'static str {
     match availability {
         InspectionAvailability::Available => "available",
+        InspectionAvailability::Polymorphic => "polymorphic",
         InspectionAvailability::Unknown => "unknown",
         InspectionAvailability::Unavailable => "unavailable",
     }
@@ -600,8 +604,16 @@ mod tests {
         unavailable.availability = InspectionAvailability::Unavailable;
         let mut unknown = entry("exact-unknown", MatchQuality::Exact);
         unknown.availability = InspectionAvailability::Unknown;
+        // Usable, with a constraint the call site decides: it must outrank
+        // `unknown`, because a model that skips it skips a working name.
+        let mut polymorphic = entry("exact-polymorphic", MatchQuality::Exact);
+        polymorphic.availability = InspectionAvailability::Polymorphic;
         let available = entry("usable-available", MatchQuality::Usable);
-        let result = LookupResult::found(":: Row".into(), vec![unavailable, unknown, available], 2);
+        let result = LookupResult::found(
+            ":: Row".into(),
+            vec![unavailable, unknown, polymorphic, available],
+            2,
+        );
         let LookupOutcome::Found { matches, truncated } = &result.outcome else {
             panic!("expected found");
         };
@@ -611,17 +623,17 @@ mod tests {
                 .iter()
                 .map(|entry| entry.name.as_str())
                 .collect::<Vec<_>>(),
-            ["usable-available", "exact-unknown"]
+            ["usable-available", "exact-polymorphic"]
         );
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["outcome"]["matches"][0]["availability"], "available");
-        assert_eq!(json["outcome"]["matches"][1]["availability"], "unknown");
+        assert_eq!(json["outcome"]["matches"][1]["availability"], "polymorphic");
         let text = LookupResponse {
             results: vec![result],
         }
         .render_text();
         assert!(text.contains("[available] usable-available :: Int"));
-        assert!(text.contains("[unknown] exact-unknown :: Int"));
+        assert!(text.contains("[polymorphic] exact-polymorphic :: Int"));
     }
 
     #[test]
