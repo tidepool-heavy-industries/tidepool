@@ -192,31 +192,65 @@ pub const DEFAULT_NURSERY_SIZE: usize = 1 << 26; // 64 MiB
 /// drift — a smaller test stack made the overflow probes diverge from real evals.
 pub const EVAL_STACK_SIZE: usize = 256 * 1024 * 1024; // 256 MiB
 
-/// Compile Haskell source and run it with the given effect handlers,
+/// Compile one `Eff` expression and run it with the given effect handlers,
 /// using the specified nursery size.
 ///
 /// # Arguments
-/// * `source` - The Haskell source code to compile.
-/// * `target` - The name of the entry point binder.
+/// * `preamble` - Module header, pragmas, and imports (e.g. from
+///   `tidepool_mcp::build_preamble`) — everything before the compiled
+///   binding. Must NOT itself import `Tidepool.Internal.Resume` or define
+///   anything named `__resume`/`__decodeValue`/`__applyEntry`/
+///   `__applyValue`/`__prepared`/`__tidepoolInEffectRow`/`__workbenchValue`:
+///   [`session::assemble_expression_module`] owns those names.
+/// * `target` - Name for the assembled top-level binding (only used inside
+///   the assembled module; the actual compile target is always
+///   [`session::PREPARED_SCAFFOLD_TARGET`] — see below).
+/// * `effect_stack` - The row `expression`'s `Eff` type is pinned to while
+///   GHC infers it (e.g. `"'[Console, Ask]"`), exactly
+///   [`session::assemble_expression_module`]'s `effect_stack` parameter.
+/// * `expression` - The `Eff effect_stack a` computation to run — a single
+///   Haskell expression (a `do { ... }` block is one expression, so a
+///   caller with a statement sequence can pass `tidepool_mcp::wrap_do(...)`
+///   of it directly).
 /// * `include` - Search paths for Haskell modules.
 /// * `handlers` - Effect dispatchers for the prepared machine.
 /// * `user` - User context for effect handlers.
 /// * `nursery_size` - Size of the allocation nursery in bytes.
 ///
+/// # Why pieces, not a whole module string
+///
+/// A prepared program's `Tidepool.Internal.Resume.Done`/`Suspended` are only
+/// reachable — hence observable via `run_settled` — when the compiled module
+/// defines the fixed-named scaffold bindings `session::turn`'s assembly
+/// helpers write (see `plans/core-engine-removal.md`'s "The `UnsettledEntry`
+/// condition"). Splicing that scaffold into an arbitrary ALREADY-ASSEMBLED
+/// module string is not safe in general (a bare append breaks Haskell's
+/// import-before-declarations layout rule); every caller that already
+/// builds its source from a preamble + one expression already has the
+/// pieces this needs, so building the scaffolded module is this crate's
+/// job via the SAME assembly `session::turn`'s own resident-turn machinery
+/// uses ([`session::assemble_expression_module`]), not a second assembler
+/// or a caller-side splice.
+///
 /// # Returns
 /// * `Ok(EvalResult)` on successful execution.
 /// * `Err(RuntimeError)` for compilation or execution errors.
+#[allow(clippy::too_many_arguments)]
 pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
-    source: &str,
+    preamble: &str,
     target: &str,
+    effect_stack: &str,
+    expression: &str,
     include: &[&Path],
     handlers: &mut H,
     user: &U,
     nursery_size: usize,
 ) -> Result<EvalResult, RuntimeError> {
     compile_and_run_cancellable(
-        source,
+        preamble,
         target,
+        effect_stack,
+        expression,
         include,
         handlers,
         user,
@@ -235,7 +269,11 @@ pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
 /// eval/repl servers turn a turn timeout into an actual abort instead of a
 /// permanently-parked thread.
 ///
-/// A bare one-shot run outside any session: it bootstraps a standalone
+/// A bare one-shot run outside any session: it assembles the expression
+/// through the exact same scaffold `session::turn`'s resident-turn assembly
+/// uses ([`session::assemble_expression_module`] +
+/// [`session::PREPARED_SCAFFOLD_TARGET`] as the compile target — see this
+/// function's sibling doc for why), bootstraps a standalone
 /// [`session::prepared::PreparedEngine`] from the compiled prepared program,
 /// runs its settled entry to completion, and drops the engine (and its
 /// heap) once done. A request no installed handler recognizes is reported
@@ -243,27 +281,44 @@ pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
 /// matching what a plain (non-suspendable) run has always reported for an
 /// unclaimed effect — there is no resume path here for a caller to answer
 /// it later.
+#[allow(clippy::too_many_arguments)]
 pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
-    source: &str,
+    preamble: &str,
     target: &str,
+    effect_stack: &str,
+    expression: &str,
     include: &[&Path],
     handlers: &mut H,
     user: &U,
     nursery_size: usize,
     on_ready: impl FnOnce(CancelHandle),
 ) -> Result<EvalResult, RuntimeError> {
+    let assembled = session::assemble_expression_module(
+        preamble,
+        target,
+        effect_stack,
+        expression,
+        session::ExpressionLift::Effectful,
+    );
     let CompileResult {
         expr,
         mut table,
         warnings,
         prepared,
-    } = compile_haskell(source, target, include)?;
+    } = compile_haskell(&assembled, session::PREPARED_SCAFFOLD_TARGET, include)?;
     if warnings.has_io {
         return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
     }
     // Populate type-sibling groups from case branches so that get_companion
     // can disambiguate constructors sharing unqualified names (e.g. Bin/Tip
     // from Data.Map vs Data.Set) when a response value renders to JSON.
+    // NOT YET VERIFIED against a real GHC compile (build windows closed at
+    // the time this was written): `expr` is now __prepared's own extracted
+    // Core, a thin `settle target` wrapper — whether GHC's simplifier
+    // inlines `target`'s body into it before serialization (so its case
+    // branches are still visible here) or leaves it a bare application
+    // (losing sibling info from deep inside the real computation) needs a
+    // real compile to confirm.
     table.populate_siblings_from_expr(&expr);
     let value = run_prepared_program(
         prepared.prepared().clone(),
@@ -352,6 +407,75 @@ pub fn run_prepared_program<U, H: DispatchEffect<U>>(
     }
 }
 
+/// Compile a WHOLE already-assembled module string and run it effectfully
+/// against a bare `JitEffectMachine` — Core, not the prepared route.
+///
+/// This is [`compile_and_run`]'s pre-prepared-scaffold implementation,
+/// preserved under its own name rather than deleted: `compile_and_run`
+/// itself now takes preamble/target/effect_stack/expression pieces so it
+/// can assemble the prepared-STG scaffold
+/// ([`session::assemble_expression_module`] +
+/// [`session::PREPARED_SCAFFOLD_TARGET`] — see its doc and
+/// `plans/core-engine-removal.md`'s "The `UnsettledEntry` condition" for
+/// why a whole module string can't safely get that scaffold spliced in
+/// after the fact). A caller that only holds an already-fully-assembled
+/// module string (`tidepool-testing::eval_harness::EvalHarness::run_with`/
+/// `run_with_owned`, whose own callers build source via
+/// `tidepool_mcp::template_haskell` — a separate, richer templating system
+/// with `imports`/`helpers`/`budget`/`Render` capabilities
+/// `assemble_expression_module` does not have) is exactly the caller this
+/// task's instructions say does not get a splice invented for it: it stays
+/// here, on Core, until a decision is made about whether/how that shape
+/// reaches the prepared route.
+pub fn compile_and_run_whole_string_core<U, H: DispatchEffect<U>>(
+    source: &str,
+    target: &str,
+    include: &[&Path],
+    handlers: &mut H,
+    user: &U,
+    nursery_size: usize,
+) -> Result<EvalResult, RuntimeError> {
+    compile_and_run_cancellable_whole_string_core(
+        source,
+        target,
+        include,
+        handlers,
+        user,
+        nursery_size,
+        |_| {},
+    )
+}
+
+/// As [`compile_and_run_whole_string_core`], but hands the freshly-built
+/// machine's [`CancelHandle`] to `on_ready` BEFORE the (blocking) run
+/// begins — see [`compile_and_run_cancellable`]'s doc for the shape; this
+/// is that same behavior over a whole already-assembled module string,
+/// preserved for the same reason [`compile_and_run_whole_string_core`] is.
+pub fn compile_and_run_cancellable_whole_string_core<U, H: DispatchEffect<U>>(
+    source: &str,
+    target: &str,
+    include: &[&Path],
+    handlers: &mut H,
+    user: &U,
+    nursery_size: usize,
+    on_ready: impl FnOnce(CancelHandle),
+) -> Result<EvalResult, RuntimeError> {
+    let CompileResult {
+        expr,
+        mut table,
+        warnings,
+        ..
+    } = compile_haskell(source, target, include)?;
+    if warnings.has_io {
+        return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
+    }
+    table.populate_siblings_from_expr(&expr);
+    let mut machine = JitEffectMachine::compile(&expr, &table, nursery_size)?;
+    on_ready(machine.cancel_handle());
+    let value = machine.run(&table, handlers, user)?;
+    Ok(EvalResult::new(value, table, warnings.warnings))
+}
+
 /// Compile Haskell source and run it as a pure (non-effectful) program.
 ///
 /// Skips freer-simple effect dispatch — the result is converted directly
@@ -389,29 +513,24 @@ pub fn compile_and_run_pure_salted(
     Ok(EvalResult::new(value, table, warnings.warnings))
 }
 
-/// Compile Haskell source and run it with the given effect handlers,
-/// using the default nursery size (64 MiB).
-///
-/// # Arguments
-/// * `source` - The Haskell source code to compile.
-/// * `target` - The name of the entry point binder.
-/// * `include` - Search paths for Haskell modules.
-/// * `handlers` - Effect dispatchers for the JIT machine.
-/// * `user` - User context for effect handlers.
-///
-/// # Returns
-/// * `Ok(EvalResult)` on successful execution.
-/// * `Err(RuntimeError)` for compilation or JIT execution errors.
+/// Compile one `Eff` expression and run it with the given effect handlers,
+/// using the default nursery size (64 MiB). See
+/// [`compile_and_run_with_nursery_size`] for the full argument doc and why
+/// this takes assembly pieces rather than a whole module string.
 pub fn compile_and_run<U, H: DispatchEffect<U>>(
-    source: &str,
+    preamble: &str,
     target: &str,
+    effect_stack: &str,
+    expression: &str,
     include: &[&Path],
     handlers: &mut H,
     user: &U,
 ) -> Result<EvalResult, RuntimeError> {
     compile_and_run_with_nursery_size(
-        source,
+        preamble,
         target,
+        effect_stack,
+        expression,
         include,
         handlers,
         user,

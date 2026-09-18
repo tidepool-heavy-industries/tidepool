@@ -197,9 +197,25 @@ impl Driver {
         includes.push(crate::haskell_sources::ensure_embedded_stdlib()?);
         includes.extend(selected.include.iter().cloned());
         let refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        let source = format!("{{-# LANGUAGE DataKinds #-}}\nmodule RecipeMain where\nimport Control.Monad.Freer\nimport Tidepool.Check\nimport qualified {module}\nresult :: Eff '[RecipeCheck] ()\nresult = {entry}\n");
+        // Pieces, not a whole module string: `compile_and_run` assembles the
+        // prepared-STG scaffold itself (session::assemble_expression_module)
+        // — see its doc for why splicing that into an already-composed
+        // module string isn't safe in general.
+        let preamble = format!(
+            "{{-# LANGUAGE DataKinds #-}}\nmodule RecipeMain where\n\
+             import Control.Monad.Freer\nimport Tidepool.Check\n\
+             import qualified {module}\n"
+        );
         tokio::task::block_in_place(|| {
-            tidepool_runtime::compile_and_run(&source, "result", &refs, self, &())
+            tidepool_runtime::compile_and_run(
+                &preamble,
+                "result",
+                "'[RecipeCheck]",
+                entry,
+                &refs,
+                self,
+                &(),
+            )
         })?;
         Ok(())
     }
