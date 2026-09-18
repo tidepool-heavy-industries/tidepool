@@ -62,6 +62,45 @@ hardest to draw.
 executed a group retirement that stopped and forgot all three children and
 returned `cleanupReceiptComplete = True`. See the caveat below.
 
+## The record actor starts
+
+Run 7's decisive blocker was that `R.start (gateFor …)` could not be started at
+all: the prepared engine rejected it with *"prepared compilation rejected:
+unsupported expression at node 18541 in binding ValueId(17401)"*, because the
+emitter had no arm for GHC's rubbish atom. Every level of that run then did
+review and merge coordination by hand, in notebook turns, which is the thing
+these actors exist to avoid. `70e4ff22e` fixed the emitter and is an ancestor of
+this tree, but nothing had started a real record actor since.
+
+**It starts.** Told the history and asked to try without working around a
+failure, the `evalA` lead started `Project.Merge` as actor `9@1`, submitted HEAD
+itself as the smallest possible candidate, and got a complete cycle:
+
+```
+Published (GitOid "65bbb44…") (GitOid "65bbb44…") check.sh=ok(review-run)
+```
+
+with the actor's own recorded state:
+
+```
+merge tree=…/wt-0370577c-… advance=- blocked=no
+[0] integrate 65bbb44 review-run merged_green: record-actor-startup-exercise:
+    AlreadyContained (…); green -> Proceed (Green) -> replied to the review
+```
+
+It then finished cleanly. The lead's closing line: *"No errors or
+prepared-compilation rejections occurred."*
+
+So the actor starts, takes a publish request, merges, runs `check.sh`, reads the
+result, decides, replies to the review and retires. Run 8 is not blocked on the
+engine.
+
+**What this does not show.** The candidate was HEAD, so the merge was
+`AlreadyContained` and the check was green. The red path, the rollback path and
+the Jev seams inside the record actor were not exercised by this. What is
+established is that the actor compiles, starts, and completes a cycle — which is
+exactly what run 7 could not get.
+
 ## The bugs
 
 ### 1. A child can report success while its work is never committed
@@ -229,6 +268,15 @@ Note also that the lead found bug 1 on its own, from the merge results:
 *"Detecting from the merge results that the help and list workers had left their
 edits uncommitted, so those two branches carried no candidate change."* The
 information was recoverable — four exercises and one deliberate merge later.
+
+### Checked independently, not taken on the lead's word
+
+| claim | evidence |
+|---|---|
+| the rollback restored the exact prior OID | the integration worktree is at `50e4781`, clean, which is precisely the state before the red merge |
+| the red work was unmerged, not destroyed | `a770e97 test: deliberately make integration red` still exists on its own branch, parented on `50e4781` |
+| the green candidate advanced the intended integration ref | **no.** `shoal/integration` is still at `65bbb44`. Everything happened on the worktree's own branch and nothing was published to the base. The scenario stopped one step short of the thing that would make it real |
+| cleanup receipts complete for every role | complete for the three leaves. There was no supervisor or integrator actor in this run — the lead hand-rolled integration — so there is no third receipt to check, and the two leaf worktrees named in bug 2 are still on disk |
 
 ## Where the time went
 
