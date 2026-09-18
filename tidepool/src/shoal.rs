@@ -48,6 +48,10 @@ maximum_depth = 8
 "#;
 const ENV_PACKAGED_CODEX_CLOSURE: &str = "TIDEPOOL_SHOAL_CODEX_CLOSURE";
 const ENV_NIX_STORE_BIN: &str = "TIDEPOOL_SHOAL_NIX_STORE_BIN";
+/// The `nix` executable that fetches the project's flake inputs when
+/// `[haskell.flake_sources]` pins Haskell source outside the workspace. Set by
+/// the packaged `shoal` wrapper and the dev shell; otherwise the one on `PATH`.
+const ENV_NIX_BIN: &str = "TIDEPOOL_SHOAL_NIX_BIN";
 const GC_ROOT_TIMEOUT: Duration = Duration::from_secs(30);
 const GC_ROOT_ERROR_LIMIT: usize = 16 * 1024;
 const BOUNDARY_PROBE_TIMEOUT: Duration = Duration::from_secs(10);

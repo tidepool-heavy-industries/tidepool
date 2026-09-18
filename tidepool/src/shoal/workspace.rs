@@ -11,6 +11,14 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[serde(default, deny_unknown_fields)]
 pub(super) struct HaskellConfig {
     pub source_roots: Vec<PathBuf>,
+    /// Haskell source directories inside the project's flake inputs, keyed by
+    /// the input name `flake.nix` declares. Each directory is relative to the
+    /// root of the fetched input.
+    pub flake_sources: BTreeMap<String, Vec<PathBuf>>,
+    /// Directories that stand in for a pinned input while it is being
+    /// developed. Relative to `.shoal`, like every other configured path; an
+    /// absolute path reaches a sibling checkout directly.
+    pub flake_overrides: BTreeMap<String, PathBuf>,
     pub modules: Vec<String>,
     pub checks: Vec<String>,
     pub tools: Option<String>,
@@ -87,10 +95,14 @@ impl FrozenWorkspace {
         // Failed captures have no manifest. A retry selects fresh directories,
         // so deleted modules from a partial attempt cannot remain importable.
         let capture = uuid::Uuid::new_v4();
-        for (index, root) in config.haskell.source_roots.iter().enumerate() {
-            let source = base.join(root).canonicalize()?;
+        let mut roots = Vec::new();
+        for root in &config.haskell.source_roots {
+            roots.push(base.join(root).canonicalize()?);
+        }
+        roots.extend(flake_source_roots(workspace, &config.haskell)?);
+        for (index, source) in roots.iter().enumerate() {
             let relative = PathBuf::from(format!("sources/{capture}/{index}"));
-            capture_sources(&source, &relative, &directory, &mut files)?;
+            capture_sources(source, &relative, &directory, &mut files)?;
             include.push(directory.join(relative));
         }
         for entry in config
@@ -264,6 +276,126 @@ fn valid_module(module: &str) -> bool {
             chars.next().is_some_and(|c| c.is_ascii_uppercase())
                 && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\'')
         })
+}
+
+/// Fetch the project's flake inputs and return the Haskell source directories
+/// `[haskell.flake_sources]` selects from them, ordered by input name.
+///
+/// `nix flake archive` locks the project's `flake.nix`, fetches every input,
+/// and reports where each one landed. The returned directories are ordinary
+/// source roots from that point on: the caller captures them into this run's
+/// frozen workspace exactly like an authored `source_roots` entry, so a pinned
+/// dependency compiles through the same pipeline, reaches every actor through
+/// the same resident include list, and is fingerprinted by the same content
+/// walk. There is no separate dependency registry and no precompiled package.
+///
+/// The workspace is handed to `nix` the way any other `nix` command receives a
+/// project directory, so a Git workspace contributes its tracked working-tree
+/// files and a dirty `flake.nix` is read as written.
+///
+/// `[haskell.flake_overrides]` replaces an input with a local directory for
+/// this run. The project's `flake.lock` is left alone while an override is in
+/// play, so editing a dependency in place stays a working change rather than a
+/// re-pin.
+fn flake_source_roots(workspace: &Path, config: &HaskellConfig) -> Result<Vec<PathBuf>> {
+    for input in config.flake_overrides.keys() {
+        if !config.flake_sources.contains_key(input) {
+            return Err(format!(
+                "[haskell.flake_overrides] names {input:?}, which [haskell.flake_sources] does not use"
+            )
+            .into());
+        }
+    }
+    if config.flake_sources.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !workspace.join("flake.nix").is_file() {
+        return Err(format!(
+            "[haskell.flake_sources] pins source through the project's flake, but {} has no flake.nix",
+            workspace.display()
+        )
+        .into());
+    }
+    let base = workspace.join(".shoal");
+    let nix =
+        std::env::var_os(super::ENV_NIX_BIN).map_or_else(|| PathBuf::from("nix"), PathBuf::from);
+    let mut command = std::process::Command::new(&nix);
+    command
+        .arg("--extra-experimental-features")
+        .arg("nix-command flakes")
+        .args(["flake", "archive", "--json"]);
+    if !config.flake_overrides.is_empty() {
+        command.arg("--no-write-lock-file");
+    }
+    for (input, path) in &config.flake_overrides {
+        let directory = base.join(path).canonicalize()?;
+        let directory = directory.to_str().ok_or_else(|| {
+            format!("[haskell.flake_overrides] {input:?} is not a text path: {directory:?}")
+        })?;
+        command
+            .arg("--override-input")
+            .arg(input)
+            .arg(format!("path:{directory}"));
+    }
+    let report = command.arg(workspace).output().map_err(|error| {
+        format!("cannot start {} to fetch flake inputs: {error}", nix.display())
+    })?;
+    if !report.status.success() {
+        return Err(format!(
+            "cannot fetch the project's flake inputs ({}): {}",
+            report.status,
+            String::from_utf8_lossy(&report.stderr).trim()
+        )
+        .into());
+    }
+    #[derive(Deserialize)]
+    struct Archive {
+        #[serde(default)]
+        inputs: BTreeMap<String, ArchivedInput>,
+    }
+    #[derive(Deserialize)]
+    struct ArchivedInput {
+        path: PathBuf,
+    }
+    let archive: Archive = serde_json::from_slice(&report.stdout)?;
+    let mut roots = Vec::new();
+    for (input, directories) in &config.flake_sources {
+        let fetched = archive.inputs.get(input).ok_or_else(|| {
+            format!("the project's flake.nix declares no input named {input:?}")
+        })?;
+        if directories.is_empty() {
+            return Err(format!(
+                "[haskell.flake_sources] {input:?} names no source directory"
+            )
+            .into());
+        }
+        for directory in directories {
+            if directory.is_absolute()
+                || directory.components().any(|part| {
+                    !matches!(
+                        part,
+                        std::path::Component::Normal(_) | std::path::Component::CurDir
+                    )
+                })
+            {
+                return Err(format!(
+                    "[haskell.flake_sources] {input:?} directory must stay inside the input: {}",
+                    directory.display()
+                )
+                .into());
+            }
+            let root = fetched.path.join(directory);
+            if !root.is_dir() {
+                return Err(format!(
+                    "flake input {input:?} has no directory {}",
+                    directory.display()
+                )
+                .into());
+            }
+            roots.push(root);
+        }
+    }
+    Ok(roots)
 }
 
 /// Copy the authored package into an isolated check repository, excluding runtime trees.
@@ -442,6 +574,107 @@ mod tests {
             FrozenWorkspace::load(project.path(), tempfile::tempdir().unwrap().path()).unwrap();
         assert_eq!(next.tools.as_deref(), Some("Project.Next.tools"));
         assert_ne!(next.identity, frozen.identity);
+    }
+
+    /// External Haskell source pinned through the project's flake reaches a
+    /// run the same way authored source does: captured into the frozen
+    /// workspace, importable by module name, and covered by the compile
+    /// cache's own content fingerprint. A local override stands in for the pin
+    /// without rewriting `flake.lock`, and editing that override moves the
+    /// cache key — which is what makes the rapid-development loop honest.
+    #[test]
+    fn flake_pinned_sources_are_captured_overridden_and_rekeyed() {
+        let project = tempfile::tempdir().unwrap();
+        let pinned = tempfile::tempdir().unwrap();
+        let authored = project.path().join(".shoal");
+        std::fs::create_dir_all(&authored).unwrap();
+        let local = authored.join("local-ext");
+        write_tiny_module(pinned.path(), "41");
+        write_tiny_module(&local, "99");
+        std::fs::write(
+            project.path().join("flake.nix"),
+            format!(
+                "{{\n  inputs.tiny = {{ url = \"path:{}\"; flake = false; }};\n  outputs = _: {{ }};\n}}\n",
+                pinned.path().display()
+            ),
+        )
+        .unwrap();
+        // Nix resolves a bare directory through its enclosing Git tree, which
+        // every Shoal workspace has, and only reads files Git knows about.
+        for argv in [&["init", "-q"][..], &["add", "-A"][..]] {
+            assert!(std::process::Command::new("git")
+                .args(argv)
+                .current_dir(project.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        let config = |overridden: bool| {
+            let mut text = String::from(
+                "[defaults]\nmodel = 'gpt-5.6-sol'\n[haskell]\nmodules = ['Ext.Tiny']\n[haskell.flake_sources]\ntiny = ['src']\n",
+            );
+            if overridden {
+                text.push_str("[haskell.flake_overrides]\ntiny = 'local-ext'\n");
+            }
+            std::fs::write(authored.join("config.toml"), text).unwrap();
+        };
+        let tiny = |frozen: &FrozenWorkspace| {
+            let root = frozen
+                .include
+                .iter()
+                .find(|root| root.join("Ext/Tiny.hs").is_file())
+                .expect("the pinned module is captured as an ordinary source root");
+            std::fs::read_to_string(root.join("Ext/Tiny.hs")).unwrap()
+        };
+
+        config(false);
+        let first_run = tempfile::tempdir().unwrap();
+        let first = FrozenWorkspace::load(project.path(), first_run.path()).unwrap();
+        assert!(tiny(&first).contains("41"), "{}", tiny(&first));
+        let lock = std::fs::read(project.path().join("flake.lock")).unwrap();
+
+        config(true);
+        let second_run = tempfile::tempdir().unwrap();
+        let second = FrozenWorkspace::load(project.path(), second_run.path()).unwrap();
+        assert!(tiny(&second).contains("99"), "{}", tiny(&second));
+        assert_eq!(
+            std::fs::read(project.path().join("flake.lock")).unwrap(),
+            lock,
+            "an override is a working change, not a re-pin"
+        );
+        assert_ne!(first.identity, second.identity);
+        assert_ne!(cache_key(&first.include), cache_key(&second.include));
+
+        write_tiny_module(&local, "123");
+        let third_run = tempfile::tempdir().unwrap();
+        let third = FrozenWorkspace::load(project.path(), third_run.path()).unwrap();
+        assert!(tiny(&third).contains("123"), "{}", tiny(&third));
+        assert_ne!(cache_key(&second.include), cache_key(&third.include));
+    }
+
+    fn write_tiny_module(root: &Path, value: &str) {
+        std::fs::create_dir_all(root.join("src/Ext")).unwrap();
+        std::fs::write(
+            root.join("src/Ext/Tiny.hs"),
+            format!("module Ext.Tiny where\n\ntiny :: Int\ntiny = {value}\n"),
+        )
+        .unwrap();
+    }
+
+    /// The compiled-artifact key an extract over these include roots would get.
+    fn cache_key(include: &[PathBuf]) -> String {
+        let input = PathBuf::from("Turn.hs");
+        let argv = vec![std::ffi::OsString::from("Turn.hs")];
+        tidepool_runtime::cache::invocation_key(&tidepool_runtime::cache::Invocation {
+            source: "module Turn where",
+            argv: &argv,
+            input_path: &input,
+            include,
+            endpoint_identity: b"frozen-workspace-test",
+            stable_val: None,
+        })
+        .expect("an include-only invocation is cacheable")
+        .to_string()
     }
 
     #[test]
