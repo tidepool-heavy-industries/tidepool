@@ -1,0 +1,8 @@
+check "E0425 classifies as llm_patch, not an automatic import" (fmap reflexNext (reflexFor 1 "error[E0425]: cannot find value `missing` in this scope") == Just LlmPatch)
+check "E0433 classifies as llm_patch, not an automatic import" (fmap reflexNext (reflexFor 1 "error[E0433]: failed to resolve") == Just LlmPatch)
+check "E0412 classifies as llm_patch, not an automatic import" (fmap reflexNext (reflexFor 1 "error[E0412]: cannot find type") == Just LlmPatch)
+check "E0599 classifies as llm_patch, not an automatic import" (fmap reflexNext (reflexFor 1 "error[E0599]: no method named `missing`") == Just LlmPatch)
+check "GHC-76037 classifies as llm_patch, not an automatic import" (fmap reflexNext (reflexFor 1 "[GHC-76037] Not in scope") == Just LlmPatch)
+check "an import hint in the message does not change the classification" (fmap reflexNext (reflexFor 1 "error[E0425]: missing\nhelp: consider importing unrelated::Name") == Just LlmPatch)
+check "exit 0 is green regardless of output" (fmap reflexNext (reflexFor 0 "error[E0425]") == Just Proceed)
+check "unmatched output stays unclassified" (case reflexFor 1 "unknown failure" of { Nothing -> True; _ -> False })

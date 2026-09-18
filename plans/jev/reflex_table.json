@@ -1,9 +1,8 @@
 {
- "$schema_note": "Reflex table v1, 2026-09-17. Codes verified by compiling with rustc 1.93.0 and GHC 9.12.2 unless verified=false. next_step vocabulary: cargo_fix (apply machine-applicable suggestions: `cargo fix --allow-dirty` or `cargo clippy --fix --allow-dirty`, then re-run; if the diagnostic persists, fall through to llm_patch), run_fmt (`cargo fmt`), add_import (the diagnostic names the path; add the use/import line), rerun (same command once), llm_patch (a model reads the code and edits), escalate (a person or reasoning model decides). Precedence: (1) rustfmt diff -> run_fmt; (2) an error code or lint name in the FIRST error -> this table; (3) test-runner output -> test classes; (4) no code -> Jev over the code-less class list.",
+ "$schema_note": "Reflex table v1, 2026-09-17. Codes verified by compiling with rustc 1.93.0 and GHC 9.12.2 unless verified=false. next_step vocabulary: cargo_fix (apply machine-applicable suggestions: `cargo fix --allow-dirty` or `cargo clippy --fix --allow-dirty`, then re-run; if the diagnostic persists, fall through to llm_patch), run_fmt (`cargo fmt`), rerun (same command once), llm_patch (a model reads the code and edits -- this is also where a name-resolution diagnostic lands, since the code alone does not establish that adding an import is the repair), escalate (a person or reasoning model decides). Precedence: (1) rustfmt diff -> run_fmt; (2) an error code or lint name in the FIRST error -> this table; (3) test-runner output -> test classes; (4) no code -> Jev over the code-less class list.",
  "next_steps": [
   "cargo_fix",
   "run_fmt",
-  "add_import",
   "rerun",
   "llm_patch",
   "escalate"
@@ -113,21 +112,21 @@
   },
   "E0425": {
    "class": "unresolved_name",
-   "next_step": "add_import",
+   "next_step": "llm_patch",
    "verified": true,
-   "note": "add_import only when the diagnostic carries `help: consider importing`; otherwise llm_patch"
+   "note": "inspect the source and this diagnostic before choosing an import or definition repair; a `help: consider importing` line points toward an import but does not settle it"
   },
   "E0433": {
    "class": "unresolved_name",
-   "next_step": "add_import",
+   "next_step": "llm_patch",
    "verified": true,
-   "note": "same condition as E0425"
+   "note": "inspect the source and this diagnostic before choosing an import or definition repair; same condition as E0425"
   },
   "E0412": {
    "class": "unresolved_name",
-   "next_step": "add_import",
+   "next_step": "llm_patch",
    "verified": false,
-   "note": "same condition as E0425"
+   "note": "inspect the source and this diagnostic before choosing an import or definition repair; same condition as E0425"
   },
   "E0432": {
    "class": "unresolved_import",
@@ -137,9 +136,9 @@
   },
   "E0599": {
    "class": "no_such_method",
-   "next_step": "add_import",
+   "next_step": "llm_patch",
    "verified": true,
-   "note": "add_import only when the output says `items from traits can only be used if the trait is in scope`; otherwise llm_patch"
+   "note": "inspect the source and this diagnostic before choosing an import or definition repair; an `items from traits can only be used if the trait is in scope` line points toward an import but does not settle it"
   },
   "E0423": {
    "class": "unresolved_name",
@@ -274,13 +273,13 @@
    "class": "not_in_scope",
    "next_step": "llm_patch",
    "verified": true,
-   "note": "variable not in scope; add_import only if the name is qualified or the message says `Perhaps you want to add ... to the import list`"
+   "note": "variable not in scope; a qualified name or a message saying `Perhaps you want to add ... to the import list` points toward an import, but inspect the source and this diagnostic before choosing an import or definition repair"
   },
   "GHC-76037": {
    "class": "not_in_scope",
-   "next_step": "add_import",
+   "next_step": "llm_patch",
    "verified": true,
-   "note": "qualified name (`Set.fromList`) or type constructor: add_import; an unqualified record field name here is a code error: llm_patch"
+   "note": "inspect the source and this diagnostic before choosing an import or definition repair; a qualified name (`Set.fromList`) or type constructor points toward an import, an unqualified record field name toward a code error"
   },
   "GHC-87110": {
    "class": "missing_module",
@@ -427,9 +426,8 @@
  "jev_codeless_next_step": {
   "cargo_fix": "run `cargo fix --allow-dirty` or `cargo clippy --fix --allow-dirty` and rebuild; the diagnostic offers a machine-applicable suggestion",
   "run_fmt": "run `cargo fmt` and rebuild",
-  "add_import": "add the `use` or `import` line the diagnostic names and rebuild",
   "rerun": "rerun the same command once; only for locks, timeouts, network, or a build script that failed on I/O",
-  "llm_patch": "a model must read the code and write a fix, including any deterministic panic or assertion in code under test",
+  "llm_patch": "a model must read the code and write a fix, including any deterministic panic or assertion in code under test, and any name-resolution diagnostic -- the code alone does not establish that adding an import is the repair",
   "escalate": "a person or reasoning model must decide; the fix changes a design, a dependency, or the environment"
  }
 }

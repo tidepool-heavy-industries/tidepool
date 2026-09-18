@@ -43,7 +43,6 @@ data NextStep
   = RunFmt      -- ^ run `cargo fmt` and rebuild
   | CargoFix    -- ^ apply machine-applicable suggestions, then re-run; on
                 --   persistence fall through to LlmPatch
-  | AddImport   -- ^ the diagnostic names the path; add the import, rebuild
   | Rerun       -- ^ rerun once: locks, timeouts, network, build-script I/O
   | LlmPatch    -- ^ a model reads the code and edits
   | Escalate    -- ^ a person or reasoning model decides
@@ -130,11 +129,11 @@ reflexTable =
   , Reflex "lifetime" LlmPatch Rustc (Has "E0597") Nothing
   , Reflex "lifetime" LlmPatch Rustc (Has "E0621") Nothing
   , Reflex "lifetime" LlmPatch Rustc (Has "E0106") Nothing
-  , Reflex "unresolved_name" AddImport Rustc (Has "E0425") (Just "add_import only when the diagnostic carries `help: consider importing`; otherwise llm_patch")
-  , Reflex "unresolved_name" AddImport Rustc (Has "E0433") (Just "same condition as E0425")
-  , Reflex "unresolved_name" AddImport Rustc (Has "E0412") (Just "same condition as E0425")
+  , Reflex "unresolved_name" LlmPatch Rustc (Has "E0425") (Just "inspect the source and this diagnostic before choosing an import or definition repair")
+  , Reflex "unresolved_name" LlmPatch Rustc (Has "E0433") (Just "inspect the source and this diagnostic before choosing an import or definition repair")
+  , Reflex "unresolved_name" LlmPatch Rustc (Has "E0412") (Just "inspect the source and this diagnostic before choosing an import or definition repair")
   , Reflex "unresolved_import" LlmPatch Rustc (Has "E0432") (Just "the import line itself is wrong; a typo or a missing dependency")
-  , Reflex "no_such_method" AddImport Rustc (Has "E0599") (Just "add_import only when the output says `items from traits can only be used if the trait is in scope`; otherwise llm_patch")
+  , Reflex "no_such_method" LlmPatch Rustc (Has "E0599") (Just "inspect the source and this diagnostic before choosing an import or definition repair")
   , Reflex "unresolved_name" LlmPatch Rustc (Has "E0423") Nothing
   , Reflex "visibility" LlmPatch Rustc (Has "E0603") Nothing
   , Reflex "visibility" LlmPatch Rustc (Has "E0616") Nothing
@@ -155,8 +154,8 @@ reflexTable =
   , Reflex "type_mismatch" LlmPatch Ghc (Has "GHC-25897") (Just "rigid type variable or occurs check GHC codes print as [GHC-NNNNN]. GHC-18042 is the -Werror wrapper and carries no class; take the other code on the line.")
   , Reflex "instance_resolution" LlmPatch Ghc (Has "GHC-39999") (Just "no instance, ambiguous type variable, or a function applied to too few args surfacing as Show (a -> b) GHC codes print as [GHC-NNNNN]. GHC-18042 is the -Werror wrapper and carries no class; take the other code on the line.")
   , Reflex "instance_resolution" LlmPatch Ghc (Has "GHC-43085") (Just "overlapping instances GHC codes print as [GHC-NNNNN]. GHC-18042 is the -Werror wrapper and carries no class; take the other code on the line.")
-  , Reflex "not_in_scope" LlmPatch Ghc (Has "GHC-88464") (Just "variable not in scope; add_import only if the name is qualified or the message says `Perhaps you want to add ... to the import list` GHC codes print as [GHC-NNNNN]. GHC-18042 is the -Werror wrapper and carries no class; take the other code on the line.")
-  , Reflex "not_in_scope" AddImport Ghc (Has "GHC-76037") (Just "qualified name (`Set.fromList`) or type constructor: add_import; an unqualified record field name here is a code error: llm_patch GHC codes print as [GHC-NNNNN]. GHC-18042 is the -Werror wrapper and carries no class; take the other code on the line.")
+  , Reflex "not_in_scope" LlmPatch Ghc (Has "GHC-88464") (Just "variable not in scope; qualified name or a message saying `Perhaps you want to add ... to the import list` points toward an import, but inspect the source and this diagnostic before choosing an import or definition repair GHC codes print as [GHC-NNNNN]. GHC-18042 is the -Werror wrapper and carries no class; take the other code on the line.")
+  , Reflex "not_in_scope" LlmPatch Ghc (Has "GHC-76037") (Just "inspect the source and this diagnostic before choosing an import or definition repair GHC codes print as [GHC-NNNNN]. GHC-18042 is the -Werror wrapper and carries no class; take the other code on the line.")
   , Reflex "missing_module" LlmPatch Ghc (Has "GHC-87110") (Just "cabal dependency or exposed-modules change; a build-file edit GHC codes print as [GHC-NNNNN]. GHC-18042 is the -Werror wrapper and carries no class; take the other code on the line.")
   , Reflex "syntax_error" LlmPatch Ghc (Has "GHC-58481") (Just "GHC codes print as [GHC-NNNNN]. GHC-18042 is the -Werror wrapper and carries no class; take the other code on the line.")
   , Reflex "duplicate_definition" LlmPatch Ghc (Has "GHC-29916") (Just "GHC codes print as [GHC-NNNNN]. GHC-18042 is the -Werror wrapper and carries no class; take the other code on the line.")
@@ -198,4 +197,4 @@ jevClasses =
 -- | The table's own description of itself, for a wake notice that has to
 -- say where a classification came from.
 tableVocabulary :: Text
-tableVocabulary = "Reflex table v1, 2026-09-17, flattened from tidepool-jev plans/jev/reflex_table.json. Entries are in precedence order: take the FIRST entry whose matcher hits the output. Sections in order: rustfmt (a rustfmt diff wins outright), environment (matched anywhere; these precede the code table because they explain the codes that follow them), rustc / rustc_lint / clippy / ghc (an error code or lint name in the FIRST error), parse (rustc parse errors carry no code; match them before falling through to Jev), test_runner (nextest and libtest output has no codes; first literal marker wins), and jev (output with no code, no lint name, no test marker and no environment marker -- hand the Choice criteria map below to Jev, which picks both a class and a next_step). next_step vocabulary: cargo_fix = apply machine-applicable suggestions (`cargo fix --allow-dirty` or `cargo clippy --fix --allow-dirty`), then re-run; if the diagnostic persists, fall through to llm_patch. run_fmt = run `cargo fmt` and rebuild. add_import = the diagnostic names the path; add the use/import line and rebuild. rerun = rerun the same command once; only for locks, timeouts, network, or a build script that failed on I/O. llm_patch = a model reads the code and edits, including any deterministic panic or assertion in code under test. escalate = a person or reasoning model decides; the fix changes a design, a dependency, or the environment. `verified` means the code was reproduced by compiling with rustc 1.93.0 / GHC 9.12.2."
+tableVocabulary = "Reflex table v1, 2026-09-17, flattened from tidepool-jev plans/jev/reflex_table.json. Entries are in precedence order: take the FIRST entry whose matcher hits the output. Sections in order: rustfmt (a rustfmt diff wins outright), environment (matched anywhere; these precede the code table because they explain the codes that follow them), rustc / rustc_lint / clippy / ghc (an error code or lint name in the FIRST error), parse (rustc parse errors carry no code; match them before falling through to Jev), test_runner (nextest and libtest output has no codes; first literal marker wins), and jev (output with no code, no lint name, no test marker and no environment marker -- hand the Choice criteria map below to Jev, which picks both a class and a next_step). next_step vocabulary: cargo_fix = apply machine-applicable suggestions (`cargo fix --allow-dirty` or `cargo clippy --fix --allow-dirty`), then re-run; if the diagnostic persists, fall through to llm_patch. run_fmt = run `cargo fmt` and rebuild. rerun = rerun the same command once; only for locks, timeouts, network, or a build script that failed on I/O. llm_patch = a model reads the code and edits, including any deterministic panic or assertion in code under test -- this is also where a name-resolution diagnostic lands, since the code alone does not establish that adding an import is the repair. escalate = a person or reasoning model decides; the fix changes a design, a dependency, or the environment. `verified` means the code was reproduced by compiling with rustc 1.93.0 / GHC 9.12.2."

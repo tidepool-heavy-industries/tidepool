@@ -39,10 +39,15 @@ behavior marked `verified: true` was produced by compiling a planted break on ru
 1.93.0 / GHC 9.12.2 / clippy 0.1.96 today; the four marked false are from rustc's own
 catalog and were not exercised. Shape:
 
-- `next_steps`: six values. `cargo_fix`, `run_fmt`, `add_import`, `rerun`, `llm_patch`,
-  `escalate`. `delete_line` is gone: unused imports and unused mut are machine-applicable
-  and `cargo fix` handles them; deleting a dead function or an unused variable is a
-  judgment and goes to `llm_patch`.
+- `next_steps`: five values. `cargo_fix`, `run_fmt`, `rerun`, `llm_patch`, `escalate`.
+  `delete_line` is gone: unused imports and unused mut are machine-applicable and
+  `cargo fix` handles them; deleting a dead function or an unused variable is a judgment
+  and goes to `llm_patch`. `add_import` is also gone: a diagnostic code alone does not
+  establish that adding an import is the repair (the case that removed it was a model
+  applying a function to the wrong one of two similarly-named result types, which no
+  import would fix), so every entry that selected it now goes to `llm_patch` with a note
+  to inspect the source and the diagnostic before choosing an import or a definition
+  repair.
 - Precedence, first match wins: rustfmt `Diff in` → environment markers (locks, build
   scripts, linker, network, disk, dependency resolution) → the first error's E-code or
   lint name → rustc code-less parse errors (`error: expected ...`) → test-runner markers
@@ -53,10 +58,12 @@ catalog and were not exercised. Shape:
   needless_return, map_clone, clone_on_copy, useless_vec and len_zero were applied in one
   pass, and the pass surfaced two new lints (iter_cloned_collect, const_is_empty). So the
   reflex is fix, rebuild, repeat up to three times, then llm_patch for whatever persists.
-- Three codes need a sub-rule from the message text, written in the entry's `note`:
-  E0425/E0433 are `add_import` only when rustc prints `help: consider importing`; E0599 is
-  `add_import` only when it says the trait is not in scope; GHC-76037 is `add_import` for
-  a qualified name and `llm_patch` for an unqualified record field.
+- E0425, E0433, E0412, E0599 and GHC-76037 are all `llm_patch`, each with a note on what
+  the message text still tells you: E0425/E0433/E0412 mention a `help: consider
+  importing` line, E0599 an `items from traits can only be used if the trait is in scope`
+  line, and GHC-76037 a qualified name versus an unqualified record field -- useful
+  context for the model, but none of it is a standing license to skip inspecting the
+  source and the diagnostic before choosing an import or a definition repair.
 - GHC-18042 is the -Werror wrapper and carries no class; take the other code on the line.
   GHC-39999 covers no-instance, ambiguous-type and too-few-arguments (which surfaces as
   `No instance for Show (Int -> Int)`), all `llm_patch`.
