@@ -44,6 +44,25 @@ original spec:
 An actor that has not activated a published revision is still running the old
 one, truthfully, and says so.
 
+## The spec is one module among the ones the agent curates
+
+It is not a special location. `.shoal/AgentSpec.hs` sits beside `.shoal/Project/`,
+in the same declared source roots a notebook cell imports, and a reload publishes
+all of them in one revision. The notebook and the spec are two consumers of that
+one revision, activating on their own schedule: the next cell compiles against it
+when it runs, and the actor re-derives its record when it asks.
+
+That is what makes the promotion path cheap. A helper written in a cell moves to
+`.shoal/discoveries/` while it is experimental, to `.shoal/Project/` when a second
+consumer genuinely shares it, and becomes a tool or a slot by being *named in the
+spec* — no copy, no move, no second library location. The same module can back a
+cell today and a tool tomorrow, compiled once from one revision, so the two can
+never disagree about what the helper does.
+
+The reverse direction matters as much: a tool's implementation is ordinary source
+the agent can import into a cell and exercise directly, without going through the
+tool boundary to test it.
+
 ## What the existing code already guarantees
 
 `prepare_tools` (`tidepool-actor/src/resident_workbench.rs:1864-1982`) compiles
