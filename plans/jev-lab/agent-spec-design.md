@@ -63,6 +63,35 @@ The reverse direction matters as much: a tool's implementation is ordinary sourc
 the agent can import into a cell and exercise directly, without going through the
 tool boundary to test it.
 
+## What the spec value is
+
+The existing tools DSL, unchanged, plus one record around it. A tools record is
+already an ordinary `Generic` record whose fields are endpoints
+(`haskell/lib/Tidepool/Agent/Contract.hs`, the `mode :- endpoint` family at
+`:118-135`; `haskell/lib/Tidepool/Command/Tools.hs:78-85` is a shipped example).
+A field's name is the tool's name and its input and output types generate the
+schemas, so no tool is ever named by a convention.
+
+The spec keeps that property for slots. They are fields of one record, not
+magically-named top-level functions:
+
+```haskell
+agentSpec = defaultSpec
+  { tools     = Tools.definitions
+  , afterTool = Just AfterTool.run
+  }
+```
+
+**The record needs a default, and that is the point.** More slots are expected,
+and a slot added as a new field with a default leaves every existing spec
+compiling untouched. A spec written as a bare constructor application would break
+on every addition, so the default is what makes the surface extensible rather
+than versioned.
+
+So the whole convention is two names: the module `AgentSpec` and the value
+`agentSpec`. Everything a model writes below that is ordinary Haskell it can read
+the type of.
+
 ## How the spec is found
 
 By convention, because configuration cannot express it. `[haskell] tools`
