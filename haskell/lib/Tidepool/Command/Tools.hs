@@ -31,7 +31,7 @@ import Tidepool.Aeson.FromJSON (FromJSON)
 import Tidepool.Agent.Contract
 import qualified Tidepool.Command as Cmd
 import Tidepool.Command.Types (Job (..))
-import Tidepool.Effects.Core (Commands (..))
+import Tidepool.Effects.Core (CommandPresentation (..), Commands (..))
 import Tidepool.Inspection (Display (..))
 
 data Execute = Execute
@@ -208,12 +208,17 @@ readRetained ReadOutput {session_id = key, stream = selected, offset = position,
       result <- case first of
         Right page | utf8Bytes (Cmd.outputText page) > contentBudget -> read (max 1 (contentBudget `div` 3))
         _ -> pure first
-      pure $ case result of
-        Left Cmd.CommandOutputPending -> "session_id: " <> key <> "\nNo output yet; streams are starting."
-        Left issue -> "session_id: " <> key <> "\nOutput unavailable: " <> T.pack (show issue) <> "\nInspect the same job; do not rerun the command."
-        Right details ->
+      case result of
+        Left Cmd.CommandOutputPending -> pure $ "session_id: " <> key <> "\nNo output yet; streams are starting."
+        Left issue -> pure $ "session_id: " <> key <> "\nOutput unavailable: " <> T.pack (show issue) <> "\nInspect the same job; do not rerun the command."
+        Right details -> do
+          -- A read does not start or wait on anything, but a confirmed page
+          -- still names the job's retained Haskell binding, same as every
+          -- other direct command tool. The small budget only covers this
+          -- heading; the page itself is never refetched here.
+          _ <- send (CommandPresentWith key (CommandVisible ("Read · session_id: " <> key) 512))
           let (text, _) = displayWith budget details
-          in T.pack (show selectedStream) <> " · " <> text <> "\nnext_offset: " <> T.pack (show (Cmd.outputEnd details))
+          pure $ T.pack (show selectedStream) <> " · " <> text <> "\nnext_offset: " <> T.pack (show (Cmd.outputEnd details))
 
 utf8Bytes :: Text -> Int
 utf8Bytes = T.foldl' (\n c -> n + width c) 0

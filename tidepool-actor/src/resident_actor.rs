@@ -4810,11 +4810,15 @@ where
                                                 Err(tidepool_bridge_effects::CommandError::CommandOutputPending) => false,
                                                 Err(_) => true,
                                             });
-                                        if text.len() > limit || incomplete {
-                                            shortened = text.len() > limit;
-                                            let binding = workbench
-                                                .bind_command_job(context.clone(), job.clone())
-                                                .await?;
+                                        // Every direct command tool call retains a Haskell binding,
+                                        // not only ones whose output would otherwise be truncated —
+                                        // the cheap path must cross into a program for free.
+                                        let oversized = text.len() > limit || incomplete;
+                                        shortened = oversized;
+                                        let binding = workbench
+                                            .bind_command_job(context.clone(), job.clone())
+                                            .await?;
+                                        if oversized {
                                             shortened |= text.len()
                                                 > (8 * 1024).min(limit).saturating_sub(512);
                                             *text = crate::workbench_display::bounded_output(
@@ -4822,8 +4826,10 @@ where
                                                 (8 * 1024).min(limit).saturating_sub(512),
                                             );
                                             text.push_str(&format!("\nRead retained output with read_output: session_id={job}, stream=Stdout (or Stderr), offset=0. Do not rerun.\nOptional Haskell binding: {binding} :: Cmd.Job"));
-                                            next_fragment.retain_job_binding(binding);
+                                        } else {
+                                            text.push_str(&format!("\nretained as {binding} :: Cmd.Job"));
                                         }
+                                        next_fragment.retain_job_binding(binding);
                                     }
                                 }
                                 if let CommandPresentation::CommandVisible(text, _) =
