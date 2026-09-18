@@ -361,6 +361,20 @@ well under a second, an idle after-tool slot adds tens of milliseconds, and Jev
 answers in a few hundred. We are working on the compile path, and the design
 already lets you spend it once rather than every turn.
 
+This is early alpha. Given another week on compiles-per-call and compile speed,
+here is what I expect:
+
+| Operation | Today | Expected |
+| --- | --- | --- |
+| Reload an edited spec | 28–35 s | 1–2 s |
+| Warm cell, six statements | ~62 s | 2–3 s plus the effects themselves |
+| First cell, fresh session, known workspace | 78 s | 3–5 s |
+| First ever session in a new workspace | ~113 s | 20–30 s, once |
+| Child joining a swarm | 7 m 45 s | 10–20 s |
+
+Still, a 60-second compile that saves you a frontier-model round trip is worth
+it today.
+
 We are exploring agents exchanging and improving semantic functions, context-aware
 tool views, and programs that do more work between model turns. These are directions
 for experimentation, not a claimed speedup or a finished autonomous service.
