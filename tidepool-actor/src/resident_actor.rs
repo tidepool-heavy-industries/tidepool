@@ -508,6 +508,35 @@ fn record_workbench_operation(
     });
 }
 
+/// Classify a `resolve_effect` failure that is not a command boundary (a
+/// command computes its own disposition in `resolve_command` and that value
+/// always wins over this one via the `command_disposition.unwrap_or(..)`
+/// callers below).
+///
+/// Every non-command arm of `resolve_effect` produces its response and then
+/// hands it to the resident machine through exactly one of
+/// `ResidentSession::resume`, `resume_handle`, or `resume_framed_custody`
+/// (see the `resume_*`/`abort_live` helpers on `ResidentMachineAccess` in
+/// `resident_workbench.rs`). Those three calls are fused with driving the
+/// resumed fragment onward to its next suspension or completion, so a
+/// failure returned from one of them does not mean delivery failed — it can
+/// equally mean delivery succeeded and something LATER in that same
+/// resumption failed. `ResidentActorWorkbenchError::Delivered` is raised
+/// only at those three call sites (never before), so it proves the response
+/// already crossed into the machine: the operation committed even though
+/// the error propagates. Every other error variant here happened before or
+/// during delivery, so it keeps the conservative `Unknown` disposition,
+/// which documents (workbench.rs:265-268) "the effect owner failed after
+/// dispatch without proving whether its mutation crossed the commit point".
+fn disposition_for_non_command_failure(
+    error: &ResidentActorWorkbenchError,
+) -> WorkbenchOperationDisposition {
+    match error {
+        ResidentActorWorkbenchError::Delivered(_) => WorkbenchOperationDisposition::Committed,
+        _ => WorkbenchOperationDisposition::Unknown,
+    }
+}
+
 fn settle_prepared_operations(
     operations: &mut [WorkbenchOperationReceipt],
     disposition: WorkbenchOperationDisposition,
@@ -4522,8 +4551,9 @@ where
                                         unit.input_unit_index,
                                         ordinal,
                                         &effect,
-                                        command_disposition
-                                            .unwrap_or(WorkbenchOperationDisposition::Unknown),
+                                        command_disposition.unwrap_or_else(|| {
+                                            disposition_for_non_command_failure(&error)
+                                        }),
                                     );
                                     return Err(error);
                                 }
@@ -7420,16 +7450,17 @@ fn lookup_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        lookup_response, workbench_failure_after_operations, workbench_response,
-        ChildExitObservations, WorkbenchBoundaryRecord, WorkbenchExecutions,
+        disposition_for_non_command_failure, lookup_response, workbench_failure_after_operations,
+        workbench_response, ChildExitObservations, WorkbenchBoundaryRecord, WorkbenchExecutions,
     };
     use crate::{ActorId, ActorRef, Incarnation};
     use tidepool_runtime::session::{
         CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellSourceSpan, InfoEntry,
-        InspectionAvailability, InspectionResult, TurnClassification, TurnKind, TypeMatch,
-        TypeMatchQuality, WorkbenchCellItemKind, WorkbenchExecutionId, WorkbenchItemReceipt,
-        WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
-        WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
+        InspectionAvailability, InspectionResult, ResidentError, TurnClassification, TurnKind,
+        TypeMatch, TypeMatchQuality, WorkbenchCellItemKind, WorkbenchExecutionId,
+        WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition,
+        WorkbenchOperationId, WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse,
+        WorkbenchRunStatus,
     };
 
     #[test]
@@ -7829,6 +7860,53 @@ mod tests {
         );
         assert_eq!(
             failure.receipts[0].operations[0].disposition,
+            WorkbenchOperationDisposition::Unknown
+        );
+    }
+
+    #[test]
+    fn effect_response_delivered_then_downstream_failure_commits() {
+        // `Delivered` is raised only at the `resume`/`resume_handle`/
+        // `resume_framed_custody` call sites in `resident_workbench.rs`,
+        // i.e. only once the boundary's response has already crossed into
+        // the resident machine. A failure carrying it must not be reported
+        // `Unknown` (workbench.rs:265-268): the mutation is known to have
+        // crossed the commit point even though something downstream then
+        // failed (this is the `reflect` conversation-reader bug: the value
+        // was delivered and only a later step failed).
+        let error =
+            crate::ResidentActorWorkbenchError::Delivered(ResidentError::ForeignCustody);
+        assert_eq!(
+            disposition_for_non_command_failure(&error),
+            WorkbenchOperationDisposition::Committed
+        );
+    }
+
+    #[test]
+    fn effect_failure_before_delivery_stays_unknown() {
+        // A failure produced before any response reached the runner (e.g.
+        // the arm's own answer computation) proves nothing about whether a
+        // mutation crossed the commit point, so it keeps the conservative
+        // `Unknown` disposition.
+        let error = crate::ResidentActorWorkbenchError::ActorProtocol(
+            "dispatch failed before delivery".into(),
+        );
+        assert_eq!(
+            disposition_for_non_command_failure(&error),
+            WorkbenchOperationDisposition::Unknown
+        );
+    }
+
+    #[test]
+    fn effect_failure_via_bare_resident_variant_stays_unknown() {
+        // `Resident` (unlike `Delivered`) also covers failures BEFORE a
+        // response reaches the machine, e.g. `set_actor_execution` in
+        // `with_machine_wait`. It must not be reclassified as `Committed`
+        // just because it wraps the same `ResidentError` payload as
+        // `Delivered` can.
+        let error = crate::ResidentActorWorkbenchError::Resident(ResidentError::ForeignCustody);
+        assert_eq!(
+            disposition_for_non_command_failure(&error),
             WorkbenchOperationDisposition::Unknown
         );
     }

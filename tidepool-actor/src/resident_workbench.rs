@@ -1686,6 +1686,20 @@ pub enum ResidentActorWorkbenchError {
     CompileInfrastructure(String),
     #[error("resident workbench execution failed: {0}")]
     Resident(#[from] ResidentError),
+    /// The response that answers a boundary's effect was already handed to
+    /// the resident machine — `ResidentSession::resume`,
+    /// `resume_handle`, or `resume_framed_custody` was actually called with
+    /// the computed answer — and driving the resumed fragment onward from
+    /// there failed. Distinguished from `Resident` (which also covers
+    /// failures BEFORE that call, e.g. establishing actor execution context
+    /// or computing the answer value) so a caller can tell a failure after
+    /// delivery from one before or during it. See
+    /// `tidepool_runtime::session::workbench::WorkbenchOperationDisposition::Unknown`
+    /// (workbench.rs:265-268): that disposition means "failed after dispatch
+    /// without proving whether its mutation crossed the commit point" — this
+    /// variant proves that it did.
+    #[error("resident workbench execution failed after delivering a response: {0}")]
+    Delivered(ResidentError),
     /// An earlier cell hit an integrity failure; this actor's machine refuses
     /// all further execution.
     #[error(
@@ -1944,7 +1958,7 @@ where
                 let answer = ().to_value(session.data_con_table())?;
                 let settled = session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                    .map_err(ResidentActorWorkbenchError::Delivered)?;
                 if !matches!(
                     settled,
                     ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. }
@@ -2534,7 +2548,7 @@ where
                     structured_introspection_answer(table, kind, inspected, &provenance, &current)?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4088,7 +4102,7 @@ where
                 let answer = ().to_value(session.data_con_table())?;
                 session
                     .resume(readiness.hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4195,7 +4209,7 @@ where
                             qualified_constructor(table, "Tidepool.Effects.Core", name, fields)?;
                         session
                             .resume(hole, value)
-                            .map_err(ResidentActorWorkbenchError::Resident)
+                            .map_err(ResidentActorWorkbenchError::Delivered)
                     })
                     .await?
             }
@@ -4391,7 +4405,7 @@ where
                 let answer = ().to_value(session.data_con_table())?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4435,7 +4449,7 @@ where
                 let answer = value.to_value(session.data_con_table())?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4549,7 +4563,7 @@ where
                 let answer = actor_context_constructor(table, "ActorContextInfo", fields)?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4570,7 +4584,7 @@ where
                 let answer = core_list(table, entries)?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4596,7 +4610,7 @@ where
                     .to_value(table)?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4616,7 +4630,7 @@ where
                     .to_value(table)?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4653,7 +4667,7 @@ where
                 let answer = actor_context_constructor(table, name, fields)?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4708,7 +4722,7 @@ where
                 let answer = outcome.to_value(session.data_con_table())?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4725,7 +4739,7 @@ where
                 let answer = agent_stop_value(table, outcome)?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4741,7 +4755,7 @@ where
                 let answer = cleanup_plan_value(session.data_con_table(), &plan)?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4769,7 +4783,7 @@ where
                 )?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4793,7 +4807,7 @@ where
                     .to_value(session.data_con_table())?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4810,7 +4824,7 @@ where
                     crate::request_effect::rejected_reply_value(error, session.data_con_table())?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4829,7 +4843,7 @@ where
                 )?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4855,7 +4869,7 @@ where
                 };
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4881,7 +4895,7 @@ where
                 };
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4910,7 +4924,7 @@ where
                         let prefix = vec![revision.to_value(table)?];
                         return session
                             .resume_framed_custody(hole, &snapshot.value, constructor, prefix)
-                            .map_err(ResidentActorWorkbenchError::Resident);
+                            .map_err(ResidentActorWorkbenchError::Delivered);
                     }
                     Ok((None, closed)) => crate::request_effect::constructor(
                         table,
@@ -4931,7 +4945,7 @@ where
                 };
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4948,7 +4962,7 @@ where
                     crate::request_effect::cancel_request_value(outcome, session.data_con_table())?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4967,7 +4981,7 @@ where
                 )?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -4986,7 +5000,7 @@ where
                 )?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -5005,7 +5019,7 @@ where
                 )?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -5021,7 +5035,7 @@ where
                 let keep_receiving = true.to_value(session.data_con_table())?;
                 let outcome = session
                     .resume(receiver_continuation, keep_receiving)
-                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                    .map_err(ResidentActorWorkbenchError::Delivered)?;
                 let _ = session.close_realm(handler_realm);
                 Ok(outcome)
             })
@@ -5042,7 +5056,7 @@ where
                 )?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -5075,7 +5089,7 @@ where
                 )?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -5118,7 +5132,7 @@ where
                     crate::request_effect::forget_watch_value(outcome, session.data_con_table())?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -5135,7 +5149,7 @@ where
                 let answer = (name, arguments).to_value(session.data_con_table())?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -5150,7 +5164,7 @@ where
             .with_machine(context, move |session, _, _| {
                 session
                     .resume_handle(hole, value)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -5166,7 +5180,7 @@ where
                 let answer = crate::actor_terminal_value(&terminal, session.data_con_table())?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -5192,7 +5206,7 @@ where
                 })?;
                 session
                     .resume(hole, Value::Con(constructor, fields))
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -5224,7 +5238,7 @@ where
                 };
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -5369,7 +5383,7 @@ where
                     .to_value(session.data_con_table())?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -5395,7 +5409,7 @@ where
                 .to_value(session.data_con_table())?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -5411,7 +5425,7 @@ where
                 let answer = Err::<(), _>(detail).to_value(session.data_con_table())?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -5426,7 +5440,7 @@ where
                 let answer = Ok::<(), String>(()).to_value(session.data_con_table())?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
@@ -5460,7 +5474,7 @@ where
                 let answer = actor_context_constructor(table, name, fields)?;
                 session
                     .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+                    .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
     }
