@@ -1781,8 +1781,11 @@ mod tests {
             );
         }
         let spec = std::fs::read_to_string(workspace.path().join(".shoal/AgentSpec.hs")).unwrap();
-        assert!(spec.contains("afterTool = Just afterEachTool"), "{spec}");
-        assert!(spec.contains("Abstained"), "{spec}");
+        assert!(
+            spec.contains("afterTool = Just (Watchdog.watchChildrenWith defaultHeuristics)"),
+            "{spec}"
+        );
+        assert!(spec.contains("Watchdog.coreHeuristics"), "{spec}");
         let tools =
             std::fs::read_to_string(workspace.path().join(".shoal/Project/Tools.hs")).unwrap();
         assert!(tools.contains("shell :: Shell.ShellTools mode"), "{tools}");

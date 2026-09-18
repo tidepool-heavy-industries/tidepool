@@ -24,6 +24,7 @@ module Project.Watchdog
   , Heuristic (..)
   , watchBy
   , watchWith
+  , watchChildrenWith
   , coreHeuristics
   , codingHeuristics
   , repeatingItself
@@ -172,6 +173,18 @@ watchWith
   :: (Member Jev effects, Member ActorContext effects, Member Notifications effects, Member Reflect effects)
   => [Heuristic] -> ToolCall -> ToolResult -> Eff effects Annotation
 watchWith heuristics = watchBy (const heuristics)
+
+-- | Install one heuristic set on children while leaving the root silent. A
+-- shared agent spec is inherited by both, so parent presence is the stable
+-- distinction; actor-path spelling is not policy.
+watchChildrenWith
+  :: (Member Jev effects, Member ActorContext effects, Member Notifications effects, Member Reflect effects)
+  => [Heuristic] -> ToolCall -> ToolResult -> Eff effects Annotation
+watchChildrenWith heuristics call result = do
+  parent <- parentAgent
+  case parent of
+    Nothing -> pure (Abstained "root has no parent watchdog")
+    Just _ -> watchWith heuristics call result
 
 annotationText :: [Text] -> [(Heuristic, Double, Text)] -> Text
 annotationText advised escalated =
