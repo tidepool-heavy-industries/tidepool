@@ -1,6 +1,6 @@
 # Sync: breadth survey of Jev patterns, 2026-09-17
 
-Twelve experiments, run live against real artifacts in four parallel Shoal
+Sixteen experiments, run live against real artifacts in four parallel Shoal
 sessions. Every number here came from a real call; the raw distributions are in
 `NOTEBOOK.md` and `NOTES-lab{6,7,8}.md`, and every cell reruns.
 
