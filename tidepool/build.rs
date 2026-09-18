@@ -83,6 +83,14 @@ fn emit_scaffold_package(repository: PathBuf) {
         ".shoal/Project/Tools.hs".to_owned(),
         repository.join(".shoal/Project/Tools.hs"),
     ));
+    // The worked-example watchdog: a set of monitors a parent may install on
+    // the children it spawns. The starter `AgentSpec.hs` does not turn it on
+    // (its slot keeps abstaining); the module ships so a project can adopt it
+    // by writing one `afterTool` line.
+    entries.push((
+        ".shoal/Project/Watchdog.hs".to_owned(),
+        repository.join(".shoal/Project/Watchdog.hs"),
+    ));
 
     let skills = repository.join("examples/shoal-workspace/.shoal/skills");
     println!("cargo:rerun-if-changed={}", skills.display());

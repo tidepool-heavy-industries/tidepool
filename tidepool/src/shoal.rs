@@ -1631,6 +1631,10 @@ mod tests {
                 ".shoal/Project/Tools.hs",
                 include_str!("../../.shoal/Project/Tools.hs"),
             ),
+            (
+                ".shoal/Project/Watchdog.hs",
+                include_str!("../../.shoal/Project/Watchdog.hs"),
+            ),
         ] {
             assert_eq!(
                 std::fs::read_to_string(workspace.path().join(relative)).unwrap(),
@@ -1728,6 +1732,7 @@ mod tests {
             ".shoal/config.toml",
             ".shoal/AgentSpec.hs",
             ".shoal/Project/Tools.hs",
+            ".shoal/Project/Watchdog.hs",
             ".shoal/Jev/Operators.hs",
             ".agents/skills/shoal-jev",
             "flake.nix",
