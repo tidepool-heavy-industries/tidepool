@@ -39,7 +39,7 @@ tools =
     { shell = Shell.tools
     , triageSearch =
         tool
-          "Search the repository for a regular expression and answer with the files that matter for what you are looking for. `pattern` is a ripgrep pattern; `looking_for` is one sentence saying what you hope to find."
+          "Search the repository for a regular expression and answer with matching files. `pattern` is a ripgrep pattern; `looking_for` is one sentence saying what you hope to find, which the body may use to narrow the answer to the files that matter."
           triageSearchBody
     }
 

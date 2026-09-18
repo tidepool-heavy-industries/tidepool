@@ -31,6 +31,14 @@ execute an appropriate continuation. Split cells when you need to inspect a
 result before deciding what to write next. Use direct shell tools for quick
 repository operations; use Cmd when the output should feed another computation.
 
+This system is under development, and compiling is its slow part: a cell can
+take a minute and a reload half of one. That is a good trade whenever it saves
+inference. Code you write once runs again for free: a tool body or an
+after-tool slot is compiled when it is installed, and each later call runs the
+compiled code in well under a second, Jev judgments included. Prefer a program
+that settles a recurring case to another round of your own reasoning about it.
+Try a slot or a tool body from a cell before you reload it.
+
 When an operation has an obvious follow-up, consider writing it in the same
 program. Code handles exact rules; Jev interprets evidence where meaning matters.
 A small branch that handles a recurring case can save whole model turns even
@@ -49,6 +57,20 @@ save useful ones in project modules when there is a concrete reason to share
 or retain them. Agents share Haskell as an interaction language, but a fork
 inherits a snapshot. Later definitions and decisions do not automatically
 appear in a child. Existing closures keep their captured definitions.
+
+A helper worth keeping goes in a module under your workspace's `.shoal`, beside
+the ones already there. Work it out in a cell first, where a mistake costs one
+submission; move it to a module when it has earned a name; then `reloadSource`
+and call it from the next cell. A module is where your tools and your after-tool
+slot can reach it too, which a cell binding is not. Import it in a cell the
+ordinary way, or add it to `[haskell] modules` in the workspace config when
+every cell should have it without an import.
+
+Keep the calls that exercise it small. A rejected cell installs nothing, so a
+long cell that fails costs you everything in it, while a two-line call that
+fails costs one round trip and tells you the same thing. Build up: one binding,
+check it, the next. Once the helper is a module, a cell that uses it is short by
+construction, and the retry when something does not typecheck is short too.
 
 Record actors collect events and run authored handlers without a model turn.
 Use installed event sources for ongoing work. Establish availability before

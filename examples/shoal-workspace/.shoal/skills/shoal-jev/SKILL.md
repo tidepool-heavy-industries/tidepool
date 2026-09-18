@@ -44,9 +44,22 @@ previews <- forM names $ \n ->
 
 A packet is a chain of labelled cells joined with `:&`. Nothing terminates it,
 and two packets join the same way, so a shared set of questions is an ordinary
-value. The candidate set is an ordinary Haskell list too: `J.each key question
-rows` asks one question per row and hands each row back beside its own answer,
-so there is nothing to look up afterwards.
+value: define one in a module, append it to the questions this call needs, and
+the answer carries both sets' fields. A label written twice is a compile error.
+
+`:&` is not `<>`, though. Each append changes the packet's type, so packets
+cannot be collected in a list and folded, and there is no empty packet to start
+from. A set of questions that varies at run time is therefore not a list of
+packets; it is a list of your own values, which composes with `<>` as any list
+does, turned into one packet by `J.each`. The candidate set is an ordinary
+Haskell list too: `J.each key question rows` asks one question per row and hands
+each row back beside its own answer, so there is nothing to look up afterwards.
+A fixed section and a per-row section belong in the same packet:
+
+```haskell
+#budget := J.noul "Is this past the effort the assignment justifies?"
+  :& #checks := J.each checkName (\c -> J.noul (checkQuestion c)) checks
+```
 
 ```haskell
 let packet =
