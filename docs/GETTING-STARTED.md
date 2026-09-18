@@ -72,10 +72,11 @@ nix build .#shoal
 
 The flake declares the public `tidepool.cachix.org` binary cache. Follow the
 [cache trust setup](../README.md#the-binary-cache), especially on a multi-user
-Nix installation where an ordinary user's flake-provided public key is ignored. Artifacts
-missing from the cache build locally; rebuilding the patched GHC toolchain
-and its Haskell dependencies can take a long time. Cache availability does
-not imply that every checkout's complete build is already published.
+Nix installation where an ordinary user's flake-provided public key is ignored.
+Do not treat a reachable cache endpoint as proof that a release is present:
+the exact `shoal` output and every path in its closure must be published.
+Artifacts missing from the cache build locally; rebuilding the patched GHC
+toolchain and its Haskell dependencies can take a long time.
 The wrapper selects the matched extractor and client itself; it does not replace
 `codex` on your `PATH`.
 
@@ -109,7 +110,9 @@ nothing, when a workspace is already there. It writes:
 | `flake.nix`, `flake.lock` | only when the project has none: one input, pinning jev-dsl |
 
 Nothing it writes is specific to your machine, so the package belongs in Git.
-A teammate who clones the project runs `shoal init` and nothing else.
+After completing the one-time machine setup and authenticating the pinned
+clients, a teammate who clones the project can run `shoal init` without
+scaffolding the workspace again.
 
 Jev's operators are compiled from the jev-dsl revision the project's `flake.nix`
 pins. When the project already has a `flake.nix`, `shoal new` leaves it alone
@@ -170,16 +173,18 @@ graph. See [the operator interface](SHOAL-OPERATOR-HTTP.md).
 **Change code without restarting.** Workspace modules are captured at launch.
 After an agent edits one, `reloadSource` typechecks the edited source and
 publishes it for later cells, or refuses and leaves the session as it was.
-`reload_agent_spec` does that and also rebuilds the agent's own tools and
-after-tool slot, so the next tool call runs the edited body. A reload that would
-change a tool's name, description or argument types is refused with the
-difference, and takes effect at the agent's next incarnation. Prompts, and the
-Haskell library Tidepool ships, change only with a new run.
+`reload_agent_spec` does that and also rebuilds the agent's own tools,
+after-tool slot, and after-turn slot, so later eligible calls and completed
+turns run the edited bodies. An invocation already admitted keeps the spec
+revision it started with. A reload that would change a tool's name, description
+or argument types is refused with the difference, and takes effect at the
+agent's next incarnation. Prompts, and the Haskell library Tidepool ships,
+change only with a new run.
 
 **See what is live.** The agent's `status` tool, with `view: "detailed"`, shows
 which spec is installed and from which file and revision, what the after-tool
-slot did on each recent call, retained command jobs, bindings, and whether the
-source on disk has drifted from what is loaded.
+and after-turn slots did recently, retained command jobs, bindings, and whether
+the source on disk has drifted from what is loaded.
 
 **Read the trace.** `.shoal/logs/<run>.jsonl` is a structured trace: run, actor,
 tool call, cell, unit. By default it includes cell source and tool results in
