@@ -243,13 +243,51 @@ write. Kill criterion: Astra still prefers native subagents in the next flight.
 
 ## Parallel track — jev-dsl at `f16f136` via `flake_sources` (own worktree)
 
-1. **Upstream** (`~/dev/jev-dsl`; design is Sol's territory — propose, do not
-   impose): make the operator front polymorphic over the JSON type like the core,
-   so `src/Jev/Operators.hs` no longer imports aeson directly.
+1. **Upstream** — DONE as a proposal, awaiting review. Branch
+   `proposal/generic-front` in `~/dev/jev-dsl`, worktree `~/dev/jev-dsl-generic`,
+   commits `b33ed2c` and `d29f9e9`. Not merged; `main` untouched. Design is Sol's
+   territory, so this is a proposal, not a landing.
+
+   The shape, proven rather than argued:
+   - `core/Jev/Front.hs` (new, in `jev-core`) is the operator front with the JSON
+     type as a parameter. It must live in `jev-core` because that is the only
+     library a consumer without aeson can depend on. It adds no dependency.
+   - `src/Jev/Operators.hs` becomes pure specialisation — type aliases fixing the
+     parameter to aeson's `Value`, plus `name = Front.name` under the signature it
+     already had. No logic left in it.
+
+   Measured cost, zero on all three criteria: `examples/Guard.hs`, `app/Main.hs`
+   and every existing test are byte-identical, not one character changed; all 19
+   rejection fixtures produce byte-identical GHC output; `:browse Jev.Operators`
+   is unchanged modulo the module qualifier GHCi prints.
+
+   **The finding that decides our facade's shape: a re-export-only facade does not
+   work.** Aliasing the types while leaving the functions class-constrained leaves
+   an unannotated top-level binding monomorphised with an unsolvable constraint
+   (`Ambiguous type variable 'v0' ... prevents the constraint '(JsonValue v0)'`).
+   It does not fire for `let`/`where` bindings, only top-level ones — which is
+   exactly how a model writes in a notebook. `NoMonomorphismRestriction` does not
+   fix it. The cure is to name each value-carrying verb at the fixed type: 9 type
+   aliases plus 24 one-line specialisations, being exactly the exports whose type
+   mentions the JSON parameter. Everything else re-exports unchanged.
 2. **Tidepool**: delete `scripts/sync-jev-dsl.sh`, `haskell/lib/Jev/VENDORED`,
-   the copied `Jev/Core*`, and the hand-ported `Jev/Operators.hs`. Keep only
+   the copied `Jev/Core*`, and the hand-ported `Jev/Operators.hs`. Keep
    `Jev.Tidepool` (the `JsonValue` instance) and `Jev.Host` (effect-backed
-   session), shipped as workspace source beside the pinned input.
+   session), and add the specialisation facade described in step 1, shipped as
+   workspace source beside the pinned input.
+
+   Size it honestly: the facade is roughly 80 lines, not three — the upstream
+   proposal built and tested exactly this facade for a second JSON type to prove
+   it. But they are 80 lines of signature and delegation, where drift surfaces as
+   a compile error on the exact line, replacing a 335-line hand-port of real logic
+   that can drift silently. That is the whole of the win and it should not be
+   oversold as more.
+
+   Two smaller things the proposal surfaced: the facade needs a second import of
+   `Jev.Core` for constraints the generic front does not re-export, which widening
+   that export list would fix but is a design call for the owner; and this step is
+   blocked until the upstream proposal is reviewed and lands, since we must not
+   pin a branch.
 3. `examples/shoal-workspace`: `flake.nix` input `jev-dsl` (`flake = false`),
    `[haskell.flake_sources] jev-dsl = ["core","src"]`, modules list; mechanism
    already exists in `tidepool/src/shoal/workspace.rs:282-390`.
