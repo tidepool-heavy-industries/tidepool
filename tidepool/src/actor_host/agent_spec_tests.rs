@@ -112,6 +112,74 @@ noted call result
     )
 }
 
+fn turn_spec_module(marker: &str) -> String {
+    format!(
+        r#"{{-# LANGUAGE OverloadedStrings #-}}
+module AgentSpec (agentSpec) where
+
+import Control.Monad.Freer (Eff)
+import qualified Data.Text as T
+import Tidepool.Agent.Contract
+import qualified Project.Tools as Tools
+
+agentSpec :: AgentSpec Tools.SpecTools effects
+agentSpec = defaultSpec
+  {{ specTools = Tools.tools
+  , afterTurn = Just reviewed
+  }}
+
+reviewed :: TurnObservation -> Eff effects Annotation
+reviewed observation =
+  pure (Annotated (T.pack "{marker}:" <> turnIdentity (turnObservationTurn observation)))
+"#
+    )
+}
+
+fn turn_result_spec_module(body: &str) -> String {
+    format!(
+        r#"{{-# LANGUAGE OverloadedStrings #-}}
+module AgentSpec (agentSpec) where
+
+import Control.Monad.Freer (Eff)
+import Tidepool.Agent.Contract
+import qualified Project.Tools as Tools
+
+agentSpec :: AgentSpec Tools.SpecTools effects
+agentSpec = defaultSpec
+  {{ specTools = Tools.tools
+  , afterTurn = Just reviewed
+  }}
+
+reviewed :: TurnObservation -> Eff effects Annotation
+reviewed _ = {body}
+"#
+    )
+}
+
+fn turn_sleep_spec_module() -> String {
+    r#"{-# LANGUAGE OverloadedStrings #-}
+module AgentSpec (agentSpec) where
+
+import Control.Monad.Freer (Eff, Member)
+import Tidepool.Agent.Contract
+import Tidepool.Duration (seconds)
+import Tidepool.Effects.Core (Sleep, sleep)
+import qualified Project.Tools as Tools
+
+agentSpec :: Member Sleep effects => AgentSpec Tools.SpecTools effects
+agentSpec = defaultSpec
+  { specTools = Tools.tools
+  , afterTurn = Just reviewed
+  }
+
+reviewed :: Member Sleep effects => TurnObservation -> Eff effects Annotation
+reviewed _ = do
+  sleep (seconds 3)
+  pure (Annotated "late review")
+"#
+    .to_owned()
+}
+
 /// Derived context beside the tool's own output.
 const ANNOTATES: &str = "pure (Annotated (T.pack \"asked about this topic twice before\"))";
 
@@ -238,6 +306,135 @@ async fn status(policy: &dyn tidepool_actor::ResidentToolEndpoint) -> String {
     dispatch_structured_tool(policy, "status", serde_json::json!({"view": "detailed"}))
         .await
         .to_string()
+}
+
+fn observed_turn(id: &str) -> tidepool_actor::ConversationTurn {
+    tidepool_actor::ConversationTurn {
+        turn: id.into(),
+        started_at: None,
+        completed_at: None,
+        items: vec![tidepool_actor::TurnItem::Message {
+            role: tidepool_actor::ConversationRole::Assistant,
+            text: "done".into(),
+        }],
+    }
+}
+
+#[tokio::test]
+async fn after_turn_observation_uses_the_hot_reloaded_spec_revision() {
+    let campaign = start_with_slot("one", ABSTAINS).await;
+    let workspace = campaign._repository.path().to_path_buf();
+    let authored = workspace.join(".shoal");
+    std::fs::write(authored.join("AgentSpec.hs"), turn_spec_module("first")).unwrap();
+    let policy = campaign.root_installation.policy.clone();
+    let receipt = reload(policy.as_ref()).await;
+    assert!(receipt.contains("swapped"), "{receipt}");
+
+    policy
+        .record_turn_baseline_boxed("thread".into(), Some("baseline-turn".into()))
+        .await
+        .unwrap();
+    policy
+        .observe_turn_boxed("thread".into(), observed_turn("turn-one"))
+        .await
+        .unwrap();
+    let first = status(policy.as_ref()).await;
+    assert!(
+        first.contains("after-turn baseline: thread=thread completion=baseline-turn"),
+        "{first}"
+    );
+    assert!(first.contains("after-turn#1 turn-one"), "{first}");
+    assert!(first.contains("annotated: first:turn-one"), "{first}");
+
+    std::fs::write(authored.join("AgentSpec.hs"), turn_spec_module("second")).unwrap();
+    let receipt = reload(policy.as_ref()).await;
+    assert!(receipt.contains("swapped"), "{receipt}");
+    policy
+        .observe_turn_boxed("thread".into(), observed_turn("turn-two"))
+        .await
+        .unwrap();
+    let second = status(policy.as_ref()).await;
+    assert!(second.contains("after-turn#2 turn-two"), "{second}");
+    assert!(second.contains("annotated: second:turn-two"), "{second}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn after_turn_rejects_pruning_and_records_slot_failure() {
+    let campaign = start_with_slot("one", ABSTAINS).await;
+    let workspace = campaign._repository.path().to_path_buf();
+    let authored = workspace.join(".shoal");
+    let policy = campaign.root_installation.policy.clone();
+
+    std::fs::write(
+        authored.join("AgentSpec.hs"),
+        turn_result_spec_module(r#"pure (Pruned "not meaningful" "unused")"#),
+    )
+    .unwrap();
+    assert!(reload(policy.as_ref()).await.contains("swapped"));
+    policy
+        .observe_turn_boxed("thread".into(), observed_turn("pruned-turn"))
+        .await
+        .unwrap();
+    let pruned = status(policy.as_ref()).await;
+    assert!(
+        pruned.contains("failed: after-turn slots cannot prune a completed conversation turn"),
+        "{pruned}"
+    );
+
+    std::fs::write(
+        authored.join("AgentSpec.hs"),
+        turn_result_spec_module(r#"error "turn review exploded""#),
+    )
+    .unwrap();
+    assert!(reload(policy.as_ref()).await.contains("swapped"));
+    policy
+        .observe_turn_boxed("thread".into(), observed_turn("failed-turn"))
+        .await
+        .unwrap();
+    let failed = status(policy.as_ref()).await;
+    assert!(failed.contains("after-turn#2 failed-turn"), "{failed}");
+    assert!(failed.contains("failed:"), "{failed}");
+    assert!(failed.contains("turn review exploded"), "{failed}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn after_turn_timeout_aborts_its_parked_continuation() {
+    std::env::set_var(tidepool_actor::AFTER_TOOL_WAIT_ENV, "400");
+    let campaign = start_with_slot("one", ABSTAINS).await;
+    let workspace = campaign._repository.path().to_path_buf();
+    let authored = workspace.join(".shoal");
+    let policy = campaign.root_installation.policy.clone();
+
+    std::fs::write(authored.join("AgentSpec.hs"), turn_sleep_spec_module()).unwrap();
+    assert!(reload(policy.as_ref()).await.contains("swapped"));
+    policy
+        .observe_turn_boxed("thread".into(), observed_turn("sleeping-turn"))
+        .await
+        .unwrap();
+    let timed_out = status(policy.as_ref()).await;
+    assert!(
+        timed_out.contains("after-turn#1 sleeping-turn"),
+        "{timed_out}"
+    );
+    assert!(timed_out.contains("timed out after 400ms"), "{timed_out}");
+
+    let cell = tokio::time::timeout(
+        Duration::from_secs(60),
+        dispatch_haskell_script(policy.as_ref(), "inspectFull (21 * 2 :: Int)"),
+    )
+    .await
+    .expect("the timed-out slot retained a parked continuation");
+    assert_eq!(cell["items"][0]["output"], "42", "{cell}");
+
+    std::env::remove_var(tidepool_actor::AFTER_TOOL_WAIT_ENV);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
 }
 
 /// The whole point: an edited body, the same declared surface, and the NEXT

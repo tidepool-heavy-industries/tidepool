@@ -715,6 +715,12 @@ pub struct ResidentKernelBehavior<H, O> {
     /// Every after-tool invocation this actor has made, and what became of it.
     /// An abstention's reason lives here and nowhere else.
     after_tool: crate::after_tool::AfterToolLog,
+    /// Completed-turn System 1 observations. Their answers never enter the
+    /// provider conversation; status is the passive inspection path.
+    after_turn: crate::after_tool::AfterToolLog,
+    /// Exact provider thread and completed turn captured as the observer's
+    /// non-replay baseline. `None` turn means the baseline was an empty log.
+    after_turn_baseline: Option<(String, Option<String>)>,
     /// Set while the after-tool slot is running. A slot's own effects and tool
     /// use never trigger a slot, so a broken slot can never block its own
     /// repair.
@@ -742,6 +748,42 @@ struct PendingForkPublication {
     releases: Vec<(ActorRef, tidepool_codegen::scope::ScopeId)>,
     unused_scopes: Vec<tidepool_codegen::scope::ScopeId>,
     published: bool,
+}
+
+fn completed_turn_json(turn: &tidepool_model::ConversationTurn) -> serde_json::Value {
+    let items = turn.items.iter().map(|item| match item {
+        tidepool_model::TurnItem::Message { role, text } => serde_json::json!({
+            "kind": "message",
+            "role": match role {
+                tidepool_model::Role::System => "system",
+                tidepool_model::Role::Developer => "developer",
+                tidepool_model::Role::User => "user",
+                tidepool_model::Role::Assistant => "assistant",
+            },
+            "text": text,
+        }),
+        tidepool_model::TurnItem::ToolCall {
+            call,
+            tool,
+            arguments,
+        } => serde_json::json!({
+            "kind": "toolCall",
+            "call": call,
+            "tool": tool,
+            "arguments": arguments,
+        }),
+        tidepool_model::TurnItem::ToolResult { call, output } => serde_json::json!({
+            "kind": "toolResult",
+            "call": call,
+            "output": output,
+        }),
+    });
+    serde_json::json!({
+        "identity": turn.turn,
+        "startedAt": turn.started_at,
+        "completedAt": turn.completed_at,
+        "items": items.collect::<Vec<_>>(),
+    })
 }
 
 #[derive(Clone)]
@@ -1290,6 +1332,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             compiled_tools: None,
             spec_installs: 0,
             after_tool: crate::after_tool::AfterToolLog::default(),
+            after_turn: crate::after_tool::AfterToolLog::default(),
+            after_turn_baseline: None,
             after_tool_active: false,
             forest_control: false,
             pending_program: None,
@@ -1749,8 +1793,22 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 rows => format!("\n  after-tool:\n    {}", rows.join("\n    ")),
             },
         };
+        let after_turn = match view {
+            StatusView::Concise => String::new(),
+            _ => match self.after_turn.rows_named("after-turn") {
+                rows if rows.is_empty() => String::new(),
+                rows => format!("\n  after-turn:\n    {}", rows.join("\n    ")),
+            },
+        };
+        let after_turn_baseline = match (view, &self.after_turn_baseline) {
+            (StatusView::Concise, _) | (_, None) => String::new(),
+            (_, Some((thread, turn))) => format!(
+                "\n  after-turn baseline: thread={thread} completion={} (eligible completions are strictly after this capture)",
+                turn.as_deref().unwrap_or("(none)")
+            ),
+        };
         let status = format!(
-            "{current}{failure}{spec}{after_tool}\n  {workspace}\n  deadlines: [{}]\nactors:\n{}",
+            "{current}{failure}{spec}{after_tool}{after_turn_baseline}{after_turn}\n  {workspace}\n  deadlines: [{}]\nactors:\n{}",
             requests
                 .deadlines
                 .iter()
@@ -4289,6 +4347,7 @@ where
         self.spec_installs = install;
         self.compiled_tools = Some(candidate);
         self.after_tool.forget_failures();
+        self.after_turn.forget_failures();
         reload_receipt("swapped", started, receipt)
     }
 
@@ -5559,6 +5618,136 @@ where
                 "the after-tool slot ended in a transfer instead of an annotation".into(),
             )),
         }
+    }
+
+    async fn run_after_turn(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        workbench: &crate::ResidentActorWorkbench<H, O>,
+        dispatch: Arc<RootCustody>,
+        payload: serde_json::Value,
+    ) -> Result<crate::after_tool::Annotation, ResidentActorWorkbenchError> {
+        let mut operations = Vec::new();
+        let mut display_remaining = 16usize * 1024;
+        let mut command_output = Vec::new();
+        let step = workbench
+            .begin_after_turn(context.clone(), dispatch, payload)
+            .await?;
+        let step = match step {
+            ResidentWorkbenchStep::Running { fragment, outcome } => {
+                self.settle_fragment_effects(
+                    kernel,
+                    context,
+                    workbench,
+                    fragment,
+                    *outcome,
+                    WorkbenchUnitExecution {
+                        execution: None,
+                        input_unit_index: 0,
+                        total: 1,
+                        named_tool: true,
+                        operations: &mut operations,
+                        display_remaining: &mut display_remaining,
+                        command_output: &mut command_output,
+                    },
+                )
+                .await?
+            }
+            settled => settled,
+        };
+        match step {
+            ResidentWorkbenchStep::Committed { output, .. } => {
+                crate::after_tool::Annotation::decode(&output)
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)
+            }
+            ResidentWorkbenchStep::Rejected(rejection) => {
+                Err(ResidentActorWorkbenchError::ActorProtocol(rejection.output))
+            }
+            _ => Err(ResidentActorWorkbenchError::ActorProtocol(
+                "the after-turn slot ended in a transfer instead of an annotation".into(),
+            )),
+        }
+    }
+
+    async fn run_after_turn_observation(
+        &mut self,
+        kernel: &KernelContext,
+        thread: String,
+        turn: tidepool_model::ConversationTurn,
+    ) -> Result<(), KernelInvocationFailure> {
+        use crate::after_tool::{Disposition, Invocation};
+
+        let context = self.context(kernel.identity());
+        let Some(tools) = self.compiled_tools.as_ref() else {
+            return Ok(());
+        };
+        if !tools
+            .slots
+            .iter()
+            .any(|slot| slot == crate::after_turn::AFTER_TURN_SLOT)
+        {
+            return Ok(());
+        }
+        let dispatch = Arc::clone(&tools.dispatch);
+        let provenance = tools.provenance();
+        let turn_id = turn.turn.clone();
+        let payload = serde_json::json!({
+            "thread": thread,
+            "turn": completed_turn_json(&turn),
+        });
+        let ordinal = self.after_turn.begin();
+        let started = std::time::Instant::now();
+        let workbench = self.environment.runner.application_workbench();
+        let parked_before = workbench
+            .parked_continuations(context.clone())
+            .await
+            .unwrap_or_default();
+        let wait = crate::after_turn::wait();
+        let result = tokio::time::timeout(
+            wait,
+            self.run_after_turn(kernel, &context, &workbench, dispatch, payload),
+        )
+        .await;
+        let disposition = match result {
+            Ok(Ok(crate::after_tool::Annotation::Nothing)) => Disposition::Silent,
+            Ok(Ok(crate::after_tool::Annotation::Abstained(reason))) => {
+                Disposition::Abstained(reason)
+            }
+            Ok(Ok(crate::after_tool::Annotation::Annotated(text))) => {
+                Disposition::TurnAnnotated(crate::after_tool::bounded_turn_annotation(&text))
+            }
+            Ok(Ok(crate::after_tool::Annotation::Pruned { .. })) => Disposition::Failed(
+                "after-turn slots cannot prune a completed conversation turn".into(),
+            ),
+            Ok(Err(error)) => Disposition::Failed(error.to_string()),
+            Err(_) => {
+                if let Err(error) = workbench
+                    .abort_parked_since(
+                        context.clone(),
+                        parked_before,
+                        "after-turn slot ran out of time".into(),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        actor = %context.actor,
+                        ordinal,
+                        %error,
+                        "after-turn slot timed out and its suspended turn could not be aborted"
+                    );
+                }
+                Disposition::TimedOut(wait)
+            }
+        };
+        self.after_turn.record(Invocation {
+            ordinal,
+            tool: turn_id,
+            elapsed: started.elapsed(),
+            provenance,
+            disposition,
+        });
+        Ok(())
     }
 
     /// The cell level of the run's span tree. `execution` is the tool call's
@@ -7378,6 +7567,41 @@ where
             }
             result
         })
+    }
+
+    fn observe_completed_turn<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        thread: String,
+        turn: tidepool_model::ConversationTurn,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), KernelInvocationFailure>> {
+        Box::pin(async move {
+            if !self.policy_installed
+                || !matches!(
+                    self.standing,
+                    ResidentStanding::Interactive(_)
+                        | ResidentStanding::Receiving(_)
+                        | ResidentStanding::Workbench
+                )
+            {
+                return Err(KernelInvocationFailure::Rejected {
+                    actor: kernel.identity(),
+                    detail: "actor has no active Haskell application workbench".into(),
+                });
+            }
+            self.run_after_turn_observation(kernel, thread, turn).await
+        })
+    }
+
+    fn record_turn_baseline(
+        &mut self,
+        kernel: &KernelContext,
+        thread: String,
+        turn: Option<String>,
+    ) -> Result<(), KernelInvocationFailure> {
+        self.after_turn_baseline = Some((thread, turn));
+        let _ = kernel;
+        Ok(())
     }
 
     fn reconcile_workbench_cancellation(

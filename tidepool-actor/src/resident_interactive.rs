@@ -148,6 +148,32 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         &self.tools
     }
 
+    fn observe_turn_boxed(
+        &self,
+        thread: String,
+        turn: tidepool_model::ConversationTurn,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), crate::ResidentToolError>> + Send + 'static,
+        >,
+    > {
+        let client = self.client.clone();
+        Box::pin(async move { client.observe_turn(thread, turn).await })
+    }
+
+    fn record_turn_baseline_boxed(
+        &self,
+        thread: String,
+        turn: Option<String>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), crate::ResidentToolError>> + Send + 'static,
+        >,
+    > {
+        let client = self.client.clone();
+        Box::pin(async move { client.record_turn_baseline(thread, turn).await })
+    }
+
     fn output_format(&self) -> crate::ResidentToolOutput {
         crate::ResidentToolOutput::Workbench
     }

@@ -289,6 +289,22 @@ pub trait ResidentToolEndpoint: Send + Sync {
     }
 
     fn tools(&self) -> &[HostedTool];
+    /// Observe one completed turn from this endpoint's exact bound provider
+    /// conversation. Default endpoints have no resident System 1 policy.
+    fn observe_turn_boxed(
+        &self,
+        _thread: String,
+        _turn: tidepool_model::ConversationTurn,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ResidentToolError>> + Send + 'static>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn record_turn_baseline_boxed(
+        &self,
+        _thread: String,
+        _turn: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ResidentToolError>> + Send + 'static>> {
+        Box::pin(async { Ok(()) })
+    }
     /// The owning endpoint chooses interpretation; tool input syntax does not.
     fn output_format(&self) -> ResidentToolOutput {
         ResidentToolOutput::Value
@@ -417,6 +433,64 @@ impl ResidentToolClient {
         self.actor
             .seal_hosted_work()
             .await
+            .map_err(ResidentToolError::Invocation)
+    }
+
+    pub(crate) async fn observe_turn(
+        &self,
+        thread: String,
+        turn: tidepool_model::ConversationTurn,
+    ) -> Result<(), ResidentToolError> {
+        let _guard = self.dispatch_gate.lock().await;
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .address()
+            .send_message(crate::KernelMessage::AfterTurn {
+                thread,
+                turn,
+                reply: reply.into(),
+            })
+            .map_err(|_| {
+                ResidentToolError::Invocation(crate::KernelInvocationFailure::ActorExited(
+                    self.actor.identity(),
+                ))
+            })?;
+        receive
+            .await
+            .map_err(|_| {
+                ResidentToolError::Unavailable(
+                    "the actor stopped before settling the after-turn slot".into(),
+                )
+            })?
+            .map_err(ResidentToolError::Invocation)
+    }
+
+    pub(crate) async fn record_turn_baseline(
+        &self,
+        thread: String,
+        turn: Option<String>,
+    ) -> Result<(), ResidentToolError> {
+        let _guard = self.dispatch_gate.lock().await;
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .address()
+            .send_message(crate::KernelMessage::AfterTurnBaseline {
+                thread,
+                turn,
+                reply: reply.into(),
+            })
+            .map_err(|_| {
+                ResidentToolError::Invocation(crate::KernelInvocationFailure::ActorExited(
+                    self.actor.identity(),
+                ))
+            })?;
+        receive
+            .await
+            .map_err(|_| {
+                ResidentToolError::Unavailable(
+                    "the actor stopped before recording the after-turn baseline".into(),
+                )
+            })?
             .map_err(ResidentToolError::Invocation)
     }
     pub(crate) fn local(actor: crate::LocalActorRef) -> Self {

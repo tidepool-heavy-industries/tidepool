@@ -607,6 +607,7 @@ struct InteractiveDeployment {
     notified_provider_failures: std::collections::BTreeSet<(String, String)>,
     actor: ActorRef,
     local_actor: LocalActorRef,
+    policy: Arc<dyn tidepool_actor::ResidentToolEndpoint>,
     pane: TmuxPaneId,
     workspace: PathBuf,
     inbox: Arc<ActorInbox>,
@@ -668,6 +669,8 @@ enum InteractiveConnection {
     Bound {
         delivery_shutdown: oneshot::Sender<()>,
         delivery: tokio::task::JoinHandle<()>,
+        turn_shutdown: oneshot::Sender<()>,
+        turn_observer: tokio::task::JoinHandle<()>,
     },
 }
 
@@ -3192,6 +3195,14 @@ async fn run_interactive_applications(
                             worktrees.clone(),
                             stop_delivery,
                         ));
+                        let (turn_shutdown, stop_turn_observer) = oneshot::channel();
+                        let turn_observer = tokio::spawn(run_turn_observer(
+                            actor,
+                            thread.clone(),
+                            Arc::clone(&backend),
+                            Arc::clone(&deployment.policy),
+                            stop_turn_observer,
+                        ));
                         tracing::info!(
                             ?actor,
                             input_producer = deployment.input_producer.as_str(),
@@ -3200,6 +3211,8 @@ async fn run_interactive_applications(
                         deployment.connection = InteractiveConnection::Bound {
                             delivery_shutdown,
                             delivery,
+                            turn_shutdown,
+                            turn_observer,
                         };
                         deployment.thread = Some(thread.clone());
                         if let Some(owner) = application_owners.lock().get_mut(&actor) {
@@ -4271,6 +4284,7 @@ async fn launch_prepared_interactive_application(
             notified_provider_failures: Default::default(),
             actor: actor_identity,
             local_actor: actor,
+            policy: Arc::clone(&installation.policy),
             pane,
             workspace,
             inbox,
@@ -4950,6 +4964,150 @@ async fn run_delivery_pump(
     }
 }
 
+/// Observe only turns completed after this exact conversation binding.
+///
+/// The first readable snapshot is an explicit cursor baseline and is never
+/// dispatched, so attaching or restarting cannot replay historical turns.
+/// If that cursor falls outside the bounded provider snapshot, observation
+/// advances visibly rather than guessing which old turns are new.
+async fn run_turn_observer(
+    actor: ActorRef,
+    thread: QueueReadyThread,
+    backend: Arc<dyn InteractiveAgentBackend>,
+    policy: Arc<dyn tidepool_actor::ResidentToolEndpoint>,
+    mut shutdown: oneshot::Receiver<()>,
+) {
+    // The current backend already projects the whole rollout before applying
+    // this count. Keep every completed turn so a long-running hook cannot make
+    // its cursor fall out of an arbitrary window.
+    const SNAPSHOT_TURNS: usize = usize::MAX;
+    let thread_id = thread.id().0.clone();
+    let mut poll = tokio::time::interval(Duration::from_secs(1));
+    let mut initialized = false;
+    let mut last_seen: Option<String> = None;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut last_error: Option<String> = None;
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => return,
+            _ = poll.tick() => {}
+        }
+        let snapshot = tokio::select! {
+            biased;
+            _ = &mut shutdown => return,
+            result = backend.conversation(&thread, SNAPSHOT_TURNS) => result,
+        };
+        let turns = match snapshot {
+            Ok(Some(turns)) => {
+                if last_error.take().is_some() {
+                    tracing::info!(?actor, %thread_id, "after-turn observation recovered");
+                }
+                turns
+            }
+            Ok(None) => {
+                let detail = "provider keeps no readable completed-turn record".to_owned();
+                if last_error.as_deref() != Some(detail.as_str()) {
+                    tracing::warn!(?actor, %thread_id, %detail, "after-turn observation unavailable");
+                }
+                last_error = Some(detail);
+                continue;
+            }
+            Err(error) => {
+                let detail = error.to_string();
+                if last_error.as_deref() != Some(detail.as_str()) {
+                    tracing::warn!(?actor, %thread_id, %detail, "after-turn observation unavailable");
+                }
+                last_error = Some(detail);
+                continue;
+            }
+        };
+        if !initialized {
+            seen.extend(turns.iter().map(|turn| turn.turn.clone()));
+            last_seen = turns.last().map(|turn| turn.turn.clone());
+            let recorded = tokio::select! {
+                biased;
+                _ = &mut shutdown => return,
+                result = policy.record_turn_baseline_boxed(thread_id.clone(), last_seen.clone()) => result,
+            };
+            if let Err(error) = recorded {
+                tracing::warn!(
+                    ?actor,
+                    %thread_id,
+                    %error,
+                    "after-turn observer could not expose its non-replay baseline"
+                );
+            }
+            initialized = true;
+            tracing::info!(
+                ?actor,
+                %thread_id,
+                baseline = last_seen.as_deref().unwrap_or("(empty)"),
+                "after-turn observer established its non-replay cursor"
+            );
+            continue;
+        }
+        let unseen = match completed_turns_after(last_seen.as_deref(), &seen, &turns) {
+            Ok(unseen) => unseen,
+            Err(cursor) => {
+                tracing::warn!(
+                    ?actor,
+                    %thread_id,
+                    %cursor,
+                    "after-turn cursor fell outside provider snapshot; advancing without replay"
+                );
+                seen.extend(turns.iter().map(|turn| turn.turn.clone()));
+                last_seen = turns.last().map(|turn| turn.turn.clone());
+                continue;
+            }
+        };
+        for turn in unseen {
+            let turn_id = turn.turn.clone();
+            seen.insert(turn_id.clone());
+            let observed = tokio::select! {
+                biased;
+                _ = &mut shutdown => return,
+                result = policy.observe_turn_boxed(thread_id.clone(), turn) => result,
+            };
+            match observed {
+                Ok(()) => last_seen = Some(turn_id),
+                Err(error) => {
+                    tracing::warn!(
+                        ?actor,
+                        %thread_id,
+                        turn = %turn_id,
+                        %error,
+                        "after-turn slot invocation failed"
+                    );
+                    // Invocation was admitted and its failure is actor-visible.
+                    // Advance rather than repeatedly running effects.
+                    last_seen = Some(turn_id);
+                }
+            }
+        }
+    }
+}
+
+fn completed_turns_after(
+    cursor: Option<&str>,
+    seen: &std::collections::BTreeSet<String>,
+    turns: &[tidepool_actor::ConversationTurn],
+) -> Result<Vec<tidepool_actor::ConversationTurn>, String> {
+    let start = match cursor {
+        None => 0,
+        Some(cursor) => turns
+            .iter()
+            .position(|turn| turn.turn == cursor)
+            .map(|index| index + 1)
+            .ok_or_else(|| cursor.to_owned())?,
+    };
+    Ok(turns[start..]
+        .iter()
+        .filter(|turn| !seen.contains(&turn.turn))
+        .cloned()
+        .collect())
+}
+
 /// Observe source drift for `actor` on the same 10-second cadence
 /// `usage_poll` already pays for provider observation, rather than a new
 /// timer: reading a source layer's disk revision or a checkout's dirty
@@ -5170,17 +5328,7 @@ async fn retire_interactive_application(
         Some(CleanupComponentOutcome::Completed)
     );
     let mut components = Vec::with_capacity(6);
-    let mut delivery = match deployment.connection {
-        InteractiveConnection::AwaitingBinding => None,
-        InteractiveConnection::Bound {
-            delivery_shutdown,
-            delivery,
-            ..
-        } => {
-            let _ = delivery_shutdown.send(());
-            Some(delivery)
-        }
-    };
+    let (mut delivery, mut turn_observer) = begin_connection_retirement(deployment.connection);
     if let Some(process) = scoped_process {
         let pane = if native_retirement == NativeRetirement::Preserve
             || matches!(process, CleanupComponentOutcome::Completed)
@@ -5205,7 +5353,7 @@ async fn retire_interactive_application(
             outcome: retire_native_pane(tmux, &deployment.pane, native_retirement).await,
         });
     }
-    let (service_outcome, delivery_outcome) = tokio::join!(
+    let (service_outcome, delivery_outcome, turn_outcome) = tokio::join!(
         stop_retired_tool_service(deployment.actor, &mut deployment.service),
         async {
             if let Some(delivery) = delivery.as_mut() {
@@ -5215,6 +5363,14 @@ async fn retire_interactive_application(
                 CleanupComponentOutcome::Completed
             }
         },
+        async {
+            if let Some(observer) = turn_observer.as_mut() {
+                stop_retired_delivery(deployment.actor, observer, APPLICATION_TASK_GRACE_TIMEOUT)
+                    .await
+            } else {
+                CleanupComponentOutcome::Completed
+            }
+        }
     );
     components.push(CleanupComponentReceipt {
         component: CleanupComponent::ToolService,
@@ -5222,7 +5378,24 @@ async fn retire_interactive_application(
     });
     components.push(CleanupComponentReceipt {
         component: CleanupComponent::Delivery,
-        outcome: delivery_outcome,
+        outcome: match (delivery_outcome, turn_outcome) {
+            (CleanupComponentOutcome::Completed, CleanupComponentOutcome::Completed) => {
+                CleanupComponentOutcome::Completed
+            }
+            (CleanupComponentOutcome::Failed { detail }, CleanupComponentOutcome::Completed)
+            | (CleanupComponentOutcome::Completed, CleanupComponentOutcome::Failed { detail }) => {
+                CleanupComponentOutcome::Failed { detail }
+            }
+            (
+                CleanupComponentOutcome::Failed { detail: first },
+                CleanupComponentOutcome::Failed { detail: second },
+            ) => CleanupComponentOutcome::Failed {
+                detail: format!("delivery: {first}; turn observer: {second}"),
+            },
+            (left, right) => CleanupComponentOutcome::Failed {
+                detail: format!("delivery cleanup: {left:?}; turn observer cleanup: {right:?}"),
+            },
+        },
     });
     let quiescent = exact_process_stopped
         && components
@@ -5311,6 +5484,27 @@ async fn retire_interactive_application(
         outcome: binding_outcome,
     });
     InteractiveCleanupReceipt { actor, components }
+}
+
+fn begin_connection_retirement(
+    connection: InteractiveConnection,
+) -> (
+    Option<tokio::task::JoinHandle<()>>,
+    Option<tokio::task::JoinHandle<()>>,
+) {
+    match connection {
+        InteractiveConnection::AwaitingBinding => (None, None),
+        InteractiveConnection::Bound {
+            delivery_shutdown,
+            delivery,
+            turn_shutdown,
+            turn_observer,
+        } => {
+            let _ = delivery_shutdown.send(());
+            let _ = turn_shutdown.send(());
+            (Some(delivery), Some(turn_observer))
+        }
+    }
 }
 
 /// Account for exact resident cleanup before draining the original HTTP task.
@@ -6399,6 +6593,64 @@ mod tests {
     }
 
     use super::*;
+
+    fn completed_turn(id: &str) -> tidepool_actor::ConversationTurn {
+        tidepool_actor::ConversationTurn {
+            turn: id.into(),
+            started_at: None,
+            completed_at: None,
+            items: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn after_turn_cursor_excludes_baseline_enumerates_all_new_turns_and_deduplicates() {
+        let baseline = vec![completed_turn("before"), completed_turn("baseline")];
+        let seen = baseline
+            .iter()
+            .map(|turn| turn.turn.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        let later = vec![
+            completed_turn("before"),
+            completed_turn("baseline"),
+            completed_turn("one"),
+            completed_turn("two"),
+        ];
+        let unseen = completed_turns_after(Some("baseline"), &seen, &later).unwrap();
+        assert_eq!(
+            unseen
+                .iter()
+                .map(|turn| turn.turn.as_str())
+                .collect::<Vec<_>>(),
+            ["one", "two"]
+        );
+
+        let seen = seen
+            .into_iter()
+            .chain(["one".to_owned(), "two".to_owned()])
+            .collect();
+        assert!(completed_turns_after(Some("baseline"), &seen, &later)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn after_turn_empty_baseline_accepts_first_completion_and_missing_cursor_is_a_gap() {
+        let turns = vec![completed_turn("first"), completed_turn("second")];
+        let unseen = completed_turns_after(None, &Default::default(), &turns).unwrap();
+        assert_eq!(
+            unseen
+                .iter()
+                .map(|turn| turn.turn.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        assert_eq!(
+            completed_turns_after(Some("missing"), &Default::default(), &turns),
+            Err("missing".into())
+        );
+    }
     use tidepool_agent::{
         AgentBackendError, InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture,
     };
@@ -8751,6 +9003,44 @@ mod tests {
         assert!(receipt
             .render()
             .contains("Delivery: forcibly stopped before graceful settlement"));
+    }
+
+    #[tokio::test]
+    async fn bound_retirement_cancels_and_joins_delivery_and_turn_observer() {
+        let actor = ActorRef::first(tidepool_actor::ActorId(9));
+        let (delivery_shutdown, delivery_stop) = oneshot::channel();
+        let (turn_shutdown, turn_stop) = oneshot::channel();
+        let delivery = tokio::spawn(async move {
+            let _ = delivery_stop.await;
+        });
+        let turn_observer = tokio::spawn(async move {
+            let _ = turn_stop.await;
+        });
+        let (mut delivery, mut turn_observer) =
+            begin_connection_retirement(InteractiveConnection::Bound {
+                delivery_shutdown,
+                delivery,
+                turn_shutdown,
+                turn_observer,
+            });
+
+        let delivery_outcome = stop_retired_delivery(
+            actor,
+            delivery.as_mut().expect("bound delivery task"),
+            Duration::from_secs(1),
+        )
+        .await;
+        let turn_outcome = stop_retired_delivery(
+            actor,
+            turn_observer.as_mut().expect("bound turn observer task"),
+            Duration::from_secs(1),
+        )
+        .await;
+
+        assert_eq!(delivery_outcome, CleanupComponentOutcome::Completed);
+        assert_eq!(turn_outcome, CleanupComponentOutcome::Completed);
+        assert!(delivery.as_ref().unwrap().is_finished());
+        assert!(turn_observer.as_ref().unwrap().is_finished());
     }
 
     #[test]
