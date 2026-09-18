@@ -111,6 +111,13 @@ fn shoal_exports_persistent_agents_and_hides_turn_lifecycle_operations() {
     }
 
     compile_haskell(
+        include_str!("shoal_action_surface/skill_promised_names.hs"),
+        "result",
+        &include_refs,
+    )
+    .expect("a name a shipped skill uses in a worked example must be callable from a cell");
+
+    compile_haskell(
         include_str!("shoal_action_surface/coding_can_unfold.hs"),
         "result",
         &include_refs,

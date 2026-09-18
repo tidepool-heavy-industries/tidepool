@@ -250,6 +250,7 @@ module Tidepool.Actors.Shoal
   , GitRef
   , InProgressKind (..)
   , GitOid (..)
+  , renderGitOid
   , GitFailureReceipt
   , worktreeId
   , worktreeBranch
