@@ -93,5 +93,9 @@ bottom are an open failure, recorded.
 3. Bind previews, not evidence. A cell's display budget is spent by what you
    send to the model, not by what you return, and a cell can succeed, pay for
    its calls, and show you six characters of its answer. `Cmd.quiet` helps.
-4. Never truncate from the front. A check log begins with nix and cargo
-   preamble and ends with the diagnostics.
+4. Keep the whole output and select the excerpt you need from it. The original
+   rule here said never truncate from the front, which was overfit to one
+   fixture: a check log happened to open with nix and cargo preamble and close
+   with the diagnostics. Errors are not reliably at either end — a failure can
+   abort a run halfway, and a warning that explains it can precede everything.
+   Filter for what you are looking for instead of cutting by position.

@@ -9,14 +9,15 @@ evidence and start the review. Review asks for repair → send the findings back
 Repair settles → re-review. Accepted → merge and run the integrated check.
 Those were ten root turns per task in a measured run; they are one actor here.
 
-**Look for one that already exists before you write any of it.** `doc topics`
-ends by naming the workspace's own compiled modules, and `lookup` on one of
-those names browses it. A workspace that has been through this before usually
-already authors the merge or review actor you are about to hand-roll. One lead
-looked up `Project.Merge`, saw `RedRolledBack GitOid GitOid CheckResult` in the
+**Find out whether an installed actor already fits, before writing any of it.**
+`doc topics` ends by naming this workspace's own compiled modules, and `lookup`
+on one of those names browses its declarations and the outcomes it can return.
+The answer is often that the workspace authors types and helpers and no actor,
+and then writing your own is exactly right. The cost is only in not checking:
+one lead browsed a module, saw `RedRolledBack GitOid GitOid CheckResult` in the
 answer, and then spent nine model turns and two and a half minutes writing
 `tryMerge`, `cargo test` and `git reset --hard HEAD^` by hand — reimplementing,
-badly, the outcome it had just been shown. Starting the actor was four calls.
+badly, the outcome it had just been shown. Starting that actor was four calls.
 
 **This is a pattern to copy into your own `.shoal/Project`, not a library.**
 Nothing below is importable. Paste it, rename it, cut the seams you do not

@@ -3,11 +3,11 @@ model. One record describes private state, public calls, and fixed event
 handlers; the same record supplies both the definition and the typed client.
 `R` is `Tidepool.Actor.Record`.
 
-Check whether this workspace already authors the one you want. `doc topics`
-ends by naming the workspace's compiled modules and `lookup` on one of those
-names browses its declarations, including the outcomes it can return. Starting
-an existing actor is `R.start` plus a call per candidate; rebuilding what it
-does out of shell commands costs turns and tests nothing.
+Find out whether this workspace already authors one that fits. `doc topics` ends
+by naming its compiled modules and `lookup` on one of those names browses their
+declarations, including the outcomes they can return. Some workspaces ship types
+and helpers and no actor at all; authoring your own is then the right move. What
+costs turns is rebuilding in shell what an installed actor already does.
 
 The minimal shape is a record with one `State`, one `Call`, and one `Event` over
 the settlements you want collected:

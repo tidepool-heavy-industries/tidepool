@@ -36,13 +36,15 @@ Load `shoal-unfold` for the worked cells.
 
 `tryMerge` is the primitive, not the whole job. Merging a candidate means
 merging it, running the check, and putting the worktree back if the check goes
-red — and a workspace that has done this before usually authors an actor that
-does all three, with the rollback already in its result type. Before you write
-`tryMerge` plus a check command plus `git reset` by hand, read the workspace
-modules that `doc topics` names and `lookup` one of them. A lead once browsed
-such a module, saw its red-rollback outcome in the answer, and still spent nine
-model turns rebuilding it in shell; starting the actor was four calls, and the
-hand-rolled version proved nothing about the mechanism it replaced.
+red. Before writing that sequence by hand, find out whether an installed actor
+already fits: `doc topics` ends by naming this workspace's own compiled modules,
+and `lookup` on one of those names browses its declarations and the outcomes it
+can return. Many workspaces author none, in which case writing the sequence is
+the right answer — the point is to know which case you are in before you spend
+turns. One lead browsed a module, saw its red-rollback outcome in the answer,
+and still spent nine model turns rebuilding it in shell; starting that actor was
+four calls, and the hand-rolled version proved nothing about the mechanism it
+replaced.
 
 One shared interface can support four branches: a pure test implementation,
 integration tests exercising the real implementation, the real implementation,
