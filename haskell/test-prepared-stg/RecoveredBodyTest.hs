@@ -90,7 +90,6 @@ main = do
     let fstIds = filter isFst references
     cache <- liftIO newFatIfaceCache
     ownerCache <- liftIO newOwnerInterfaceCache
-  bodyCache <- liftIO newPreparedBodyCache
     bodyCache <- liftIO newPreparedBodyCache
     recovered <- liftIO $ recoverFirst hsc cache fstIds
     case recovered of

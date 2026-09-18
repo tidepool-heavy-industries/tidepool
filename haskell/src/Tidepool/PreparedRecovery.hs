@@ -12,7 +12,7 @@ import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Maybe (isJust)
-import GHC.Types.Unique.Set (elementOfUniqSet)
+import GHC.Types.Unique.Set (elementOfUniqSet, nonDetEltsUniqSet, sizeUniqSet)
 import System.Environment (lookupEnv)
 import GHC.Core (CoreBind, Bind(..))
 import GHC.Driver.Env (HscEnv)
@@ -25,9 +25,10 @@ import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (Module, unitString)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.ExecutionProjection
-  ( ProjectionContext, combinePreparedTargetReferences, preparedModuleReachFacts
-  , preparedModuleReferenceFacts, preparedSeedUniques, preparedTargetReferences
-  , reachableTopUniques, topBinders )
+  ( PreparedReachability(..), ProjectionContext, admitReachFacts
+  , combinePreparedTargetReferences, emptyPreparedReachability
+  , preparedModuleReachFacts, preparedModuleReferenceFacts, preparedSeedUniques
+  , preparedTargetReferences, topBinders )
 import Tidepool.FatIface (FatIfaceCache, FatIfaceMissing, OwnerInterfaceCache)
 import Tidepool.PreparedStg
   ( PreparedBodyCache, PreparedModule(..), RecoveredModuleFailure(..)
@@ -74,10 +75,12 @@ data RecoveredClosure = RecoveredClosure
   }
 
 -- | Diagnostic split of 'prepared_recover' (flat sub-phases, summed over
--- rounds): per-module fact computation, reference collection, body lookup,
--- and defining-module preparation, plus the round and preparation counts.
+-- rounds): per-module fact computation, the reachability walk, reference
+-- collection, body lookup, and defining-module preparation, plus the round
+-- and preparation counts.
 data Spent = Spent
   { spentFacts :: !Integer
+  , spentReach :: !Integer
   , spentRefs :: !Integer
   , spentLookup :: !Integer
   , spentPrepare :: !Integer
@@ -106,14 +109,16 @@ recoverPreparedClosure env cache ownerCache bodyCache context home = do
   -- Per-module facts (external references per group, raw references per
   -- top) are pure in 'context' and a module's own bindings. Home modules
   -- never change during this call; a recovered module's entry is dropped
-  -- when 'prepareOne' replaces it. Reachability runs over top uniques from
-  -- the home seeds; 'TIDEPOOL_RECOVERY_CHECK' compares every round against
-  -- the identity-based 'preparedTargetReferences'.
+  -- when 'prepareOne' replaces it. Reachability runs from the home seeds and
+  -- is carried across rounds ('PreparedReachability'), so a round admits what
+  -- it discovered rather than re-walking the closure;
+  -- 'TIDEPOOL_RECOVERY_CHECK' compares every round against the
+  -- identity-based 'preparedTargetReferences'.
   checking <- isJust <$> lookupEnv "TIDEPOOL_RECOVERY_CHECK"
   let factsOf prepared =
         (preparedModuleReferenceFacts context prepared, preparedModuleReachFacts context prepared)
       homeFacts = [(prepared, factsOf prepared) | prepared <- home]
-      seeds = preparedSeedUniques context home
+      seedList = nonDetEltsUniqSet (preparedSeedUniques context home)
   factsMemo <- newIORef Map.empty
   let factsFor prepared = do
         memo <- readIORef factsMemo
@@ -123,16 +128,16 @@ recoverPreparedClosure env cache ownerCache bodyCache context home = do
             let fresh = factsOf prepared
             modifyIORef' factsMemo (Map.insert (pmModule prepared) fresh)
             pure fresh
-      roundReferences modules recovered =
-        let entries = homeFacts ++ recovered
-            reachable = reachableTopUniques seeds [reach | (_, (_, reach)) <- entries]
-            kept binding = any ((`elementOfUniqSet` reachable) . varUnique) (topBinders binding)
-        in combinePreparedTargetReferences context kept
+      roundReferences reach entries =
+        let reached = reachedUniques reach
+            kept binding =
+              any ((`elementOfUniqSet` reached) . varUnique) (topBinders binding)
+        in combinePreparedTargetReferences context (admittedTops reach) kept
              [(prepared, references) | (prepared, (references, _)) <- entries]
-  spent <- newIORef (Spent 0 0 0 0 0 0)
+  spent <- newIORef (Spent 0 0 0 0 0 0 0)
   let homeOwners = Set.fromList (map pmModule home)
       charge f = modifyIORef' spent f
-      go attempted groups prepared failures = do
+      go attempted groups prepared failures admitted previousReach = do
         let modules = home ++ Map.elems prepared
         -- Forced here rather than left to 'roundReferences': the per-module
         -- facts are the memoized half of this phase and the round-invariant
@@ -144,8 +149,19 @@ recoverPreparedClosure env cache ownerCache bodyCache context home = do
             _ <- evaluate (sum (map length (Map.elems references)))
             evaluate (sum (map (length . snd) reach))) entries
           pure entries
+        let entries = homeFacts ++ recovered
+        (reach, reachMs) <- timeSection $ do
+          -- Only what this round admitted enters the walk: the closure and
+          -- the dependency relation carry over from the previous round.
+          let admittedFacts =
+                [ reach | (entry, (_, reach)) <- entries
+                , Set.member (pmModule entry) admitted ]
+              extended = admitReachFacts seedList admittedFacts previousReach
+          _ <- evaluate (sizeUniqSet (reachedUniques extended))
+          _ <- evaluate (sizeUniqSet (admittedTops extended))
+          pure extended
         (references, refsMs) <- timeSection $ do
-          refs <- evaluate (roundReferences modules recovered)
+          refs <- evaluate (roundReferences reach entries)
           _ <- evaluate (length refs)
           when checking $ do
             let expected = preparedTargetReferences context modules
@@ -154,6 +170,7 @@ recoverPreparedClosure env cache ownerCache bodyCache context home = do
                 ++ show (length refs) ++ " vs " ++ show (length expected) ++ " references"))
           pure refs
         charge (\s -> s { spentFacts = spentFacts s + factsMs
+                        , spentReach = spentReach s + reachMs
                         , spentRefs = spentRefs s + refsMs
                         , spentRounds = spentRounds s + 1 })
         let pending = filter (\binder -> not (Set.member (varName binder) attempted)
@@ -161,9 +178,10 @@ recoverPreparedClosure env cache ownerCache bodyCache context home = do
               references
         if null pending
           then do
-            Spent factsTotal refsTotal lookupTotal prepareTotal rounds preparedModules
-              <- readIORef spent
+            Spent factsTotal reachTotal refsTotal lookupTotal prepareTotal rounds
+              preparedModules <- readIORef spent
             emitPhase timing "prepared_recover_facts" factsTotal
+            emitPhase timing "prepared_recover_reach" reachTotal
             emitPhase timing "prepared_recover_refs" refsTotal
             emitPhase timing "prepared_recover_lookup" lookupTotal
             emitPhase timing "prepared_recover_prepare" prepareTotal
@@ -180,7 +198,7 @@ recoverPreparedClosure env cache ownerCache bodyCache context home = do
                             , spentPreparations =
                                 spentPreparations s + fromIntegral (Set.size dirty) })
             go (Set.union attempted (Set.fromList (map varName pending)))
-              nextGroups nextPrepared finalFailures
+              nextGroups nextPrepared finalFailures dirty reach
       lookupOne _cacheRef homeOwnersRef (groups, dirty, failures) binder
         | Just _ <- wiredInErrorKind binder = pure (groups, dirty, failures)
         | Just _ <- deferredFunction binder = pure (groups, dirty, failures)
@@ -217,7 +235,7 @@ recoverPreparedClosure env cache ownerCache bodyCache context home = do
               , filter (not . preparationFailureFor owner) failures
               )
           Left failure -> pure (prepared, failures ++ [DefiningPreparationFailure failure])
-  go Set.empty Map.empty Map.empty []
+  go Set.empty Map.empty Map.empty [] homeOwners emptyPreparedReachability
 
 preparationFailureFor :: Module -> RecoveryFailure -> Bool
 preparationFailureFor owner (DefiningPreparationFailure failure) =
