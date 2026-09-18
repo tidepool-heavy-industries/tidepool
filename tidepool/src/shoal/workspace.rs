@@ -338,7 +338,10 @@ fn flake_source_roots(workspace: &Path, config: &HaskellConfig) -> Result<Vec<Pa
             .arg(format!("path:{directory}"));
     }
     let report = command.arg(workspace).output().map_err(|error| {
-        format!("cannot start {} to fetch flake inputs: {error}", nix.display())
+        format!(
+            "cannot start {} to fetch flake inputs: {error}",
+            nix.display()
+        )
     })?;
     if !report.status.success() {
         return Err(format!(
@@ -360,14 +363,14 @@ fn flake_source_roots(workspace: &Path, config: &HaskellConfig) -> Result<Vec<Pa
     let archive: Archive = serde_json::from_slice(&report.stdout)?;
     let mut roots = Vec::new();
     for (input, directories) in &config.flake_sources {
-        let fetched = archive.inputs.get(input).ok_or_else(|| {
-            format!("the project's flake.nix declares no input named {input:?}")
-        })?;
+        let fetched = archive
+            .inputs
+            .get(input)
+            .ok_or_else(|| format!("the project's flake.nix declares no input named {input:?}"))?;
         if directories.is_empty() {
-            return Err(format!(
-                "[haskell.flake_sources] {input:?} names no source directory"
-            )
-            .into());
+            return Err(
+                format!("[haskell.flake_sources] {input:?} names no source directory").into(),
+            );
         }
         for directory in directories {
             if directory.is_absolute()

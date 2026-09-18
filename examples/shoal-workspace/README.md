@@ -58,6 +58,50 @@ ordinary authored names selected by Project.Work, not Rust workflow roles.
 Shoal.Workspace exposes the captured prompts, module names and definition identity.
 Every worker has the normal Codex TUI for engineering and direct human steering.
 
+A project can also compile Haskell that lives in another repository, pinned
+through its own `flake.nix`. `[haskell.flake_sources]` names, for one flake
+input, the directories inside it that hold modules:
+
+```toml
+[haskell]
+source_roots = ["."]
+modules = ["Project.Work", "Jev.Core", "Jev.Operators"]
+
+[haskell.flake_sources]
+jev-dsl = ["core", "src"]
+```
+
+with the matching input in the project's `flake.nix`:
+
+```nix
+inputs.jev-dsl = { url = "github:inanna-malick/jev-dsl"; flake = false; };
+```
+
+Those directories become ordinary source roots. Shoal captures them into the
+run's frozen workspace, compiles them through the same pipeline as authored
+source, imports the configured modules into every actor, and fingerprints them
+in the compile cache by content. There is no package build and no separate
+dependency list: `flake.lock` is the pin, and updating it is what moves the
+dependency. Authored roots are searched before pinned ones.
+
+While a dependency is being developed, `[haskell.flake_overrides]` substitutes
+a working directory for one input:
+
+```toml
+[haskell.flake_overrides]
+jev-dsl = "../../jev-dsl"
+```
+
+Override paths follow the usual rule — relative to `.shoal/config.toml`, or
+absolute for a checkout elsewhere. An overridden run leaves `flake.lock`
+untouched, so editing the dependency in place stays a working change rather
+than a re-pin; each edit gives the next run a different cache key and a fresh
+compile. Remove the override to go back to the pin.
+
+Both forms ask `nix` to resolve the project the way any other `nix` command
+would, so `flake.nix` must be a tracked file in the project's Git tree; its
+uncommitted edits are read as written.
+
 `[launch].systemd_slice` selects the shared systemd user slice (default
 `swarm.slice`). Configure its finite RAM and swap limits on the machine before
 launching. Shoal places compiler, host, native panes and shared command resources
