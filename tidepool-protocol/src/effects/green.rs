@@ -230,5 +230,6 @@ pub fn green() -> Effect {
         polymorphism: Polymorphism::None,
         // There is deliberately no `GreenHandler` (see the module doc).
         dispatched: false,
+        caller_principal: false,
     }
 }

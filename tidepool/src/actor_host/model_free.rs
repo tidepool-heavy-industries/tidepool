@@ -44,11 +44,13 @@ impl ModelFreeSession {
             runtime_namespace(session_root.path()),
             Arc::clone(&bindings),
         );
+        let source_layers = super::source_service(config, session_root.path(), worktrees.clone());
         let (source, root, program) = compile_root(
             config,
             session_root.path(),
             worktrees.clone(),
             authority.clone(),
+            source_layers.as_ref(),
         )?;
         let (descriptor, machine, outcome) = root.into_parts();
         let (forest, mut deployments) = ResidentForest::new_with_launch_resolver(
@@ -67,12 +69,18 @@ impl ModelFreeSession {
         );
         let mut forest = forest;
         forest.set_jev_backend(super::jev_backend(config));
+        if let Some(layers) = &source_layers {
+            forest.set_source_layers(layers.clone());
+        }
         if let Some(conversation) = conversation {
             forest = forest.with_conversation_reader(conversation);
         }
         let forest = Arc::new(forest);
         let (actor, hosted) = forest.admit_root(descriptor, outcome).await?;
         authority.install_grant(actor.identity().into(), ActorWorktreeGrant::Repository);
+        if let Some(layers) = &source_layers {
+            layers.bind_run(actor.identity().into());
+        }
         let Some(LocalResidentDeployment::PolicyInstalled(root_installation)) =
             deployments.recv().await
         else {

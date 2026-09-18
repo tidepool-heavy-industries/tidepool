@@ -19,22 +19,33 @@ pub use crate::generated::source::{SourceError, SourceReq};
 /// What a run must be able to do for `Source` to answer.
 ///
 /// Implemented by the Shoal composition root, which owns the frozen workspace,
-/// the run's live source layer, and the driver compile that decides whether a
-/// candidate revision typechecks.
+/// every actor's live source layer, and the driver compile that decides
+/// whether a candidate revision typechecks.
+///
+/// Every verb names the CALLER. A source layer is per checkout, so "which
+/// layer" is not a property of the run: it is a property of the actor asking,
+/// and the caller's principal is issued by the kernel rather than spelled by
+/// the program. The service answers each actor about exactly the layer that
+/// actor's own cells compile against.
 pub trait SourceReloadService: Send + Sync {
-    /// Capture the declared source roots, check the affected module graph, and
-    /// publish it if — and only if — all of it compiles. `also_check` names
-    /// additional modules to pull into the checked graph.
+    /// Capture `caller`'s own source roots, check the affected module graph,
+    /// and publish it into `caller`'s own layer if — and only if — all of it
+    /// compiles. `also_check` names additional modules to pull into the
+    /// checked graph.
     ///
     /// A rejected candidate is an `Ok(SrReloadOutcome::ReloadRejected(..))`,
     /// not an `Err`: a failed typecheck is an expected result a program
-    /// handles. `Err` is for a run that has no source layer to reload at all,
-    /// or roots that could not be read.
-    fn reload(&self, also_check: &[String]) -> Result<SrReloadOutcome, SourceError>;
+    /// handles. `Err` is for a caller with no layer of its own to publish, or
+    /// roots that could not be read.
+    fn reload(
+        &self,
+        caller: tidepool_repr::PrincipalId,
+        also_check: &[String],
+    ) -> Result<SrReloadOutcome, SourceError>;
 
-    /// The revision later cells compile against, and the revision the source
-    /// roots hold right now.
-    fn status(&self) -> Result<SrStatus, SourceError>;
+    /// The revision `caller`'s later cells compile against, and the revision
+    /// its own source roots hold right now.
+    fn status(&self, caller: tidepool_repr::PrincipalId) -> Result<SrStatus, SourceError>;
 }
 
 /// The `Source` effect's handler.
@@ -70,13 +81,23 @@ impl SourceHandler {
 
     pub(crate) fn source_reload(
         &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
         also_check: Vec<String>,
-    ) -> Result<SrReloadOutcome, SourceError> {
-        self.service()?.reload(&also_check)
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        cx.respond(
+            self.service()
+                .and_then(|service| service.reload(cx.principal(), &also_check)),
+        )
     }
 
-    pub(crate) fn source_status(&mut self) -> Result<SrStatus, SourceError> {
-        self.service()?.status()
+    pub(crate) fn source_status(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        cx.respond(
+            self.service()
+                .and_then(|service| service.status(cx.principal())),
+        )
     }
 }
 

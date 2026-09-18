@@ -325,5 +325,6 @@ pub fn run_llm_turn() -> Effect {
         polymorphism: Polymorphism::None,
         // No real `tidepool-handlers` handler (see the module doc).
         dispatched: false,
+        caller_principal: false,
     }
 }

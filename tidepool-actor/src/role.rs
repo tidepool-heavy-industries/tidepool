@@ -77,10 +77,11 @@ pub enum ActorEffectKey {
     Console,
     Actor,
     Reflect,
-    /// Reloading the run's own workspace source. Root only: publishing a
-    /// revision changes what EVERY later cell in the run compiles against, so
-    /// it is a run-wide act rather than something a child does inside its own
-    /// checkout.
+    /// Reloading the source layer the holder's own cells compile against. The
+    /// root's layer is the run's; an actor launched with a checkout has its
+    /// own, captured from that checkout. The key names the verb, never the
+    /// layer: which layer a call reaches is fixed when the actor is built, so
+    /// holding this key in a checkout cannot reach the run's source.
     Source,
 }
 
@@ -219,6 +220,11 @@ impl EffectiveRole {
                 ActorEffectKey::Console,
                 ActorEffectKey::Actor,
                 ActorEffectKey::Reflect,
+                // A coding actor reloads the source layer of the checkout it
+                // holds, which is where its own authored Haskell lives. It
+                // cannot reach the run's layer: its service is bound to its
+                // own checkout when the actor is constructed.
+                ActorEffectKey::Source,
             ],
         )
     }

@@ -166,5 +166,6 @@ pub fn exec() -> Effect {
         ],
         polymorphism: Polymorphism::None,
         dispatched: true,
+        caller_principal: false,
     }
 }

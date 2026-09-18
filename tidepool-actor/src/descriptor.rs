@@ -25,6 +25,7 @@ pub struct ActorDescriptor {
     instructions: Option<String>,
     fork_budget: Option<(i64, i64)>,
     fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
+    source_layer: std::sync::Arc<[std::path::PathBuf]>,
 }
 
 impl ActorDescriptor {
@@ -48,6 +49,7 @@ impl ActorDescriptor {
             instructions: None,
             fork_budget: None,
             fork_boundary: None,
+            source_layer: std::sync::Arc::from([]),
         }
     }
 
@@ -228,6 +230,20 @@ impl ActorDescriptor {
         &self.source_imports
     }
 
+    /// Give this actor its own source layer: include roots only its cells see,
+    /// ahead of every shared root. Selected once, before the actor is spawned,
+    /// from the checkout the actor is launched with.
+    #[must_use]
+    pub fn with_source_layer(mut self, layer: Vec<std::path::PathBuf>) -> Self {
+        self.source_layer = layer.into();
+        self
+    }
+
+    #[must_use]
+    pub fn source_layer(&self) -> &[std::path::PathBuf] {
+        &self.source_layer
+    }
+
     #[must_use]
     pub fn session_context(&self, actor: ActorRef) -> ActorSessionContext {
         ActorSessionContext {
@@ -237,6 +253,7 @@ impl ActorDescriptor {
             live_payload: self.live_payload,
             source_imports: self.source_imports.clone(),
             haskell_effects_alias: self.role.haskell_effects_type(),
+            source_layer: self.source_layer.clone(),
         }
     }
 }

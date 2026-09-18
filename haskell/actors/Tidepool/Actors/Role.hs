@@ -19,6 +19,7 @@ module Tidepool.Actors.Role
   , Forks
   , Jev
   , Reflect
+  , Source
   , EffectWitness
   , Effects
   , KnownEffect (effectWitness)
@@ -47,6 +48,7 @@ import Tidepool.Effects.Core
   , Forks
   , Jev
   , Reflect
+  , Source
   , WorktreeAllocation
   , WorktreeIntegration
   , WorktreeRegistry
@@ -69,10 +71,14 @@ type ResearchEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentInspection, AgentControl, BoundWorktree, Notifications, Jev, Commands, Actor, Reflect
    ]
+-- A coding child reloads the source layer of the checkout it holds; the layer
+-- its calls reach is fixed when the actor is constructed, so this never lets
+-- it republish the run's own source.
 type CodingEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentInspection, AgentControl, BoundWorktree
    , WorktreeAllocation, WorktreeIntegration, Notifications, Jev, Commands, Actor, Reflect
+   , Source
    ]
 type IntegrationEffects =
   '[ Replies, Watches, ActorContext

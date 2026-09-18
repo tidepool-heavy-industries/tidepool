@@ -136,6 +136,7 @@ pub fn forks() -> Effect {
                         "EffectJev",
                         "EffectActor",
                         "EffectReflect",
+                        "EffectSource",
                     ]
                     .into_iter()
                     .map(|ctor| SumVariant {
@@ -331,6 +332,7 @@ pub fn forks() -> Effect {
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,
         dispatched: false,
+        caller_principal: false,
     }
 }
 

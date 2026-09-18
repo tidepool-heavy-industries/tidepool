@@ -123,6 +123,18 @@ pub struct Effect {
     /// contribute its DECL text (`decl_rs`) once its helpers are fully
     /// schema-representable, entirely independent of this flag.
     pub dispatched: bool,
+    /// Does this effect's handler need to know WHICH actor asked?
+    ///
+    /// An ordinary handler answers the same way for every caller, so its
+    /// error-tagged verbs take only their arguments and the dispatch arm wraps
+    /// the result with `cx.respond`. An effect whose authority is per actor —
+    /// `Source`, where a reload acts on the caller's own source layer and
+    /// nobody else's — needs the kernel-issued principal, which only the
+    /// dispatch context carries. Setting this passes `cx` to every verb method
+    /// of the effect, error-tagged or not, and the method renders its own
+    /// response. It is deliberately per effect rather than per verb: an effect
+    /// that resolves a caller resolves it for its whole surface.
+    pub caller_principal: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

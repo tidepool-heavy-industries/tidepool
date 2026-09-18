@@ -144,6 +144,7 @@ pub enum ActorEffectKeyWire {
     EffectConsole,
     EffectActor,
     EffectReflect,
+    EffectSource,
 }
 
 impl From<ActorEffectKeyWire> for crate::ActorEffectKey {
@@ -167,6 +168,7 @@ impl From<ActorEffectKeyWire> for crate::ActorEffectKey {
             ActorEffectKeyWire::EffectConsole => Self::Console,
             ActorEffectKeyWire::EffectActor => Self::Actor,
             ActorEffectKeyWire::EffectReflect => Self::Reflect,
+            ActorEffectKeyWire::EffectSource => Self::Source,
         }
     }
 }

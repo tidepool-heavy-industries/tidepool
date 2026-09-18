@@ -115,5 +115,6 @@ pub fn actor_local() -> Effect {
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,
         dispatched: false,
+        caller_principal: false,
     }
 }

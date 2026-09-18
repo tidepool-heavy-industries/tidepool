@@ -202,6 +202,7 @@ pub fn reflect() -> Effect {
         }],
         polymorphism: Polymorphism::None,
         dispatched: false,
+        caller_principal: false,
     }
 }
 

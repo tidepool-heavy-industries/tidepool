@@ -178,8 +178,10 @@ fn body(e: &Effect) -> String {
             format!("{}::{}({})", e.req_enum, v.ctor, names.join(", "))
         };
         // An errors-tagged method takes no `cx` and is total in the error ADT;
-        // a plain method takes `cx` and returns the Response itself.
-        let call = if v.errors.is_some() {
+        // a plain method takes `cx` and returns the Response itself. An effect
+        // that resolves its CALLER (`Effect::caller_principal`) always takes
+        // `cx`, because the kernel-issued principal is only there.
+        let call = if v.errors.is_some() && !e.caller_principal {
             format!("cx.respond(self.{}({}))", v.method, names.join(", "))
         } else {
             let mut a = vec!["cx".to_string()];
@@ -203,7 +205,7 @@ fn body(e: &Effect) -> String {
             for name in &names {
                 out.push_str(&format!("                {name},\n"));
             }
-            if v.errors.is_some() {
+            if v.errors.is_some() && !e.caller_principal {
                 out.push_str(&format!("            ) => cx.respond(self.{}(\n", v.method));
                 for name in &names {
                     out.push_str(&format!("                {name},\n"));

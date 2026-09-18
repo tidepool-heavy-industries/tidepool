@@ -1,37 +1,82 @@
 # Source reload — design
 
-Answers `plans/jev-lab/source-reload-spec.md`. Written before the
-implementation; file:line citations are to the tree at the time of writing.
+Answers `plans/jev-lab/source-reload-spec.md`. A standing description of what
+the tree does now.
 
 ## The shape in one paragraph
 
-A Shoal run already captures its Haskell source roots once, into
+A Shoal run captures its Haskell source roots once, into
 `<run_root>/workspace/sources/<capture>/<index>`, and hands those directories
-to every compile as `--include` roots. Reload adds a second, *mutable* layer
-in front of that frozen floor: `<run_root>/workspace/revisions/<revision>/<index>`,
-reached through one symlink `<run_root>/workspace/active`. The include list
-every compile receives names `active/<index>` **before** the frozen
-`sources/<capture>/<index>`, so a module present in the active revision
-shadows the frozen copy. Publishing a revision is one `rename(2)` of that
-symlink. Nothing else in the compile pipeline changes: the include vector's
-length and entries are fixed for the life of the run, and only the bytes
-behind one path move.
+to every compile as `--include` roots. Reload adds *mutable* layers in front of
+that frozen floor. Every layer has the same shape — a directory of
+content-named revisions and one symlink naming the live one — and there are two
+kinds. The **run's** layer, `<run_root>/workspace/{revisions,active}`, sits
+ahead of the frozen capture in the include list every actor shares. A
+**checkout's** layer, `<run_root>/workspace/checkouts/<worktree>/{revisions,active}`,
+sits ahead of *that*, in one actor's include list alone. So a module present in
+a layer shadows the copy beneath it, and an actor editing Haskell inside its
+own checkout shadows the run's copy for its own later cells and for nobody
+else's. Publishing a revision is one `rename(2)` of a symlink. Nothing else in
+the compile pipeline changes: an actor's include vector is fixed when the actor
+is constructed, and only the bytes behind one path on it move.
 
 ## Where a reloaded revision's compiled source lives
 
-`<run_root>/workspace/revisions/<revision-id>/`, with one subdirectory per
-configured source root (`0`, `1`, …, in the frozen config's root order) plus a
-`resources/` directory holding the generated `Shoal/Source/Revision.hs`.
-`<run_root>/workspace/active` is a symlink to the currently published
-revision directory.
+`<layer>/revisions/<revision-id>/`, with one subdirectory per source root
+(`0`, `1`, …, in root order) plus a `resources/` directory holding the
+generated `Shoal/Source/Revision.hs`. `<layer>/active` is a symlink to the
+currently published revision directory, and `<layer>/active.json` records its
+identity, its display generation, and how many roots it has.
 
 `run_root` is `~/.cache/tidepool/shoal/runs/<run_id>`
-(`tidepool/src/shoal.rs:468-472`), outside the workspace, so a revision tree
-can never be re-captured into itself.
+(`tidepool/src/shoal.rs`), outside the workspace, so a revision tree can never
+be re-captured into itself. A checkout's layer lives under the run root too,
+never inside the checkout: Git never sees it, and a capture never reads a
+previous capture of itself.
 
-Revision `0` is materialized at driver-compile time from the frozen capture
-directories, so `active` always resolves and the include list is well-formed
-before any reload happens. It is byte-identical to what the run froze.
+Revision one of the run's layer is materialized at driver-compile time from the
+frozen capture directories, so `active` always resolves and the include list is
+well-formed before any reload happens. It is byte-identical to what the run
+froze. Revision one of a checkout's layer is captured from that checkout while
+the actor holding it is being constructed, for the same reason.
+
+## One layer per checkout
+
+An actor launched with a managed worktree
+(`tidepool-actor/src/start.rs`'s `launch_worktrees`) gets a layer of its own,
+captured from that checkout's `.shoal` source roots with the same
+`capture_sources` walk, the same content identity, the same
+typecheck-before-publish, and the same atomic symlink publication as the run's.
+Two deliberate differences from the run's capture
+(`workspace::checkout_source_roots`):
+
+- A configured root the checkout does not have is absent rather than an error.
+  A checkout carrying no `.shoal` at all has no layer, and the actor holding it
+  compiles against exactly what every other actor does.
+- Flake inputs are not re-resolved per checkout. They are pinned by the run,
+  identical in every checkout, and already on the search path beneath the
+  layer; `[haskell.flake_overrides]` remains the way to develop one, and
+  nothing about pinning changes.
+
+**Where the layer enters the include list.** An actor's per-cell compile builds
+its include list from `ActorWorkbenchSource::base_include`, which is
+deployment-wide and shared by every actor in the forest
+(`ResidentForest::new` hands one `ActorWorkbenchSource` to
+`ResidentActorRunner`). The per-actor part is `ActorCompileView`, built from the
+actor's own `ActorSessionContext`, and that is where the layer travels:
+`ActorSessionContext::source_layer` holds the actor's own roots and
+`ActorCompileView::include_paths` puts them ahead of the shared base and the
+session's module tree (`tidepool-actor/src/mount.rs`). It is set on the
+descriptor before the actor is spawned
+(`ResidentKernelBehavior::try_start_child`) and there is no setter: an actor's
+search path must not move under a cell that is already compiling.
+
+The host answers the two questions the actor engine cannot — what a checkout's
+roots are, and where its revisions live — through one installed
+`tidepool_actor::ActorSourceLayers`, implemented by `ShoalSourceReload` in the
+composition root. `layer_include` materializes the layer and answers its
+include roots; `bind` names the actor those roots belong to. Both are called
+once, while the child is being admitted.
 
 ## How the frozen workspace's tamper check is respected
 
@@ -55,16 +100,25 @@ into a corrupted run.
 ## How the reverse-dependency closure is computed and rebuilt
 
 It is not hand-rolled. GHC already owns the module graph, and
-`validate_workspace_program` already compiles the whole Shoal driver against a
-`FrozenWorkspace`'s include roots (`tidepool/src/actor_host.rs:1773-1840`),
-importing `Shoal.Workspace` plus every configured module
-(`workspace.rs:231-233`, used at `actor_host.rs:1806-1808`).
+`validate_workspace_program` compiles the whole Shoal driver against a
+`FrozenWorkspace`'s include roots (`typecheck_candidate_revision` and
+`compile_driver`, `tidepool/src/actor_host.rs`), importing `Shoal.Workspace`
+plus every configured module.
 
-The reload check is that same compile with `active/<index>` replaced by the
-*pending* revision's directories. If `Project.CommandEvidence` changed, GHC
-recompiles it and everything in the driver's import closure that depends on
-it, including `Project.RunAhead`. A type error anywhere in that closure fails
-the whole compile, and nothing is published.
+The reload check is that same compile with the pending revision's directories
+on the search path. If `Project.CommandEvidence` changed, GHC recompiles it and
+everything in the driver's import closure that depends on it, including
+`Project.RunAhead`. A type error anywhere in that closure fails the whole
+compile, and nothing is published.
+
+Where the candidate goes says which layer is being reloaded, and is the one
+difference between the two cases. A reload of the run's layer puts the
+candidate **in place of** that layer, exactly as publishing would. A reload of
+a checkout's layer puts it **in front of** the run's layer, which stays on the
+search path beneath it — because that is where the checkout's layer sits in its
+own actor's include list, and because a checkout reload must not disturb what
+anybody else compiles against
+(`CandidateSources::replaces_run_layer`).
 
 **Scope, stated plainly.** The closure is everything reachable from the
 configured module list (`[haskell] modules`) plus the driver. A module that
@@ -105,40 +159,45 @@ the same id and the same generated module.
 
 ## Atomic publication
 
-1. Resolve the source roots from the frozen config: `[haskell] source_roots`
-   canonicalized under `.shoal`, then `flake_source_roots`
-   (`workspace.rs:300-402`). Re-resolving through `nix flake archive` is what
-   keeps pinned inputs immutable and makes `[haskell.flake_overrides]` the
-   working-change route the spec names; when `flake_sources` is empty the
-   function returns without touching `nix` (`workspace.rs:309-311`).
-2. Capture each root into `revisions/.pending-<uuid>/<index>` with the existing
-   `capture_sources` walk (`workspace.rs:415-421`), which already refuses
-   symlinks and skips runtime/build trees.
+The same six steps for every layer (`SourceLayer` and `ShoalSourceReload::settle`).
+
+1. Resolve the source roots. For the run's layer that is `[haskell]
+   source_roots` canonicalized under the workspace's `.shoal`, then
+   `flake_source_roots`: re-resolving through `nix flake archive` is what keeps
+   pinned inputs immutable and makes `[haskell.flake_overrides]` the
+   working-change route, and when `flake_sources` is empty the function returns
+   without touching `nix`. For a checkout's layer it is that checkout's own
+   `.shoal` roots, resolved once when the actor holding it was constructed —
+   fixing them there is what makes the actor's search path and its reload
+   target the same thing.
+2. Capture each root into `revisions/.pending-<uuid>/<index>` with the
+   `capture_sources` walk, which refuses symlinks and skips runtime/build
+   trees.
 3. Compute the revision id from the captured tree. If it equals the active
    revision's id, remove the pending directory and answer `ReloadUnchanged`.
 4. Write `resources/Shoal/Source/Revision.hs`, then rename the pending
    directory to `revisions/<id>` (an existing directory with that id is
    byte-identical, so the pending copy is simply discarded).
-5. Compile the driver with `active/<index>` substituted by
-   `revisions/<id>/<index>`. On failure, answer `ReloadRejected` carrying the
-   rejected revision and the rendered diagnostics. The `active` symlink has not
-   moved, the previously compiled graph is still installed, and nothing under
-   the workspace was written — the edited files are exactly as the model left
-   them.
+5. Compile the driver against the candidate, as above. On failure, answer
+   `ReloadRejected` carrying the rejected revision and the rendered
+   diagnostics. The `active` symlink has not moved, the previously compiled
+   graph is still installed, and nothing under the workspace was written — the
+   edited files are exactly as the model left them.
 6. On success, `rename(2)` a fresh symlink over `active`. That is the
    publication, and it is atomic: a concurrent compile opening `active/<index>`
    sees either the whole old revision or the whole new one.
 
-Reloads are serialized by a mutex in the reload service, so two actors cannot
-interleave step 5 and step 6.
+Reloads are serialized by one mutex in the reload service, across every layer,
+so two actors cannot interleave step 5 and step 6.
 
 ## How a later cell picks up the new revision, and why the requesting cell does not
 
-An actor's per-cell compile builds its include list once per cell from
-`ActorWorkbenchSource::base_include` (`tidepool-actor/src/resident_workbench.rs:211`,
-read at `:236` via `SessionCompileView::include_paths`,
-`tidepool-runtime/src/session/view.rs:298-304`). That vector is fixed at actor
-construction — there is no setter and none is added here. What changes is what
+An actor's per-cell compile builds its include list once per cell, from its own
+`ActorSessionContext::source_layer` followed by the deployment-wide
+`ActorWorkbenchSource::base_include` (`ActorCompileView::include_paths`,
+`tidepool-actor/src/mount.rs`; read via `ActorWorkbenchSource::prepare`,
+`tidepool-actor/src/resident_workbench.rs`). Both halves are fixed when the
+actor is constructed — there is no setter for either. What changes is what
 `active/<index>` resolves to on the filesystem when GHC opens it.
 
 - The cell that called reload was compiled, and its machine code installed,
@@ -149,13 +208,20 @@ construction — there is no setter and none is added here. What changes is what
   `fingerprint_dir_relative` walks through the symlink, so a new revision is a
   different key.
 
-The same substitution reaches all three consumers of the run's include vector,
-because all three receive the same vector built in `compile_driver`: the
-session library's declaration-validation include
-(`actor_host.rs:1878-1879`), the resident machine
-(`actor_host.rs:1893-1904`), and the per-cell workbench source
-(`actor_host.rs:1946`). No per-crate API churn is needed, which is the main
-reason the symlink layer was chosen over making `base_include` swappable.
+For the run's layer the same substitution reaches all three consumers of the
+run's include vector, because all three receive the same vector built in
+`compile_driver`: the session library's declaration-validation include, the
+resident machine, and the per-cell workbench source. No per-crate API churn is
+needed, which is the main reason the symlink layer was chosen over making
+`base_include` swappable.
+
+A checkout's layer reaches one of those three: the per-cell workbench source of
+the actor that holds the checkout. The resident machine and the session
+library's validation include are forest-wide — one machine and one
+`ActorWorkbenchSource` serve every actor in a Shoal run
+(`ResidentForest::new`) — so a declaration a checkout actor persists is still
+validated against the run's include roots. That is a real limit and is recorded
+below rather than papered over.
 
 **Bindings keep their implementation.** A value already bound lives on the
 resident heap as a session `Val` generation; reload does not touch the heap, so
@@ -173,10 +239,13 @@ Ordinary data, from two places.
 - **Runtime.** `sourceStatus` answers a `SourceStatus` carrying the active
   revision and the latest observed disk revision, each a `SourceRevision` with
   its identity, its display generation, and the per-module `(name, digest)`
-  list read from the revision's own manifest. That is the spec's "currently
-  active snapshot" and "latest observed disk snapshot", and
-  `Source.activeRevision "Project.RunAhead"` is a lookup in
-  `revisionModules` rather than a separate verb.
+  list read from the revision's own manifest. It answers about the CALLER's own
+  layer: a checkout actor reads its own layer and its own checkout's roots, and
+  an actor with no layer of its own reads the run's, which is what its cells
+  actually compile against. That is the spec's "currently active snapshot" and
+  "latest observed disk snapshot", and `Source.activeRevision
+  "Project.RunAhead"` is a lookup in `revisionModules` rather than a separate
+  verb.
 - **Compile time.** Each revision directory carries a generated
   `Shoal.Source.Revision` module exporting `compiledSourceRevision :: Text`.
   An authored workspace module that records it gets, honestly, the source
@@ -199,13 +268,38 @@ unmigrated base-eval effects). It is `dispatched: true`, so it is serviced
 synchronously by an `EffectHandler` in the bootstrap handler list
 (`actor_host.rs:1893-1900`) rather than suspending to the actor kernel.
 
-**Who may call it.** A new `ActorEffectKey::Source`
-(`tidepool-actor/src/role.rs`), granted to the **root role only**. Publishing a
-revision changes what every later cell in the run compiles against, so it is a
-run-wide act, not something a child does inside its own checkout: a coding
-actor writing in a worktree must not be able to republish the swarm's source
-graph. A child that needs a reload asks the root for one, which is an ordinary
-actor call.
+**Who may call it, and on what.** `ActorEffectKey::Source`
+(`tidepool-actor/src/role.rs`) is held by the root role and the coding role.
+The key names the verb; it never names a layer. Which layer a call reaches is
+decided once, while the actor is being constructed, and is not re-decided per
+call:
+
+- the actor that owns the run — the root, and the operator workbench — is bound
+  to the run's own layer by the host, at admission
+  (`ShoalSourceReload::bind_run`);
+- an actor launched with a checkout that carries source is bound to that
+  checkout's layer, by the same `ActorSourceLayers::bind` call that fixed its
+  include list, before it runs anything;
+- every other actor is bound to the run's layer read-only: it sees, through
+  `sourceStatus`, exactly what its cells compile against, and `reloadSource`
+  answers `SourceUnavailable` because it has no layer of its own to publish
+  into.
+
+This is why authority cannot widen. There is no role test and no principal
+string comparison below that binding: a call resolves the caller's
+kernel-issued principal to the layer object the host installed for it
+(`ShoalSourceReload::scope`), and every publication path takes that object. A
+coding actor writing in a worktree therefore cannot republish the swarm's
+source graph — not because it is checked and refused, but because the only
+layer it can name is its own. A child that needs the run's source reloaded asks
+the root for one, which is an ordinary actor call.
+
+`Source` is the first effect with `Effect::caller_principal` set
+(`tidepool-protocol/src/schema.rs`): its generated dispatch arms pass the
+`EffectContext` to the handler method, because the caller's principal is only
+there. The handler stack is bootstrapped once for a whole Shoal run — one
+resident machine serves every actor — so per-actor authority cannot be
+expressed by handing each actor a different handler.
 
 ```haskell
 reloadSource :: [Text] -> M (Either SourceError ReloadOutcome)
@@ -218,10 +312,11 @@ data ReloadOutcome
 ```
 
 `ReloadRejected` is a value, not an error: a failed typecheck is an expected
-result a program can handle. `SourceError` is reserved for the case where
-there is no workspace to reload at all. The handler holds a trait object
-implemented in the `tidepool` composition root, because the typecheck step is
-`compile_driver`, which lives there.
+result a program can handle. `SourceError` is reserved for a caller with no
+layer to publish into — a run with no workspace at all, or an actor with no
+source of its own. The handler holds a trait object implemented in the
+`tidepool` composition root, because the typecheck step is `compile_driver`,
+which lives there.
 
 A convenience tool is not part of this change; the Haskell operation is the
 only route, which the spec permits.
@@ -319,3 +414,14 @@ tool module within the same run — and is corrected as part of this change.
   invocation, especially across `replace`"). The runtime does not record a
   revision per completed call today, and claiming one would break the spec's
   own honesty limit.
+- **Per-checkout declaration validation.** A checkout's layer reaches its
+  actor's per-cell compiles. The session library's declaration-validation
+  include and the resident machine's include are forest-wide, so a declaration
+  a checkout actor persists is validated against the run's roots rather than
+  its own. Fixing it means making those two per actor, which is a larger
+  change to the one-machine-per-run shape than a source layer needs.
+- **A layer for a checkout acquired after launch.** A checkout layer is fixed
+  when the actor is constructed, from the worktree it is launched with, because
+  the include list is fixed there too. An actor that allocates a worktree later,
+  or whose checkout gains a `.shoal` after it starts, has no layer for it; that
+  actor's next incarnation does.

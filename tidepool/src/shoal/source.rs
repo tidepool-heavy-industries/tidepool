@@ -1,26 +1,47 @@
-//! Live source revisions for one Shoal run.
+//! Live source layers: one per checkout, plus the run's own.
 //!
 //! A run freezes its Haskell source roots once, into
 //! `<run_root>/workspace/sources/<capture>/<index>`, and that capture is
 //! verified byte for byte every time the run is reloaded
 //! ([`super::workspace::FrozenWorkspace::load`]). Nothing here writes inside
-//! it. Instead this module owns a second layer in FRONT of that floor:
+//! it. Instead this module owns mutable layers in FRONT of that floor. The
+//! run's layer is shared by every actor:
 //!
 //! ```text
 //! <run_root>/workspace/revisions/<identity>/{0,1,…,resources}
 //! <run_root>/workspace/active -> revisions/<identity>
 //! ```
 //!
-//! Every compile in the run receives `active/<index>` ahead of the frozen
-//! `sources/<capture>/<index>`, so a module in the active revision shadows the
-//! frozen copy. Publishing a revision is one `rename(2)` of that symlink: a
-//! compile that opens `active/0` sees either the whole previous revision or
-//! the whole new one, never a mixture. The include VECTOR handed to the
-//! compiler never changes for the life of the run — only what one path on it
-//! resolves to.
+//! and an actor launched with a managed checkout gets one of its own, captured
+//! from that checkout's `.shoal` source roots:
+//!
+//! ```text
+//! <run_root>/workspace/checkouts/<worktree>/revisions/<identity>/{0,…,resources}
+//! <run_root>/workspace/checkouts/<worktree>/active -> revisions/<identity>
+//! ```
+//!
+//! A layer is the same object either way — same capture walk, same content
+//! identity, same typecheck before publication, same one-`rename(2)`
+//! publication — and differs only in where it lives and what it reads. What
+//! differs is reach: the run's layer sits ahead of the frozen capture in the
+//! include list every actor shares, and a checkout layer sits ahead of THAT,
+//! in one actor's include list alone
+//! (`tidepool_actor::ActorCompileView::include_paths`). So an actor editing a
+//! module inside its own checkout shadows the run's copy for its own later
+//! cells and for nobody else's.
+//!
+//! Publishing a revision is one `rename(2)` of a symlink: a compile that opens
+//! `active/0` sees either the whole previous revision or the whole new one,
+//! never a mixture. No include VECTOR changes for the life of an actor — only
+//! what one path on it resolves to.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use parking_lot::{Mutex, RwLock};
+use tidepool_repr::PrincipalId;
+use tidepool_worktree::{WorktreeId, WorktreeManager};
 
 use super::workspace::FrozenWorkspace;
 
@@ -85,16 +106,28 @@ impl PendingRevision {
     }
 }
 
-/// The source layer of one run.
+/// One mutable source layer: its revisions, and the symlink naming the live
+/// one. The run has one; so does every checkout that carries source.
 #[derive(Clone, Debug)]
 pub(crate) struct SourceLayer {
     directory: PathBuf,
 }
 
 impl SourceLayer {
+    /// The run's own layer, shared by every actor that has no checkout layer
+    /// of its own.
     pub(crate) fn new(run_root: &Path) -> Self {
         Self {
             directory: run_root.join("workspace"),
+        }
+    }
+
+    /// The layer belonging to one managed checkout. It lives under the run
+    /// root, never inside the checkout, so a capture can never read a
+    /// previous capture of itself and Git never sees it.
+    pub(crate) fn checkout(run_root: &Path, worktree: &str) -> Self {
+        Self {
+            directory: run_root.join("workspace").join("checkouts").join(worktree),
         }
     }
 
@@ -116,21 +149,39 @@ impl SourceLayer {
         revision_include_paths(&self.active_link(), roots)
     }
 
+    /// The include roots the layer's owner compiles against, read from the
+    /// published record rather than a caller-supplied count. A checkout layer
+    /// captures whatever roots that checkout has, which need not be as many as
+    /// the run froze.
+    pub(crate) fn active_include_paths(&self) -> Result<Vec<PathBuf>> {
+        let record = self.read_record()?;
+        Ok(record
+            .map(|record| revision_include_paths(&self.active_link(), record.roots))
+            .unwrap_or_default())
+    }
+
     /// Materialize revision one from the run's own frozen capture, unless a
     /// revision is already active. Idempotent, and the only way `active` comes
     /// into existence: every compile in the run needs it to resolve.
     pub(crate) fn ensure_active(&self, frozen: &FrozenWorkspace) -> Result<SourceRevision> {
+        self.ensure_active_from(frozen.identity(), frozen.captured_source_roots())
+    }
+
+    /// As [`Self::ensure_active`], for a layer with no frozen capture of its
+    /// own: revision one is captured from `roots` as they stand.
+    pub(crate) fn ensure_active_from(
+        &self,
+        domain: &str,
+        roots: &[PathBuf],
+    ) -> Result<SourceRevision> {
         if let Some(active) = self.read_active()? {
             return Ok(active);
         }
-        let roots = frozen.captured_source_roots();
-        let pending = self.capture_roots(frozen, roots)?;
+        let pending = self.capture_from_roots(domain, roots)?;
         self.publish(pending)
     }
 
-    /// The revision currently on the search path, or `None` before the first
-    /// one is materialized.
-    pub(crate) fn read_active(&self) -> Result<Option<SourceRevision>> {
+    fn read_record(&self) -> Result<Option<ActiveRecord>> {
         if !self.active_link().exists() {
             return Ok(None);
         }
@@ -139,7 +190,15 @@ impl SourceLayer {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let record: ActiveRecord = serde_json::from_slice(&record)?;
+        Ok(Some(serde_json::from_slice(&record)?))
+    }
+
+    /// The revision currently on the search path, or `None` before the first
+    /// one is materialized.
+    pub(crate) fn read_active(&self) -> Result<Option<SourceRevision>> {
+        let Some(record) = self.read_record()? else {
+            return Ok(None);
+        };
         let directory = self.revisions().join(&record.identity);
         Ok(Some(SourceRevision {
             modules: revision_modules(&directory, record.roots),
@@ -166,12 +225,15 @@ impl SourceLayer {
         if roots.len() != frozen.captured_source_roots().len() {
             return Err("the workspace's source-root list changed; start a new swarm".into());
         }
-        self.capture_roots(frozen, &roots)
+        self.capture_from_roots(frozen.identity(), &roots)
     }
 
-    fn capture_roots(
+    /// Capture `roots` as a candidate revision of this layer. `domain_identity`
+    /// frames the content digest so a revision is only ever compared within one
+    /// run's configuration, prompts and library build.
+    pub(crate) fn capture_from_roots(
         &self,
-        frozen: &FrozenWorkspace,
+        domain_identity: &str,
         roots: &[PathBuf],
     ) -> Result<PendingRevision> {
         let pending = self
@@ -195,7 +257,7 @@ impl SourceLayer {
         // below carries that identity, so hashing it too would be circular —
         // the same ordering `freeze` uses for `Shoal/Workspace.hs`.
         let mut domain = DOMAIN.to_vec();
-        domain.extend_from_slice(frozen.identity().as_bytes());
+        domain.extend_from_slice(domain_identity.as_bytes());
         let captured_roots: Vec<PathBuf> = (0..roots.len())
             .map(|index| pending.join(index.to_string()))
             .collect();
@@ -274,22 +336,61 @@ impl SourceLayer {
     }
 }
 
-/// The run's answer to the `Source` effect.
+/// One checkout's source layer, and the checkout it is read from.
+#[derive(Clone)]
+struct CheckoutSource {
+    layer: SourceLayer,
+    /// The authored roots this checkout provides, resolved once, when the
+    /// actor holding the checkout was constructed. Fixing them there is what
+    /// makes the actor's search path and its reload target the same thing.
+    roots: Arc<[PathBuf]>,
+}
+
+/// Which layer one actor's own source calls act on.
 ///
-/// It owns the three things a reload needs and nothing else: the run's frozen
-/// workspace, where its authored source lives, and the source layer it
-/// publishes into. The compile that decides whether a candidate is acceptable
-/// is the run's ordinary driver compile, so a reload is checked by exactly the
-/// compiler the run uses.
+/// Selected when the actor is constructed and never afterwards, so an actor
+/// cannot reach another actor's source by asking differently. This is the
+/// whole authority story for `Source`: there is no role test anywhere below
+/// this point, because by then the layer is already decided.
+#[derive(Clone)]
+enum ActorSourceScope {
+    /// The run's own layer. Publishing here changes what every actor without a
+    /// layer of its own compiles against, so it belongs to the actor that owns
+    /// the run.
+    Run,
+    /// The actor's own checkout layer.
+    Checkout(CheckoutSource),
+    /// The run's layer, readable but not publishable. This actor compiles
+    /// against it — that is what `sourceStatus` reports — and has no source of
+    /// its own to publish.
+    RunReadOnly,
+}
+
+/// The run's answer to the `Source` effect, for every actor in it.
+///
+/// It owns the run's frozen workspace, where its authored source lives, the
+/// run's own layer, and one layer per checkout that carries source. The
+/// compile that decides whether a candidate is acceptable is the run's
+/// ordinary driver compile, so every reload — the run's and a checkout's — is
+/// checked by exactly the compiler the run uses.
 pub(crate) struct ShoalSourceReload {
     frozen: FrozenWorkspace,
     workspace: PathBuf,
     run_root: PathBuf,
     haskell_root: PathBuf,
     layer: SourceLayer,
-    /// One reload at a time: step 5 and step 6 of a publication must not
-    /// interleave with another actor's.
-    gate: parking_lot::Mutex<()>,
+    /// Resolves a launch worktree id to the checkout on disk. Absent in the
+    /// unit tests below, which exercise the run's own layer only.
+    worktrees: Option<WorktreeManager>,
+    /// One layer per checkout, by worktree id, materialized on first use.
+    /// `None` records a checkout that carries no source of its own, so the
+    /// answer is not recomputed for every actor that holds it.
+    checkouts: Mutex<HashMap<String, Option<CheckoutSource>>>,
+    /// What each actor's own source calls reach.
+    scopes: RwLock<HashMap<PrincipalId, ActorSourceScope>>,
+    /// One reload at a time: a publication's check and its `rename(2)` must
+    /// not interleave with another actor's.
+    gate: Mutex<()>,
 }
 
 impl ShoalSourceReload {
@@ -306,8 +407,86 @@ impl ShoalSourceReload {
             run_root,
             haskell_root,
             layer,
-            gate: parking_lot::Mutex::new(()),
+            worktrees: None,
+            checkouts: Mutex::new(HashMap::new()),
+            scopes: RwLock::new(HashMap::new()),
+            gate: Mutex::new(()),
         }
+    }
+
+    /// Resolve launch worktrees through this manager, which is what makes
+    /// per-checkout layers possible at all.
+    #[must_use]
+    pub(crate) fn with_worktrees(mut self, worktrees: WorktreeManager) -> Self {
+        self.worktrees = Some(worktrees);
+        self
+    }
+
+    /// Name the actor that owns the run's own layer. Exactly one actor does,
+    /// and the host says which while admitting it.
+    pub(crate) fn bind_run(&self, actor: PrincipalId) {
+        self.scopes.write().insert(actor, ActorSourceScope::Run);
+    }
+
+    /// What `caller`'s own source calls reach.
+    ///
+    /// An actor the host never bound gets the run's layer read-only: it can
+    /// see what its cells compile against and cannot publish anything. The
+    /// bootstrap principal is the run itself, before any actor exists.
+    fn scope(&self, caller: PrincipalId) -> ActorSourceScope {
+        if caller == PrincipalId::SYSTEM {
+            return ActorSourceScope::Run;
+        }
+        self.scopes
+            .read()
+            .get(&caller)
+            .cloned()
+            .unwrap_or(ActorSourceScope::RunReadOnly)
+    }
+
+    /// The layer belonging to the checkout an actor is launched with, made
+    /// live on first use. `None` when the actor holds no checkout, when the
+    /// checkout is not a managed worktree, or when it carries no `.shoal`
+    /// source of its own — in every one of those cases the actor simply
+    /// compiles against what the run provides.
+    fn checkout(&self, worktrees: &[String]) -> Option<CheckoutSource> {
+        let manager = self.worktrees.as_ref()?;
+        let [id] = worktrees else { return None };
+        let mut known = self.checkouts.lock();
+        if let Some(checkout) = known.get(id) {
+            return checkout.clone();
+        }
+        let resolved = self
+            .materialize_checkout(manager, id)
+            .unwrap_or_else(|error| {
+                tracing::warn!(worktree = %id, %error, "checkout source layer unavailable");
+                None
+            });
+        known.insert(id.clone(), resolved.clone());
+        resolved
+    }
+
+    fn materialize_checkout(
+        &self,
+        manager: &WorktreeManager,
+        id: &str,
+    ) -> Result<Option<CheckoutSource>> {
+        let Some(handle) = manager.lookup(&WorktreeId::from_raw(id))? else {
+            return Ok(None);
+        };
+        let config = self.frozen.config()?;
+        let roots = super::workspace::checkout_source_roots(handle.cwd(), &config.haskell);
+        if roots.is_empty() {
+            return Ok(None);
+        }
+        let layer = SourceLayer::checkout(&self.run_root, id);
+        // Revision one before the actor exists, so its very first cell already
+        // resolves `active/<index>` and the include list is well-formed.
+        layer.ensure_active_from(self.frozen.identity(), &roots)?;
+        Ok(Some(CheckoutSource {
+            layer,
+            roots: roots.into(),
+        }))
     }
 
     fn wire(revision: &SourceRevision) -> tidepool_bridge_effects::SrRevision {
@@ -317,34 +496,77 @@ impl ShoalSourceReload {
             &revision.modules,
         )
     }
-}
 
-fn unreadable(error: Box<dyn std::error::Error>) -> tidepool_handlers::SourceError {
-    tidepool_handlers::SourceError::SourceUnreadable(error.to_string())
-}
-
-impl tidepool_handlers::SourceReloadService for ShoalSourceReload {
-    fn reload(
+    /// Reload the run's own layer: re-read the workspace's declared roots and
+    /// publish them in place of the layer every actor shares.
+    fn reload_run(
         &self,
         also_check: &[String],
     ) -> std::result::Result<tidepool_bridge_effects::SrReloadOutcome, tidepool_handlers::SourceError>
     {
-        use tidepool_bridge_effects::SrReloadOutcome;
-        let _one_at_a_time = self.gate.lock();
         let active = self.layer.ensure_active(&self.frozen).map_err(unreadable)?;
         let pending = self
             .layer
             .capture_from_workspace(&self.frozen, &self.workspace)
             .map_err(unreadable)?;
+        let candidate = |pending: &PendingRevision| {
+            pending.include_paths(self.frozen.captured_source_roots().len())
+        };
+        self.settle(&self.layer, active, pending, &candidate, true, also_check)
+    }
+
+    /// Reload one checkout's own layer. Same transaction, one checkout's
+    /// source, and the run's layer stays exactly where it is: the candidate
+    /// goes in FRONT of it for the check, never in place of it.
+    fn reload_checkout(
+        &self,
+        checkout: &CheckoutSource,
+        also_check: &[String],
+    ) -> std::result::Result<tidepool_bridge_effects::SrReloadOutcome, tidepool_handlers::SourceError>
+    {
+        let active = checkout
+            .layer
+            .ensure_active_from(self.frozen.identity(), &checkout.roots)
+            .map_err(unreadable)?;
+        let pending = checkout
+            .layer
+            .capture_from_roots(self.frozen.identity(), &checkout.roots)
+            .map_err(unreadable)?;
+        let candidate = |pending: &PendingRevision| pending.include_paths(checkout.roots.len());
+        self.settle(
+            &checkout.layer,
+            active,
+            pending,
+            &candidate,
+            false,
+            also_check,
+        )
+    }
+
+    /// The publication transaction, which is the same for every layer: an
+    /// unchanged candidate publishes nothing, a candidate that does not
+    /// typecheck moves nothing, and a candidate that does becomes the revision
+    /// the layer's owner compiles against from its next cell.
+    fn settle(
+        &self,
+        layer: &SourceLayer,
+        active: SourceRevision,
+        pending: PendingRevision,
+        candidate: &dyn Fn(&PendingRevision) -> Vec<PathBuf>,
+        replaces_run_layer: bool,
+        also_check: &[String],
+    ) -> std::result::Result<tidepool_bridge_effects::SrReloadOutcome, tidepool_handlers::SourceError>
+    {
+        use tidepool_bridge_effects::SrReloadOutcome;
         if pending.revision().identity == active.identity {
             return Ok(SrReloadOutcome::ReloadUnchanged(Self::wire(&active)));
         }
-        let candidate = pending.include_paths(self.frozen.captured_source_roots().len());
         if let Err(error) = crate::actor_host::typecheck_candidate_revision(
             &self.frozen,
             &self.run_root,
             &self.haskell_root,
-            &candidate,
+            &candidate(&pending),
+            replaces_run_layer,
             also_check,
         ) {
             // Nothing moved: the active symlink still points where it did, and
@@ -355,8 +577,8 @@ impl tidepool_handlers::SourceReloadService for ShoalSourceReload {
                 error.to_string(),
             ));
         }
-        let changed = self.layer.changed_modules(&active, pending.revision());
-        let published = self.layer.publish(pending).map_err(unreadable)?;
+        let changed = layer.changed_modules(&active, pending.revision());
+        let published = layer.publish(pending).map_err(unreadable)?;
         Ok(SrReloadOutcome::ReloadPublished(
             Self::wire(&active),
             Self::wire(&published),
@@ -364,25 +586,99 @@ impl tidepool_handlers::SourceReloadService for ShoalSourceReload {
         ))
     }
 
-    fn status(
+    fn status_of(
         &self,
-    ) -> std::result::Result<tidepool_bridge_effects::SrStatus, tidepool_handlers::SourceError>
-    {
-        let _one_at_a_time = self.gate.lock();
-        let active = self.layer.ensure_active(&self.frozen).map_err(unreadable)?;
-        let disk = self
-            .layer
-            .capture_from_workspace(&self.frozen, &self.workspace)
-            .map_err(unreadable)?;
+        active: SourceRevision,
+        disk: &PendingRevision,
+    ) -> tidepool_bridge_effects::SrStatus {
         let disk = if disk.revision().identity == active.identity {
             active.clone()
         } else {
             disk.revision().clone()
         };
-        Ok(tidepool_bridge_effects::SrStatus {
+        tidepool_bridge_effects::SrStatus {
             active: Self::wire(&active),
             disk: Self::wire(&disk),
-        })
+        }
+    }
+}
+
+fn unreadable(error: Box<dyn std::error::Error>) -> tidepool_handlers::SourceError {
+    tidepool_handlers::SourceError::SourceUnreadable(error.to_string())
+}
+
+impl tidepool_handlers::SourceReloadService for ShoalSourceReload {
+    fn reload(
+        &self,
+        caller: PrincipalId,
+        also_check: &[String],
+    ) -> std::result::Result<tidepool_bridge_effects::SrReloadOutcome, tidepool_handlers::SourceError>
+    {
+        let _one_at_a_time = self.gate.lock();
+        match self.scope(caller) {
+            ActorSourceScope::Run => self.reload_run(also_check),
+            ActorSourceScope::Checkout(checkout) => self.reload_checkout(&checkout, also_check),
+            ActorSourceScope::RunReadOnly => {
+                Err(tidepool_handlers::SourceError::SourceUnavailable(
+                    "this actor has no source layer of its own: it compiles against the run's, \
+                     which only the actor that owns the run republishes"
+                        .into(),
+                ))
+            }
+        }
+    }
+
+    fn status(
+        &self,
+        caller: PrincipalId,
+    ) -> std::result::Result<tidepool_bridge_effects::SrStatus, tidepool_handlers::SourceError>
+    {
+        let _one_at_a_time = self.gate.lock();
+        match self.scope(caller) {
+            ActorSourceScope::Run | ActorSourceScope::RunReadOnly => {
+                let active = self.layer.ensure_active(&self.frozen).map_err(unreadable)?;
+                let disk = self
+                    .layer
+                    .capture_from_workspace(&self.frozen, &self.workspace)
+                    .map_err(unreadable)?;
+                Ok(self.status_of(active, &disk))
+            }
+            ActorSourceScope::Checkout(checkout) => {
+                let active = checkout
+                    .layer
+                    .ensure_active_from(self.frozen.identity(), &checkout.roots)
+                    .map_err(unreadable)?;
+                let disk = checkout
+                    .layer
+                    .capture_from_roots(self.frozen.identity(), &checkout.roots)
+                    .map_err(unreadable)?;
+                Ok(self.status_of(active, &disk))
+            }
+        }
+    }
+}
+
+impl tidepool_actor::ActorSourceLayers for ShoalSourceReload {
+    fn layer_include(&self, worktrees: &[String]) -> Vec<PathBuf> {
+        self.checkout(worktrees)
+            .map(|checkout| {
+                checkout
+                    .layer
+                    .active_include_paths()
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(%error, "checkout source layer has no include roots");
+                        Vec::new()
+                    })
+            })
+            .unwrap_or_default()
+    }
+
+    fn bind(&self, actor: PrincipalId, worktrees: &[String]) {
+        let scope = match self.checkout(worktrees) {
+            Some(checkout) => ActorSourceScope::Checkout(checkout),
+            None => ActorSourceScope::RunReadOnly,
+        };
+        self.scopes.write().insert(actor, scope);
     }
 }
 
@@ -540,6 +836,51 @@ mod tests {
         FrozenWorkspace::load(project.path(), run.path()).unwrap();
     }
 
+    /// A checkout's layer is the run's layer's equal in every way but two:
+    /// where it lives, and who sees it. Materializing one leaves the run's
+    /// exactly where it was, and a checkout with no authored source of its own
+    /// has no roots to capture and so gets no layer at all.
+    #[test]
+    fn a_checkout_layer_is_its_own_and_leaves_the_run_alone() {
+        let (project, run) = workspace_with("module Project.Work where\nwork :: Int\nwork = 1\n");
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let run_layer = SourceLayer::new(run.path());
+        let published = run_layer.ensure_active(&frozen).unwrap();
+
+        // A checkout of the same project, carrying different source.
+        let checkout = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(checkout.path().join(".shoal/Project")).unwrap();
+        std::fs::write(
+            checkout.path().join(".shoal/Project/Work.hs"),
+            "module Project.Work where\nwork :: Int\nwork = 2\n",
+        )
+        .unwrap();
+        let haskell = frozen.config().unwrap().haskell;
+        let roots = super::super::workspace::checkout_source_roots(checkout.path(), &haskell);
+        let layer = SourceLayer::checkout(run.path(), "tree-7");
+        let first = layer.ensure_active_from(frozen.identity(), &roots).unwrap();
+
+        assert_ne!(first.identity, published.identity);
+        assert!(run
+            .path()
+            .join("workspace/checkouts/tree-7/active")
+            .exists());
+        assert_eq!(run_layer.read_active().unwrap().unwrap(), published);
+
+        // Its include roots are its own, read from what it actually captured
+        // rather than from the run's root count.
+        let include = layer.active_include_paths().unwrap();
+        assert_eq!(include.len(), roots.len() + 1);
+        assert!(std::fs::read_to_string(include[0].join("Project/Work.hs"))
+            .unwrap()
+            .contains("work = 2"));
+
+        // A checkout with no authored package contributes nothing, which is
+        // how an ordinary coding worktree ends up with no layer.
+        let bare = tempfile::tempdir().unwrap();
+        assert!(super::super::workspace::checkout_source_roots(bare.path(), &haskell).is_empty());
+    }
+
     // ------------------------------------------------------------------
     // The reload transaction itself, checked by the run's own compiler.
     // ------------------------------------------------------------------
@@ -632,7 +973,9 @@ mod tests {
 
         write_types(project.path(), "evidenceAmount");
         write_work(project.path(), "evidenceAmount");
-        let outcome = tidepool_handlers::SourceReloadService::reload(&reload, &[]).unwrap();
+        let outcome =
+            tidepool_handlers::SourceReloadService::reload(&reload, PrincipalId::SYSTEM, &[])
+                .unwrap();
         let tidepool_bridge_effects::SrReloadOutcome::ReloadPublished(previous, published, changed) =
             outcome
         else {
@@ -672,7 +1015,9 @@ mod tests {
             .revision()
             .identity
             .clone();
-        let outcome = tidepool_handlers::SourceReloadService::reload(&reload, &[]).unwrap();
+        let outcome =
+            tidepool_handlers::SourceReloadService::reload(&reload, PrincipalId::SYSTEM, &[])
+                .unwrap();
         let tidepool_bridge_effects::SrReloadOutcome::ReloadRejected(active, rejected, diagnostics) =
             outcome
         else {
@@ -703,7 +1048,9 @@ mod tests {
     fn an_unedited_workspace_reloads_to_the_same_revision() {
         let (project, run, reload) = cooperating_pair();
         let active = reload.layer.ensure_active(&reload.frozen).unwrap();
-        let outcome = tidepool_handlers::SourceReloadService::reload(&reload, &[]).unwrap();
+        let outcome =
+            tidepool_handlers::SourceReloadService::reload(&reload, PrincipalId::SYSTEM, &[])
+                .unwrap();
         let tidepool_bridge_effects::SrReloadOutcome::ReloadUnchanged(revision) = outcome else {
             panic!("an unedited workspace must not republish: {outcome:?}");
         };
@@ -718,7 +1065,8 @@ mod tests {
     #[test]
     fn status_reports_the_active_and_the_on_disk_revision() {
         let (project, run, reload) = cooperating_pair();
-        let status = tidepool_handlers::SourceReloadService::status(&reload).unwrap();
+        let status =
+            tidepool_handlers::SourceReloadService::status(&reload, PrincipalId::SYSTEM).unwrap();
         assert_eq!(status.active.identity, status.disk.identity);
         let work = |revision: &tidepool_bridge_effects::SrRevision| {
             revision
@@ -732,7 +1080,8 @@ mod tests {
         let before = work(&status.active);
 
         write_work(project.path(), "evidenceValue + 0 `seq` evidenceValue");
-        let status = tidepool_handlers::SourceReloadService::status(&reload).unwrap();
+        let status =
+            tidepool_handlers::SourceReloadService::status(&reload, PrincipalId::SYSTEM).unwrap();
         assert_ne!(status.active.identity, status.disk.identity);
         assert_eq!(work(&status.active), before);
         assert_ne!(work(&status.disk), before);

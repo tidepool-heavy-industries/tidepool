@@ -56,5 +56,6 @@ pub fn console() -> Effect {
         // `suspension_roster`'s doc). `true` documents the real shape even
         // though this Effect stays out of `effects::all()` for now.
         dispatched: true,
+        caller_principal: false,
     }
 }

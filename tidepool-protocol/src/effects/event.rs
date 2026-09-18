@@ -198,6 +198,7 @@ pub fn event() -> Effect {
         helpers: helpers(),
         polymorphism: Polymorphism::None,
         dispatched: true,
+        caller_principal: false,
     }
 }
 

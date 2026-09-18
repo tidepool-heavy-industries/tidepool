@@ -68,5 +68,6 @@ pub fn read_state() -> Effect {
         }],
         polymorphism: Polymorphism::None,
         dispatched: false,
+        caller_principal: false,
     }
 }

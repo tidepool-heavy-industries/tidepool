@@ -98,7 +98,7 @@ pub use local_actor::{
 pub use mailbox::MailboxValue;
 pub use mount::{
     ActorCompileView, ActorCompileViewError, ActorPlacement, ActorRunTarget, ActorSessionContext,
-    ActorSourceImports,
+    ActorSourceImports, ActorSourceLayerResolver, ActorSourceLayers,
 };
 pub use notification::{
     NotificationError, NotificationPoll, NotificationReceipt, NotificationSend, NotificationState,

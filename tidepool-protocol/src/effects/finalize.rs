@@ -131,5 +131,6 @@ pub fn finalize() -> Effect {
         polymorphism: Polymorphism::ArgBound { tyvar: "v" },
         // No real `tidepool-handlers` handler (see the module doc).
         dispatched: false,
+        caller_principal: false,
     }
 }

@@ -30,6 +30,7 @@ import Tidepool.Effects.Core
   , BoundWorktree
   , Forks
   , Reflect
+  , Source
   , WorktreeAllocation
   , WorktreeIntegration
   , WorktreeRegistry
@@ -84,3 +85,4 @@ instance KnownEffect Notifications where effectWitness = EffectWitness EffectNot
 instance KnownEffect Jev where effectWitness = EffectWitness EffectJev
 instance KnownEffect Actor where effectWitness = EffectWitness EffectActor
 instance KnownEffect Reflect where effectWitness = EffectWitness EffectReflect
+instance KnownEffect Source where effectWitness = EffectWitness EffectSource

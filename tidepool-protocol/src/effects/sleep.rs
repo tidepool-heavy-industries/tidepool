@@ -51,5 +51,6 @@ pub fn sleep() -> Effect {
         }],
         polymorphism: Polymorphism::None,
         dispatched: false,
+        caller_principal: false,
     }
 }

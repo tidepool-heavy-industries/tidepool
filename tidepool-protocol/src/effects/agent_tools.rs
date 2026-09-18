@@ -109,5 +109,6 @@ pub fn agent_tools() -> Effect {
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,
         dispatched: false,
+        caller_principal: false,
     }
 }

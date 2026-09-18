@@ -161,6 +161,7 @@ pub fn agent_control() -> Effect {
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,
         dispatched: false,
+        caller_principal: false,
     }
 }
 

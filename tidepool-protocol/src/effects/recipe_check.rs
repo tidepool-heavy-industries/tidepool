@@ -125,5 +125,6 @@ pub fn recipe_check() -> Effect {
         helpers: vec![],
         polymorphism: Polymorphism::None,
         dispatched: false,
+        caller_principal: false,
     }
 }

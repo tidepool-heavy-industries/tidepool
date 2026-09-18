@@ -1,10 +1,12 @@
-//! Reloading the workspace's own Haskell source inside a live run.
+//! Reloading an actor's own Haskell source inside a live run.
 //!
 //! A Shoal run captures its declared source roots once and compiles every cell
-//! against that capture. `Source` lets a program re-read those same roots,
-//! check the whole affected module graph, and publish it as the revision later
-//! cells compile against — without restarting the session, and without any
-//! cell losing the environment it was compiled in.
+//! against that capture. `Source` lets a program re-read the roots IT works in,
+//! check the whole affected module graph, and publish it as the revision its
+//! own later cells compile against — without restarting the session, and
+//! without any cell losing the environment it was compiled in. Which roots
+//! those are is fixed when the actor is built: the run's, for the actor that
+//! owns the run; its own checkout's, for an actor working in one.
 //!
 //! The verbs are deliberately about *snapshots*, not files: a revision is
 //! named by the content of the roots that produced it, so "which code is this"
@@ -37,20 +39,25 @@ pub fn source() -> Effect {
         req_enum: "SourceReq",
         decl_fn: "source_decl",
         description: &[
-            "Reload the workspace's own Haskell source inside this run. Write a module ",
-            "under a configured source root with ordinary file tools, then ",
-            "`reloadSource []` re-reads every configured root, compiles the whole ",
-            "affected module graph, and — only if all of it typechecks — makes that ",
-            "snapshot the revision LATER cells compile against. It is a compilation ",
+            "Reload the Haskell source YOUR OWN cells compile against. Which source that ",
+            "is was decided when you were created and cannot be chosen per call: if you ",
+            "work in your own checkout, it is the `.shoal` package in that checkout, and ",
+            "your reload is invisible to every other actor; if you own the run, it is the ",
+            "run's own package, which every actor without a checkout of its own compiles ",
+            "against. Write a module under a configured source root with ordinary file ",
+            "tools, then `reloadSource []` re-reads every configured root, compiles the ",
+            "whole affected module graph, and — only if all of it typechecks — makes that ",
+            "snapshot the revision YOUR LATER cells compile against. It is a compilation ",
             "boundary, not dynamic scope: the cell that asked for the reload was already ",
             "compiled against the previous revision and keeps it for the rest of its own ",
             "computation, and a value bound before the reload keeps the code it was built ",
             "from. `ReloadRejected` is an ordinary result, not a catastrophe — the edited ",
             "files are still on disk exactly as written, the previously compiled graph is ",
             "still active, and the receipt names the snapshot that failed and carries its ",
-            "diagnostics. `sourceStatus` answers what is active and what is on disk as ",
-            "data, so a program can decide whether it is running the current code rather ",
-            "than parsing a status page.",
+            "diagnostics. `sourceStatus` answers what is active and what is on disk, for ",
+            "your own source, as data — so a program can decide whether it is running the ",
+            "current code rather than parsing a status page. An actor with no source of ",
+            "its own can read that status and has nothing to reload.",
         ],
         prompt_card: None,
         type_params: &[],
@@ -225,9 +232,10 @@ pub fn source() -> Effect {
                 ctor: Some("SourceReloadWith"),
                 substrate: false,
                 doc: &[
-                    "Re-read every configured source root, check the affected module graph,",
-                    "and publish it as one transaction. `reloadSource []` is the whole",
-                    "workspace; the list names ADDITIONAL modules to pull into the checked",
+                    "Re-read every configured source root of the package YOU work in, check",
+                    "the affected module graph, and publish it as one transaction.",
+                    "`reloadSource []` is that whole package; the list names ADDITIONAL",
+                    "modules to pull into the checked",
                     "graph when a module you rely on is not reachable from the workspace's",
                     "configured module list. Natural spelling: `Right outcome <- reloadSource",
                     "[]`. The definitions become available to LATER cells — the cell that",
@@ -241,8 +249,8 @@ pub fn source() -> Effect {
                 ctor: Some("SourceStatusWith"),
                 substrate: false,
                 doc: &[
-                    "The revision later cells compile against, and the revision the source",
-                    "roots hold right now. Compare `revisionIdentity`s to tell whether an",
+                    "The revision YOUR later cells compile against, and the revision your",
+                    "own source roots hold right now. Compare `revisionIdentity`s to tell whether an",
                     "edit is waiting, and look a module up in `revisionModules` to compare",
                     "one module across the two.",
                 ],
@@ -251,6 +259,10 @@ pub fn source() -> Effect {
         ],
         polymorphism: Polymorphism::None,
         dispatched: true,
+        // A reload acts on the CALLER's own source layer: the root's for the
+        // root, and an actor's own checkout layer for an actor that has one.
+        // The handler needs the kernel-issued principal to reach it.
+        caller_principal: true,
     }
 }
 

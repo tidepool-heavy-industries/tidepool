@@ -239,6 +239,7 @@ fn effect(
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,
         dispatched: true,
+        caller_principal: false,
     }
 }
 

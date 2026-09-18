@@ -38,8 +38,8 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for 
         cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         match req {
-            SourceReq::SourceReloadWith(also_check) => cx.respond(self.source_reload(also_check)),
-            SourceReq::SourceStatusWith => cx.respond(self.source_status()),
+            SourceReq::SourceReloadWith(also_check) => self.source_reload(cx, also_check),
+            SourceReq::SourceStatusWith => self.source_status(cx),
         }
     }
 }

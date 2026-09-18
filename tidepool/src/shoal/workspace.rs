@@ -301,6 +301,30 @@ pub(super) fn resolve_source_roots(
     Ok(roots)
 }
 
+/// The authored source roots ONE CHECKOUT provides, in the same search order,
+/// skipping the ones that checkout does not have.
+///
+/// A managed checkout is a copy of the project, so `[haskell] source_roots`
+/// names the same directories relative to its own `.shoal`. Two differences
+/// from [`resolve_source_roots`], both deliberate:
+///
+/// - A missing root is absent, not an error. A checkout that carries no
+///   `.shoal` at all contributes no source, and the actor holding it compiles
+///   against exactly what every other actor does.
+/// - Flake inputs are not re-resolved. They are pinned by the run, identical
+///   in every checkout, and already on the search path beneath this layer; a
+///   checkout layer exists to shadow AUTHORED modules, and re-archiving a
+///   pinned input per checkout would be work with no effect.
+pub(super) fn checkout_source_roots(workspace: &Path, config: &HaskellConfig) -> Vec<PathBuf> {
+    let base = workspace.join(".shoal");
+    config
+        .source_roots
+        .iter()
+        .filter_map(|root| base.join(root).canonicalize().ok())
+        .filter(|root| root.is_dir())
+        .collect()
+}
+
 /// Fetch the project's flake inputs and return the Haskell source directories
 /// `[haskell.flake_sources]` selects from them, ordered by input name.
 ///

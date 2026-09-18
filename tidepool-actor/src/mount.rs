@@ -45,6 +45,32 @@ impl ActorSourceImports {
     }
 }
 
+/// How a host turns the checkout an actor is launched with into that actor's
+/// own source layer.
+///
+/// One implementation per host, supplied by the composition root that owns the
+/// run's source. The actor engine neither reads source roots nor knows where a
+/// run keeps its revisions: it asks once, while the actor is being
+/// constructed, for the include roots that actor alone compiles against, and
+/// then names the actor those roots belong to. Everything after that is
+/// structural — the layer is fixed on the actor's descriptor, and the source
+/// service the host hands out for that principal is bound to the same layer,
+/// so an actor cannot reach another actor's source by asking differently.
+pub trait ActorSourceLayers: Send + Sync {
+    /// The include roots for an actor launched with `worktrees`, ahead of
+    /// every shared root. Empty when that checkout contributes no source of
+    /// its own, which is the ordinary case.
+    fn layer_include(&self, worktrees: &[String]) -> Vec<PathBuf>;
+
+    /// Bind the layer [`Self::layer_include`] just answered to the actor that
+    /// will compile against it, so that actor's own source calls act on
+    /// exactly that layer and no other.
+    fn bind(&self, actor: PrincipalId, worktrees: &[String]);
+}
+
+/// The installed [`ActorSourceLayers`], shared by every actor in one forest.
+pub type ActorSourceLayerResolver = std::sync::Arc<dyn ActorSourceLayers>;
+
 /// An actor's exact, owned source-side compilation snapshot.
 ///
 /// Construction validates the session and lexical scope against the actor
@@ -55,6 +81,7 @@ impl ActorSourceImports {
 pub struct ActorCompileView {
     session: SessionCompileView,
     external: SourceImports,
+    source_layer: std::sync::Arc<[PathBuf]>,
 }
 
 impl ActorCompileView {
@@ -96,9 +123,22 @@ impl ActorCompileView {
         self.session.workbench_imports(&self.external)
     }
 
+    /// This actor's own source layer, then the deployment-wide roots, then the
+    /// session's module tree.
+    ///
+    /// The layer leads because GHC takes the first root that provides a module:
+    /// an actor editing a module inside its own checkout shadows the run's copy
+    /// for its own cells and for nobody else's. An actor with no checkout of
+    /// its own carries an empty layer and gets exactly the deployment-wide
+    /// list, which is what the root itself carries.
     #[must_use]
     pub fn include_paths(&self, base: &[PathBuf]) -> Vec<PathBuf> {
-        self.session.include_paths(base)
+        if self.source_layer.is_empty() {
+            return self.session.include_paths(base);
+        }
+        let mut include = self.source_layer.to_vec();
+        include.extend(self.session.include_paths(base));
+        include
     }
 
     #[must_use]
@@ -168,6 +208,12 @@ pub struct ActorSessionContext {
     pub live_payload: LivePayloadPolicy,
     pub source_imports: ActorSourceImports,
     pub haskell_effects_alias: String,
+    /// Include roots this actor alone compiles against, ahead of every shared
+    /// root. Empty for an actor with no checkout of its own — the root, the
+    /// operator workbench, and every actor launched without a worktree. Fixed
+    /// when the actor is constructed; there is no setter, because an actor's
+    /// search path must not move under a cell that is already compiling.
+    pub source_layer: std::sync::Arc<[PathBuf]>,
 }
 
 impl ActorSessionContext {
@@ -202,6 +248,7 @@ impl ActorSessionContext {
         Ok(ActorCompileView {
             session,
             external: self.source_imports.imports.clone(),
+            source_layer: self.source_layer.clone(),
         })
     }
 }

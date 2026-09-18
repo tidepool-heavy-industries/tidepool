@@ -340,5 +340,6 @@ pub fn commands() -> Effect {
         helpers: vec![],
         polymorphism: Polymorphism::None,
         dispatched: false,
+        caller_principal: false,
     }
 }

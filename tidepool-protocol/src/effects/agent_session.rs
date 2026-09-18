@@ -80,5 +80,6 @@ pub fn agent_session() -> Effect {
         helpers: Vec::new(),
         polymorphism: Polymorphism::ResultBound { tyvar: "output" },
         dispatched: false,
+        caller_principal: false,
     }
 }

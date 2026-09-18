@@ -37,6 +37,7 @@ pub fn agent_launch() -> Effect {
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,
         dispatched: false,
+        caller_principal: false,
     }
 }
 

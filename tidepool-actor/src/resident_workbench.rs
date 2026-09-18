@@ -7074,6 +7074,7 @@ mod request_tests {
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             source_imports: crate::ActorSourceImports::default(),
             haskell_effects_alias: effects_alias.into(),
+            source_layer: std::sync::Arc::from([]),
         };
         let source = ActorWorkbenchSource::new(preamble, include);
         let mut ordinal = 0usize;
@@ -7227,6 +7228,7 @@ mod request_tests {
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             source_imports: crate::ActorSourceImports::default(),
             haskell_effects_alias: effects_alias.into(),
+            source_layer: std::sync::Arc::from([]),
         };
         let source = ActorWorkbenchSource::new(preamble, include);
 

@@ -173,6 +173,9 @@ struct ResidentEnvironment<H, O> {
     fork_workspaces: Option<crate::fork_workspace::SharedForkWorkspaceAdmission>,
     root_admission_closed: Arc<tokio::sync::RwLock<bool>>,
     launch_resolver: Option<crate::WorkerLaunchResolver>,
+    /// Installed by a host that keeps a source layer per checkout. Without
+    /// one every actor compiles against exactly the deployment-wide roots.
+    source_layers: Option<crate::ActorSourceLayerResolver>,
     jev: crate::JevBackendHandle,
     /// Set by an actor host that answers `ReleaseAwait`; without one a stop
     /// has no interactive resources to wait for.
@@ -342,6 +345,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             fork_workspaces: self.fork_workspaces.clone(),
             root_admission_closed: self.root_admission_closed.clone(),
             launch_resolver: self.launch_resolver.clone(),
+            source_layers: self.source_layers.clone(),
             jev: Arc::clone(&self.jev),
             release_tracked: Arc::clone(&self.release_tracked),
             conversation_reader: self.conversation_reader.clone(),
@@ -1799,10 +1803,21 @@ where
                 "child actor entry crossed a resident machine boundary".into(),
             ));
         }
+        // The checkout this child is launched with is settled here — a
+        // context-fork workspace has already been admitted above — so this is
+        // the last moment before the child exists, and the only honest place
+        // to fix its search path. `base_include` is deployment-wide and shared
+        // by every actor in the forest; an actor's OWN layer travels on its
+        // descriptor instead, and neither ever moves afterwards.
+        let source_layers = self.environment.source_layers.clone();
+        if let Some(layers) = &source_layers {
+            descriptor = descriptor.with_source_layer(layers.layer_include(&launch_worktrees));
+        }
         let allocated_label = descriptor.label().to_string();
         let admitted_worktree = prepared_workspace
             .as_ref()
             .map(|prepared| prepared.handle().clone());
+        let bound_worktrees = launch_worktrees.clone();
         let mut behavior = Self::child(
             descriptor,
             self.environment.clone(),
@@ -1814,6 +1829,12 @@ where
             .spawn_worker(None, behavior, lifetime)
             .await
             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        // The child now has a principal, so the layer its descriptor carries
+        // can be named as its own. This happens before the child runs, so its
+        // first cell already reaches its own layer and no other.
+        if let Some(layers) = &source_layers {
+            layers.bind(child.identity().into(), &bound_worktrees);
+        }
         Ok((child, allocated_label, admitted_worktree))
     }
 
@@ -6885,6 +6906,13 @@ where
         self.environment.jev = backend;
     }
 
+    /// Give every actor launched from now on its own source layer, resolved
+    /// from the checkout it is launched with. Without this every actor
+    /// compiles against the deployment-wide include roots and nothing else.
+    pub fn set_source_layers(&mut self, layers: crate::ActorSourceLayerResolver) {
+        self.environment.source_layers = Some(layers);
+    }
+
     /// Declare that an actor host answers `LocalResidentDeployment::ReleaseAwait`.
     /// From now on a stop reports `StoppedNow` only once that host has released
     /// the actor's interactive resources.
@@ -6935,6 +6963,7 @@ where
             fork_workspaces,
             root_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
             launch_resolver,
+            source_layers: None,
             jev: Arc::new(crate::jev::UnconfiguredJev),
             release_tracked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             conversation_reader: None,

@@ -1403,11 +1403,13 @@ pub async fn run(
     }
     let backend = native_interactive_backend(config.interactive_agent.clone());
     let application_owners: InteractiveOwners = Arc::new(Mutex::new(HashMap::new()));
+    let source_layers = source_service(&config, &run_root, worktrees.clone());
     let (source, root, program) = compile_root(
         &config,
         &run_root,
         worktrees.clone(),
         worktree_authority.clone(),
+        source_layers.as_ref(),
     )?;
     let (descriptor, machine, outcome) = root.into_parts();
     let (forest, deployments) = ResidentForest::new_with_launch_resolver(
@@ -1448,12 +1450,21 @@ pub async fn run(
         backend.clone(),
     ));
     forest.set_jev_backend(jev_backend(&config));
+    if let Some(layers) = &source_layers {
+        forest.set_source_layers(layers.clone());
+    }
     forest.track_resource_release();
     let forest = Arc::new(forest);
     let (mut root_actor, mut root_task) = forest.admit_root(descriptor, outcome).await?;
     worktree_authority.install_grant(root_actor.identity().into(), ActorWorktreeGrant::Repository);
+    // The run's own layer belongs to the actor that owns the run, named here,
+    // before it runs anything. Every other actor is bound as it is admitted.
+    if let Some(layers) = &source_layers {
+        layers.bind_run(root_actor.identity().into());
+    }
     let provision_forest = forest.clone();
     let provision_authority = worktree_authority.clone();
+    let provision_source = source_layers.clone();
     let operator_role =
         tidepool_actor::EffectiveRole::root().with_research_policy(config.research_policy);
     let operator_socket = run_root.join("operator").join("operator.sock");
@@ -1467,6 +1478,7 @@ pub async fn run(
             let forest = provision_forest.clone();
             let role = operator_role.clone();
             let authority = provision_authority.clone();
+            let source = provision_source.clone();
             Box::pin(async move {
                 let grant = worktree_grant(role.role());
                 let actor = forest
@@ -1474,6 +1486,11 @@ pub async fn run(
                     .await
                     .map_err(|e| e.to_string())?;
                 authority.install_grant(actor.identity().into(), grant);
+                // The operator workbench holds the run itself, not a checkout:
+                // it reads and republishes the run's own layer.
+                if let Some(layers) = &source {
+                    layers.bind_run(actor.identity().into());
+                }
                 Ok(actor)
             })
         }),
@@ -1793,16 +1810,22 @@ pub(crate) fn validate_workspace_program(
     Ok(())
 }
 
-/// Compile the driver with a CANDIDATE source revision standing in for the
-/// active one. This is the whole reload check: GHC's own module graph, rooted
-/// at the driver and every configured workspace module, decides whether the
-/// candidate's reverse-dependency closure typechecks. Nothing is published
-/// unless it does.
+/// Compile the driver against a CANDIDATE source revision. This is the whole
+/// reload check: GHC's own module graph, rooted at the driver and every
+/// configured workspace module, decides whether the candidate's
+/// reverse-dependency closure typechecks. Nothing is published unless it does.
+///
+/// `replaces_run_layer` says which layer is being reloaded. The run's own
+/// reload stands in for the run's layer, exactly as publishing would. A
+/// checkout's reload goes in FRONT of it instead, because that is where the
+/// checkout's layer sits in its own actor's include list, and the run's layer
+/// must stay on the path beneath it either way.
 pub(crate) fn typecheck_candidate_revision(
     inputs: &crate::shoal::workspace::FrozenWorkspace,
     run_root: &Path,
     haskell_root: &Path,
     candidate: &[PathBuf],
+    replaces_run_layer: bool,
     extra_modules: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     // A scratch session root, never the live swarm's. The check compiles a
@@ -1819,6 +1842,7 @@ pub(crate) fn typecheck_candidate_revision(
         &scratch,
         Some(CandidateSources {
             include: candidate,
+            replaces_run_layer,
             extra_modules,
         }),
     );
@@ -1827,27 +1851,46 @@ pub(crate) fn typecheck_candidate_revision(
     Ok(())
 }
 
-/// The run's `Source` handler. A run without a frozen workspace has no
-/// declared source roots, so there is nothing a reload could honestly read;
-/// that case answers `SourceUnavailable` rather than reloading nothing.
-fn source_handler(config: &ActorHostConfig, run_root: &Path) -> tidepool_handlers::SourceHandler {
-    match &config.workspace_inputs {
-        Some(inputs) => tidepool_handlers::SourceHandler::new(std::sync::Arc::new(
-            crate::shoal::source::ShoalSourceReload::new(
-                inputs.clone(),
-                config.workspace.clone(),
-                run_root.to_path_buf(),
-                config.haskell_root.clone(),
-            ),
-        )),
+/// The run's source service: the run's own layer, one layer per checkout that
+/// carries source, and which actor reaches which.
+///
+/// A run without a frozen workspace has no declared source roots, so there is
+/// nothing a reload could honestly read; that case has no service at all and
+/// every verb answers `SourceUnavailable`.
+pub(crate) fn source_service(
+    config: &ActorHostConfig,
+    run_root: &Path,
+    worktrees: WorktreeManager,
+) -> Option<Arc<crate::shoal::source::ShoalSourceReload>> {
+    let inputs = config.workspace_inputs.as_ref()?;
+    Some(Arc::new(
+        crate::shoal::source::ShoalSourceReload::new(
+            inputs.clone(),
+            config.workspace.clone(),
+            run_root.to_path_buf(),
+            config.haskell_root.clone(),
+        )
+        .with_worktrees(worktrees),
+    ))
+}
+
+fn source_handler(
+    service: Option<&Arc<crate::shoal::source::ShoalSourceReload>>,
+) -> tidepool_handlers::SourceHandler {
+    match service {
+        Some(service) => tidepool_handlers::SourceHandler::new(service.clone()),
         None => tidepool_handlers::SourceHandler::unavailable(),
     }
 }
 
-/// The active source layer a driver compile reads, when it is not the one the
-/// run has published.
+/// The candidate source layer a driver compile reads, when it is not the one
+/// the run has published.
 struct CandidateSources<'a> {
     include: &'a [PathBuf],
+    /// Does the candidate stand in for the run's own layer, or sit in front of
+    /// it? A run reload replaces it; a checkout reload adds its own layer and
+    /// leaves the run's exactly where it is.
+    replaces_run_layer: bool,
     extra_modules: &'a [String],
 }
 
@@ -1877,12 +1920,15 @@ fn compile_driver(
         // capture stays on the path beneath it as the verified floor.
         let layer = crate::shoal::source::SourceLayer::new(run_root);
         let roots = inputs.captured_source_roots().len();
-        match &candidate {
-            Some(candidate) => include.extend(candidate.include.iter().cloned()),
-            None => {
-                layer.ensure_active(inputs)?;
-                include.extend(layer.include_paths(roots));
-            }
+        if let Some(candidate) = &candidate {
+            include.extend(candidate.include.iter().cloned());
+        }
+        if candidate
+            .as_ref()
+            .is_none_or(|candidate| !candidate.replaces_run_layer)
+        {
+            layer.ensure_active(inputs)?;
+            include.extend(layer.include_paths(roots));
         }
         include.extend(inputs.include.iter().cloned());
         for module in inputs.import_modules() {
@@ -1931,6 +1977,7 @@ fn compile_root(
     run_root: &Path,
     worktrees: WorktreeManager,
     worktree_authority: ActorWorktreeAuthority,
+    source: Option<&Arc<crate::shoal::source::ShoalSourceReload>>,
 ) -> Result<
     (
         ActorWorkbenchSource,
@@ -1978,7 +2025,7 @@ fn compile_root(
         &compiled.expr,
         compiled.table.clone(),
         hlist![
-            source_handler(config, run_root),
+            source_handler(source),
             ActorBoundWorktreeHandler::new(worktree_handler.clone()),
             ActorWorktreeRegistryHandler::new(worktree_handler.clone()),
             ActorWorktreeAllocationHandler::new(worktree_handler.clone()),

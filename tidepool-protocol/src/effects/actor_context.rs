@@ -55,6 +55,7 @@ pub fn actor_context() -> Effect {
         }],
         polymorphism: Polymorphism::None,
         dispatched: false,
+        caller_principal: false,
     }
 }
 
