@@ -1,8 +1,8 @@
 # Worked cells
 
-Six cells kept because each shows a technique, kept because each one shows a
-technique rather than a result. They are reference to copy from, not modules to
-import — the programs themselves are in `.shoal/Project/`.
+Six cells, each kept because it shows a technique rather than a result. They are
+reference to copy from, not modules to import — the programs themselves are in
+`.shoal/Project/`.
 
 Every one of them assumes this helper. Declare it once in your session:
 
