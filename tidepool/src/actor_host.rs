@@ -5816,12 +5816,15 @@ mod tests {
         assert_eq!(reply["status"], "replied", "{reply:?}");
         let ready = dispatch_haskell_script(root.as_ref(), "pollResponse answer >>= \\s -> pure (case s of { ResponseReady result -> responseValue result == 42; _ -> False })").await;
         assert_eq!(ready["items"][0]["output"], "True", "{ready:?}");
-        let late = dispatch_haskell_script(
-            root.as_ref(),
-            "Right late <- updateRequest answer \"too late\"\npollRequestUpdate late",
-        )
-        .await;
-        assert!(late.to_string().contains("Right UpdateTooLate"), "{late:?}");
+        // A correction sent after the child has already replied is refused by
+        // the send itself. It used to be accepted, leaving the caller to learn
+        // from a second observation that nobody would ever see it — which is
+        // too late to steer anything.
+        let late = dispatch_haskell_script(root.as_ref(), "updateRequest answer \"too late\"").await;
+        assert!(
+            late.to_string().contains("Left ReplyAlreadySettled"),
+            "{late:?}"
+        );
         campaign
             .actor
             .shutdown(ActorTerminal {

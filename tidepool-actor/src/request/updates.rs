@@ -275,20 +275,22 @@ impl RequestRegistry {
         owner: ActorRef,
         id: RequestId,
         message: String,
-    ) -> Result<(RequestUpdateId, Option<RequestUpdateDelivery>), ReplyError> {
+    ) -> Result<(RequestUpdateId, RequestUpdateDelivery), ReplyError> {
         let mut state = self.state.lock();
         let request = state.requests.get_mut(&id).ok_or(ReplyError::Stale)?;
         authorize_owner(request, owner)?;
-        let queued = match request.target_state {
-            TargetState::Presented if matches!(request.owner_state, OwnerState::Observing) => true,
+        // An update the target can no longer be shown is refused here rather
+        // than accepted and abandoned. A caller that reads a success must be
+        // able to act on it; learning otherwise from a later observation is
+        // learning too late to steer.
+        match request.target_state {
+            TargetState::Presented if matches!(request.owner_state, OwnerState::Observing) => {}
             TargetState::Reserved | TargetState::Queued => return Err(ReplyError::Stale),
-            _ => false,
-        };
-        if queued
-            && request.updates.iter().any(|update| {
-                matches!(update.phase, UpdatePhase::Queued) || update.fences_settlement()
-            })
-        {
+            _ => return Err(ReplyError::AlreadySettled),
+        }
+        if request.updates.iter().any(|update| {
+            matches!(update.phase, UpdatePhase::Queued) || update.fences_settlement()
+        }) {
             return Err(ReplyError::UpdatePending);
         }
         let update = RequestUpdateId {
@@ -296,18 +298,14 @@ impl RequestRegistry {
             sequence: request.updates.len() as u64 + 1,
         };
         request.updates.push(UpdateRecord {
-            phase: if queued {
-                UpdatePhase::Queued
-            } else {
-                UpdatePhase::TooLate
-            },
+            phase: UpdatePhase::Queued,
             correlation: None,
         });
-        let delivery = queued.then(|| RequestUpdateDelivery {
+        let delivery = RequestUpdateDelivery {
             registry: Arc::clone(self), owner, target: request.target, id: update,
             key: format!("shoal-update-{}", uuid::Uuid::new_v4()),
             message: format!("Update {} for your existing request {}. The original assignment and sessionReply remain pending.\n\n{}", update.sequence, id.0, message),
-        });
+        };
         Ok((update, delivery))
     }
 
@@ -506,7 +504,6 @@ mod tests {
         let (update, delivery) = registry
             .update_request(owner, request, "clickable tabs".into())
             .unwrap();
-        let delivery = delivery.unwrap();
         let duplicate = delivery.clone();
         let presentation = delivery.begin().unwrap();
         assert!(duplicate.begin().is_none());
@@ -546,19 +543,48 @@ mod tests {
             .update_request(owner, request, "tabs".into())
             .unwrap();
         registry.begin_reply(target, request).unwrap();
-        assert!(delivery.unwrap().begin().is_none());
+        assert!(delivery.begin().is_none());
         assert_eq!(
             registry.observe_update(owner, update),
             Ok(RequestUpdateState::UpdateTooLate)
         );
         registry.finish_reply(request);
-        let (late, delivery) = registry
-            .update_request(owner, request, "late".into())
-            .unwrap();
-        assert!(delivery.is_none());
+        // Once the reply has settled there is nobody left to show an update to,
+        // so the send is refused outright. A caller must not have to make a
+        // second observation to discover that its correction went nowhere.
         assert_eq!(
-            registry.observe_update(owner, late),
-            Ok(RequestUpdateState::UpdateTooLate)
+            registry
+                .update_request(owner, request, "late".into())
+                .err(),
+            Some(ReplyError::AlreadySettled)
+        );
+    }
+
+    #[test]
+    fn an_update_the_target_can_never_see_is_refused_rather_than_accepted() {
+        // The exact situation a live lead hit: a child had already replied, the
+        // lead sent a correction naming that child, and the send reported
+        // success. It reached nobody, and only a separate observation said so.
+        let (registry, owner, target, request) = active();
+        registry.begin_reply(target, request).unwrap();
+        registry.finish_reply(request);
+        assert_eq!(
+            registry
+                .update_request(owner, request, "use this test name instead".into())
+                .err(),
+            Some(ReplyError::AlreadySettled)
+        );
+        // Nothing was recorded either, so no sequence number was spent on an
+        // update that never existed.
+        assert_eq!(
+            registry.observe_update(
+                owner,
+                RequestUpdateId {
+                    request,
+                    sequence: 1
+                }
+            ),
+            Err(ReplyError::Stale)
         );
     }
 
@@ -568,7 +594,7 @@ mod tests {
         let (update, delivery) = registry
             .update_request(owner, request, "tabs".into())
             .unwrap();
-        drop(delivery.unwrap().begin().unwrap());
+        drop(delivery.begin().unwrap());
         assert!(matches!(
             registry.observe_update(owner, update),
             Ok(RequestUpdateState::UpdateUnconfirmed(_))
@@ -610,8 +636,7 @@ mod tests {
             let (update, delivery) = registry
                 .update_request(owner, request, "tabs".into())
                 .unwrap();
-            let delivery = delivery.unwrap();
-            let presentation = claim.then(|| delivery.clone().begin().unwrap());
+                let presentation = claim.then(|| delivery.clone().begin().unwrap());
             registry
                 .cancel_request(owner, request, CancellationReason::RequesterCancelled)
                 .unwrap();
@@ -650,7 +675,6 @@ mod tests {
             .update_request(owner, request, "tabs".into())
             .unwrap();
         delivery
-            .unwrap()
             .begin()
             .unwrap()
             .not_presented("backend unavailable".into());
@@ -673,7 +697,7 @@ mod tests {
             registry.update_request(owner, request, "second".into()),
             Err(ReplyError::UpdatePending)
         ));
-        let presentation = delivery.unwrap().begin().unwrap();
+        let presentation = delivery.begin().unwrap();
         assert!(matches!(
             registry.update_request(owner, request, "second".into()),
             Err(ReplyError::UpdatePending)
@@ -695,7 +719,7 @@ mod tests {
             let other = barrier.clone();
             let claimant = std::thread::spawn(move || {
                 other.wait();
-                delivery.unwrap().begin()
+                delivery.begin()
             });
             barrier.wait();
             let reply = registry.begin_reply(target, request);
@@ -725,7 +749,6 @@ mod tests {
             producer: "run-a/inbox-2/actor-2.1".into(),
             sequence: NonZeroU64::new(7).unwrap(),
         };
-        let delivery = delivery.unwrap();
         let reconciler = delivery.bind_correlation(correlation.clone()).unwrap();
         assert_eq!(delivery.id(), update);
         assert_eq!(delivery.target(), target);
@@ -774,7 +797,6 @@ mod tests {
             producer: "run/inbox/actor".into(),
             sequence: NonZeroU64::new(1).unwrap(),
         };
-        let delivery = delivery.unwrap();
         let reconciler = delivery.bind_correlation(correlation.clone()).unwrap();
         delivery.begin().unwrap().unconfirmed("timeout".into());
         reconciler
@@ -803,7 +825,6 @@ mod tests {
             producer: "run/inbox/actor".into(),
             sequence: NonZeroU64::new(1).unwrap(),
         };
-        let delivery = delivery.unwrap();
         let reconciler = delivery.bind_correlation(correlation).unwrap();
         delivery
             .begin()
@@ -844,7 +865,6 @@ mod tests {
             producer: "run/inbox/actor-2.1".into(),
             sequence: NonZeroU64::new(9).unwrap(),
         };
-        let delivery = delivery.unwrap();
         let reconciler = delivery.bind_correlation(correlation.clone()).unwrap();
         delivery
             .begin()

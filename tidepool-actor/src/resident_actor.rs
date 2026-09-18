@@ -3117,18 +3117,15 @@ where
                     .requests
                     .update_request(context.actor, request, message)
                     .map(|(update, delivery)| {
-                        if let Some(delivery) = delivery {
-                            if let Err(error) = self
-                                .environment
-                                .deployments
-                                .send(LocalResidentDeployment::RequestUpdate { delivery })
-                            {
-                                if let LocalResidentDeployment::RequestUpdate { delivery } = error.0
-                                {
-                                    if let Some(presentation) = delivery.begin() {
-                                        presentation
-                                            .not_presented("deployment owner unavailable".into());
-                                    }
+                        if let Err(error) = self
+                            .environment
+                            .deployments
+                            .send(LocalResidentDeployment::RequestUpdate { delivery })
+                        {
+                            if let LocalResidentDeployment::RequestUpdate { delivery } = error.0 {
+                                if let Some(presentation) = delivery.begin() {
+                                    presentation
+                                        .not_presented("deployment owner unavailable".into());
                                 }
                             }
                         }

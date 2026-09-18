@@ -293,6 +293,115 @@ ordinary shell commands and their overhead was compile time.
 batches its queries — the right instinct — pays for all of them at once and sees
 nothing until they all finish.
 
+## Second pass: what four parallel readers found in the transcripts
+
+The nine findings above came from watching the runs live. Afterwards four
+readers went through the rollouts, the durable inboxes, the host logs and the
+compiler logs, each on one axis: discovery, cell authoring, delegation and
+lifecycle, and Jev. What follows is what they found that watching did not, with
+the duplicates against the nine dropped.
+
+### 10. The ready-made merge actor was found and then not used
+
+The `evalB` lead looked up `Project.Merge`, and the same response showed it
+`RedRolledBack GitOid GitOid CheckResult` — the rollback outcome it was about to
+spend nine model turns reimplementing. It then wrote twelve tool calls of raw
+`tryMerge`, `cargo test` and `git reset --hard HEAD^`, taking 151 seconds. The
+`evalA` lead used the actor for the same shape of job and it took four calls.
+
+The cost is not only the turns. It means the rollback scenario exercised a
+hand-written substitute and proved nothing about the mechanism we wanted tested.
+
+`shoal-orchestrate` already says that a transition determined by a child's
+outcome belongs in Haskell rather than a model turn. What it does not say is to
+look in the workspace-modules list for an actor that already does it before
+writing raw git. That is a one-line addition and it is the highest-value change
+on this list.
+
+**Why it chose the primitive is not recoverable.** Codex encrypts its reasoning
+payloads, so all four readers hit the same wall. If we want motive we have to ask
+a live lead; a rollout cannot answer it.
+
+### 11. No child was ever told to commit
+
+This is the cause of finding 1. The lead built all three assignments from one
+shared string asking for a test and a summary. `grep` across all three durable
+inboxes finds no occurrence of "commit". One child inferred it; two saw
+` M src/panels/help.rs` in their own `git status` and replied as done anyway.
+
+`shoal-unfold` tells the **parent** that "a typed reply is evidence of execution,
+not of integration; verify the submitted commit before merging". It never tells
+the **child** to make one. The fix belongs in the child's task template.
+
+### 12. Discovery misreports names that are real and advertised
+
+Two directions, one underlying problem.
+
+`renderGitOid` returns `no match`. It is defined at
+`haskell/lib/Tidepool/Worktree.hs:398` and **exported at line 131**, and two
+shipped skills use it in their worked examples. Needing a `GitOid`, the `evalA`
+lead queried six plausible names, got nothing, gave up on discovery, and pasted a
+hex string it had read from a `git log` eight minutes earlier in an unrelated
+exercise.
+
+`R.start` and `R.client` come back tagged `[unknown]` although
+`shoal-define-actors` lists both under "Shipped — in every Shoal cell", and both
+worked on first use. The cause is in the source: availability is decided by
+whether a callable's *required effects* fit the asking actor's row, and these
+carry `Derive`, `Generic` and `GActor` constraints, which are not `Member X effs`
+shapes, so classification falls through to unknown. The lead only used them
+because it had read the skill first; one that trusted the tag would have gone
+looking for an alternative that does not exist.
+
+### 13. Half the compiler daemon's time is not compiling
+
+Across `evalA`, 112 compiler requests totalled 305 seconds of elapsed daemon
+time, while the compile summaries in the same log account for 148 seconds of
+work. Forty-six individual requests each exceeded two seconds.
+
+The per-cell trace is sharper. The cell that first started `Project.Merge` took
+33.4 seconds and issued **nine** separate compiler requests, six of them costing
+2.2 to 3.9 seconds, while each request's own reported work was 40 to 260
+milliseconds. The log shows why: `tidepool-memo-miss module=Tidepool.Session.Lib.G2…G6
+reason=dependency-miss`, one round trip per newly needed module. A cell touching
+only warm modules finishes in under a second.
+
+If that batches into one request per cell, it is the largest single latency win
+available — larger than anything in discovery.
+
+### 14. Smaller, still worth fixing
+
+- **`Project.Merge` calls a check script a review.** `ReviewRun` and "replied to
+  the review" label a `check.sh` exit code. A reader of
+  `Published … check.sh=ok(review-run)` could reasonably believe a change was
+  reviewed. Naming, not behaviour.
+- **`doc tree` is a 4,900-character essay** whose load-bearing sentence about
+  `tryMerge` sits about 4,600 characters in.
+- **The documented way to stop a session produces a terminal error.**
+  `shoal init` prints `stop: tmux kill-session -t <session>`. Doing exactly that
+  left both hosts logging `Shoal actor host failed … Resources still retained …
+  Connection refused (os error 111)`, listing every resource class as
+  unconfirmed. Recorded here because a reader of those logs would reasonably
+  conclude something broke; what actually happened is that the advertised stop
+  command removes the process supervisor the shutdown path then tries to reach.
+- **The children never called `lookup` once.** All three went straight to shell
+  reads, `apply_patch`, `cargo test` and `respond`. Discovery friction is a
+  lead-only phenomenon, confined to orchestration vocabulary.
+
+### Fixed so far
+
+Finding 3, `updateRequest`. It now refuses with `ReplyError::AlreadySettled` at
+submit time rather than accepting an update it has already classified as
+undeliverable, and the delivery is no longer optional, so a success necessarily
+carries one. The genuine race is untouched: an update deliverable when sent that
+loses the window before presentation still reports `UpdateTooLate` on poll.
+
+Two tests. A unit test reconstructing the live situation — a child that has
+replied, a correction naming it — asserting the refusal and that no sequence
+number is spent. And the live Haskell-surface test at
+`tidepool/src/actor_host.rs`, which previously asserted a successful send
+followed by `Right UpdateTooLate` and now asserts `Left ReplyAlreadySettled`.
+
 ## One thing that is not a bug but should be known
 
 Between exercises the `evalA` lead was told its previous cell had printed 7,247
