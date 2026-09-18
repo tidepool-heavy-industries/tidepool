@@ -1219,10 +1219,95 @@ pub fn render_cell_compile_rejection(error: &CompileError, cell_text: &str) -> C
             source: cell_text,
         },
     );
+    let output = with_advice(rendered.text, |text| advice_for(text, cell_text));
+    let output = with_stdlib_hint(output, &rendered.diagnostics);
     CompileRejection {
-        output: with_advice(rendered.text, |text| advice_for(text, cell_text)),
+        output,
         diagnostics: rendered.diagnostics,
     }
+}
+
+/// Append a recognized-error hint, when one of the two narrow patterns below
+/// matches one of the diagnostics GHC actually produced. Always ADDS to
+/// GHC's own text, never replaces it — unlike [`with_advice`], which
+/// sometimes substitutes plain language for a diagnostic that is an artifact
+/// of cell wrapping. A no-op when the hint text is already present, so this
+/// stays safe to call more than once on the same rendered output.
+fn with_stdlib_hint(
+    mut output: String,
+    diagnostics: &[crate::diag::StructuredDiagnostic],
+) -> String {
+    let Some(hint) = stdlib_advice(diagnostics) else {
+        return output;
+    };
+    if !output.contains(hint) {
+        if !output.is_empty() {
+            output.push_str("\n\n");
+        }
+        output.push_str(hint);
+    }
+    output
+}
+
+/// Two harness-specific compile errors, chosen from dogfooding transcript
+/// counts, that name the next valid operation. Matched narrowly against the
+/// structured diagnostics GHC actually reported — never against arbitrary
+/// rendered text, and never a general interpretation of GHC's output.
+///
+/// Deliberately does not attempt every GHC diagnostic shape: only the two
+/// forms observed twice each across two dogfood runs.
+fn stdlib_advice(diagnostics: &[crate::diag::StructuredDiagnostic]) -> Option<&'static str> {
+    diagnostics
+        .iter()
+        .find_map(|diagnostic| single_stdlib_advice(&diagnostic.message))
+}
+
+fn single_stdlib_advice(message: &str) -> Option<&'static str> {
+    if is_command_result_stream_mismatch(message) {
+        return Some(COMMAND_RESULT_STREAM_ADVICE);
+    }
+    if is_string_text_mismatch(message) {
+        return Some(STRING_TEXT_ADVICE);
+    }
+    None
+}
+
+const COMMAND_RESULT_STREAM_ADVICE: &str = "`Cmd.stdout`/`Cmd.stderr` read a retained \
+    `Cmd.RunResult`, not the outcome-only `Cmd.CommandResult` a completion event delivers: \
+    capture the job and use `Cmd.readStdout job` / `Cmd.readCommand job` instead, handling \
+    the `Left` case.";
+
+/// `Cmd.stdout`/`Cmd.stderr` (`stdout :: RunResult -> Either OutputIssue Text`,
+/// `stderr :: RunResult -> Text`, `Tidepool.Command`) applied to a
+/// `Cmd.CommandResult` — what a retained job's completion event
+/// (`Cmd.completion job :: R.EventSource CommandResult`) actually delivers.
+/// Narrow: both type names must appear in the same "Couldn't match" block,
+/// and the block must name the function actually applied.
+fn is_command_result_stream_mismatch(message: &str) -> bool {
+    message.contains("Couldn't match")
+        && message.contains("RunResult")
+        && message.contains("CommandResult")
+        && (names_quoted(message, "stdout") || names_quoted(message, "stderr"))
+}
+
+const STRING_TEXT_ADVICE: &str = "the stdlib is Text-first; a string literal here is already \
+    `Text`, not `String`/`[Char]` — pass it as written rather than converting it.";
+
+/// `[Char]`/`String` vs `Text` at an argument of a stdlib function. Narrow:
+/// requires an actual "Couldn't match" block naming both `Text` and one of
+/// GHC's two spellings for a string literal's inferred type.
+fn is_string_text_mismatch(message: &str) -> bool {
+    message.contains("Couldn't match")
+        && message.contains("Text")
+        && (message.contains("[Char]") || message.contains("String"))
+}
+
+/// Whether `message` quotes `name` as a whole identifier, in any of the
+/// quote styles GHC's pretty-printer uses across configurations.
+fn names_quoted(message: &str, name: &str) -> bool {
+    message.contains(&format!("\u{2018}{name}\u{2019}"))
+        || message.contains(&format!("`{name}'"))
+        || message.contains(&format!("`{name}`"))
 }
 
 /// Whether GHC's own text is worth keeping beside the advice.
@@ -3484,6 +3569,46 @@ mod ambiguity_advice_tests {
         // there is nothing to say.
         let git_ref = "<cell>:1:1: error:\n    Couldn't match expected type `GitRef' with actual type `[Char]'";
         assert_eq!(constructor_advice(git_ref), None);
+    }
+
+    /// `Cmd.stdout`/`Cmd.stderr` applied to the outcome-only `CommandResult` a
+    /// completion event delivers, instead of the retained `RunResult` they
+    /// actually take — the diagnostic named twice in the parked Astra flight.
+    /// The hint is added BESIDE GHC's own text, never instead of it.
+    #[test]
+    fn command_result_stream_mismatch_adds_the_capture_hint() {
+        let message = "Couldn't match expected type `RunResult' with actual type \
+            `CommandResult'\n    In the first argument of `stdout', namely `event'";
+        let rendered = render_cell_compile_error(&cell_error(message), "Cmd.stdout event");
+        assert!(rendered.contains("CommandResult"), "GHC's own text must survive: {rendered}");
+        assert!(
+            rendered.contains("Cmd.readStdout job"),
+            "the recognized-error hint must be added beside GHC's text: {rendered}"
+        );
+    }
+
+    /// `[Char]`/`String` vs `Text` at an argument of a stdlib function: the
+    /// stdlib is Text-first, so the hint says the literal is already `Text`.
+    #[test]
+    fn string_text_mismatch_adds_the_stdlib_hint() {
+        let message = "Couldn't match expected type `Text' with actual type `[Char]'";
+        let rendered = render_cell_compile_error(&cell_error(message), "greet \"hi\"");
+        assert!(rendered.contains("[Char]"), "GHC's own text must survive: {rendered}");
+        assert!(
+            rendered.contains("Text-first"),
+            "the recognized-error hint must be added beside GHC's text: {rendered}"
+        );
+    }
+
+    /// Neither recognized pattern fires for an ordinary type mismatch that
+    /// happens to share no vocabulary with either — the recognizer is narrow
+    /// by construction, not a general GHC interpreter.
+    #[test]
+    fn an_unrelated_type_error_adds_no_stdlib_hint() {
+        let message = "Couldn't match expected type `Int' with actual type `Bool'";
+        let rendered = render_cell_compile_error(&cell_error(message), "1 == True");
+        assert!(!rendered.contains("Text-first"), "{rendered}");
+        assert!(!rendered.contains("Cmd.readStdout"), "{rendered}");
     }
 
     /// The exact text a cell gets today for `Right handle <- createWorktree …`
