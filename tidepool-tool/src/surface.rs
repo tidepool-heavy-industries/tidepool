@@ -41,10 +41,21 @@ impl ToolField {
 /// One difference between an active surface and a candidate one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SurfaceChange {
-    Added { name: String },
-    Removed { name: String },
-    Changed { name: String, fields: Vec<ToolField> },
-    Moved { name: String, from: usize, to: usize },
+    Added {
+        name: String,
+    },
+    Removed {
+        name: String,
+    },
+    Changed {
+        name: String,
+        fields: Vec<ToolField>,
+    },
+    Moved {
+        name: String,
+        from: usize,
+        to: usize,
+    },
 }
 
 impl SurfaceChange {
@@ -62,8 +73,12 @@ impl SurfaceChange {
     #[must_use]
     pub fn describe(&self) -> String {
         match self {
-            Self::Added { name } => format!("{name}: declared by the candidate and not by the active surface"),
-            Self::Removed { name } => format!("{name}: declared by the active surface and not by the candidate"),
+            Self::Added { name } => {
+                format!("{name}: declared by the candidate and not by the active surface")
+            }
+            Self::Removed { name } => {
+                format!("{name}: declared by the active surface and not by the candidate")
+            }
             Self::Changed { name, fields } => {
                 let fields: Vec<&str> = fields.iter().map(|field| field.label()).collect();
                 format!("{name}: {} changed", fields.join(", "))
@@ -98,7 +113,10 @@ fn output_schema(tool: &HostedTool) -> Option<&serde_json::Value> {
 
 /// True when two schema slots differ in the text a model would receive, having
 /// already been found equal as values.
-fn renders_differently(active: Option<&serde_json::Value>, candidate: Option<&serde_json::Value>) -> bool {
+fn renders_differently(
+    active: Option<&serde_json::Value>,
+    candidate: Option<&serde_json::Value>,
+) -> bool {
     match (active, candidate) {
         (Some(active), Some(candidate)) => {
             let (active, candidate) = (active.to_string(), candidate.to_string());
@@ -204,7 +222,11 @@ mod tests {
 
     fn surface() -> Vec<HostedTool> {
         vec![
-            function("check", "Run the check", serde_json::json!({"type": "object"})),
+            function(
+                "check",
+                "Run the check",
+                serde_json::json!({"type": "object"}),
+            ),
             HostedTool::Custom(CustomToolDeclaration {
                 name: "bash".into(),
                 description: "Run a command".into(),
@@ -257,13 +279,19 @@ mod tests {
     fn a_tool_gained_and_a_tool_lost_are_reported_by_name() {
         let candidate = vec![
             surface()[0].clone(),
-            function("review", "Review a diff", serde_json::json!({"type": "object"})),
+            function(
+                "review",
+                "Review a diff",
+                serde_json::json!({"type": "object"}),
+            ),
         ];
         let changes = compare_surfaces(&surface(), &candidate);
         assert_eq!(
             changes,
             vec![
-                SurfaceChange::Removed { name: "bash".into() },
+                SurfaceChange::Removed {
+                    name: "bash".into()
+                },
                 SurfaceChange::Added {
                     name: "review".into()
                 },
@@ -296,7 +324,11 @@ mod tests {
     #[test]
     fn a_raw_tool_that_became_a_function_changes_its_kind() {
         let mut candidate = surface();
-        candidate[1] = function("bash", "Run a command", serde_json::json!({"type": "object"}));
+        candidate[1] = function(
+            "bash",
+            "Run a command",
+            serde_json::json!({"type": "object"}),
+        );
         let changes = compare_surfaces(&surface(), &candidate);
         let SurfaceChange::Changed { fields, .. } = &changes[0] else {
             panic!("expected a changed tool, got {changes:?}");

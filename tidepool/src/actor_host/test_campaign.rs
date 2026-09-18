@@ -124,6 +124,7 @@ impl TestCampaign {
             research_policy,
             root_launch_mode: InteractiveLaunchMode::Fresh,
             pane_environment: BTreeMap::new(),
+            jev_key_file: None,
             jev: Some(tidepool_actor::unconfigured_jev()),
         };
         configure(&mut config);

@@ -676,7 +676,10 @@ mod tests {
         // below it, and its row must be a SUBSET of the gate's own row: a
         // narrow parent cannot hand out authority it does not hold.
         let gate_actor = root
-            .preview_child(EffectiveRole::research().with_effect_keys(gate.clone()), None)
+            .preview_child(
+                EffectiveRole::research().with_effect_keys(gate.clone()),
+                None,
+            )
             .expect("gate admitted");
         let reviewer = gate_actor
             .preview_child(

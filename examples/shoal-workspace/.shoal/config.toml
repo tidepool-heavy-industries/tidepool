@@ -6,6 +6,9 @@ effort = "medium"
 planner = "gpt-6-astra"
 executor = "gpt-5.6-sol"
 
+[jev]
+key_file = "~/.config/typesafe/api-key"
+
 [launch]
 systemd_slice = "swarm.slice"
 

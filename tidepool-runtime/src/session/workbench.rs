@@ -861,8 +861,18 @@ enum SourceUnitShape<'a> {
 /// Mirrors `classify_workbench_item`'s `DECLARATION_PREFIXES` list, kept as
 /// its own copy so this heuristic stays in its own region of the file.
 const CONSERVATIVE_DECLARATION_PREFIXES: &[&str] = &[
-    "data ", "newtype ", "type ", "class ", "instance ", "infixl ", "infixr ", "infix ",
-    "foreign ", "import ", "default ", "{-# ",
+    "data ",
+    "newtype ",
+    "type ",
+    "class ",
+    "instance ",
+    "infixl ",
+    "infixr ",
+    "infix ",
+    "foreign ",
+    "import ",
+    "default ",
+    "{-# ",
 ];
 
 fn classify_source_unit(text: &str) -> SourceUnitShape<'_> {
@@ -1846,7 +1856,8 @@ mod tests {
     /// rejected — silently binding to the import instead would be worse.
     #[test]
     fn silent_shadow_by_an_in_scope_import_is_still_rejected() {
-        let cell = "import Control.Lens (previews)\n\nprevious <- computePreviews\nsummary = previous\n";
+        let cell =
+            "import Control.Lens (previews)\n\nprevious <- computePreviews\nsummary = previous\n";
         let hit = detect_hoisted_declaration_collision(cell)
             .expect("a same-named import must not suppress the rejection");
         assert_eq!(hit.declaration_name, "summary");

@@ -755,12 +755,10 @@ impl<'w, 'p> Walker<'w, 'p> {
                     &mut children,
                 )
                 .map_err(|error| match error {
-                    ParseError::InvalidSignature(detail) => {
-                        ParseError::InvalidSignature(format!(
-                            "{detail}; scrutinee {}",
-                            self.describe_node(*scrutinee)
-                        ))
-                    }
+                    ParseError::InvalidSignature(detail) => ParseError::InvalidSignature(format!(
+                        "{detail}; scrutinee {}",
+                        self.describe_node(*scrutinee)
+                    )),
                     other => other,
                 })?;
             }

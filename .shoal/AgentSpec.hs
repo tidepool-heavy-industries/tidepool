@@ -9,8 +9,9 @@ import Control.Monad.Freer (Eff, Member)
 import Tidepool.Agent.Contract
 import qualified Tidepool.Command as Cmd
 import qualified Project.Tools as Tools
+import Tidepool.Effects.Core (Jev)
 
-agentSpec :: Member Cmd.Commands effects => AgentSpec Tools.WorkspaceTools effects
+agentSpec :: (Member Cmd.Commands effects, Member Jev effects) => AgentSpec Tools.WorkspaceTools effects
 agentSpec =
   defaultSpec
     { specTools = Tools.tools

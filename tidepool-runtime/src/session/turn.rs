@@ -811,8 +811,7 @@ pub fn ambiguous_type_advice(message: &str, submitted: &str) -> Option<String> {
     // instance conflict produces carry no such line.
     let unresolved_overlap = message.contains("Overlapping instances for")
         && message.contains("The choice depends on the instantiation of");
-    (unresolved_overlap || message.contains("ZonkAny"))
-        .then(|| AMBIGUOUS_TYPE_ADVICE.to_owned())
+    (unresolved_overlap || message.contains("ZonkAny")).then(|| AMBIGUOUS_TYPE_ADVICE.to_owned())
 }
 
 /// GHC's `MonadFail` desugaring for a refutable bind in a `do` block, as it
@@ -3262,7 +3261,8 @@ mod ambiguity_advice_tests {
             ambiguous_type_advice(AMBIGUOUS_PURE_DISPATCH, "pure (1 :: Int)").as_deref(),
             Some(CELL_PURE_DISPATCH_ADVICE)
         );
-        let rendered = render_cell_compile_error(&cell_error(AMBIGUOUS_PURE_DISPATCH), "pure (1 :: Int)");
+        let rendered =
+            render_cell_compile_error(&cell_error(AMBIGUOUS_PURE_DISPATCH), "pure (1 :: Int)");
         assert!(
             rendered.contains("Ambiguous type variable"),
             "GHC's own text must survive: {rendered}"
@@ -3273,7 +3273,12 @@ mod ambiguity_advice_tests {
     #[test]
     fn pin_final_cell_expression_wraps_only_the_final_expression_item() {
         let bind_item = CellAnalysisItem {
-            span: CellSourceSpan { start_line: 1, start_column: 1, end_line: 1, end_column: 12 },
+            span: CellSourceSpan {
+                start_line: 1,
+                start_column: 1,
+                end_line: 1,
+                end_column: 12,
+            },
             source: "h <- pure 1".to_owned(),
             verdict: TurnClassification {
                 kind: TurnKind::Bind,
@@ -3282,12 +3287,22 @@ mod ambiguity_advice_tests {
             },
             source_items: vec![CellAnalysisSourceItem {
                 ordinal: 0,
-                span: CellSourceSpan { start_line: 1, start_column: 1, end_line: 1, end_column: 12 },
+                span: CellSourceSpan {
+                    start_line: 1,
+                    start_column: 1,
+                    end_line: 1,
+                    end_column: 12,
+                },
                 kind: TurnKind::Bind,
             }],
         };
         let final_item = CellAnalysisItem {
-            span: CellSourceSpan { start_line: 2, start_column: 1, end_line: 2, end_column: 16 },
+            span: CellSourceSpan {
+                start_line: 2,
+                start_column: 1,
+                end_line: 2,
+                end_column: 16,
+            },
             source: "pure (1 :: Int)".to_owned(),
             verdict: TurnClassification {
                 kind: TurnKind::Expr,
@@ -3296,7 +3311,12 @@ mod ambiguity_advice_tests {
             },
             source_items: vec![CellAnalysisSourceItem {
                 ordinal: 1,
-                span: CellSourceSpan { start_line: 2, start_column: 1, end_line: 2, end_column: 16 },
+                span: CellSourceSpan {
+                    start_line: 2,
+                    start_column: 1,
+                    end_line: 2,
+                    end_column: 16,
+                },
                 kind: TurnKind::Expr,
             }],
         };
@@ -3305,8 +3325,8 @@ mod ambiguity_advice_tests {
             items: Some(vec![bind_item.clone(), final_item.clone()]),
         };
         let cell_text = "h <- pure 1\npure (1 :: Int)\n";
-        let (retry_text, restored) =
-            pin_final_cell_expression(&failure, cell_text).expect("this is exactly the pinnable shape");
+        let (retry_text, restored) = pin_final_cell_expression(&failure, cell_text)
+            .expect("this is exactly the pinnable shape");
         assert_eq!(restored.source, final_item.source);
         assert_eq!(restored.span, final_item.span);
         assert!(
@@ -3371,9 +3391,11 @@ mod ambiguity_advice_tests {
             "{rendered}"
         );
         // A handler helper that never got its effect row lands here too.
-        assert!(ambiguous_type_advice(AMBIGUOUS_FIND_ELEM, "announce message = say message")
-            .unwrap()
-            .starts_with("`announce`'s type is ambiguous"));
+        assert!(
+            ambiguous_type_advice(AMBIGUOUS_FIND_ELEM, "announce message = say message")
+                .unwrap()
+                .starts_with("`announce`'s type is ambiguous")
+        );
     }
 
     #[test]
@@ -3406,7 +3428,8 @@ mod ambiguity_advice_tests {
             ambiguous_type_advice(message, "value = toJSON \"src/app.rs\"").as_deref(),
             Some(LITERAL_ANNOTATION_ADVICE)
         );
-        let rendered = render_cell_compile_error(&cell_error(message), "value = toJSON \"src/app.rs\"");
+        let rendered =
+            render_cell_compile_error(&cell_error(message), "value = toJSON \"src/app.rs\"");
         assert!(rendered.contains("arising from the literal"), "{rendered}");
         assert!(rendered.ends_with(LITERAL_ANNOTATION_ADVICE), "{rendered}");
     }
@@ -3417,8 +3440,12 @@ mod ambiguity_advice_tests {
     #[test]
     fn a_signature_without_its_equation_says_they_share_one_item() {
         let message = "<cell>:1:1: error: [GHC-44432]\n    The type signature for \u{2018}summarize\u{2019} lacks an accompanying binding";
-        let rendered = render_cell_compile_error(&cell_error(message), "summarize :: [Text] -> Text");
-        assert!(rendered.contains("lacks an accompanying binding"), "{rendered}");
+        let rendered =
+            render_cell_compile_error(&cell_error(message), "summarize :: [Text] -> Text");
+        assert!(
+            rendered.contains("lacks an accompanying binding"),
+            "{rendered}"
+        );
         assert!(
             rendered.ends_with(&format!(
                 "`summarize` has a signature but no equation in this cell item; \
@@ -3467,7 +3494,8 @@ mod ambiguity_advice_tests {
         // The compiler's own text survives: it names the occurrence, both
         // generations, and the line. The advice is added after it, not
         // substituted for it.
-        let rendered = render_cell_compile_error(&cell_error(AMBIGUOUS_REDECLARED_FIELD), "probe holder");
+        let rendered =
+            render_cell_compile_error(&cell_error(AMBIGUOUS_REDECLARED_FIELD), "probe holder");
         assert!(rendered.contains("Ambiguous occurrence"), "{rendered}");
         assert!(rendered.ends_with(&advice), "{rendered}");
     }
@@ -3561,7 +3589,10 @@ mod ambiguity_advice_tests {
         // The diagnostic survives: it says which types, which the advice does not.
         let rendered = render_cell_compile_error(&cell_error(mismatch), "createWorktree boundHead");
         assert!(rendered.contains("WorktreeSeed"), "{rendered}");
-        assert!(rendered.ends_with(&constructor_advice(mismatch).unwrap()), "{rendered}");
+        assert!(
+            rendered.ends_with(&constructor_advice(mismatch).unwrap()),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -3581,7 +3612,10 @@ mod ambiguity_advice_tests {
         let message = "Couldn't match expected type `RunResult' with actual type \
             `CommandResult'\n    In the first argument of `stdout', namely `event'";
         let rendered = render_cell_compile_error(&cell_error(message), "Cmd.stdout event");
-        assert!(rendered.contains("CommandResult"), "GHC's own text must survive: {rendered}");
+        assert!(
+            rendered.contains("CommandResult"),
+            "GHC's own text must survive: {rendered}"
+        );
         assert!(
             rendered.contains("Cmd.readStdout job"),
             "the recognized-error hint must be added beside GHC's text: {rendered}"
@@ -3594,7 +3628,10 @@ mod ambiguity_advice_tests {
     fn string_text_mismatch_adds_the_stdlib_hint() {
         let message = "Couldn't match expected type `Text' with actual type `[Char]'";
         let rendered = render_cell_compile_error(&cell_error(message), "greet \"hi\"");
-        assert!(rendered.contains("[Char]"), "GHC's own text must survive: {rendered}");
+        assert!(
+            rendered.contains("[Char]"),
+            "GHC's own text must survive: {rendered}"
+        );
         assert!(
             rendered.contains("Text-first"),
             "the recognized-error hint must be added beside GHC's text: {rendered}"
@@ -3631,7 +3668,10 @@ mod ambiguity_advice_tests {
     fn several_refutable_binds_name_the_first_without_claiming_which_failed() {
         let cell = "x <- pure 1\nJust a <- pure Nothing\nRight b <- pure (Left 2)";
         let advice = runtime_failure_advice(DO_BLOCK_FAILURE, cell).unwrap();
-        assert!(advice.starts_with("a pattern bind, first `Just a` on line 2,"), "{advice}");
+        assert!(
+            advice.starts_with("a pattern bind, first `Just a` on line 2,"),
+            "{advice}"
+        );
     }
 
     /// A cell with no refutable bind at all still gets the recovery, because
@@ -3947,7 +3987,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let prelude = tidepool_testing::eval_harness::prelude_path();
         let effects = tidepool_testing::eval_harness::effects_include();
-        let include = [prelude.as_path(), effects[0].as_path(), effects[1].as_path()];
+        let include = [
+            prelude.as_path(),
+            effects[0].as_path(),
+            effects[1].as_path(),
+        ];
         let template = super::super::workbench::resident_cell_check_template(
             &eff_cell_preamble(),
             EFF_ROW,
@@ -3999,7 +4043,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let prelude = tidepool_testing::eval_harness::prelude_path();
         let effects = tidepool_testing::eval_harness::effects_include();
-        let include = [prelude.as_path(), effects[0].as_path(), effects[1].as_path()];
+        let include = [
+            prelude.as_path(),
+            effects[0].as_path(),
+            effects[1].as_path(),
+        ];
         let template = super::super::workbench::resident_cell_check_template(
             &eff_cell_preamble(),
             EFF_ROW,
@@ -4029,10 +4077,7 @@ mod tests {
             inject_modules: &[],
         })
         .expect("the wrapper must not reject what check_cell already accepts");
-        assert_eq!(
-            via_wrapper.items.last().unwrap().source,
-            final_item.source
-        );
+        assert_eq!(via_wrapper.items.last().unwrap().source, final_item.source);
     }
 
     /// [`PREAMBLE_DEFAULT_MARKER`] is duplicated (not depended-on) from

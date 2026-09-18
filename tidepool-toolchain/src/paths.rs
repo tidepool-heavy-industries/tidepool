@@ -384,7 +384,10 @@ mod tests {
         // `tmp` (an ancestor of `nested`) carries the OTHER marker, closer
         // than nothing at all would be — a `.shoal` search must not match it.
         std::fs::create_dir_all(tmp.join(".tidepool")).unwrap();
-        assert_eq!(find_root_with_marker(&nested, ".tidepool"), Some(tmp.clone()));
+        assert_eq!(
+            find_root_with_marker(&nested, ".tidepool"),
+            Some(tmp.clone())
+        );
         assert_eq!(find_root_with_marker(&nested, ".shoal"), None);
 
         // Once `nested` itself carries the marker being searched for, that
@@ -392,7 +395,10 @@ mod tests {
         // exactly the "workspace directly under an unrelated parent
         // workspace" case `shoal init` must get right.
         std::fs::create_dir_all(nested.join(".shoal")).unwrap();
-        assert_eq!(find_root_with_marker(&nested, ".shoal"), Some(nested.clone()));
+        assert_eq!(
+            find_root_with_marker(&nested, ".shoal"),
+            Some(nested.clone())
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

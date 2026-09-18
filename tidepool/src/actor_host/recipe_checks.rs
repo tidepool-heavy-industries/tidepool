@@ -117,6 +117,7 @@ impl Driver {
             research_policy: defaults.research,
             root_launch_mode: InteractiveLaunchMode::Fresh,
             pane_environment: BTreeMap::new(),
+            jev_key_file: defaults.jev.key_file,
             jev: None,
         };
         let session = ModelFreeSession::start(&config, |admission| admission).await?;

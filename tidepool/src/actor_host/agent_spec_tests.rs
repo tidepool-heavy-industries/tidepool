@@ -210,11 +210,7 @@ async fn start_with_sleeping_slot(answer: &str, slot: &str) -> TestCampaign {
             write_workspace(&config.workspace, DESCRIPTION, &answer);
             let authored = config.workspace.join(".shoal");
             std::fs::write(authored.join("config.toml"), SPEC_CONFIG).unwrap();
-            std::fs::write(
-                authored.join("AgentSpec.hs"),
-                spec_module_with_sleep(&slot),
-            )
-            .unwrap();
+            std::fs::write(authored.join("AgentSpec.hs"), spec_module_with_sleep(&slot)).unwrap();
             config.workspace_inputs = Some(
                 crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
                     .unwrap(),

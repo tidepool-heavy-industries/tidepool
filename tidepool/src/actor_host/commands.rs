@@ -377,8 +377,7 @@ impl HostCommandBackend {
             // A resident actor has no pane and no terminal to attach one to.
             CommandInput::TerminalInput => {
                 return Err(
-                    "this actor has no terminal; run the command with piped or closed input"
-                        .into(),
+                    "this actor has no terminal; run the command with piped or closed input".into(),
                 );
             }
         };
@@ -465,7 +464,11 @@ impl HostCommandBackend {
                 exit = command.wait() => break exit.map_err(detail)?,
             }
         };
-        let resource = self.resources.status(&self.actor, id).await.map_err(detail)?;
+        let resource = self
+            .resources
+            .status(&self.actor, id)
+            .await
+            .map_err(detail)?;
         let cleanup = match &resource {
             Resource::Completed | Resource::ResourceExhausted | Resource::CancelledBeforeStart => {
                 CommandCleanup::CommandClean
@@ -671,7 +674,10 @@ mod readiness_tests {
     /// "pass the previous page's `end` back as an offset".
     #[test]
     fn a_read_window_follows_the_position_it_was_asked_for() {
-        assert_eq!(window(CommandPosition::OutputBeginning, 10), (0, PAGE_BYTES));
+        assert_eq!(
+            window(CommandPosition::OutputBeginning, 10),
+            (0, PAGE_BYTES)
+        );
         assert_eq!(window(CommandPosition::OutputSlice(2, 5), 10), (2, 5));
         assert_eq!(
             window(CommandPosition::OutputOffset(4), 10),

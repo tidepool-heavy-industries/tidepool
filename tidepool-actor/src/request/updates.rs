@@ -288,9 +288,11 @@ impl RequestRegistry {
             TargetState::Reserved | TargetState::Queued => return Err(ReplyError::Stale),
             _ => return Err(ReplyError::AlreadySettled),
         }
-        if request.updates.iter().any(|update| {
-            matches!(update.phase, UpdatePhase::Queued) || update.fences_settlement()
-        }) {
+        if request
+            .updates
+            .iter()
+            .any(|update| matches!(update.phase, UpdatePhase::Queued) || update.fences_settlement())
+        {
             return Err(ReplyError::UpdatePending);
         }
         let update = RequestUpdateId {
@@ -553,9 +555,7 @@ mod tests {
         // so the send is refused outright. A caller must not have to make a
         // second observation to discover that its correction went nowhere.
         assert_eq!(
-            registry
-                .update_request(owner, request, "late".into())
-                .err(),
+            registry.update_request(owner, request, "late".into()).err(),
             Some(ReplyError::AlreadySettled)
         );
     }
@@ -636,7 +636,7 @@ mod tests {
             let (update, delivery) = registry
                 .update_request(owner, request, "tabs".into())
                 .unwrap();
-                let presentation = claim.then(|| delivery.clone().begin().unwrap());
+            let presentation = claim.then(|| delivery.clone().begin().unwrap());
             registry
                 .cancel_request(owner, request, CancellationReason::RequesterCancelled)
                 .unwrap();

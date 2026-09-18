@@ -684,8 +684,7 @@ impl ShoalSourceReload {
                 .ensure_active_from(self.frozen.identity(), &checkout.roots)
                 .map_err(unreadable)?,
         };
-        if let Some((seen_signature, seen_active, drift)) = self.drift_seen.lock().get(&layer_key)
-        {
+        if let Some((seen_signature, seen_active, drift)) = self.drift_seen.lock().get(&layer_key) {
             if *seen_signature == signature && *seen_active == active_now.identity {
                 return Ok(drift.clone());
             }

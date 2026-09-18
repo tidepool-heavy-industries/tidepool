@@ -90,22 +90,20 @@ pub use workbench::{
 };
 
 pub use turn::{
-    ambiguous_type_advice, assemble_bind_module, constructor_advice, assemble_display_expression_module,
-    assemble_expression_module,
-    assemble_inspection_module, assemble_opaque_expression_module, check_cell,
-    check_cell_preferring_effectful, classify_block,
+    ambiguous_type_advice, assemble_bind_module, assemble_display_expression_module,
+    assemble_expression_module, assemble_inspection_module, assemble_opaque_expression_module,
+    check_cell, check_cell_preferring_effectful, classify_block, constructor_advice,
     enable_no_monomorphism_restriction, insert_preamble_imports, place_turn_stmt,
     prepared_scaffold_binding, render_cell_compile_error, render_cell_compile_rejection,
     render_template, render_turn_compile_error, render_turn_compile_rejection,
-    resume_import_targets, run_turn, run_turn_pinned,
-    runtime_failure_advice, turn_user_code_line_range, turn_user_code_offset, with_resume_import,
-    BoundBinder, CompileRejection,
+    resume_import_targets, run_turn, run_turn_pinned, runtime_failure_advice,
+    turn_user_code_line_range, turn_user_code_offset, with_resume_import, BoundBinder,
     CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellCheckFailure, CellCheckRequest,
-    CellSourceSpan, CheckedBinderPin, CompiledTurn, DeclarationReceipt, DeclarationSource,
-    ExpressionLift, LocatedImport, LocatedPragma, PragmaKind, PreparedTurn, SourcePrologue,
-    TemplateSelector, TurnClassification, TurnCode, TurnFailure, TurnKind, TurnRequest, TurnResult,
-    TurnTemplate, ValueTier, AMBIGUOUS_TYPE_ADVICE, CELL_PURE_DISPATCH_ADVICE,
-    DECL_TEMPLATE_SOURCE, PREPARED_SCAFFOLD_TARGET,
+    CellSourceSpan, CheckedBinderPin, CompileRejection, CompiledTurn, DeclarationReceipt,
+    DeclarationSource, ExpressionLift, LocatedImport, LocatedPragma, PragmaKind, PreparedTurn,
+    SourcePrologue, TemplateSelector, TurnClassification, TurnCode, TurnFailure, TurnKind,
+    TurnRequest, TurnResult, TurnTemplate, ValueTier, AMBIGUOUS_TYPE_ADVICE,
+    CELL_PURE_DISPATCH_ADVICE, DECL_TEMPLATE_SOURCE, PREPARED_SCAFFOLD_TARGET,
 };
 
 /// Host-visible reentry state for one resident session.

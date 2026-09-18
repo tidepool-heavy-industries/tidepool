@@ -5,10 +5,12 @@
 //! tmux is process ownership and observability, never message transport.
 
 #[cfg(test)]
-mod command_jobs_tests;
-mod commands;
+mod agent_spec_tests;
 #[cfg(test)]
 mod cell_compile_cost_tests;
+#[cfg(test)]
+mod command_jobs_tests;
+mod commands;
 #[cfg(test)]
 mod compiler_warmup_tests;
 #[cfg(test)]
@@ -22,8 +24,6 @@ mod hosted_retirement;
 mod hosted_tools_tests;
 #[cfg(test)]
 mod jev_tests;
-#[cfg(test)]
-mod agent_spec_tests;
 #[cfg(test)]
 mod lookup_availability_tests;
 #[cfg(test)]
@@ -430,8 +430,10 @@ pub struct ActorHostConfig {
     pub research_policy: tidepool_actor::ResearchPolicy,
     pub root_launch_mode: InteractiveLaunchMode,
     pub pane_environment: std::collections::BTreeMap<String, String>,
+    /// Optional credential file selected by the frozen Shoal configuration.
+    pub jev_key_file: Option<PathBuf>,
     /// Answers actors' `Jev` requests; `None` uses the TypeSafe client with
-    /// the key from `TYPESAFE_API_KEY` or the secrets directory.
+    /// the configured credential sources.
     pub jev: Option<tidepool_actor::JevBackendHandle>,
 }
 
@@ -487,7 +489,9 @@ fn jev_backend(config: &ActorHostConfig) -> tidepool_actor::JevBackendHandle {
     if let Some(backend) = &config.jev {
         return Arc::clone(backend);
     }
-    match tidepool_handlers::JevClient::new(tidepool_handlers::JevConfig::default()) {
+    let mut jev = tidepool_handlers::JevConfig::default();
+    jev.key_file.clone_from(&config.jev_key_file);
+    match tidepool_handlers::JevClient::new(jev) {
         Ok(client) => {
             if !client.configured() {
                 tracing::info!("jev: no TYPESAFE_API_KEY; Jev requests answer JevUnconfigured");

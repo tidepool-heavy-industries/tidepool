@@ -259,7 +259,8 @@ impl FrozenWorkspace {
     }
 
     pub(crate) fn config(&self) -> Result<super::ShoalConfig> {
-        let config: super::ShoalConfig = toml::from_str(&self.config)?;
+        let config: super::ShoalConfig =
+            toml::from_str::<super::ShoalConfig>(&self.config)?.resolve_paths()?;
         config.launch.validate()?;
         Ok(config)
     }
@@ -574,7 +575,9 @@ pub(super) fn sources_signature(roots: &[PathBuf]) -> Result<String> {
             let name = entry.file_name();
             if matches!(
                 name.to_str(),
-                Some("logs" | "sessions" | "runtime" | "build" | ".git" | "dist-newstyle" | "target")
+                Some(
+                    "logs" | "sessions" | "runtime" | "build" | ".git" | "dist-newstyle" | "target"
+                )
             ) {
                 continue;
             }
@@ -592,10 +595,10 @@ pub(super) fn sources_signature(roots: &[PathBuf]) -> Result<String> {
                 let metadata = entry.metadata()?;
                 hasher.update(entry.path().as_os_str().as_encoded_bytes());
                 hasher.update(&metadata.len().to_le_bytes());
-                if let Ok(elapsed) = metadata
-                    .modified()
-                    .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).map_err(std::io::Error::other))
-                {
+                if let Ok(elapsed) = metadata.modified().and_then(|at| {
+                    at.duration_since(std::time::UNIX_EPOCH)
+                        .map_err(std::io::Error::other)
+                }) {
                     hasher.update(&elapsed.as_nanos().to_le_bytes());
                 }
             }

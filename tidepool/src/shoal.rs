@@ -156,9 +156,28 @@ pub(crate) struct ShoalConfig {
     #[serde(default)]
     pub(crate) models: std::collections::BTreeMap<String, String>,
     #[serde(default)]
+    pub(crate) jev: ShoalJevConfig,
+    #[serde(default)]
     haskell: workspace::HaskellConfig,
     #[serde(default)]
     prompts: workspace::PromptConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct ShoalJevConfig {
+    pub(crate) key_file: Option<PathBuf>,
+}
+
+impl ShoalConfig {
+    fn resolve_paths(mut self) -> Result<Self, Box<dyn std::error::Error>> {
+        self.jev.key_file = self
+            .jev
+            .key_file
+            .map(resolve_configured_key_file)
+            .transpose()?;
+        Ok(self)
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -246,6 +265,7 @@ pub fn new(options: NewOptions) -> Result<(), Box<dyn std::error::Error>> {
     for path in &report.written {
         println!("  {}", path.display());
     }
+    eprintln!("Jev: configured ~/.config/typesafe/api-key; TODO: interactive setup flow");
     match report.jev {
         scaffold::JevPin::Locked => {}
         scaffold::JevPin::Unlocked(error) => {
@@ -339,7 +359,7 @@ fn read_project_config(workspace: &Path) -> Result<(ShoalConfig, String), Config
                 // gap this field exists for is caught earlier, in
                 // `resolve_workspace` itself.
                 searched_from: None,
-            })
+            });
         }
         Err(error) => {
             return Err(ConfigError::Rejected(runtime_error(format!(
@@ -356,12 +376,13 @@ fn parse_project_config(
     path: &Path,
     text: String,
 ) -> Result<(ShoalConfig, String), Box<dyn std::error::Error>> {
-    let mut config: ShoalConfig = toml::from_str(&text).map_err(|error| {
+    let config: ShoalConfig = toml::from_str(&text).map_err(|error| {
         runtime_error(format!(
             "invalid Shoal configuration {}: {error}",
             path.display()
         ))
     })?;
+    let mut config = config.resolve_paths()?;
     config.launch.validate()?;
     validate_tracked_exclusions(workspace, &config.launch.source_exclude)?;
     config.resources.validate().map_err(|error| {
@@ -375,6 +396,27 @@ fn parse_project_config(
         &format!("Shoal configuration {}", path.display()),
     )?;
     Ok((config, text))
+}
+
+fn resolve_configured_key_file(path: PathBuf) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    let text = path.to_string_lossy();
+    if text == "~" || text.starts_with("~/") {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| runtime_error("[jev].key_file uses ~ but HOME is not set"))?;
+        return Ok(if text == "~" {
+            home
+        } else {
+            home.join(&text[2..])
+        });
+    }
+    Err(runtime_error(format!(
+        "[jev].key_file must be absolute or start with ~/: {}",
+        path.display()
+    )))
 }
 
 fn validate_agent_defaults(
@@ -1046,6 +1088,7 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
             workspace_inputs: Some(workspace_inputs),
             root_launch_mode,
             pane_environment: pane_environment(),
+            jev_key_file: configuration.jev.key_file,
             jev: None,
         },
         readiness_tx,
@@ -1612,6 +1655,26 @@ mod tests {
         .is_err());
     }
 
+    #[test]
+    fn configured_jev_key_file_expands_home_and_rejects_relative_paths() {
+        let absolute = PathBuf::from("/var/lib/keys/typesafe");
+        assert_eq!(
+            resolve_configured_key_file(absolute.clone()).unwrap(),
+            absolute
+        );
+
+        let home = PathBuf::from(std::env::var_os("HOME").expect("test requires HOME"));
+        assert_eq!(
+            resolve_configured_key_file(PathBuf::from("~/.config/typesafe/api-key")).unwrap(),
+            home.join(".config/typesafe/api-key")
+        );
+
+        let error = resolve_configured_key_file(PathBuf::from("keys/typesafe")).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("must be absolute or start with ~/"));
+    }
+
     /// A lock step that produces what `nix flake lock` would, so scaffolding
     /// is exercised on a machine with neither `nix` nor a network.
     struct StubLock;
@@ -1724,6 +1787,12 @@ mod tests {
             std::fs::read_to_string(workspace.path().join(".shoal/Project/Tools.hs")).unwrap();
         assert!(tools.contains("shell :: Shell.ShellTools mode"), "{tools}");
         assert!(tools.contains("triageSearch"), "{tools}");
+        let config = std::fs::read_to_string(workspace.path().join(".shoal/config.toml")).unwrap();
+        assert!(config.contains("[jev]"), "{config}");
+        assert!(
+            config.contains("key_file = \"~/.config/typesafe/api-key\""),
+            "{config}"
+        );
     }
 
     /// Every workspace skill lands, and the links a client discovers them

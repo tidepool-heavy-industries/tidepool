@@ -796,6 +796,22 @@ verifyTextMemchrProjection = do
     Left (UnsupportedForeignCall _ _) -> pure ()
     other -> ioError (userError
       ("unauthorized _hs_text_measure_off was not rejected: " <> show other))
+  case projectPreparedTarget (context textAuthority "breakPath") (pprModules prepared) of
+    Left failure -> ioError (userError
+      ("text _hs_text_reverse projection failed: " <> show failure))
+    Right program -> case
+      [ programSignatures program !! fromIntegral index
+      | OperationDecl (IntrinsicIdentity "_hs_text_reverse" CCall) (SignatureId index)
+          <- programOperations program
+      ] of
+      [Signature [UnliftedRefRep, UnliftedRefRep, WordRep 64, WordRep 64, VoidRep]
+        (Returns [])] -> pure ()
+      signatures -> ioError (userError
+        ("expected exact text _hs_text_reverse operation, got " <> show signatures))
+  case projectPreparedTarget (context Nothing "breakPath") (pprModules prepared) of
+    Left (UnsupportedForeignCall _ _) -> pure ()
+    other -> ioError (userError
+      ("unauthorized _hs_text_reverse was not rejected: " <> show other))
 
 verifyBottomingSentinelContracts :: IO ()
 verifyBottomingSentinelContracts = do

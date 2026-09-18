@@ -354,8 +354,7 @@ fn strip_generated_query_location(line: &str) -> &str {
         return line;
     };
     let mut segments = head.trim_start().rsplitn(3, ':');
-    let (Some(column), Some(row), Some(path)) =
-        (segments.next(), segments.next(), segments.next())
+    let (Some(column), Some(row), Some(path)) = (segments.next(), segments.next(), segments.next())
     else {
         return line;
     };
@@ -453,9 +452,7 @@ pub(crate) enum LookupOutcome {
     /// encoding, earlier than the cell-compile path's structured `Diag`
     /// report). Widening this to a structured field needs a Haskell/extractor
     /// change first, not a Rust-only one.
-    Rejected {
-        diagnostic: String,
-    },
+    Rejected { diagnostic: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -976,7 +973,10 @@ mod tests {
             .map(String::from)
             .collect();
         let matches = near_matches("exitCode", &candidates, 5);
-        assert!(matches.contains(&"commandExitCode".to_string()), "{matches:?}");
+        assert!(
+            matches.contains(&"commandExitCode".to_string()),
+            "{matches:?}"
+        );
         assert!(matches.len() <= 5);
     }
 
@@ -986,7 +986,10 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect();
-        assert_eq!(near_matches("resultOf", &candidates, 5), Vec::<String>::new());
+        assert_eq!(
+            near_matches("resultOf", &candidates, 5),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

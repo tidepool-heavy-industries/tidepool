@@ -23,6 +23,9 @@ effort = "medium"
 default_depth = 1
 maximum_depth = 8
 
+[jev]
+key_file = "~/.config/typesafe/api-key"
+
 [haskell]
 source_roots = ["."]
 

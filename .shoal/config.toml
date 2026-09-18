@@ -2,6 +2,9 @@
 model = "gpt-5.6-sol"
 effort = "low"
 
+[jev]
+key_file = "~/.config/typesafe/api-key"
+
 [haskell]
 source_roots = ["."]
 # Everything here compiles against this revision and is imported into every

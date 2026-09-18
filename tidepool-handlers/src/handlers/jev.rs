@@ -8,6 +8,7 @@
 // exposes a typed `JevFailure` and folds key resolution + call budgeting in,
 // since this is the handler Shoal actually dispatches against.
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -24,6 +25,7 @@ pub struct JevConfig {
     pub base_url: String,
     pub timeout: Duration,
     pub max_calls: u64,
+    pub key_file: Option<PathBuf>,
 }
 
 impl Default for JevConfig {
@@ -32,13 +34,16 @@ impl Default for JevConfig {
             base_url: "https://api.typesafe.ai".to_string(),
             timeout: Duration::from_secs(15),
             max_calls: 100_000,
+            key_file: None,
         }
     }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum JevFailure {
-    #[error("Jev is not configured: no TYPESAFE_API_KEY in env or secrets dir")]
+    #[error(
+        "Jev is not configured: no TYPESAFE_API_KEY in env, configured key file, or secrets dir"
+    )]
     Unconfigured,
     #[error("Jev call budget exhausted")]
     CallCap,
@@ -54,22 +59,45 @@ pub enum JevFailure {
     Malformed(String),
 }
 
-/// Resolves `TYPESAFE_API_KEY`: process env first (non-empty), else
-/// `secrets_dir()/TYPESAFE_API_KEY` (trimmed, non-empty), else `None`. Never
-/// writes to the process environment.
-fn resolve_key() -> Option<String> {
+/// Resolves `TYPESAFE_API_KEY`: process env first (non-empty), then the
+/// configured file, then `secrets_dir()/TYPESAFE_API_KEY`. Never writes to the
+/// process environment or includes key contents in diagnostics.
+fn resolve_key(configured: Option<&Path>) -> Option<String> {
     if let Ok(key) = std::env::var("TYPESAFE_API_KEY") {
         if !key.trim().is_empty() {
             return Some(key);
         }
     }
-    let path = tidepool_toolchain::paths::secrets_dir().join("TYPESAFE_API_KEY");
-    let contents = std::fs::read_to_string(path).ok()?;
+
+    let mut configured_issue = None;
+    if let Some(path) = configured {
+        match read_key(path) {
+            Ok(key) => {
+                eprintln!("Jev: using API key file {}", path.display());
+                return Some(key);
+            }
+            Err(error) => configured_issue = Some(format!("{}: {error}", path.display())),
+        }
+    }
+
+    let secret = tidepool_toolchain::paths::secrets_dir().join("TYPESAFE_API_KEY");
+    if let Ok(key) = read_key(&secret) {
+        return Some(key);
+    }
+
+    if let Some(issue) = configured_issue {
+        eprintln!("Jev: cannot use configured API key file {issue}; TODO: interactive setup flow");
+    }
+    None
+}
+
+fn read_key(path: &Path) -> std::io::Result<String> {
+    let contents = std::fs::read_to_string(path)?;
     let trimmed = contents.trim();
     if trimmed.is_empty() {
-        None
+        Err(std::io::Error::other("file is empty"))
     } else {
-        Some(trimmed.to_string())
+        Ok(trimmed.to_owned())
     }
 }
 
@@ -104,7 +132,8 @@ impl JevClient {
     /// `reqwest::Client` is infallible for this configuration, but errors
     /// are threaded through as `JevFailure` for symmetry with `ask`.
     pub fn new(config: JevConfig) -> Result<Self, JevFailure> {
-        Self::with_key(config, resolve_key())
+        let key = resolve_key(config.key_file.as_deref());
+        Self::with_key(config, key)
     }
 
     /// For tests: bypass env/secrets resolution and supply the key directly.
@@ -270,7 +299,22 @@ mod tests {
             base_url,
             timeout: Duration::from_secs(2),
             max_calls: 100_000,
+            key_file: None,
         }
+    }
+
+    #[test]
+    fn key_file_is_trimmed_and_empty_files_are_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let key = directory.path().join("key");
+        std::fs::write(&key, "  test-key\n").unwrap();
+        assert_eq!(read_key(&key).unwrap(), "test-key");
+
+        std::fs::write(&key, "  \n").unwrap();
+        assert_eq!(
+            read_key(&key).unwrap_err().kind(),
+            std::io::ErrorKind::Other
+        );
     }
 
     #[tokio::test]

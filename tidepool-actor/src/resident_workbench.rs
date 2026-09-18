@@ -18,12 +18,11 @@ use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
     check_cell_preferring_effectful, hide_preamble_exports, insert_preamble_imports,
-    render_turn_compile_error, render_turn_compile_rejection,
-    resident_cell_check_template, resident_workbench_templates, run_inspections, run_turn,
-    run_turn_pinned, CellCheck, CellCheckRequest, CheckedBinderPin, DeclarationReceipt,
-    InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, ResidentError, ResidentHole,
-    ResidentOutcome, ResidentSession, RootCustody, SourceImports, TurnClassification, TurnKind,
-    TurnRequest, TurnResult,
+    render_turn_compile_error, render_turn_compile_rejection, resident_cell_check_template,
+    resident_workbench_templates, run_inspections, run_turn, run_turn_pinned, CellCheck,
+    CellCheckRequest, CheckedBinderPin, DeclarationReceipt, InspectionQuery, InspectionRequest,
+    OutputSink, ParsedBlock, ResidentError, ResidentHole, ResidentOutcome, ResidentSession,
+    RootCustody, SourceImports, TurnClassification, TurnKind, TurnRequest, TurnResult,
 };
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
 
@@ -2139,9 +2138,10 @@ where
                     let installation =
                         tidepool_runtime::value_to_json(&declarations, session.data_con_table(), 0);
                     let SpecInstallation { tools, slots } = decode_installation(installation)?;
-                    let declarations = crate::resident_interactive::project_tools(tools).map_err(
-                        |error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
-                    )?;
+                    let declarations =
+                        crate::resident_interactive::project_tools(tools).map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                        })?;
                     let dispatch = session
                         .live_payload_handle_owned_by(
                             hole.cont_id(),
@@ -2670,8 +2670,7 @@ where
     pub(crate) async fn live_bindings(
         &self,
         context: crate::ActorSessionContext,
-    ) -> Result<Vec<tidepool_runtime::session::WorkbenchBinding>, ResidentActorWorkbenchError>
-    {
+    ) -> Result<Vec<tidepool_runtime::session::WorkbenchBinding>, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, |session, context, _| {
                 Ok(session.workbench_bindings_in(context.placement.lexical_scope))
@@ -3022,40 +3021,39 @@ where
     } = compiled;
     match result {
         TurnResult::Decl(receipt) => {
-            let result =
-                match session.define_scoped_with_imports_in(
-                    context.placement.lexical_scope,
-                    &[&declaration_source],
-                    &declaration_imports,
-                ) {
-                    Ok(generation) => ResidentWorkbenchStep::Committed {
-                        output: format!(
-                            "defined {} at generation {}",
-                            if receipt.binders.is_empty() {
-                                "declaration".to_string()
-                            } else {
-                                receipt.binders.join(", ")
-                            },
-                            generation.0
-                        ),
-                        warnings: Vec::new(),
-                        installed_bindings: receipt.binders.clone(),
-                    },
-                    Err(tidepool_runtime::session::SessionError::ValidationFailed(failure)) => {
-                        ResidentWorkbenchStep::Rejected(failure.rejection_for_input(
-                            &format!("<cell item {}>", block.ordinal),
-                            &block.source,
-                        ))
-                    }
-                    Err(error) if classify_session(&error).class == FailureClass::UserHaskell => {
-                        ResidentWorkbenchStep::Rejected(classify_session(&error).message.into())
-                    }
-                    Err(error) => {
-                        return Err(ResidentActorWorkbenchError::Resident(
-                            ResidentError::Session(error),
-                        ))
-                    }
-                };
+            let result = match session.define_scoped_with_imports_in(
+                context.placement.lexical_scope,
+                &[&declaration_source],
+                &declaration_imports,
+            ) {
+                Ok(generation) => ResidentWorkbenchStep::Committed {
+                    output: format!(
+                        "defined {} at generation {}",
+                        if receipt.binders.is_empty() {
+                            "declaration".to_string()
+                        } else {
+                            receipt.binders.join(", ")
+                        },
+                        generation.0
+                    ),
+                    warnings: Vec::new(),
+                    installed_bindings: receipt.binders.clone(),
+                },
+                Err(tidepool_runtime::session::SessionError::ValidationFailed(failure)) => {
+                    ResidentWorkbenchStep::Rejected(failure.rejection_for_input(
+                        &format!("<cell item {}>", block.ordinal),
+                        &block.source,
+                    ))
+                }
+                Err(error) if classify_session(&error).class == FailureClass::UserHaskell => {
+                    ResidentWorkbenchStep::Rejected(classify_session(&error).message.into())
+                }
+                Err(error) => {
+                    return Err(ResidentActorWorkbenchError::Resident(
+                        ResidentError::Session(error),
+                    ))
+                }
+            };
             Ok(result)
         }
         TurnResult::Bind {

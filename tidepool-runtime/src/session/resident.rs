@@ -1024,9 +1024,11 @@ fn finish_prepared<H: DispatchEffect<O>, O>(
 fn is_observation_budget_exhausted(error: &PreparedRuntimeError) -> bool {
     matches!(
         error,
-        PreparedRuntimeError::Run(tidepool_codegen::prepared_program::ExecutionError::Observation(
-            tidepool_codegen::prepared_program::ObservationFailure::BudgetExceeded { .. }
-        ))
+        PreparedRuntimeError::Run(
+            tidepool_codegen::prepared_program::ExecutionError::Observation(
+                tidepool_codegen::prepared_program::ObservationFailure::BudgetExceeded { .. }
+            )
+        )
     )
 }
 
@@ -4039,9 +4041,9 @@ mod tests {
     /// earlier effect in the same unit already committed.
     #[test]
     fn failure_layer_is_effect_for_a_jit_effect_dispatch_error() {
-        let error = ResidentError::Run(RuntimeError::Jit(JitError::Effect(
-            EffectError::Handler("boom".into()),
-        )));
+        let error = ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
+            "boom".into(),
+        ))));
         assert_eq!(
             error.failure_layer(),
             Some(crate::session::workbench::WorkbenchFailureLayer::Effect)

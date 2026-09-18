@@ -151,6 +151,8 @@ textKernels =
       [UnliftedRefRep, WordRep 64, WordRep 64, WordRep 8, VoidRep] (Returns [IntRep 64]))
   , ("_hs_text_measure_off", Signature
       [UnliftedRefRep, WordRep 64, WordRep 64, WordRep 64, VoidRep] (Returns [IntRep 64]))
+  , ("_hs_text_reverse", Signature
+      [UnliftedRefRep, UnliftedRefRep, WordRep 64, WordRep 64, VoidRep] (Returns []))
   ]
 
 -- | Authority is a compiler-resolved unit, never a package-name prefix.

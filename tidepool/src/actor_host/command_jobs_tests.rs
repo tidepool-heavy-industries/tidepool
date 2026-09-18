@@ -647,9 +647,7 @@ async fn write_stdin_and_cancel_command_each_name_the_same_retained_binding() {
     .await
     .unwrap();
     assert_eq!(cancel["status"], "committed", "{cancel}");
-    let cancel_binding = cancel["items"][0]["installedBindings"][0]
-        .as_str()
-        .unwrap();
+    let cancel_binding = cancel["items"][0]["installedBindings"][0].as_str().unwrap();
     assert_eq!(cancel_binding, started_binding, "{cancel}");
     assert!(
         cancel["items"][0]["output"]
