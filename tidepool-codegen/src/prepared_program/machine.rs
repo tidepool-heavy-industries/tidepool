@@ -62,7 +62,7 @@ use crate::machine_state::{MachineDisposition, MachineFailure, MachineState};
 use crate::old_space::OldSpace;
 use crate::prepared_control::CallStatus;
 use crate::resource_ledger::{
-    ContinuationFrame, FrameCell, FrameEvidence, PreparedFrameEvidence, ResourceLedger,
+    ContinuationFrame, FrameCell, FrameEvidence, HandleClass, PreparedFrameEvidence, ResourceLedger,
 };
 use crate::suspension::{ContinuationId, ParkKind, RealmId, ValueHandle};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -158,6 +158,10 @@ pub struct ResidencyCounts {
     pub block_words: usize,
     pub persistent_roots: usize,
     pub handles: usize,
+    /// Installed-program tops retained as machine-lifetime export roots
+    /// ([`PreparedMachine::retain_export_top`]), counted apart from
+    /// `handles` so neither class hides the other's growth.
+    pub code_exports: usize,
     pub parked: usize,
     pub stack_map_links: usize,
     pub static_regions: usize,
@@ -994,6 +998,7 @@ impl<'code> PreparedMachine<'code> {
                 .sum(),
             persistent_roots: self.machine.persistent_roots_count(),
             handles: self.handle_count(),
+            code_exports: self.handles.counts().code_exports,
             parked: self.parked_count(),
             stack_map_links: self.machine.stack_map_link_count(),
             static_regions: self.statics.len(),
@@ -1916,6 +1921,29 @@ impl<'code> PreparedMachine<'code> {
         id: ProgramId,
         value: ValueId,
     ) -> Result<PreparedHandle, ExecutionError> {
+        self.retain_top_as(id, value, HandleClass::Value)
+    }
+
+    /// [`Self::retain_top`] for a machine-lifetime export root: the same
+    /// handle, accounted as [`HandleClass::CodeExport`] and therefore
+    /// outside `residency().handles` and outside every scope closure. Use it
+    /// for a top a later program will import rather than compile its own
+    /// copy of; the root is what keeps the defining program, and so its
+    /// code, alive for those importers.
+    pub fn retain_export_top(
+        &mut self,
+        id: ProgramId,
+        value: ValueId,
+    ) -> Result<PreparedHandle, ExecutionError> {
+        self.retain_top_as(id, value, HandleClass::CodeExport)
+    }
+
+    fn retain_top_as(
+        &mut self,
+        id: ProgramId,
+        value: ValueId,
+        class: HandleClass,
+    ) -> Result<PreparedHandle, ExecutionError> {
         self.ensure_handle_access()?;
         let compiled = self
             .programs
@@ -1969,9 +1997,15 @@ impl<'code> PreparedMachine<'code> {
             }
             return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
         };
-        let raw = self
-            .handles
-            .insert_handle(root, RealmId::ROOT, RuntimeRep::LiftedRef);
+        let raw = match class {
+            HandleClass::Value => {
+                self.handles
+                    .insert_handle(root, RealmId::ROOT, RuntimeRep::LiftedRef)
+            }
+            HandleClass::CodeExport => self
+                .handles
+                .insert_export_handle(root, RuntimeRep::LiftedRef),
+        };
         Ok(PreparedHandle {
             raw,
             rep: RuntimeRep::LiftedRef,

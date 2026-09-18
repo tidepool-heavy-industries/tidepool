@@ -57,9 +57,12 @@ not compact `OldSpace` or reclaim its slot cells. Do not describe deregistration
 as immediate memory reclamation.
 
 The prepared machine reports these classes separately as `ResidencyCounts`:
-programs, block words, persistent roots, handles, parked frames, stack-map
-links, static regions, and descriptor/callable/enter rows. One leak must not
-be able to hide behind another counter staying flat. Program retirement
+programs, block words, persistent roots, handles, code exports, parked frames,
+stack-map links, static regions, and descriptor/callable/enter rows. One leak
+must not be able to hide behind another counter staying flat. Code exports
+(`retain_export_top`) are a machine-lifetime class of their own: they belong to
+no realm, grow only as installs reach new package tops, and are counted apart
+from a turn's handles so neither can mask the other. Program retirement
 happens only under the `Quiescent` token, minted by `PreparedMachine::quiesce`
 and consumed by `collect_major`: a non-moving liveness mark over every root
 class finds each program still reachable, and only an unreachable program's

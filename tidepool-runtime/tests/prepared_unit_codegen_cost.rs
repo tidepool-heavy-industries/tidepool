@@ -77,7 +77,11 @@ fn install_stage_trace() {
     );
     let _ = tracing_subscriber::registry()
         .with(filter)
-        .with(tracing_subscriber::fmt::layer().without_time().with_target(true))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .without_time()
+                .with_target(true),
+        )
         .try_init();
 }
 

@@ -4104,6 +4104,7 @@ dependencies = [
  "tidepool-toolchain",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "trybuild",
 ]
 

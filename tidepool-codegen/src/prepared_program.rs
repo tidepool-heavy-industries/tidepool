@@ -28,9 +28,9 @@ use tidepool_repr::DataConId;
 mod adapter;
 mod admission;
 mod apply;
-pub(crate) mod compile_phases;
 #[cfg(test)]
 mod caller_result_tests;
+pub(crate) mod compile_phases;
 mod emit;
 mod image;
 #[cfg(test)]

@@ -1335,7 +1335,7 @@ impl PreparedEngine {
             if self.code_exports.contains_key(&identity) {
                 continue;
             }
-            let Ok(handle) = self.machine.retain_top(program, value) else {
+            let Ok(handle) = self.machine.retain_export_top(program, value) else {
                 continue;
             };
             self.code_exports
@@ -1346,7 +1346,9 @@ impl PreparedEngine {
     /// Every package top this machine already carries, as the extractor
     /// wants them: `(identity, generation)` pairs whose bodies the next
     /// turn's projection drops in favour of a declared global.
-    pub(crate) fn code_export_retentions(&self) -> impl Iterator<Item = (SymbolIdentity, u64)> + '_ {
+    pub(crate) fn code_export_retentions(
+        &self,
+    ) -> impl Iterator<Item = (SymbolIdentity, u64)> + '_ {
         self.code_exports
             .keys()
             .map(|identity| (identity.clone(), CODE_EXPORT_GENERATION))
