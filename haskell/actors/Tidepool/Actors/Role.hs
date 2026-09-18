@@ -11,7 +11,7 @@ module Tidepool.Actors.Role
   , AgentControl
   , Notifications
   , Commands
-  , Actor, Reflect
+  , Actor
   , BoundWorktree
   , WorktreeRegistry
   , WorktreeAllocation
@@ -41,7 +41,7 @@ import Tidepool.Effects.Core
   , AgentControl
   , Notifications
   , Commands
-  , Actor, Reflect
+  , Actor
   , AgentInspection
   , AgentLaunch
   , BoundWorktree

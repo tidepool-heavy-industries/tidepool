@@ -204,6 +204,11 @@ impl OverlayResourceLease {
         tidepool_atomic_write::create_dir_all_durable(parent)?;
         let parent = parent.canonicalize()?;
         let path = parent.join(name);
+        // Exclusive on purpose, and never `create_dir_all`: a directory that
+        // already exists under this key was retained by an earlier owner, and
+        // adopting it as a fresh lease would skip the delete-before-retry
+        // fence. Failing here forces the caller to prove ownership or clean up
+        // before the name is reused.
         std::fs::create_dir(&path)?;
         tidepool_atomic_write::sync_parent_directory(&path)?;
         let storage = Arc::new(OverlayStorage {

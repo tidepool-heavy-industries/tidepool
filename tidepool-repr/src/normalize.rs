@@ -13,9 +13,8 @@
 //! # Properties
 //!
 //! - **Idempotent.** `normalize(normalize(x)) == normalize(x)` for all `x`.
-//! - **Semantics-preserving (proptest in tidepool-testing/tests/normalize_semantics.rs).**
-//!   A normalized expression evaluates to the same value as the input under
-//!   the interpreter's evaluation rules.
+//! - **Semantics-preserving.** A normalized expression evaluates to the same
+//!   value as the input. The GHC differential corpus is what exercises this.
 //! - **Total.** Every well-formed [`CoreExpr`] has a canonical form.
 
 use crate::frame::CoreFrame;

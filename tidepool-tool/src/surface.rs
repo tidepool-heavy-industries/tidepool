@@ -100,7 +100,10 @@ fn output_schema(tool: &HostedTool) -> Option<&serde_json::Value> {
 /// already been found equal as values.
 fn renders_differently(active: Option<&serde_json::Value>, candidate: Option<&serde_json::Value>) -> bool {
     match (active, candidate) {
-        (Some(active), Some(candidate)) => active.to_string() != candidate.to_string(),
+        (Some(active), Some(candidate)) => {
+            let (active, candidate) = (active.to_string(), candidate.to_string());
+            active != candidate
+        }
         _ => false,
     }
 }

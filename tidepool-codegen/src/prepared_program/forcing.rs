@@ -328,10 +328,6 @@ const EXCEPTION_DESCRIPTION_BUDGET: usize = 16_384;
 /// under a bounded budget and restore the failure with its message (the
 /// `error` text, or the first string the exception carries). Any failure
 /// while describing leaves the plain raise.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "description forces through the same machine, program, VM and heap custody as observation"
-)]
 pub(super) fn describe_raised_exception(
     machine: &MachineState,
     program: &CompiledProgram,
