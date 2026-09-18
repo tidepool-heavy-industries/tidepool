@@ -172,6 +172,19 @@ pub struct CommandJobs {
     entries: Arc<Mutex<HashMap<String, Entry>>>,
 }
 
+/// A read-only projection of one retained job: who raised it, who observes
+/// its completion ("collectors", in `Tidepool.Actor` usage), and whether it
+/// has finished. Backs the status tool's what-is-live view; it is not a
+/// second place jobs are tracked — every field is read straight off the
+/// `Entry` `start`/`connect`/`status` already maintain.
+#[derive(Clone, Debug)]
+pub(crate) struct CommandJobSnapshot {
+    pub id: String,
+    pub owner: ActorRef,
+    pub observers: Vec<ActorRef>,
+    pub finished: bool,
+}
+
 pub struct CommandConnection {
     _sink: Arc<CompletionSink>,
     shared: Arc<Shared>,
@@ -323,6 +336,32 @@ impl CommandJobs {
             .lock()
             .insert(id.clone(), Entry { actor, shared });
         Ok((id, request))
+    }
+
+    /// Every retained job, owner and observers included, for a what-is-live
+    /// status render. No authorization filter: the caller (the status tool)
+    /// restricts the result to jobs it may already observe in the actor
+    /// roster before rendering anything.
+    pub(crate) fn snapshot(&self) -> Vec<CommandJobSnapshot> {
+        self.entries
+            .lock()
+            .iter()
+            .map(|(id, entry)| {
+                let finished = matches!(
+                    *entry.shared.phase.borrow(),
+                    CommandStatus::CommandFinished(_)
+                );
+                let mut observers: Vec<ActorRef> =
+                    entry.shared.observers.lock().keys().copied().collect();
+                observers.sort();
+                CommandJobSnapshot {
+                    id: id.clone(),
+                    owner: entry.shared.owner,
+                    observers,
+                    finished,
+                }
+            })
+            .collect()
     }
 
     fn shared(&self, owner: ActorRef, id: &str) -> Result<Arc<Shared>, CommandError> {

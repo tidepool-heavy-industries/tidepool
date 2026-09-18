@@ -15,6 +15,12 @@ pub(crate) enum StatusView {
     Lineage,
     Trace,
     Bindings,
+    /// Collectors and the command jobs they watch (finished or not);
+    /// bindings with the session generation that defines them, the exact
+    /// source of their defining cell, and the execution id that submitted
+    /// it. A view over data the actor and workbench already retain — see
+    /// `resident_actor::live_status_text`.
+    Live,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,19 +37,19 @@ struct StatusArguments {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("status arguments must be an object with optional `view` (summary, detailed, recovery, lineage, trace, bindings): {0}")]
+#[error("status arguments must be an object with optional `view` (summary, detailed, recovery, lineage, trace, bindings, live): {0}")]
 pub(crate) struct StatusInputError(String);
 
 pub(crate) fn declaration() -> HostedTool {
     HostedTool::Function(ToolDeclaration {
         name: STATUS_TOOL.into(),
-        description: "Inspect this actor and its workbench. Example: {\"view\":\"recovery\"}. Omit view for a compact summary; use detailed, lineage, trace, or bindings for other perspectives.".into(),
+        description: "Inspect this actor and its workbench. Example: {\"view\":\"recovery\"}. Omit view for a compact summary; use detailed, lineage, trace, bindings, or live for other perspectives.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "view": {
                     "type": "string",
-                    "enum": ["summary", "detailed", "recovery", "lineage", "trace", "bindings"]
+                    "enum": ["summary", "detailed", "recovery", "lineage", "trace", "bindings", "live"]
                 }
             },
             "additionalProperties": false
@@ -73,7 +79,7 @@ mod tests {
         assert_eq!(tool.input_schema["additionalProperties"], false);
         assert_eq!(
             tool.input_schema["properties"]["view"]["enum"],
-            serde_json::json!(["summary", "detailed", "recovery", "lineage", "trace", "bindings"])
+            serde_json::json!(["summary", "detailed", "recovery", "lineage", "trace", "bindings", "live"])
         );
         assert!(tool.input_schema.get("required").is_none());
     }
@@ -88,6 +94,7 @@ mod tests {
             ("lineage", StatusView::Lineage),
             ("trace", StatusView::Trace),
             ("bindings", StatusView::Bindings),
+            ("live", StatusView::Live),
         ] {
             assert_eq!(parse(serde_json::json!({"view": name})).unwrap(), expected);
         }

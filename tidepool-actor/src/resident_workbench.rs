@@ -2327,6 +2327,22 @@ where
             .await
     }
 
+    /// Every workbench binding visible at `context`'s scope, generation
+    /// included — the value-plane half of the status tool's what-is-live
+    /// view. A structured read of [`ResidentSession::workbench_bindings_in`];
+    /// it retains nothing new of its own.
+    pub(crate) async fn live_bindings(
+        &self,
+        context: crate::ActorSessionContext,
+    ) -> Result<Vec<tidepool_runtime::session::WorkbenchBinding>, ResidentActorWorkbenchError>
+    {
+        self.access
+            .with_machine(context, |session, context, _| {
+                Ok(session.workbench_bindings_in(context.placement.lexical_scope))
+            })
+            .await
+    }
+
     /// `build_queries` receives the exact imports text this turn's inspection
     /// module will compile with
     /// ([`ActorWorkbenchSource::prepare`]-assembled, one import spec per

@@ -420,6 +420,13 @@ pub struct WorkbenchBinding {
     pub type_display: Option<String>,
     pub kind: WorkbenchBindingKind,
     type_query: Option<String>,
+    /// The session generation (`DeclLog` turn, or the `Val` module's own
+    /// generation) whose commit currently defines this name — the same
+    /// identity `current_declarations_in`/`current_binding_in` already
+    /// track for latest-wins shadowing. `None` only if the caller built this
+    /// value without going through [`Self::declaration`]/[`Self::materialized`]
+    /// plus [`Self::with_generation`].
+    defining_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -439,27 +446,51 @@ impl WorkbenchBindingKind {
 }
 
 impl WorkbenchBinding {
-    pub(crate) fn declaration(name: String, type_query: String) -> Self {
+    /// Public so a downstream crate's status-rendering tests (there is no
+    /// invariant here to protect: this is a plain data constructor) can
+    /// build a value without a live session.
+    #[must_use]
+    pub fn declaration(name: String, type_query: String) -> Self {
         Self {
             name,
             type_display: None,
             kind: WorkbenchBindingKind::Declaration,
             type_query: Some(type_query),
+            defining_generation: None,
         }
     }
 
-    pub(crate) fn materialized(name: String, type_display: Option<String>) -> Self {
+    /// Public for the same reason as [`Self::declaration`].
+    #[must_use]
+    pub fn materialized(name: String, type_display: Option<String>) -> Self {
         Self {
             name,
             type_display,
             kind: WorkbenchBindingKind::MaterializedValue,
             type_query: None,
+            defining_generation: None,
         }
+    }
+
+    /// Attach the generation whose commit currently defines this binding.
+    #[must_use]
+    pub fn with_generation(mut self, generation: Option<u64>) -> Self {
+        self.defining_generation = generation;
+        self
     }
 
     #[must_use]
     pub fn type_query(&self) -> Option<&str> {
         self.type_query.as_deref()
+    }
+
+    /// The defining session generation, when known. This is the "cell
+    /// execution" identity a what-is-live status view renders beside a
+    /// binding: the same latest-wins turn `current_declarations_in`/
+    /// `current_binding_in` already resolve, not a newly tracked id.
+    #[must_use]
+    pub fn defining_generation(&self) -> Option<u64> {
+        self.defining_generation
     }
 }
 

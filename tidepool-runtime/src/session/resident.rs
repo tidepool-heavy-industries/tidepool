@@ -2028,21 +2028,24 @@ where
     /// never forces a live value.
     pub fn workbench_bindings_in(&self, scope: ScopeId) -> Vec<super::WorkbenchBinding> {
         let mut bindings = std::collections::BTreeMap::new();
-        for (item, _) in self.core.lib().current_declarations_in(scope) {
+        for (item, generation) in self.core.lib().current_declarations_in(scope) {
             if let super::ExportItem::Value { name } = &item {
                 bindings.insert(
                     name.clone(),
-                    super::WorkbenchBinding::declaration(name.clone(), item.render_entry()),
+                    super::WorkbenchBinding::declaration(name.clone(), item.render_entry())
+                        .with_generation(Some(generation)),
                 );
             }
         }
         for name in self.binding_names_in(scope) {
-            let type_display = self
+            let (generation, type_display) = self
                 .current_binding_in(scope, &name)
-                .and_then(|(_, _, _, type_display)| type_display);
+                .map(|(_, module, _, type_display)| (Some(module.gen().0), type_display))
+                .unwrap_or_default();
             bindings.insert(
                 name.clone(),
-                super::WorkbenchBinding::materialized(name, type_display),
+                super::WorkbenchBinding::materialized(name, type_display)
+                    .with_generation(generation),
             );
         }
         bindings.into_values().collect()
