@@ -152,7 +152,7 @@ up, with an append that carries both sets' labels in the type and rejects a
 duplicate at compile time.
 
 That whole capability is workspace Haskell. Designing it and writing it took
-about a quarter of an hour, and it needed two small additions to the shipped
+about half an hour, and it needed two small additions to the shipped
 library, a way for a slot to name its parent and an optional line of intent on
 a shell call, and no engine change at all: asking Jev, reading the running
 actor's identity and messaging another agent were already effects, and a slot
