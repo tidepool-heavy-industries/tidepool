@@ -7822,6 +7822,7 @@ mod tests {
                 WorkbenchRunStatus::Committed,
                 vec![WorkbenchItemReceipt {
                     diagnostics: Vec::new(),
+                    failure_layer: None,
                     index: 0,
                     kind: None,
                     span: None,
