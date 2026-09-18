@@ -45,8 +45,9 @@ tidepool # Communicates via JSON-RPC over stdio
 
 There are two paths today, depending on whether the effect you're touching
 has migrated to the schema-driven scaffold yet
-(`tidepool-protocol/src/effects/` — currently `Exec`, `Journal`, `Worktree`,
-`RepoEvent`; check `tidepool_protocol::effects::all()` for the current set).
+(`tidepool-protocol/src/effects/` — most effects have, and
+`tidepool_protocol::effects::all()` is the current set; the few that remain
+are the macros in `tidepool-mcp/src/effect_defs.rs`).
 
 - **Schema-driven (migrated effects):** the effect's truth lives as data in
   `tidepool-protocol/src/effects/<effect>.rs` (a `schema::Effect` value), and

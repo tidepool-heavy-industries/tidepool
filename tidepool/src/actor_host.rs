@@ -431,6 +431,25 @@ pub struct ActorHostConfig {
     pub jev: Option<tidepool_actor::JevBackendHandle>,
 }
 
+impl ActorHostConfig {
+    /// Whether this run's captured workspace supplies the Jev authoring
+    /// surface. Jev is pinned source a project opts into through
+    /// `[haskell.flake_sources]`, not part of the Tidepool library, so both
+    /// the workbench that offers `J` and the instructions that describe it
+    /// read this one answer.
+    fn jev_surface(&self) -> prompt_catalog::JevSurface {
+        if self
+            .workspace_inputs
+            .as_ref()
+            .is_some_and(|inputs| inputs.provides_module("Jev.Operators"))
+        {
+            prompt_catalog::JevSurface::Installed
+        } else {
+            prompt_catalog::JevSurface::Absent
+        }
+    }
+}
+
 /// The TypeSafe client as the forest's `Jev` backend.
 struct HostJev(tidepool_handlers::JevClient);
 
@@ -486,6 +505,7 @@ fn worker_launch_resolver(config: &ActorHostConfig) -> tidepool_actor::WorkerLau
             .as_ref()
             .and_then(|inputs| inputs.prompts.get("core"))
             .map(String::as_str),
+        config.jev_surface(),
     );
     let fingerprint = blake3::hash(base.as_bytes()).to_hex().to_string();
     Arc::new(move |request| resolve_worker_launch(&config, request, &fingerprint))
@@ -1444,6 +1464,7 @@ pub async fn run(
                             .as_ref()
                             .and_then(|inputs| inputs.prompts.get("core"))
                             .map(String::as_str),
+                        config.jev_surface(),
                     )?,
                 }),
             }),
@@ -1944,6 +1965,25 @@ fn compile_driver(
         for module in candidate.iter().flat_map(|c| c.extra_modules.iter()) {
             preamble = insert_preamble_imports(&preamble, module);
         }
+        // What an actor installs at startup is compiled here too, so a broken
+        // spec fails `shoal check` and `shoal init` instead of the first actor
+        // to start. None of these is in `[haskell] modules`: the spec module is
+        // found by convention, and the two keys name a value, not an import.
+        // They are imported qualified because they only need to typecheck.
+        let named = [inputs.spec.as_deref(), inputs.tools.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.rsplit_once('.').map(|(module, _)| module.to_owned()));
+        let conventional = inputs
+            .provides_module("AgentSpec")
+            .then(|| "AgentSpec".to_owned());
+        let installed: std::collections::BTreeSet<String> =
+            conventional.into_iter().chain(named).collect();
+        for module in installed {
+            if inputs.provides_module(&module) {
+                preamble = insert_preamble_imports(&preamble, &format!("qualified {module}"));
+            }
+        }
     }
     let templates = resident_workbench_templates(&preamble, DRIVER_EFFECTS, "");
     let include_refs: Vec<_> = include.iter().map(PathBuf::as_path).collect();
@@ -2083,15 +2123,10 @@ fn compile_root(
     .with_effective_role(
         tidepool_actor::EffectiveRole::root().with_research_policy(config.research_policy),
     );
-    // Jev is pinned source a project opts into, not part of the Tidepool
-    // library: `Jev.Operators` reaches a run through the workspace's
-    // `[haskell.flake_sources]` and the facade beside it. A run that does not
-    // supply it gets a workbench without `J`, rather than a compile failure
-    // over a module nothing on its search path defines.
-    let jev = config
-        .workspace_inputs
-        .as_ref()
-        .is_some_and(|inputs| inputs.provides_module("Jev.Operators"));
+    // A run that does not supply `Jev.Operators` gets a workbench without `J`,
+    // rather than a compile failure over a module nothing on its search path
+    // defines. The same answer tells the agent so in its instructions.
+    let jev = config.jev_surface() == prompt_catalog::JevSurface::Installed;
     let mut workbench = ActorWorkbenchSource::new(preamble, include)
         .with_imports(WORKBENCH_SURFACE_MODULE)
         .with_imports("qualified Tidepool.Actor.Record as R")
@@ -2356,6 +2391,7 @@ async fn run_interactive_applications(
             .as_ref()
             .and_then(|inputs| inputs.prompts.get("core"))
             .map(String::as_str),
+        config.jev_surface(),
     )
     .map_err(|error| format!("cannot prepare Shoal base prompt: {error}"))?;
     let mut root_identity = root.identity();

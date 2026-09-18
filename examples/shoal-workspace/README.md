@@ -9,10 +9,12 @@ is the runtime materialization selected for that swarm. This source ownership is
 separate from its frozen runtime authority. No copy or activation is needed during
 prompt review, and updating this package does not authorize a paused run to resume.
 
-Copy the accompanying `.agents/skills` links with the package when preparing a
-different repository. They use Codex's ordinary repository skill discovery and
-point into the canonical `.shoal/skills`; no Shoal-specific loader is involved.
-This repository already tracks those links at its root. Skills cover forking,
+`shoal new` writes these skills and the accompanying `.agents/skills` links into
+a project; this directory is the source they are embedded from, so preparing a
+different repository is that command rather than a copy. The links use Codex's
+ordinary repository skill discovery and point into the canonical `.shoal/skills`;
+no Shoal-specific loader is involved. This repository already tracks those links
+at its root. Skills cover forking,
 coordination, review, actor definitions and commands. Their Markdown examples are
 executed by the coordination recipes and resident command acceptance checks.
 Keep installed skills unchanged during a wave.
@@ -81,7 +83,10 @@ This package pins jev-dsl that way and supplies `Jev/Operators.hs`, the front
 that fixes the library's JSON type to Tidepool's own `Value`. It is the one
 Haskell file here that specialises rather than decides: every declaration in it
 is a type alias or a name bound to its generic counterpart, so drift from the
-pinned revision is a compile error on the line that drifted.
+pinned revision is a compile error on the line that drifted. `shoal new` writes
+the same revision and the same front into a project that has no `flake.nix`;
+into one that has its own it writes neither, and prints the input line and the
+lock command instead.
 
 Those directories become ordinary source roots. Shoal captures them into the
 run's frozen workspace, compiles them through the same pipeline as authored

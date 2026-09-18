@@ -77,6 +77,26 @@ pub(super) enum PromptRole {
     Developer,
 }
 
+/// Whether this run's workspace supplies the Jev authoring surface.
+///
+/// The base instructions describe Jev unconditionally, because it is the
+/// surface a workspace is expected to pin. A workspace that has not pinned it
+/// gets one line saying so, so the agent does not spend a turn discovering
+/// that `J` is not in its workbench.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum JevSurface {
+    Installed,
+    Absent,
+}
+
+const JEV_ABSENT: &str = "\n\n\
+# Jev is not installed in this workspace\n\n\
+This workspace supplies no `Jev.Operators`, so `J` is absent from your workbench \
+and the Jev guidance above does not apply here. Installing it is two lines: the \
+`jev-dsl` input in the project's `flake.nix`, and `jev-dsl = [\"core\"]` under \
+`[haskell.flake_sources]` in `.shoal/config.toml`. `shoal new` writes both; a \
+project that has them already needs `nix flake lock` and a new run.\n";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PromptArtifact {
     pub(super) id: PromptId,
@@ -98,14 +118,15 @@ pub(super) struct FrozenBasePrompt {
 impl FrozenBasePrompt {
     #[cfg(test)]
     pub(super) fn materialize(run_root: &std::path::Path) -> std::io::Result<Self> {
-        Self::materialize_selected(run_root, None)
+        Self::materialize_selected(run_root, None, JevSurface::Installed)
     }
 
     pub(super) fn materialize_selected(
         run_root: &std::path::Path,
         core: Option<&str>,
+        jev: JevSurface,
     ) -> std::io::Result<Self> {
-        let body = Self::selected_body(core);
+        let body = Self::selected_body(core, jev);
         let directory = run_root.join("prompts");
         std::fs::create_dir_all(&directory)?;
         let directory = directory.canonicalize()?;
@@ -130,14 +151,18 @@ impl FrozenBasePrompt {
         })
     }
 
-    pub(super) fn selected_body(core: Option<&str>) -> String {
-        match core {
+    pub(super) fn selected_body(core: Option<&str>, jev: JevSurface) -> String {
+        let mut body = match core {
             Some(core) => format!(
                 "{core}\n\n{}",
                 include_str!("../../../prompts/shoal/api-guide.md")
             ),
             None => PromptId::ShoalBase.body().to_owned(),
+        };
+        if jev == JevSurface::Absent {
+            body.push_str(JEV_ABSENT);
         }
+        body
     }
 
     pub(super) fn body(&self) -> &str {
@@ -172,6 +197,26 @@ mod tests {
         );
         let blocked = tempfile::NamedTempFile::new().unwrap();
         assert!(FrozenBasePrompt::materialize(blocked.path()).is_err());
+    }
+
+    /// The base instructions describe Jev unconditionally. A workspace that
+    /// does not supply it says so once, in the same instructions, rather than
+    /// letting the agent find out from a cell that will not compile.
+    #[test]
+    fn a_workspace_without_jev_says_so_in_the_instructions() {
+        let installed = FrozenBasePrompt::selected_body(None, JevSurface::Installed);
+        let absent = FrozenBasePrompt::selected_body(None, JevSurface::Absent);
+        assert_eq!(installed, PromptId::ShoalBase.body());
+        assert!(absent.starts_with(&installed));
+        assert!(
+            absent.contains("Jev is not installed in this workspace"),
+            "{absent}"
+        );
+        assert!(absent.contains("[haskell.flake_sources]"), "{absent}");
+        assert!(absent.contains("shoal new"), "{absent}");
+        let selected = FrozenBasePrompt::selected_body(Some("project core"), JevSurface::Absent);
+        assert!(selected.starts_with("project core"));
+        assert!(selected.contains("Jev is not installed in this workspace"));
     }
 
     #[test]

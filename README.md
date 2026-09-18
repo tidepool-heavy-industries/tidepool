@@ -2,7 +2,6 @@
 
 **Your agent can program how it works.**
 
-[![CI](https://github.com/tidepool-heavy-industries/tidepool/actions/workflows/ci.yml/badge.svg)](https://github.com/tidepool-heavy-industries/tidepool/actions/workflows/ci.yml)
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE.md)
 
 Give your agents a shared programming language for using tools, investigating
@@ -45,18 +44,15 @@ let excerpts =
       , ("fetch", "src/Fetch.hs: HTTP requests with a per-request timeout")
       , ("view",  "src/View.hs: renders the download progress indicator")
       ]
-let files = J.pool #files [(name, String text, name) | (name, text) <- excerpts]
 let packet =
-      #files := files
-        :& #per_file := J.eachIn files (\file ->
-              #on_path := J.askAbout file "Could this code participate in the repeated request timeout?"
-                :& #enough := J.askAbout file "Does this excerpt show enough implementation to diagnose the timeout?"
-                :& J.Nil)
-        :& J.Nil
+      #per_file := J.each fst (\(name, text) ->
+            #on_path := J.noul ("Could the code in " <> name <> " participate in the repeated request timeout? " <> text)
+              :& #enough := J.noul ("Does this excerpt of " <> name <> " show enough implementation to diagnose the timeout? " <> text))
+        excerpts
 answer <- J.ask
-  (J.state (object ["task" .= ("Investigate a download that times out after three retries" :: Text)]))
+  (J.state (#task := ("Investigate a download that times out after three retries" :: Text)))
   packet
-fmap (\r -> [(name, a.on_path.yes, a.enough.yes) | (name, a) <- (J.answers r).per_file]) answer
+fmap (\r -> [(name, a.on_path.yes, a.enough.yes) | ((name, _), a) <- r.per_file]) answer
 ```
 
 The next expression can fetch the promising files, inspect callers, or prepare a
@@ -64,8 +60,8 @@ focused question for another agent. Turn that sequence into a function and call
 it again on the next failure. The code is yours to change.
 
 The [Jev skill](examples/shoal-workspace/.shoal/skills/shoal-jev/SKILL.md) covers
-pools, choices carrying executable actions, speculative questions, and reading
-uncertainty. The [TypeSafe cookbooks](https://docs.typesafe.ai/patterns) are a
+per-item question batteries, choices carrying executable actions, policies for
+settling an answer, and reading uncertainty. The [TypeSafe cookbooks](https://docs.typesafe.ai/patterns) are a
 rich source of things to try: semantic search, structured extraction, multi-path
 exploration, and more. A judgment can be wrong; the program decides how to use it,
 collect more evidence, or ask a reasoning model.
@@ -85,8 +81,45 @@ A project’s `.shoal/` package contains Haskell modules, configuration, prompts
 and skills. Start from the [example package](examples/shoal-workspace/README.md),
 then reshape it around your project. Choose the models, write your coordination
 rules, add useful functions. Experiment live; save the good parts as source for
-the next run. The selected package is frozen at launch, so file changes take
-effect on the next run; live cells extend the running workbench.
+the next run. The package is captured at launch, and an agent that edits its
+modules can ask for them back: `reloadSource` typechecks the edited source and
+publishes it in one step, or refuses and leaves the running notebook exactly as
+it was. Existing bindings stay; later cells see the new code.
+
+### An agent's own tools and reflexes
+
+Each checkout carries one more module, `.shoal/AgentSpec.hs`. It is the agent's
+`xmonad.hs`: the tools it is offered, and a slot that runs after every tool call.
+
+```haskell
+agentSpec = defaultSpec
+  { specTools = Tools.tools
+  , afterTool = Just noted
+  }
+
+noted :: ToolCall -> ToolResult -> Eff effects Annotation
+```
+
+A tool is a field in a record, `mode :- Call input output`. The field name is
+the tool name and the schemas derive from the types, so the declaration and the
+handler cannot drift apart. The body is ordinary Haskell with the agent's own
+effects, which means a tool can ask Jev before it answers.
+
+The after-tool slot is where System 1 lives. It sees each finished call and its
+result and may annotate it, prune it to the lines that matter while the whole
+result stays bound to a name, or say nothing. It can read the recent
+conversation and ask Jev what is relevant to it. It is compiled once with the
+tools, so nothing compiles per call, and the reasoning model is only shown what
+survived.
+
+The agent edits the module with ordinary file tools and calls
+`reload_agent_spec`. Tool bodies and the slot swap between calls; a call already
+running keeps the code it started with. A reload that would change a tool's
+name, description or schema is refused with the difference: the tool list is
+registered once per session, so a changed surface waits for the agent's next
+incarnation and the prompt already sent is never rewritten. The
+[agent spec skill](examples/shoal-workspace/.shoal/skills/shoal-agent-spec/SKILL.md)
+has the details.
 
 An agent can use ordinary shell tools or write reusable command values:
 
@@ -151,7 +184,10 @@ or an experiment unrelated to coding swarms can use the same substrate.
 The current setup is **Linux with Nix, systemd user services/cgroup v2,
 Bubblewrap, and tmux**. Shoal uses a pinned Tidepool Codex fork for its hosted
 interface. Authenticate that client before starting model work. For Jev, set
-`TYPESAFE_API_KEY` in the environment before launching Shoal.
+`TYPESAFE_API_KEY` in the environment before launching Shoal. The Jev operators
+are [jev-dsl](https://github.com/inanna-malick/jev-dsl), compiled from the
+revision your project's `flake.nix` pins; `shoal new` writes that pin, and the
+[workspace setup guide](examples/shoal-workspace/README.md) explains it.
 
 Build the matching host, extractor, and client from this checkout:
 
@@ -162,7 +198,8 @@ nix build .#shoal
 ./result/bin/shoal --help
 ```
 
-Initial source builds can be substantial. The wrapper selects the matched
+There is no public binary cache yet, so the first build compiles everything,
+GHC-side and Rust-side, and takes a good while. Later builds are incremental. The wrapper selects the matched
 extractor and client without replacing `codex` on your normal PATH.
 
 Configure a systemd user slice with finite RAM and swap limits appropriate to
@@ -173,10 +210,19 @@ for the project package and aggregate resource boundary.
 From the repository you want to work on:
 
 ```bash
+/path/to/tidepool/result/bin/shoal new
+/path/to/tidepool/result/bin/shoal check --workspace .
 /path/to/tidepool/result/bin/shoal init
 ```
 
-This opens a tmux session with the host, compiler, and root agent’s Codex TUI.
+`shoal new` writes the workspace package — configuration, the jev-dsl pin, the
+Jev operators, a starter agent spec, and the skills an agent loads — into an
+empty directory or a repository that has none, and commits or stages it.
+`shoal check` compiles that package without starting actors or providers; a live
+run exercises execution and provider integration. `shoal init` starts the run:
+it opens a tmux session with the host, compiler, and root agent’s Codex TUI, and
+scaffolds nothing.
+
 Give it a task. Detach with `Ctrl-b d`, or launch with `--no-attach` and use the
 printed connection information. Real agent runs and Jev calls use your accounts.
 
@@ -184,15 +230,24 @@ A good first task: ask the agent to investigate something in your repository,
 use Jev where semantic judgment helps, and save one useful Haskell function for
 its next task. Let it change the program as it learns.
 
-Validate a workspace package before launching:
-
-```bash
-/path/to/tidepool/result/bin/shoal check --workspace /path/to/project
-```
-
-This checks the package; a live run exercises execution and provider integration.
 Preserve useful code in Git. Restarting the host does not restore its old live
-heap, jobs, or handles.
+heap, jobs, or handles. [Getting started](docs/GETTING-STARTED.md) walks through
+each command and what it writes.
+
+### What it does not protect you from
+
+Agents run arbitrary shell commands as you. The Bubblewrap boundary is write
+containment, not a hardened sandbox: it keeps each agent's edits inside its own
+checkout and makes the rest of the repository read-only, and the memory limits
+stop a swarm from taking the machine down. The network, your credentials, your
+environment and the rest of the host filesystem stay reachable. Run it on a
+machine and in an account where that is acceptable, as you would any coding
+agent with shell access.
+
+A run records a structured trace under `.shoal/logs/`, and by default that
+includes cell source, tool results and diagnostics in full, so anything a
+command prints ends up there. The directory is ignored by Git. Set
+`SHOAL_TRACE` to a narrower filter, for example `info`, to leave content out.
 
 ## What is Tidepool?
 
@@ -219,15 +274,17 @@ experiments, feeding the failures back into the interface.
 
 Write project functions and actors in Haskell. Add a
 [Haskell-backed tool](examples/shoal-workspace/.shoal/skills/shoal-command/references/hosted-tools.md)
-when a program should also be available through a tool interface. For a new
+to the agent spec when a program should also be available through a tool
+interface. For a new
 host capability, define the effect contract in
 [`tidepool-protocol`](tidepool-protocol/README.md) and implement its Rust handler
 in [`tidepool-handlers`](tidepool-handlers/). Generated bindings connect the sides.
 
 ## Status and development
 
-This is an experimental system you can use and reshape today. Setup is involved,
-and live use still finds workbench papercuts. The most useful examples come from
+This is an early alpha: an experimental system you can use and reshape today.
+Interfaces will change without notice. Setup is involved, and live use still
+finds workbench papercuts. The most useful examples come from
 trying real tasks, keeping what works, and fixing what gets in the way.
 
 We are exploring agents exchanging and improving semantic functions, context-aware
@@ -255,7 +312,8 @@ just test-lib tidepool-actor 'test(your_test_name)'
 
 ## License
 
-Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE.md):
+Copyright Inanna Malick. Licensed under the
+[PolyForm Noncommercial License 1.0.0](LICENSE.md):
 free to use, modify, and share for any noncommercial purpose (personal
 projects, research, education, charitable and government use included).
 Commercial use requires a separate license — open an issue or contact the

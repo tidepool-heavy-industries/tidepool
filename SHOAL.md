@@ -342,8 +342,8 @@ pairReady <- watch pairReadyLabel $
   (,) <$> awaitSettled (fst forks) <*> awaitSettled (snd forks)
 ```
 
-The detailed architecture and verification record are retained in
-[the persistent applications, typed replies, and watches plan](plans/actor-model/persistent-applications-replies-and-watches.md).
+The detailed architecture and verification record landed with the feature;
+git history has the design plan.
 
 An interactive application remains attached for its actor incarnation. A
 model turn ends when the model stops producing output. The permanent root has
@@ -447,11 +447,13 @@ a meaningful integration boundary.
 - Linked worktrees share Git objects and configuration but not working files,
   indexes, or `HEAD`. Use the repository's matched extractor/toolchain path;
   stale inherited endpoints can otherwise compile a different checkout.
-- A running Shoal process does not hot-reload Haskell, prompts, or runtime
-  code. `just shoal-console` builds the current checkout, including uncommitted
-  source, but an already-launched root keeps the snapshot embedded in its
-  running host. Restart at a reviewed clean boundary before judging a changed
-  facade live.
+- A running Shoal process does not hot-reload prompts, the shipped Haskell
+  library, or runtime code. `just shoal-console` builds the current checkout,
+  including uncommitted source, but an already-launched root keeps the snapshot
+  embedded in its running host. Restart at a reviewed clean boundary before
+  judging a changed facade live. A workspace's own modules are the exception:
+  `reloadSource` republishes them, and `reload_agent_spec` rebuilds an actor's
+  tools and after-tool slot, inside a running session.
 
 ## Current implementation boundary
 
@@ -493,7 +495,7 @@ observations but no aggregate. Preserve `Nothing` when displaying these fields.
 
 ## Next live canary
 
-Use the independent, small `/home/inanna/dev/shoal-console` repository for the
+Use the independent, small `~/dev/shoal-console` repository for the
 next run. It has fast Rust tests and a dependency-free `cargo run -- --smoke`
 contract, so lifecycle evidence is not buried under a cold Tidepool/Cranelift
 build. Start it from the Tidepool checkout with a unique tmux name:

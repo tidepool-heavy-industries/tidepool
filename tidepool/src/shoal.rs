@@ -29,18 +29,13 @@ const STATUS_VERSION: u32 = 4;
 // Root startup includes up to five minutes of resource admission before launch.
 const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(420);
 pub mod resources;
+mod scaffold;
 pub(crate) mod source;
 pub mod workspace;
 
-const SHOAL_CONFIG: &str = ".shoal/config.toml";
-const DEFAULT_CONFIG: &str = r#"[defaults]
-model = "gpt-5.6-sol"
-effort = "low"
+pub use scaffold::{FlakeLock, NewRefusal, NixLock};
 
-[research]
-default_depth = 1
-maximum_depth = 8
-"#;
+const SHOAL_CONFIG: &str = ".shoal/config.toml";
 const ENV_PACKAGED_CODEX_CLOSURE: &str = "TIDEPOOL_SHOAL_CODEX_CLOSURE";
 const ENV_NIX_STORE_BIN: &str = "TIDEPOOL_SHOAL_NIX_STORE_BIN";
 /// The `nix` executable that fetches the project's flake inputs when
@@ -56,6 +51,19 @@ const COMPILER_DAEMON_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub struct NewOptions {
     pub path: Option<PathBuf>,
+    /// How the `flake.nix` the scaffolding writes is locked. Production locks
+    /// it with `nix`; a caller that must not reach the network supplies its
+    /// own.
+    pub lock: Box<dyn FlakeLock>,
+}
+
+impl Default for NewOptions {
+    fn default() -> Self {
+        Self {
+            path: None,
+            lock: Box::new(NixLock),
+        }
+    }
 }
 
 pub struct InitOptions {
@@ -220,85 +228,102 @@ pub(crate) fn source_directory_has_tracked(
     Ok(!committed.stdout.is_empty())
 }
 
-/// Initialize the smallest repository that can host a Shoal ensemble.
+/// Scaffold a Shoal workspace package.
 ///
+/// This is the one command that writes a `.shoal/config.toml`. It takes an
+/// empty directory, which it makes a repository and commits, or the root of an
+/// existing one, which it stages and leaves for the project to commit.
 /// Authored configuration is committed normally; only runtime artifacts are
 /// excluded locally through Git metadata.
-pub async fn new(options: NewOptions) -> Result<(), Box<dyn std::error::Error>> {
+pub fn new(options: NewOptions) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = match options.path {
         Some(path) => path,
         None => std::env::current_dir()?,
     };
-    if workspace.exists() {
-        let mut entries = std::fs::read_dir(&workspace)?;
-        if entries.next().transpose()?.is_some() {
-            return Err(runtime_error(format!(
-                "shoal new requires an empty directory: {}",
-                workspace.display()
-            )));
-        }
-    } else {
-        std::fs::create_dir_all(&workspace)?;
+    let report = scaffold::scaffold(&workspace, options.lock.as_ref())?;
+    let workspace = std::fs::canonicalize(&workspace)?;
+    println!("Shoal workspace package at {}", workspace.display());
+    for path in &report.written {
+        println!("  {}", path.display());
     }
-    run_git(&workspace, &["init", "--quiet"]).await?;
-
-    let state = workspace.join(".shoal");
-    std::fs::create_dir_all(state.join("logs"))?;
-    std::fs::create_dir_all(state.join("sessions"))?;
-    ensure_project_config(&workspace)?;
-    tidepool_worktree::GitCli::new().ensure_shoal_local_exclude(&workspace)?;
-
-    run_git(&workspace, &["add", "--", SHOAL_CONFIG]).await?;
-
-    run_git(
-        &workspace,
-        &[
-            "-c",
-            "user.name=Shoal",
-            "-c",
-            "user.email=shoal@localhost",
-            "commit",
-            "--quiet",
-            "--allow-empty",
-            "-m",
-            "Initialize Shoal workspace",
-        ],
-    )
-    .await?;
-
-    let workspace = std::fs::canonicalize(workspace)?;
-    println!(
-        "Initialized empty Shoal workspace at {}",
-        workspace.display()
-    );
-    println!("agent defaults: {}", workspace.join(SHOAL_CONFIG).display());
+    match report.jev {
+        scaffold::JevPin::Locked => {}
+        scaffold::JevPin::Unlocked(error) => {
+            print!("{}", scaffold::unlocked_message(&workspace, error.as_ref()))
+        }
+        scaffold::JevPin::ProjectFlake => print!("{}", scaffold::project_flake_hint(&workspace)),
+    }
+    if report.target == scaffold::Target::Repository {
+        println!(
+            "The package is staged, not committed. Child actors are launched from committed checkouts, so commit it before delegating."
+        );
+    }
+    println!("Next: shoal check --workspace {}", workspace.display());
+    println!("Then: shoal init");
     Ok(())
 }
 
-fn ensure_project_config(workspace: &Path) -> Result<ShoalConfig, Box<dyn std::error::Error>> {
-    Ok(read_project_config(workspace)?.0)
+/// Why a project's Shoal configuration could not be read.
+#[derive(Debug)]
+pub enum ConfigError {
+    /// The path carries no Shoal workspace. Every command but `shoal new`
+    /// stops here rather than inventing one.
+    NoWorkspace { workspace: PathBuf, config: PathBuf },
+    /// A workspace whose configuration is unreadable, or describes a run that
+    /// cannot start.
+    Rejected(Box<dyn std::error::Error>),
 }
 
-fn read_project_config(
-    workspace: &Path,
-) -> Result<(ShoalConfig, String), Box<dyn std::error::Error>> {
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoWorkspace { workspace, config } => write!(
+                formatter,
+                "no Shoal workspace in {}: there is no {}. `shoal new` creates one.",
+                workspace.display(),
+                config.display()
+            ),
+            Self::Rejected(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NoWorkspace { .. } => None,
+            Self::Rejected(error) => Some(error.as_ref()),
+        }
+    }
+}
+
+/// Read a project's configuration. A pure read: a project without one is a
+/// project `shoal new` has not been run in, not a project to scaffold here.
+fn read_project_config(workspace: &Path) -> Result<(ShoalConfig, String), ConfigError> {
     let path = workspace.join(SHOAL_CONFIG);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            tidepool_atomic_write::write_best_effort(&path, DEFAULT_CONFIG.as_bytes())?;
-            DEFAULT_CONFIG.to_owned()
+            return Err(ConfigError::NoWorkspace {
+                workspace: workspace.to_path_buf(),
+                config: path,
+            })
         }
         Err(error) => {
-            return Err(runtime_error(format!(
+            return Err(ConfigError::Rejected(runtime_error(format!(
                 "cannot read Shoal configuration {}: {error}",
                 path.display()
-            )))
+            ))))
         }
     };
+    parse_project_config(workspace, &path, text).map_err(ConfigError::Rejected)
+}
+
+fn parse_project_config(
+    workspace: &Path,
+    path: &Path,
+    text: String,
+) -> Result<(ShoalConfig, String), Box<dyn std::error::Error>> {
     let mut config: ShoalConfig = toml::from_str(&text).map_err(|error| {
         runtime_error(format!(
             "invalid Shoal configuration {}: {error}",
@@ -342,23 +367,6 @@ fn resolve_agent_defaults(
         effort: effort.unwrap_or(configured.effort),
     };
     validate_agent_defaults(resolved, "resolved Shoal agent defaults")
-}
-
-async fn run_git(workspace: &Path, arguments: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-    let output = tokio::process::Command::new("git")
-        .args(arguments)
-        .current_dir(workspace)
-        .output()
-        .await?;
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(runtime_error(format!(
-        "git {} failed in {}: {}",
-        arguments.join(" "),
-        workspace.display(),
-        String::from_utf8_lossy(&output.stderr).trim()
-    )))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -425,7 +433,9 @@ fn resolve_workspace(workspace: Option<PathBuf>) -> Result<PathBuf, Box<dyn std:
 
 pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
     let workspace = resolve_workspace(options.workspace)?;
-    let configuration = ensure_project_config(&workspace)?;
+    // A run starts nothing before its workspace is known to exist: no build,
+    // no tmux session, no scaffolding.
+    let configuration = read_project_config(&workspace)?.0;
     let slice = configuration.launch.systemd_slice;
     let limits = slice.inspect().await?;
     if slice.current_membership().is_err() {
@@ -1514,26 +1524,62 @@ mod tests {
         .is_err());
     }
 
+    /// A lock step that produces what `nix flake lock` would, so scaffolding
+    /// is exercised on a machine with neither `nix` nor a network.
+    struct StubLock;
+
+    impl FlakeLock for StubLock {
+        fn lock(&self, workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            std::fs::write(
+                workspace.join("flake.lock"),
+                "{\n  \"nodes\": { \"root\": {} },\n  \"root\": \"root\",\n  \"version\": 7\n}\n",
+            )?;
+            Ok(())
+        }
+    }
+
+    /// A machine that cannot lock: no `nix`, or no network.
+    struct UnavailableLock;
+
+    impl FlakeLock for UnavailableLock {
+        fn lock(&self, _workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            Err("cannot start nix to lock the project's flake".into())
+        }
+    }
+
+    fn scaffold_workspace(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        new(NewOptions {
+            path: Some(path.to_path_buf()),
+            lock: Box::new(StubLock),
+        })
+    }
+
+    fn example_skills() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/shoal-workspace/.shoal/skills")
+    }
+
     #[tokio::test]
-    async fn new_creates_only_ignored_shoal_state_and_an_empty_base_commit() {
+    async fn new_commits_a_whole_package_into_a_fresh_repository() {
         let parent = tempfile::tempdir().unwrap();
         let workspace = parent.path().join("project");
 
-        new(NewOptions {
-            path: Some(workspace.clone()),
-        })
-        .await
-        .unwrap();
+        scaffold_workspace(&workspace).unwrap();
 
         assert!(workspace.join(".shoal/logs").is_dir());
         assert!(workspace.join(".shoal/sessions").is_dir());
+        let config = read_project_config(&workspace).unwrap().0;
         assert_eq!(
-            ensure_project_config(&workspace).unwrap().defaults,
+            config.defaults,
             ShoalAgentDefaults {
                 model: "gpt-5.6-sol".into(),
-                effort: ShoalEffort::Low,
+                effort: ShoalEffort::Medium,
             }
         );
+        assert_eq!(
+            config.haskell.flake_sources.get("jev-dsl").unwrap(),
+            &[PathBuf::from("core")]
+        );
+        assert_eq!(config.haskell.source_roots, [PathBuf::from(".")]);
         let installed = std::fs::read_to_string(workspace.join(".git/info/exclude")).unwrap();
         for exclusion in tidepool_worktree::git::SHOAL_LOCAL_EXCLUDES {
             assert!(installed.lines().any(|line| line == *exclusion));
@@ -1548,19 +1594,264 @@ mod tests {
         );
         assert_eq!(
             git_stdout(&workspace, &["ls-tree", "--name-only", "HEAD"]).await,
-            ".shoal\n"
+            ".agents\n.shoal\nflake.lock\nflake.nix\n"
         );
+    }
+
+    /// The scaffolded Haskell is the repository's own, byte for byte. A copy
+    /// that drifted would compile against a different pinned revision than the
+    /// one the example workspace is checked with.
+    #[test]
+    fn the_scaffolded_haskell_is_the_repositorys_own() {
+        let workspace = tempfile::tempdir().unwrap();
+        scaffold_workspace(workspace.path()).unwrap();
+        for (relative, expected) in [
+            (
+                ".shoal/Jev/Operators.hs",
+                include_str!("../../examples/shoal-workspace/.shoal/Jev/Operators.hs"),
+            ),
+            (
+                ".shoal/AgentSpec.hs",
+                include_str!("../../.shoal/AgentSpec.hs"),
+            ),
+            (
+                ".shoal/Project/Tools.hs",
+                include_str!("../../.shoal/Project/Tools.hs"),
+            ),
+        ] {
+            assert_eq!(
+                std::fs::read_to_string(workspace.path().join(relative)).unwrap(),
+                expected,
+                "{relative}"
+            );
+        }
+        let spec = std::fs::read_to_string(workspace.path().join(".shoal/AgentSpec.hs")).unwrap();
+        assert!(spec.contains("afterTool = Just afterEachTool"), "{spec}");
+        assert!(spec.contains("Abstained"), "{spec}");
+        let tools =
+            std::fs::read_to_string(workspace.path().join(".shoal/Project/Tools.hs")).unwrap();
+        assert!(tools.contains("shell :: Shell.ShellTools mode"), "{tools}");
+        assert!(tools.contains("triageSearch"), "{tools}");
+    }
+
+    /// Every workspace skill lands, and the links a client discovers them
+    /// through resolve inside the new workspace.
+    #[test]
+    fn every_workspace_skill_lands_and_its_client_link_resolves() {
+        let workspace = tempfile::tempdir().unwrap();
+        scaffold_workspace(workspace.path()).unwrap();
+        let source = example_skills();
+        let mut checked = 0;
+        for skill in std::fs::read_dir(&source).unwrap() {
+            let skill = skill.unwrap().path();
+            let name = skill.file_name().unwrap();
+            let link = workspace.path().join(".agents/skills").join(name);
+            assert_eq!(
+                std::fs::read_link(&link).unwrap(),
+                Path::new("../../.shoal/skills").join(name),
+                "{}",
+                link.display()
+            );
+            assert_eq!(
+                std::fs::canonicalize(&link).unwrap(),
+                std::fs::canonicalize(workspace.path().join(".shoal/skills").join(name)).unwrap()
+            );
+            for file in walk_files(&skill) {
+                let relative = file.strip_prefix(&source).unwrap();
+                assert_eq!(
+                    std::fs::read_to_string(workspace.path().join(".shoal/skills").join(relative))
+                        .unwrap(),
+                    std::fs::read_to_string(&file).unwrap(),
+                    "{}",
+                    relative.display()
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 11,
+            "expected the shipped skill set, saw {checked}"
+        );
+    }
+
+    fn walk_files(directory: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                found.extend(walk_files(&path));
+            } else {
+                found.push(path);
+            }
+        }
+        found
+    }
+
+    /// An existing repository keeps its files and its history: the package is
+    /// written and staged, and the project makes the commit.
+    #[test]
+    fn new_stages_but_does_not_commit_inside_an_existing_repository() {
+        let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
+        repo.writer()
+            .commit_file("src/main.rs", "fn main() {}\n", "seed")
+            .unwrap();
+        let head = repo.path().to_path_buf();
+
+        scaffold_workspace(&head).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(head.join("src/main.rs")).unwrap(),
+            "fn main() {}\n"
+        );
+        let git = tidepool_worktree::GitCli::new();
+        let committed = git
+            .try_run(&head, &["ls-tree", "--name-only", "HEAD"])
+            .unwrap();
+        assert_eq!(committed.trimmed(), "src");
+        let staged = git
+            .try_run(&head, &["diff", "--cached", "--name-only"])
+            .unwrap();
+        for path in [
+            ".shoal/config.toml",
+            ".shoal/AgentSpec.hs",
+            ".shoal/Project/Tools.hs",
+            ".shoal/Jev/Operators.hs",
+            ".agents/skills/shoal-jev",
+            "flake.nix",
+            "flake.lock",
+        ] {
+            assert!(
+                staged.lines().contains(&path),
+                "{path} in {}",
+                staged.trimmed()
+            );
+        }
+    }
+
+    #[test]
+    fn new_refuses_a_directory_that_is_already_a_shoal_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        scaffold_workspace(workspace.path()).unwrap();
+        let before = std::fs::read_to_string(workspace.path().join(SHOAL_CONFIG)).unwrap();
+        std::fs::remove_dir_all(workspace.path().join(".agents")).unwrap();
+
+        let error = scaffold_workspace(workspace.path()).unwrap_err();
+
+        assert!(
+            matches!(
+                error.downcast_ref::<NewRefusal>(),
+                Some(NewRefusal::AlreadyAWorkspace(_))
+            ),
+            "{error}"
+        );
+        assert!(error.to_string().contains(SHOAL_CONFIG), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join(SHOAL_CONFIG)).unwrap(),
+            before
+        );
+        assert!(!workspace.path().join(".agents").exists());
+    }
+
+    #[test]
+    fn new_refuses_a_nonempty_directory_that_git_does_not_own() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("owned.txt"), "user data").unwrap();
+
+        let error = scaffold_workspace(workspace.path()).unwrap_err();
+
+        assert!(
+            matches!(
+                error.downcast_ref::<NewRefusal>(),
+                Some(NewRefusal::NotARepositoryRoot(_))
+            ),
+            "{error}"
+        );
+        assert!(!workspace.path().join(".git").exists());
+        assert!(!workspace.path().join(".shoal").exists());
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("owned.txt")).unwrap(),
+            "user data"
+        );
+    }
+
+    /// A project that brought its own flake keeps it exactly, and is told the
+    /// one input and the one command that install Jev.
+    #[test]
+    fn an_existing_flake_is_left_alone_and_its_project_is_told_what_to_add() {
+        let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
+        let authored = "{ outputs = _: { }; }\n";
+        repo.writer()
+            .commit_file("flake.nix", authored, "seed")
+            .unwrap();
+
+        let report = scaffold::scaffold(repo.path(), &StubLock).unwrap();
+
+        assert!(matches!(report.jev, scaffold::JevPin::ProjectFlake));
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("flake.nix")).unwrap(),
+            authored
+        );
+        assert!(!repo.path().join("flake.lock").exists());
+        let hint = scaffold::project_flake_hint(repo.path());
+        assert!(hint.contains("inputs.jev-dsl"), "{hint}");
+        assert!(hint.contains("nix flake lock"), "{hint}");
+        assert!(hint.contains("Jev is unavailable"), "{hint}");
+        assert!(repo.path().join(".shoal/config.toml").is_file());
+    }
+
+    /// Locking is the one step that needs a network. When it fails the pin is
+    /// still on disk and the message says what finishing it takes.
+    #[test]
+    fn a_failed_lock_keeps_the_pin_and_says_jev_is_unavailable() {
+        let workspace = tempfile::tempdir().unwrap();
+
+        let report = scaffold::scaffold(workspace.path(), &UnavailableLock).unwrap();
+
+        let scaffold::JevPin::Unlocked(error) = &report.jev else {
+            panic!("an unavailable lock leaves the flake unlocked");
+        };
+        let message = scaffold::unlocked_message(workspace.path(), error.as_ref());
+        assert!(message.contains("Jev is unavailable"), "{message}");
+        assert!(message.contains("nix flake lock"), "{message}");
+        let flake = std::fs::read_to_string(workspace.path().join("flake.nix")).unwrap();
+        assert!(flake.contains("inputs.jev-dsl"), "{flake}");
+        assert!(!workspace.path().join("flake.lock").exists());
+        assert!(workspace.path().join(".shoal/config.toml").is_file());
+    }
+
+    /// `shoal init` starts a run; it does not create a workspace. A project
+    /// that has none is told which command does, and keeps its directory.
+    #[tokio::test]
+    async fn init_without_a_workspace_names_the_command_that_creates_one() {
+        let workspace = tempfile::tempdir().unwrap();
+
+        let error = init(InitOptions {
+            workspace: Some(workspace.path().to_path_buf()),
+            session: None,
+            recreate: false,
+            no_attach: true,
+            model: None,
+            effort: None,
+        })
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                error.downcast_ref::<ConfigError>(),
+                Some(ConfigError::NoWorkspace { .. })
+            ),
+            "{error}"
+        );
+        assert!(error.to_string().contains("shoal new"), "{error}");
+        assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]
     async fn local_excludes_work_in_linked_worktrees() {
         let parent = tempfile::tempdir().unwrap();
         let workspace = parent.path().join("project");
-        new(NewOptions {
-            path: Some(workspace.clone()),
-        })
-        .await
-        .unwrap();
+        scaffold_workspace(&workspace).unwrap();
         let linked = parent.path().join("linked");
         git_stdout(
             &workspace,
@@ -1582,25 +1873,6 @@ mod tests {
         assert!(linked.join(".git").is_file());
     }
 
-    #[tokio::test]
-    async fn new_refuses_to_claim_a_nonempty_directory() {
-        let workspace = tempfile::tempdir().unwrap();
-        std::fs::write(workspace.path().join("owned.txt"), "user data").unwrap();
-
-        let error = new(NewOptions {
-            path: Some(workspace.path().into()),
-        })
-        .await
-        .unwrap_err();
-
-        assert!(error.to_string().contains("requires an empty directory"));
-        assert!(!workspace.path().join(".git").exists());
-        assert_eq!(
-            std::fs::read_to_string(workspace.path().join("owned.txt")).unwrap(),
-            "user data"
-        );
-    }
-
     #[test]
     fn project_names_become_valid_stable_session_names() {
         assert_eq!(
@@ -1616,7 +1888,8 @@ mod tests {
     #[test]
     fn project_agent_defaults_are_explicit_and_cli_overrides_are_per_field() {
         let workspace = tempfile::tempdir().unwrap();
-        let configured = ensure_project_config(workspace.path()).unwrap().defaults;
+        scaffold_workspace(workspace.path()).unwrap();
+        let configured = read_project_config(workspace.path()).unwrap().0.defaults;
         assert!(workspace.path().join(SHOAL_CONFIG).is_file());
 
         assert_eq!(
@@ -1645,7 +1918,7 @@ mod tests {
         let base = "[defaults]\nmodel = \"test-model\"\neffort = \"low\"\n";
         std::fs::write(&path, base).unwrap();
         assert_eq!(
-            ensure_project_config(workspace.path()).unwrap().research,
+            read_project_config(workspace.path()).unwrap().0.research,
             tidepool_actor::ResearchPolicy::default()
         );
         std::fs::write(
@@ -1654,7 +1927,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            ensure_project_config(workspace.path()).unwrap().research,
+            read_project_config(workspace.path()).unwrap().0.research,
             tidepool_actor::ResearchPolicy {
                 maximum_depth: 3,
                 maximum_active_children: Some(2),
@@ -1667,7 +1940,7 @@ mod tests {
             "depth = 3",
         ] {
             std::fs::write(&path, format!("{base}\n[research]\n{invalid}\n")).unwrap();
-            assert!(ensure_project_config(workspace.path())
+            assert!(read_project_config(workspace.path())
                 .unwrap_err()
                 .to_string()
                 .contains("invalid Shoal configuration"));
@@ -1692,20 +1965,21 @@ mod tests {
             .unwrap();
         };
         write_config("tracked");
-        assert!(ensure_project_config(repo.path())
+        assert!(read_project_config(repo.path())
             .unwrap_err()
             .to_string()
             .contains("contains tracked source"));
         write_config("scratch");
         assert_eq!(
-            ensure_project_config(repo.path())
+            read_project_config(repo.path())
                 .unwrap()
+                .0
                 .launch
                 .source_exclude,
             ["scratch"]
         );
         write_config("../outside");
-        assert!(ensure_project_config(repo.path()).is_err());
+        assert!(read_project_config(repo.path()).is_err());
     }
 
     #[test]
@@ -1714,7 +1988,7 @@ mod tests {
         let path = workspace.path().join(SHOAL_CONFIG);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "[defaults]\nmodel = \"\"\neffort = \"low\"\n").unwrap();
-        let error = ensure_project_config(workspace.path()).unwrap_err();
+        let error = read_project_config(workspace.path()).unwrap_err();
         assert!(error.to_string().contains("selects an empty model"));
 
         std::fs::write(
@@ -1722,7 +1996,7 @@ mod tests {
             "[defaults]\nmodel = \"test-model\"\neffort = \"furious\"\n",
         )
         .unwrap();
-        let error = ensure_project_config(workspace.path()).unwrap_err();
+        let error = read_project_config(workspace.path()).unwrap_err();
         assert!(error.to_string().contains("invalid Shoal configuration"));
     }
 
@@ -1925,7 +2199,8 @@ mod tests {
         drop(guard);
 
         let written = std::fs::read_to_string(&path).unwrap();
-        let line: serde_json::Value = serde_json::from_str(written.lines().next().unwrap()).unwrap();
+        let line: serde_json::Value =
+            serde_json::from_str(written.lines().next().unwrap()).unwrap();
         assert_eq!(line["target"], CONTENT_TARGET);
         assert_eq!(line["spans"][0]["run_id"], "run-flush");
     }

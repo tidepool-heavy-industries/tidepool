@@ -90,9 +90,11 @@ enum Command {
         #[arg(long)]
         actors: bool,
     },
-    /// Initialize an empty Git repository for Shoal orchestration.
+    /// Scaffold a Shoal workspace package: configuration, the Jev pin, a
+    /// starter agent spec, and the workspace skills.
     New {
-        /// Directory to initialize. Defaults to the current directory.
+        /// Empty directory, or the root of an existing Git repository.
+        /// Defaults to the current directory.
         path: Option<PathBuf>,
     },
     /// Check workspace customization without launching native workers or providers.
@@ -277,7 +279,10 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             })
             .await
         }
-        Command::New { path } => tidepool::shoal::new(tidepool::shoal::NewOptions { path }).await,
+        Command::New { path } => tidepool::shoal::new(tidepool::shoal::NewOptions {
+            path,
+            ..Default::default()
+        }),
         Command::Check { workspace, recipes } => tidepool::shoal::check(workspace, recipes).await,
         Command::Init {
             workspace,

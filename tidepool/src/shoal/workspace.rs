@@ -348,6 +348,12 @@ pub(super) fn checkout_source_roots(workspace: &Path, config: &HaskellConfig) ->
         .collect()
 }
 
+/// The `nix` executable Shoal invokes. One resolution, shared by the fetch
+/// that materializes a run's pinned inputs and by the lock `shoal new` writes.
+pub(super) fn nix_bin() -> PathBuf {
+    std::env::var_os(super::ENV_NIX_BIN).map_or_else(|| PathBuf::from("nix"), PathBuf::from)
+}
+
 /// Fetch the project's flake inputs and return the Haskell source directories
 /// `[haskell.flake_sources]` selects from them, ordered by input name.
 ///
@@ -387,8 +393,7 @@ fn flake_source_roots(workspace: &Path, config: &HaskellConfig) -> Result<Vec<Pa
         .into());
     }
     let base = workspace.join(".shoal");
-    let nix =
-        std::env::var_os(super::ENV_NIX_BIN).map_or_else(|| PathBuf::from("nix"), PathBuf::from);
+    let nix = nix_bin();
     let mut command = std::process::Command::new(&nix);
     command
         .arg("--extra-experimental-features")
@@ -397,6 +402,11 @@ fn flake_source_roots(workspace: &Path, config: &HaskellConfig) -> Result<Vec<Pa
     if !config.flake_overrides.is_empty() {
         command.arg("--no-write-lock-file");
     }
+    // `--override-input <name> path:<dir>` copies the whole directory into
+    // the nix store (a `path:` URL, chosen deliberately elsewhere so the
+    // workspace itself is handed to nix as a bare directory rather than
+    // copying build trees). Fine for a small sibling checkout; slow for one
+    // with build artifacts alongside it.
     for (input, path) in &config.flake_overrides {
         let directory = base.join(path).canonicalize()?;
         let directory = directory.to_str().ok_or_else(|| {

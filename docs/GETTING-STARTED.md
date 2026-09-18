@@ -33,7 +33,8 @@ nix build .#shoal
 ./result/bin/shoal --help
 ```
 
-The first build compiles GHC-side and Rust-side components and takes a while.
+There is no public binary cache yet, so the first build compiles everything,
+GHC-side and Rust-side, and takes a good while.
 The wrapper selects the matched extractor and client itself; it does not replace
 `codex` on your `PATH`.
 
