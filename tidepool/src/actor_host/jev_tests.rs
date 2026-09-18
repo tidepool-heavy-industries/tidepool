@@ -822,6 +822,19 @@ async fn a_childs_watchdog_slot_escalates_to_its_parent() {
     // actor address — observed the same way `sendMessage` is proven to reach
     // its target elsewhere in this suite (see
     // `notification_admission_and_poll_preserve_typed_request_bindings`).
+    // A judgment otherwise leaves almost no trace: capture what the child's
+    // slot and its Jev call actually wrote to the trace, over the same
+    // `#[tokio::test]` current-thread runtime the escalation itself runs on
+    // (`tracing::subscriber::set_default`'s thread-local scope covers every
+    // task polled on this thread for as long as the guard is held).
+    let trace_log = tempfile::NamedTempFile::new().unwrap();
+    let trace_subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(std::sync::Mutex::new(trace_log.reopen().unwrap()))
+        .finish();
+    let trace_guard = tracing::subscriber::set_default(trace_subscriber);
+
     let escalate_policy = escalate_child.policy.clone();
     let escalate_call = tokio::spawn(async move {
         tokio::time::timeout(
@@ -856,6 +869,34 @@ async fn a_childs_watchdog_slot_escalates_to_its_parent() {
     assert!(
         escalated_result.contains("escalated to your parent"),
         "{escalated_result}"
+    );
+
+    drop(trace_guard);
+    let traced = std::fs::read_to_string(trace_log.path()).unwrap();
+    // The Jev call the slot made: a compact `info` line, packet and answer
+    // bodies only at `debug`.
+    assert!(traced.contains("jev call packet"), "{traced}");
+    assert!(traced.contains("jev call answer"), "{traced}");
+    assert!(traced.contains("jev call answered"), "{traced}");
+    // The slot invocation itself, with the outcome's reason text — the
+    // likelihood-bearing judgment a live run could not previously answer for.
+    assert!(traced.contains("after-tool slot invoked"), "{traced}");
+    assert!(traced.contains("after_tool_slot"), "{traced}");
+    assert!(traced.contains("out_of_scope"), "{traced}");
+    assert!(traced.contains("escalated to your parent"), "{traced}");
+    // The escalation itself: which child, and who it told.
+    assert!(traced.contains("actor notification sent"), "{traced}");
+    assert!(traced.contains("from_slot=true"), "{traced}");
+    assert!(
+        traced.contains(&escalate_child.actor.identity().id.0.to_string()),
+        "the child's own actor id is traced: {traced}"
+    );
+    // The generic baseline: every effect the slot's body made (not only the
+    // Jev call) gets a settlement line, real time, because a slot
+    // invocation has no later cell receipt to batch one into.
+    assert!(
+        traced.matches("effect settled").count() >= 2,
+        "actorContext and notify effects settle too, not only jev: {traced}"
     );
 
     // (c) a nudge heuristic trips on the OTHER labelled child: its own result
