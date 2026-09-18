@@ -174,7 +174,21 @@ impl From<Effort> for ShoalEffort {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// The default `Result`-returning `main` prints an unhandled `Err` via
+/// `Debug`, not `Display` — so every `runtime_error`/`ConfigError`/`BinError`
+/// message this binary hand-crafts for an operator (including
+/// `ConfigError::NoWorkspace`'s and `BinError`'s Display impls) was silently
+/// discarded in favor of the derived struct/enum dump (`NoWorkspace {
+/// workspace: "...", config: "..." }`, `Os { code: 2, kind: NotFound, ... }`)
+/// that operators actually saw. Print the Display text ourselves instead.
+fn main() {
+    if let Err(error) = try_main() {
+        eprintln!("Error: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     let command = Cli::parse().command;
     if let Command::MountHelper = command {
         return Ok(());

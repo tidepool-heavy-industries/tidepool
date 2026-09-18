@@ -221,17 +221,36 @@ fn existing_roots(leaf: &str) -> Vec<PathBuf> {
 }
 
 /// Walk up from `start` to the filesystem root, returning the nearest ancestor
-/// that contains a `.tidepool/` directory (git-style project discovery). `None`
-/// if launched outside any project.
-pub fn find_project_root(start: &Path) -> Option<PathBuf> {
+/// that contains a directory named `marker` (git-style project discovery,
+/// generalized over the marker name so a caller with its own project-root
+/// concept — e.g. Shoal's `.shoal/`-rooted workspace, distinct from this
+/// crate's own `.tidepool/` project state — does not need to duplicate the
+/// walk). `None` if no ancestor carries it.
+pub fn find_root_with_marker(start: &Path, marker: &str) -> Option<PathBuf> {
     let mut cur = Some(start);
     while let Some(dir) = cur {
-        if dir.join(".tidepool").is_dir() {
+        if dir.join(marker).is_dir() {
             return Some(dir.to_path_buf());
         }
         cur = dir.parent();
     }
     None
+}
+
+/// Walk up from `start` to the filesystem root, returning the nearest ancestor
+/// that contains a `.tidepool/` directory (git-style project discovery). `None`
+/// if launched outside any project.
+///
+/// This is this crate's OWN `.tidepool/` project marker (used by
+/// [`load_secrets`]'s walk-up) — not a general-purpose "find my project root"
+/// for every marker directory. A caller with a different marker (Shoal's
+/// `.shoal/`, say) must call [`find_root_with_marker`] with its own marker
+/// name rather than reuse this: reusing it silently matches on the WRONG
+/// marker, and a `.tidepool/` that legitimately exists somewhere up the tree
+/// (e.g. the user-global legacy `~/.tidepool`) then wins over the caller's
+/// own, closer, correctly-named directory.
+pub fn find_project_root(start: &Path) -> Option<PathBuf> {
+    find_root_with_marker(start, ".tidepool")
 }
 
 /// What [`load_secrets`] did — callers log with their own subscriber
@@ -348,5 +367,33 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::remove_dir_all(&orphan);
+    }
+
+    /// A caller with its own marker (Shoal's `.shoal/`) must not be confused
+    /// by an unrelated `.tidepool/` sitting closer to `start` — regression
+    /// coverage for the bug where `shoal init`'s cwd-detection reused
+    /// [`find_project_root`] (this crate's OWN `.tidepool/` marker) and so
+    /// silently resolved a nested Shoal workspace to whichever ancestor
+    /// (often `$HOME`) happened to carry a `.tidepool/` first, ignoring a
+    /// `.shoal/` that was actually closer.
+    #[test]
+    fn find_root_with_marker_is_not_confused_by_a_different_markers_directory() {
+        let tmp = std::env::temp_dir().join(format!("tp-paths-marker-{}", std::process::id()));
+        let nested = tmp.join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        // `tmp` (an ancestor of `nested`) carries the OTHER marker, closer
+        // than nothing at all would be — a `.shoal` search must not match it.
+        std::fs::create_dir_all(tmp.join(".tidepool")).unwrap();
+        assert_eq!(find_root_with_marker(&nested, ".tidepool"), Some(tmp.clone()));
+        assert_eq!(find_root_with_marker(&nested, ".shoal"), None);
+
+        // Once `nested` itself carries the marker being searched for, that
+        // nearer directory wins over the farther `.tidepool` ancestor —
+        // exactly the "workspace directly under an unrelated parent
+        // workspace" case `shoal init` must get right.
+        std::fs::create_dir_all(nested.join(".shoal")).unwrap();
+        assert_eq!(find_root_with_marker(&nested, ".shoal"), Some(nested.clone()));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

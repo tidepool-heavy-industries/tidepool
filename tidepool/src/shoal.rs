@@ -268,7 +268,16 @@ pub fn new(options: NewOptions) -> Result<(), Box<dyn std::error::Error>> {
 pub enum ConfigError {
     /// The path carries no Shoal workspace. Every command but `shoal new`
     /// stops here rather than inventing one.
-    NoWorkspace { workspace: PathBuf, config: PathBuf },
+    NoWorkspace {
+        workspace: PathBuf,
+        config: PathBuf,
+        /// The launch `cwd`, set only when `workspace` was auto-detected (no
+        /// `--workspace` given) by walking up from it — so a failure caused
+        /// by the walk settling on an unrelated ancestor names both the
+        /// directory the operator was actually in and the one Shoal decided
+        /// to use, instead of only the latter.
+        searched_from: Option<PathBuf>,
+    },
     /// A workspace whose configuration is unreadable, or describes a run that
     /// cannot start.
     Rejected(Box<dyn std::error::Error>),
@@ -277,12 +286,29 @@ pub enum ConfigError {
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NoWorkspace { workspace, config } => write!(
-                formatter,
-                "no Shoal workspace in {}: there is no {}. `shoal new` creates one.",
-                workspace.display(),
-                config.display()
-            ),
+            Self::NoWorkspace {
+                workspace,
+                config,
+                searched_from,
+            } => {
+                write!(
+                    formatter,
+                    "no Shoal workspace in {}: there is no {}. `shoal new` creates one.",
+                    workspace.display(),
+                    config.display()
+                )?;
+                if let Some(cwd) = searched_from {
+                    if cwd != workspace {
+                        write!(
+                            formatter,
+                            " (searched upward from {} and settled on {}; pass --workspace to target a specific directory)",
+                            cwd.display(),
+                            workspace.display()
+                        )?;
+                    }
+                }
+                Ok(())
+            }
             Self::Rejected(error) => error.fmt(formatter),
         }
     }
@@ -307,6 +333,12 @@ fn read_project_config(workspace: &Path) -> Result<(ShoalConfig, String), Config
             return Err(ConfigError::NoWorkspace {
                 workspace: workspace.to_path_buf(),
                 config: path,
+                // This call site only ever sees an already-resolved
+                // workspace path (explicit `--workspace`, or one
+                // `resolve_workspace` has already vetted); the cwd-detection
+                // gap this field exists for is caught earlier, in
+                // `resolve_workspace` itself.
+                searched_from: None,
             })
         }
         Err(error) => {
@@ -421,14 +453,39 @@ pub async fn check(
 }
 
 fn resolve_workspace(workspace: Option<PathBuf>) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let workspace = match workspace {
-        Some(workspace) => workspace,
+    // Auto-detection (no `--workspace`) walks up from the launch cwd looking
+    // for a Shoal workspace: `.shoal/`, NOT `tidepool_runtime::paths`'s own
+    // `.tidepool/` project marker. Reusing that marker previously meant a
+    // workspace nested under an unrelated ancestor that happens to carry a
+    // `.tidepool/` (the user-global legacy `~/.tidepool`, in particular)
+    // silently resolved to that ancestor instead of the intended cwd, with no
+    // `.shoal/` in sight — see `find_root_with_marker`'s doc comment.
+    let (workspace, searched_from) = match workspace {
+        Some(workspace) => (workspace, None),
         None => {
             let cwd = std::env::current_dir()?;
-            tidepool_runtime::paths::find_project_root(&cwd).unwrap_or(cwd)
+            let root = tidepool_runtime::paths::find_root_with_marker(&cwd, ".shoal")
+                .unwrap_or_else(|| cwd.clone());
+            (root, Some(cwd))
         }
     };
-    Ok(std::fs::canonicalize(workspace)?)
+    let workspace = std::fs::canonicalize(workspace)?;
+    // Auto-detection can still climb to an ancestor `.shoal/` that carries no
+    // `config.toml` (a directory that predates `shoal new`, or a `.shoal/`
+    // left by something else entirely). Catch that here, with full context,
+    // rather than letting a downstream `read_project_config` raise the same
+    // error without knowing a walk-up ever happened.
+    if let Some(cwd) = searched_from {
+        let config = workspace.join(SHOAL_CONFIG);
+        if !config.is_file() {
+            return Err(Box::new(ConfigError::NoWorkspace {
+                workspace,
+                config,
+                searched_from: Some(cwd),
+            }));
+        }
+    }
+    Ok(workspace)
 }
 
 pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
@@ -507,7 +564,25 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
 
     let executable = retain_run_executable(&run_root, "shoal", &std::env::current_exe()?)?;
     let compiler_socket = run_root.join("compiler.sock");
-    let compiler_source = tidepool_extract_cmd::resolve_bin()?.path.canonicalize()?;
+    // `tidepool_extract_cmd::resolve_bin()` intentionally returns the bare
+    // `tidepool-extract` name when unset, deferring the PATH search to the
+    // OS at actual spawn time (see its doc comment). This call site needs an
+    // absolute path up front, to retain (copy) the binary into the run root
+    // below — so it goes through `locate_extract`, the existing mechanism
+    // that already does that PATH search and produces a typed, actionable
+    // error (also used by `preflight`'s `bind_extract_endpoint` check below)
+    // instead of reinventing (and, as `.canonicalize()` did here, getting
+    // wrong: canonicalize resolves a bare name against the CWD, never PATH,
+    // so it failed even when `tidepool-extract` WAS on PATH).
+    let compiler_source = tidepool_runtime::toolchain::locate_extract()
+        .map_err(|error| {
+            runtime_error(format!(
+                "{error} Shoal also needs TIDEPOOL_EXTRACT_WORKER for the Haskell compiler \
+                 worker. Launch through `just shoal-console` or `just shoal-init` (or the \
+                 packaged `nix build .#shoal` wrapper), which set both."
+            ))
+        })?
+        .path;
     let worker_source = tidepool_extract_cmd::frontend::worker_for_frontend(&compiler_source);
     let compiler_bin = retain_run_executable(&run_root, "tidepool-extract", &compiler_source)?;
     let mut selected_environment = std::collections::BTreeMap::from([(
@@ -1863,6 +1938,61 @@ mod tests {
         );
         assert!(error.to_string().contains("shoal new"), "{error}");
         assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 0);
+    }
+
+    /// `resolve_workspace`'s cwd auto-detection (no `--workspace`) must look
+    /// for `.shoal/`, not `tidepool_runtime::paths`'s own `.tidepool/`
+    /// project marker — regression coverage for `shoal init` silently
+    /// resolving to an unrelated ancestor (often `$HOME`, via its
+    /// `~/.tidepool` legacy config dir) instead of the intended cwd. Mutates
+    /// the process cwd, which is safe only because nextest gives each test
+    /// its own process.
+    #[test]
+    fn resolve_workspace_auto_detection_uses_the_shoal_marker_not_tidepool() {
+        let original_cwd = std::env::current_dir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        // An unrelated `.tidepool/` sits closer (at `root`) than any `.shoal/`
+        // — the OLD (`.tidepool`-marker) walk would have stopped here.
+        std::fs::create_dir_all(root.path().join(".tidepool")).unwrap();
+        let workspace = root.path().join("project");
+        scaffold_workspace(&workspace).unwrap();
+        let nested = workspace.join("deep").join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let restore = |dir: &Path| std::env::set_current_dir(dir).unwrap();
+
+        // From the workspace root itself: resolves to the workspace, not the
+        // `.tidepool`-carrying `root` two levels up.
+        std::env::set_current_dir(&workspace).unwrap();
+        assert_eq!(
+            resolve_workspace(None).unwrap(),
+            std::fs::canonicalize(&workspace).unwrap()
+        );
+
+        // From a subdirectory: walks up to find the workspace's `.shoal/`,
+        // same as git-style discovery — not past it to `root`.
+        std::env::set_current_dir(&nested).unwrap();
+        assert_eq!(
+            resolve_workspace(None).unwrap(),
+            std::fs::canonicalize(&workspace).unwrap()
+        );
+
+        // From `root` itself: no `.shoal/` anywhere in reach (its own
+        // `.tidepool/` is irrelevant to Shoal), so resolution stays at `root`
+        // and fails with a self-explaining error rather than silently
+        // inventing a workspace.
+        std::env::set_current_dir(root.path()).unwrap();
+        let error = resolve_workspace(None).unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<ConfigError>(),
+                Some(ConfigError::NoWorkspace { .. })
+            ),
+            "{error}"
+        );
+        assert!(error.to_string().contains("shoal new"), "{error}");
+
+        restore(&original_cwd);
     }
 
     #[tokio::test]
