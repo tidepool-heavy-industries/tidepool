@@ -5,6 +5,36 @@ and services them from Rust. Haskell is the high-level language for authored
 programs and agent harnesses; Rust owns runtime mechanics such as processes,
 providers, scheduling, resources, persistence, and argument parsing.
 
+## Start here
+
+1. Read this file, then `docs/GLOSSARY.md` for names. `README.md` says what the
+   system is for; `plans/README.md` lists what is being designed right now.
+2. Before editing a subsystem, read the nearest nested `AGENTS.md` or
+   `CLAUDE.md`. They state that crate's boundaries and invariants.
+3. Build and test through the `justfile`, which enters the Nix shell itself:
+   `just test-lib <crate> 'test(<name>)'` runs one test and compiles only what
+   it needs. `just verify` is the full gate and takes about two hours; do not
+   run it as a routine check.
+4. To run it, follow `docs/GETTING-STARTED.md`: `shoal new` writes a workspace,
+   `shoal init` starts a run, and in this repository `just shoal-init` builds
+   the checkout first. To see the system from the model's side, read
+   `prompts/shoal/base.md` and the skills under
+   `examples/shoal-workspace/.shoal/skills/`, and drive a session from a
+   terminal with `shoal proxy` (`docs/SHOAL-OPERATOR-HTTP.md`).
+
+Most changes touch one of three layers, and it helps to know which:
+
+- **The engine**: GHC Core to Cranelift, the heap and collector, the effect
+  machine (`tidepool-repr`, `tidepool-heap`, `tidepool-codegen`). Correctness
+  is differential against GHC. Changes here are rare and carefully tested.
+- **The resident runtime**: sessions, the workbench, actors, effects and their
+  handlers (`tidepool-runtime`, `tidepool-actor`, `tidepool-protocol`,
+  `tidepool-handlers`). Most feature work lands here.
+- **The model-facing surface**: the Haskell library in `haskell/lib`, the
+  shipped prompts in `prompts/shoal/`, and the skills. Text here is read by a
+  model on every turn, so it is held to the glossary and kept short. A Haskell
+  snippet in a prompt or skill must be one that has been compiled.
+
 ## How to work here
 
 - Prefer one clear owner and one implementation for each mechanism. Before
@@ -63,17 +93,15 @@ providers, scheduling, resources, persistence, and argument parsing.
 - `tidepool-model`, `tidepool-model-output`, `tidepool-agent`: provider-neutral
   conversations, model-output parsing, and coding-agent backends.
 - `tidepool-actor`: actor identity, lifecycle, mailbox, and resident workbench.
-- `tidepool-repl` (currently not a Cargo workspace member — its `Cargo.toml`
-  was removed under the in-progress STG cutover; source remains on disk) and
-  `tidepool`: user-facing REPL and Shoal runtimes.
+- `tidepool`: the public facade and the Shoal runtime and binaries.
 - `tidepool-worktree`: managed coding checkouts and repository observation.
 
 Read the nearest nested `AGENTS.md` before editing a subsystem. Use
 `docs/GLOSSARY.md` for names, especially model-facing text. `plans/README.md`
 lists active designs; plan documents are temporary scaffolding, not standing
-architecture. Root and nested `AGENTS.md` files are the contributor guidance;
-legacy `CLAUDE.md` files may be stale and are not a prerequisite for starting work.
-Verify architectural claims against owning source and production consumers.
+architecture. The root `CLAUDE.md` carries the same rules in brief with the
+cross-crate mechanism index; a nested `CLAUDE.md` governs its own crate. Verify
+architectural claims against owning source and production consumers.
 Keep detailed design references out of always-loaded instructions.
 
 ## Shared-context development
@@ -105,6 +133,12 @@ Keep detailed design references out of always-loaded instructions.
 |---|---|
 | Shoal CLI, actor launch composition, prompt assembly | `tidepool/src/shoal.rs`, `tidepool/src/actor_host.rs`, `tidepool/src/actor_host/prompt_catalog.rs` |
 | Shipped resident instructions and shared API guide | `prompts/shoal/` |
+| Workspace skills, and the links a client loads them through | `examples/shoal-workspace/.shoal/skills/`, `.agents/skills/` |
+| Agent spec discovery, reload, and the after-tool slot | `tidepool-actor/src/{agent_spec,reload_spec_tool,after_tool}.rs`; Haskell side in `haskell/lib/Tidepool/Agent/Contract.hs` |
+| Comparing two declared tool surfaces | `tidepool-tool/src/surface.rs` |
+| Source layers: capture, typecheck, atomic publication, drift | `tidepool/src/shoal/source.rs` |
+| Jev operators | the pinned `jev-dsl` flake input, fronted per workspace by `.shoal/Jev/Operators.hs` |
+| Run trace (structured JSONL under `.shoal/logs/`) | `tidepool/src/shoal.rs` |
 | Actor identity, lifecycle, mailbox, resident actor workbench | `tidepool-actor` |
 | Backend protocols, interactive launch and active-update transport | `tidepool-agent/src/backend/codex/` |
 | Process mount boundary and durable inbox | `tidepool-node/src/process_boundary.rs`, `tidepool-node/src/inbox.rs` |

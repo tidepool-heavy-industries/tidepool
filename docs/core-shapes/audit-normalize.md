@@ -37,7 +37,7 @@ The pass is bounded (max 100 fixpoint iterations) and idempotent. Each rule is c
 - **Rewrites to:** `PrimOp { args: [Lit(_)..] }` — peels the boxing on each arg
 - **Assumes:** All-or-nothing — any non-boxed arg cancels the rewrite for the whole call.
 - **Mode:** `always-on`
-- **Test coverage:** `tidepool-repr/src/normalize.rs::tests::prim_args_unboxed_when_all_boxed`, `prim_args_not_unboxed_when_mixed`; semantics-preservation proptest in `tidepool-testing/tests/normalize_semantics.rs`
+- **Test coverage:** `tidepool-repr/src/normalize.rs::tests::prim_args_unboxed_when_all_boxed`, `prim_args_not_unboxed_when_mixed`
 - **Notes:** Heuristic conservatism — `PrimOp { args: [Lit, Var] }` could often be unboxed via local let-binding inspection but isn't, since the all-or-nothing rule is provably semantics-preserving and easy to audit.
 
 ## resolve_var fuel
@@ -60,7 +60,7 @@ The pass is bounded (max 100 fixpoint iterations) and idempotent. Each rule is c
 ## Properties
 
 - **Idempotent:** `normalize(normalize(x)) == normalize(x)` — proptest `prop_idempotence`.
-- **Semantics-preserving:** `eval(x) == eval(normalize(x))` for closed expressions — proptest `tidepool-testing/tests/normalize_semantics.rs::prop_normalize_preserves_semantics` (PR #294).
+- **Semantics-preserving:** `eval(x) == eval(normalize(x))` for closed expressions — formerly a proptest against the reference interpreter, removed with it; exercised now by the GHC differential corpus.
 - **Bounded:** Always terminates within the fixpoint limit — proptest `prop_bounded_iteration`.
 
 ## Coverage gaps

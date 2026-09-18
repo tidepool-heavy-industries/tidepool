@@ -1,3 +1,5 @@
+Required Notice: Copyright Inanna Malick (https://github.com/tidepool-heavy-industries/tidepool)
+
 # PolyForm Noncommercial License 1.0.0
 
 <https://polyformproject.org/licenses/noncommercial/1.0.0>

@@ -4,6 +4,9 @@ Tidepool compiles Haskell effect programs into Cranelift-backed state machines
 driven from Rust. Haskell describes the computation; Rust executes it and
 services its effects.
 
+`AGENTS.md` is the contributor guide: how to work here, the language boundary,
+and where to start. This file is the short form, with the mechanism index.
+
 ## Repository rules
 
 - Cross-crate mechanisms have one implementation. Check the mechanism index
@@ -39,7 +42,6 @@ services its effects.
 | `tidepool-protocol` | Source schema for effect and error definitions |
 | `tidepool-mcp` | MCP server library and generated Haskell effect surface |
 | `tidepool-handlers` | Concrete effect handlers |
-| `tidepool-repl` | Stateful GHCi-style MCP server (currently not a Cargo workspace member — its `Cargo.toml` was removed under the in-progress STG cutover; directory and source remain on disk) |
 | `tidepool-harness` | Resident authored-harness runtime and driver |
 | `tidepool-agent` | Typed coding-agent backend boundary |
 | `tidepool-worktree` | Managed coding checkouts, repository observation, and journal |
@@ -77,6 +79,10 @@ Small support crates have short local charters describing their exact scope.
 | authored Haskell concurrency | `Tidepool.Async` |
 | operator forms, gates, and steering | `OperatorGate::present_form` and `Tidepool.Form` |
 | operator listen queue and socket | `tidepool-harness::listen` |
+| agent spec discovery, reload, and the after-tool slot | `tidepool-actor::{agent_spec, reload_spec_tool, after_tool}` |
+| declared tool surface comparison | `tidepool-tool::surface` |
+| source layers: capture, typecheck, publication, drift | `tidepool::shoal::source` |
+| Jev operators | pinned `jev-dsl` flake input; never vendored |
 | effect and error definitions | `tidepool-protocol` and unmigrated definitions in `tidepool-mcp/src/effect_defs.rs` |
 
 ## Build and test

@@ -38,6 +38,15 @@ One module per effect under `src/handlers/`:
 - `src/handlers/worktree.rs` — `WorktreeReq`/`WorktreeHandler` over
   `tidepool_worktree::create`/`registry`/`git`; also not in the
   `base_effects!` default row — see `tidepool-worktree/CLAUDE.md`
+- `src/handlers/journal.rs`, `journal_version.rs` — the durable append-only
+  run journal, one JSON line per `record`, and its wire-format version stamp on
+  `tidepool_repr::version_ladder`
+- `src/handlers/source.rs` — reloading a run's own workspace Haskell source.
+  The capture, typecheck and publication live in `tidepool::shoal::source`;
+  this module is the effect's request decoding and wire conversion
+- `src/handlers/jev.rs` — the Jev HTTP client behind the `Jev` effect
+- `src/handlers/agent.rs` — the agent effect's request handling
+- `src/handlers/entropy.rs` — process-local randomness for authored programs
 
 `src/lib.rs` keeps the stack assembly (`HandlerConfig`, `handler_for!`,
 `build_base_stack`, `build_minimal_stack`, `base_decls`) and

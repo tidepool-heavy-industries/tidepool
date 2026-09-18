@@ -31,10 +31,9 @@ Tidepool transforms `freer-simple` continuations into a state machine:
 
 ## Surfaces
 
-The compiled effect machine is used by three live entry points:
+The compiled effect machine is used by two live entry points:
 
 - **One-shot eval (`tidepool`)** compiles and runs a fresh program.
-- **Resident REPL (`tidepool-repl`)** preserves declarations, bindings, and the heap across calls.
 - **Shoal (`tidepool` actor host)** runs persistent typed actors. Haskell describes requests, watches, actor records, and context unfolds; Rust owns actor identity, scheduling, providers, worktrees, authority, and persistence.
 
 Each entry point services only the effects installed by its Rust interpreter. Declaring an effect in Haskell does not install runtime authority or a handler.
@@ -61,7 +60,6 @@ The `tidepool` library crate re-exports the crates a Rust consumer needs to comp
 - **`tidepool-bridge-effects`**: Single-source bridged-record types (e.g. `Proc`, `Hit`, `Commit`) shared by handlers and test mocks.
 - **`tidepool-handlers`**: Central effect-request handler arms — the Rust side of the effect contract (`<Eff>Req` matches, sandbox enforcement).
 - **`tidepool-mcp`**: MCP server library, generic over effect handlers.
-- **`tidepool-repl`**: GHCi-style resident-session MCP server (declarations and heap persist across calls). See "Surfaces" above for what it actually services.
 - **`tidepool-worktree`**: Managed git worktrees, a durable registry, and typed repository events. It includes one typed merge-and-abort primitive; conflict resolution and other git workflow remain authored policy.
 - **`tidepool-agent`**: Typed headless coding subagents — the containment boundary and the one place a coding backend (Codex today) is named. Spawns a subagent into a managed `tidepool-worktree` worktree.
 - **`tidepool`**: Facade crate + the `tidepool` MCP server binary. See "Facade surface" above.

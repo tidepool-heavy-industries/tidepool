@@ -179,7 +179,7 @@ The JIT includes safepoints where long-running or infinite computations can be i
 
 **Properties** (all proptest-verified):
 - Idempotent (`prop_idempotence` in `normalize.rs`).
-- Semantics-preserving (`prop_normalize_preserves_semantics` in `tidepool-testing/tests/normalize_semantics.rs`, PR #294).
+- Semantics-preserving by construction of each rule. The proptest that checked it ran against the reference interpreter and went with it; the GHC differential corpus is what exercises it now.
 - Bounded fixpoint (`prop_bounded_iteration`).
 
 **Known limitation**: Rule 2 effectiveness on real cross-mode programs is unverified — see [Coverage Gaps](#coverage-gaps).

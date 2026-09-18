@@ -17,6 +17,7 @@
 target/
 /target-*/
 dist-newstyle/
+dist-newstyle-*/
 # scripts/bench-turn.sh results (timestamped, machine-specific — not committed)
 bench/
 *.hi
