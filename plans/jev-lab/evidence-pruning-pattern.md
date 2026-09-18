@@ -58,6 +58,78 @@ actor's turns and cannot reach another's. Reading turns is a distinct
 it must hold it. A background actor therefore gets an intentional snapshot rather
 than silently borrowing a conversation.
 
+## Relevance is several judgments, not one
+
+*"'Relevant' alone collapses distinctions I need."* The judgments worth asking
+separately, because different consumers want different ones:
+
+- establishes the mechanism;
+- supplies a constraint;
+- contradicts the proposed explanation;
+- duplicates evidence already retained;
+- merely shares vocabulary.
+
+**A contradiction must survive a low causal-relevance score.** Something that
+contradicts the working explanation is exactly what a single relevance ranking
+discards, and exactly what the caller most needs. Treat it as its own question
+with its own retention rule, not as a high score on the ranking.
+
+## Judged irrelevant is not the same as never examined
+
+The distinction that makes a pruned view auditable. A pruned result carries the
+source revision, the selected ranges, a compact index of omissions, **the question
+used to select**, and a handle to the original — and it separates material the
+selector considered and rejected from material it never looked at.
+
+Consequential omissions get named: tests located but bodies unread, source outside
+the allowed scope, omitted log regions, checks not run. Silence is fine about the
+irrelevant universe of things nobody asked for. It is not fine about a requested
+obligation or a candidate the program deliberately skipped.
+
+A bad omission should be noticeable *before* acting, not after a wrong conclusion
+becomes a failed repair: enough about what was cut that a reader can ask why the
+compatibility test is missing. A later contradiction should expand the view
+automatically.
+
+## When pruning should refuse
+
+Refusing is a legitimate answer, returned with an explanation and the original:
+
+- the requested conclusion depends on interactions across most of the material;
+- capture was incomplete;
+- the selector cannot identify what may safely be omitted.
+
+And short, clear output bypasses pruning entirely rather than being ranked.
+
+## Observation and judgment, where the line is actually hard
+
+The worked case: *"four callers are affected."* Four compiler-reported locations
+is an observation. Four distinct callers requiring changes is an interpretation —
+locations may repeat, a shared definition may be the real fault, or one apparent
+caller may be generated code. The return should read: the compiler reported these
+four locations; the widget judges that these two require caller changes. That
+keeps the boundary inspectable instead of collapsing it into a count.
+
+## The failure mode to design against
+
+Not a shallow risk. The way this goes wrong after three good weeks:
+
+> The library becomes convincingly wrong in a coordinated way. Several tools reuse
+> the same evidence selector. It drops a category of inconvenient evidence.
+> Downstream widgets agree because they all see the same reduced world. We mistake
+> agreement for independent confirmation, while successful cases encourage broader
+> automatic action. Meanwhile source revisions and active handlers drift apart, and
+> nobody can quickly establish which policy made the decision.
+
+The counterweights are structural, not statistical: original evidence kept
+reachable, omissions made visible, revision identity on every decision, narrow
+contracts, and occasional direct inspection. **Raising a confidence threshold is
+not a counterweight** — a shared selector that is confidently wrong scores well.
+
+The practical rule that follows: two widgets agreeing is not evidence if they
+share a selector. Anything that treats agreement as confirmation must be able to
+show the selectors differed.
+
 ## The guards
 
 These are what keep it from becoming a machine that hides evidence.
