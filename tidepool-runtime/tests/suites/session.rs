@@ -7,6 +7,8 @@ mod prepared_reply_types;
 mod prepared_residency;
 #[path = "../prepared_turn.rs"]
 mod prepared_turn;
+#[path = "../prepared_unit_codegen_cost.rs"]
+mod prepared_unit_codegen_cost;
 #[path = "../run_llm_turn_sidecar.rs"]
 mod run_llm_turn_sidecar;
 #[path = "../session_decl_accum.rs"]

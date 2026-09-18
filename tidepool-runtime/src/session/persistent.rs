@@ -240,6 +240,16 @@ impl ResidentEngine {
         }
     }
 
+    /// Lifetime `(functions, code_bytes)` of Cranelift work this engine's
+    /// installs caused; `None` on the Core route.
+    #[must_use]
+    pub fn codegen_totals(&self) -> Option<(u64, u64)> {
+        match self {
+            Self::Core(_) => None,
+            Self::Prepared(engine) => Some(engine.codegen_totals()),
+        }
+    }
+
     /// Prepared old-space bytes as of the last successful between-turn
     /// collection; `None` on the Core route.
     #[must_use]
@@ -607,6 +617,13 @@ impl PersistentSession {
         self.machine.as_ref()?.residency()
     }
 
+    /// Lifetime `(functions, code_bytes)` of Cranelift work this session's
+    /// installs caused; `None` on the Core route or before bootstrap.
+    #[must_use]
+    pub fn codegen_totals(&self) -> Option<(u64, u64)> {
+        self.machine.as_ref()?.codegen_totals()
+    }
+
     /// Prepared old-space bytes as of the last successful between-turn
     /// collection; `None` on the Core route or before the machine has
     /// bootstrapped.
@@ -735,7 +752,30 @@ impl PersistentSession {
     /// binding instead of recompiling a body it does not have.
     #[must_use]
     pub fn prepared_retained(&self) -> Vec<(SymbolIdentity, u64)> {
-        self.binding_index.prepared_retained()
+        let mut retained = self.binding_index.prepared_retained();
+        if let Some(ResidentEngine::Prepared(engine)) = self.machine.as_ref() {
+            // Package tops the machine already carries compiled code for.
+            // A value binding wins any collision: the value plane's own
+            // generation is what a turn that reads `x` must link against.
+            let bound: std::collections::BTreeSet<&SymbolIdentity> =
+                retained.iter().map(|(identity, _)| identity).collect();
+            let exported: Vec<(SymbolIdentity, u64)> = engine
+                .code_export_retentions()
+                .filter(|(identity, _)| !bound.contains(identity))
+                .collect();
+            retained.extend(exported);
+        }
+        retained
+    }
+
+    /// How many package tops this session's machine can hand a later turn
+    /// instead of recompiling; `None` on the Core route or before bootstrap.
+    #[must_use]
+    pub fn code_export_count(&self) -> Option<usize> {
+        match self.machine.as_ref()? {
+            ResidentEngine::Core(_) => None,
+            ResidentEngine::Prepared(engine) => Some(engine.code_export_count()),
+        }
     }
 
     /// Move the resident machine out onto a [`MachineLease`] (to run a turn on

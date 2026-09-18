@@ -1562,6 +1562,22 @@ where
         self.core.residency()
     }
 
+    /// Lifetime `(functions, code_bytes)` of Cranelift work this session's
+    /// prepared installs have caused; `None` on the Core route or before
+    /// the machine has bootstrapped. Diff across a turn to attribute that
+    /// turn's code generation.
+    #[must_use]
+    pub fn codegen_totals(&self) -> Option<(u64, u64)> {
+        self.core.codegen_totals()
+    }
+
+    /// How many package tops this session's machine can hand a later turn
+    /// instead of recompiling; `None` on the Core route or before bootstrap.
+    #[must_use]
+    pub fn code_export_count(&self) -> Option<usize> {
+        self.core.code_export_count()
+    }
+
     /// Prepared old-space bytes as of the last successful between-turn
     /// collection, or `None` on the Core route or before the machine has
     /// bootstrapped.

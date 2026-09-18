@@ -62,7 +62,7 @@ use crate::machine_state::{MachineDisposition, MachineFailure, MachineState};
 use crate::old_space::OldSpace;
 use crate::prepared_control::CallStatus;
 use crate::resource_ledger::{
-    ContinuationFrame, FrameCell, FrameEvidence, PreparedFrameEvidence, ResourceLedger,
+    ContinuationFrame, FrameCell, FrameEvidence, HandleClass, PreparedFrameEvidence, ResourceLedger,
 };
 use crate::suspension::{ContinuationId, ParkKind, RealmId, ValueHandle};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -158,6 +158,10 @@ pub struct ResidencyCounts {
     pub block_words: usize,
     pub persistent_roots: usize,
     pub handles: usize,
+    /// Installed-program tops retained as machine-lifetime export roots
+    /// ([`PreparedMachine::retain_export_top`]), counted apart from
+    /// `handles` so neither class hides the other's growth.
+    pub code_exports: usize,
     pub parked: usize,
     pub stack_map_links: usize,
     pub static_regions: usize,
@@ -213,6 +217,16 @@ pub struct PreparedMachine<'code> {
     /// Interned/shared headers are never inserted (no single owner), same as
     /// `owned_headers` itself.
     header_owners: HashMap<usize, ProgramId>,
+    /// Lifetime totals of the Cranelift work this machine's installs caused:
+    /// functions `define_function` accepted, and the machine-code bytes they
+    /// occupy. Never decremented, including by retirement -- they answer
+    /// "how much code generation did this machine pay for", not "how much
+    /// code is live now" (which is `residency()`'s job). A session that
+    /// reuses an earlier unit's code shows a small delta per install; one
+    /// that regenerates the same reachable program shows the same large
+    /// delta every time.
+    compiled_functions: u64,
+    compiled_code_bytes: u64,
     /// Each installed program's static region paired with its owner, in
     /// install order, for [`Self::mark_live_programs`]'s
     /// `observation_heap_and_starts` call: a `Traced::Static { region }` hit is an
@@ -433,7 +447,22 @@ impl<'code> PreparedMachine<'code> {
             interner: super::DescriptorInterner::default(),
             header_owners: HashMap::new(),
             region_owners: Vec::new(),
+            compiled_functions: 0,
+            compiled_code_bytes: 0,
         })
+    }
+
+    /// Lifetime Cranelift functions compiled for this machine's installs.
+    /// See the `compiled_functions` field doc for how to read a delta.
+    #[must_use]
+    pub fn compiled_functions(&self) -> u64 {
+        self.compiled_functions
+    }
+
+    /// Lifetime machine-code bytes generated for this machine's installs.
+    #[must_use]
+    pub fn compiled_code_bytes(&self) -> u64 {
+        self.compiled_code_bytes
     }
 
     /// Compile a program to install next on this machine: against this
@@ -537,6 +566,8 @@ impl<'code> PreparedMachine<'code> {
             .iter()
             .map(|callable| callable.header)
             .collect();
+        self.compiled_functions += compiled.pipeline.functions_defined();
+        self.compiled_code_bytes += compiled.pipeline.code_bytes();
         let id = ProgramId(self.next_program);
         self.next_program += 1;
         self.header_owners
@@ -967,6 +998,7 @@ impl<'code> PreparedMachine<'code> {
                 .sum(),
             persistent_roots: self.machine.persistent_roots_count(),
             handles: self.handle_count(),
+            code_exports: self.handles.counts().code_exports,
             parked: self.parked_count(),
             stack_map_links: self.machine.stack_map_link_count(),
             static_regions: self.statics.len(),
@@ -1889,6 +1921,29 @@ impl<'code> PreparedMachine<'code> {
         id: ProgramId,
         value: ValueId,
     ) -> Result<PreparedHandle, ExecutionError> {
+        self.retain_top_as(id, value, HandleClass::Value)
+    }
+
+    /// [`Self::retain_top`] for a machine-lifetime export root: the same
+    /// handle, accounted as [`HandleClass::CodeExport`] and therefore
+    /// outside `residency().handles` and outside every scope closure. Use it
+    /// for a top a later program will import rather than compile its own
+    /// copy of; the root is what keeps the defining program, and so its
+    /// code, alive for those importers.
+    pub fn retain_export_top(
+        &mut self,
+        id: ProgramId,
+        value: ValueId,
+    ) -> Result<PreparedHandle, ExecutionError> {
+        self.retain_top_as(id, value, HandleClass::CodeExport)
+    }
+
+    fn retain_top_as(
+        &mut self,
+        id: ProgramId,
+        value: ValueId,
+        class: HandleClass,
+    ) -> Result<PreparedHandle, ExecutionError> {
         self.ensure_handle_access()?;
         let compiled = self
             .programs
@@ -1942,9 +1997,15 @@ impl<'code> PreparedMachine<'code> {
             }
             return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
         };
-        let raw = self
-            .handles
-            .insert_handle(root, RealmId::ROOT, RuntimeRep::LiftedRef);
+        let raw = match class {
+            HandleClass::Value => {
+                self.handles
+                    .insert_handle(root, RealmId::ROOT, RuntimeRep::LiftedRef)
+            }
+            HandleClass::CodeExport => self
+                .handles
+                .insert_export_handle(root, RuntimeRep::LiftedRef),
+        };
         Ok(PreparedHandle {
             raw,
             rep: RuntimeRep::LiftedRef,

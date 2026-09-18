@@ -44,6 +44,7 @@ tidepool-effect.workspace = true
 tidepool-mcp.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "test-util"] }
 serial_test.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 filetime = "0.2"
 glob.workspace = true
 

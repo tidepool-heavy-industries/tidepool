@@ -91,6 +91,23 @@ pub(crate) struct HandleEntry {
     pub(crate) slot: RootSlot,
     pub(crate) realm: RealmId,
     pub(crate) rep: RuntimeRep,
+    pub(crate) class: HandleClass,
+}
+
+/// What a rooted handle is accounted as. Both classes share one handle
+/// namespace -- an import slot is published from either without knowing
+/// which -- but they are counted apart, so a value-handle leak cannot hide
+/// behind a machine's growing export set and a runaway export set cannot
+/// hide behind a turn's handles.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HandleClass {
+    /// A turn's own retained value: bound, delivered, parked or observed.
+    /// Released when its owner releases it, or with its realm.
+    Value,
+    /// An installed program's top, retained for the machine's lifetime so
+    /// later programs can import it instead of compiling their own copy.
+    /// Owned by no realm's lifetime and never taken by scope closure.
+    CodeExport,
 }
 
 /// The one machine-local owner for opaque rooted-value identities.
@@ -101,6 +118,12 @@ pub(crate) struct HandleEntry {
 #[derive(Default)]
 pub(crate) struct RootHandleLedger {
     handles: HashMap<u64, HandleEntry>,
+    /// Live [`HandleClass::CodeExport`] entries in `handles`, maintained by
+    /// every insert and removal. A machine carries thousands of exports and
+    /// only a handful of value handles, and the counts are read on the
+    /// rooting receipt at every park and close; neither class is counted by
+    /// walking the map.
+    code_exports: usize,
 }
 
 impl RootHandleLedger {
@@ -111,8 +134,14 @@ impl RootHandleLedger {
         self.handles.try_reserve(additional)
     }
 
+    /// Live [`HandleClass::Value`] handles.
     pub(crate) fn len(&self) -> usize {
-        self.handles.len()
+        self.handles.len() - self.code_exports
+    }
+
+    /// Live [`HandleClass::CodeExport`] handles.
+    pub(crate) fn code_exports(&self) -> usize {
+        self.code_exports
     }
 
     pub(crate) fn insert(
@@ -120,12 +149,22 @@ impl RootHandleLedger {
         slot: RootSlot,
         realm: RealmId,
         rep: RuntimeRep,
+        class: HandleClass,
     ) -> ValueHandle {
         let handle = ValueHandle::fresh();
-        let replaced = self
-            .handles
-            .insert(handle.0, HandleEntry { slot, realm, rep });
+        let replaced = self.handles.insert(
+            handle.0,
+            HandleEntry {
+                slot,
+                realm,
+                rep,
+                class,
+            },
+        );
         debug_assert!(replaced.is_none(), "fresh value handle must not collide");
+        if class == HandleClass::CodeExport {
+            self.code_exports += 1;
+        }
         handle
     }
 
@@ -134,7 +173,11 @@ impl RootHandleLedger {
     }
 
     pub(crate) fn take(&mut self, handle: ValueHandle) -> Option<HandleEntry> {
-        self.handles.remove(&handle.0)
+        let entry = self.handles.remove(&handle.0)?;
+        if entry.class == HandleClass::CodeExport {
+            self.code_exports -= 1;
+        }
+        Some(entry)
     }
 
     pub(crate) fn rehome(&mut self, handle: ValueHandle, realm: RealmId) -> bool {
@@ -156,11 +199,17 @@ impl RootHandleLedger {
         self.handles.values().map(|entry| entry.slot)
     }
 
+    /// Every [`HandleClass::Value`] handle owned by `realm`. A code export
+    /// outlives every realm -- it is the machine's own root on installed
+    /// code, not a turn's lease -- so scope closure never takes one, and the
+    /// export count this removal path never touches stays correct.
     pub(crate) fn take_realm(&mut self, realm: RealmId) -> Vec<HandleEntry> {
         let ids: Vec<_> = self
             .handles
             .iter()
-            .filter_map(|(&id, entry)| (entry.realm == realm).then_some(id))
+            .filter_map(|(&id, entry)| {
+                (entry.realm == realm && entry.class == HandleClass::Value).then_some(id)
+            })
             .collect();
         ids.into_iter()
             .filter_map(|id| self.handles.remove(&id))
@@ -179,6 +228,10 @@ pub(crate) struct ClosedRealm {
 pub struct ResourceCounts {
     pub parked_continuations: usize,
     pub value_handles: usize,
+    /// Installed-program tops retained for later programs to import
+    /// ([`HandleClass::CodeExport`]). Counted apart from `value_handles` so
+    /// neither class can mask the other's growth.
+    pub code_exports: usize,
     pub cancellation_scopes: usize,
 }
 
@@ -196,6 +249,7 @@ impl ResourceLedger {
         ResourceCounts {
             parked_continuations: self.continuations.len(),
             value_handles: self.handles.len(),
+            code_exports: self.handles.code_exports(),
             cancellation_scopes: self.cancel_flags.len(),
         }
     }
@@ -289,7 +343,14 @@ impl ResourceLedger {
         realm: RealmId,
         rep: RuntimeRep,
     ) -> ValueHandle {
-        self.handles.insert(slot, realm, rep)
+        self.handles.insert(slot, realm, rep, HandleClass::Value)
+    }
+
+    /// [`Self::insert_handle`] for a machine-lifetime export root: same
+    /// handle namespace, counted as [`HandleClass::CodeExport`].
+    pub(crate) fn insert_export_handle(&mut self, slot: RootSlot, rep: RuntimeRep) -> ValueHandle {
+        self.handles
+            .insert(slot, RealmId::ROOT, rep, HandleClass::CodeExport)
     }
 
     pub(crate) fn handle(&self, handle: ValueHandle) -> Option<&HandleEntry> {

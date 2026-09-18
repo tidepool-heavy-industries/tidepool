@@ -30,6 +30,7 @@ mod admission;
 mod apply;
 #[cfg(test)]
 mod caller_result_tests;
+pub(crate) mod compile_phases;
 mod emit;
 mod image;
 #[cfg(test)]
@@ -405,14 +406,19 @@ impl CompiledProgram {
         {
             return Err(Unsupported::Target(target.clone()).into());
         }
+        let mut clock = compile_phases::PhaseClock::start();
+        let mut phases = compile_phases::CompilePhases::default();
         admit_program(linked)?;
+        phases.admit = clock.lap();
         use crate::entry_abi::{EnvironmentMode, NativeAbiProfile};
         use cranelift_codegen::isa::CallConv;
         use cranelift_module::Linkage;
         use tidepool_repr::execution_schema::{HeapRhs, RuntimeRep};
         let plan = plan::ProgramPlan::new(linked.prepared(), interner, existing_bytes)?;
         let profile = NativeAbiProfile::new(plan.program.envelope().target.clone(), 0)?;
+        phases.plan = clock.lap();
         let statics = image::build_static_image(&plan)?;
+        phases.static_image = clock.lap();
         let mut pipeline = CodegenPipeline::new(
             &[
                 (
@@ -602,6 +608,7 @@ impl CompiledProgram {
             .chain(text_search::host_functions())
             .collect::<Vec<_>>(),
         )?;
+        phases.pipeline_init = clock.lap();
         #[cfg(test)]
         {
             pipeline.emitted_ir = Some(BTreeMap::new());
@@ -815,6 +822,7 @@ impl CompiledProgram {
             }
         }
         let dispatchers = apply::declare_dispatchers(&plan, &profile, &mut pipeline)?;
+        phases.declare = clock.lap();
         let callables = apply::emit_dispatchers(
             &plan,
             &dispatchers,
@@ -829,6 +837,7 @@ impl CompiledProgram {
             prepared_unresolved_call,
             &mut pipeline,
         )?;
+        phases.emit_dispatchers = clock.lap();
         // Every function address has been declared, including recursive peers.
         for (&id, instances) in &functions {
             if plan.thunks.contains_key(&id) {
@@ -850,6 +859,7 @@ impl CompiledProgram {
                 )?;
             }
         }
+        phases.emit_functions = clock.lap();
         for (&id, &body) in &thunk_bodies {
             emit::emit_thunk_body(
                 &plan,
@@ -864,6 +874,7 @@ impl CompiledProgram {
                 &mut pipeline,
             )?;
         }
+        phases.emit_thunks = clock.lap();
         let thunk_entries = plan
             .thunks
             .iter()
@@ -898,6 +909,7 @@ impl CompiledProgram {
             prepared_recorded_failure,
             write_barrier,
         )?;
+        phases.emit_enter = clock.lap();
         let force_adapter =
             adapter::emit_force_adapter(&mut pipeline, "prepared_force_adapter", prepared_enter)?;
         let mut entries = BTreeMap::new();
@@ -933,7 +945,9 @@ impl CompiledProgram {
                 },
             );
         }
+        phases.emit_adapters = clock.lap();
         pipeline.finalize()?;
+        phases.finalize = clock.lap();
         let mut descriptors = plan.constructors.clone();
         descriptors.push(Arc::clone(&plan.boxed_array));
         descriptors.push(Arc::clone(&plan.mut_var));
@@ -1052,6 +1066,20 @@ impl CompiledProgram {
                     .ok_or(CompileError::MissingRepresentation(id))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
+        phases.descriptors = clock.lap();
+        compile_phases::record(
+            &phases,
+            &compile_phases::CompileScale {
+                plan_functions: plan.functions.len(),
+                plan_thunks: plan.thunks.len(),
+                tops: plan.top_slots.len(),
+                constructors: plan.program.constructors().len(),
+                imports: plan.import_slots.len(),
+                functions_defined: pipeline.functions_defined(),
+                blocks_emitted: pipeline.blocks_emitted(),
+                code_bytes: pipeline.code_bytes(),
+            },
+        );
         Ok(Self {
             pipeline,
             entries,
