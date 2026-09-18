@@ -70,10 +70,16 @@ impl ResolvedSpec {
     pub(crate) fn describe(&self) -> String {
         let entry = self.entry.as_deref().unwrap_or("(none)");
         match &self.file {
+            // The file is read from a published revision deep in the run's
+            // cache. A reader edits the copy in their own source roots, so the
+            // name they know is shown; `file` keeps the path that was read.
             Some(file) => format!(
                 "rule={} entry={entry} file={}",
                 self.rule.label(),
-                file.display()
+                file.file_name().map_or_else(
+                    || file.display().to_string(),
+                    |name| name.to_string_lossy().into_owned()
+                )
             ),
             None => format!(
                 "rule={} entry={entry} searched={}",

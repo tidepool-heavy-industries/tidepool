@@ -525,6 +525,17 @@ fn failure_layer_output_hint(layer: Option<WorkbenchFailureLayer>) -> String {
 /// still known to be post-commit (its doc: the response was already handed
 /// to the machine before this failed), so it defaults to `Effect` rather
 /// than staying unclassified.
+/// A reload receipt leads with where it ended and how long it took. The
+/// lines beneath say how far it got; a reader deciding what to do next should
+/// not have to read them to learn the outcome.
+fn reload_receipt(outcome: &str, started: std::time::Instant, lines: Vec<String>) -> String {
+    format!(
+        "outcome: {outcome} ({:.1}s)\n{}",
+        started.elapsed().as_secs_f64(),
+        lines.join("\n")
+    )
+}
+
 fn resident_actor_failure_layer(
     error: &ResidentActorWorkbenchError,
 ) -> Option<WorkbenchFailureLayer> {
@@ -4080,6 +4091,7 @@ where
                 .to_string();
         };
         let resolved = active.resolved.clone();
+        let started = std::time::Instant::now();
         let mut receipt = vec![format!("spec: {}", resolved.describe())];
 
         // The spec module was found by convention and is in no configured
@@ -4097,7 +4109,7 @@ where
             receipt.push(
                 "layer: this host installs no source layers, so nothing was republished.".into(),
             );
-            return receipt.join("\n");
+            return reload_receipt("unavailable", started, receipt);
         };
         // The layer is the one the host bound to THIS principal when the actor
         // was admitted. A reload is scoped to the actor that asked and never
@@ -4105,7 +4117,7 @@ where
         match layers.reload(tidepool_repr::PrincipalId::from(context.actor), &checked) {
             crate::SourceLayerReload::Unavailable(detail) => {
                 receipt.push(format!("layer: {detail}"));
-                return receipt.join("\n");
+                return reload_receipt("unavailable", started, receipt);
             }
             crate::SourceLayerReload::Rejected {
                 active,
@@ -4117,7 +4129,7 @@ where
                      Your edited files are on disk exactly as you wrote them, and the previous \
                      spec is still serving calls.\n{diagnostics}"
                 ));
-                return receipt.join("\n");
+                return reload_receipt("rejected", started, receipt);
             }
             crate::SourceLayerReload::Unchanged { revision } => {
                 receipt.push(format!("layer: unchanged at {revision}."));
@@ -4153,20 +4165,21 @@ where
                      still active."
                         .into(),
                 );
-                return receipt.join("\n");
+                return reload_receipt("nothing to install", started, receipt);
             }
             Err(error) => {
                 receipt.push(format!(
                     "spec: the install fragment did not compile against the new revision, so the \
-                     previous record is still active.\n{error}"
+                     previous record is still active. The layer above WAS published, so your \
+                     cells already see the edited modules.\n{error}"
                 ));
-                return receipt.join("\n");
+                return reload_receipt("spec did not compile", started, receipt);
             }
         };
 
         let Some(active) = self.compiled_tools.as_ref() else {
             receipt.push("spec: the active record vanished mid-reload; nothing was swapped.".into());
-            return receipt.join("\n");
+            return reload_receipt("not swapped", started, receipt);
         };
         let changes = tidepool_tool::surface::compare_surfaces(
             &active.declarations,
@@ -4179,7 +4192,7 @@ where
                  a changed surface takes effect at your next incarnation.\n{}",
                 tidepool_tool::surface::describe_changes(&changes)
             ));
-            return receipt.join("\n");
+            return reload_receipt("refused", started, receipt);
         }
 
         receipt.push(format!(
@@ -4193,7 +4206,7 @@ where
         self.spec_installs = install;
         self.compiled_tools = Some(candidate);
         self.after_tool.forget_failures();
-        receipt.join("\n")
+        reload_receipt("swapped", started, receipt)
     }
 
     async fn install_interactive_policy(
