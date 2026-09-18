@@ -17,6 +17,7 @@
 //! by all live execution surfaces.
 
 use crate::EffectDecl;
+use tidepool_runtime::session::{prepared_scaffold_binding, with_resume_import};
 
 /// THE single ordered source of the base effect stack (Ask excluded here — it
 /// is interposed separately, by the eval server's own turn driver and by
@@ -683,21 +684,41 @@ pub struct TurnTemplate<'a> {
     /// touched here) — `code` itself is never textually rewritten. Default
     /// `false`: every pre-existing caller's bytes are unchanged.
     pub delegate_wrap: bool,
+    /// When `true`, the rendered module reaches the prepared-STG route:
+    /// the resume imports go into the preamble via
+    /// [`tidepool_runtime::session::with_resume_import`] (the SAME public
+    /// splice `session::turn`'s own resident-turn assembly uses — found at
+    /// the identical `"default (Int"` marker this struct's own `imports`
+    /// splice already searches for, so the two compose without conflict:
+    /// whichever runs first inserts before the marker, the other still
+    /// finds it further down and inserts before that), and
+    /// [`tidepool_runtime::session::prepared_scaffold_binding`] is appended
+    /// after the primary `result` entry — the SAME scaffold
+    /// `compile_and_run` now requires (see `plans/core-engine-removal.md`'s
+    /// "The `UnsettledEntry` condition"). One implementation of the
+    /// scaffold, reused, not a second one. Only settles the PRIMARY entry
+    /// (`result`); `extra_entries` are not independently resumable under
+    /// this flag — a caller needing that scaffolds each one itself via
+    /// [`prepared_scaffold_binding_named`](tidepool_runtime::session::prepared_scaffold_binding_named).
+    /// Default `false`: every pre-existing caller's bytes are unchanged.
+    pub settled: bool,
 }
 
 impl TurnTemplate<'_> {
     pub fn render(&self) -> String {
         let mut out = String::new();
+        let preamble: std::borrow::Cow<'_, str> = if self.settled {
+            std::borrow::Cow::Owned(with_resume_import(self.preamble))
+        } else {
+            std::borrow::Cow::Borrowed(self.preamble)
+        };
 
         // Preamble contains: pragmas, module header, standard imports, default decl,
         // data declarations, type alias. User imports must go after standard imports
         // (after "import Control.Monad.Freer\n") and before "default".
         if !self.imports.is_empty() {
-            let insert_point = self
-                .preamble
-                .find("default (Int")
-                .unwrap_or(self.preamble.len());
-            out.push_str(&self.preamble[..insert_point]);
+            let insert_point = preamble.find("default (Int").unwrap_or(preamble.len());
+            out.push_str(&preamble[..insert_point]);
             // 1-based line range the emitted `import ...` lines occupy —
             // tagged with its own marker (mirrors the code marker below) so
             // `tidepool_runtime::diag::extract_user_code_ranges` can classify
@@ -722,9 +743,9 @@ impl TurnTemplate<'_> {
                     imports_start_line + imports_line_count - 1
                 ));
             }
-            out.push_str(&self.preamble[insert_point..]);
+            out.push_str(&preamble[insert_point..]);
         } else {
-            out.push_str(self.preamble);
+            out.push_str(&preamble);
         }
 
         // Marker for user code section (used by error formatting to trim preamble)
@@ -792,6 +813,10 @@ impl TurnTemplate<'_> {
             if i + 1 < self.extra_entries.len() {
                 out.push('\n');
             }
+        }
+
+        if self.settled {
+            out.push_str(&prepared_scaffold_binding("result"));
         }
 
         out
@@ -1672,5 +1697,81 @@ mod template_haskell_pin {
         let err = normalize_import_lines("Data.List (sort)\nnotamodule garbage")
             .expect_err("second line is malformed");
         assert_eq!(err.line, "notamodule garbage");
+    }
+
+    /// `settled: true` reuses `session::turn`'s own scaffold — one
+    /// implementation, not a second — and byte-verifies both halves land:
+    /// the four resume imports before the real `default (Int, Double,
+    /// Text)` marker (NOT this module's own abbreviated `PRE`'s `"default
+    /// (Int)"`: `with_resume_import` matches the marker EXACTLY, so this
+    /// test deliberately uses a preamble shaped like a real one — built via
+    /// `tidepool_mcp::build_preamble` in production — rather than `PRE`,
+    /// to actually exercise the splice instead of silently falling back to
+    /// `preamble.len()` and appending imports after every declaration,
+    /// which is not valid Haskell), and `__prepared`/`__resume`/
+    /// `__decodeValue`/`__applyEntry`/`__applyValue` after `result`.
+    #[test]
+    fn settled_true_splices_the_real_resume_scaffold() {
+        const REALISTIC_PRE: &str =
+            "module Expr where\nimport Control.Monad.Freer\ndefault (Int, Double, Text)\n";
+        let src = TurnTemplate {
+            preamble: REALISTIC_PRE,
+            effect_stack: STACK,
+            code: CODE,
+            settled: true,
+            ..Default::default()
+        }
+        .render();
+
+        // The resume imports land BEFORE the marker, not after (proves the
+        // splice found the real marker rather than falling back to the
+        // string's end).
+        let default_pos = src
+            .find("default (Int, Double, Text)")
+            .expect("marker survives");
+        let resume_import_pos = src
+            .find("import qualified Tidepool.Internal.Resume")
+            .expect("resume import present");
+        assert!(
+            resume_import_pos < default_pos,
+            "resume imports must precede the default declaration \
+             (Haskell requires imports before any other top-level \
+             declaration) — got:\n{src}"
+        );
+
+        // The four fixed-named scaffold bindings are present, and the
+        // settled line names the PRIMARY entry (`result`).
+        for needle in [
+            "__prepared = TidepoolResume.settle result\n",
+            "__resume q x = TidepoolResume.settle",
+            "__decodeValue t = ",
+            "__applyEntry f n = TidepoolResume.settle",
+            "__applyValue f x = TidepoolResume.settle",
+        ] {
+            assert!(
+                src.contains(needle),
+                "expected {needle:?} in settled output:\n{src}"
+            );
+        }
+    }
+
+    /// `settled: false` (the default) is untouched by any of the above —
+    /// byte-identical to `plain_wrapper_pin`'s pinned literal, so no
+    /// existing caller's compile-cache key moved.
+    #[test]
+    fn settled_false_is_byte_identical_to_default() {
+        let src = TurnTemplate {
+            preamble: PRE,
+            effect_stack: STACK,
+            code: CODE,
+            settled: false,
+            ..Default::default()
+        }
+        .render();
+        assert_eq!(
+            src,
+            "module Expr where\ndefault (Int)\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 6:6\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toJSON _r)\n",
+            "settled:false must stay byte-identical to plain_wrapper_pin's literal"
+        );
     }
 }
