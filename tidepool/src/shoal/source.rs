@@ -34,6 +34,17 @@
 //! `active/0` sees either the whole previous revision or the whole new one,
 //! never a mixture. No include VECTOR changes for the life of an actor — only
 //! what one path on it resolves to.
+//!
+//! Not implemented, and why: an actor's already-installed tool record is not
+//! re-derived on reload (it is a one-shot compile at actor startup; the
+//! refresh boundary is the actor's next incarnation); `shoal check --recipes`
+//! still compiles against the frozen capture only; deleting a module from a
+//! source root stops it being updated but not being importable, since the
+//! frozen capture stays on the search path beneath the active layer; and a
+//! checkout's declaration validation still runs against the forest-wide run
+//! layer rather than the checkout's own, because the session library's
+//! validation include and the resident machine are shared by the whole
+//! forest.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -236,6 +247,40 @@ impl SourceLayer {
         domain_identity: &str,
         roots: &[PathBuf],
     ) -> Result<PendingRevision> {
+        self.capture(domain_identity, roots, true)
+    }
+
+    /// What `roots` would be as a revision, without keeping it. A status or
+    /// drift read answers a question about the disk; it must not leave a
+    /// revision directory behind each time the answer changes.
+    pub(crate) fn observe_from_roots(
+        &self,
+        domain_identity: &str,
+        roots: &[PathBuf],
+    ) -> Result<SourceRevision> {
+        Ok(self.capture(domain_identity, roots, false)?.revision)
+    }
+
+    /// [`Self::observe_from_roots`] over the workspace's declared roots.
+    pub(crate) fn observe_from_workspace(
+        &self,
+        frozen: &FrozenWorkspace,
+        workspace: &Path,
+    ) -> Result<SourceRevision> {
+        let config = frozen.config()?;
+        let roots = super::workspace::resolve_source_roots(workspace, &config.haskell)?;
+        if roots.len() != frozen.captured_source_roots().len() {
+            return Err("the workspace's source-root list changed; start a new swarm".into());
+        }
+        self.observe_from_roots(frozen.identity(), &roots)
+    }
+
+    fn capture(
+        &self,
+        domain_identity: &str,
+        roots: &[PathBuf],
+        keep: bool,
+    ) -> Result<PendingRevision> {
         let pending = self
             .revisions()
             .join(format!(".pending-{}", uuid::Uuid::new_v4()));
@@ -273,7 +318,7 @@ impl SourceLayer {
         // A revision directory is named by its content, so an existing one
         // holds the same bytes; keep it and discard the fresh copy.
         let directory = self.revisions().join(&identity);
-        if directory.exists() {
+        if directory.exists() || !keep {
             std::fs::remove_dir_all(&pending)?;
         } else {
             std::fs::rename(&pending, &directory)?;
@@ -456,14 +501,19 @@ impl ShoalSourceReload {
         if let Some(checkout) = known.get(id) {
             return checkout.clone();
         }
-        let resolved = self
-            .materialize_checkout(manager, id)
-            .unwrap_or_else(|error| {
+        // Only an answer is remembered. A lookup that failed may succeed once
+        // the worktree has finished being made, and remembering the failure
+        // would leave every actor on this checkout read-only for the whole run.
+        match self.materialize_checkout(manager, id) {
+            Ok(resolved) => {
+                known.insert(id.clone(), resolved.clone());
+                resolved
+            }
+            Err(error) => {
                 tracing::warn!(worktree = %id, %error, "checkout source layer unavailable");
                 None
-            });
-        known.insert(id.clone(), resolved.clone());
-        resolved
+            }
+        }
     }
 
     fn materialize_checkout(
@@ -603,7 +653,7 @@ impl ShoalSourceReload {
                 let active = self.layer.ensure_active(&self.frozen).map_err(unreadable)?;
                 let disk = self
                     .layer
-                    .capture_from_workspace(&self.frozen, &self.workspace)
+                    .observe_from_workspace(&self.frozen, &self.workspace)
                     .map_err(unreadable)?;
                 (active, disk)
             }
@@ -614,15 +664,15 @@ impl ShoalSourceReload {
                     .map_err(unreadable)?;
                 let disk = checkout
                     .layer
-                    .capture_from_roots(self.frozen.identity(), &checkout.roots)
+                    .observe_from_roots(self.frozen.identity(), &checkout.roots)
                     .map_err(unreadable)?;
                 (active, disk)
             }
         };
-        let disk = if disk.revision().identity == active.identity {
+        let disk = if disk.identity == active.identity {
             active.clone()
         } else {
-            disk.revision().clone()
+            disk
         };
         let changed_modules = disk.changed_since(&active);
         Ok(tidepool_actor::SourceLayerDrift {
@@ -663,12 +713,12 @@ impl ShoalSourceReload {
     fn status_of(
         &self,
         active: SourceRevision,
-        disk: &PendingRevision,
+        disk: &SourceRevision,
     ) -> tidepool_bridge_effects::SrStatus {
-        let disk = if disk.revision().identity == active.identity {
+        let disk = if disk.identity == active.identity {
             active.clone()
         } else {
-            disk.revision().clone()
+            disk.clone()
         };
         tidepool_bridge_effects::SrStatus {
             active: Self::wire(&active),
@@ -713,7 +763,7 @@ impl tidepool_handlers::SourceReloadService for ShoalSourceReload {
                 let active = self.layer.ensure_active(&self.frozen).map_err(unreadable)?;
                 let disk = self
                     .layer
-                    .capture_from_workspace(&self.frozen, &self.workspace)
+                    .observe_from_workspace(&self.frozen, &self.workspace)
                     .map_err(unreadable)?;
                 Ok(self.status_of(active, &disk))
             }
@@ -724,7 +774,7 @@ impl tidepool_handlers::SourceReloadService for ShoalSourceReload {
                     .map_err(unreadable)?;
                 let disk = checkout
                     .layer
-                    .capture_from_roots(self.frozen.identity(), &checkout.roots)
+                    .observe_from_roots(self.frozen.identity(), &checkout.roots)
                     .map_err(unreadable)?;
                 Ok(self.status_of(active, &disk))
             }
