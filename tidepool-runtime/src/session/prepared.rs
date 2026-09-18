@@ -1114,12 +1114,13 @@ const MAJOR_COLLECTION_INSTALL_INTERVAL: usize = 4;
 const MAJOR_COLLECTION_GROWTH_BYTES: usize = 1024 * 1024;
 
 /// The run's parking policy, carried onto the eval thread beside the settle
-/// plan: what a suspension is parked with.
+/// plan: what a suspension is parked with. `pub` alongside
+/// [`PreparedEngine::park_suspension`], which takes it.
 #[derive(Clone, Copy)]
-pub(crate) struct ParkPolicy {
-    pub(crate) principal: PrincipalId,
-    pub(crate) effect_policy: EffectRunPolicy,
-    pub(crate) live_payload: LivePayloadPolicy,
+pub struct ParkPolicy {
+    pub principal: PrincipalId,
+    pub effect_policy: EffectRunPolicy,
+    pub live_payload: LivePayloadPolicy,
 }
 
 /// How a settled entry (the scaffold or a resume) is called: nothing is
@@ -1783,7 +1784,26 @@ impl PreparedEngine {
     /// suspension under `HandleOrError` (nothing is handled on this route
     /// yet), a request without a typed site (an ordinary handled effect, not
     /// yet answered on this route), or a site no installed program declares.
-    pub(crate) fn park_suspension(
+    ///
+    /// `pub`, not `pub(crate)`: this method is self-contained on `Self` —
+    /// every input it reads (`self.sites`/`self.verb_sites`/`self.programs`,
+    /// all populated by [`Self::bootstrap`]/[`Self::install`]) and mutates
+    /// (the machine's own park registry) belongs to the engine itself, with
+    /// no session, actor, or lexical-scope bookkeeping folded in. The rest of
+    /// the parked-continuation cycle this feeds — [`Self::resume_with_answer`],
+    /// [`Self::parked_count`], [`Self::stowed_roots_count`],
+    /// [`Self::parked_ids`], [`Self::parked_realm`], [`Self::close_realm`],
+    /// [`Self::abort_parked`] — was already `pub`; this was the one private
+    /// step in an otherwise-public cycle.
+    ///
+    /// Per `docs/continuation-parking-contract.md`'s "Consumer obligations":
+    /// the returned [`PreparedParked::id`] is the caller's to retain — this
+    /// engine enforces no capacity limit (e.g. "one outstanding turn") and no
+    /// actor-local grant or principal check; those remain the caller's, same
+    /// as on `JitEffectMachine`. A parked frame is a registered GC root until
+    /// resumed or its realm closes; an unresumed park that the caller drops
+    /// on the floor leaks a root until [`Self::close_realm`].
+    pub fn park_suspension(
         &mut self,
         program: ProgramId,
         realm: RealmId,
