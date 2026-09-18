@@ -252,15 +252,15 @@ async fn raw_bash_uses_compiled_handler_and_shared_command_owner() {
         .supply(Ok(backend.clone()));
     let receipt = first.await.unwrap().unwrap();
     assert_eq!(receipt["status"], "committed", "{receipt}");
+    let output = receipt["items"][0]["output"].as_str().unwrap();
+    assert!(output.contains("result"), "{receipt}");
+    // Every direct command tool call retains a Haskell binding, named in the
+    // result text, even when output is small and nothing was truncated.
+    let binding = receipt["items"][0]["installedBindings"][0]
+        .as_str()
+        .expect("a small raw command still installs a retained job binding");
     assert!(
-        receipt["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("result"),
-        "{receipt}"
-    );
-    assert!(
-        receipt["items"][0]["installedBindings"].is_null(),
+        output.contains(&format!("retained as {binding} :: Cmd.Job")),
         "{receipt}"
     );
     assert_eq!(
@@ -333,6 +333,10 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
         .next()
         .unwrap();
     let session = session.to_owned();
+    let binding = receipt["items"][0]["installedBindings"][0]
+        .as_str()
+        .expect("exec_command names a retained binding even with small output")
+        .to_owned();
     let first = call(
         "write_stdin",
         serde_json::json!({"session_id":session,"yield_time_ms":0}),
@@ -356,11 +360,18 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
     let read = call("read_output", serde_json::json!({"session_id":session}))
         .await
         .unwrap();
+    let read_output = read["items"][0]["output"].as_str().unwrap();
+    assert!(read_output.contains("result"), "{read}");
+    // read_output is the one direct command tool that never starts, waits, or
+    // sends anything — it still names the same retained binding the earlier
+    // exec_command call installed, not a fresh one.
+    assert_eq!(
+        read["items"][0]["installedBindings"][0].as_str().unwrap(),
+        binding,
+        "{read}"
+    );
     assert!(
-        read["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("result"),
+        read_output.contains(&format!("retained as {binding} :: Cmd.Job")),
         "{read}"
     );
     let input = call(
@@ -383,6 +394,13 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
             .unwrap()
             .contains("CommandExited 0"),
         "{finished}"
+    );
+    // The binding named across four separate direct tool calls resolves in a
+    // later cell exactly like a cell-created binding — no rerun, no refetch.
+    let resolved = committed(&campaign, &format!("Cmd.status {binding}")).await;
+    assert!(
+        resolved.to_string().contains("CommandExited 0"),
+        "{resolved}"
     );
     let foreign = call(
         "write_stdin",
@@ -522,6 +540,23 @@ async fn raw_bash_timeout_preserves_the_command_for_haskell_continuation() {
         .split_whitespace()
         .next()
         .unwrap();
+    // The notice for a backgrounded command carries both the attempt's
+    // identity (session_id) and the retained handle (Haskell binding)
+    // together, so a model can act on it without re-deriving either. Nothing
+    // here supports calling the job superseded — the notice must not guess
+    // that either.
+    let notice_binding = response["items"][0]["installedBindings"][0]
+        .as_str()
+        .unwrap();
+    assert!(
+        output.contains(&format!("session_id: {session}")),
+        "{output}"
+    );
+    assert!(
+        output.contains(&format!("{notice_binding} :: Cmd.Job")),
+        "{output}"
+    );
+    assert!(!output.contains("superseded"), "{output}");
     let direct = policy
         .dispatch_boxed(ToolInvocation {
             context: None,
@@ -545,6 +580,93 @@ async fn raw_bash_timeout_preserves_the_command_for_haskell_continuation() {
     .await;
     assert!(observed.to_string().contains("result"), "{observed}");
     assert_eq!(backend.specs.lock().len(), 1);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+/// Every direct command tool — not only the ones that happen to overflow the
+/// display budget — leaves the same retained job bound in Haskell scope, and
+/// names it in its own result text. `write_stdin` and `cancel_command` are
+/// the two tools not covered by the other command-jobs tests in this file.
+#[tokio::test]
+async fn write_stdin_and_cancel_command_each_name_the_same_retained_binding() {
+    let mut campaign = TestCampaign::start().await;
+    let backend = TestCommands::new();
+    let policy = campaign.root_installation.policy.clone();
+    let call = |name: &str, arguments| {
+        policy.dispatch_boxed(ToolInvocation {
+            context: None,
+            name: name.into(),
+            arguments: ToolArguments::Structured(arguments),
+        })
+    };
+    let running = tokio::spawn(call(
+        "exec_command",
+        serde_json::json!({"cmd":"printf literal", "stdin":true, "yield_time_ms":0}),
+    ));
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let started = running.await.unwrap().unwrap();
+    let started_binding = started["items"][0]["installedBindings"][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let session = started["items"][0]["output"]
+        .as_str()
+        .unwrap()
+        .split("session_id: ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+
+    let write = call(
+        "write_stdin",
+        serde_json::json!({"session_id":session,"chars":"","yield_time_ms":0}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(write["status"], "committed", "{write}");
+    let write_binding = write["items"][0]["installedBindings"][0].as_str().unwrap();
+    assert_eq!(write_binding, started_binding, "{write}");
+    assert!(
+        write["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("retained as {write_binding} :: Cmd.Job")),
+        "{write}"
+    );
+
+    let cancel = call(
+        "cancel_command",
+        serde_json::json!({"session_id":session,"yield_time_ms":0}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cancel["status"], "committed", "{cancel}");
+    let cancel_binding = cancel["items"][0]["installedBindings"][0]
+        .as_str()
+        .unwrap();
+    assert_eq!(cancel_binding, started_binding, "{cancel}");
+    assert!(
+        cancel["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("retained as {cancel_binding} :: Cmd.Job")),
+        "{cancel}"
+    );
+
+    // The binding named by both write_stdin and cancel_command resolves in a
+    // later cell exactly as a cell-created binding would.
+    let resolved = committed(
+        &campaign,
+        &format!("saved <- Cmd.await {started_binding}\nCmd.status {started_binding}"),
+    )
+    .await;
+    assert!(resolved.to_string().contains("Cancelled"), "{resolved}");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
