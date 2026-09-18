@@ -22,22 +22,56 @@ impl JevBackend for FakeJev {
     }
 }
 
+/// The Jev surface is pinned source, not Tidepool library: a run reaches it
+/// through a workspace whose `flake.nix` names the jev-dsl revision and whose
+/// own `Jev/Operators.hs` fixes that library's JSON type to Tidepool's. These
+/// tests select the package this repository ships, so what they compile is
+/// what a project gets — including the pin.
+pub(super) fn pinned_jev_workspace(config: &mut ActorHostConfig) {
+    let package = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../examples/shoal-workspace")
+        .canonicalize()
+        .expect("the Shoal workspace package this repository ships");
+    let authored = config.workspace.join(".shoal");
+    std::fs::create_dir_all(&authored).unwrap();
+    std::fs::write(
+        authored.join("config.toml"),
+        format!(
+            "[defaults]\nmodel = 'test-model'\n\n[haskell]\nsource_roots = ['{}']\n\n[haskell.flake_sources]\njev-dsl = ['core']\n",
+            package.join(".shoal").display()
+        ),
+    )
+    .unwrap();
+    for name in ["flake.nix", "flake.lock"] {
+        std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
+    }
+    super::test_campaign::commit_workspace(&config.workspace);
+    config.workspace_inputs = Some(
+        crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+            .expect("resolve the pinned Haskell source"),
+    );
+}
+
 async fn campaign_with(backend: Arc<FakeJev>) -> TestCampaign {
     TestCampaign::start_with_config(
         tidepool_actor::ResearchPolicy::default(),
         |admission| admission,
-        |config| config.jev = Some(backend),
+        |config| {
+            config.jev = Some(backend);
+            pinned_jev_workspace(config);
+        },
     )
     .await
 }
 
 /// No `LANGUAGE` pragma: `OverloadedLabels` is in the cell dialect
 /// (`session::dialect::EVAL_PRAGMAS`), so `#not_here` needs no ceremony.
-const CELL: &str = r#"answer <- J.ask1 (J.state (String "retry loop in fetch; timeout branch at line 12"))
+const CELL: &str = r#"answer <- J.ask1 (J.rawState (String "retry loop in fetch; timeout branch at line 12"))
   (J.choice "Which line begins the retry-timeout branch?"
      (J.alt #not_here "The branch is not in this file" (0 :: Int)
-        J..| J.many [("line-4", "if attempts > 3", 4), ("line-12", "if elapsed > timeout", 12)]))
-either (const 0) (\a -> J.handle (J.chosen a) (#not_here id J..| J.onMany (\_ n -> n))) answer"#;
+        J..| J.many #line (\(k, _, _) -> k) (\(_, w, _) -> w)
+               [("line-4", "if attempts > 3", 4), ("line-12", "if elapsed > timeout", 12)]))
+either (const 0) (\a -> J.handle a (#not_here id J..| #line (\_ (_, _, n) -> n))) answer"#;
 
 #[tokio::test]
 async fn jev_choice_round_trips_through_the_host_backend() {
@@ -79,7 +113,7 @@ async fn jev_call_failure_is_a_typed_left() {
     let result = dispatch_haskell_script(
         campaign.root_installation.policy.as_ref(),
         &CELL.replace(
-            "either (const 0) (\\a -> J.handle (J.chosen a) (#not_here id J..| J.onMany (\\_ n -> n))) answer",
+            "either (const 0) (\\a -> J.handle a (#not_here id J..| #line (\\_ (_, _, n) -> n))) answer",
             "either (const \"failed\") (const \"answered\") answer :: Text",
         ),
     )
@@ -118,9 +152,9 @@ async fn retained_packet_bindings_reach_a_later_statement() {
         // cell item's shape. If template selection ever starts needing it,
         // this test is where that shows up.
         r#"let offers = J.alt #line_4 "if attempts > 3" (4 :: Int) J..| J.alt #line_12 "if elapsed > timeout" 12
-let packet = #place := J.choice "Which line begins the retry-timeout branch?" offers :& #enough := J.noul "Is the branch visible?" :& J.Nil
-answer <- J.ask (J.state (String "retry loop in fetch")) packet
-either (const 0) (\r -> J.handle (J.chosen (J.answers r).place) (#line_4 id J..| #line_12 id)) answer"#,
+let packet = #place := J.choice "Which line begins the retry-timeout branch?" offers :& #enough := J.noul "Is the branch visible?"
+answer <- J.ask (J.rawState (String "retry loop in fetch")) packet
+either (const 0) (\r -> J.handle (J.answers r).place (#line_4 id J..| #line_12 id)) answer"#,
     )
     .await;
     assert_eq!(result["status"], "committed", "{result}");
@@ -131,25 +165,26 @@ either (const 0) (\r -> J.handle (J.chosen (J.answers r).place) (#line_4 id J..|
     campaign.hosted.await.unwrap();
 }
 
-/// The pooled packet in `doc jev` compiles, runs, and sends one request.
+/// A Jev-dense cell judges every file of a bound preview list in one packet,
+/// and an unconfigured endpoint reaches the cell as an ordinary `Left`. The
+/// per-row battery flattens to dotted wire keys, one per row, beside the
+/// top-level cell.
 #[tokio::test]
-async fn doc_jev_pool_example_sends_one_request() {
-    let doc = include_str!("../../../prompts/shoal/docs/jev.md");
-    let section = doc
-        .split("## A packet with a pool")
-        .nth(1)
-        .expect("doc jev has the pool section");
-    let cell = section
-        .split("```haskell\n")
-        .nth(1)
-        .and_then(|rest| rest.split("```").next())
-        .expect("the pool section has a Haskell cell");
+async fn a_per_row_battery_sends_one_request_with_one_question_per_row() {
     let backend = Arc::new(FakeJev {
         requests: Mutex::new(Vec::new()),
         answer: Err(JevCallFailure::Unconfigured),
     });
     let campaign = campaign_with(Arc::clone(&backend)).await;
-    let result = dispatch_haskell_script(campaign.root_installation.policy.as_ref(), cell).await;
+    let result = dispatch_haskell_script(
+        campaign.root_installation.policy.as_ref(),
+        r##"let previews = [("README.md", "# jev-dsl\ntyped packets"), ("LICENSE", "MIT")] :: [(Text, Text)]
+answer <- J.ask (J.rawState (String "choosing what to read next"))
+  ( #enough := J.noul "Is the listing enough to choose from?"
+ :& #worth_reading := J.each fst (\(_, body) -> J.noul ("Worth reading in full? " <> body)) previews )
+either (T.pack . show) (const "answered") answer :: Text"##,
+    )
+    .await;
     assert_eq!(result["status"], "committed", "{result}");
     let output = result["items"].as_array().unwrap().last().unwrap()["output"]
         .as_str()
@@ -159,54 +194,10 @@ async fn doc_jev_pool_example_sends_one_request() {
     let requests = backend.requests.lock();
     assert_eq!(requests.len(), 1);
     let questions = &requests[0]["questions"];
-    for key in ["best", "fixed"] {
-        assert!(questions.get(key).is_some(), "{key} missing: {questions}");
-    }
-    drop(requests);
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-}
-
-/// The Jev-dense cell in `doc jev` judges every file of a bound preview list
-/// in one packet. The shell cell before it is not run here: the test campaign
-/// has no command backend, so the previews are bound directly.
-#[tokio::test]
-async fn doc_jev_dense_example_sends_one_request() {
-    let doc = include_str!("../../../prompts/shoal/docs/jev.md");
-    let section = doc
-        .split("## A Jev-dense cell")
-        .nth(1)
-        .expect("doc jev has the dense-cell section");
-    let cell = section
-        .split("```haskell\n")
-        .nth(2)
-        .and_then(|rest| rest.split("```").next())
-        .expect("the dense-cell section has a second Haskell cell");
-    // The cell leads with nothing to hoist past — the dialect supplies its
-    // extensions — so the bound previews simply go first. Prepending after a
-    // presumed pragma line instead would shift `let files` above this binding,
-    // where `previews` resolves to Control.Lens's, not the list.
-    let cell = format!(
-        "let previews = [(\"README.md\", \"# jev-dsl\\ntyped packets\"), (\"LICENSE\", \"MIT\")] :: [(Text, Text)]\n{cell}"
+    assert!(
+        questions.get("enough").is_some(),
+        "enough missing: {questions}"
     );
-    let backend = Arc::new(FakeJev {
-        requests: Mutex::new(Vec::new()),
-        answer: Err(JevCallFailure::Unconfigured),
-    });
-    let campaign = campaign_with(Arc::clone(&backend)).await;
-    let result = dispatch_haskell_script(campaign.root_installation.policy.as_ref(), &cell).await;
-    assert_eq!(result["status"], "committed", "{result}");
-    let output = result["items"].as_array().unwrap().last().unwrap()["output"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert!(output.contains("no Jev endpoint is configured"), "{result}");
-    let requests = backend.requests.lock();
-    assert_eq!(requests.len(), 1);
-    let questions = &requests[0]["questions"];
-    // `enough` is a top-level cell; `worth_reading` is an `eachIn` over the
-    // pool, so each member flattens to a dotted wire key.
-    assert!(questions.get("enough").is_some(), "enough missing: {questions}");
     let per_file = questions
         .as_object()
         .unwrap()
@@ -231,17 +222,20 @@ async fn live_jev_from_a_haskell_cell() {
     let campaign = TestCampaign::start_with_config(
         tidepool_actor::ResearchPolicy::default(),
         |admission| admission,
-        |config| config.jev = None,
+        |config| {
+            config.jev = None;
+            pinned_jev_workspace(config);
+        },
     )
     .await;
     let result = dispatch_haskell_script(
         campaign.root_installation.policy.as_ref(),
-        r#"answer <- J.ask1 (J.state (String "A cat is sitting on a warm windowsill in the sun."))
+        r#"answer <- J.ask1 (J.rawState (String "A cat is sitting on a warm windowsill in the sun."))
   (J.choice "Where is the cat?"
      (J.alt #windowsill "On a windowsill" (1 :: Int)
         J..| J.alt #roof "On a roof" 2
         J..| J.alt #bed "In a bed" 3))
-either (const 0) (\a -> J.handle (J.chosen a) (#windowsill id J..| #roof id J..| #bed id)) answer"#,
+either (const 0) (\a -> J.handle a (#windowsill id J..| #roof id J..| #bed id)) answer"#,
     )
     .await;
     assert_eq!(result["status"], "committed", "{result}");

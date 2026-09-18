@@ -2,6 +2,30 @@
 
 use super::*;
 
+/// Commit everything a campaign's workspace carries before the run selects it.
+///
+/// Two mechanisms read the tree rather than the directory: `nix` resolves a
+/// project's pinned Haskell source from its tracked `flake.nix`, and a child's
+/// worktree admission refuses a dirty source repository. An installed workspace
+/// package therefore gets committed, not merely written.
+pub(super) fn commit_workspace(workspace: &std::path::Path) {
+    let git = tidepool_worktree::GitCli::new();
+    git.try_run(workspace, &["add", "--all", "--", "."])
+        .unwrap();
+    git.try_run(
+        workspace,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "-m",
+            "workspace package",
+        ],
+    )
+    .unwrap();
+}
+
 pub(super) struct TestCampaign {
     pub _repository: tidepool_worktree::testing::TestRepo,
     pub _runtime: tempfile::TempDir,

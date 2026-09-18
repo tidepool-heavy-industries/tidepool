@@ -2,9 +2,14 @@
 {-# LANGUAGE LambdaCase #-}
 
 -- | 'JsonValue' for Tidepool's own 'Tidepool.Aeson.Value.Value' (the
--- vendored aeson-shaped JSON type used by the Tidepool stdlib — there is no
--- aeson package here). Mirrors "Jev.Aeson", the upstream instance for
--- aeson's 'Value'.
+-- aeson-shaped JSON type used by the Tidepool stdlib — there is no aeson
+-- package here). Mirrors @Jev.Aeson@, jev-dsl's instance for aeson's
+-- 'Data.Aeson.Value'.
+--
+-- "Jev.Core.Json" is jev-dsl, which a workspace pins through its own
+-- @flake.nix@; this module and "Jev.Host" are the Tidepool side of that
+-- boundary — the value type and the transport. The authoring surface over
+-- them is workspace source beside the pinned input.
 module Jev.Tidepool () where
 
 import qualified Data.Map.Strict as Map

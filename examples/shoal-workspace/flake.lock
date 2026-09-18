@@ -1,0 +1,28 @@
+{
+  "nodes": {
+    "jev-dsl": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1789702195,
+        "narHash": "sha256-Mutm3ZRHy27xKDufuTm5B8D4UJa6QQTiuOw6A8xjaEM=",
+        "owner": "inanna-malick",
+        "repo": "jev-dsl",
+        "rev": "f16f1363b4d389d6e34f9d695fbd254ca0735f2e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "inanna-malick",
+        "repo": "jev-dsl",
+        "rev": "f16f1363b4d389d6e34f9d695fbd254ca0735f2e",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "jev-dsl": "jev-dsl"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

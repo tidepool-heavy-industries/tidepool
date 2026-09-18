@@ -1,17 +1,17 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | The Shoal host transport for 'Jev.Operators': one Jev request/response
--- exchanged as JSON text with the host through the generated @Jev@ effect
--- (@Tidepool.Effects.Core@, constructor
+-- | The Shoal host transport for the Jev authoring surface: one Jev
+-- request/response exchanged as JSON text with the host through the generated
+-- @Jev@ effect (@Tidepool.Effects.Core@, constructor
 -- @JevAskWith :: Text -> Jev (Either JevCallError Text)@ — request and
 -- response bodies cross the effect boundary as JSON TEXT, not 'Value';
 -- 'jevTransport' does the encode/decode at the boundary).
 --
--- 'jevTransport' is NOT re-exported from "Jev.Operators": the documented
--- path for actor code is 'Jev.Operators.ask' \/ 'Jev.Operators.ask1' \/
--- 'Jev.Operators.askWith', which already close over it. It is exported here
--- only so tests can drive the transport directly.
+-- 'jevTransport' is NOT re-exported from the authoring surface: the documented
+-- path for actor code is its @ask@ \/ @ask1@ \/ @askWith@, which already bind
+-- a session over this transport. It is exported here only so tests can drive
+-- the transport directly.
 module Jev.Host
   ( jevTransport
   , renderJevCallError
@@ -25,8 +25,8 @@ import Tidepool.Effects.Core (Jev (..), JevCallError (..))
 
 -- | Encode a Jev request 'Value' to JSON text, send it through the @Jev@
 -- effect, and decode the response body back to 'Value' — matching the
--- @Value -> m (Either Text Value)@ shape 'Jev.Core.roundTrip' and
--- 'Jev.Core.jev1' take as a transport.
+-- @Value -> m (Either Text Value)@ shape @Jev.Core.session@ binds into the
+-- session that @Jev.Core.roundTrip@ and @Jev.Core.jev1@ take.
 jevTransport :: Member Jev effs => Value -> Eff effs (Either Text Value)
 jevTransport body = do
   reply <- send (JevAskWith (encodeValue body))

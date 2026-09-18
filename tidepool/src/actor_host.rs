@@ -2076,17 +2076,30 @@ fn compile_root(
     .with_effective_role(
         tidepool_actor::EffectiveRole::root().with_research_policy(config.research_policy),
     );
-    Ok((
-        ActorWorkbenchSource::new(preamble, include)
-            .with_imports(WORKBENCH_SURFACE_MODULE)
-            .with_imports("qualified Tidepool.Actor.Record as R")
-            .with_imports("qualified Tidepool.Command as Cmd")
+    // Jev is pinned source a project opts into, not part of the Tidepool
+    // library: `Jev.Operators` reaches a run through the workspace's
+    // `[haskell.flake_sources]` and the facade beside it. A run that does not
+    // supply it gets a workbench without `J`, rather than a compile failure
+    // over a module nothing on its search path defines.
+    let jev = config
+        .workspace_inputs
+        .as_ref()
+        .is_some_and(|inputs| inputs.provides_module("Jev.Operators"));
+    let mut workbench = ActorWorkbenchSource::new(preamble, include)
+        .with_imports(WORKBENCH_SURFACE_MODULE)
+        .with_imports("qualified Tidepool.Actor.Record as R")
+        .with_imports("qualified Tidepool.Command as Cmd");
+    if jev {
+        workbench = workbench
             .with_imports("qualified Jev.Operators as J")
-            .with_imports("Jev.Operators (Cell ((:=)), Packet ((:&), Nil))")
+            .with_imports("Jev.Operators (Packet ((:=), (:&)))")
             .with_imports("qualified Jev.Core")
             .with_imports("qualified Jev.Core.Contract")
             .with_imports("qualified Jev.Core.Schema")
-            .with_imports("qualified Jev.Core.Json")
+            .with_imports("qualified Jev.Core.Json");
+    }
+    Ok((
+        workbench
             .with_imports("Tidepool.Command (bash, withMemory, Memory(..))")
             .with_imports("qualified Tidepool.Actor as Actor")
             .with_default_quasiquoters()

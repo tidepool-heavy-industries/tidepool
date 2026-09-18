@@ -225,6 +225,21 @@ impl FrozenWorkspace {
         &self.include[..self.include.len().saturating_sub(1)]
     }
 
+    /// Whether this run's captured source carries a module, wherever it came
+    /// from — an authored root or a pinned flake input.
+    ///
+    /// The Jev authoring surface is the case this exists for. It is pinned
+    /// source a project opts into through `[haskell.flake_sources]`, not part
+    /// of the Tidepool library, so the workbench offers it under `J` only
+    /// where the project supplies it and a run without it compiles unchanged.
+    pub(crate) fn provides_module(&self, module: &str) -> bool {
+        let relative = module.replace('.', "/");
+        self.captured_source_roots().iter().any(|root| {
+            root.join(format!("{relative}.hs")).is_file()
+                || root.join(format!("{relative}.lhs")).is_file()
+        })
+    }
+
     pub(crate) fn imports(&self) -> Vec<String> {
         self.import_modules()
             .map(|module| format!("import {module}"))
@@ -448,7 +463,14 @@ fn flake_source_roots(workspace: &Path, config: &HaskellConfig) -> Result<Vec<Pa
     Ok(roots)
 }
 
-/// Copy the authored package into an isolated check repository, excluding runtime trees.
+/// Copy the authored package into an isolated check repository, excluding
+/// runtime trees.
+///
+/// The project's `flake.nix` and `flake.lock` travel with it: a package whose
+/// `[haskell.flake_sources]` names pinned Haskell does not compile without the
+/// pin, so a copy that left them behind would be a package the copy cannot
+/// build. The copy is files only; `nix` reads a Git tree's tracked files, so a
+/// destination that is a repository has to commit what it received.
 pub(crate) fn copy_authored(workspace: &Path, destination: &Path) -> Result<()> {
     capture_tree(
         &workspace.join(".shoal"),
@@ -456,7 +478,13 @@ pub(crate) fn copy_authored(workspace: &Path, destination: &Path) -> Result<()> 
         destination,
         &mut BTreeMap::new(),
         true,
-    )
+    )?;
+    for name in ["flake.nix", "flake.lock"] {
+        if workspace.join(name).is_file() {
+            std::fs::copy(workspace.join(name), destination.join(name))?;
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn capture_sources(

@@ -81,7 +81,9 @@ impl Driver {
             &["config", "core.hooksPath", "/dev/null"],
         )?;
         crate::shoal::workspace::copy_authored(workspace, repository.path())?;
-        git.try_run(repository.path(), &["add", "--", ".shoal"])?;
+        // The pin travels with the package: `nix` resolves a project's pinned
+        // Haskell source from its tracked `flake.nix`.
+        git.try_run(repository.path(), &["add", "--all", "--", "."])?;
         git.try_run(
             repository.path(),
             &[

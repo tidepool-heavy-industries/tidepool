@@ -65,17 +65,23 @@ input, the directories inside it that hold modules:
 ```toml
 [haskell]
 source_roots = ["."]
-modules = ["Project.Work", "Jev.Core", "Jev.Operators"]
+modules = ["Project.Work"]
 
 [haskell.flake_sources]
-jev-dsl = ["core", "src"]
+jev-dsl = ["core"]
 ```
 
 with the matching input in the project's `flake.nix`:
 
 ```nix
-inputs.jev-dsl = { url = "github:inanna-malick/jev-dsl"; flake = false; };
+inputs.jev-dsl = { url = "github:inanna-malick/jev-dsl/<rev>"; flake = false; };
 ```
+
+This package pins jev-dsl that way and supplies `Jev/Operators.hs`, the front
+that fixes the library's JSON type to Tidepool's own `Value`. It is the one
+Haskell file here that specialises rather than decides: every declaration in it
+is a type alias or a name bound to its generic counterpart, so drift from the
+pinned revision is a compile error on the line that drifted.
 
 Those directories become ordinary source roots. Shoal captures them into the
 run's frozen workspace, compiles them through the same pipeline as authored

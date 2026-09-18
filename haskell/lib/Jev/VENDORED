@@ -1,8 +1,0 @@
-Vendored from /home/inanna/dev/jev-dsl
-commit: working tree after f4729ce, wave 2 (uncommitted at sync time)
-date: 2026-09-17T17:02:01Z
-files:
-  src/Jev/Core.hs
-  src/Jev/Core/Json.hs
-  src/Jev/Core/Contract.hs
-  src/Jev/Core/Schema.hs

@@ -728,7 +728,14 @@ async fn invalid_label_literals_fail_before_actor_side_effects() {
 
 #[tokio::test]
 async fn shared_api_guide_example_handles_success_and_unavailable() {
-    let mut campaign = TestCampaign::start().await;
+    // The guide's command/judgment example reads `J`, which a run gets from the
+    // Jev library its workspace pins, so this campaign selects that workspace.
+    let mut campaign = TestCampaign::start_with_config(
+        tidepool_actor::ResearchPolicy::default(),
+        |admission| admission,
+        super::jev_tests::pinned_jev_workspace,
+    )
+    .await;
     let root = campaign.root_installation.policy.clone();
     let guide = include_str!("../../../prompts/shoal/api-guide.md");
     let mut guide_examples = examples(guide);
@@ -1770,6 +1777,7 @@ async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign 
             )
             .unwrap();
             configure(&authored);
+            super::test_campaign::commit_workspace(&config.workspace);
             config.workspace_inputs = Some(
                 crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
                     .unwrap(),
@@ -2896,6 +2904,21 @@ async fn frozen_prompt_bytes_round_trip_through_haskell() {
 
 fn recipe_workspace(checks: Option<&[&str]>) -> tempfile::TempDir {
     let repository = tempfile::tempdir().unwrap();
+    // A candidate is a project, and a project is a Git tree: that is how `nix`
+    // reads the `flake.nix` a package's pinned Haskell source is named in.
+    let git = tidepool_worktree::GitCli::new();
+    git.try_run(repository.path(), &["init", "--quiet"])
+        .unwrap();
+    git.try_run(
+        repository.path(),
+        &["config", "user.name", "Shoal recipe check"],
+    )
+    .unwrap();
+    git.try_run(
+        repository.path(),
+        &["config", "user.email", "recipe-check@localhost"],
+    )
+    .unwrap();
     crate::shoal::workspace::copy_authored(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/shoal-workspace"),
         repository.path(),
@@ -2913,6 +2936,7 @@ fn recipe_workspace(checks: Option<&[&str]>) -> tempfile::TempDir {
         );
         std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
     }
+    super::test_campaign::commit_workspace(repository.path());
     repository
 }
 
@@ -2994,6 +3018,7 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
                 .unwrap()
                 .join("examples/shoal-workspace");
             crate::shoal::workspace::copy_authored(&package, &config.workspace).unwrap();
+            super::test_campaign::commit_workspace(&config.workspace);
             config.workspace_inputs = Some(
                 crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
                     .unwrap(),

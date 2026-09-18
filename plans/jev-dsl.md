@@ -435,13 +435,15 @@ Suggested continuation sequence:
 ### Current state and later work
 
 The `Jev` effect (`JevAskWith`, JSON text in and out) is available to every
-Shoal role. `haskell/lib/Jev/Core*` is vendored from `~/dev/jev-dsl` by
-`scripts/sync-jev-dsl.sh` (the source commit is in `haskell/lib/Jev/VENDORED`).
-`Jev.Operators` binds the operators to Tidepool's `Value` and the host transport.
+Shoal role. jev-dsl itself is not in this repository: a workspace pins the
+revision in its own `flake.nix` and names the library directory in
+`[haskell.flake_sources]`, and `examples/shoal-workspace/.shoal/Jev/Operators.hs`
+is the front that fixes the library's JSON type to Tidepool's `Value`.
+`haskell/lib/Jev/Tidepool.hs` supplies the `JsonValue` instance and
+`haskell/lib/Jev/Host.hs` the host transport.
 
-Later: make jev-dsl a nix flake input in the GHC package set, and drop the
-vendored copy and the sync script. Add a `[jev]` workspace config table
-(`base_url`, `timeout_ms`, `max_calls_per_run`) if the defaults stop fitting.
+Later: add a `[jev]` workspace config table (`base_url`, `timeout_ms`,
+`max_calls_per_run`) if the defaults stop fitting.
 
 ### Acceptance examples and checks to design
 
