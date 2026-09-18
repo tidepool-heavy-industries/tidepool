@@ -191,6 +191,13 @@ impl AfterToolLog {
         }
     }
 
+    /// A rebuilt slot starts with a clean record of what it has been told.
+    /// A failure that comes back after a repair is news, and the invocation
+    /// its reference would name may no longer be among the rows kept.
+    pub(crate) fn forget_failures(&mut self) {
+        self.seen.clear();
+    }
+
     /// The status view's rows, newest last. Empty when no slot has ever run,
     /// which is the ordinary case.
     pub(crate) fn rows(&self) -> Vec<String> {

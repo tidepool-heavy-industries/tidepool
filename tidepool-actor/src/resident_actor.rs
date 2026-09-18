@@ -4192,6 +4192,7 @@ where
         }
         self.spec_installs = install;
         self.compiled_tools = Some(candidate);
+        self.after_tool.forget_failures();
         receipt.join("\n")
     }
 
@@ -5218,6 +5219,12 @@ where
         let started = std::time::Instant::now();
         let wait = crate::after_tool::wait();
         let observation = self.runtime_observation.clone();
+        // What is parked before the slot runs, so a slot that is cut off can
+        // have exactly its own suspended turn aborted and nothing else.
+        let parked_before = workbench
+            .parked_continuations(context.clone())
+            .await
+            .unwrap_or_default();
         self.after_tool_active = true;
         let answer = {
             let slot = self.run_after_tool(
@@ -5255,6 +5262,32 @@ where
         };
         self.after_tool_active = false;
         let elapsed = started.elapsed();
+        if answer.is_none() {
+            // Nobody is driving the slot any more, so an effect it is
+            // suspended on would never be answered and its turn would hold
+            // the machine against the next call.
+            match workbench
+                .abort_parked_since(
+                    context.clone(),
+                    parked_before,
+                    "after-tool slot ran out of time".into(),
+                )
+                .await
+            {
+                Ok(aborted) => tracing::info!(
+                    actor = %context.actor,
+                    ordinal,
+                    aborted,
+                    "after-tool slot cut off; its suspended turn was aborted"
+                ),
+                Err(error) => tracing::warn!(
+                    actor = %context.actor,
+                    ordinal,
+                    %error,
+                    "after-tool slot cut off and its suspended turn could not be aborted"
+                ),
+            }
+        }
         let (delivered, disposition) = match answer {
             None => {
                 let reason = format!(
@@ -8470,8 +8503,7 @@ fn lookup_response(
                                 TypeMatchQuality::Usable => MatchQuality::Usable,
                             },
                             availability: entry.availability,
-                            usage_pointer: crate::usage_pointer::pointer_for(&entry.name)
-                                .map(str::to_owned),
+                            usage_pointer: crate::usage_pointer::pointer_for(&entry.name),
                         })
                         .collect(),
                     MATCH_LIMIT,
@@ -8507,7 +8539,7 @@ fn lookup_response(
             "coercion" => LookupEntryKind::Coercion,
             _ => LookupEntryKind::Value,
         };
-        let usage_pointer = crate::usage_pointer::pointer_for(&entry.name).map(str::to_owned);
+        let usage_pointer = crate::usage_pointer::pointer_for(&entry.name);
         LookupEntry {
             name: entry.name,
             defining_module: entry.module.clone(),
