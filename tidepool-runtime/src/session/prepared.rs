@@ -1188,17 +1188,27 @@ fn resolve_prepared_import<'a>(
 impl PreparedEngine {
     /// Create the session's machine from its first turn's program and
     /// install that program. The first turn can import nothing: no prepared
-    /// binding exists before the machine does.
+    /// binding exists before the machine does. Uses the default nursery
+    /// size; see [`Self::bootstrap_with_nursery_bytes`] for a caller-chosen
+    /// size (e.g. a session's configured `nursery_size`, or a one-shot
+    /// caller that wants a small nursery to force collections).
     pub fn bootstrap(prepared: PreparedProgram) -> Result<(Self, ProgramId), PreparedRuntimeError> {
+        Self::bootstrap_with_nursery_bytes(prepared, RunOptions::default().nursery_bytes)
+    }
+
+    /// As [`Self::bootstrap`], with an explicit nursery size instead of the
+    /// default.
+    pub fn bootstrap_with_nursery_bytes(
+        prepared: PreparedProgram,
+        nursery_bytes: usize,
+    ) -> Result<(Self, ProgramId), PreparedRuntimeError> {
         let facts = ProgramFacts::of(&prepared);
         let exports = exportable_code_tops(&prepared);
         let linked = link_program(prepared, &MachineImports::default())?;
         let compiled = CompiledProgram::compile(&linked).map_err(PreparedRuntimeError::Compile)?;
         let (machine, program) = PreparedMachine::new(
             compiled,
-            PreparedMachineOptions {
-                nursery_bytes: RunOptions::default().nursery_bytes,
-            },
+            PreparedMachineOptions { nursery_bytes },
         )
         .map_err(PreparedRuntimeError::Run)?;
         let mut engine = Self {

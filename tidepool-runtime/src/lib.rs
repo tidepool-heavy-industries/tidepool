@@ -1,8 +1,10 @@
 //! High-level runtime for compiling and executing Haskell source via Tidepool.
 //!
-//! Provides `compile_haskell` (source to checked prepared execution plus the
-//! transitional Core path) and `compile_and_run` (source to evaluated result),
-//! with filesystem caching of compiled artifacts.
+//! Provides `compile_haskell` (source to a checked prepared program, plus
+//! the `CoreExpr`/`DataConTable` the pure-eval path in `compile_and_run_pure`
+//! still needs) and `compile_and_run` (source to evaluated result — a bare
+//! one-shot [`session::prepared::PreparedEngine`], no session/actor/decl
+//! plane involved), with filesystem caching of compiled artifacts.
 //!
 //! Toolchain location, validation, fingerprinting, and the compile-output
 //! cache live in `tidepool-toolchain` (a crate this one depends on and sits
@@ -69,17 +71,22 @@ pub fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-/// Result of successful Haskell compilation, including both the checked
-/// prepared program and the transitional legacy execution inputs.
+/// Result of successful Haskell compilation, including the checked prepared
+/// program and the `CoreExpr`/`DataConTable` [`compile_and_run_pure`] still
+/// runs directly (its Core-only pure path has not yet migrated).
 #[derive(Debug)]
 pub struct CompileResult {
-    /// The compiled Core expression (the JIT/eval input).
+    /// The compiled Core expression. Read by [`compile_and_run_pure`]'s
+    /// bare-`JitEffectMachine` path; the effectful `compile_and_run` family
+    /// runs `prepared` instead and does not read this field.
     pub expr: CoreExpr,
-    /// DataCon metadata the JIT needs to dispatch on constructors.
+    /// DataCon metadata for constructor dispatch — read on both routes
+    /// (prepared execution and [`compile_and_run_pure`] alike).
     pub table: DataConTable,
     /// Compile warnings (e.g. `has_io`, captured type).
     pub warnings: MetaWarnings,
-    /// Checked versioned execution program for the native cutover path.
+    /// Checked versioned prepared-STG program — what `compile_and_run`'s
+    /// effectful family actually executes.
     pub prepared: PreparedArtifact,
 }
 
@@ -89,9 +96,17 @@ pub enum RuntimeError {
     /// Error during Haskell compilation.
     #[error(transparent)]
     Compile(#[from] CompileError),
-    /// Error during JIT execution.
+    /// A runtime/effect-handling failure, on either engine — `JitError`'s
+    /// name is a historical holdover from when it wrapped only Core JIT
+    /// execution; `resident.rs`'s prepared-route turn paths already reuse it
+    /// (via `JitError::Effect`) as the shared handler-failure vocabulary.
     #[error(transparent)]
     Jit(#[from] JitError),
+    /// The prepared engine refused or failed a bare one-shot run (bootstrap,
+    /// settle, or resume) — distinct from [`Self::Jit`], which covers a
+    /// handler/effect failure once a run is under way.
+    #[error(transparent)]
+    Prepared(#[from] session::prepared::PreparedRuntimeError),
 }
 
 /// Compiles Haskell source code to Tidepool Core at runtime.
@@ -184,13 +199,13 @@ pub const EVAL_STACK_SIZE: usize = 256 * 1024 * 1024; // 256 MiB
 /// * `source` - The Haskell source code to compile.
 /// * `target` - The name of the entry point binder.
 /// * `include` - Search paths for Haskell modules.
-/// * `handlers` - Effect dispatchers for the JIT machine.
+/// * `handlers` - Effect dispatchers for the prepared machine.
 /// * `user` - User context for effect handlers.
 /// * `nursery_size` - Size of the allocation nursery in bytes.
 ///
 /// # Returns
 /// * `Ok(EvalResult)` on successful execution.
-/// * `Err(RuntimeError)` for compilation or JIT execution errors.
+/// * `Err(RuntimeError)` for compilation or execution errors.
 pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
     source: &str,
     target: &str,
@@ -210,15 +225,24 @@ pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
     )
 }
 
-/// As [`compile_and_run_with_nursery_size`], but hands the freshly-built machine's
-/// [`CancelHandle`] to `on_ready` BEFORE the (blocking) run begins.
+/// As [`compile_and_run_with_nursery_size`], but hands the freshly-built
+/// engine's [`CancelHandle`] to `on_ready` BEFORE the (blocking) run begins.
 ///
 /// The handle is `Send + Sync + Clone`, so a caller running this on a worker
-/// thread can ship a clone to a watchdog/timeout task that flips it; the running
-/// program then aborts at its next GC/tail-call safepoint with
-/// `YieldError::Cancelled`, freeing the thread (and any resources it pins). This
-/// is how the eval/repl servers turn a turn timeout into an actual abort instead
-/// of a permanently-parked thread.
+/// thread can ship a clone to a watchdog/timeout task that flips it; the
+/// running program then aborts at its next safepoint with a cancellation
+/// failure, freeing the thread (and any resources it pins). This is how the
+/// eval/repl servers turn a turn timeout into an actual abort instead of a
+/// permanently-parked thread.
+///
+/// A bare one-shot run outside any session: it bootstraps a standalone
+/// [`session::prepared::PreparedEngine`] from the compiled prepared program,
+/// runs its settled entry to completion, and drops the engine (and its
+/// heap) once done. A request no installed handler recognizes is reported
+/// as [`JitError::Effect`]`(`[`tidepool_effect::error::EffectError::UnhandledEffect`]`)`,
+/// matching what a plain (non-suspendable) run has always reported for an
+/// unclaimed effect — there is no resume path here for a caller to answer
+/// it later.
 pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
     source: &str,
     target: &str,
@@ -228,23 +252,59 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
     nursery_size: usize,
     on_ready: impl FnOnce(CancelHandle),
 ) -> Result<EvalResult, RuntimeError> {
+    use session::prepared::{ParkPolicy, PreparedEngine};
+    use session::resident::{finish_prepared, PreparedRun, SettlePlan};
+    use tidepool_codegen::suspension::RealmId;
+    use tidepool_effect::dispatch::request_constructor;
+    use tidepool_effect::error::EffectError;
+    use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+    use tidepool_repr::PrincipalId;
+
     let CompileResult {
-        expr,
-        mut table,
+        table,
         warnings,
+        prepared,
         ..
     } = compile_haskell(source, target, include)?;
     if warnings.has_io {
         return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
     }
-    // Populate type-sibling groups from case branches so that get_companion
-    // can disambiguate constructors sharing unqualified names (e.g. Bin/Tip
-    // from Data.Map vs Data.Set).
-    table.populate_siblings_from_expr(&expr);
-    let mut machine = JitEffectMachine::compile(&expr, &table, nursery_size)?;
-    on_ready(machine.cancel_handle());
-    let value = machine.run(&table, handlers, user)?;
-    Ok(EvalResult::new(value, table, warnings.warnings))
+    let (mut engine, program) =
+        PreparedEngine::bootstrap_with_nursery_bytes(prepared.prepared().clone(), nursery_size)?;
+    let realm = RealmId::ROOT;
+    on_ready(engine.cancel_handle(realm));
+    let park = ParkPolicy {
+        principal: PrincipalId::SYSTEM,
+        effect_policy: EffectRunPolicy::HandleOrSuspend,
+        live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+    };
+    let settlement = engine.run_settled(program, realm)?;
+    let run = finish_prepared(
+        &mut engine,
+        program,
+        realm,
+        SettlePlan::Observe,
+        park,
+        &table,
+        handlers,
+        user,
+        settlement,
+    )?;
+    match run {
+        PreparedRun::Done { value, .. } => Ok(EvalResult::new(value, table, warnings.warnings)),
+        PreparedRun::Suspended { id, request } => {
+            let constructor = request_constructor(&request, &table);
+            // No handler claimed it and there is no resume path in a
+            // one-shot run: release the parked frame rather than leak it.
+            let _ = engine.abort_parked(id);
+            Err(RuntimeError::Jit(JitError::Effect(
+                EffectError::UnhandledEffect { constructor },
+            )))
+        }
+        PreparedRun::Projected { .. } => {
+            unreachable!("SettlePlan::Observe never produces a projected run")
+        }
+    }
 }
 
 /// Compile Haskell source and run it as a pure (non-effectful) program.

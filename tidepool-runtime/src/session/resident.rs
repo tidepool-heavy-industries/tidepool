@@ -664,7 +664,7 @@ enum PreparedTurnMode<'a> {
 
 /// The `Send` projection of one prepared run that crosses the eval thread:
 /// handles are ids, the observed value is an owned tree.
-enum PreparedRun {
+pub(crate) enum PreparedRun {
     Done {
         handle: PreparedHandle,
         value: Value,
@@ -719,7 +719,7 @@ fn settle_plan_of(mode: &PreparedTurnMode<'_>) -> SettlePlan {
 /// (a forcing observation) before it is tenured; a Tier-1 closure is tenured
 /// as-is, since a function cannot be observed without applying it.
 #[derive(Clone)]
-enum SettlePlan {
+pub(crate) enum SettlePlan {
     /// Observe the value and return it as the turn's result.
     Observe,
     /// One binder at this tier.
@@ -864,7 +864,7 @@ fn response_value(response: Response) -> Value {
 /// the host-answer path and the resumed layer is finished here in turn; a
 /// request no handler claims is reported parked, as Core reports one.
 #[allow(clippy::too_many_arguments)]
-fn finish_prepared<H: DispatchEffect<O>, O>(
+pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
     engine: &mut super::prepared::PreparedEngine,
     mut program: ProgramId,
     mut realm: RealmId,

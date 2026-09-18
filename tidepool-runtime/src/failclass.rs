@@ -20,7 +20,7 @@ pub use tidepool_toolchain::failclass::{classify_compile, FailureClass, FailureE
 pub fn classify(err: &RuntimeError) -> FailureEnvelope {
     match err {
         RuntimeError::Compile(c) => classify_compile(c),
-        RuntimeError::Jit(_) => {
+        RuntimeError::Jit(_) | RuntimeError::Prepared(_) => {
             FailureEnvelope::new(FailureClass::Runtime, Phase::Run, err.to_string())
         }
     }
