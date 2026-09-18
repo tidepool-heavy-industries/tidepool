@@ -4,35 +4,44 @@
 
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE.md)
 
-Give your agents a shared programming language for using tools, investigating
-problems, and working together. In **Shoal**, Tidepool’s agent environment, that
-language is Haskell. Agents write programs as they go: keep values between turns,
-define functions and types, launch work, and compose the results.
+Tidepool is an **agent harness and orchestration system built from the ground
+up for rapid, token-efficient recursive self-improvement (RSI)**. Its agent
+environment, **Shoal**, is a live Haskell notebook backed by a shared heap,
+with tools and hooks defined in editable Haskell files inspired by `xmonad.hs`.
+The harness is part of the agent’s working material.
 
-Put [**Jev**](https://docs.typesafe.ai/concepts/system-one) inside those programs
-and things get interesting. Cheap semantic judgments become ordinary ingredients
-in code. A cell can gather evidence, ask a whole collection of questions, follow
-up on the answers, and return something useful—all between reasoning-model turns.
-Agents can save and share the little System 1 programs they discover.
+**Reasoning LLMs provide System 2.
+[Jev](https://docs.typesafe.ai/concepts/system-one) provides System 1.**
+Jev is a first-class component: cheap semantic judgments that agents compose
+with ordinary code and effects. A reasoning model can discover a better way
+to investigate a failure, write it as a Haskell program with Jev inside it,
+and start using it in the same session. It can revise and hot-swap that
+behavior, save it, and share it with other agents.
 
-And they can fork. Children can branch into children, inheriting useful context
-and working state. **Bubblewrap and copy-on-write filesystem layers** give those
-branches isolated working environments without eagerly copying every build
-artifact. Memory limits, process boundaries, fork budgets, cancellation, and
-cleanup make recursive trees practical. Easy fan-out needs an answer to the
-**Sorcerer’s Apprentice** problem: you wanted a swarm, and suddenly the machine
-is out of RAM and your SSH daemon is dead. Shoal gives the swarm an aggregate
-resource boundary and individual commands their own budgets.
+Haskell makes this unusually expressive without making every change a leap
+of faith. Agents define their own types, functions, and small DSLs; the
+typechecker checks that the pieces fit as they evolve. Useful working habits
+become executable programs rather than another paragraph of instructions.
 
-This is my Gastown. It is also an invitation to take a very programmable agent
-environment and see what you can make it do.
+The same model extends to a tree of workers. **Unfold work into branches;
+fold typed results back through review and integration.** Children inherit
+useful context and working state. Shared conversation prefixes support
+provider-cache reuse; Bubblewrap and copy-on-write filesystem snapshots give
+branches isolated workspaces without eagerly duplicating unchanged files and
+build artifacts. Parents can send working policies down the tree along with
+the work.
 
-## Put semantic judgment inside the program
+I built Tidepool using earlier iterations of this approach. This is my
+Gastown: both the machinery and an ongoing experiment in what agents can
+build when they can program how they work. Come reshape it.
 
-Jev supplies typed judgments; Haskell combines them with exact operations and
-whatever state the agent has kept. Ask several questions about the same evidence
-in one request. Keep the answers around. Change how you use them without reading
-the evidence into another large-model turn.
+## System 1 is a program, not another chat
+
+Jev supplies typed judgments; Haskell combines them with exact operations,
+retained evidence, and effects. Ask several questions in one request, use the
+answers to choose what to read next, then run that read—all without another
+frontier-model turn to relay the result. Keep the answers and change how you
+use them without asking again.
 
 Here is a small example in the Shoal workbench. These illustrative excerpts could
 instead come from a search or a command; the question names the task explicitly:
@@ -85,10 +94,16 @@ failed builds into source investigations. One particularly useful
 different repairs depending on whether a signature change was intentional.
 Supplying the assignment resolved the ambiguity that threshold tuning could not.
 
-## Your harness is a program
+## A live notebook. A programmable harness.
 
 The inspiration is **XMonad and `xmonad.hs`**: configure and extend your working
 environment in the language you use to operate it.
+
+In the notebook, an agent can define a sum type, write a function over it,
+keep a command result, or compose a new investigation. Those are actual values
+and functions in the resident machine, not text the next model turn has to
+reconstruct. Haskell is the working language as well as the configuration
+language.
 
 A project’s `.shoal/` package contains Haskell modules, configuration, prompts,
 and skills. Start from the [example package](examples/shoal-workspace/README.md),
@@ -118,45 +133,42 @@ the tool name and the schemas derive from the types, so the declaration and the
 handler cannot drift apart. The body is ordinary Haskell with the agent's own
 effects, which means a tool can ask Jev before it answers.
 
-The after-tool slot is where System 1 lives. It sees each finished call and its
-result and may annotate it, prune it to the lines that matter while the whole
-result stays bound to a name, or say nothing. It can read the recent
-conversation and ask Jev what is relevant to it. It is compiled once with the
-tools, so nothing compiles per call, and the reasoning model is only shown what
-survived.
+The after-tool slot is one place to install System 1. It sees a finished
+hosted tool call and its displayed result. It can read recent conversation,
+ask Jev which passages matter, and annotate or select the result while
+preserving a reference to the original. It can also leave the result alone.
 
-**Compiled once, then free.** Compiling Haskell is the slow part of this
-system, and a notebook cell pays for it. A tool or a slot does not. It is
-compiled when it is installed, and every call after that runs the retained
-machine code in the agent's own resident machine. In a live session a tool that
-ran two searches and asked Jev about the results answered in half a second, an
-idle slot added about thirty milliseconds to a call, and a Jev packet of three
-hundred questions came back in a third of a second. So the expensive thing is
-writing a reflex, and running it ten thousand times costs next to nothing. That
-is the trade the whole design makes: spend compile time once to stop spending
-reasoning-model turns on the same judgment again and again.
+**Compile once; reuse the program.** Tools and hooks run retained machine
+code, so there is no compile per invocation. Jev and other effects still have
+their own costs, but executing the policy needs no frontier-model turn. In a
+live session, a tool that ran two searches and asked Jev about the results
+answered in half a second. That is the trade: spend reasoning and compilation
+on discovering a useful procedure, then run the procedure cheaply.
+
+An **after-turn hook** extends the same idea to completed model turns,
+including text-only replies: a precompiled Haskell effect program can inspect
+the turn and ask Jev for a review. The observational implementation is under
+review; automatic turn-level nudges are not yet enabled. Existing after-tool
+hooks do not cover every operation, including notebook cells.
 
 **Same machine, same effects.** A tool body or a slot is not a sandboxed
 plugin. It runs with the agent's own effect row, so it can run commands, ask
 Jev, read the agent's recent conversation, send to a record actor, or message
 another agent.
 
-**A parent installs monitors on the subtrees it spawns.** This is the part we
-are most excited about. A capable parent hands work to fast, cheap children, and
-the usual price is that nobody is watching them. Here the parent writes the
-watching down: a few lines of Haskell that ask Jev, after each of a child's tool
-calls, whether it is repeating itself, leaving its assignment, ignoring a
-failure, or about to do something destructive. Children are made from a commit,
-so every child carries what the parent committed, and the parent chooses which
-monitors each child gets by the label it spawns it under.
+**A parent can install monitors on its children.** A few lines of Haskell
+ask Jev whether the available evidence shows a repeated failed approach or an
+ignored failure. Assignment-aware policies can check scope, too. The parent
+encodes the judgment it wants applied rather than rereading every tool result.
+These are observations after execution, not a gate that prevents destructive
+commands.
 
 A parent writes two kinds of heuristic. A **nudge** is advice it already knows
 the answer to: when it looks like the child is doing X, the child's next tool
-result carries the parent's own line telling it to do Y instead, and the parent
-spends nothing. An **escalation** is for what the parent must decide: it sends
-the parent the reason and the handle of the node that tripped it, and the parent
-steers that child directly with the tools it already has. Both run at Jev speed
-inside the child, so the parent is only interrupted for what it has to answer.
+result carries the parent's own line telling it to do Y instead, without a
+parent-model turn. An **escalation** asks the parent to decide: it identifies
+the child and the concern so the parent can inspect evidence and steer it.
+Both use the same Jev-and-Haskell machinery inside the child.
 
 The heuristics are ordinary values in the workspace, so a set of them is a list,
 two sets compose with `<>`, and a parent adds one for the task at hand by
@@ -164,18 +176,16 @@ writing a sentence. Jev's own question packets compose the same way one level
 up, with an append that carries both sets' labels in the type and rejects a
 duplicate at compile time.
 
-That whole capability is workspace Haskell. Designing it and writing it took
-about half an hour. It needed two small additions to the shipped library, a way
-for a slot to name its parent and an optional line of intent on a shell call,
-and no engine change at all: asking Jev, reading the running actor's identity
-and messaging another agent were already effects, and a slot already ran
-compiled after every tool call.
+This supervision logic is workspace Haskell, not a new Rust subsystem for
+each heuristic. Agents can compose policies as ordinary values and share
+System 1 snippets with other agents during a run. Sharing source, loading it,
+and installing it are explicit steps: a parent's reload does not silently
+replace a running child's policy.
 
-This is what the system is for. The engine work is done once, in Rust and in the
-effect contracts. After that a new reflex, a new tool, a new monitor over a whole
-subtree is a few dozen lines in a file the agent itself can edit, typecheck and
-reload without restarting anything. An agent that finds a better way to work can
-write it down and be using it minutes later.
+That is the RSI loop: **experiment, inspect, revise, typecheck, install**.
+System 2 improves the System 1 programs it uses. Type safety keeps interfaces
+coherent while they change; tests and evidence still determine whether the
+behavior is useful.
 
 The agent edits the module with ordinary file tools and calls
 `reload_agent_spec`. Tool bodies and the slot swap between calls; a call already
