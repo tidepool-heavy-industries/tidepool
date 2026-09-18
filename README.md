@@ -263,10 +263,47 @@ nix build .#shoal
 ./result/bin/shoal --help
 ```
 
-There is no public binary cache yet, so the first build compiles everything,
-GHC-side and Rust-side, and takes a good while. Later builds are incremental.
+The first build compiles everything, GHC-side and Rust-side, and takes a good
+while: Tidepool patches GHC to emit fat interface files, so the compiler and
+every Haskell dependency are rebuilt from source. Later builds are incremental.
 The wrapper selects the matched extractor and client without replacing `codex`
 on your normal PATH.
+
+### The binary cache
+
+`flake.nix` declares a Cachix substituter that serves that toolchain prebuilt.
+Whether you need to do anything depends on how Nix was installed:
+
+```bash
+nix config show trusted-users
+```
+
+- **Your username is listed** — this is what the Determinate Systems installer
+  does — then nothing is needed. Accept the flake configuration when prompted
+  and the cache is used.
+- **Only `root` is listed**, the official multi-user installer's default, then
+  one root action is needed once:
+
+  ```bash
+  sudo cachix use tidepool            # writes /etc/nix/nix.conf
+  sudo cachix use tidepool --mode nixos   # on NixOS, writes /etc/nixos/cachix/
+  ```
+
+- **Single-user install** (no daemon), then `cachix use tidepool` without sudo.
+
+A substituter writes into the shared `/nix/store`, so only root can authorize
+one; a user who could add substituters and signing keys could hand every other
+user on the machine an arbitrary binary. That is why a flake's own
+`nixConfig` is ignored for untrusted users, and why no flag works around it.
+On NixOS the least-privilege form is to permit rather than impose, leaving the
+opt-in with the flake:
+
+```nix
+nix.settings.trusted-substituters = [ "https://tidepool.cachix.org" ];
+nix.settings.trusted-public-keys = [
+  "tidepool.cachix.org-1:jnYeaWymP+9/MeAECROfi4+/l7X1ilkOqM5Nrr5Lo1w="
+];
+```
 
 Configure a systemd user slice with finite RAM and swap limits appropriate to
 your machine. Shoal defaults to `swarm.slice` and checks placement before running
