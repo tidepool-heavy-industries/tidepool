@@ -1,11 +1,16 @@
-//! Reloading one actor's agent spec from inside a live session.
+//! Reloading one actor's agent spec from inside a live session, and the
+//! after-tool slot that spec fills.
 //!
-//! The comparison itself is checked in `tidepool_tool::surface`, and discovery
-//! in `tidepool_actor::agent_spec`. What is checked HERE is what only a live
-//! actor can answer: a rebuilt record that declares the same surface swaps and
-//! a later call runs the new code; one that declares a different surface is
-//! refused and the previous record keeps answering; and a spec found by
-//! convention in an actor's own checkout is the one that gets installed.
+//! The comparison itself is checked in `tidepool_tool::surface`, discovery in
+//! `tidepool_actor::agent_spec`, and the delivery rules in
+//! `tidepool_actor::after_tool`. What is checked HERE is what only a live actor
+//! can answer: a rebuilt record that declares the same surface swaps and a
+//! later call runs the new code; one that declares a different surface is
+//! refused and the previous record keeps answering; a spec found by convention
+//! in an actor's own checkout is the one that gets installed; and a retained
+//! slot, applied at the tool-result boundary in the actor's own resident
+//! machine, annotates or prunes what the model is shown without ever rewriting
+//! it.
 
 use std::path::Path;
 
@@ -22,7 +27,7 @@ fn tools_module(description: &str, answer: &str) -> String {
 {{-# LANGUAGE DeriveGeneric #-}}
 {{-# LANGUAGE OverloadedStrings #-}}
 {{-# LANGUAGE TypeOperators #-}}
-module Project.Tools (SpecTools (..), Probe (..), tools) where
+module Project.Tools (SpecTools (..), Probe (..), probeBody, tools) where
 
 import Control.Monad.Freer (Eff)
 import Data.Text (Text)
@@ -36,36 +41,74 @@ newtype Probe = Probe {{ topic :: Text }}
 newtype SpecTools mode = SpecTools {{ probe :: mode :- Call Probe Text }}
   deriving (Generic)
 
+-- | The tool's implementation as ordinary source, so a slot can exercise the
+-- same function the tool dispatches to without going through the boundary.
+probeBody :: Probe -> Eff effects Text
+probeBody _ = pure "{answer}"
+
 tools :: SpecTools (AsServerT (Eff effects))
-tools = SpecTools {{ probe = tool "{description}" (\_ -> pure "{answer}") }}
+tools = SpecTools {{ probe = tool "{description}" probeBody }}
 "#
     )
 }
 
 /// A spec module found by convention: the module `AgentSpec`, the value
-/// `agentSpec`, and a record update over the default that fills one slot.
-const SPEC_MODULE: &str = r#"{-# LANGUAGE OverloadedStrings #-}
+/// `agentSpec`, and a record update over the default that fills one slot. Only
+/// the slot's body differs between tests.
+fn spec_module(slot: &str) -> String {
+    format!(
+        r#"{{-# LANGUAGE OverloadedStrings #-}}
 module AgentSpec (agentSpec) where
 
 import Control.Monad.Freer (Eff)
+import Data.Text (Text)
+import qualified Data.Text as T
 import Tidepool.Agent.Contract
 import qualified Project.Tools as Tools
 
 agentSpec :: AgentSpec Tools.SpecTools effects
 agentSpec = defaultSpec
-  { specTools = Tools.tools
+  {{ specTools = Tools.tools
   , afterTool = Just noted
-  }
+  }}
 
 noted :: ToolCall -> ToolResult -> Eff effects Annotation
 noted call result
-  | toolCallName call == "probe" = pure (Annotated (toolResultHandle result))
-  | otherwise = pure NoAnnotation
-"#;
+  | toolCallName call /= T.pack "probe" = pure NoAnnotation
+  | otherwise = {slot}
+"#
+    )
+}
+
+/// Derived context beside the tool's own output.
+const ANNOTATES: &str = "pure (Annotated (T.pack \"asked about this topic twice before\"))";
+
+/// A selection, and the handle the whole of it stays addressable under.
+const PRUNES: &str = "pure (Pruned (T.pack \"the line that mattered\") (toolResultHandle result))";
+
+/// A deliberate non-decision. Silent to the model.
+const ABSTAINS: &str = "pure (Abstained (T.pack \"the result is already minimal\"))";
+
+/// A slot that is simply broken.
+const FAILS: &str = "error \"the slot is broken\"";
+
+/// A slot that runs the tool's own implementation. Its own tool use must not
+/// bring it back round on itself.
+const REENTERS: &str =
+    "Annotated . (T.pack \"the slot ran the tool body and got: \" <>) <$> Tools.probeBody (Tools.Probe (T.pack \"again\"))";
 
 const CONFIG: &str = "[defaults]\nmodel = 'gpt-5.6-sol'\n\
                       [haskell]\nsource_roots = ['.']\nmodules = ['Project.Tools']\n\
                       tools = 'Project.Tools.tools'\n";
+
+/// The same workspace with rule two answering: `[haskell] spec` names the
+/// module, so the ROOT installs the spec and its slot without needing a
+/// checkout of its own.
+const SPEC_CONFIG: &str = "[defaults]\nmodel = 'gpt-5.6-sol'\n\
+                           [haskell]\nsource_roots = ['.']\n\
+                           modules = ['Project.Tools', 'AgentSpec']\n\
+                           tools = 'Project.Tools.tools'\n\
+                           spec = 'AgentSpec.agentSpec'\n";
 
 fn write_workspace(workspace: &Path, description: &str, answer: &str) {
     let authored = workspace.join(".shoal");
@@ -86,6 +129,28 @@ async fn start(description: &str, answer: &str) -> TestCampaign {
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, description, answer);
+            config.workspace_inputs = Some(
+                crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+                    .unwrap(),
+            );
+        },
+    )
+    .await
+}
+
+/// A root whose spec is named by rule two, so it carries a slot with no
+/// checkout of its own.
+async fn start_with_slot(answer: &str, slot: &str) -> TestCampaign {
+    let slot = slot.to_owned();
+    let answer = answer.to_owned();
+    TestCampaign::start_with_config(
+        tidepool_actor::ResearchPolicy::default(),
+        |admission| admission,
+        move |config| {
+            write_workspace(&config.workspace, DESCRIPTION, &answer);
+            let authored = config.workspace.join(".shoal");
+            std::fs::write(authored.join("config.toml"), SPEC_CONFIG).unwrap();
+            std::fs::write(authored.join("AgentSpec.hs"), spec_module(&slot)).unwrap();
             config.workspace_inputs = Some(
                 crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
                     .unwrap(),
@@ -187,10 +252,9 @@ async fn a_spec_that_does_not_typecheck_leaves_the_old_one_active_and_the_file_o
 
     assert!(probe(policy).await.contains("one"));
 
-    let broken = tools_module(DESCRIPTION, "one").replace(
-        "(\\_ -> pure \"one\")",
-        "(\\_ -> pure undefinedByThisSpecReload)",
-    );
+    let broken =
+        tools_module(DESCRIPTION, "one").replace("pure \"one\"", "pure undefinedByThisSpecReload");
+    assert!(broken.contains("undefinedByThisSpecReload"), "{broken}");
     std::fs::write(workspace.join(".shoal/Project/Tools.hs"), &broken).unwrap();
     let receipt = reload(policy).await;
     assert!(receipt.contains("rejected"), "{receipt}");
@@ -245,7 +309,11 @@ async fn a_checkout_spec_module_is_installed_ahead_of_the_workspace_key() {
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, DESCRIPTION, "one");
-            std::fs::write(config.workspace.join(".shoal/AgentSpec.hs"), SPEC_MODULE).unwrap();
+            std::fs::write(
+                config.workspace.join(".shoal/AgentSpec.hs"),
+                spec_module(ANNOTATES),
+            )
+            .unwrap();
             commit(&config.workspace, "authored package with a spec");
             config.workspace_inputs = Some(
                 crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
@@ -290,8 +358,16 @@ async fn a_checkout_spec_module_is_installed_ahead_of_the_workspace_key() {
     let root_status = status(root.as_ref()).await;
     assert!(root_status.contains("workspace tools key"), "{root_status}");
 
-    // And the spec the child installed is the one serving its calls.
-    assert!(probe(child.policy.as_ref()).await.contains("one"));
+    // And the spec the child installed is the one serving its calls, slot and
+    // all — attributing its annotation to the revision of the checkout it was
+    // compiled from rather than to the run's.
+    let answered = probe(child.policy.as_ref()).await;
+    assert!(answered.contains("one"), "{answered}");
+    assert!(
+        answered.contains("asked about this topic twice before"),
+        "{answered}"
+    );
+    assert!(!answered.contains("spec revision (run)"), "{answered}");
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -307,7 +383,11 @@ async fn a_child_reloads_its_own_spec_and_never_upgrades_anybody_else() {
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, DESCRIPTION, "one");
-            std::fs::write(config.workspace.join(".shoal/AgentSpec.hs"), SPEC_MODULE).unwrap();
+            std::fs::write(
+                config.workspace.join(".shoal/AgentSpec.hs"),
+                spec_module(ANNOTATES),
+            )
+            .unwrap();
             commit(&config.workspace, "authored package with a spec");
             config.workspace_inputs = Some(
                 crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
@@ -347,6 +427,208 @@ async fn a_child_reloads_its_own_spec_and_never_upgrades_anybody_else() {
     assert!(probe(child.policy.as_ref()).await.contains("two"));
     // Scoped to the actor that asked: the root never saw this reload.
     assert!(probe(root.as_ref()).await.contains("one"));
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// The after-tool slot, applied at the tool-result boundary.
+// ---------------------------------------------------------------------------
+
+/// Derived context reaches the model beside the tool's own output, said to be
+/// derived and naming the revision the slot was compiled from. The tool's
+/// answer is still there in full: the slot annotated, it did not rewrite.
+#[tokio::test]
+async fn an_annotation_reaches_the_model_as_derived_context_beside_the_output() {
+    let campaign = start_with_slot("keptwhole", ANNOTATES).await;
+    let policy = campaign.root_installation.policy.clone();
+    let policy = policy.as_ref();
+
+    let result = probe(policy).await;
+    assert!(result.contains("keptwhole"), "{result}");
+    assert!(
+        result.contains("Derived context, not part of the tool's output"),
+        "{result}"
+    );
+    assert!(
+        result.contains("asked about this topic twice before"),
+        "{result}"
+    );
+    assert!(result.contains("spec revision"), "{result}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+/// A pruned view says it is a selection, and the whole result stays
+/// addressable: the handle the slot was shown is an ordinary binding a later
+/// cell evaluates.
+#[tokio::test]
+async fn a_pruned_result_says_it_is_a_selection_and_its_handle_answers_the_whole() {
+    let campaign = start_with_slot("keptwhole", PRUNES).await;
+    let policy = campaign.root_installation.policy.clone();
+    let policy = policy.as_ref();
+
+    let result = probe(policy).await;
+    assert!(
+        result.contains("A selection of this result, not the whole of it"),
+        "{result}"
+    );
+    assert!(result.contains("the line that mattered"), "{result}");
+    assert!(result.contains("toolResult1"), "{result}");
+
+    // The handle is a binding in the same lexical scope the model's own cells
+    // run in, so the whole result is one cell away.
+    let cell = dispatch_haskell_script(policy, "inspectFull toolResult1").await;
+    assert!(
+        cell["items"][0]["output"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("keptwhole"),
+        "{cell}"
+    );
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+/// Abstention is silent. The model never asked for a judgement on this result,
+/// so the original is delivered exactly as the tool produced it and the reason
+/// lives where a model can go and look for it.
+#[tokio::test]
+async fn an_abstention_delivers_the_original_and_appears_only_in_the_receipt() {
+    let campaign = start_with_slot("keptwhole", ABSTAINS).await;
+    let policy = campaign.root_installation.policy.clone();
+    let policy = policy.as_ref();
+
+    let result = probe(policy).await;
+    assert!(result.contains("keptwhole"), "{result}");
+    assert!(!result.contains("[after-tool]"), "{result}");
+    assert!(!result.contains("already minimal"), "{result}");
+
+    let status = status(policy).await;
+    assert!(status.contains("after-tool#1"), "{status}");
+    assert!(
+        status.contains("abstained: the result is already minimal"),
+        "{status}"
+    );
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+/// A slot that failed is not a slot that abstained: the original result is
+/// preserved and one compact line warns, because a failure could change how
+/// the result is read. The second failure earns a reference, not a second copy
+/// of the diagnostic.
+#[tokio::test]
+async fn a_slot_that_fails_delivers_the_original_with_one_compact_line() {
+    let campaign = start_with_slot("keptwhole", FAILS).await;
+    let policy = campaign.root_installation.policy.clone();
+    let policy = policy.as_ref();
+
+    let first = probe(policy).await;
+    assert!(first.contains("keptwhole"), "{first}");
+    assert!(first.contains("the slot did not answer"), "{first}");
+    assert!(first.contains("after-tool#1"), "{first}");
+    assert_eq!(
+        first.matches("[after-tool]").count(),
+        1,
+        "one compact line, not a diagnostic dump: {first}"
+    );
+
+    let second = probe(policy).await;
+    assert!(second.contains("keptwhole"), "{second}");
+    assert!(
+        second.contains("same failure as after-tool#1"),
+        "a repeated failure does not fill the conversation with copies: {second}"
+    );
+    assert!(!second.contains("the slot did not answer"), "{second}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+/// The result waits for the slot, and when the wait runs out the original is
+/// delivered anyway. Nothing is rolled back and nothing is replayed.
+#[tokio::test]
+async fn a_slot_that_outruns_its_wait_delivers_the_original_result() {
+    // The wait is five minutes, which is not a test. Shortening it to nothing
+    // is the whole of what this knob is for.
+    std::env::set_var(tidepool_actor::AFTER_TOOL_WAIT_ENV, "0");
+    let campaign = start_with_slot("keptwhole", ANNOTATES).await;
+    let policy = campaign.root_installation.policy.clone();
+    let policy = policy.as_ref();
+
+    let result = probe(policy).await;
+    assert!(result.contains("keptwhole"), "{result}");
+    assert!(result.contains("no answer within 0ms"), "{result}");
+    assert!(
+        !result.contains("asked about this topic twice before"),
+        "{result}"
+    );
+
+    let status = status(policy).await;
+    assert!(status.contains("timed out after 0ms"), "{status}");
+
+    std::env::remove_var(tidepool_actor::AFTER_TOOL_WAIT_ENV);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+/// The two tools a model repairs a broken slot with are never annotated, so a
+/// slot can never block its own repair. Neither is an authored cell, which is
+/// not a tool call at all.
+#[tokio::test]
+async fn the_repair_tools_and_authored_cells_are_never_annotated() {
+    let campaign = start_with_slot("keptwhole", ANNOTATES).await;
+    let policy = campaign.root_installation.policy.clone();
+    let policy = policy.as_ref();
+
+    let reloaded = reload(policy).await;
+    assert!(reloaded.contains("swapped"), "{reloaded}");
+    assert!(!reloaded.contains("[after-tool]"), "{reloaded}");
+
+    let status = status(policy).await;
+    assert!(!status.contains("[after-tool]"), "{status}");
+
+    let cell = dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)").await;
+    assert_eq!(cell["items"][0]["output"], "2", "{cell}");
+
+    // And the slot is installed and working, so none of that was vacuous.
+    assert!(probe(policy).await.contains("twice before"));
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+/// A slot's own tool use never triggers a slot. This one runs the very
+/// function the tool dispatches to, and one call still records exactly one
+/// invocation.
+#[tokio::test]
+async fn a_slots_own_tool_use_does_not_bring_it_back_round_on_itself() {
+    let campaign = start_with_slot("keptwhole", REENTERS).await;
+    let policy = campaign.root_installation.policy.clone();
+    let policy = policy.as_ref();
+
+    let result = probe(policy).await;
+    assert!(
+        result.contains("the slot ran the tool body and got: keptwhole"),
+        "{result}"
+    );
+    assert_eq!(
+        result.matches("[after-tool]").count(),
+        1,
+        "one boundary, one annotation: {result}"
+    );
+
+    let status = status(policy).await;
+    assert_eq!(
+        status.matches("after-tool#").count(),
+        1,
+        "one call, one invocation: {status}"
+    );
 
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();

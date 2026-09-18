@@ -22,6 +22,7 @@
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
+pub(crate) mod after_tool;
 pub(crate) mod agent_spec;
 mod conversation;
 mod descriptor;
@@ -63,6 +64,7 @@ mod usage_pointer;
 mod wait;
 mod workbench_display;
 pub use workbench_display::bounded_output as bound_workbench_display;
+pub use after_tool::AFTER_TOOL_WAIT_ENV;
 
 pub use conversation::{ConversationFuture, ConversationReader, ConversationUnavailable};
 // A `ConversationReader` resolves to `Vec<ConversationTurn>`, so anyone who

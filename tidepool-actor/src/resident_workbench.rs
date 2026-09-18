@@ -2191,6 +2191,110 @@ where
             .await
     }
 
+    /// Apply the retained after-tool slot to a finished call and what it
+    /// answered.
+    ///
+    /// The same `Arc<RootCustody>` an ordinary call is an application of,
+    /// entered at the slot's own index instead of zero. Nothing compiles here,
+    /// and nothing is retained per call: a slot invocation costs exactly what
+    /// a tool invocation costs.
+    pub(crate) async fn begin_after_tool(
+        &self,
+        context: crate::ActorSessionContext,
+        dispatch: Arc<RootCustody>,
+        tool: String,
+        payload: serde_json::Value,
+    ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, context, _| {
+                let outcome = session
+                    .run_rooted_entry_borrowed(
+                        "after_tool_slot",
+                        &dispatch,
+                        crate::after_tool::AFTER_TOOL_ENTRY,
+                        context.placement.resource_scope,
+                        None,
+                    )
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "after-tool slot completed without requesting its input".into(),
+                    ));
+                };
+                let input = (|| {
+                    if !matches!(
+                        ResidentRequest::decode(&request, session.data_con_table())?,
+                        ResidentRequest::AgentTools(
+                            crate::generated::agent_tools::AgentToolsReq::AgentToolsInputWith
+                        )
+                    ) {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "after-tool slot crossed an unexpected input boundary".into(),
+                        ));
+                    }
+                    Ok((tool, payload).to_value(session.data_con_table())?)
+                })();
+                let answer = match input {
+                    Ok(answer) => answer,
+                    Err(error) => {
+                        let _ =
+                            session.abort(hole.cont_id(), "after-tool slot input rejected".into());
+                        return Err(error);
+                    }
+                };
+                let outcome = session.resume(hole, answer);
+                start_fragment_settlement(
+                    session,
+                    context,
+                    1,
+                    // A slot invocation has no submitted cell to point at.
+                    String::new(),
+                    WorkbenchDisplay::Tool,
+                    Vec::new(),
+                    outcome,
+                )
+            })
+            .await
+    }
+
+    /// Bind one tool result under the handle the slot was shown, so a pruned
+    /// view keeps the whole of what it selected from addressable.
+    ///
+    /// This is [`Self::bind_command_job`]'s mechanism, for the same reason: a
+    /// value the model may want back belongs in the lexical environment it
+    /// already computes in, not in a second handle registry beside it. The
+    /// handle is chosen before the slot runs, and defined only when the slot
+    /// actually prunes.
+    pub(crate) async fn bind_tool_result(
+        &self,
+        context: crate::ActorSessionContext,
+        binding: String,
+        result: String,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, context, source| {
+                let scope = context.placement.lexical_scope;
+                let trusted_imports =
+                    SourceImports::from_specs(["qualified Data.Text as ShoalToolResultText"]);
+                let literal =
+                    tidepool_runtime::session::escape_workbench_haskell_string(&result);
+                let declaration = format!(
+                    "{binding} :: ShoalToolResultText.Text\n{binding} = ShoalToolResultText.pack \"{literal}\""
+                );
+                let mut imports = source.workbench_imports.clone();
+                imports.extend(&trusted_imports);
+                session
+                    .define_scoped_with_imports_in(scope, &[&declaration], &imports)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::InputMount(format!(
+                            "the whole result could not be bound as {binding}: {error}"
+                        ))
+                    })?;
+                Ok(())
+            })
+            .await
+    }
+
     pub(crate) async fn mount_named_input(
         &self,
         context: crate::ActorSessionContext,

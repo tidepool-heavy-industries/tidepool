@@ -676,6 +676,13 @@ pub struct ResidentKernelBehavior<H, O> {
     /// the first-install latch; a reload is a second, explicit path that
     /// replaces `compiled_tools` and advances this.
     spec_installs: u64,
+    /// Every after-tool invocation this actor has made, and what became of it.
+    /// An abstention's reason lives here and nowhere else.
+    after_tool: crate::after_tool::AfterToolLog,
+    /// Set while the after-tool slot is running. A slot's own effects and tool
+    /// use never trigger a slot, so a broken slot can never block its own
+    /// repair.
+    after_tool_active: bool,
     forest_control: bool,
     pending_program: Option<ResidentOutcome>,
     pending_reply: Option<crate::RequestId>,
@@ -1228,6 +1235,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             policy_installed: false,
             compiled_tools: None,
             spec_installs: 0,
+            after_tool: crate::after_tool::AfterToolLog::default(),
+            after_tool_active: false,
             forest_control: false,
             pending_program: None,
             pending_reply: None,
@@ -1677,8 +1686,17 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             ),
             (_, None) => "\n  spec: none installed".to_string(),
         };
+        // Where an abstention's reason lives, and where a failure line's
+        // reference points. Never repeated into the results themselves.
+        let after_tool = match view {
+            StatusView::Concise => String::new(),
+            _ => match self.after_tool.rows() {
+                rows if rows.is_empty() => String::new(),
+                rows => format!("\n  after-tool:\n    {}", rows.join("\n    ")),
+            },
+        };
         let status = format!(
-            "{current}{failure}{spec}\n  {workspace}\n  deadlines: [{}]\nactors:\n{}",
+            "{current}{failure}{spec}{after_tool}\n  {workspace}\n  deadlines: [{}]\nactors:\n{}",
             requests
                 .deadlines
                 .iter()
@@ -5149,6 +5167,216 @@ where
         }
     }
 
+    /// Apply the retained after-tool slot at the tool-result boundary, and
+    /// answer what the model is shown.
+    ///
+    /// The result waits for the slot, up to five minutes. Past thirty seconds
+    /// the elapsed time is published as workbench posture, which is an
+    /// observation channel: nothing here wakes the model or causes an
+    /// inference. On timeout or failure the original result is delivered with
+    /// one compact line and a reference — work the slot already completed is
+    /// kept rather than replayed, because the blocking machine task settles
+    /// its own checkout whether or not this caller is still polling it, and a
+    /// diagnostic already shown becomes a reference to its first sighting
+    /// instead of a second copy.
+    async fn annotate_tool_result(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        workbench: &crate::ResidentActorWorkbench<H, O>,
+        dispatch: Arc<RootCustody>,
+        call: &tidepool_runtime::session::workbench::WorkbenchToolCall,
+        output: String,
+    ) -> String {
+        use crate::after_tool::{Annotation, Disposition, Invocation};
+
+        let Some(tools) = self.compiled_tools.as_ref() else {
+            return output;
+        };
+        if !tools
+            .slots
+            .iter()
+            .any(|slot| slot == crate::after_tool::AFTER_TOOL_SLOT)
+        {
+            return output;
+        }
+        // A slot's own effects and tool use never trigger a slot.
+        if self.after_tool_active {
+            return output;
+        }
+        let provenance = tools.provenance();
+        let revision = tools.revision.clone().unwrap_or_else(|| "(run)".to_owned());
+        let ordinal = self.after_tool.begin();
+        // The handle is chosen before the slot runs, because the slot is shown
+        // it and names it back when it prunes. It is defined only if the slot
+        // actually prunes.
+        let handle = format!("toolResult{ordinal}");
+        let payload = serde_json::json!({
+            "call": { "name": call.name, "arguments": call.arguments },
+            "result": { "name": call.name, "handle": handle, "output": output },
+        });
+        let started = std::time::Instant::now();
+        let wait = crate::after_tool::wait();
+        let observation = self.runtime_observation.clone();
+        self.after_tool_active = true;
+        let answer = {
+            let slot = self.run_after_tool(
+                kernel,
+                context,
+                workbench,
+                dispatch,
+                call.name.clone(),
+                payload,
+            );
+            tokio::pin!(slot);
+            let expiry = tokio::time::sleep(wait);
+            tokio::pin!(expiry);
+            let mut progress = tokio::time::interval_at(
+                tokio::time::Instant::now() + crate::after_tool::AFTER_TOOL_PROGRESS,
+                crate::after_tool::AFTER_TOOL_PROGRESS,
+            );
+            loop {
+                tokio::select! {
+                    biased;
+                    settled = &mut slot => break Some(settled),
+                    () = &mut expiry => break None,
+                    _ = progress.tick() => observation.publish_workbench_posture(
+                        crate::ActorWorkbenchPosture::AwaitingEffect {
+                            input_unit_index: 0,
+                            total: 1,
+                            effect: format!(
+                                "after-tool slot, {}s elapsed",
+                                started.elapsed().as_secs()
+                            ),
+                        },
+                    ),
+                }
+            }
+        };
+        self.after_tool_active = false;
+        let elapsed = started.elapsed();
+        let (delivered, disposition) = match answer {
+            None => {
+                let reason = format!(
+                    "no answer within {}",
+                    crate::after_tool::describe_wait(wait)
+                );
+                let notice = self.after_tool.notice(ordinal, &reason);
+                (
+                    crate::after_tool::failed(&output, &notice),
+                    Disposition::TimedOut(wait),
+                )
+            }
+            Some(Err(error)) => {
+                let reason = crate::after_tool::compact_reason(&error.to_string());
+                let notice = self.after_tool.notice(ordinal, &reason);
+                (
+                    crate::after_tool::failed(&output, &notice),
+                    Disposition::Failed(reason),
+                )
+            }
+            Some(Ok(Annotation::Nothing)) => (output, Disposition::Silent),
+            // Silent to the model. It never asked for a judgement on this
+            // result, and a non-decision is not a refusal to announce.
+            Some(Ok(Annotation::Abstained(reason))) => (output, Disposition::Abstained(reason)),
+            Some(Ok(Annotation::Annotated(text))) => (
+                crate::after_tool::annotated(&output, &text, &revision),
+                Disposition::Annotated,
+            ),
+            Some(Ok(Annotation::Pruned { text, .. })) => {
+                match workbench
+                    .bind_tool_result(context.clone(), handle.clone(), output.clone())
+                    .await
+                {
+                    Ok(()) => (
+                        crate::after_tool::pruned(&text, &handle, &revision),
+                        Disposition::Pruned(handle),
+                    ),
+                    // A selection whose whole is unreachable would be a
+                    // rewrite, so the original is delivered instead.
+                    Err(error) => {
+                        let reason = crate::after_tool::compact_reason(&error.to_string());
+                        let notice = self.after_tool.notice(ordinal, &reason);
+                        (
+                            crate::after_tool::failed(&output, &notice),
+                            Disposition::Failed(reason),
+                        )
+                    }
+                }
+            }
+        };
+        tracing::info!(
+            actor = %context.actor,
+            tool = %call.name,
+            ordinal,
+            elapsed_ms = elapsed.as_millis(),
+            disposition = ?disposition,
+            "after-tool slot invoked"
+        );
+        self.after_tool.record(Invocation {
+            ordinal,
+            tool: call.name.clone(),
+            elapsed,
+            provenance,
+            disposition,
+        });
+        delivered
+    }
+
+    /// One slot invocation, in the actor's own resident machine: the retained
+    /// dispatcher entered at the slot's index, and its effects settled exactly
+    /// as a tool call's are.
+    async fn run_after_tool(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        workbench: &crate::ResidentActorWorkbench<H, O>,
+        dispatch: Arc<RootCustody>,
+        tool: String,
+        payload: serde_json::Value,
+    ) -> Result<crate::after_tool::Annotation, ResidentActorWorkbenchError> {
+        let mut operations = Vec::new();
+        let mut display_remaining = 16usize * 1024;
+        let mut command_output = Vec::new();
+        let step = workbench
+            .begin_after_tool(context.clone(), dispatch, tool, payload)
+            .await?;
+        let step = match step {
+            ResidentWorkbenchStep::Running { fragment, outcome } => {
+                self.settle_fragment_effects(
+                    kernel,
+                    context,
+                    workbench,
+                    fragment,
+                    *outcome,
+                    WorkbenchUnitExecution {
+                        execution: None,
+                        input_unit_index: 0,
+                        total: 1,
+                        named_tool: true,
+                        operations: &mut operations,
+                        display_remaining: &mut display_remaining,
+                        command_output: &mut command_output,
+                    },
+                )
+                .await?
+            }
+            settled => settled,
+        };
+        match step {
+            ResidentWorkbenchStep::Committed { output, .. } => {
+                crate::after_tool::Annotation::decode(&output)
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)
+            }
+            ResidentWorkbenchStep::Rejected(rejection) => {
+                Err(ResidentActorWorkbenchError::ActorProtocol(rejection.output))
+            }
+            _ => Err(ResidentActorWorkbenchError::ActorProtocol(
+                "the after-tool slot ended in a transfer instead of an annotation".into(),
+            )),
+        }
+    }
+
     /// The cell level of the run's span tree. `execution` is the tool call's
     /// own identity carried into the actor task, and is how a reconstructed
     /// cell joins back to the provider call that asked for it.
@@ -5712,6 +5940,25 @@ where
                         output
                     } else {
                         format!("{command_prefix}\n{output}")
+                    };
+                    // The tool-result boundary: the result exists and has not
+                    // been returned. Only a hosted tool call reaches here —
+                    // `lookup`, `status` and `reload_agent_spec` never acquire
+                    // a dispatcher, and an authored cell is not a tool call at
+                    // all — so a broken slot can never block its own repair.
+                    let output = match (request.tool_call().cloned(), tool_dispatch.as_ref()) {
+                        (Some(call), Some(dispatch)) => {
+                            self.annotate_tool_result(
+                                kernel,
+                                context,
+                                &workbench,
+                                Arc::clone(dispatch),
+                                &call,
+                                output,
+                            )
+                            .await
+                        }
+                        _ => output,
                     };
                     if let Some(checked) = &cell_check {
                         let spent = if checked.items[index].verdict.kind
