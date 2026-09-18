@@ -754,6 +754,50 @@ impl tidepool_actor::ActorSourceLayers for ShoalSourceReload {
         };
         self.scopes.write().insert(actor, scope);
     }
+
+    /// Publish the caller's own layer, through exactly the path the `Source`
+    /// effect takes.
+    ///
+    /// Same `scope` resolution, same gate, same transaction. An actor asking
+    /// for its spec to be reloaded therefore reaches the one layer the host
+    /// bound to it and no other, and a coding actor still cannot republish the
+    /// swarm's source graph — not because this is checked, but because the
+    /// only layer it can name is its own.
+    fn reload(
+        &self,
+        actor: PrincipalId,
+        also_check: &[String],
+    ) -> tidepool_actor::SourceLayerReload {
+        use tidepool_actor::SourceLayerReload;
+        use tidepool_bridge_effects::SrReloadOutcome;
+        match tidepool_handlers::SourceReloadService::reload(self, actor, also_check) {
+            Ok(SrReloadOutcome::ReloadUnchanged(revision)) => SourceLayerReload::Unchanged {
+                revision: revision.identity,
+            },
+            Ok(SrReloadOutcome::ReloadPublished(previous, published, changed)) => {
+                SourceLayerReload::Published {
+                    previous: previous.identity,
+                    revision: published.identity,
+                    changed,
+                }
+            }
+            Ok(SrReloadOutcome::ReloadRejected(active, rejected, diagnostics)) => {
+                SourceLayerReload::Rejected {
+                    active: active.identity,
+                    rejected: rejected.identity,
+                    diagnostics,
+                }
+            }
+            Err(tidepool_handlers::SourceError::SourceUnavailable(detail)) => {
+                SourceLayerReload::Unavailable(detail)
+            }
+            Err(tidepool_handlers::SourceError::SourceUnreadable(detail)) => {
+                SourceLayerReload::Unavailable(format!(
+                    "the declared source roots could not be re-read: {detail}"
+                ))
+            }
+        }
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]

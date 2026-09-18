@@ -66,6 +66,43 @@ pub trait ActorSourceLayers: Send + Sync {
     /// will compile against it, so that actor's own source calls act on
     /// exactly that layer and no other.
     fn bind(&self, actor: PrincipalId, worktrees: &[String]);
+
+    /// Re-read and publish `actor`'s OWN layer, with `also_check` naming
+    /// modules to pull into the checked closure beyond the configured list.
+    ///
+    /// The layer is the one [`Self::bind`] fixed for this principal and cannot
+    /// be chosen per call, so a reload is scoped to the actor that asked and
+    /// never upgrades a child. Hosts that install no layers answer
+    /// [`SourceLayerReload::Unavailable`], which is also the default.
+    fn reload(&self, actor: PrincipalId, also_check: &[String]) -> SourceLayerReload {
+        let _ = (actor, also_check);
+        SourceLayerReload::Unavailable("this host installs no source layers".into())
+    }
+}
+
+/// What publishing one actor's own layer did, as the actor engine needs to
+/// read it: enough to decide whether to recompile a spec, and enough to put in
+/// a receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceLayerReload {
+    /// The roots still hold the active revision's content. Nothing was
+    /// rebuilt and nothing was republished.
+    Unchanged { revision: String },
+    /// A new revision is live for this actor's later compiles.
+    Published {
+        previous: String,
+        revision: String,
+        changed: Vec<String>,
+    },
+    /// The affected module graph did not typecheck. The previous revision is
+    /// still active and the edited files are untouched on disk.
+    Rejected {
+        active: String,
+        rejected: String,
+        diagnostics: String,
+    },
+    /// This actor has no layer of its own to publish into.
+    Unavailable(String),
 }
 
 /// The installed [`ActorSourceLayers`], shared by every actor in one forest.

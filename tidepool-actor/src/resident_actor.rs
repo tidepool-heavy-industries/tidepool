@@ -672,6 +672,10 @@ pub struct ResidentKernelBehavior<H, O> {
     worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
     policy_installed: bool,
     compiled_tools: Option<crate::resident_workbench::ResidentWorkbenchTools>,
+    /// How many specs this incarnation has installed. `policy_installed` stays
+    /// the first-install latch; a reload is a second, explicit path that
+    /// replaces `compiled_tools` and advances this.
+    spec_installs: u64,
     forest_control: bool,
     pending_program: Option<ResidentOutcome>,
     pending_reply: Option<crate::RequestId>,
@@ -1223,6 +1227,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             worktree_custody: None,
             policy_installed: false,
             compiled_tools: None,
+            spec_installs: 0,
             forest_control: false,
             pending_program: None,
             pending_reply: None,
@@ -1660,8 +1665,20 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             }
             _ => String::new(),
         };
+        // Discovery is implicit, so the resolved rule and file are reported
+        // rather than left to be guessed. A concise view stays concise; every
+        // wider view names the spec that is actually live.
+        let spec = match (view, self.compiled_tools.as_ref()) {
+            (StatusView::Concise, _) => String::new(),
+            (_, Some(tools)) => format!(
+                "\n  spec: {} slots=[{}]",
+                tools.provenance(),
+                tools.slots.join(", ")
+            ),
+            (_, None) => "\n  spec: none installed".to_string(),
+        };
         let status = format!(
-            "{current}{failure}\n  {workspace}\n  deadlines: [{}]\nactors:\n{}",
+            "{current}{failure}{spec}\n  {workspace}\n  deadlines: [{}]\nactors:\n{}",
             requests
                 .deadlines
                 .iter()
@@ -4022,6 +4039,144 @@ where
         Ok(InteractivePark::Parked)
     }
 
+    /// Rebuild this actor's spec and swap the retained record between calls.
+    ///
+    /// Four steps, and the receipt says which one it ended at, because they
+    /// really can end in different places. Publishing the layer while the spec
+    /// itself fails to compile is a real outcome, not an error: the revision is
+    /// live for this actor's later cells, so a model repairing its spec can
+    /// import and exercise the new modules from a cell while the spec does not
+    /// yet compile, and this actor keeps serving the record it already has.
+    ///
+    /// Step three refuses rather than asks. The tool bridge registers a tool
+    /// list once and serves it read-only for the life of that registration, so
+    /// no confirmation could make a changed surface work; a changed surface
+    /// takes effect at the actor's next incarnation.
+    async fn reload_agent_spec(
+        &mut self,
+        context: &ActorSessionContext,
+        also_check: &[String],
+    ) -> String {
+        let Some(active) = self.compiled_tools.as_ref() else {
+            return "this actor installed no agent spec, so there is nothing to reload."
+                .to_string();
+        };
+        let resolved = active.resolved.clone();
+        let mut receipt = vec![format!("spec: {}", resolved.describe())];
+
+        // The spec module was found by convention and is in no configured
+        // module list, so the reload adds it: a spec that fails to compile
+        // must fail its own reload rather than surface later at an unrelated
+        // call.
+        let mut checked: Vec<String> = also_check.to_vec();
+        if let Some(module) = resolved.checked_module() {
+            if !checked.contains(&module) {
+                checked.push(module);
+            }
+        }
+
+        let Some(layers) = self.environment.source_layers.clone() else {
+            receipt.push(
+                "layer: this host installs no source layers, so nothing was republished.".into(),
+            );
+            return receipt.join("\n");
+        };
+        // The layer is the one the host bound to THIS principal when the actor
+        // was admitted. A reload is scoped to the actor that asked and never
+        // upgrades a child.
+        match layers.reload(tidepool_repr::PrincipalId::from(context.actor), &checked) {
+            crate::SourceLayerReload::Unavailable(detail) => {
+                receipt.push(format!("layer: {detail}"));
+                return receipt.join("\n");
+            }
+            crate::SourceLayerReload::Rejected {
+                active,
+                rejected,
+                diagnostics,
+            } => {
+                receipt.push(format!(
+                    "layer: rejected. {active} is still active; {rejected} did not typecheck. \
+                     Your edited files are on disk exactly as you wrote them, and the previous \
+                     spec is still serving calls.\n{diagnostics}"
+                ));
+                return receipt.join("\n");
+            }
+            crate::SourceLayerReload::Unchanged { revision } => {
+                receipt.push(format!("layer: unchanged at {revision}."));
+            }
+            crate::SourceLayerReload::Published {
+                previous,
+                revision,
+                changed,
+            } => {
+                receipt.push(format!(
+                    "layer: published {revision} over {previous}; changed {}.",
+                    if changed.is_empty() {
+                        "nothing".to_string()
+                    } else {
+                        changed.join(", ")
+                    }
+                ));
+            }
+        }
+
+        let install = self.spec_installs + 1;
+        let candidate = self
+            .environment
+            .runner
+            .application_workbench()
+            .prepare_tools(context.clone(), install)
+            .await;
+        let candidate = match candidate {
+            Ok(Some(candidate)) => candidate,
+            Ok(None) => {
+                receipt.push(
+                    "spec: the resolved entry named nothing to install; the previous record is \
+                     still active."
+                        .into(),
+                );
+                return receipt.join("\n");
+            }
+            Err(error) => {
+                receipt.push(format!(
+                    "spec: the install fragment did not compile against the new revision, so the \
+                     previous record is still active.\n{error}"
+                ));
+                return receipt.join("\n");
+            }
+        };
+
+        let Some(active) = self.compiled_tools.as_ref() else {
+            receipt.push("spec: the active record vanished mid-reload; nothing was swapped.".into());
+            return receipt.join("\n");
+        };
+        let changes = tidepool_tool::surface::compare_surfaces(
+            &active.declarations,
+            &candidate.declarations,
+        );
+        if !changes.is_empty() {
+            receipt.push(format!(
+                "refused: the rebuilt spec declares a different surface, and the tool list was \
+                 registered once for this session. The previous record is still serving calls; \
+                 a changed surface takes effect at your next incarnation.\n{}",
+                tidepool_tool::surface::describe_changes(&changes)
+            ));
+            return receipt.join("\n");
+        }
+
+        receipt.push(format!(
+            "swapped: install {install} now serves later calls ({}). A call already accepted \
+             keeps the implementation it started with.",
+            candidate.provenance()
+        ));
+        if !candidate.slots.is_empty() {
+            receipt.push(format!("slots: {}", candidate.slots.join(", ")));
+        }
+        self.spec_installs = install;
+        self.compiled_tools = Some(candidate);
+        receipt.join("\n")
+    }
+
     async fn install_interactive_policy(
         &mut self,
         kernel: &KernelContext,
@@ -4036,11 +4191,12 @@ where
                 "local actor was absent from its routing directory".into(),
             )
         })?;
+        self.spec_installs = 1;
         self.compiled_tools = self
             .environment
             .runner
             .application_workbench()
-            .prepare_tools(context.clone())
+            .prepare_tools(context.clone(), self.spec_installs)
             .await?;
         let declarations = self
             .compiled_tools
@@ -5021,9 +5177,14 @@ where
             .tool_call()
             .filter(|call| call.name == crate::status_tool::STATUS_TOOL)
             .cloned();
+        let reload_spec_call = request
+            .tool_call()
+            .filter(|call| call.name == crate::reload_spec_tool::RELOAD_SPEC_TOOL)
+            .cloned();
         let tool_dispatch = if let Some(call) = request.tool_call().filter(|call| {
             call.name != crate::lookup_tool::LOOKUP_TOOL
                 && call.name != crate::status_tool::STATUS_TOOL
+                && call.name != crate::reload_spec_tool::RELOAD_SPEC_TOOL
         }) {
             let tools = self
                 .compiled_tools
@@ -5049,10 +5210,52 @@ where
                         ),
                     )
                 })?;
+            // Dispatch clones the retained record, so the identity of THAT
+            // record is known at the moment of the call and costs nothing to
+            // carry. It says which installed record served the call, and the
+            // revision that record was built from — not that everything
+            // reachable through the call belongs to one revision.
+            tracing::info!(
+                actor = %context.actor,
+                tool = %call.name,
+                spec = %tools.provenance(),
+                "hosted tool call served by an installed spec"
+            );
             Some(Arc::clone(&tools.dispatch))
         } else {
             None
         };
+        if let Some(call) = reload_spec_call {
+            let arguments = crate::reload_spec_tool::parse(call.arguments).map_err(|error| {
+                workbench_failure(
+                    &[],
+                    0,
+                    1,
+                    ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
+                )
+            })?;
+            let output = self.reload_agent_spec(context, &arguments.also_check).await;
+            return Ok(KernelStep::Continue(workbench_response(
+                WorkbenchRunStatus::Committed,
+                vec![WorkbenchItemReceipt {
+                    diagnostics: Vec::new(),
+                    index: 0,
+                    kind: None,
+                    span: None,
+                    source_items: Vec::new(),
+                    status: WorkbenchItemStatus::Committed,
+                    output,
+                    warnings: Vec::new(),
+                    installed_bindings: Vec::new(),
+                    operations: Vec::new(),
+                    terminal_transfer: None,
+                    failure_layer: None,
+                }],
+                1,
+                1,
+                None,
+            )));
+        }
         let workbench = match &self.standing {
             ResidentStanding::Interactive(awaiting) => self.environment.runner.workbench(
                 awaiting.request.response.clone(),

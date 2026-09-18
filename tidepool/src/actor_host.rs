@@ -19,6 +19,8 @@ mod hosted_tools_tests;
 #[cfg(test)]
 mod jev_tests;
 #[cfg(test)]
+mod agent_spec_tests;
+#[cfg(test)]
 mod lookup_availability_tests;
 #[cfg(test)]
 mod observation_budget_tests;
@@ -2114,6 +2116,15 @@ fn compile_root(
                     .as_ref()
                     .and_then(|inputs| inputs.tools.as_deref())
                     .unwrap_or("Tidepool.Command.Tools.tools"),
+            )
+            // Rule two of spec discovery. Rule one is a file in an actor's own
+            // checkout and belongs to no run-wide value; this key is how a
+            // workspace names a spec for actors that have no checkout.
+            .with_spec_if(
+                config
+                    .workspace_inputs
+                    .as_ref()
+                    .and_then(|inputs| inputs.spec.as_deref()),
             )
             .with_workspace_modules(
                 config
@@ -6356,7 +6367,7 @@ mod tests {
         result
     }
 
-    async fn dispatch_structured_tool(
+    pub(super) async fn dispatch_structured_tool(
         endpoint: &dyn tidepool_actor::ResidentToolEndpoint,
         name: &str,
         arguments: serde_json::Value,

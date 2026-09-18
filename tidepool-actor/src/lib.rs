@@ -22,6 +22,7 @@
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
+pub(crate) mod agent_spec;
 mod conversation;
 mod descriptor;
 mod external_application;
@@ -41,6 +42,7 @@ mod mount;
 mod notification;
 mod profile;
 mod prompt_catalog;
+pub(crate) mod reload_spec_tool;
 mod request;
 pub use request::sources::SourceDelivery;
 mod request_effect;
@@ -98,7 +100,7 @@ pub use local_actor::{
 pub use mailbox::MailboxValue;
 pub use mount::{
     ActorCompileView, ActorCompileViewError, ActorPlacement, ActorRunTarget, ActorSessionContext,
-    ActorSourceImports, ActorSourceLayerResolver, ActorSourceLayers,
+    ActorSourceImports, ActorSourceLayerResolver, ActorSourceLayers, SourceLayerReload,
 };
 pub use notification::{
     NotificationError, NotificationPoll, NotificationReceipt, NotificationSend, NotificationState,

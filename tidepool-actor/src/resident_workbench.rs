@@ -211,6 +211,10 @@ pub struct ActorWorkbenchSource {
     base_include: Arc<[PathBuf]>,
     workbench_imports: SourceImports,
     tools: Option<Arc<str>>,
+    /// The workspace's `[haskell] spec` key, when it names one. Rule two of
+    /// spec discovery; rule one is a file in the actor's own checkout and
+    /// belongs to no shared value.
+    spec: Option<Arc<str>>,
     workspace_modules: Arc<[String]>,
 }
 
@@ -249,6 +253,7 @@ impl ActorWorkbenchSource {
                 "Tidepool.Inspection (print, cellDisplay)",
             ]),
             tools: None,
+            spec: None,
             workspace_modules: Arc::from([]),
         }
     }
@@ -297,11 +302,110 @@ impl ActorWorkbenchSource {
         self.tools = Some(entry);
         self
     }
+
+    /// Select the workspace's `[haskell] spec` value — rule two of spec
+    /// discovery, for a workspace that wants a name other than
+    /// `AgentSpec.agentSpec`.
+    #[must_use]
+    pub fn with_spec(mut self, entry: impl Into<Arc<str>>) -> Self {
+        let entry = entry.into();
+        if let Some((module, _)) = entry.rsplit_once('.') {
+            self.workbench_imports
+                .extend_text(&format!("qualified {module}"));
+        }
+        self.workbench_imports
+            .extend_text("qualified Tidepool.Agent.Contract");
+        self.spec = Some(entry);
+        self
+    }
+
+    /// [`Self::with_spec`] when the workspace named one, and nothing when it
+    /// did not.
+    #[must_use]
+    pub fn with_spec_if(self, entry: Option<&str>) -> Self {
+        match entry {
+            Some(entry) => self.with_spec(entry),
+            None => self,
+        }
+    }
 }
 
+/// One installed spec: the surface it declares, the retained value every call
+/// and every slot is an application of, and the identity of this install.
 pub(crate) struct ResidentWorkbenchTools {
     pub(crate) declarations: Vec<tidepool_tool::HostedTool>,
     pub(crate) dispatch: Arc<RootCustody>,
+    /// Which slots the installed record fills, by name, as the same compile
+    /// declared them.
+    pub(crate) slots: Vec<String>,
+    /// How the spec was found, and where. Reported in status and in every
+    /// reload receipt.
+    pub(crate) resolved: crate::agent_spec::ResolvedSpec,
+    /// Which install this record is, counting from one within this actor
+    /// incarnation. A completed call names it, so a receipt says which record
+    /// served the call and not merely which record is active now.
+    pub(crate) install: u64,
+    /// The source revision this record was built from, when the actor has a
+    /// layer of its own to name one.
+    ///
+    /// This says which installed record served a call and what revision that
+    /// record was compiled against. It does NOT say that every function
+    /// reachable through the call belongs to one revision, which would be a
+    /// different and possibly false claim.
+    pub(crate) revision: Option<String>,
+}
+
+/// What one `installSpec` publishes: the declared surface, and which slots the
+/// same compile filled.
+pub(crate) struct SpecInstallation {
+    pub(crate) tools: Vec<tidepool_tool::ToolDeclaration>,
+    pub(crate) slots: Vec<String>,
+}
+
+/// Read an installation out of the suspension's JSON.
+///
+/// A bare array is a tools-only installation, which is what every spec with no
+/// slot filled publishes and what the shape was before slots existed; the
+/// object form additionally names the slots.
+pub(crate) fn decode_installation(
+    installation: serde_json::Value,
+) -> Result<SpecInstallation, ResidentActorWorkbenchError> {
+    let declarations = |value| {
+        serde_json::from_value::<Vec<tidepool_tool::ToolDeclaration>>(value).map_err(|error| {
+            ResidentActorWorkbenchError::ActorProtocol(format!("tool declarations: {error}"))
+        })
+    };
+    match installation {
+        serde_json::Value::Object(mut fields) => {
+            let tools = declarations(
+                fields
+                    .remove("tools")
+                    .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
+            )?;
+            let slots = fields
+                .remove("slots")
+                .and_then(|slots| serde_json::from_value::<Vec<String>>(slots).ok())
+                .unwrap_or_default();
+            Ok(SpecInstallation { tools, slots })
+        }
+        array => Ok(SpecInstallation {
+            tools: declarations(array)?,
+            slots: Vec::new(),
+        }),
+    }
+}
+
+impl ResidentWorkbenchTools {
+    /// The provenance a completed call records: this record, and the revision
+    /// it was built from.
+    pub(crate) fn provenance(&self) -> String {
+        format!(
+            "install={} revision={} {}",
+            self.install,
+            self.revision.as_deref().unwrap_or("(run)"),
+            self.resolved.describe()
+        )
+    }
 }
 
 /// Shared-machine registry shape used by actors. String holes are only the
@@ -1861,14 +1965,51 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    /// Resolve this actor's spec without compiling anything, for status and
+    /// for a reload receipt that must name the rule before it knows whether
+    /// the spec compiles.
+    pub(crate) fn resolve_spec(
+        &self,
+        context: &crate::ActorSessionContext,
+    ) -> crate::agent_spec::ResolvedSpec {
+        crate::agent_spec::resolve(
+            &context.source_layer,
+            self.access.source.spec.as_deref(),
+            self.access.source.tools.as_deref(),
+        )
+    }
+
+    /// Compile one spec and keep both of its products.
+    ///
+    /// One fragment produces the declarations — read out of the
+    /// `AgentToolsInstallWith` suspension — and the retained dispatcher, kept
+    /// as an `Arc<RootCustody>` heap root, which covers ordinary tool calls
+    /// and every slot the spec fills. They are two products of one compile of
+    /// one module against one include list, so a schema can never advertise a
+    /// handler from another revision, and a slot can never be a revision ahead
+    /// of the tools beside it.
     pub(crate) async fn prepare_tools(
         &self,
         context: crate::ActorSessionContext,
+        install: u64,
     ) -> Result<Option<ResidentWorkbenchTools>, ResidentActorWorkbenchError> {
-        let Some(entry) = self.access.source.tools.clone() else {
+        let resolved = self.resolve_spec(&context);
+        let revision = crate::agent_spec::layer_revision(&context.source_layer);
+        let Some(entry) = resolved.entry.clone() else {
             return Ok(None);
         };
         let mut source = self.access.source.clone();
+        // A spec found by convention is named by no configured key, so its
+        // module is not in the shared workbench vocabulary; the fragment that
+        // installs it brings its own qualified import.
+        if let Some((module, _)) = entry.rsplit_once('.') {
+            source
+                .workbench_imports
+                .extend_text(&format!("qualified {module}"));
+        }
+        source
+            .workbench_imports
+            .extend_text("qualified Tidepool.Agent.Contract");
         source.preamble =
             insert_preamble_imports(&source.preamble, "qualified Tidepool.Effects.Core").into();
         source.preamble = format!(
@@ -1876,7 +2017,18 @@ where
             source.preamble, context.haskell_effects_alias
         )
         .into();
+        // Rules one and two name a spec value; rule three names the tools
+        // record `[haskell] tools` names today. `installTools` is a spec whose
+        // only field is set, so both reach one installer and one retained
+        // dispatcher shape.
+        let installer = match resolved.rule {
+            crate::agent_spec::SpecRule::CheckoutModule
+            | crate::agent_spec::SpecRule::WorkspaceSpec => "installSpec",
+            crate::agent_spec::SpecRule::WorkspaceTools
+            | crate::agent_spec::SpecRule::BuiltinDefault => "installTools",
+        };
         let authored_effects = context.haskell_effects_alias.clone();
+        let publication_resolved = resolved.clone();
         let mut compile_context = context.clone();
         compile_context.haskell_effects_alias = "HostedToolEffects".into();
         self.access
@@ -1885,7 +2037,7 @@ where
                     ordinal: 1,
                     total: 1,
                     source: format!(
-                        "_ <- Tidepool.Agent.Contract.installTools @({authored_effects}) {entry}"
+                        "_ <- Tidepool.Agent.Contract.{installer} @({authored_effects}) {entry}"
                     ),
                 };
                 let step = begin_fragment(
@@ -1924,18 +2076,12 @@ where
                             "tool installer crossed an unexpected effect boundary".into(),
                         ));
                     };
-                    let declarations =
+                    let installation =
                         tidepool_runtime::value_to_json(&declarations, session.data_con_table(), 0);
-                    let declarations: Vec<tidepool_tool::ToolDeclaration> =
-                        serde_json::from_value(declarations).map_err(|error| {
-                            ResidentActorWorkbenchError::ActorProtocol(format!(
-                                "tool declarations: {error}"
-                            ))
-                        })?;
-                    let declarations = crate::resident_interactive::project_tools(declarations)
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                        })?;
+                    let SpecInstallation { tools, slots } = decode_installation(installation)?;
+                    let declarations = crate::resident_interactive::project_tools(tools).map_err(
+                        |error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
+                    )?;
                     let dispatch = session
                         .live_payload_handle_owned_by(
                             hole.cont_id(),
@@ -1946,9 +2092,9 @@ where
                                 "tool installer did not retain its dispatcher".into(),
                             )
                         })?;
-                    Ok((declarations, dispatch))
+                    Ok((declarations, slots, dispatch))
                 })();
-                let (declarations, dispatch) = match publication {
+                let (declarations, slots, dispatch) = match publication {
                     Ok(publication) => publication,
                     Err(error) => {
                         let _ = session.abort(hole.cont_id(), "tool publication rejected".into());
@@ -1976,6 +2122,10 @@ where
                 Ok(Some(ResidentWorkbenchTools {
                     declarations,
                     dispatch: Arc::new(dispatch),
+                    slots,
+                    resolved: publication_resolved,
+                    install,
+                    revision,
                 }))
             })
             .await

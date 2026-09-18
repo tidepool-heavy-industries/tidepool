@@ -41,13 +41,17 @@ impl ResidentInteractivePolicy {
         let custom = tools.into_iter().filter(|tool| {
             !matches!(
                 tool.name(),
-                HASKELL_TOOL | crate::lookup_tool::LOOKUP_TOOL | crate::status_tool::STATUS_TOOL
+                HASKELL_TOOL
+                    | crate::lookup_tool::LOOKUP_TOOL
+                    | crate::status_tool::STATUS_TOOL
+                    | crate::reload_spec_tool::RELOAD_SPEC_TOOL
             )
         });
         Self {
             tools: std::iter::once(haskell_tool_declaration())
                 .chain(std::iter::once(crate::lookup_tool::declaration()))
                 .chain(std::iter::once(crate::status_tool::declaration()))
+                .chain(std::iter::once(crate::reload_spec_tool::declaration()))
                 .chain(custom)
                 .collect::<Vec<_>>()
                 .into(),
@@ -61,6 +65,7 @@ impl ResidentInteractivePolicy {
                 haskell_tool_declaration(),
                 crate::lookup_tool::declaration(),
                 crate::status_tool::declaration(),
+                crate::reload_spec_tool::declaration(),
             ]
             .into(),
             client,
@@ -76,6 +81,7 @@ pub(crate) fn project_tools(
         HASKELL_TOOL.to_string(),
         crate::lookup_tool::LOOKUP_TOOL.to_string(),
         crate::status_tool::STATUS_TOOL.to_string(),
+        crate::reload_spec_tool::RELOAD_SPEC_TOOL.to_string(),
     ]);
     declarations
         .into_iter()

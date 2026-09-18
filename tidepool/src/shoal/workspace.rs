@@ -22,6 +22,10 @@ pub(super) struct HaskellConfig {
     pub modules: Vec<String>,
     pub checks: Vec<String>,
     pub tools: Option<String>,
+    /// The workspace's agent spec, for a workspace that wants a name other
+    /// than the `AgentSpec.agentSpec` an actor's own checkout supplies. Rule
+    /// two of spec discovery; `tools` remains rule three.
+    pub spec: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -50,6 +54,8 @@ pub struct FrozenWorkspace {
     pub(crate) checks: Vec<String>,
     #[serde(default)]
     pub(crate) tools: Option<String>,
+    #[serde(default)]
+    pub(crate) spec: Option<String>,
     pub(crate) prompts: BTreeMap<String, String>,
     #[serde(default)]
     pub(crate) models: BTreeMap<String, String>,
@@ -106,6 +112,7 @@ impl FrozenWorkspace {
             .checks
             .iter()
             .chain(config.haskell.tools.iter())
+            .chain(config.haskell.spec.iter())
         {
             let Some((module, function)) = entry.rsplit_once('.') else {
                 return Err(format!("Haskell entry must be Module.function: {entry}").into());
@@ -204,6 +211,7 @@ impl FrozenWorkspace {
             modules: config.haskell.modules,
             checks: config.haskell.checks,
             tools: config.haskell.tools,
+            spec: config.haskell.spec,
             prompts,
             models: config.models,
             files,

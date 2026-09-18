@@ -11,6 +11,7 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE EmptyDataDecls #-}
 {-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
 -- | Mode-interpreted agent tool records compiled into declarations and
 -- dynamic dispatch.
 --
@@ -67,6 +68,19 @@ module Tidepool.Agent.Contract
   , ToolName
   , StructuralValue
 
+    -- * The agent spec: one tools record, plus System 1 slots
+  , AgentSpec (..)
+  , NoTools (..)
+  , defaultSpec
+  , installSpec
+  , toolCallEntry
+  , afterToolEntry
+  , ToolCall (..)
+  , ToolResult (..)
+  , ResultHandle
+  , Annotation (..)
+  , annotationToJson
+
     -- * Naming (exposed for the diagnostics fixtures)
   , toSnakeCase
   ) where
@@ -80,8 +94,8 @@ import Data.Proxy (Proxy (..))
 import GHC.Generics
 import GHC.TypeLits (TypeError, ErrorMessage (..))
 import Tidepool.Inspection (Display (..))
-import Tidepool.Aeson.Value (Value, ToJSON (..), object, (.=))
-import Tidepool.Aeson.FromJSON (FromJSON (..), Result (..), fromJSON)
+import Tidepool.Aeson.Value (Value (..), ToJSON (..), encodeValue, object, (.=))
+import Tidepool.Aeson.FromJSON (FromJSON (..), Result (..), fromJSON, withObject, (.:), (.:?), (.!=))
 import Tidepool.Aeson.Schema (JsonSchema (..))
 import Control.Monad.Freer (Eff, Member, raise, send)
 import Tidepool.Effects.Core (AgentTools (..))
@@ -550,22 +564,180 @@ renderToolOutput value =
   let (text, omitted) = displayWith 32500 value
   in if omitted then text <> "\n[Tool result shortened; request a smaller result.]" else text
 
+-- ---------------------------------------------------------------------------
+-- The agent spec — one tools record, plus the slots the runtime applies at
+-- supported events
+-- ---------------------------------------------------------------------------
+
+-- | The handle under which a complete tool result stays addressable after a
+-- slot has offered a selection of it. Plain 'Text': the runtime issues it, and
+-- a slot only carries it back.
+type ResultHandle = Text
+
+-- | What the runtime asked a tool to do, as the slot sees it.
+data ToolCall = ToolCall
+  { toolCallName :: Text
+  , toolCallArguments :: Value
+  }
+
+-- | What the tool answered, and the handle the whole answer stays addressable
+-- under.
+data ToolResult = ToolResult
+  { toolResultName :: Text
+  , toolResultHandle :: ResultHandle
+  , toolResultOutput :: Text
+  }
+
+instance FromJSON ToolCall where
+  parseJSON = withObject "ToolCall" $ \o ->
+    ToolCall <$> (o .: T.pack "name") <*> ((o .:? T.pack "arguments") .!= Null)
+
+instance FromJSON ToolResult where
+  parseJSON = withObject "ToolResult" $ \o ->
+    ToolResult
+      <$> (o .: T.pack "name")
+      <*> ((o .:? T.pack "handle") .!= T.empty)
+      <*> ((o .:? T.pack "output") .!= T.empty)
+
+-- | What the runtime shows the after-tool slot: one finished call, and what it
+-- answered.
+data AfterToolInput = AfterToolInput ToolCall ToolResult
+
+instance FromJSON AfterToolInput where
+  parseJSON = withObject "AfterToolInput" $ \o ->
+    AfterToolInput <$> (o .: T.pack "call") <*> (o .: T.pack "result")
+
+-- | What a slot has to say about a result it was shown. Annotate or prune,
+-- never rewrite: a pruned view states that it is a selection and names the
+-- handle the whole result is still addressable under.
+data Annotation
+  = -- | Nothing worth adding. The result is delivered exactly as the tool
+    -- produced it and nothing is recorded beyond the invocation itself.
+    NoAnnotation
+  | -- | A deliberate non-decision, with its reason. Silent to the model:
+    -- the reason belongs in the receipt, because the model never asked for a
+    -- judgement on this result.
+    Abstained Text
+  | -- | Derived context attached beside the tool's own output, and attributed
+    -- as derived so an observation is never read as a judgement.
+    Annotated Text
+  | -- | A selection of the result, and the handle the complete result stays
+    -- addressable under.
+    Pruned Text ResultHandle
+
+-- | The one external encoding of an annotation, mirroring
+-- 'declarationsToJson': the runtime reads this shape, nothing else.
+annotationToJson :: Annotation -> Value
+annotationToJson annotation = case annotation of
+  NoAnnotation -> object ["kind" .= T.pack "none"]
+  Abstained reason -> object ["kind" .= T.pack "abstained", "reason" .= reason]
+  Annotated text -> object ["kind" .= T.pack "annotated", "text" .= text]
+  Pruned text handle ->
+    object ["kind" .= T.pack "pruned", "text" .= text, "handle" .= handle]
+
+-- | A tools record with no fields. The type of 'defaultSpec'\'s tools, so the
+-- default is a total value rather than a bottom waiting for a record update.
+data NoTools mode = NoTools deriving (Generic)
+
+-- | One agent's tools and its System 1 slots, in one value.
+--
+-- Written as a record update over 'defaultSpec', never as a bare constructor
+-- application:
+--
+-- > agentSpec = defaultSpec
+-- >   { specTools = Tools.definitions
+-- >   , afterTool = Just AfterTool.run
+-- >   }
+--
+-- That is the point of the default. A slot added later is a new field with a
+-- default, so every spec already written keeps compiling untouched; a spec
+-- spelled as a constructor application would break on every addition.
+data AgentSpec tools effects = AgentSpec
+  { -- | Exactly the record @[haskell] tools@ names today, unchanged. A field's
+    -- name is its tool's name and its types generate the schemas.
+    --
+    -- Not spelled @tools@: every authored tools module imports this module
+    -- unqualified and names its own record @tools@, and a field selector by
+    -- that name would make each of those modules ambiguous.
+    specTools :: tools (AsServerT (Eff effects))
+  , -- | Applied when a tool call finishes, to that call and its result, in the
+    -- actor's own resident machine.
+    afterTool :: Maybe (ToolCall -> ToolResult -> Eff effects Annotation)
+  }
+
+-- | The spec every field of which is its default: no tools, no slots.
+defaultSpec :: AgentSpec NoTools effects
+defaultSpec = AgentSpec {specTools = NoTools, afterTool = Nothing}
+
+-- | The entry index the retained dispatcher serves an ordinary tool call at.
+toolCallEntry :: Int
+toolCallEntry = 0
+
+-- | The entry index the retained dispatcher serves the after-tool slot at.
+afterToolEntry :: Int
+afterToolEntry = 1
+
 -- | Install startup-compiled tools alongside the interactive workbench.
 -- The runtime owns the captured dispatcher; this does not enter a serving loop.
 installTools
   :: forall effects tools. HasAgentApi tools (Eff effects)
   => tools (AsServerT (Eff effects)) -> Eff (AgentTools ': effects) ()
-installTools tools = case compileTools tools of
+installTools record = installSpec (defaultSpec {specTools = record})
+
+-- | Install one spec: its declared tool surface and every slot it fills, from
+-- a single compile of a single module.
+--
+-- Declarations and the retained dispatcher are two products of that one
+-- compile, so a schema can never advertise a handler built from another
+-- revision, and a slot can never be a revision ahead of the tools beside it.
+-- The runtime selects what to run by entry index — 'toolCallEntry' for a tool
+-- call, 'afterToolEntry' for the after-tool slot.
+installSpec
+  :: forall effects tools. HasAgentApi tools (Eff effects)
+  => AgentSpec tools effects -> Eff (AgentTools ': effects) ()
+installSpec spec = case compileTools (specTools spec) of
   Left problem -> error (T.unpack (renderToolCompileError problem))
-  Right compiled -> send (AgentToolsInstallWith (declarationsToJson (declarations compiled)) run)
+  Right compiled -> send (AgentToolsInstallWith installation entry)
     where
-      run :: Int -> Eff (AgentTools ': effects) Text
-      run _ = do
+      installation =
+        object
+          [ "tools" .= declarationsToJson (declarations compiled)
+          , "slots" .= toJSON slots
+          ]
+      slots = case afterTool spec of
+        Nothing -> []
+        Just _ -> [T.pack "afterTool"]
+
+      entry :: Int -> Eff (AgentTools ': effects) Text
+      entry index
+        | index == afterToolEntry = runAfterTool (afterTool spec)
+        | otherwise = runToolCall compiled
+
+      runToolCall :: CompiledTools (Eff effects) -> Eff (AgentTools ': effects) Text
+      runToolCall tooling = do
         (name, arguments) <- send AgentToolsInputWith
-        result <- raise (dispatch compiled name arguments)
+        result <- raise (dispatch tooling name arguments)
         pure (case fromJSON result of
           Success text -> text
           Error _ -> renderToolOutput result)
+
+      -- An unfilled slot is never selected by the runtime, which reads the
+      -- installed slot list; asking for one anyway is the honest silence the
+      -- slot itself would have produced.
+      runAfterTool
+        :: Maybe (ToolCall -> ToolResult -> Eff effects Annotation)
+        -> Eff (AgentTools ': effects) Text
+      runAfterTool Nothing = pure (renderAnnotation NoAnnotation)
+      runAfterTool (Just slot) = do
+        (_, payload) <- send AgentToolsInputWith
+        case fromJSON payload of
+          Error message ->
+            pure (renderAnnotation (Abstained (T.pack ("after-tool slot input: " ++ message))))
+          Success (AfterToolInput call result) ->
+            renderAnnotation <$> raise (slot call result)
+
+renderAnnotation :: Annotation -> Text
+renderAnnotation = encodeValue . annotationToJson
 
 -- | Install an immutable tools record as this actor's resident tool policy.
 -- Rust resumes this loop only with names from the declarations published by
