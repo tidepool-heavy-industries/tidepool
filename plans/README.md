@@ -8,6 +8,25 @@ archive).
 
 ## Active work
 
+- [Programs using the agent’s own context](jev-own-context.md): critical-path
+  Codex integration experiment for Jev programs that use recent conversation and
+  native tool interactions alongside exact artifacts.
+- [TypeSafe patterns and cookbook adaptations](jev-typesafe-patterns.md):
+  primary research agenda for Jev experiments, advanced compositions, source map,
+  and corrections from reading the published examples.
+- [Continuous improvement of the agent's tools](jev-tool-improvement.md):
+  guiding principle, connected experiment plans, and the critical path from
+  small interaction improvements to useful Jev-driven worker loops.
+- [More useful swarm work through Jev-driven programs](jev-swarm-leverage.md):
+  strategy for the 10× ambition, with supervision, evidence preparation,
+  smaller contexts, shared components, investigation branches, and concrete trials.
+- [Swarms sharing and improving System 1 code](jev-shared-components.md):
+  agents develop, exchange, compose, and revise Jev-backed Haskell functions.
+  Begin with project source, short usage notes, and frequent dogfood restarts;
+  then try the same useful components as live callable values.
+- [Recovered Jev experiments](jev-recovered-experiments.md): small trials for
+  semantic investigation, decision reuse, conditional worker admission,
+  executable criteria, migration archaeology, and revisable memory behavior.
 - [Jev effect and Haskell DSL](jev-dsl.md): recorded design decisions and API
   uncertainties; isolated experiments live in the `jev-integration` workspace crate.
   Its [core Shoal examples](jev-core-shoal-uses.md) show paired Haskell DSL and
