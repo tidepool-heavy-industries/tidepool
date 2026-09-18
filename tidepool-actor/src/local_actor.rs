@@ -586,6 +586,21 @@ pub trait KernelBehavior: Send + 'static {
         control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
     ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>>;
 
+    fn observe_completed_turn<'a>(
+        &'a mut self,
+        context: &'a KernelContext,
+        _thread: String,
+        _turn: tidepool_model::ConversationTurn,
+    ) -> BoxFuture<'a, Result<(), KernelInvocationFailure>> {
+        let actor = context.identity;
+        Box::pin(async move {
+            Err(KernelInvocationFailure::Rejected {
+                actor,
+                detail: "actor has no completed-turn observer".into(),
+            })
+        })
+    }
+
     fn reconcile_workbench_cancellation(
         &self,
         execution: tidepool_runtime::session::WorkbenchExecutionId,
@@ -1208,6 +1223,24 @@ where
                         let _ = reply.send(Err(error));
                     }
                 }
+            }
+            KernelMessage::AfterTurn {
+                thread,
+                turn,
+                reply,
+            } => {
+                if !matches!(state.hosted_admission, HostedAdmission::Open) {
+                    let _ = reply.send(Err(KernelInvocationFailure::Rejected {
+                        actor: state.context.identity,
+                        detail: "hosted work admission is sealed".into(),
+                    }));
+                    return Ok(());
+                }
+                let outcome = state
+                    .behavior
+                    .observe_completed_turn(&state.context, thread, turn)
+                    .await;
+                let _ = reply.send(outcome);
             }
             KernelMessage::ReconcileWorkbenchCancellation {
                 execution,

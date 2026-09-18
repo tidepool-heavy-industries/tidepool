@@ -201,11 +201,15 @@ impl AfterToolLog {
     /// The status view's rows, newest last. Empty when no slot has ever run,
     /// which is the ordinary case.
     pub(crate) fn rows(&self) -> Vec<String> {
+        self.rows_named("after-tool")
+    }
+
+    pub(crate) fn rows_named(&self, name: &str) -> Vec<String> {
         self.invocations
             .iter()
             .map(|invocation| {
                 format!(
-                    "after-tool#{} {} {}ms {} [{}]",
+                    "{name}#{} {} {}ms {} [{}]",
                     invocation.ordinal,
                     invocation.tool,
                     invocation.elapsed.as_millis(),

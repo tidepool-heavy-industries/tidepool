@@ -23,6 +23,7 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
 pub(crate) mod after_tool;
+pub(crate) mod after_turn;
 pub(crate) mod agent_spec;
 mod conversation;
 mod descriptor;

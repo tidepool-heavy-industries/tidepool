@@ -112,6 +112,28 @@ noted call result
     )
 }
 
+fn turn_spec_module(marker: &str) -> String {
+    format!(
+        r#"{{-# LANGUAGE OverloadedStrings #-}}
+module AgentSpec (agentSpec) where
+
+import Control.Monad.Freer (Eff)
+import qualified Data.Text as T
+import Tidepool.Agent.Contract
+import qualified Project.Tools as Tools
+
+agentSpec :: AgentSpec Tools.SpecTools effects
+agentSpec = defaultSpec
+  {{ specTools = Tools.tools
+  , afterTurn = Just reviewed
+  }}
+
+reviewed :: TurnObservation -> Eff effects Annotation
+reviewed _ = pure (Abstained (T.pack "{marker}"))
+"#
+    )
+}
+
 /// Derived context beside the tool's own output.
 const ANNOTATES: &str = "pure (Annotated (T.pack \"asked about this topic twice before\"))";
 
@@ -238,6 +260,48 @@ async fn status(policy: &dyn tidepool_actor::ResidentToolEndpoint) -> String {
     dispatch_structured_tool(policy, "status", serde_json::json!({"view": "detailed"}))
         .await
         .to_string()
+}
+
+#[tokio::test]
+async fn after_turn_observation_uses_the_hot_reloaded_spec_revision() {
+    let campaign = start_with_slot("one", ABSTAINS).await;
+    let workspace = campaign._repository.path().to_path_buf();
+    let authored = workspace.join(".shoal");
+    std::fs::write(authored.join("AgentSpec.hs"), turn_spec_module("first")).unwrap();
+    let policy = campaign.root_installation.policy.clone();
+    let receipt = reload(policy.as_ref()).await;
+    assert!(receipt.contains("swapped"), "{receipt}");
+
+    let turn = |id: &str| tidepool_actor::ConversationTurn {
+        turn: id.into(),
+        started_at: None,
+        completed_at: None,
+        items: vec![tidepool_actor::TurnItem::Message {
+            role: tidepool_actor::ConversationRole::Assistant,
+            text: "done".into(),
+        }],
+    };
+    policy
+        .observe_turn_boxed("thread".into(), turn("turn-one"))
+        .await
+        .unwrap();
+    let first = status(policy.as_ref()).await;
+    assert!(first.contains("after-turn#1 turn-one"), "{first}");
+    assert!(first.contains("abstained: first"), "{first}");
+
+    std::fs::write(authored.join("AgentSpec.hs"), turn_spec_module("second")).unwrap();
+    let receipt = reload(policy.as_ref()).await;
+    assert!(receipt.contains("swapped"), "{receipt}");
+    policy
+        .observe_turn_boxed("thread".into(), turn("turn-two"))
+        .await
+        .unwrap();
+    let second = status(policy.as_ref()).await;
+    assert!(second.contains("after-turn#2 turn-two"), "{second}");
+    assert!(second.contains("abstained: second"), "{second}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
 }
 
 /// The whole point: an edited body, the same declared surface, and the NEXT

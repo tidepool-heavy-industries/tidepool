@@ -75,8 +75,10 @@ module Tidepool.Agent.Contract
   , installSpec
   , toolCallEntry
   , afterToolEntry
+  , afterTurnEntry
   , ToolCall (..)
   , ToolResult (..)
+  , TurnObservation (..)
   , ResultHandle
   , Annotation (..)
   , annotationToJson
@@ -639,6 +641,20 @@ instance FromJSON AfterToolInput where
   parseJSON = withObject "AfterToolInput" $ \o ->
     AfterToolInput <$> (o .: T.pack "call") <*> (o .: T.pack "result")
 
+-- | One exact completed provider turn observed for this actor. The completed
+-- turn remains JSON so this contract does not duplicate the provider-neutral
+-- conversation schema already owned by the runtime.
+data TurnObservation = TurnObservation
+  { turnObservationThread :: Text
+  , turnObservationTurn :: Value
+  }
+
+instance FromJSON TurnObservation where
+  parseJSON = withObject "TurnObservation" $ \o ->
+    TurnObservation
+      <$> (o .: T.pack "thread")
+      <*> (o .: T.pack "turn")
+
 -- | What a slot has to say about a result it was shown. Annotate or prune,
 -- never rewrite: a pruned view states that it is a selection and names the
 -- handle the whole result is still addressable under.
@@ -695,11 +711,14 @@ data AgentSpec tools effects = AgentSpec
   , -- | Applied when a tool call finishes, to that call and its result, in the
     -- actor's own resident machine.
     afterTool :: Maybe (ToolCall -> ToolResult -> Eff effects Annotation)
+  , -- | Applied after a completed provider turn. Its answer is retained as
+    -- observation only and is never inserted into the provider conversation.
+    afterTurn :: Maybe (TurnObservation -> Eff effects Annotation)
   }
 
 -- | The spec every field of which is its default: no tools, no slots.
 defaultSpec :: AgentSpec NoTools effects
-defaultSpec = AgentSpec {specTools = NoTools, afterTool = Nothing}
+defaultSpec = AgentSpec {specTools = NoTools, afterTool = Nothing, afterTurn = Nothing}
 
 -- | The entry index the retained dispatcher serves an ordinary tool call at.
 toolCallEntry :: Int
@@ -708,6 +727,10 @@ toolCallEntry = 0
 -- | The entry index the retained dispatcher serves the after-tool slot at.
 afterToolEntry :: Int
 afterToolEntry = 1
+
+-- | The entry index the retained dispatcher serves the after-turn slot at.
+afterTurnEntry :: Int
+afterTurnEntry = 2
 
 -- | Install startup-compiled tools alongside the interactive workbench.
 -- The runtime owns the captured dispatcher; this does not enter a serving loop.
@@ -736,13 +759,19 @@ installSpec spec = case compileTools (specTools spec) of
           [ "tools" .= declarationsToJson (declarations compiled)
           , "slots" .= toJSON slots
           ]
-      slots = case afterTool spec of
-        Nothing -> []
-        Just _ -> [T.pack "afterTool"]
+      slots =
+        [ T.pack name
+        | (name, filled) <-
+            [ ("afterTool", maybe False (const True) (afterTool spec))
+            , ("afterTurn", maybe False (const True) (afterTurn spec))
+            ]
+        , filled
+        ]
 
       entry :: Int -> Eff (AgentTools ': effects) Text
       entry index
         | index == afterToolEntry = runAfterTool (afterTool spec)
+        | index == afterTurnEntry = runAfterTurn (afterTurn spec)
         | otherwise = runToolCall compiled
 
       runToolCall :: CompiledTools (Eff effects) -> Eff (AgentTools ': effects) Text
@@ -767,6 +796,18 @@ installSpec spec = case compileTools (specTools spec) of
             pure (renderAnnotation (Abstained (T.pack ("after-tool slot input: " ++ message))))
           Success (AfterToolInput call result) ->
             renderAnnotation <$> raise (slot call result)
+
+      runAfterTurn
+        :: Maybe (TurnObservation -> Eff effects Annotation)
+        -> Eff (AgentTools ': effects) Text
+      runAfterTurn Nothing = pure (renderAnnotation NoAnnotation)
+      runAfterTurn (Just slot) = do
+        (_, payload) <- send AgentToolsInputWith
+        case fromJSON payload of
+          Error message ->
+            pure (renderAnnotation (Abstained (T.pack ("after-turn slot input: " ++ message))))
+          Success observation ->
+            renderAnnotation <$> raise (slot observation)
 
 renderAnnotation :: Annotation -> Text
 renderAnnotation = encodeValue . annotationToJson

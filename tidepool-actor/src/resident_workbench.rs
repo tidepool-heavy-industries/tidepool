@@ -2317,6 +2317,65 @@ where
             .await
     }
 
+    /// Enter the retained after-turn slot with one exact completed provider
+    /// turn. Nothing compiles and the answer remains actor-local observation.
+    pub(crate) async fn begin_after_turn(
+        &self,
+        context: crate::ActorSessionContext,
+        dispatch: Arc<RootCustody>,
+        payload: serde_json::Value,
+    ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, context, _| {
+                let outcome = session
+                    .run_rooted_entry_borrowed(
+                        "after_turn_slot",
+                        &dispatch,
+                        crate::after_turn::AFTER_TURN_ENTRY,
+                        context.placement.resource_scope,
+                        None,
+                    )
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "after-turn slot completed without requesting its input".into(),
+                    ));
+                };
+                let input = (|| {
+                    if !matches!(
+                        ResidentRequest::decode(&request, session.data_con_table())?,
+                        ResidentRequest::AgentTools(
+                            crate::generated::agent_tools::AgentToolsReq::AgentToolsInputWith
+                        )
+                    ) {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "after-turn slot crossed an unexpected input boundary".into(),
+                        ));
+                    }
+                    Ok(("afterTurn".to_owned(), payload).to_value(session.data_con_table())?)
+                })();
+                let answer = match input {
+                    Ok(answer) => answer,
+                    Err(error) => {
+                        let _ =
+                            session.abort(hole.cont_id(), "after-turn slot input rejected".into());
+                        return Err(error);
+                    }
+                };
+                let outcome = session.resume(hole, answer);
+                start_fragment_settlement(
+                    session,
+                    context,
+                    1,
+                    String::new(),
+                    WorkbenchDisplay::Tool,
+                    Vec::new(),
+                    outcome,
+                )
+            })
+            .await
+    }
+
     /// The continuations parked in this actor's machine right now, oldest
     /// first. Taken before a slot runs, so what it leaves behind can be told
     /// from what was already there.

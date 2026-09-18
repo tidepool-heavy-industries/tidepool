@@ -189,6 +189,13 @@ pub enum KernelMessage {
         control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
         reply: RpcReplyPort<KernelWorkbenchReply>,
     },
+    /// One exact provider turn completed for this actor's bound conversation.
+    /// The resident after-turn slot observes it without creating provider input.
+    AfterTurn {
+        thread: String,
+        turn: tidepool_model::ConversationTurn,
+        reply: RpcReplyPort<Result<(), KernelInvocationFailure>>,
+    },
     ReconcileWorkbenchCancellation {
         invocation: Option<tidepool_tool::ToolInvocationContext>,
         execution: tidepool_runtime::session::WorkbenchExecutionId,
@@ -239,6 +246,7 @@ impl KernelMessage {
             Self::Call { .. } => "Call",
             Self::Tool { .. } => "Tool",
             Self::Workbench { .. } => "Workbench",
+            Self::AfterTurn { .. } => "AfterTurn",
             Self::ReconcileWorkbenchCancellation { .. } => "ReconcileWorkbenchCancellation",
             Self::ReconcileWorkbenchBoundary { .. } => "ReconcileWorkbenchBoundary",
             Self::ToolCompleted { .. } => "ToolCompleted",
@@ -290,6 +298,11 @@ impl std::fmt::Debug for KernelMessage {
             Self::Workbench { request, .. } => formatter
                 .debug_struct("Workbench")
                 .field("request", request)
+                .finish_non_exhaustive(),
+            Self::AfterTurn { thread, turn, .. } => formatter
+                .debug_struct("AfterTurn")
+                .field("thread", thread)
+                .field("turn", &turn.turn)
                 .finish_non_exhaustive(),
             Self::ReconcileWorkbenchCancellation { execution, .. } => formatter
                 .debug_tuple("ReconcileWorkbenchCancellation")
