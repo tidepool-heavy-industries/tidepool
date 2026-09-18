@@ -231,6 +231,45 @@ live run later shows this compile is in fact the dominant term for the *first*
 research child, the fix is to warm it once at host start, not to remove it from
 the child.
 
+## What stage two actually shipped
+
+`errand` in `haskell/actors/Tidepool/Actors/Unfold.hs`, re-exported from
+`Tidepool.Actors.Shoal`:
+
+```
+errand :: (Member AgentLaunch parent, Member Replies parent, Member Watches parent)
+       => Label -> Text -> Eff parent (Watch (Settlement Text))
+```
+
+It is `startAgent (readonlyAgent …)`, then `requestWith`, then `watch
+(awaitSettled …)` — the three calls a read-only question already needed —
+composed into one, on the fresh-child path rather than the fork path. It adds
+no launch mechanism: the authority, the parent-owned lifetime and the absent
+worktree are what the existing `AgentLaunchWith` capture already produces
+(`resident_workbench.rs:3331-3350`, `start.rs:486-492`).
+
+**The reply is `Text`, not a caller-chosen result type, and that is forced by
+the extractor.** `requestWith` is a typed-suspension verb head-swapped to its
+sited sibling only where both site types are closed
+(`haskell/src/Tidepool/SiteClassifier.hs:65-84`). A first attempt kept
+`errand @result` polymorphic and marked the wrapper `INLINE`, on the theory
+that the occurrence would be rewritten in the authored cell where the caller
+had fixed `result`. The extractor rejected it:
+
+```
+polymorphic requestWith site in Tidepool.Actors.Unfold.errand: result_a1FW7
+```
+
+— the extractor walks the *library's* Core, not only the cell's, so the
+occurrence in the wrapper needs a site of its own regardless of what any call
+site does. A caller-typed errand therefore needs a new row in `sitedVerbs`
+(`haskell/src/Tidepool/EffectSchema.hs:96-155`), which means rebuilding and
+redeploying the extractor (`haskell/CLAUDE.md`, "Toolchain resolution and
+deployment") and regenerating fixtures. That is a deliberate extractor change,
+not ceremony-cutting, and is not in this parcel. `Text` is also the right
+default for the errand's actual job: a native subagent returns prose, and the
+comparison this wave is trying to win is against a native subagent.
+
 ## Kill criterion
 
 If a model still prefers its provider's native subagent for a read-only
