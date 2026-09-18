@@ -8,6 +8,9 @@ archive).
 
 ## Active work
 
+- [Alpha release acceptance](alpha-release-acceptance.md): temporary gate for
+  freezing the exact revision, publishing and verifying its complete Nix
+  closure, and proving setup in an isolated clean-user environment.
 - [Agent spec and System 1 slots](jev-lab/agent-spec-design.md): one Haskell
   module per checkout names an agent's tools and the slot applied after every
   tool call; edited with file tools and reloaded live. After-tool is the first
