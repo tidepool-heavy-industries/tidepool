@@ -139,11 +139,53 @@ fn hide_same_cell_collisions(
 /// The same cell-check failure mapping every `prepare_cell` exit uses:
 /// a genuine Haskell error becomes a rejectable [`CellCheck`] failure the
 /// caller can present, anything else is infrastructure trouble.
+/// When a cell GHC has already rejected has a declaration reaching for a name
+/// an earlier statement binds, say so beside GHC's own diagnostics.
+///
+/// The scan that finds this shape is lexical and cannot see every way Haskell
+/// binds a name (a case alternative, a record field, an operator containing
+/// `<-`), so it explains a failure and never causes one: a cell GHC accepts is
+/// never refused on its word. It speaks only when GHC's diagnostics name the
+/// same binder, which keeps it quiet on failures it has nothing to do with.
+fn explain_source_order(
+    failure: &mut tidepool_runtime::session::CellCheckFailure,
+    cell_source: &str,
+) {
+    let CompileError::Diagnostics(diagnostics) = &mut failure.error else {
+        return;
+    };
+    let Some(collision) =
+        tidepool_runtime::session::detect_hoisted_declaration_collision(cell_source)
+    else {
+        return;
+    };
+    if !diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains(&collision.binder_name))
+    {
+        return;
+    }
+    let line = u32::try_from(collision.declaration_line).unwrap_or(u32::MAX);
+    diagnostics.push(tidepool_runtime::diag::ExtractDiag {
+        span: Some(tidepool_runtime::diag::DiagSpan {
+            file: "<cell>".to_string(),
+            start_line: line,
+            start_col: 1,
+            end_line: line,
+            end_col: 1,
+        }),
+        severity: tidepool_runtime::diag::DiagnosticSeverity::Warning,
+        message: collision.message(),
+    });
+}
+
 fn cell_check_error(
     failure: tidepool_runtime::session::CellCheckFailure,
     cell_source: &str,
 ) -> ResidentActorWorkbenchError {
     if classify_compile(&failure.error).class == FailureClass::UserHaskell {
+        let mut failure = failure;
+        explain_source_order(&mut failure, cell_source);
         ResidentActorWorkbenchError::CellCheck(failure)
     } else {
         ResidentActorWorkbenchError::CompileInfrastructure(
@@ -1972,8 +2014,13 @@ where
         &self,
         context: &crate::ActorSessionContext,
     ) -> crate::agent_spec::ResolvedSpec {
+        // The roots this actor's cells resolve a module in, in GHC's order:
+        // its own checkout's layer, then what the run provides. An actor with
+        // no checkout of its own, the root among them, finds the run's spec.
+        let mut roots = context.source_layer.to_vec();
+        roots.extend(self.access.source.base_include.iter().cloned());
         crate::agent_spec::resolve(
-            &context.source_layer,
+            &roots,
             self.access.source.spec.as_deref(),
             self.access.source.tools.as_deref(),
         )
@@ -1994,7 +2041,12 @@ where
         install: u64,
     ) -> Result<Option<ResidentWorkbenchTools>, ResidentActorWorkbenchError> {
         let resolved = self.resolve_spec(&context);
-        let revision = crate::agent_spec::layer_revision(&context.source_layer);
+        // The revision of the root the spec was read from; a configured entry
+        // names no file, so it answers for the actor's own layer.
+        let revision = match resolved.file.as_deref().and_then(std::path::Path::parent) {
+            Some(root) => crate::agent_spec::layer_revision(&[root.to_path_buf()]),
+            None => crate::agent_spec::layer_revision(&context.source_layer),
+        };
         let Some(entry) = resolved.entry.clone() else {
             return Ok(None);
         };
@@ -2257,6 +2309,57 @@ where
             .await
     }
 
+    /// The continuations parked in this actor's machine right now, oldest
+    /// first. Taken before a slot runs, so what it leaves behind can be told
+    /// from what was already there.
+    pub(crate) async fn parked_continuations(
+        &self,
+        context: crate::ActorSessionContext,
+    ) -> Result<Vec<String>, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                Ok(session
+                    .parked_holes()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect())
+            })
+            .await
+    }
+
+    /// Abort every continuation parked since `before` was taken.
+    ///
+    /// A slot whose wait ran out is no longer being driven, so an effect it
+    /// was suspended on will never be answered. Left parked, that turn holds
+    /// the machine against the next caller. One handler runs at a time per
+    /// actor, so anything parked since the snapshot is the slot's own. An
+    /// aborted turn may suspend again while unwinding, hence the bounded loop.
+    pub(crate) async fn abort_parked_since(
+        &self,
+        context: crate::ActorSessionContext,
+        before: Vec<String>,
+        reason: String,
+    ) -> Result<usize, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let mut aborted = 0usize;
+                for _ in 0..8 {
+                    let Some(abandoned) = session
+                        .parked_holes()
+                        .into_iter()
+                        .find(|hole| !before.iter().any(|known| known == hole))
+                        .map(str::to_owned)
+                    else {
+                        break;
+                    };
+                    let _ = session.abort(&abandoned, reason.clone());
+                    aborted += 1;
+                }
+                Ok(aborted)
+            })
+            .await
+    }
+
     /// Bind one tool result under the handle the slot was shown, so a pruned
     /// view keeps the whole of what it selected from addressable.
     ///
@@ -2399,36 +2502,6 @@ where
         context: crate::ActorSessionContext,
         cell_source: String,
     ) -> Result<(CellCheck, PreparedCell), ResidentActorWorkbenchError> {
-        // Pre-GHC source-order check (astra-fix-waves.md Wave 4 / proposal 5,
-        // stage one): a lexical scan of the raw cell, before any compile
-        // round trip, catches a declaration whose free names reach an
-        // earlier statement's binder — a shape GHC either rejects
-        // confusingly or, worse, silently mis-resolves against an in-scope
-        // import. Routed through the exact same `CellCheck` rejection path a
-        // real GHC-detected cell failure uses, so every downstream renderer
-        // (`cell_check_rejection`, `render_cell_compile_rejection`) needs no
-        // changes to present it.
-        if let Some(collision) =
-            tidepool_runtime::session::detect_hoisted_declaration_collision(&cell_source)
-        {
-            return Err(cell_check_error(
-                tidepool_runtime::session::CellCheckFailure {
-                    error: CompileError::Diagnostics(vec![tidepool_runtime::diag::ExtractDiag {
-                        span: Some(tidepool_runtime::diag::DiagSpan {
-                            file: "<cell>".to_string(),
-                            start_line: collision.declaration_line as u32,
-                            start_col: 1,
-                            end_line: collision.declaration_line as u32,
-                            end_col: 1,
-                        }),
-                        severity: tidepool_runtime::diag::DiagnosticSeverity::Error,
-                        message: collision.message(),
-                    }]),
-                    items: None,
-                },
-                &cell_source,
-            ));
-        }
         let response = self.response.clone();
         let request = self.request;
         let type_modules = Arc::clone(&self.type_modules);
@@ -3123,7 +3196,19 @@ where
             let receipt = match fragment.display {
                 WorkbenchDisplay::Binding(names) => format!("[bound {}]", names.join(", ")),
                 WorkbenchDisplay::Opaque => "<opaque value>".into(),
-                WorkbenchDisplay::Tool => String::from_value(result.value(), result.table())?,
+                WorkbenchDisplay::Tool => {
+                    // A bounded observation marks what it could not afford to
+                    // materialize. That is a size answer, so say so instead of
+                    // letting the decoder call it a type mismatch.
+                    if tidepool_codegen::heap_bridge::contains_oversize_sentinel(result.value()) {
+                        return Err(ResidentActorWorkbenchError::Inspection(
+                            "the tool's answer exceeded the observation budget; return a \
+                             smaller Text, or bind the whole value in a cell and select from it"
+                                .into(),
+                        ));
+                    }
+                    String::from_value(result.value(), result.table())?
+                }
                 WorkbenchDisplay::Observation {
                     name,
                     budget,

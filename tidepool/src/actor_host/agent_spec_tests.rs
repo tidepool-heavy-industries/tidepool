@@ -80,6 +80,38 @@ noted call result
     )
 }
 
+/// A spec module whose slot can suspend on the resident `Sleep` effect: the
+/// same shape as `spec_module`, with a `Member Sleep effects` constraint and
+/// the imports that constraint needs. Kept separate so the plain
+/// `spec_module` every other test uses never carries an effect constraint it
+/// doesn't need.
+fn spec_module_with_sleep(slot: &str) -> String {
+    format!(
+        r#"{{-# LANGUAGE OverloadedStrings #-}}
+module AgentSpec (agentSpec) where
+
+import Control.Monad.Freer (Eff, Member)
+import Data.Text (Text)
+import qualified Data.Text as T
+import Tidepool.Agent.Contract
+import Tidepool.Effects.Core (Sleep, sleep)
+import Tidepool.Duration (seconds)
+import qualified Project.Tools as Tools
+
+agentSpec :: Member Sleep effects => AgentSpec Tools.SpecTools effects
+agentSpec = defaultSpec
+  {{ specTools = Tools.tools
+  , afterTool = Just noted
+  }}
+
+noted :: Member Sleep effects => ToolCall -> ToolResult -> Eff effects Annotation
+noted call result
+  | toolCallName call /= T.pack "probe" = pure NoAnnotation
+  | otherwise = {slot}
+"#
+    )
+}
+
 /// Derived context beside the tool's own output.
 const ANNOTATES: &str = "pure (Annotated (T.pack \"asked about this topic twice before\"))";
 
@@ -91,6 +123,12 @@ const ABSTAINS: &str = "pure (Abstained (T.pack \"the result is already minimal\
 
 /// A slot that is simply broken.
 const FAILS: &str = "error \"the slot is broken\"";
+
+/// Suspends on the resident `Sleep` effect for three seconds — long enough to
+/// outlast a short after-tool wait while the slot is genuinely parked mid-
+/// effect, not merely slow — and then annotates.
+const SLEEPS_THEN_ANNOTATES: &str =
+    "do { sleep (seconds 3); pure (Annotated (T.pack \"slept then annotated\")) }";
 
 /// A slot that runs the tool's own implementation. Its own tool use must not
 /// bring it back round on itself.
@@ -151,6 +189,32 @@ async fn start_with_slot(answer: &str, slot: &str) -> TestCampaign {
             let authored = config.workspace.join(".shoal");
             std::fs::write(authored.join("config.toml"), SPEC_CONFIG).unwrap();
             std::fs::write(authored.join("AgentSpec.hs"), spec_module(&slot)).unwrap();
+            config.workspace_inputs = Some(
+                crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+                    .unwrap(),
+            );
+        },
+    )
+    .await
+}
+
+/// A root whose spec is named by rule two, carrying a slot that can suspend
+/// on the resident `Sleep` effect.
+async fn start_with_sleeping_slot(answer: &str, slot: &str) -> TestCampaign {
+    let slot = slot.to_owned();
+    let answer = answer.to_owned();
+    TestCampaign::start_with_config(
+        tidepool_actor::ResearchPolicy::default(),
+        |admission| admission,
+        move |config| {
+            write_workspace(&config.workspace, DESCRIPTION, &answer);
+            let authored = config.workspace.join(".shoal");
+            std::fs::write(authored.join("config.toml"), SPEC_CONFIG).unwrap();
+            std::fs::write(
+                authored.join("AgentSpec.hs"),
+                spec_module_with_sleep(&slot),
+            )
+            .unwrap();
             config.workspace_inputs = Some(
                 crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
                     .unwrap(),
@@ -299,9 +363,10 @@ async fn a_workspace_without_a_spec_file_reports_the_tools_key_and_behaves_as_be
 
 /// An actor whose own checkout carries `AgentSpec.hs` installs THAT, ahead of
 /// both configured keys, and says which rule matched and which file it read.
-/// The root, which has no checkout of its own, keeps resolving by the
-/// workspace's key — so the two actors in one run are running two different
-/// specs, which is the whole reason discovery is per checkout.
+/// The root, which has no checkout of its own, finds the run's copy by the same
+/// rule. Each reads its own roots first, so once the child edits its checkout
+/// the two are running two different specs, which is the whole reason
+/// discovery is per checkout.
 #[tokio::test]
 async fn a_checkout_spec_module_is_installed_ahead_of_the_workspace_key() {
     let mut campaign = TestCampaign::start_with_config(
@@ -354,9 +419,11 @@ async fn a_checkout_spec_module_is_installed_ahead_of_the_workspace_key() {
     // spec filled, retained beside the tools it sits with.
     assert!(child_status.contains("slots=[afterTool]"), "{child_status}");
 
-    // The root has no checkout of its own, so rule one cannot answer for it.
+    // The root has no checkout of its own, and finds the run's copy of the
+    // same module by the same rule: the first `AgentSpec.hs` in the roots its
+    // cells resolve, which for the root are the run's.
     let root_status = status(root.as_ref()).await;
-    assert!(root_status.contains("workspace tools key"), "{root_status}");
+    assert!(root_status.contains("checkout module"), "{root_status}");
 
     // And the spec the child installed is the one serving its calls, slot and
     // all — attributing its annotation to the revision of the checkout it was
@@ -577,6 +644,134 @@ async fn a_slot_that_outruns_its_wait_delivers_the_original_result() {
     campaign.hosted.await.unwrap();
 }
 
+/// A slot cut off while it is suspended on an effect, rather than at its first
+/// await: the wait is 400ms and the slot sleeps three seconds on the resident
+/// `Sleep` effect. Its suspended turn is aborted, so the machine keeps
+/// answering at its usual pace, and the late slot answer reaches nobody.
+#[tokio::test]
+async fn a_slot_cut_off_mid_effect_leaves_the_machine_answering() {
+    std::env::set_var(tidepool_actor::AFTER_TOOL_WAIT_ENV, "400");
+    let campaign = start_with_sleeping_slot("keptwhole", SLEEPS_THEN_ANNOTATES).await;
+    let policy = campaign.root_installation.policy.clone();
+    let policy = policy.as_ref();
+
+    // The first authored cell pays for the cell template's cold compile. Pay
+    // it here, so the timing below measures the cut-off and nothing else.
+    let warm = std::time::Instant::now();
+    let _ = dispatch_haskell_script(policy, "inspectFull (2 + 2 :: Int)").await;
+    eprintln!("DUMP warm-up cell before any slot [{:?}]", warm.elapsed());
+    let baseline = std::time::Instant::now();
+    let _ = dispatch_haskell_script(policy, "inspectFull (3 + 3 :: Int)").await;
+    let baseline = baseline.elapsed();
+    eprintln!("DUMP warm baseline cell [{baseline:?}]");
+
+    let t0 = std::time::Instant::now();
+    let first = tokio::time::timeout(Duration::from_secs(60), probe(policy))
+        .await
+        .expect("first probe did not hang");
+    eprintln!("DUMP first probe [{:?}]: {first}", t0.elapsed());
+    assert!(first.contains("keptwhole"), "{first}");
+    assert!(first.contains("no answer within 400ms"), "{first}");
+
+    // Immediately: the slot future was just dropped mid-effect. Does the next
+    // call on the same actor still work?
+    let t1 = std::time::Instant::now();
+    let second = tokio::time::timeout(Duration::from_secs(60), probe(policy))
+        .await
+        .expect("second probe did not hang");
+    eprintln!(
+        "DUMP second probe (immediately after the cut-off) [{:?}]: {second}",
+        t1.elapsed()
+    );
+
+    // An authored cell, in the same resident workbench.
+    let t2 = std::time::Instant::now();
+    let cell = tokio::time::timeout(
+        Duration::from_secs(60),
+        dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)"),
+    )
+    .await
+    .expect("authored cell did not hang");
+    eprintln!(
+        "DUMP authored cell after cut-off [{:?}]: {cell}",
+        t2.elapsed()
+    );
+    // A slot cut off while suspended on an effect must not hold the machine
+    // against the next caller: the cell costs what a warm cell cost before.
+    assert_eq!(cell["items"][0]["output"], "2", "{cell}");
+    assert!(
+        t2.elapsed() < baseline * 2 + Duration::from_secs(5),
+        "a cell after two cut-off slots took {:?} against a warm baseline of {baseline:?}",
+        t2.elapsed()
+    );
+
+    // Wait past when the original 3s sleep would have elapsed, then probe and
+    // check status again.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    let t3 = std::time::Instant::now();
+    let third = tokio::time::timeout(Duration::from_secs(60), probe(policy))
+        .await
+        .expect("third probe did not hang");
+    eprintln!(
+        "DUMP third probe (after the original sleep would have elapsed) [{:?}]: {third}",
+        t3.elapsed()
+    );
+
+    let t4 = std::time::Instant::now();
+    let status_after = tokio::time::timeout(Duration::from_secs(60), status(policy))
+        .await
+        .expect("status did not hang");
+    eprintln!("DUMP status after [{:?}]: {status_after}", t4.elapsed());
+    assert!(third.contains("keptwhole"), "{third}");
+    assert!(!third.contains("slept then annotated"), "{third}");
+    assert_eq!(
+        status_after.matches("timed out after 400ms").count(),
+        3,
+        "{status_after}"
+    );
+
+    std::env::remove_var(tidepool_actor::AFTER_TOOL_WAIT_ENV);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+/// The root has no checkout of its own, and its spec is still the first
+/// `AgentSpec.hs` its cells would resolve: no configuration key names it.
+#[tokio::test]
+async fn the_root_finds_its_spec_by_convention_with_no_key_naming_it() {
+    let campaign = TestCampaign::start_with_config(
+        tidepool_actor::ResearchPolicy::default(),
+        |admission| admission,
+        |config| {
+            write_workspace(&config.workspace, DESCRIPTION, "keptwhole");
+            // CONFIG names only the tools key, and lists no spec module.
+            std::fs::write(
+                config.workspace.join(".shoal/AgentSpec.hs"),
+                spec_module(ANNOTATES),
+            )
+            .unwrap();
+            config.workspace_inputs = Some(
+                crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+                    .unwrap(),
+            );
+        },
+    )
+    .await;
+    let policy = campaign.root_installation.policy.clone();
+    let policy = policy.as_ref();
+
+    let result = probe(policy).await;
+    assert!(result.contains("keptwhole"), "{result}");
+    assert!(result.contains("twice before"), "{result}");
+
+    let status = status(policy).await;
+    assert!(status.contains("rule=checkout module"), "{status}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
 /// The two tools a model repairs a broken slot with are never annotated, so a
 /// slot can never block its own repair. Neither is an authored cell, which is
 /// not a tool call at all.
@@ -687,4 +882,130 @@ async fn next_child(campaign: &mut TestCampaign) -> tidepool_actor::LocalResiden
     })
     .await
     .expect("child admission")
+}
+
+// ---------------------------------------------------------------------------
+// Nesting: a tools record that carries another tools record as a field.
+// ---------------------------------------------------------------------------
+
+/// A workspace tools record that nests `Tidepool.Command.Tools.ShellTools`
+/// beside a tool of its own. The `shell` selector names no tool — the inner
+/// record's fields are spliced in at that position — so this record declares
+/// the whole shell surface first and then `probe`.
+const NESTED_TOOLS_MODULE: &str = r#"{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeOperators #-}
+module Project.Tools (MyTools (..), Probe (..), tools) where
+
+import Control.Monad.Freer (Eff, Member)
+import Data.Text (Text)
+import GHC.Generics (Generic)
+import Tidepool.Aeson.FromJSON (FromJSON)
+import Tidepool.Agent.Contract
+import qualified Tidepool.Command as Cmd
+import qualified Tidepool.Command.Tools as Shell
+
+newtype Probe = Probe { topic :: Text }
+  deriving (Generic, FromJSON, JsonSchema)
+
+data MyTools mode = MyTools
+  { shell :: Shell.ShellTools mode
+  , probe :: mode :- Call Probe Text
+  }
+  deriving (Generic)
+
+tools :: Member Cmd.Commands effects => MyTools (AsServerT (Eff effects))
+tools = MyTools
+  { shell = Shell.tools
+  , probe = tool "Answer one fixed question about a topic." (\_ -> pure "one")
+  }
+"#;
+
+/// A campaign whose workspace `[haskell] tools` key names the nesting record.
+async fn start_nested() -> TestCampaign {
+    TestCampaign::start_with_config(
+        tidepool_actor::ResearchPolicy::default(),
+        |admission| admission,
+        |config| {
+            let authored = config.workspace.join(".shoal");
+            std::fs::create_dir_all(authored.join("Project")).unwrap();
+            std::fs::write(authored.join("config.toml"), CONFIG).unwrap();
+            std::fs::write(authored.join("Project/Tools.hs"), NESTED_TOOLS_MODULE).unwrap();
+            config.workspace_inputs = Some(
+                crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+                    .unwrap(),
+            );
+        },
+    )
+    .await
+}
+
+/// Naming an agent's own tools record replaces the shell record rather than
+/// adding to it, so the only way to keep `bash` is to carry the shell record
+/// inside your own. One nested field declares the whole shell surface at the
+/// position it occupies, ahead of the record's own tool, and both halves
+/// answer: the nested `bash` reaches the same compiled raw handler and the
+/// same shared command owner it does when the shell record is installed
+/// alone.
+#[tokio::test]
+async fn a_nested_shell_record_declares_its_tools_in_place_and_both_halves_answer() {
+    use tidepool_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
+
+    let mut campaign = start_nested().await;
+    let policy = campaign.root_installation.policy.clone();
+
+    // (1) The declared surface: the inner record's tools, in the inner
+    // record's own field order, at the position the `shell` field occupies —
+    // and `shell` itself is not a tool.
+    let declared: Vec<&str> = policy.tools().iter().map(|tool| tool.name()).collect();
+    let index = |name: &str| {
+        declared
+            .iter()
+            .position(|declared| *declared == name)
+            .unwrap_or_else(|| panic!("{name} is not declared: {declared:?}"))
+    };
+    let bash = index("bash");
+    let exec_command = index("exec_command");
+    let probe_at = index("probe");
+    assert!(bash < exec_command, "{declared:?}");
+    assert!(exec_command < probe_at, "{declared:?}");
+    assert!(!declared.contains(&"shell"), "{declared:?}");
+
+    // (2) The record's own tool answers.
+    assert!(probe(policy.as_ref()).await.contains("one"));
+
+    // (3) The nested raw tool answers, through the shell record's own handler
+    // and the campaign's shared command owner. The command backend is the
+    // test one every other hosted command test uses, so what is checked here
+    // is that a nested `bash` reaches it and returns its output — not what a
+    // real shell would print.
+    let script = "echo nested-ok";
+    let dispatch = {
+        let policy = policy.clone();
+        tokio::spawn(policy.dispatch_boxed(ToolInvocation {
+            name: "bash".into(),
+            arguments: ToolArguments::Raw(script.into()),
+            context: Some(ToolInvocationContext {
+                context_call_id: Some("nested-bash".into()),
+                thread_id: "nested-thread".into(),
+                turn_id: "nested-turn".into(),
+                call_id: "nested-bash".into(),
+                namespace: None,
+            }),
+        }))
+    };
+    let backend = super::command_jobs_tests::TestCommands::completed("nested-ok");
+    super::command_jobs_tests::backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    let receipt = dispatch.await.unwrap().unwrap();
+    assert_eq!(receipt["status"], "committed", "{receipt}");
+    let output = receipt["items"][0]["output"].as_str().unwrap();
+    assert!(output.contains("nested-ok"), "{receipt}");
+    assert_eq!(backend.executions(), 1, "{receipt}");
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
 }

@@ -446,6 +446,38 @@ instance
     where
       fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
 
+-- | A field whose type is itself a server-interpreted tools record SPLICES
+-- that record's tools in at its position. The outer selector contributes
+-- nothing to any tool name — it is a place in the field order, not a
+-- namespace — so
+--
+-- > data MyTools mode = MyTools
+-- >   { shell         :: Shell.ShellTools mode
+-- >   , triage_search :: mode :- Call Triage Text
+-- >   } deriving (Generic)
+--
+-- declares @bash, exec_command, write_stdin, read_output, cancel_command,
+-- triage_search@, in that order. This is how an agent keeps the shell tools
+-- while adding its own: a record that does not nest them does not have them.
+--
+-- 'OVERLAPPABLE' because the leaf instances above are the intended answer for
+-- a @Tool@\/@RawTool@\/@UpdateTool@\/@FinishTool@ field. In practice the two
+-- kinds of field never both match — matching this head would require a leaf's
+-- final type argument to BE @AsServerT m@ — but the pragma keeps a partly
+-- resolved field type from being reported as an ambiguous overlap.
+--
+-- The entries are spliced into the ONE flat list 'compileEntrySet' checks, so
+-- a nested tool that collides with an outer one is rejected by exactly the
+-- 'DuplicateWireName' path that rejects two colliding outer selectors.
+instance
+  {-# OVERLAPPABLE #-}
+  ( Generic (inner (AsServerT m))
+  , GCompileTools (Rep (inner (AsServerT m))) m result
+  ) =>
+  GCompileTools (M1 S s (K1 R (inner (AsServerT m)))) m result
+  where
+  gCompileEntries (M1 (K1 nested)) = gCompileEntries (from nested)
+
 actorEntry
   :: forall input m result
    . (FromJSON input, JsonSchema input)

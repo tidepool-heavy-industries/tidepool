@@ -148,6 +148,11 @@ pub(crate) fn layer_revision(layer: &[PathBuf]) -> Option<String> {
     let root = layer.first()?;
     let resolved = std::fs::canonicalize(root).ok()?;
     let revision: &Path = resolved.parent()?;
+    // Only a published revision has an identity to name. A root that is not
+    // inside a layer would otherwise answer with an unrelated directory name.
+    if revision.parent()?.file_name()?.to_str()? != "revisions" {
+        return None;
+    }
     Some(revision.file_name()?.to_str()?.to_owned())
 }
 
