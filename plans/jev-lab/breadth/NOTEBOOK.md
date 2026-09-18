@@ -522,3 +522,119 @@ law about Jev. Missing evidence remains a separate and independent failure
 mode, and the audit above shows it was operating in this very notebook at the
 same time. Two distinct causes were in play, and fixing one does not retire the
 other.
+
+---
+
+## C1. Trajectory-aware assistance
+
+**Suggested composition**: supply a short ordered sequence of actions and
+outcomes, plus facts code derives (elapsed time, repeated commands, changing
+revisions), plus the excerpts saying what was tried. The claim to test was that
+neither the raw transcript nor the counters alone suffice.
+
+**Fixture**: a real 17-step trajectory extracted from a run-7 rollout, the
+agent that produced commit `f726882`. Code derived attempt count, distinct
+command count, repeats, and the exit codes in order
+(`0, 0, 1, 101, 0, 101, 0, 0, 0, 0, 0, 0, 101, 0`).
+
+Four independent conditions, so four nouls, asked against three states.
+
+| state | new evidence | different explanation | changed candidate | repeats unaddressed |
+|---|---|---|---|---|
+| sequence only | 0.94 | 0.71 | 0.93 | 0.42 |
+| derived counters only | 0.53 | 0.39 | 0.54 | 0.47 |
+| both | 0.95 | 0.73 | 0.92 | **0.31** |
+
+All four answers are correct: that worker really did fetch new evidence, change
+the files under test, and commit a green check, and it was not stuck.
+
+**The claim is half confirmed.** Counters alone are worthless here, every answer
+within 0.11 of a half, which is no signal. But the raw sequence alone was
+nearly as good as both, and adding the derived facts moved only the repetition
+question, 0.42 to 0.31. On this fixture the transcript carries almost
+everything and the counters sharpen one question.
+
+Honest caveat: this trajectory is a *productive* one. The counters may earn more
+on a genuinely stuck worker, where a repeated command with an unchanged exit
+code is the whole signal and the prose around it looks busy. That case is not in
+hand and is the experiment to run next.
+
+**Outcome: worked, with the advice partly contradicted.**
+
+---
+
+## C2. Simulated Reflect: does an agent's own history supply the missing intent?
+
+**The motivation**, from the earlier interview: the decisive sentence was in the
+conversation and missing from the investigation's state.
+
+**Fixture, and it is fully real and matched.** All three pieces come from the
+same past run and the same worker: the assignment actually sent to it, its own
+17 real steps ending at commit `f726882`, and the check that failed at that
+commit. The assignment says "Own only src/app.rs; change no other file". The
+failure names `src/main.rs` and `src/panels/status.rs`. So whether this red
+build is that worker's problem is answerable from its history and not from the
+diagnostics. Three separate named fields, per the design guidance.
+
+| state | key | mass | confidence | correct |
+|---|---|---|---|---|
+| repository evidence only | `unresolved` | 1.00 | 1.00 | yes |
+| plus task instructions | `unresolved` | 0.78 | 0.66 | yes |
+| **plus conversation history** | **`expected_handoff`** | 0.83 | 0.74 | **yes** |
+| history replaced by off-task turns | `unresolved` | 0.71 | 0.56 | yes |
+
+**History supplies the answer the evidence cannot.** With the diagnostics alone
+the program refuses at 1.00, correctly, because nothing present can settle it.
+The assignment alone is not enough either. The worker's own history moves it to
+the right answer. And irrelevant history does not fabricate one; it returns to
+`unresolved`.
+
+### The wording rule bit again, twice, in one experiment
+
+First draft: every alternative named `task_instructions` as the authority on
+ownership. A later correction inside the history therefore could not win **by
+construction**, whatever it said. That is the same defect as the routing case,
+in a new disguise: the alternative named a specific field instead of the thing
+it meant.
+
+Second draft: I rewrote two of the three alternatives and not the third, so the
+set was asymmetric in both authority and length. Every confidence collapsed:
+the correct case fell from 0.74 to 0.52 and the off-task case to 0.26. **An
+asymmetric alternative set degrades every answer in the packet, not only the
+odd one out.** That is a stronger statement than the earlier finding and it was
+an accident.
+
+Third draft, all three symmetric: the table above, and the off-task case
+corrected itself from a wrong answer to `unresolved`.
+
+### Supersession is not solved
+
+A later correction that reassigns ownership was not honoured.
+
+| where the correction sits | key | mass | confidence |
+|---|---|---|---|
+| buried as a final step in a 6000-character history | `expected_handoff` | 0.76 | 0.64 |
+| hoisted into its own `latest_correction` field | `expected_handoff` | 0.57 | **0.36** |
+
+Both keys are wrong. Hoisting the correction into a named field of its own did
+not flip the answer, so this is not a salience or placement problem.
+
+**What does track the truth is the confidence**, which fell from 0.64 to 0.36 as
+the contradicting instruction became more prominent. The model became visibly
+unsure rather than changing its mind. Under every policy we ship, 0.36 declines
+to act, so the program would hand back rather than proceed wrongly.
+
+Untested diagnosis, and I am stopping rather than running a wording campaign:
+`expected_handoff` carries two conjuncts, the ownership clause and "the required
+command was run and the work committed", and the second is strongly true in
+this fixture. `worker_incomplete` carries one clause. A more specific
+alternative that is partly satisfied may beat a less specific one that is fully
+satisfied. If so the rule is that alternatives should match in **number of
+conditions** as well as in vocabulary, which would be a new and useful
+constraint. That is one clean experiment, not a campaign.
+
+**Outcome: worked for the headline, interesting failure for supersession.**
+Reflect's motivating case is demonstrated on real matched data. A consumer of
+Reflect should not assume a later instruction inside the history will override
+an earlier one, and should read a confidence drop as the flag that the history
+disagrees with the assignment.
