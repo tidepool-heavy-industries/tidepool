@@ -194,6 +194,16 @@ pub struct RootCustody {
     handle: Option<ValueHandle>,
     cleanup: Arc<CustodyCleanup>,
     provenance: Arc<ProgramProvenance>,
+    /// `true` when this token ALIASES a handle another owner (a live
+    /// binding, at present -- see [`ResidentSession::prepared_binding_handle`])
+    /// already keeps rooted, rather than exclusively owning it. An ordinary
+    /// (non-shared) custody's whole contract is "abandon it and its root is
+    /// released" -- exactly wrong for an alias, since abandoning the ALIAS
+    /// must not touch the root the other owner still needs. Sharing only
+    /// changes what an unconsumed drop does; every consuming operation
+    /// (delivery, mount, discard) behaves exactly as it does for an
+    /// exclusive custody.
+    shared: bool,
 }
 
 // Custody must remain exclusive.
@@ -210,6 +220,23 @@ impl RootCustody {
             handle: Some(handle),
             cleanup,
             provenance,
+            shared: false,
+        }
+    }
+
+    /// [`Self::new`], but the wrapped handle aliases a root some other
+    /// owner already keeps alive (see the `shared` field doc) — dropping
+    /// this token unconsumed must not enqueue that root for release.
+    fn shared(
+        handle: ValueHandle,
+        cleanup: Arc<CustodyCleanup>,
+        provenance: Arc<ProgramProvenance>,
+    ) -> Self {
+        RootCustody {
+            handle: Some(handle),
+            cleanup,
+            provenance,
+            shared: true,
         }
     }
 
@@ -227,6 +254,7 @@ impl RootCustody {
             cleanup: Arc::clone(&self.cleanup),
             provenance: Arc::clone(&self.provenance),
             committed: false,
+            shared: self.shared,
         }
     }
 }
@@ -234,7 +262,9 @@ impl RootCustody {
 impl Drop for RootCustody {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
-            self.cleanup.enqueue(handle);
+            if !self.shared {
+                self.cleanup.enqueue(handle);
+            }
         }
     }
 }
@@ -302,6 +332,10 @@ struct CustodyTransfer {
     cleanup: Arc<CustodyCleanup>,
     provenance: Arc<ProgramProvenance>,
     committed: bool,
+    /// Carried from the source [`RootCustody`] — see that type's `shared`
+    /// field doc. A transfer that fails before `commit` drops uncommitted,
+    /// same as an ordinary abandoned custody, so this must agree.
+    shared: bool,
 }
 
 impl CustodyTransfer {
@@ -311,17 +345,25 @@ impl CustodyTransfer {
 
     fn into_custody(mut self) -> RootCustody {
         self.committed = true;
-        RootCustody::new(
-            self.handle,
-            Arc::clone(&self.cleanup),
-            Arc::clone(&self.provenance),
-        )
+        if self.shared {
+            RootCustody::shared(
+                self.handle,
+                Arc::clone(&self.cleanup),
+                Arc::clone(&self.provenance),
+            )
+        } else {
+            RootCustody::new(
+                self.handle,
+                Arc::clone(&self.cleanup),
+                Arc::clone(&self.provenance),
+            )
+        }
     }
 }
 
 impl Drop for CustodyTransfer {
     fn drop(&mut self) {
-        if !self.committed {
+        if !self.committed && !self.shared {
             self.cleanup.enqueue(self.handle);
         }
     }
@@ -3783,15 +3825,19 @@ where
     /// surface, mirroring how [`Self::live_payload_handle`] mints a Core
     /// frame's live payload as a `RootCustody`. Reuses `BoundValue::
     /// Prepared`'s own linking handle rather than minting a fresh one, so
-    /// custody moves without disturbing the binding's root. `None` for an
-    /// unknown binding or a Core-route binding (no `PreparedHandle` to
-    /// borrow).
+    /// custody moves without disturbing the binding's root -- and, because
+    /// the binding table (not this token) is the handle's real owner, the
+    /// returned custody is [`RootCustody::shared`]: a caller that only ever
+    /// borrows it (`resume_framed_custody`'s `&RootCustody`) and then drops
+    /// it leaves `name`'s binding exactly as it was, same as never calling
+    /// this at all. `None` for an unknown binding or a Core-route binding
+    /// (no `PreparedHandle` to borrow).
     pub fn prepared_binding_handle(&self, name: &str) -> Option<RootCustody> {
         let entry = self.core.bindings().resolve(name)?;
         let BoundValue::Prepared { handle, .. } = &entry.value else {
             return None;
         };
-        Some(RootCustody::new(
+        Some(RootCustody::shared(
             handle.raw(),
             Arc::clone(&self.custody_cleanup),
             Arc::new(ProgramProvenance::default()),
