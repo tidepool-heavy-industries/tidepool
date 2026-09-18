@@ -436,6 +436,10 @@ pub(crate) struct ShoalSourceReload {
     /// One reload at a time: a publication's check and its `rename(2)` must
     /// not interleave with another actor's.
     gate: Mutex<()>,
+    /// The last drift read per layer, and the signature of the disk it was
+    /// read from. Drift is read on a timer for every actor; while neither the
+    /// disk nor the active revision has moved, the answer has not either.
+    drift_seen: Mutex<HashMap<String, (String, String, tidepool_actor::SourceLayerDrift)>>,
 }
 
 impl ShoalSourceReload {
@@ -456,6 +460,7 @@ impl ShoalSourceReload {
             checkouts: Mutex::new(HashMap::new()),
             scopes: RwLock::new(HashMap::new()),
             gate: Mutex::new(()),
+            drift_seen: Mutex::new(HashMap::new()),
         }
     }
 
@@ -648,7 +653,44 @@ impl ShoalSourceReload {
         caller: PrincipalId,
     ) -> std::result::Result<tidepool_actor::SourceLayerDrift, tidepool_handlers::SourceError> {
         let _one_at_a_time = self.gate.lock();
-        let (active, disk) = match self.scope(caller) {
+        let scope = self.scope(caller);
+        // What the copy below would read, signed without reading it.
+        let (layer_key, roots) = match &scope {
+            ActorSourceScope::Run | ActorSourceScope::RunReadOnly => {
+                let config = self.frozen.config().map_err(unreadable)?;
+                let roots =
+                    super::workspace::resolve_source_roots(&self.workspace, &config.haskell)
+                        .map_err(unreadable)?;
+                ("run".to_owned(), roots)
+            }
+            // A checkout's roots are its own directories, so they name it.
+            ActorSourceScope::Checkout(checkout) => (
+                checkout
+                    .roots
+                    .iter()
+                    .map(|root| root.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(":"),
+                checkout.roots.to_vec(),
+            ),
+        };
+        let signature = super::workspace::sources_signature(&roots).map_err(unreadable)?;
+        let active_now = match &scope {
+            ActorSourceScope::Run | ActorSourceScope::RunReadOnly => {
+                self.layer.ensure_active(&self.frozen).map_err(unreadable)?
+            }
+            ActorSourceScope::Checkout(checkout) => checkout
+                .layer
+                .ensure_active_from(self.frozen.identity(), &checkout.roots)
+                .map_err(unreadable)?,
+        };
+        if let Some((seen_signature, seen_active, drift)) = self.drift_seen.lock().get(&layer_key)
+        {
+            if *seen_signature == signature && *seen_active == active_now.identity {
+                return Ok(drift.clone());
+            }
+        }
+        let (active, disk) = match scope {
             ActorSourceScope::Run | ActorSourceScope::RunReadOnly => {
                 let active = self.layer.ensure_active(&self.frozen).map_err(unreadable)?;
                 let disk = self
@@ -675,13 +717,18 @@ impl ShoalSourceReload {
             disk
         };
         let changed_modules = disk.changed_since(&active);
-        Ok(tidepool_actor::SourceLayerDrift {
+        let drift = tidepool_actor::SourceLayerDrift {
             active_identity: active.identity,
             active_generation: active.generation,
             disk_identity: disk.identity,
             disk_generation: disk.generation,
             changed_modules,
-        })
+        };
+        self.drift_seen.lock().insert(
+            layer_key,
+            (signature, drift.active_identity.clone(), drift.clone()),
+        );
+        Ok(drift)
     }
 
     /// Frozen workspace modules whose digest differs from the same module

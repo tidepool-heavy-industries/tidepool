@@ -373,7 +373,63 @@ pub(super) fn nix_bin() -> PathBuf {
 /// this run. The project's `flake.lock` is left alone while an override is in
 /// play, so editing a dependency in place stays a working change rather than a
 /// re-pin.
+/// What `nix flake archive` answered for one project, and the state of the
+/// flake files it answered for.
+type ArchivedRoots = ((PathBuf, String), (FileStamp, FileStamp), Vec<PathBuf>);
+
+/// A file's size and modification time, or `None` when it is absent.
+type FileStamp = Option<(u64, std::time::SystemTime)>;
+
+fn file_stamp(path: &Path) -> FileStamp {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((metadata.len(), metadata.modified().ok()?))
+}
+
+/// [`archive_flake_sources`], remembered while the project's flake files are
+/// unchanged.
+///
+/// A pinned input is a store path fixed by `flake.lock`, so asking again while
+/// `flake.nix` and `flake.lock` are unchanged evaluates the flake to learn what
+/// is already known. Source status and drift are read on a timer for every
+/// actor, which made that one `nix` process per actor every few seconds. An
+/// override names a local directory whose contents can change under the same
+/// flake files, so an overridden project is always asked again.
 fn flake_source_roots(workspace: &Path, config: &HaskellConfig) -> Result<Vec<PathBuf>> {
+    static REMEMBERED: std::sync::Mutex<Vec<ArchivedRoots>> = std::sync::Mutex::new(Vec::new());
+    if config.flake_sources.is_empty() || !config.flake_overrides.is_empty() {
+        return archive_flake_sources(workspace, config);
+    }
+    let key = (
+        workspace.to_path_buf(),
+        format!("{:?}", config.flake_sources),
+    );
+    let stamp = (
+        file_stamp(&workspace.join("flake.nix")),
+        file_stamp(&workspace.join("flake.lock")),
+    );
+    if let Ok(remembered) = REMEMBERED.lock() {
+        if let Some((_, _, roots)) = remembered
+            .iter()
+            .find(|(known, known_stamp, _)| *known == key && *known_stamp == stamp)
+        {
+            return Ok(roots.clone());
+        }
+    }
+    let roots = archive_flake_sources(workspace, config)?;
+    // The lock file may have been written by the call above; stamp what is
+    // there now, so the next read matches it.
+    let stamp = (
+        file_stamp(&workspace.join("flake.nix")),
+        file_stamp(&workspace.join("flake.lock")),
+    );
+    if let Ok(mut remembered) = REMEMBERED.lock() {
+        remembered.retain(|(known, _, _)| *known != key);
+        remembered.push((key, stamp, roots.clone()));
+    }
+    Ok(roots)
+}
+
+fn archive_flake_sources(workspace: &Path, config: &HaskellConfig) -> Result<Vec<PathBuf>> {
     for input in config.flake_overrides.keys() {
         if !config.flake_sources.contains_key(input) {
             return Err(format!(
@@ -503,6 +559,57 @@ pub(crate) fn copy_authored(workspace: &Path, destination: &Path) -> Result<()> 
         }
     }
     Ok(())
+}
+
+/// A cheap signature of what [`capture_sources`] would read from `roots`: every
+/// captured file's path, size and modification time, and nothing of its
+/// contents. Two equal signatures mean a capture would produce the same
+/// revision, so a reader on a timer can skip the copy. A root inside the Nix
+/// store is immutable and is signed by its path alone.
+pub(super) fn sources_signature(roots: &[PathBuf]) -> Result<String> {
+    fn walk(directory: &Path, hasher: &mut blake3::Hasher) -> Result<()> {
+        let mut entries: Vec<_> = std::fs::read_dir(directory)?.collect::<std::io::Result<_>>()?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let name = entry.file_name();
+            if matches!(
+                name.to_str(),
+                Some("logs" | "sessions" | "runtime" | "build" | ".git" | "dist-newstyle" | "target")
+            ) {
+                continue;
+            }
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                walk(&entry.path(), hasher)?;
+            } else if kind.is_symlink()
+                || matches!(
+                    entry.path().extension().and_then(|x| x.to_str()),
+                    Some("hs" | "lhs" | "hs-boot" | "h")
+                )
+            {
+                // A symlink makes a capture fail; signing it keeps that
+                // failure from being hidden behind an unchanged signature.
+                let metadata = entry.metadata()?;
+                hasher.update(entry.path().as_os_str().as_encoded_bytes());
+                hasher.update(&metadata.len().to_le_bytes());
+                if let Ok(elapsed) = metadata
+                    .modified()
+                    .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).map_err(std::io::Error::other))
+                {
+                    hasher.update(&elapsed.as_nanos().to_le_bytes());
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut hasher = blake3::Hasher::new();
+    for root in roots {
+        hasher.update(root.as_os_str().as_encoded_bytes());
+        if !root.starts_with("/nix/store") {
+            walk(root, &mut hasher)?;
+        }
+    }
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 pub(super) fn capture_sources(
