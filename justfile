@@ -92,6 +92,14 @@ doctor:
 shoal-init *args:
     {{ shoal_nix }} scripts/shoal-init.sh "$@"
 
+# Start the alpha smoke run: one Sol root agent in this repository's own
+# workspace, handed plans/jev-lab/alpha-smoke-prompt.md. Needs a TypeSafe key
+# in TYPESAFE_API_KEY or ~/.config/typesafe/api-key. Extra arguments are
+# forwarded to `shoal init`, for example `just shoal-smoke -- --recreate`.
+[positional-arguments]
+shoal-smoke *args:
+    {{ shoal_nix }} scripts/shoal-smoke.sh "$@"
+
 # Build Shoal from this checkout and run it against the independent console
 # repository. Extra arguments are forwarded to `shoal init`.
 [positional-arguments]
