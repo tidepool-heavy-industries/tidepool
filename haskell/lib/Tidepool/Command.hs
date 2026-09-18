@@ -38,6 +38,10 @@ module Tidepool.Command
     failure,
     renderCommandError,
     readStdout,
+    readStderr,
+    readCommand,
+    Capture (..),
+    StreamCapture (..),
     decodeWith,
     asJSON,
     OutputPage,
@@ -46,6 +50,7 @@ module Tidepool.Command
     next,
     readOutput,
     readPage,
+    tryPage,
     CommandPosition (..),
     tailOutput,
     nextPage,
@@ -116,6 +121,43 @@ data DecodeIssue e = OutputProblem OutputIssue | DecodeProblem e
   deriving (Eq, Show)
 
 data OutputPage = OutputPage {pageJob :: Job, pageStream :: CommandStream, pageDetails :: CommandPage}
+  deriving (Eq, Show)
+
+-- | One stream's retained output, said in a way a reader cannot mistake.
+--
+-- There is deliberately no total accessor from this to 'Text': a caller that
+-- wants the bytes matches, and in matching confronts the two ways a read ends
+-- short. Only 'CaptureComplete' carries evidence — every byte the stream
+-- produced, through end of file. The 'Text' in the other two constructors is a
+-- display excerpt: what had been read when the read stopped, discontiguous if
+-- retention had already dropped something, and never the whole stream.
+data StreamCapture
+  = -- | Every retained byte, contiguous from zero, through end of file.
+    CaptureComplete Text
+  | -- | The page that stopped the read, then the excerpt read before it.
+    -- The page carries the protocol's own account of why: 'outputLostBytes'
+    -- for a retention gap, 'outputLossy' for a replacement-character decode,
+    -- 'outputFinished' with 'outputEnd' short of 'outputAvailableEnd' for a
+    -- stream that has not ended, 'outputRetainedStart' for what rotated away.
+    CapturePartial CommandPage Text
+  | -- | The command service would not serve the next page, then the excerpt.
+    CaptureRefused CommandError Text
+  deriving (Eq, Show)
+
+-- | Both streams of one finished command, each said separately, beside the
+-- outcome and cleanup the command actually reported.
+--
+-- Capture failure is per stream: a lossy stderr says nothing about stdout, so
+-- the two are not collapsed into one verdict. 'capturedResult' is the command's
+-- own report and is never reinterpreted here — a complete capture of a command
+-- that exited 3 is a successful capture of a failed command, and this type
+-- keeps those two facts apart.
+data Capture = Capture
+  { capturedJob :: Job,
+    capturedResult :: CommandResult,
+    capturedStdout :: StreamCapture,
+    capturedStderr :: StreamCapture
+  }
   deriving (Eq, Show)
 
 -- | The convenience form of a command operation: a refusal ends the cell.
@@ -254,6 +296,63 @@ readStdout retained@(Job key) = do
           | outputEnd page <= cursor -> pure (Left (IncompleteStdout retained))
           | otherwise -> collect (outputEnd page) (outputText page : chunks)
 
+-- | Read complete retained stderr, whatever the command's exit status.
+--
+-- The sibling of 'readStdout' that was missing. It does not gate on the
+-- outcome, for the reason 'stderr' gives: a failed command is exactly when its
+-- diagnostic stream is wanted. It does not reduce to @Either OutputIssue Text@
+-- either, because a stream that could not be read whole has more to say than
+-- one refusal constructor — see 'StreamCapture'.
+readStderr :: (Member Commands effects) => Job -> Eff effects StreamCapture
+readStderr retained = captureStream retained Stderr
+
+-- | Both streams of a retained command, its outcome and its cleanup, in one
+-- call, valid when the command failed. Reading never executes anything again.
+--
+-- This is the paging loop that a caller otherwise writes by hand: it drives
+-- 'tryPage' from byte zero to end of file and inspects each page's retention,
+-- decode and end-of-file signals before it will call a stream complete. Those
+-- signals survive into the result rather than being flattened, so a convenient
+-- call cannot turn an incomplete capture into an apparently complete string.
+--
+-- 'Left' is reserved for the command as a whole: still running, or a status
+-- the service would not report. A finished command always gives 'Right', even
+-- when both of its streams failed to capture.
+--
+-- > Right capture <- Cmd.readCommand job
+-- > case Cmd.capturedStderr capture of
+-- >   Cmd.CaptureComplete said -> block (Cmd.capturedResult capture, said)
+-- >   incomplete -> block incomplete
+readCommand :: (Member Commands effects) => Job -> Eff effects (Either OutputIssue Capture)
+readCommand retained@(Job key) = do
+  observed <- send (CommandStatusWith key)
+  case observed of
+    Left failure -> pure (Left (OutputUnavailable retained failure))
+    Right (CommandFinished result) ->
+      fmap Right $
+        Capture retained result
+          <$> captureStream retained Stdout
+          <*> captureStream retained Stderr
+    Right _ -> pure (Left (StillRunning retained))
+
+-- | Page one stream from byte zero, stopping at the first page that proves the
+-- capture cannot be complete. Shared by 'readStderr' and 'readCommand'.
+captureStream :: (Member Commands effects) => Job -> CommandStream -> Eff effects StreamCapture
+captureStream retained stream = collect 0 []
+  where
+    collect cursor chunks = do
+      observed <- tryPage retained stream (OutputOffset cursor)
+      case fmap pageDetails observed of
+        Left failure -> pure (CaptureRefused failure (assembled chunks))
+        Right page
+          | outputLossy page || outputLostBytes page /= 0 || outputStart page /= cursor ->
+              pure (CapturePartial page (assembled (outputText page : chunks)))
+          | outputEnd page == outputAvailableEnd page && outputFinished page ->
+              pure (CaptureComplete (assembled (outputText page : chunks)))
+          | outputEnd page <= cursor -> pure (CapturePartial page (assembled chunks))
+          | otherwise -> collect (outputEnd page) (outputText page : chunks)
+    assembled = T.concat . reverse
+
 decodeWith :: (Text -> Either e a) -> Either OutputIssue Text -> Either (DecodeIssue e) a
 decodeWith _ (Left issue) = Left (OutputProblem issue)
 decodeWith decode (Right text) = either (Left . DecodeProblem) Right (decode text)
@@ -282,8 +381,14 @@ nextPage OutputPage {pageJob = retained, pageStream = stream, pageDetails = deta
   readPage retained stream (OutputOffset (outputEnd details))
 
 readPage :: (Member Commands effects) => Job -> CommandStream -> CommandPosition -> Eff effects OutputPage
-readPage retained@(Job key) stream position =
-  OutputPage retained stream . checked <$> send (CommandReadWith key stream position)
+readPage retained stream position = checked <$> tryPage retained stream position
+
+-- | Read one page, returning the refusal instead of ending the cell. What
+-- 'readPage', 'readOutput' and 'next' are built from, and what a capture that
+-- must survive a refused read drives directly.
+tryPage :: (Member Commands effects) => Job -> CommandStream -> CommandPosition -> Eff effects (Either CommandError OutputPage)
+tryPage retained@(Job key) stream position =
+  fmap (OutputPage retained stream) <$> send (CommandReadWith key stream position)
 
 pageText :: OutputPage -> Text
 pageText = outputText . pageDetails
@@ -312,6 +417,41 @@ instance WorkbenchDisplay OutputPage where
 
 instance WorkbenchDisplay CommandOutput where
   workbenchDisplay = displayWith 65536
+
+instance WorkbenchDisplay Capture where
+  workbenchDisplay = displayWith 65536
+
+instance WorkbenchDisplay StreamCapture where
+  workbenchDisplay = displayWith 65536
+
+-- | A capture renders its outcome first, then each stream separately, and an
+-- incomplete stream says so before any of its text is shown.
+instance Display Capture where
+  displayWith budget capture =
+    let heading = resultHeading (capturedResult capture) <> "\n"
+        remaining = max 0 (budget - T.length heading)
+        (out, omittedOut) = captureDisplay "stdout" (remaining `div` 2) (capturedStdout capture)
+        (err, omittedErr) = captureDisplay "stderr" (max 0 (remaining - T.length out)) (capturedStderr capture)
+        (text, clipped) = renderText budget (heading <> out <> err)
+     in (text, omittedOut || omittedErr || clipped)
+
+instance Display StreamCapture where
+  displayWith = captureDisplay "output"
+
+captureDisplay :: Text -> Int -> StreamCapture -> (Text, Bool)
+captureDisplay stream budget capture =
+  let (marker, body) = case capture of
+        CaptureComplete text -> (stream <> " · complete capture", text)
+        CapturePartial page text ->
+          ("INCOMPLETE capture · display excerpt · " <> outputMetadata stream page, text)
+        CaptureRefused failure text ->
+          (stream <> " · INCOMPLETE capture · display excerpt · " <> renderCommandError failure, text)
+      header = marker <> "\n"
+      allowance = max 0 (budget - T.length header)
+      (shown, omitted) =
+        if T.length body <= allowance then (body, False) else (T.takeEnd allowance body, True)
+      (text, clipped) = renderText budget (header <> shown <> "\n")
+   in (text, omitted || clipped)
 
 instance Display RunResult where
   displayTree Finished {commandResult = outcome, capturedOutput = captured} =

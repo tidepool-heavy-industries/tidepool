@@ -8,6 +8,9 @@ use tidepool_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 pub(super) struct TestCommands {
     specs: Mutex<Vec<CommandSpec>>,
     stdout: Mutex<String>,
+    stderr: Mutex<String>,
+    exit_code: std::sync::atomic::AtomicI64,
+    degraded_output: std::sync::atomic::AtomicBool,
     finish: watch::Sender<bool>,
     cancelled: std::sync::atomic::AtomicBool,
     output_unavailable: std::sync::atomic::AtomicBool,
@@ -36,6 +39,9 @@ impl TestCommands {
         Arc::new(Self {
             specs: Mutex::new(Vec::new()),
             stdout: Mutex::new("result".into()),
+            stderr: Mutex::new(String::new()),
+            exit_code: 0.into(),
+            degraded_output: false.into(),
             finish: watch::channel(false).0,
             cancelled: false.into(),
             output_unavailable: false.into(),
@@ -68,7 +74,9 @@ impl CommandBackend for TestCommands {
                 outcome: if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
                     CommandOutcome::CommandCancelled
                 } else {
-                    CommandOutcome::CommandExited(0)
+                    CommandOutcome::CommandExited(
+                        self.exit_code.load(std::sync::atomic::Ordering::Acquire),
+                    )
                 },
                 cleanup: CommandCleanup::CommandClean,
             }
@@ -121,7 +129,7 @@ impl CommandBackend for TestCommands {
             }
             let mut page = match stream {
                 CommandStream::Stdout => test_page(&self.stdout.lock()),
-                CommandStream::Stderr => test_page(""),
+                CommandStream::Stderr => test_page(&self.stderr.lock()),
             };
             let (offset, limit) = match position {
                 CommandPosition::OutputSlice(offset, bytes) => (offset, bytes as usize),
@@ -140,6 +148,19 @@ impl CommandBackend for TestCommands {
             page.text = page.text[start..end].to_owned();
             page.start = start as i64;
             page.end = end as i64;
+            // A retained stream that rotated bytes away, decoded with
+            // replacement characters, and has not reached end of file: the
+            // three signals a capture must never flatten into a plain string.
+            if self
+                .degraded_output
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                page.lossy = true;
+                page.lost_bytes = 64;
+                page.retained_start = 64;
+                page.finished = false;
+                page.available_end = page.end + 500;
+            }
             Ok(page)
         })
     }
@@ -164,7 +185,7 @@ impl CommandBackend for TestCommands {
             }
             Ok(CommandOutput {
                 stdout: test_page(&self.stdout.lock()),
-                stderr: test_page(""),
+                stderr: test_page(&self.stderr.lock()),
             })
         })
     }
@@ -605,6 +626,59 @@ async fn command_output_ux_preserves_large_values_and_decodes_complete_stdout() 
     .await;
     assert!(info.to_string().contains("data RunResult"), "{info}");
     assert!(!text.contains("Display failed"), "{text}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+/// A failed command's diagnostic output is exactly what a caller wants, and is
+/// what `Cmd.stdout`/`Cmd.readStdout` deliberately refuse. `Cmd.readCommand`
+/// serves it — without letting an incomplete capture read as a complete string.
+#[tokio::test]
+async fn read_command_captures_both_streams_of_a_failed_command() {
+    let mut campaign = TestCampaign::start().await;
+    committed(&campaign, "job <- Cmd.start [bash|exit 3|]").await;
+    let backend = TestCommands::new();
+    *backend.stdout.lock() = "standard out".into();
+    *backend.stderr.lock() = "boom: file not found".into();
+    backend
+        .exit_code
+        .store(3, std::sync::atomic::Ordering::Release);
+    backend.finish.send_replace(true);
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(backend.clone()));
+    committed(&campaign, "finished <- Cmd.await job").await;
+
+    let whole = committed(&campaign, include_str!("command_capture.hs")).await;
+    let text = whole.to_string();
+    for marker in [
+        "outcome-unreinterpreted",
+        "failed-streams-captured",
+        "stderr-read",
+        "capture-display-ok",
+        "stdout-still-gated",
+        "readStdout-still-gated",
+    ] {
+        assert!(text.contains(marker), "missing {marker}: {text}");
+    }
+
+    // The same retained job, now serving pages that rotated bytes away, decoded
+    // lossily, and stop short of end of file.
+    backend
+        .degraded_output
+        .store(true, std::sync::atomic::Ordering::Release);
+    let degraded = committed(&campaign, include_str!("command_capture_lossy.hs")).await;
+    let text = degraded.to_string();
+    for marker in [
+        "loss-signals-survive",
+        "both-streams-partial",
+        "outcome-survives-loss",
+        "readStderr-partial",
+        "incomplete-cannot-read-as-complete",
+    ] {
+        assert!(text.contains(marker), "missing {marker}: {text}");
+    }
+    assert_eq!(backend.executions(), 1, "reading must not run the command");
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
