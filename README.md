@@ -59,6 +59,19 @@ The next expression can fetch the promising files, inspect callers, or prepare a
 focused question for another agent. Turn that sequence into a function and call
 it again on the next failure. The code is yours to change.
 
+**What it costs.** One packet is one round trip, however many questions are in
+it. Measured in a live session against `jev-1.13.0`: the six questions above
+returned in 215 ms, and a packet of 322 questions over a whole source file
+returned in 351 ms. So ask everything you want to know about one piece of
+evidence at once; a second packet costs another round trip and a judgment cannot
+see another judgment's answer anyway.
+
+What is not cheap yet is compiling a cell, which is where this alpha spends its
+time. That is the argument for moving a program you intend to run again out of
+the notebook: a tool or an after-tool slot is compiled once when it is installed
+and every later call runs retained machine code, so the same Jev-backed judgment
+that costs you a compile as a cell costs a few hundred milliseconds as a tool.
+
 The [Jev skill](examples/shoal-workspace/.shoal/skills/shoal-jev/SKILL.md) covers
 per-item question batteries, choices carrying executable actions, policies for
 settling an answer, and reading uncertainty. The [TypeSafe cookbooks](https://docs.typesafe.ai/patterns) are a
@@ -152,13 +165,14 @@ up, with an append that carries both sets' labels in the type and rejects a
 duplicate at compile time.
 
 That whole capability is workspace Haskell. Designing it and writing it took
-about half an hour, and it needed two small additions to the shipped
-library, a way for a slot to name its parent and an optional line of intent on
-a shell call, and no engine change at all: asking Jev, reading the running
-actor's identity and messaging another agent were already effects, and a slot
-already ran compiled after every tool call. This is
-what the system is for. The engine work is done once, in Rust and in the effect
-contracts; after that a new reflex, a new tool, a new monitor over a whole
+about half an hour. It needed two small additions to the shipped library, a way
+for a slot to name its parent and an optional line of intent on a shell call,
+and no engine change at all: asking Jev, reading the running actor's identity
+and messaging another agent were already effects, and a slot already ran
+compiled after every tool call.
+
+This is what the system is for. The engine work is done once, in Rust and in the
+effect contracts. After that a new reflex, a new tool, a new monitor over a whole
 subtree is a few dozen lines in a file the agent itself can edit, typecheck and
 reload without restarting anything. An agent that finds a better way to work can
 write it down and be using it minutes later.
@@ -250,8 +264,9 @@ nix build .#shoal
 ```
 
 There is no public binary cache yet, so the first build compiles everything,
-GHC-side and Rust-side, and takes a good while. Later builds are incremental. The wrapper selects the matched
-extractor and client without replacing `codex` on your normal PATH.
+GHC-side and Rust-side, and takes a good while. Later builds are incremental.
+The wrapper selects the matched extractor and client without replacing `codex`
+on your normal PATH.
 
 Configure a systemd user slice with finite RAM and swap limits appropriate to
 your machine. Shoal defaults to `swarm.slice` and checks placement before running
@@ -335,8 +350,16 @@ in [`tidepool-handlers`](tidepool-handlers/). Generated bindings connect the sid
 
 This is an early alpha: an experimental system you can use and reshape today.
 Interfaces will change without notice. Setup is involved, and live use still
-finds workbench papercuts. The most useful examples come from
-trying real tasks, keeping what works, and fixing what gets in the way.
+finds workbench papercuts. The most useful examples come from trying real tasks,
+keeping what works, and fixing what gets in the way.
+
+The sharpest edge today is compile latency. A first notebook cell in a fresh
+session takes on the order of a minute, and reloading an edited agent spec about
+half of that, because each statement is compiled and its machine code generated
+from scratch. Everything downstream of a compile is fast: a tool call answers in
+well under a second, an idle after-tool slot adds tens of milliseconds, and Jev
+answers in a few hundred. We are working on the compile path, and the design
+already lets you spend it once rather than every turn.
 
 We are exploring agents exchanging and improving semantic functions, context-aware
 tool views, and programs that do more work between model turns. These are directions
