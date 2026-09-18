@@ -725,16 +725,17 @@ impl DurableActorEvent {
         })
     }
 
-    fn render(&self, launched_at: Option<i64>) -> String {
-        let elapsed = |occurred: u64| match launched_at
+    /// `reader_launched_at` is the launch time of the actor this text is being
+    /// delivered to, not of whatever actor the event is about. The label has to
+    /// say so: it read "since actor launch" beside a child's settlement, and a
+    /// live parent was told its child had taken five and a half minutes when the
+    /// child had lived seventy seconds. The figure was the parent's own age.
+    fn render(&self, reader_launched_at: Option<i64>) -> String {
+        let elapsed = |occurred: u64| match reader_launched_at
             .and_then(|start| i64::try_from(occurred).ok()?.checked_sub(start))
             .filter(|elapsed| *elapsed >= 0)
         {
-            Some(ms) => format!(
-                "+{}m{:02}s since actor launch",
-                ms / 60_000,
-                (ms / 1000) % 60
-            ),
+            Some(ms) => format!("+{}m{:02}s into your session", ms / 60_000, (ms / 1000) % 60),
             None => "elapsed time unavailable".to_owned(),
         };
         match self {
@@ -6606,7 +6607,10 @@ mod tests {
                 watermark: tidepool_actor::ActorEventSequence(3),
             },
         });
-        assert!(watch.render(Some(0)).contains("+12m34s since actor launch"));
+        // The argument is the reading actor's launch time, so the text must not
+        // claim to measure the actor the event is about.
+        assert!(watch.render(Some(0)).contains("+12m34s into your session"));
+        assert!(!watch.render(Some(0)).contains("since actor launch"));
         assert!(watch.render(None).contains("elapsed time unavailable"));
         assert!(watch
             .render(Some(800_000))

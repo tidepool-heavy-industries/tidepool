@@ -836,9 +836,11 @@ fn agent_roster_value(
             cache_boundary.to_value(table)?,
             actor_int(entry.runtime.event_watermark)?.to_value(table)?,
             workbench_posture,
-            // The host already observes when this actor launched; a
-            // supervisor that has to derive "+4m50s since actor launch" from
-            // prose cannot subtract it from a settlement time.
+            // The host already observes when this actor launched; a supervisor
+            // that has to derive "+4m50s" from prose cannot subtract it from a
+            // settlement time. This is the value that lets a parent compute a
+            // child's real elapsed time, which the notification prose does not
+            // carry — that prose is measured against the reader's own launch.
             entry.runtime.launched_at_unix_ms.to_value(table)?,
         ],
     )?)

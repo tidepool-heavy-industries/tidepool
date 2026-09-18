@@ -136,12 +136,34 @@ assignment asked for a test and a summary and never mentioned committing; one
 child inferred it and two did not. The gap is that the harness treats a child's
 prose as a settlement without ever asking whether a candidate exists.
 
-### 2. `cleanupReceiptComplete = True` over abandoned work
+### 2. ~~`cleanupReceiptComplete = True` over abandoned work~~ — retracted
 
-The same two worktrees above still sit on disk with uncommitted changes, after a
-receipt that reported every actor stopped, every actor forgotten, the group
-retired, and the whole thing complete. A receipt that says complete should not be
-compatible with orphaned modifications in a worktree it was retiring.
+**This was wrong, and I am leaving it here rather than deleting it.** I reported
+that a complete cleanup receipt over two dirty worktrees was a defect. It is the
+documented contract working as designed. `doc cleanup` says so in as many words:
+
+> Cleanup never deletes worktrees, branches, commits, build evidence, or user
+> files. Dirty worktrees remain available after actor retirement.
+
+Checked against the receipt rather than assumed: every actor reported
+`AgentStoppedNow`, which per the same document means both phases completed — the
+actor published its terminal state *and* the host released its process, pane,
+tool service, socket and workspace view. The runtime resources were released. The
+directories remaining is the promise being kept, not broken.
+
+**What survives is narrower and still worth fixing: retained work is not
+discoverable from the receipt.** A lead reading `cleanupReceiptComplete = True`
+learns that the group retired. It learns nothing about two worktrees that still
+hold uncommitted changes, where they are, or that they are deliberately being
+kept. The contract preserves the work precisely so a person can come back for it;
+the receipt gives them no way to know there is anything to come back for. A
+receipt that named the retained worktrees would close that, and nothing would
+need to be deleted.
+
+The general lesson is the one this whole document keeps hitting from different
+sides: I read a directory on disk and inferred a failure without checking the
+contract that governs it. That is the same mistake as reading a rollout and
+inferring intent.
 
 ### 3. `updateRequest` reports success for an update nobody will receive
 
@@ -189,7 +211,27 @@ constructor that would have worked. A direct lookup of `Selected` in the same
 turn returned `no match`, so the type view and the symbol view disagree, and the
 misleading one is the type view.
 
+**Located, not yet fixed.** `browseEntries`
+(`haskell/src/Tidepool/Introspection.hs:731`) renders every entry with
+`pprTyThingInContext showEverything thing`. `showEverything` is what prints all
+of a `TyThing`'s constructors and fields regardless of the export list; GHCi's
+own `:browse` abbreviates precisely here. The export list is already in hand two
+lines above — `inspectModule` passes `modInfoExports` in as `names` and
+`browseEntries` binds it as `exportedNames`, using it only to decide whether an
+entry has an exported parent. The fix is to render sub-things against that set.
+
+It is a GHC-plugin change needing an extractor redeploy, so it is recorded here
+rather than started late in a session with other live work on the machine.
+
 ### 5. `apply_patch` reports a file updated when nothing changed
+
+**Not ours.** `apply_patch` is a Codex tool, not part of this harness. Recorded
+because it hurt an agent working inside a Shoal run and because anyone reading a
+child's transcript should know a patch receipt can claim a file was updated when
+the tree is unchanged. Nothing here can fix it; a child can defend itself by
+running `git diff` after a patch, which is what the `list.rs` child did.
+
+### 5b. The original observation
 
 In the `list.rs` child, a patch with two context anchors and no added or removed
 lines returned `"Success. Updated the following files:\nM …/src/panels/list.rs"`
@@ -204,9 +246,14 @@ launch)"*. That child was admitted about seventy seconds earlier. The figure
 matches the age of the **root's own session** to within two seconds, for both
 children reported. `tidepool/src/actor_host.rs:4396` renders the event with
 `observation.snapshot().launched_at_unix_ms` — the launch time of the actor
-*receiving* the notice, not the actor it is about — and the label at line 734
-says "since actor launch". Either the label or the value is wrong; as it stands
-it overstates a child's runtime by the parent's age.
+*receiving* the notice, not the actor it is about.
+
+**Fixed.** The value was right and the label was lying about it. The label now
+reads `+12m34s into your session`, the parameter is named `reader_launched_at`,
+and a test asserts the text does not claim to measure the actor the event is
+about. The useful number — a child's real elapsed time — is separately available:
+the host already exposes each actor's `launched_at_unix_ms` as a value precisely
+so a parent can subtract it rather than parse prose.
 
 ### 7. `doc <topic>` refuses while a skill by that name exists
 
