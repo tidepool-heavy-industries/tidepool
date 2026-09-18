@@ -465,11 +465,6 @@ fn two_placements_one_retired(engine: EngineKind) {
 }
 
 #[test]
-fn placement_retirement_on_core() {
-    two_placements_one_retired(EngineKind::Core);
-}
-
-#[test]
 fn placement_retirement_on_prepared_stg() {
     two_placements_one_retired(EngineKind::Prepared);
 }

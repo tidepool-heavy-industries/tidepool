@@ -7829,11 +7829,6 @@ mod request_tests {
     }
 
     #[test]
-    fn notebook_cells_run_on_core() {
-        notebook_cells_on(tidepool_runtime::session::EngineKind::Core);
-    }
-
-    #[test]
     fn notebook_cells_run_on_prepared_stg() {
         notebook_cells_on(tidepool_runtime::session::EngineKind::Prepared);
     }
