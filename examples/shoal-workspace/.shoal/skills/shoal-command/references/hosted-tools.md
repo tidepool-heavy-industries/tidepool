@@ -45,7 +45,11 @@ The shared `haskell` tool remains available. Field names become snake_case tool
 names; `RawCall` receives literal Text, while `Call` derives its input schema
 from the same types used for decoding. Returned Text displays literally.
 Schemas and handler code freeze at actor startup; calls apply retained compiled
-code to input data. Changes require a new package/run, not a live file edit.
+code to input data, so an accepted call always finishes under the
+implementation it started with. `reloadSource` publishes an edited tool module
+as the revision later cells compile against, but it does not re-derive an
+actor's already-installed tool record: that record refreshes at the actor's
+next incarnation, not on a live file edit.
 
 `Shell.execute` composes `Cmd.start` and bounded `Cmd.observe`, allowing the
 handler to continue even when the command is still running. The resulting

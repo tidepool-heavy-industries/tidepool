@@ -77,6 +77,11 @@ pub enum ActorEffectKey {
     Console,
     Actor,
     Reflect,
+    /// Reloading the run's own workspace source. Root only: publishing a
+    /// revision changes what EVERY later cell in the run compiles against, so
+    /// it is a run-wide act rather than something a child does inside its own
+    /// checkout.
+    Source,
 }
 
 impl ActorEffectKey {
@@ -100,6 +105,7 @@ impl ActorEffectKey {
             Self::Console => "Console",
             Self::Actor => "Actor",
             Self::Reflect => "Reflect",
+            Self::Source => "Source",
         }
     }
 }
@@ -146,6 +152,7 @@ impl EffectiveRole {
                 ActorEffectKey::Console,
                 ActorEffectKey::Actor,
                 ActorEffectKey::Reflect,
+                ActorEffectKey::Source,
             ],
         )
     }

@@ -199,6 +199,14 @@ unmigrated base-eval effects). It is `dispatched: true`, so it is serviced
 synchronously by an `EffectHandler` in the bootstrap handler list
 (`actor_host.rs:1893-1900`) rather than suspending to the actor kernel.
 
+**Who may call it.** A new `ActorEffectKey::Source`
+(`tidepool-actor/src/role.rs`), granted to the **root role only**. Publishing a
+revision changes what every later cell in the run compiles against, so it is a
+run-wide act, not something a child does inside its own checkout: a coding
+actor writing in a worktree must not be able to republish the swarm's source
+graph. A child that needs a reload asks the root for one, which is an ordinary
+actor call.
+
 ```haskell
 reloadSource :: [Text] -> M (Either SourceError ReloadOutcome)
 sourceStatus ::           M (Either SourceError SourceStatus)
@@ -280,12 +288,11 @@ admission-time property compiled into the dispatch closure, not a per-call
 check; this design neither weakens nor strengthens that.
 
 **Standing documentation.** `examples/shoal-workspace/.shoal/skills/shoal-command/references/hosted-tools.md`
-says "Schemas and handler code freeze at actor startup; calls apply retained
+said "Schemas and handler code freeze at actor startup; calls apply retained
 compiled code to input data. Changes require a new package/run, not a live
-file edit." The first sentence stays true. The second becomes imprecise: after
+file edit." The first sentence stays true. The second became imprecise — after
 this change a source reload plus a new actor incarnation picks up an edited
-tool module within the same run. That sentence is corrected as part of this
-change.
+tool module within the same run — and is corrected as part of this change.
 
 ## Not implemented in this cut, and why
 

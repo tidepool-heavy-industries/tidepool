@@ -24,6 +24,8 @@ mod lookup_availability_tests;
 mod observation_budget_tests;
 mod overlay_resource;
 #[cfg(test)]
+mod source_reload_tests;
+#[cfg(test)]
 #[path = "host_dynamic_tools/tui_resource_tests.rs"]
 mod tui_resource_tests;
 #[cfg(test)]

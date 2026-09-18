@@ -124,7 +124,7 @@ impl SourceLayer {
             return Ok(active);
         }
         let roots = frozen.captured_source_roots();
-        let pending = self.capture_roots(frozen, &roots)?;
+        let pending = self.capture_roots(frozen, roots)?;
         self.publish(pending)
     }
 
@@ -521,5 +521,205 @@ mod tests {
             .contains("work = 2"));
         // …and the run still loads, which is the tamper check passing.
         FrozenWorkspace::load(project.path(), run.path()).unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // The reload transaction itself, checked by the run's own compiler.
+    // ------------------------------------------------------------------
+
+    /// A two-module workspace: `Project.Work` is the configured module and it
+    /// reads `Project.Types`, so `Types` has a reverse dependency to rebuild.
+    fn cooperating_pair() -> (tempfile::TempDir, tempfile::TempDir, ShoalSourceReload) {
+        let project = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        let authored = project.path().join(".shoal");
+        std::fs::create_dir_all(authored.join("Project")).unwrap();
+        std::fs::write(
+            authored.join("config.toml"),
+            "[defaults]\nmodel = 'gpt-5.6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n",
+        )
+        .unwrap();
+        write_types(project.path(), "evidenceValue");
+        write_work(project.path(), "evidenceValue");
+        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let reload = ShoalSourceReload::new(
+            frozen,
+            project.path().to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_shoal_haskell().unwrap(),
+        );
+        (project, run, reload)
+    }
+
+    fn write_types(project: &Path, accessor: &str) {
+        std::fs::write(
+            project.join(".shoal/Project/Types.hs"),
+            format!(
+                "module Project.Types (Evidence(..), {accessor}) where\n\
+                 \n\
+                 newtype Evidence = Evidence Int\n\
+                 \n\
+                 {accessor} :: Evidence -> Int\n\
+                 {accessor} (Evidence n) = n\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn write_work(project: &Path, accessor: &str) {
+        std::fs::write(
+            project.join(".shoal/Project/Work.hs"),
+            format!(
+                "module Project.Work (describe) where\n\
+                 \n\
+                 import Project.Types\n\
+                 \n\
+                 describe :: Evidence -> Int\n\
+                 describe e = {accessor} e + 1\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    /// The compiled-artifact key an extract over these include roots would
+    /// get. The include VECTOR is identical before and after a reload, so this
+    /// is the honest question "would a later compile be served the previous
+    /// artifact?".
+    fn cache_key(include: &[PathBuf]) -> String {
+        let input = PathBuf::from("Turn.hs");
+        let argv = vec![std::ffi::OsString::from("Turn.hs")];
+        tidepool_runtime::cache::invocation_key(&tidepool_runtime::cache::Invocation {
+            source: "module Turn where",
+            argv: &argv,
+            input_path: &input,
+            include,
+            endpoint_identity: b"source-reload-test",
+            stable_val: None,
+        })
+        .expect("an include-only invocation is cacheable")
+        .to_string()
+    }
+
+    /// Two cooperating files edited together are one transaction, and what a
+    /// LATER compile reads is the pair that was published. The proof is
+    /// GHC's: the new `Project.Work` calls a name that exists only in the new
+    /// `Project.Types`, and the run's frozen capture — still on the search
+    /// path underneath — provides neither.
+    #[test]
+    fn a_reloaded_pair_is_what_a_later_compile_reads() {
+        let (project, run, reload) = cooperating_pair();
+        crate::actor_host::validate_workspace_program(&reload.frozen, run.path()).unwrap();
+        let before = reload.layer.read_active().unwrap().unwrap();
+        let include = reload.layer.include_paths(1);
+        let key_before = cache_key(&include);
+
+        write_types(project.path(), "evidenceAmount");
+        write_work(project.path(), "evidenceAmount");
+        let outcome = tidepool_handlers::SourceReloadService::reload(&reload, &[]).unwrap();
+        let tidepool_bridge_effects::SrReloadOutcome::ReloadPublished(previous, published, changed) =
+            outcome
+        else {
+            panic!("a consistent pair must publish: {outcome:?}");
+        };
+        assert_eq!(previous.identity, before.identity);
+        assert_ne!(published.identity, before.identity);
+        assert_eq!(published.generation, 2);
+        assert_eq!(changed, vec!["Project.Types", "Project.Work"]);
+
+        // Same include vector, different compiled-artifact key: a later
+        // compile cannot be served the previous revision's artifact.
+        assert_eq!(include, reload.layer.include_paths(1));
+        assert_ne!(cache_key(&include), key_before);
+
+        // And GHC agrees: this only compiles if BOTH new files were read.
+        crate::actor_host::validate_workspace_program(&reload.frozen, run.path()).unwrap();
+    }
+
+    /// Changing one module rebuilds everything that imports it, and a break
+    /// anywhere in that closure rejects the WHOLE reload: the previous graph
+    /// stays active, the edited file stays on disk exactly as written, and the
+    /// receipt names the snapshot that failed.
+    #[test]
+    fn a_reload_that_breaks_a_dependent_changes_nothing() {
+        let (project, run, reload) = cooperating_pair();
+        crate::actor_host::validate_workspace_program(&reload.frozen, run.path()).unwrap();
+        let before = reload.layer.read_active().unwrap().unwrap();
+        let key_before = cache_key(&reload.layer.include_paths(1));
+
+        // Only Project.Types is edited. Project.Work still calls the old name.
+        write_types(project.path(), "evidenceAmount");
+        let expected = reload
+            .layer
+            .capture_from_workspace(&reload.frozen, project.path())
+            .unwrap()
+            .revision()
+            .identity
+            .clone();
+        let outcome = tidepool_handlers::SourceReloadService::reload(&reload, &[]).unwrap();
+        let tidepool_bridge_effects::SrReloadOutcome::ReloadRejected(active, rejected, diagnostics) =
+            outcome
+        else {
+            panic!("a dependent that no longer compiles must reject: {outcome:?}");
+        };
+
+        // The dependent was rebuilt against the new module — that is the only
+        // way this diagnostic exists, since Project.Work itself is unedited.
+        assert!(diagnostics.contains("evidenceValue"), "{diagnostics}");
+        assert_eq!(active.identity, before.identity);
+        assert_eq!(rejected.identity, expected);
+        assert_eq!(reload.layer.read_active().unwrap().unwrap(), before);
+        assert_eq!(cache_key(&reload.layer.include_paths(1)), key_before);
+
+        // The edited source is untouched, and the previous graph still
+        // compiles, which is what "still active" means.
+        assert!(
+            std::fs::read_to_string(project.path().join(".shoal/Project/Types.hs"))
+                .unwrap()
+                .contains("evidenceAmount")
+        );
+        crate::actor_host::validate_workspace_program(&reload.frozen, run.path()).unwrap();
+    }
+
+    /// Reloading a workspace nobody edited republishes nothing — the identity
+    /// is content, so there is nothing to publish.
+    #[test]
+    fn an_unedited_workspace_reloads_to_the_same_revision() {
+        let (project, run, reload) = cooperating_pair();
+        let active = reload.layer.ensure_active(&reload.frozen).unwrap();
+        let outcome = tidepool_handlers::SourceReloadService::reload(&reload, &[]).unwrap();
+        let tidepool_bridge_effects::SrReloadOutcome::ReloadUnchanged(revision) = outcome else {
+            panic!("an unedited workspace must not republish: {outcome:?}");
+        };
+        assert_eq!(revision.identity, active.identity);
+        assert_eq!(revision.generation, 1);
+        drop((project, run));
+    }
+
+    /// Provenance is data, not prose: status names what later cells compile
+    /// against and what the roots hold right now, and a module is looked up in
+    /// the revision rather than parsed out of a message.
+    #[test]
+    fn status_reports_the_active_and_the_on_disk_revision() {
+        let (project, run, reload) = cooperating_pair();
+        let status = tidepool_handlers::SourceReloadService::status(&reload).unwrap();
+        assert_eq!(status.active.identity, status.disk.identity);
+        let work = |revision: &tidepool_bridge_effects::SrRevision| {
+            revision
+                .modules
+                .iter()
+                .find(|module| module.name == "Project.Work")
+                .expect("the configured module is in the revision")
+                .digest
+                .clone()
+        };
+        let before = work(&status.active);
+
+        write_work(project.path(), "evidenceValue + 0 `seq` evidenceValue");
+        let status = tidepool_handlers::SourceReloadService::status(&reload).unwrap();
+        assert_ne!(status.active.identity, status.disk.identity);
+        assert_eq!(work(&status.active), before);
+        assert_ne!(work(&status.disk), before);
+        assert_eq!(status.disk.generation, 0, "an unpublished snapshot");
+        drop(run);
     }
 }
