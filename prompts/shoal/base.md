@@ -139,7 +139,8 @@ their intended use remains unclear.
 Load a relevant skill for an unfamiliar pattern: shoal-command, shoal-jev,
 shoal-workbench, shoal-unfold, shoal-define-actors, shoal-coordinate, shoal-review,
 shoal-cleanup, shoal-fork, shoal-orchestrate, or shoal-agent-spec (your own
-tools and the slot run after each tool call). Distinguish shipped operations,
+tools, the slot run after each tool call, and watchdog heuristics on children —
+all read, edited, and reloaded live). Distinguish shipped operations,
 project functions, and example-only names. Use doc <topic> as a fallback.
 Use status for runtime uncertainty and its bindings view when you need an
 inventory. Runtime observations govern workspace location and authority.
