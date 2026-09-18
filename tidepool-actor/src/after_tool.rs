@@ -108,6 +108,8 @@ pub(crate) enum Disposition {
     Silent,
     Abstained(String),
     Annotated,
+    /// Turn-level review text retained in status, never provider context.
+    TurnAnnotated(String),
     Pruned(String),
     Failed(String),
     TimedOut(Duration),
@@ -119,6 +121,7 @@ impl Disposition {
             Self::Silent => "silent".to_owned(),
             Self::Abstained(reason) => format!("abstained: {reason}"),
             Self::Annotated => "annotated".to_owned(),
+            Self::TurnAnnotated(text) => format!("annotated: {text}"),
             Self::Pruned(handle) => format!("pruned, whole result bound as {handle}"),
             Self::Failed(reason) => format!("failed: {reason}"),
             Self::TimedOut(wait) => format!("timed out after {}", describe_wait(*wait)),
@@ -232,6 +235,15 @@ pub(crate) fn compact_reason(reason: &str) -> String {
     match line.char_indices().nth(200) {
         Some((cut, _)) => format!("{}…", &line[..cut]),
         None => line.to_owned(),
+    }
+}
+
+/// Bound turn-level review text retained in status. Preserve short answers
+/// exactly; cap long answers without letting an always-on hook grow status.
+pub(crate) fn bounded_turn_annotation(text: &str) -> String {
+    match text.char_indices().nth(2_000) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_owned(),
     }
 }
 

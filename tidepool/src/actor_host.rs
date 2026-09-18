@@ -5328,20 +5328,7 @@ async fn retire_interactive_application(
         Some(CleanupComponentOutcome::Completed)
     );
     let mut components = Vec::with_capacity(6);
-    let (mut delivery, mut turn_observer) = match deployment.connection {
-        InteractiveConnection::AwaitingBinding => (None, None),
-        InteractiveConnection::Bound {
-            delivery_shutdown,
-            delivery,
-            turn_shutdown,
-            turn_observer,
-            ..
-        } => {
-            let _ = delivery_shutdown.send(());
-            let _ = turn_shutdown.send(());
-            (Some(delivery), Some(turn_observer))
-        }
-    };
+    let (mut delivery, mut turn_observer) = begin_connection_retirement(deployment.connection);
     if let Some(process) = scoped_process {
         let pane = if native_retirement == NativeRetirement::Preserve
             || matches!(process, CleanupComponentOutcome::Completed)
@@ -5497,6 +5484,27 @@ async fn retire_interactive_application(
         outcome: binding_outcome,
     });
     InteractiveCleanupReceipt { actor, components }
+}
+
+fn begin_connection_retirement(
+    connection: InteractiveConnection,
+) -> (
+    Option<tokio::task::JoinHandle<()>>,
+    Option<tokio::task::JoinHandle<()>>,
+) {
+    match connection {
+        InteractiveConnection::AwaitingBinding => (None, None),
+        InteractiveConnection::Bound {
+            delivery_shutdown,
+            delivery,
+            turn_shutdown,
+            turn_observer,
+        } => {
+            let _ = delivery_shutdown.send(());
+            let _ = turn_shutdown.send(());
+            (Some(delivery), Some(turn_observer))
+        }
+    }
 }
 
 /// Account for exact resident cleanup before draining the original HTTP task.
@@ -8995,6 +9003,44 @@ mod tests {
         assert!(receipt
             .render()
             .contains("Delivery: forcibly stopped before graceful settlement"));
+    }
+
+    #[tokio::test]
+    async fn bound_retirement_cancels_and_joins_delivery_and_turn_observer() {
+        let actor = ActorRef::first(tidepool_actor::ActorId(9));
+        let (delivery_shutdown, delivery_stop) = oneshot::channel();
+        let (turn_shutdown, turn_stop) = oneshot::channel();
+        let delivery = tokio::spawn(async move {
+            let _ = delivery_stop.await;
+        });
+        let turn_observer = tokio::spawn(async move {
+            let _ = turn_stop.await;
+        });
+        let (mut delivery, mut turn_observer) =
+            begin_connection_retirement(InteractiveConnection::Bound {
+                delivery_shutdown,
+                delivery,
+                turn_shutdown,
+                turn_observer,
+            });
+
+        let delivery_outcome = stop_retired_delivery(
+            actor,
+            delivery.as_mut().expect("bound delivery task"),
+            Duration::from_secs(1),
+        )
+        .await;
+        let turn_outcome = stop_retired_delivery(
+            actor,
+            turn_observer.as_mut().expect("bound turn observer task"),
+            Duration::from_secs(1),
+        )
+        .await;
+
+        assert_eq!(delivery_outcome, CleanupComponentOutcome::Completed);
+        assert_eq!(turn_outcome, CleanupComponentOutcome::Completed);
+        assert!(delivery.as_ref().unwrap().is_finished());
+        assert!(turn_observer.as_ref().unwrap().is_finished());
     }
 
     #[test]

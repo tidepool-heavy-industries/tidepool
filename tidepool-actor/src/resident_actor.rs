@@ -5714,7 +5714,9 @@ where
             Ok(Ok(crate::after_tool::Annotation::Abstained(reason))) => {
                 Disposition::Abstained(reason)
             }
-            Ok(Ok(crate::after_tool::Annotation::Annotated(_))) => Disposition::Annotated,
+            Ok(Ok(crate::after_tool::Annotation::Annotated(text))) => {
+                Disposition::TurnAnnotated(crate::after_tool::bounded_turn_annotation(&text))
+            }
             Ok(Ok(crate::after_tool::Annotation::Pruned { .. })) => Disposition::Failed(
                 "after-turn slots cannot prune a completed conversation turn".into(),
             ),

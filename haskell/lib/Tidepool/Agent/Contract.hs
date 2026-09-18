@@ -649,9 +649,8 @@ instance FromJSON AfterToolInput where
   parseJSON = withObject "AfterToolInput" $ \o ->
     AfterToolInput <$> (o .: T.pack "call") <*> (o .: T.pack "result")
 
--- | One exact completed provider turn observed for this actor. The completed
--- turn remains JSON so this contract does not duplicate the provider-neutral
--- conversation schema already owned by the runtime.
+-- | One exact completed provider turn observed for this actor, using the same
+-- typed conversation vocabulary as 'reflect'.
 data TurnObservation = TurnObservation
   { turnObservationThread :: Text
   , turnObservationTurn :: ConversationTurn
