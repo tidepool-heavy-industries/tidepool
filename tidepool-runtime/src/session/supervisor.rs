@@ -15,16 +15,12 @@
 //! for whether a `tidepool_effect::pause::PauseGate` abort request precedes
 //! it.
 //!
-//! This is deliberately NOT a full turn supervisor unifying
-//! `tidepool-runtime`'s own [`super::engine::SessionEngine`] (oneshot,
-//! channel-driven, with a resumable `Paused` outcome) with a resident
-//! session's direct-JoinHandle driver: their timeout semantics genuinely
-//! differ (a resident timeout has no "paused, resumable" state — it recovers
-//! to `Idle` or wedges), and forcing them to share one classification would
-//! be a real behavior change to safety-critical crash/timeout handling, not
-//! a mechanical dedup. `SessionEngine` remains its own caller of the two
-//! abort levers this module wraps; only the grace-wait step it does NOT
-//! share (it detaches immediately rather than waiting) stays out of scope.
+//! This is deliberately NOT a full turn supervisor unifying every driver's
+//! timeout semantics into one classification: a resident session's
+//! direct-JoinHandle driver has no "paused, resumable" state (it recovers to
+//! `Idle` or wedges), and forcing that to share a classification with a
+//! resumable oneshot driver would be a real behavior change to
+//! safety-critical crash/timeout handling, not a mechanical dedup.
 
 use std::future::Future;
 use std::time::Duration;

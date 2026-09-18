@@ -19,8 +19,8 @@
 use crate::EffectDecl;
 
 /// THE single ordered source of the base effect stack (Ask excluded here — it
-/// is interposed separately, by the shared `tidepool_runtime::session::SessionEngine`
-/// for the eval server and by `tidepool-repl`'s own dispatcher). Each row pairs
+/// is interposed separately, by the eval server's own turn driver and by
+/// `tidepool-repl`'s own dispatcher). Each row pairs
 /// the Haskell effect type name with its [`EffectDecl`] builder, in the ONE
 /// canonical order.
 ///
@@ -69,10 +69,9 @@ pub fn with_session_effects(mut handler_decls: Vec<EffectDecl>) -> Vec<EffectDec
 /// `Ask`/`RunLLMTurn` effects. The handler order comes from [`base_effects!`].
 ///
 /// **This is a per-surface roster, not a universal one** (vestigial-subsystems
-/// review §4): it names exactly what the ordinary session engine's request
-/// parser (`tidepool_runtime::session::engine::extract_ask_request`, shared
-/// verbatim by the REPL) actually accepts — `AskWith` and `RunLLMTurnWith`,
-/// nothing else. Arbitrary handler stacks use [`with_session_effects`] too.
+/// review §4): it names exactly what the ordinary eval server's request
+/// parser accepts — `AskWith` and `RunLLMTurnWith`, nothing else. Arbitrary
+/// handler stacks use [`with_session_effects`] too.
 ///
 /// A surface that genuinely services more than this — the harness Agent turn
 /// (`tidepool-harness::engine::agent_decls`) dispatches `ForkWith`/

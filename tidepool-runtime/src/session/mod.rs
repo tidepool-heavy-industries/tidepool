@@ -18,7 +18,6 @@
 
 mod binding_table;
 mod dialect;
-pub mod engine;
 pub mod facade;
 pub mod inspection;
 pub mod kernel;
@@ -59,10 +58,16 @@ pub use registry::{
     Checkout, CheckoutError, CheckoutReceipt, SessionRegistry, SingleSlot, Slot, SlotKind,
 };
 
-pub use engine::{
-    extract_ask_request, AbortOutcome, EngineConfig, GateDispatcher, OutputSink, ResumeOutcome,
-    SessionEngine, StartError, StartTurn, TurnOutcome,
-};
+/// The console-output buffer an effect handler writes into and a turn driver
+/// drains when a turn yields. Abstracted so this crate stays below the server
+/// crate that owns the concrete buffer (`tidepool_mcp::CapturedOutput`). The
+/// buffer is `Clone` (Arc-backed) so the eval thread and the driver share one.
+pub trait OutputSink: Clone + Send + 'static {
+    /// Take all buffered lines, clearing the buffer.
+    fn drain(&self) -> Vec<String>;
+    /// Copy the buffered lines without clearing (a suspension keeps computing).
+    fn snapshot(&self) -> Vec<String>;
+}
 
 pub use facade::{
     ExactExportError, ExactExportSurface, ExactFacadeError, FacadeIdentity, MaterializedFacade,

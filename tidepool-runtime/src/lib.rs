@@ -22,9 +22,7 @@ pub use tidepool_codegen::host_fns::{drain_diagnostics, push_diagnostic};
 use tidepool_codegen::jit_machine::JitEffectMachine;
 pub use tidepool_codegen::jit_machine::{CancelHandle, JitError};
 pub use tidepool_codegen::suspension::ResumeInput;
-use tidepool_codegen::suspension::{ContinuationId, ParkedOutcome, RealmId, SuspensionRun};
 pub use tidepool_effect::dispatch::DispatchEffect;
-use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 pub use tidepool_extract_cmd::{
     with_compiler_transaction, with_compiler_transaction_cancellable,
     CompilerTransactionCancellation,
@@ -39,11 +37,11 @@ pub use tidepool_toolchain::{artifacts, cache, diag, paths, timing, toolchain};
 
 pub mod failclass;
 /// Generated suspension-decode request types (`tidepool-protocol`'s
-/// `runtime_generated_files`) — currently just `Ask`, shared by
-/// [`session::engine::extract_ask_request`] and `tidepool-harness`'s
-/// `RosterRequest::Ask`. `pub` (unlike `tidepool-harness`'s own crate-private
-/// `generated` module) because the harness is a genuine second consumer
-/// across a crate boundary, not an internal implementation detail.
+/// `runtime_generated_files`) — currently just `Ask`, shared with
+/// `tidepool-harness`'s `RosterRequest::Ask`. `pub` (unlike
+/// `tidepool-harness`'s own crate-private `generated` module) because the
+/// harness is a genuine second consumer across a crate boundary, not an
+/// internal implementation detail.
 pub mod generated;
 mod render;
 pub mod session;
@@ -247,139 +245,6 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
     on_ready(machine.cancel_handle());
     let value = machine.run(&table, handlers, user)?;
     Ok(EvalResult::new(value, table, warnings.warnings))
-}
-
-/// The outcome of driving a turn that may SUSPEND at the ask boundary
-/// (threadless suspension). On [`SuspendableRun::Suspended`] the machine's heap
-/// is retained (session machinery) and the whole `JitEffectMachine` — plus the
-/// `DataConTable` — is handed back so the caller can stow it as data (no parked
-/// thread) and resume it later, on any thread, via [`resume_suspended_turn`].
-// The `Suspended` variant carries a whole `JitEffectMachine` by design (that IS
-// the stowed value); this enum is constructed and destructured immediately at
-// the eval-thread boundary, so the size asymmetry is inherent, not a leak.
-#[allow(clippy::large_enum_variant)]
-pub enum SuspendableRun {
-    /// The turn ran to completion.
-    Completed(EvalResult),
-    /// The turn suspended at the ask boundary.
-    Suspended {
-        /// The stowed machine (heap retained; continuation held internally).
-        machine: JitEffectMachine,
-        /// The constructor table this turn compiled against (needed to extract
-        /// the prompt/meta from `request` and to convert the answer on resume).
-        table: DataConTable,
-        /// Registry identity of the parked continuation.
-        continuation: ContinuationId,
-        /// The bridged `Ask` request value.
-        request: tidepool_bridge::Value,
-    },
-}
-
-/// The outcome of resuming a stowed turn (see [`resume_suspended_turn`]).
-// `Completed(EvalResult)` is the large variant; like `SuspendableRun` this is a
-// transient boundary carrier, destructured immediately by the caller.
-#[allow(clippy::large_enum_variant)]
-pub enum ResumedRun {
-    /// The turn ran to completion.
-    Completed(EvalResult),
-    /// The turn suspended again at a further ask boundary. The machine (borrowed
-    /// `&mut` by the resume) holds the new continuation internally, ready for
-    /// another [`resume_suspended_turn`].
-    Suspended {
-        continuation: ContinuationId,
-        request: tidepool_bridge::Value,
-    },
-}
-
-/// Compile `source` and drive it until it completes or reaches a request that
-/// the installed handlers do not recognize. Sibling of
-/// [`compile_and_run_cancellable`] that hands the machine back as data at that
-/// point instead of blocking a thread —
-/// the substrate for threadless session suspension. The machine is compiled
-/// as a SESSION machine so its heap is retained across the suspension (the drive
-/// itself is byte-identical to the one-shot path for a turn that never asks).
-#[allow(clippy::too_many_arguments)]
-pub fn compile_and_run_suspendable<U, H: DispatchEffect<U>>(
-    source: &str,
-    target: &str,
-    include: &[&Path],
-    handlers: &mut H,
-    user: &U,
-    nursery_size: usize,
-    on_ready: impl FnOnce(CancelHandle),
-) -> Result<SuspendableRun, RuntimeError> {
-    let CompileResult {
-        expr,
-        mut table,
-        warnings,
-        ..
-    } = compile_haskell(source, target, include)?;
-    if warnings.has_io {
-        return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
-    }
-    table.populate_siblings_from_expr(&expr);
-    let mut machine = JitEffectMachine::compile_session(&expr, &table, nursery_size)?;
-    let realm = RealmId::ROOT;
-    on_ready(machine.realm_cancel_handle(realm));
-    let run = SuspensionRun::main(&table, EffectRunPolicy::HandleOrSuspend, realm)
-        .with_live_payload(LivePayloadPolicy::HASKELL_EFFECT_VALUE);
-    match machine.run_until_suspension(run, handlers, user)? {
-        ParkedOutcome::CompletedValue(value) => Ok(SuspendableRun::Completed(EvalResult::new(
-            value,
-            table,
-            warnings.warnings,
-        ))),
-        ParkedOutcome::Suspended {
-            id,
-            request,
-            has_live_payload: _,
-        } => Ok(SuspendableRun::Suspended {
-            machine,
-            table,
-            continuation: id,
-            request,
-        }),
-        other => unreachable!("plain one-shot run returned {other:?}"),
-    }
-}
-
-/// Re-enter a stowed turn (from [`compile_and_run_suspendable`]) with the
-/// answer or an abort, driving to the next suspension or completion. Runs on
-/// ANY thread — the machine re-installs its per-thread reach and re-points GC
-/// state at its retained heap (never a nursery reset). `on_ready` receives the
-/// machine's cancel handle before the (blocking) resume begins, exactly as
-/// [`compile_and_run_cancellable`] does, so a runaway resume can be aborted.
-pub fn resume_suspended_turn<U, H: DispatchEffect<U>>(
-    machine: &mut JitEffectMachine,
-    table: &DataConTable,
-    handlers: &mut H,
-    user: &U,
-    continuation: ContinuationId,
-    input: ResumeInput,
-    on_ready: impl FnOnce(CancelHandle),
-) -> Result<ResumedRun, RuntimeError> {
-    on_ready(machine.realm_cancel_handle(RealmId::ROOT));
-    match machine.resume_continuation(continuation, handlers, user, input)? {
-        ParkedOutcome::CompletedValue(value) => {
-            // No recompile happens on resume (the JIT machine is reused as-is),
-            // so there are no new warnings to report here — they were already
-            // surfaced on the turn that produced this continuation.
-            Ok(ResumedRun::Completed(EvalResult::new(
-                value,
-                table.clone(),
-                Vec::new(),
-            )))
-        }
-        ParkedOutcome::Suspended {
-            id,
-            request,
-            has_live_payload: _,
-        } => Ok(ResumedRun::Suspended {
-            continuation: id,
-            request,
-        }),
-        other => unreachable!("plain one-shot resume returned {other:?}"),
-    }
 }
 
 /// Compile Haskell source and run it as a pure (non-effectful) program.

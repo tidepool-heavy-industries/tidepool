@@ -53,7 +53,7 @@ use tidepool_codegen::binding_table::BoundValue;
 use tidepool_repr::execution_schema::{PreparedProgram, SymbolIdentity};
 
 use super::binding_table::{BindRecord, BindingIndex};
-use super::engine::OutputSink;
+use super::OutputSink;
 use super::prepared::{PreparedEngine, PreparedRuntimeError};
 use super::{
     ExactExportError, ExactExportSurface, SessionCompileView, SessionError, SessionLib,

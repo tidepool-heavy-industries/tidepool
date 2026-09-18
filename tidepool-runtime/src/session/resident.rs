@@ -130,7 +130,7 @@ impl ProgramProvenance {
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::PrincipalId;
 
-use super::engine::OutputSink;
+use super::OutputSink;
 use super::persistent::{PersistentSession, ScopeRetirement};
 use super::turn::{BoundBinder, ValueTier};
 use super::{SessionError, SessionLib, SourceImports};
@@ -521,9 +521,9 @@ enum HoleSeed {
 /// permanently excluded from the stowable resident path, by design),
 /// and completion distinguishes value-producing turns from projected binds
 /// whose products were installed directly into the lexical scope.
-// `Completed`'s `EvalResult` is the large variant; like the engine's
-// `SuspendableRun`, this is a transient boundary carrier destructured
-// immediately by the caller, so the size asymmetry is inherent, not a leak.
+// `Completed`'s `EvalResult` is the large variant; this is a transient
+// boundary carrier destructured immediately by the caller, so the size
+// asymmetry is inherent, not a leak.
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum ResidentOutcome {
