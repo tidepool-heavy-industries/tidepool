@@ -33,8 +33,11 @@ nix build .#shoal
 ./result/bin/shoal --help
 ```
 
-There is no public binary cache yet, so the first build compiles everything,
-GHC-side and Rust-side, and takes a good while.
+The flake declares the public `tidepool.cachix.org` binary cache. Follow the
+[cache trust setup](../README.md#the-binary-cache) so Nix can use it. Artifacts
+missing from the cache build locally; rebuilding the patched GHC toolchain
+and its Haskell dependencies can take a long time. Cache availability does
+not imply that every checkout's complete build is already published.
 The wrapper selects the matched extractor and client itself; it does not replace
 `codex` on your `PATH`.
 

@@ -228,15 +228,27 @@ shoal proxy my-session --actors
 That is how we run many of the lab experiments. See the
 [operator interface](docs/SHOAL-OPERATOR-HTTP.md).
 
-## Make a swarm—or something else
+## Branch out. Bring checked results back.
 
-Shoal provides the pieces to build recursive coding swarms:
+Shoal unfolds assignments into agent trees and folds their results back through
+ordinary Haskell composition. A child can subdivide its own work; its parent
+collects typed replies, reviews candidates, and integrates what it accepts.
+Finishing a task is not the same as accepting its result.
+
+Actors form an **Erlang-style supervision tree**: parents supervise children,
+with explicit lifecycle, cancellation, and cleanup operations. This is not a
+promise of automatic restarts. It is a structure in which supervision itself
+can be programmed.
 
 - **Typed assignments and replies.** `unfold` launches child actors and returns
   handles to their results and progress. Children can delegate in turn.
 - **Useful inherited state.** Related agents can inherit conversation context;
   copy-on-write filesystem layers preserve useful source and build artifacts.
   Independent review can use a fresh context.
+- **Cache-conscious branching.** Children can reuse their parent's conversation
+  prefix rather than receiving a reconstructed briefing. Actual provider cache
+  reuse depends on the normalized requests and provider behavior; it is not
+  guaranteed by filesystem isolation.
 - **Programmable coordination.** Small Haskell actors retain state, receive events,
   collect replies, and run handlers without an LLM turn for each transition.
 - **Owned worktrees and checked integration.** Workers edit isolated checkouts;
@@ -244,15 +256,43 @@ Shoal provides the pieces to build recursive coding swarms:
 - **Resource controls.** Commands have memory budgets, cancellation, retained output,
   and input/PTY support. The shared systemd slice bounds the run as a whole.
 
-A fork inherits a snapshot, not future messages. New decisions still need to reach
-workers. Copy-on-write shares unchanged artifacts; new builds and writes still
-cost RAM and disk. Set limits appropriate to your machine.
+**Bubblewrap and copy-on-write snapshots** make these branches practical:
+isolated working environments without eagerly copying every build artifact.
+Resource limits address the **Sorcerer’s Apprentice** problem—you wanted a
+swarm, not a machine so overloaded that you cannot SSH in to stop it. The
+aggregate systemd slice bounds the run; individual commands have their own
+budgets.
+
+A fork inherits a snapshot, not future messages. New decisions and improved
+System 1 programs still need to reach workers explicitly. Copy-on-write shares
+unchanged artifacts; new builds and writes still cost RAM and disk. Set limits
+appropriate to your machine.
 
 The [actor guide](examples/shoal-workspace/.shoal/skills/shoal-define-actors/SKILL.md)
 and [orchestration skill](examples/shoal-workspace/.shoal/skills/shoal-orchestrate/SKILL.md)
 show how to compose these pieces. The supplied workflow is a starting point.
 A single agent with powerful cells, a collection of semantic background actors,
 or an experiment unrelated to coding swarms can use the same substrate.
+
+## Share a programming language, not just a message format
+
+Define a custom sum type in the notebook, send a value to another actor, and
+ask for a typed result back. Pass functions too—not just data that fits in a
+JSON message. Within the resident runtime, actors exchange live Haskell values
+through the shared heap, under explicit scope, lifetime, and ownership rules.
+This is not unrestricted access to every agent's state.
+
+Collaboration becomes ordinary programming: compose functions, pass structured
+work, and let the typechecker check that the pieces fit. A parent can give
+children useful code as well as prose. Shared System 1 programs can evolve
+during the run; existing closures retain their captured definitions, so loading
+new source and adopting the new behavior remain explicit.
+
+**Effects are explicit, by construction.** Authored programs request operations
+through `Eff`; Rust handlers execute them and enforce runtime authority. The
+custom backend does not offer `unsafePerformIO` as a back door to host
+operations. Types describe what a program can request; runtime grants determine
+which concrete resources it may use.
 
 ## Try it
 
@@ -273,15 +313,18 @@ nix build .#shoal
 ./result/bin/shoal --help
 ```
 
-The first build compiles everything, GHC-side and Rust-side, and takes a good
-while: Tidepool patches GHC to emit fat interface files, so the compiler and
-every Haskell dependency are rebuilt from source. Later builds are incremental.
+Without matching cached artifacts, the first build takes a good while:
+Tidepool patches GHC to emit fat interface files, so the compiler and its
+Haskell dependencies must be built for that toolchain. Trusting the binary
+cache below lets Nix substitute published artifacts. Missing artifacts still
+build locally; later builds reuse what is already available.
 The wrapper selects the matched extractor and client without replacing `codex`
 on your normal PATH.
 
 ### The binary cache
 
-`flake.nix` declares a Cachix substituter that serves that toolchain prebuilt.
+`flake.nix` declares a public Cachix substituter for prebuilt artifacts.
+Coverage depends on which revisions have been published.
 Whether you need to do anything depends on how Nix was installed:
 
 ```bash
@@ -362,7 +405,7 @@ includes cell source, tool results and diagnostics in full, so anything a
 command prints ends up there. The directory is ignored by Git. Set
 `SHOAL_TRACE` to a narrower filter, for example `info`, to leave content out.
 
-## What is Tidepool?
+## Underneath: Haskell running inside Rust
 
 Underneath Shoal is **Haskell running inside Rust**. GHC compiles the source,
 Tidepool extracts prepared STG, and Cranelift turns it into executable code driven
@@ -400,31 +443,16 @@ Interfaces will change without notice. Setup is involved, and live use still
 finds workbench papercuts. The most useful examples come from trying real tasks,
 keeping what works, and fixing what gets in the way.
 
-The sharpest edge today is compile latency. A first notebook cell in a fresh
-session takes on the order of a minute, and reloading an edited agent spec about
-half of that, because each statement is compiled and its machine code generated
-from scratch. Everything downstream of a compile is fast: a tool call answers in
-well under a second, an idle after-tool slot adds tens of milliseconds, and Jev
-answers in a few hundred. We are working on the compile path, and the design
-already lets you spend it once rather than every turn.
+Compilation is still a significant cost, especially for fresh notebook cells
+and child startup. It varies with source state and caches. In a recent live
+session, small agent-spec reloads took 6–9 seconds; earlier runs took around
+half a minute. Reusable tools and hooks avoid paying that compilation cost
+on each invocation. We are improving the compile path rather than treating
+these measurements as a performance guarantee.
 
-This is early alpha. Given another week on compiles-per-call and compile speed,
-here is what I expect:
-
-| Operation | Today | Expected |
-| --- | --- | --- |
-| Reload an edited spec | 28–35 s | 1–2 s |
-| Warm cell, six statements | ~62 s | 2–3 s plus the effects themselves |
-| First cell, fresh session, known workspace | 78 s | 3–5 s |
-| First ever session in a new workspace | ~113 s | 20–30 s, once |
-| Child joining a swarm | 7 m 45 s | 10–20 s |
-
-Still, a 60-second compile that saves you a frontier-model round trip is worth
-it today.
-
-We are exploring agents exchanging and improving semantic functions, context-aware
-tool views, and programs that do more work between model turns. These are directions
-for experimentation, not a claimed speedup or a finished autonomous service.
+The system is built for RSI, not a claim that every self-modification improves
+anything. Keep evidence, test changes, and retain the ones that help. We use
+the same loop to develop Tidepool.
 
 Read [AGENTS.md](AGENTS.md) for contributor guidance and [plans/README.md](plans/README.md)
 for active work. The main implementation areas are:
