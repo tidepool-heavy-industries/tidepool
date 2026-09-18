@@ -86,9 +86,15 @@ type IntegrationEffects =
    ]
 
 -- | Capabilities installed for the interactive root incarnation.
+--
+-- @Source@ is the run's own layer, which this incarnation owns. It is also
+-- what a coding child holds for its own checkout, and a parent may only grant
+-- what it holds — so without it here a root could not start a coding child at
+-- all, even though the runtime has always granted it the run's layer.
 type ActorEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentLaunch, AgentInspection, AgentControl
    , BoundWorktree, WorktreeRegistry, WorktreeAllocation
    , WorktreeIntegration, Notifications, Jev, Commands, Actor, Reflect
+   , Source
    ]
