@@ -26,7 +26,7 @@ and discretion to recurse. Only designated initial leads owe the planner an
 execution proposal. Descendant owners start their assigned work within that agreement; they do not repeat the
 planning checkpoint. Escalate changed consequential assumptions.
 
-Use solTask/componentLead defaults for related implementation: inherited context
+Use the solTask defaults for related implementation: inherited context
 and boundHead. Original-root source uses the corresponding From helper with
 projectHead. Fresh selected context suits unrelated mechanisms and independent
 reviews; reviewCandidate also selects its exact committed candidate. Fork before

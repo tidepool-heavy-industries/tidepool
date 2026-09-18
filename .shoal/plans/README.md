@@ -57,12 +57,33 @@ without repeating this initial interview or inventing more approval stages.
 - [launch.md](launch.md): operator-only launch and package validation.
 - [language.md](language.md): compact shared distinctions; add project vocabulary
   where it helps collaborators make the same consequential choices.
-- [graph/README.md](graph/README.md): a worked graph-view feature allocation using
-  Project.Plan. It is an example, not the default goal or next-run instruction.
+- [../examples/README.md](../examples/README.md): eight worked Jev cells with the
+  real fixtures they read. Reference to copy from, not modules to import.
 
-Project.Types, Project.Work and Project.Observe support ordinary project Tasks.
-Project.Plan includes the checked graph allocation and a reusable componentLead;
-its example constructors do not restrict which project can use the workbench.
+## What is installed
+
+Eleven modules are compiled into every session here. `doc topics` lists them and
+`lookup` on a name browses its declarations, which is authoritative over this
+paragraph.
+
+`Project.Types` is the shared vocabulary — tasks, candidates, decisions,
+questions. `Project.Work` builds the implement/review/repair/incorporate
+requests; `Project.Routing` and `Project.Actors` carry the collection patterns;
+`Project.Observe` reports on work in flight without consuming it.
+
+`Project.Reflex` classifies compiler, lint and test output from a
+precedence-ordered table, with no model turn. `Project.Evidence` types what a
+check actually established, keeping what a child reported separate from what was
+run here. `Project.Contract` carries a task agreement. `Project.Investigate`
+reads a failed build. `Project.Merge` holds an integration worktree and checks a
+merged head before publishing, rolling a red one back; the command it runs is
+`projectCheck`, named once in that module. `Project.Review` runs the loop around
+them.
+
+There is no `Project.Plan`: it generated assignments for one graph-UI feature and
+was retired rather than carried forward as if it were a general tool. The
+`graph/` campaign tree below it remains as a record of that work.
+
 Use the actual task/result contracts and callable signatures. Importing a module
 or binding a composition starts no worker.
 

@@ -88,8 +88,8 @@ distinct. These bindings prepare branches and launch nothing:
 ```haskell
 let Right wave = forkGroupLabel "wave-2"
 let group = subgroup wave
-let Right leftLabel = branchLabel "generator"
-let Right rightLabel = branchLabel "consumer"
+let Right leftLabel = labelFromText "generator"
+let Right rightLabel = labelFromText "consumer"
 let left = leftTask { taskGroup = group, taskSource = source }
 let right = rightTask { taskGroup = group, taskSource = source }
 let leftBranch = solTask leftLabel left :: Branch CodingEffects Task (Outcome Candidate)
@@ -99,7 +99,7 @@ let rightBranch = solTask rightLabel right :: Branch CodingEffects Task (Outcome
 When their prerequisites and any release condition are met, admit them together:
 
 ```haskell
-work <- unfold group ((,) <$> childWithProgress @Attention @(Outcome Candidate) leftBranch <*> childWithProgress @Attention @(Outcome Candidate) rightBranch)
+work <- unfold group ((,) <$> childWithProgress @WorkProgress @(Outcome Candidate) leftBranch <*> childWithProgress @WorkProgress @(Outcome Candidate) rightBranch)
 let ((leftWork, leftQuestions), (rightWork, rightQuestions)) = work
 ```
 
@@ -116,9 +116,9 @@ completes when the tool block returns; do not await its new child in that same b
 
 `inherited` chooses the caller's current completed context boundary. Use it when
 shared investigation and accepted decisions are valuable to the child, and fork
-before unrelated debugging accumulates. Default solTask/componentLead uses
-inherited context and boundHead, as does implement. Original-root callers use
-solTaskFrom/componentLeadFrom with projectHead. Select a fresh taskContext
+before unrelated debugging accumulates. Default solTask uses inherited
+context and boundHead, as does implement. Original-root callers use solTaskFrom
+with projectHead. Select a fresh taskContext
 explicitly for unrelated work; select withEffort Medium for substantial engineering
 when the default Low would underspecify the assignment. Use an explicit atRef
 source for exact committed inspection. Model selection is independent. Descendants

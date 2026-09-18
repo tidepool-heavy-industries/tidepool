@@ -17,7 +17,7 @@ exact app commit. These expressions run in the Sol root's resident environment:
 ```haskell
 let Right campaign = campaignLabel "graph-relations"
 let Right leads = forkGroupLabel "leads"
-let Right contractLabel = branchLabel "contract"
+let Right contractLabel = labelFromText "contract"
 let Right contractTask = component campaign RelationContract baseline
 before <- snapshot
 contractWork <- unfold (batch campaign leads) (childWithProgress @Attention @Delivery (withLifetime SwarmOwned (withContext (selected taskContext) (componentLeadFrom contractLabel projectHead contractTask))))
@@ -78,8 +78,8 @@ let Right controlsBase = component campaign RelationControls acceptedContract
 let projectionTask = withDecision contractDecision projectionBase
 let controlsTask = withDecision contractDecision controlsBase
 let Right products = forkGroupLabel "product"
-let Right projectionLabel = branchLabel "projection"
-let Right controlsLabel = branchLabel "controls"
+let Right projectionLabel = labelFromText "projection"
+let Right controlsLabel = labelFromText "controls"
 (projectionWork, controlsWork) <- unfold (batch campaign products) ((,) <$> childWithProgress @Attention @Delivery (componentLeadFrom projectionLabel projectHead projectionTask) <*> childWithProgress @Attention @Delivery (componentLeadFrom controlsLabel projectHead controlsTask))
 ```
 
@@ -107,7 +107,7 @@ request and evidence to precise friction/artifact references, all as Text/[Text]
 ```haskell
 let packet = RsiInput source question [projectionEvidence, controlsEvidence] before later evidence
 let Right improvements = forkGroupLabel "requested-improvement"
-let Right improvementLabel = branchLabel "workspace-style"
+let Right improvementLabel = labelFromText "workspace-style"
 improvement <- unfold (batch campaign improvements) (child (withLifetime SwarmOwned (rsiBranch improvementLabel (atRef (GitRef source)) packet)))
 let Right improvementReadyLabel = watchLabel "improvement-ready"
 improvementReady <- watch improvementReadyLabel (awaitSettledFork improvement)

@@ -12,10 +12,9 @@ a new swarm or validating a package change.
 
 ## Context and source defaults
 
-`solTask` and `componentLead` inherit the current completed reasoning and use
-`boundHead`. `implement` uses `solTask`. They suit recursive implementation from
-an allocated checkout. Original-root callers use `solTaskFrom label projectHead`
-or `componentLeadFrom label projectHead`. A Task's source hash records provenance;
+`solTask` inherits the current completed reasoning and uses `boundHead`.
+`implement` uses `solTask`. It suits recursive implementation from an allocated
+checkout. Original-root callers use `solTaskFrom label projectHead`. A Task's source hash records provenance;
 it does not override that live checkout selection. Commit coherent work for Git
 integration and restart recovery, even though ordinary unfold inherits working files.
 
@@ -36,10 +35,10 @@ decisions are lists. Do not put an explanatory sentence in `source`.
 ```haskell
 let Right campaign = campaignLabel "current-goal"
 let Right owners = forkGroupLabel "owners"
-let Right label = branchLabel "component-a"
+let Right label = labelFromText "component-a"
 let group = batch campaign owners
 let task = Task group plan source outcome why paths criterion decisions
-work <- unfold group (childWithProgress @Attention @Delivery (withContext (selected taskContext) (componentLeadFrom label projectHead task)))
+work <- unfold group (childWithProgress @WorkProgress @Delivery (withContext (selected taskContext) (solTaskFrom label projectHead task)))
 let (lead, questions) = work
 let Right resultLabel = watchLabel "component-ready"
 resultReady <- watch resultLabel (awaitSettledFork lead)
@@ -94,8 +93,8 @@ Blocked is an honest terminal product result when the obligation cannot continue
 
 Open broad independent implementation frontiers when a usable scaffold makes
 them productive, repeating the pattern inside substantial children. `implement
-part` returns `(Forked (Outcome Candidate), Progress Attention)`. Watch both. After
-that worker returns, reviewCandidate part (RetainedImplementer (forkedActor worker))
+part` returns `(Response (Outcome Candidate), Progress WorkProgress)`. Watch both.
+After that worker returns, reviewCandidate part (RetainedImplementer (responseActor worker))
 latest lets the reviewer request repairs directly. The worker is then available;
 queuing repairs behind a lead's pending delivery would deadlock it.
 
