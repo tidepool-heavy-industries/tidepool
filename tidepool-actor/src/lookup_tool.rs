@@ -12,22 +12,18 @@ pub(crate) const LOOKUP_TOOL: &str = "lookup";
 
 const LOOKUP_DESCRIPTION: &str = "Look up names, Haskell types, or Shoal documentation. \
 Batch example: {\"queries\":[\"awaitSettled\",\":: Int -> Int\",\"doc workbench\"]}. \
-Prefix a type query with `::`; use `doc` for topics or `doc <topic>` for a topic. \
-Type search is Hoogle-like and needs a complete type: use `_` to wildcard an \
-unknown part and qualify types as they are imported, e.g. \
-`:: Cmd.Command -> _` finds functions from `Cmd.Command` to anything. \
-A dotted capitalized query, e.g. `Cmd.RunResult` or `Project.Investigate`, is \
-resolved first as a qualified name and, only when no such name is in scope, \
-browsed as a module's exports; see `doc topics` for the workspace's own modules. \
-A qualified value or field that misses instead, e.g. `Cmd.exitCode`, suggests \
-close exports under that qualifier. \
-Callable results show current-row availability: `polymorphic` fits your row and \
-its remaining constraint is decided by the call site, so it is usable; `unknown` \
-needs more type information; a found callable may point to a worked example. \
-Resource grants are checked when an operation executes. \
-A bare string is also accepted as one query. \
-Each query reports independently in deterministic text, so one bad query does \
-not hide other results.";
+Prefix a type query with `::`; use `doc` for topics or `doc <topic>` for one. \
+Type search is Hoogle-like and needs a complete type: `_` wildcards an unknown \
+part, and types are qualified as imported, e.g. `:: Cmd.Command -> _`. \
+A dotted capitalized query, e.g. `Cmd.RunResult` or `Project.Investigate`, is a \
+qualified name first and otherwise a module's exports; `doc topics` lists the \
+workspace's modules. A qualified value that misses, e.g. `Cmd.exitCode`, \
+suggests close exports under that qualifier. \
+Callable results show availability in your row: `polymorphic` is usable, its \
+constraint decided at the call site; `unknown` needs more type information. A \
+found callable may name a worked example. Grants are checked when an operation \
+executes. A bare string is one query. Each query reports independently, so one \
+bad query does not hide the others.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -21,22 +21,26 @@ fi
 scripts/shoal-init.sh --session "$session" --model gpt-5.6-sol --effort medium --no-attach "$@"
 
 echo "==> waiting for the root agent's window"
+# The root's window is named for its actor, `shoal-root [<id>@<incarnation>]`.
+root_window() {
+  tmux list-windows -t "$session" -F '#{window_index} #{window_name}' 2>/dev/null |
+    awk '$2 == "shoal-root" { print $1; exit }'
+}
 for _ in $(seq 1 120); do
-  if tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null | grep -qx Root; then
-    break
-  fi
+  [[ -n "$(root_window)" ]] && break
   sleep 2
 done
-if ! tmux list-windows -t "$session" -F '#{window_name}' | grep -qx Root; then
-  echo "the Root window never appeared in tmux session $session; the brief was not sent" >&2
+window=$(root_window)
+if [[ -z "$window" ]]; then
+  echo "the root agent's window never appeared in tmux session $session; the brief was not sent" >&2
   exit 1
 fi
 # The client needs a moment after its window exists before it reads input.
 sleep 10
 
 tmux load-buffer -b shoal-smoke-brief "$brief"
-tmux paste-buffer -p -d -b shoal-smoke-brief -t "$session:Root"
+tmux paste-buffer -p -d -b shoal-smoke-brief -t "$session:$window"
 sleep 1
-tmux send-keys -t "$session:Root" Enter
+tmux send-keys -t "$session:$window" Enter
 
 echo "==> brief sent. Attach with: tmux attach -t $session"

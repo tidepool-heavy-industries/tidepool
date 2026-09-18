@@ -600,8 +600,19 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         "--interactive-agent-version".into(),
         interactive_agent.version().to_owned(),
     ];
+    // Replacing a session resumes its root conversation. A session whose first
+    // launch never got as far as a conversation has no binding at all: there is
+    // nothing to resume and nothing to lose, so it starts fresh. A binding that
+    // exists and cannot be read is a different case, and the host fails closed
+    // on it rather than quietly abandoning a conversation.
     if options.recreate {
-        args.push("--resume-root".into());
+        if root_binding_path.exists() {
+            args.push("--resume-root".into());
+        } else {
+            println!(
+                "no earlier root conversation in session {session_name:?}; starting a new one"
+            );
+        }
     }
     args.extend(["--model".into(), agent.model.clone()]);
     args.extend(["--effort".into(), agent.effort.to_string()]);

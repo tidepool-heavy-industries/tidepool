@@ -53,6 +53,27 @@ pub(crate) fn parse(
 mod tests {
     use super::*;
 
+    /// The provider refuses a tool whose description is longer than this, and
+    /// the host then refuses to start. Every tool an actor declares for itself
+    /// is checked here, because no hosted test crosses the provider boundary.
+    const PROVIDER_DESCRIPTION_LIMIT: usize = 1024;
+
+    #[test]
+    fn every_actor_local_tool_fits_the_providers_description_limit() {
+        for tool in [
+            declaration(),
+            crate::lookup_tool::declaration(),
+            crate::status_tool::declaration(),
+        ] {
+            let length = tool.description().chars().count();
+            assert!(
+                length <= PROVIDER_DESCRIPTION_LIMIT,
+                "`{}` describes itself in {length} characters; the limit is {PROVIDER_DESCRIPTION_LIMIT}",
+                tool.name()
+            );
+        }
+    }
+
     #[test]
     fn declaration_advertises_an_object_with_one_optional_widening_list() {
         let HostedTool::Function(tool) = declaration() else {

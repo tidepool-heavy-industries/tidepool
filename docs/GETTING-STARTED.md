@@ -107,8 +107,8 @@ stop:    tmux kill-session -t shoal-<project>
 ```
 
 The session has a `Host` window running the actor host, a `Compiler` window
-running the Haskell compile service, and a `Root` window with the root agent's
-client. Give the root a task there. Each child agent gets a window of its own
+running the Haskell compile service, and a `shoal-root` window with the root
+agent's client. Give the root a task there. Each child agent gets a window of its own
 when it starts.
 
 | Option | Effect |
