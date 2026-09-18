@@ -20,9 +20,9 @@ Four motives, in the order they carry weight:
 1. **System 1.** Routine semantic judgments are answered by Jev inside tools and
    slots, so the frontier model is interrupted only for the unresolved case.
 2. **After-tool helpers.** A slot runs when a tool finishes and attaches useful
-   evidence to that result, selected against the agent's recent turns. This is
-   `evidence-pruning-pattern.md` made standing, rather than a cell the model must
-   remember to write.
+   evidence to that result, selected against the agent's recent turns. This
+   makes the after-tool evidence-pruning pattern standing, rather than a cell
+   the model must remember to write.
 3. **More slots follow.** After-tool is the first. Because
    slots fire often, they are precompiled.
 4. **A kit that compounds.** The module is workspace source, so the next session
@@ -123,7 +123,7 @@ Two obligations follow from discovery being implicit:
   falling through to the default.
 - **The discovered module joins the checked closure.** The reload's typecheck
   covers everything reachable from the configured module list plus the driver
-  (`plans/jev-lab/source-reload-design.md`). A spec found by convention is not in
+  (`tidepool/src/shoal/source.rs`). A spec found by convention is not in
   that list, so the reload adds it, and a spec that fails to compile fails its
   own reload instead of surfacing later at an unrelated call.
 

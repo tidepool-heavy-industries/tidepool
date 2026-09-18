@@ -6387,8 +6387,7 @@ mod tests {
     // consulted correctly for a SECOND installed program's own live
     // native frames: a mutation truncating the chain to only the
     // first-installed program's registry passes every existing test
-    // (confirmed empirically; recorded in `plans/stg-wave6.md`'s S2b
-    // entry). `s2b_second_program_native_frame` below closes that gap: a
+    // (confirmed empirically). `s2b_second_program_native_frame` below closes that gap: a
     // cons-list built entirely by nested `Let`s within ONE native call,
     // where each cell is a bare Cranelift-tracked local (never wrapped in
     // an explicit root) that must stay live and correctly relocatable

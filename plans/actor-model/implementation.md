@@ -1,15 +1,17 @@
 # Actor implementation status
 
 This file is the current landed-versus-pending inventory. The active request
-and activation contract is specified in
-[persistent applications, typed replies, and watches](persistent-applications-replies-and-watches.md).
-Older `Complete`/`AgentAction` sections in the adjacent long-form plans are a
-superseded design record, not the executable surface.
+and activation contract now lives in `tidepool-actor/src/request.rs` and its
+crate charter (`tidepool-actor/CLAUDE.md`); the design record that specified
+it landed and is git history. Older `Complete`/`AgentAction` sections in the
+adjacent long-form plans are a superseded design record, not the executable
+surface.
 
-The accepted next surface and its staged implementation are specified by
-[cache-preserving context unfold](cache-preserving-context-unfold.md). That
-plan supersedes older interactive `forkActors` sketches while preserving the
-landed reply/watch contract described here.
+The accepted next surface, cache-preserving context unfold, is implemented;
+its stable user contract is documented in
+[SHOAL.md](../../SHOAL.md#cache-preserving-context-unfold). It supersedes
+older interactive `forkActors` sketches while preserving the landed
+reply/watch contract described here.
 
 Backward compatibility is not a constraint for internal actor APIs. Preserve
 serialized and externally consumed formats only through an explicit migration
@@ -111,11 +113,9 @@ decision.
   applicative batch.
 - Implement atomic `Unfold`, distinct leaf-coding and recursive-scaffolding
   roles, shared descendant budgets, prompt-role projection, and provider cache
-  observability in the gate order owned by the context-unfold plan. Its
-  [worked three-batch interaction](cache-preserving-context-unfold.md#worked-interaction-a-recursive-three-batch-campaign)
-  fixes the target UX; its
-  [linear implementation handoff](cache-preserving-context-unfold.md#linear-implementation-handoff)
-  is the execution checklist for the next sustained implementation session.
+  observability in the gate order the context-unfold plan specified and which
+  landed; see [SHOAL.md](../../SHOAL.md#cache-preserving-context-unfold) for
+  the shipped UX and contract.
 
 ### Supervisor policy
 

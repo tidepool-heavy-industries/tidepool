@@ -4,15 +4,10 @@ Status: active and incremental. The canonical landed-versus-pending inventory
 and next delivery stage are in
 [the implementation status](implementation.md#landed-architecture).
 
-The root document for the next major feature is
-[cache-preserving context unfold](cache-preserving-context-unfold.md). It owns
-the accepted LLM interaction, recursive worked campaign, architecture
-boundaries, linear implementation handoff, and persistent implementation checklist.
-The next core use case and prompt delivery direction is
-[recursive context collaboration](recursive-context-collaboration.md), building
-on the [recursive scaffold campaign](recursive-scaffold-campaign.md). It applies
-the unfold substrate to recursive implementation and direct typed review/repair;
-it does not introduce a competing actor architecture.
+The context-unfold interaction, recursive worked campaigns, and recursive
+collaboration described by earlier plans in this directory landed; their
+stable user contracts now live in [SHOAL.md](../../SHOAL.md) and the shipped
+`Tidepool.Actors.Unfold`/`Tidepool.QQ.Bash` surface, not in planning documents.
 
 ## Thesis
 
@@ -97,8 +92,8 @@ above that substrate; it does not maintain a second actor scheduler.
   context unfold clones the exact provider prefix through one hosted Haskell
   call, shares an immutable Haskell environment snapshot, narrows the child
   effect list and runtime authority, and returns persistent typed actor
-  handles. The accepted contract is
-  [cache-preserving context unfold](cache-preserving-context-unfold.md).
+  handles. The landed contract is documented in
+  [SHOAL.md](../../SHOAL.md#cache-preserving-context-unfold).
 - Fork groups and workers form one readable hierarchical path projected into
   actor labels, `shoal/<path>` Git branches, status, and receipts. Opaque actor
   and worktree IDs remain exact authority/correlation keys, not the primary
@@ -148,35 +143,14 @@ fixture generation, and executable acceptance within typed orchestration.
 2. [Live values and authority](live-values-and-authority.md) defines same-
    machine value transfer, caller identity, launch grants, and the
    distinction between invoking a closure and calling an actor.
-3. [Haskell interaction surface](haskell-surface.md) records typed API
-   consequences and older alternatives; the current Shoal vocabulary is in
-   the reply/watch plan and field guide.
-4. [Implementation plan](implementation.md) owns current status, delivery
+3. [Implementation plan](implementation.md) owns current status, delivery
    order, acceptance criteria, and retirement work.
-5. [Shoal workbench correctness plan](shoal-workbench-correctness-wave.md)
-   records the superseded completion-era migration baseline and the still-live
-   GHCi/workbench findings.
-6. [Persistent applications, typed replies, and watches](persistent-applications-replies-and-watches.md)
-   supersedes that plan's root-completion and interactive `AgentAction`
-   direction after live Shoal Console use, and owns the current
-   request/activation contract.
-7. [Cache-preserving context unfold](cache-preserving-context-unfold.md)
-   specifies the accepted next interaction surface: an applicative fork plan,
-   narrowed child roles, persistent handles, authoritative per-response
-   worktree evidence, and a later typed fold through `Await` and `Watch`.
-8. [Live context-unfold dogfood follow-ups](live-context-unfold-dogfood-followups.md)
-   is the active, lower-effort-ready implementation handoff derived from the
-   first recursive production-like campaign. Agent efficacy is its north star:
-   local failure, typed folds, dimensional deadlines, structured campaign
-   views, stable build leases, honest non-serializing recovery, and a
-   first-person permanent-root acceptance test.
-9. [Recursive context collaboration](recursive-context-collaboration.md) owns
-   the next core use case, complete interface/test/implementation/consumer
-   scenario, direct peer repair, resident acceptance ideas, and prompt delivery.
-   The [recursive scaffold campaign](recursive-scaffold-campaign.md) defines
-   the obligation and integration contract used by that scenario.
-   Its [preparation handoff](recursive-context-collaboration-handoff.md) is the
-   starting point for finishing prompt/interface changes before `shoal-repl`.
+
+The request/activation contract, cache-preserving context unfold, and
+recursive collaboration/scaffold designs once tracked here all landed; their
+architecture and verification record are in git history, and their stable
+user contracts live in [SHOAL.md](../../SHOAL.md), `tidepool-actor/CLAUDE.md`,
+and the shipped Haskell surface.
 
 ## Vocabulary
 

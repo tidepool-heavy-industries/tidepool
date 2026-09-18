@@ -886,7 +886,9 @@ fn manifest_of_roots(roots: &[PathBuf]) -> Vec<(String, String)> {
 /// wins — exactly the shadowing GHC applies across the same include roots in
 /// the same order.
 fn revision_modules(directory: &Path, roots: usize) -> Vec<(String, String)> {
-    let root_paths: Vec<PathBuf> = (0..roots).map(|index| directory.join(index.to_string())).collect();
+    let root_paths: Vec<PathBuf> = (0..roots)
+        .map(|index| directory.join(index.to_string()))
+        .collect();
     manifest_of_roots(&root_paths)
 }
 

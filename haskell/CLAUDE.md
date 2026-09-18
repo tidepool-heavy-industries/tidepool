@@ -144,6 +144,28 @@ returned JSON value against the schema.
    extractor compile for a one-line assertion.
 5. Rebuild the extractor if the module is part of the deployed library.
 
+## Recorded design rationale
+
+- **Read-only child vs. fork child** (`haskell/actors/Tidepool/Actors/Unfold.hs`,
+  `errand`). A read-only question should use `errand`/`startAgent
+  (readonlyAgent ...)`, not `unfold`/`child`: the fork path only starts after
+  the enclosing cell returns and pays a worktree checkout, while `errand`
+  starts at the effect boundary in the same cell with no fork group and no
+  `git worktree add`.
+- **Diagnostic structure loss** (`haskell/src/Tidepool/DiagJson.hs`,
+  `haskell/src/Tidepool/Introspection.hs`). GHC's `diagnosticCode` (the
+  `[GHC-NNNNN]` code) is never extracted as a field by `envelopeToDiag`; it
+  reaches Rust only if GHC's own rendering happens to embed it in the message
+  text. `InspectionRejected String` discards span and severity even earlier,
+  before any wire encoding, unlike the cell-compile path's `Diag` JSON report.
+- **Why `matchQuality` splits the sigma type first** (`Introspection.hs`,
+  `matchQuality`/`matchesEitherDirection`). Full-sigma `tcMatchTy`/`tcUnifyTy`
+  only succeeds on alpha-equivalent polymorphic types and is useless for "is
+  this candidate compatible" search, so matching splits off the type body
+  (`tcSplitSigmaTy`) and matches bodies symmetrically; predicates gate to
+  full-type equality whenever either side has constraints, because body-only
+  matching would silently erase predicate evidence.
+
 ## Current limits
 
 - Topological recovery can only recover bindings whose dependencies are

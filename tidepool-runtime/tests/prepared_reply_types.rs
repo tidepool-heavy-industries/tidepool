@@ -4,8 +4,7 @@
 //! `PreparedEngine::lower_answer` (`tidepool-runtime/src/session/prepared.rs`)
 //! refuses `TypeNode::Unconstructible` anywhere in a suspended effect's answer
 //! path, except inside the `Tidepool.Aeson.Value.Value` family (lowered whole
-//! through the decode root -- see decision 4 in
-//! `plans/handoff/designs/synthetic-sites.md`). A refusal on a verb whose
+//! through the decode root). A refusal on a verb whose
 //! reply the host cannot build means a suspended frame on that verb parks
 //! forever: it can never resume. This test finds every such verb up front by
 //! compiling ONE turn module that mentions every effect verb of a generated
@@ -34,7 +33,7 @@
 //! - A bare, unapplied reference (`let _ = verb` or `let _ = (verb :: its
 //!   own declared type)`) registers NO site at all. The synthetic-site
 //!   projector interns a request GADT constructor from its actual `Con`
-//!   occurrence in Core (`synthetic-sites.md` decision 1); a verb like
+//!   occurrence in Core (by design); a verb like
 //!   `readFile = send . FsRead` only produces that occurrence once INLINED
 //!   at an application site, so every verb is actually applied here.
 //! - A dead-branch guard (`if False then do {...} else pure ()`) ALSO
@@ -297,8 +296,8 @@ fn parse_verb(name: &str, ty: &str) -> Option<Verb> {
 ///
 /// `finalize`/`finalizeSited` (`Finalize`, `type_params ["v"]`): its answer
 /// index is the request GADT's own last argument `a` in `FinalizeWith :: Int
-/// -> v -> Finalize v a`, which `synthetic-sites.md` decision 1 explicitly
-/// documents as "skipped as open" -- no site is EVER minted for it, so
+/// -> v -> Finalize v a`, which is skipped as open by design -- no site is
+/// EVER minted for it, so
 /// calling it (which would also need `v` pinned to the row's `Finalize Void`
 /// default via a `@Void` application before `a` could be pinned by a second
 /// one -- `v` precedes `a` in its `forall`) buys this audit nothing.
@@ -306,7 +305,7 @@ const SKIPPED_VERBS: &[(&str, &str)] = &[
     (
         "finalize",
         "Finalize's reply index (`a` in `Finalize v a`) is open, not closed -- \
-         synthetic-sites.md decision 1 skips it; no site is ever minted",
+         skipped as open by design; no site is ever minted",
     ),
     (
         "finalizeSited",
@@ -458,7 +457,7 @@ fn audit(surface_name: &str, decls: &[EffectDecl]) -> BTreeSet<String> {
     // directly -- confirmed by `execution_schema/validation.rs`'s own
     // `constructor()` lookup).
     //
-    // `verb_sites` decision 1 (`synthetic-sites.md`) deliberately casts a
+    // `verb_sites` deliberately casts a
     // WIDE net -- "an extra row for a non-effect GADT costs one type-graph
     // node ... breadth is the safer error" -- and in practice does pick up
     // at least one non-effect constructor from this turn's own machinery
@@ -482,7 +481,7 @@ fn audit(surface_name: &str, decls: &[EffectDecl]) -> BTreeSet<String> {
         eprintln!(
             "[{surface_name}] note: ignored {} verb_sites entry(ies) outside \
              `{EFFECTS_MODULE}` (the projector's deliberately broad net, \
-             `synthetic-sites.md` decision 1, picking up incidental non-effect \
+             picking up incidental non-effect \
              constructors this turn's own machinery touches): {ignored_noise:?}",
             ignored_noise.len()
         );

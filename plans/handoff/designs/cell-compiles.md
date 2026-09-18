@@ -230,7 +230,7 @@ fails loudly.
 
 ## 8. Engine-neutral design (notebook slice)
 
-The notebook slice is plan step 2 in `plans/stg-completion.md`; step 5 is the
+The notebook slice is step 2 of the STG completion sequence; step 5 is the
 Core deletion that must not inherit this work as debt.
 
 - Do **not** implement the render as hand-built Core (for example Rust

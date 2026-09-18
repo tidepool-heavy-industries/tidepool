@@ -4,8 +4,8 @@
 //! which unsupported constructs are most reached for, by how much, and
 //! whether first-try-compile rate is trending up or down run over run.
 //!
-//! See `tidepool::compile_report` for the fold itself and
-//! `plans/flight-dogfood-campaign.md`'s cadence section for when to run this.
+//! See `tidepool::compile_report` for the fold itself, and its module doc for
+//! when to run this and how to read a bucket.
 //!
 //! ```text
 //! tidepool-compile-report <path-or-glob>...

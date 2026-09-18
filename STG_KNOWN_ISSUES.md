@@ -95,7 +95,7 @@ cost. Compare only like with like.
 ### Ordinary effects
 Only the verbs in `EffectSchema.sitedVerbs` carry a dynamic site; ordinary
 effects (`say`, file, KV, HTTP, form `ask`) get synthetic sites keyed by the
-request constructor. Design: `plans/handoff/designs/synthetic-sites.md`.
+request constructor.
 
 ### `Value`-carrying replies go through a leaf adapter
 `kvGet`, `httpGet`/`httpPost` and form `ask` reply with Aeson `Value`, whose
@@ -103,9 +103,14 @@ request constructor. Design: `plans/handoff/designs/synthetic-sites.md`.
 A `Value`-typed answer node is instead lowered whole as rendered JSON text
 and decoded through the turn's admitted `__decodeValue` root
 (`Tidepool.Aeson.Value.eitherDecodeValue`), spliced into the outer answer as
-a borrowed handle (design: `synthetic-sites.md`, decision 4 — taken). A
-decode failure (`Left`) is a typed `AnswerRejected` refusal with the frame
-left parked; nothing else host-side builds a `KeyMap` directly.
+a borrowed handle. Teaching
+the host answer builder Aeson's `KeyMap`/`Vector`/`Map` representations
+directly was considered and rejected: it would have permanently committed the
+host builder to knowing one library's internal representation, which is what
+`TypePolicy.isForbidden` exists to prevent — the leaf adapter keeps that
+builder's type vocabulary closed instead. A decode failure (`Left`) is a typed
+`AnswerRejected` refusal with the frame left parked; nothing else host-side
+builds a `KeyMap` directly.
 `Tidepool.Aeson.Scientific.Scientific` (`Value`'s `Number` field) is
 force-refused by `TypePolicy.isForbidden` rather than classified: its
 strict-field source-vs-runtime layout is not stable across independently

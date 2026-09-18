@@ -3007,7 +3007,7 @@ mod tests {
     }
 
     // --- Actor exit contract (Q1-B, Q2-B, single publication owner, one
-    // shutdown deadline): plans/handoff/designs/actor-exit-contract.md ---
+    // shutdown deadline) ---
 
     /// A behavior whose `pause_failed_handler` always retains the failed
     /// input, mirroring the resident actor's real pausing behavior.

@@ -1,6 +1,8 @@
 # Synthetic Shoal judgments
 
-These fixtures test the six applications in [the examples](../plans/jev-shoal-examples.md).
+These fixtures test the six applications from the Jev-in-Shoal example set
+(uncompiled mockups in the abandoned DSL; superseded by the measurements in
+this directory, which is why they are recorded here rather than linked).
 They are API calls, not a running Haskell effect, actor, or graph traversal.
 All state and source excerpts are synthetic. No selected action is executed.
 Each case runs once, with no automatic retries. Expectations below were recorded

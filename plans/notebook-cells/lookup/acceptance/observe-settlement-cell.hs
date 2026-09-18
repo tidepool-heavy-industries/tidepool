@@ -1,2 +1,0 @@
-settlement <- pollWatch settlementReady
-settlement

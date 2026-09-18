@@ -32,9 +32,10 @@ capture path and source fingerprint. `summary.json` retains selected path and
 synthetic observations. Partial attempts retain step evidence even if interrupted;
 an empty/incomplete summary is not a completed run. Files are created mode 0600.
 
-This implements the mockups in [the plan](../plans/jev-notebook-microprograms.md)
-as Rust research state machines, not as an implemented Haskell DSL or actual
-notebook execution. Helpers, budgets and transitions are explicitly authored.
+This implements the notebook microprogram mockups (an uncompiled sketch, now
+git history) as Rust research state machines, not as an implemented Haskell
+DSL or actual notebook execution. Helpers, budgets and transitions are
+explicitly authored.
 
 ## Results — 2026-09-16
 

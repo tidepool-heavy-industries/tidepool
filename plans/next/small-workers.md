@@ -47,5 +47,4 @@ Retain exact checked source and remaining limits. Broader write access is a
 separate product change, not a prerequisite for this example.
 
 The [small-agent reference](../small-agents.md) supplies the broader interface
-requirements; [workspace customization](workspace-pilot.md) owns configuration
-and context packaging.
+requirements.

@@ -65,8 +65,9 @@ use crate::JitError;
 /// at construction and never switched: a session on the prepared route never
 /// falls back to Core after a turn starts or fails.
 ///
-/// This selector is the cutover's temporary explicit migration route
-/// (`plans/stg-completion.md`, step 2); step 5 deletes it with the Core engine.
+/// This selector is the cutover's temporary explicit migration route; see
+/// `plans/core-removal-order.md` for the current removal-order survey. It is
+/// deleted along with the Core engine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EngineKind {
     /// The Core JIT machine every session ran on before the cutover.

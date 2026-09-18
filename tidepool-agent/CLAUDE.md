@@ -172,6 +172,18 @@ credential refresh of `auth.json`, which is a property of running `codex` at
 all and which `ConfigSnapshot` already fails loudly on, at one instance or at
 eight.
 
+## Debugging: prompt-cache routing needs one identity, everywhere
+
+The provider's cache/session routing silently misses unless the same routing
+identity is applied consistently to every transport location that carries
+it — for Codex, both the WebSocket `session-id` header and the top-level
+request `client_metadata.session_id`. Setting `prompt_cache_key` alone is not
+sufficient; it produces independent cache keys with no error, so a routing
+regression looks like ordinary cold-cache behavior rather than a bug. If a
+fork or resume shows unexpectedly low cache reuse, check that the routing
+identity followed the fork/resume history into every transport field, not
+just one of them.
+
 ## Model policy: allowlists, never denylists
 
 Each `ModelPolicy` names an ordered allowlist (`driver::preference_for`);

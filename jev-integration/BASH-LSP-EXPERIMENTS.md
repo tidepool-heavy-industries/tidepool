@@ -1,7 +1,7 @@
 # Bash and code-exploration simulations
 
-Paired live Jev simulations for the five potential workflows in
-[`plans/jev-bash-lsp-examples.md`](../plans/jev-bash-lsp-examples.md). Tool outputs
+Paired live Jev simulations for the five potential bash-and-code-exploration
+workflows (an uncompiled mockup, now git history). Tool outputs
 are synthetic structured fixtures; no Bash, LSP, Git, test, or source operation
 actually runs. Actual Jev selections choose subsequent fixtures. Each path is
 bounded at three requests and has no automatic retries.

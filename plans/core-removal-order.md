@@ -7,10 +7,9 @@ Not built, not tested, nothing committed. Not checked against
 
 ## State-of-play correction
 
-`plans/README.md`, `plans/stg-completion.md`, `plans/stg-production-cutover.md`
-and `plans/handoff/*` describe prepared-STG as **not yet default** and Core
-deletion as unstarted ("step 4/5... remain unfinished"). Source has moved past
-those docs without updating them:
+Earlier plan docs (since pruned; git history has them) described prepared-STG
+as **not yet default** and Core deletion as unstarted ("step 4/5... remain
+unfinished"). Source moved past those docs without updating them:
 
 - `27137a928` **"the prepared-STG engine is the default route"**:
   `EngineKind::from_env()` (`tidepool-runtime/src/session/persistent.rs:81-93`)
@@ -38,8 +37,8 @@ from "Core is default" to "Core is still a required, tested, load-bearing
 fallback with its own artifact format baked into the compile cache" — see
 §3.
 
-**Caveat on "retired Core evaluator" language:** several scripts/docs
-(`scripts/fixtures.sh:70`, `plans/stg-production-cutover.md`) say the Core
+**Caveat on "retired Core evaluator" language:** a comment
+(`scripts/fixtures.sh:70`) and an earlier, since-pruned plan doc say the Core
 "evaluator"/"interpreter" is retired: *"Both Rust interpreters and their
 differential-test machinery have been removed."* That refers to an earlier
 tree-walking interpreter generation, already gone from this tree — **not**
@@ -143,9 +142,9 @@ it does not even wait on the Core-vs-prepared question — see step 0.
 Root `CLAUDE.md`: "currently not a Cargo workspace member — its `Cargo.toml`
 was removed under the in-progress STG cutover; directory and source remain
 on disk." Verified: `tidepool-repl/Cargo.toml` does not exist, and it is not
-listed in root `Cargo.toml`'s `members`. `plans/stg-production-cutover.md`'s
-accepted destination explicitly calls for retiring "the one-shot and REPL MCP
-endpoints." Cheapest possible deletion (no build entanglement to break) —
+listed in root `Cargo.toml`'s `members`. The cutover's accepted destination
+explicitly called for retiring "the one-shot and REPL MCP endpoints."
+Cheapest possible deletion (no build entanglement to break) —
 see step 0. Not individually inventoried file-by-file in this pass.
 
 ### `tidepool-runtime/src/session/*` (turn/workbench/registry/supervisor)
@@ -175,8 +174,7 @@ opts..."), `tidepool-harness/src/selfharness/driver/lifecycle.rs:220`,
   ActorRunTarget for ResidentSession<H,O>` (S — one impl, dispatches
   internally, no separate Core impl exists).
 - `tests/placement_retirement.rs` — dual-engine test; its documented
-  `close_realm`/`parked_realm` Core-only-resolution gap from
-  `plans/handoff/continuation-2026-09-15.md` is already fixed (see
+  `close_realm`/`parked_realm` Core-only-resolution gap is already fixed (see
   State-of-play correction).
 
 ### `tidepool-harness`
@@ -195,9 +193,9 @@ comment, so treat as probable-but-not-exhaustively-checked.
 | `src/Tidepool/Translate.hs` | 2,705 | **C, live blocker** | GHC Core → `CoreExpr` CBOR translator. Per `STG_KNOWN_ISSUES.md:143-154`, this is also where Core intercepts `eitherDecodeValue` to the `JsonDecode` primop — a Core-specific special case with no prepared analogue (prepared instead runs a real Haskell parser, per the same doc) |
 | `src/Tidepool/Artifacts.hs` | 299 | Mixed, mostly C | `writeWholeModuleClosed`/`runMultiTargetClosed`/`translateTargetClosed` (Core-write helpers, lines 60,277,288) call into `Translate.hs`; `renderAsksJson`/site plumbing (shared) stays |
 | `app/Main.hs:716` | — | **C, live blocker call site** | `writeWholeModuleClosed` runs on every compiled turn **unconditionally**, regardless of `requestPreparedTurn` — verified by direct read of the surrounding function (lines 690-720): `preparedArtifacts` is computed conditionally on `requestPreparedTurn args`, but the very next line calls `writeWholeModuleClosed` with no such guard |
-| `src/Tidepool/ExecutionProjection.hs` | 1,943 | P | The STG-to-prepared-schema projector; central subject of `plans/stg-completion.md`'s execution sequence |
+| `src/Tidepool/ExecutionProjection.hs` | 1,943 | P | The STG-to-prepared-schema projector; central subject of the STG completion sequence's execution phase |
 | `src/Tidepool/PreparedStg.hs`, `PreparedSites.hs`, `PreparedRecovery.hs` | not sized individually | P | By name and by `STG_KNOWN_ISSUES.md:10-19` (`recoverPreparedClosure` lives in `Main.hs`/`PreparedRecovery.hs`) |
-| `src/Tidepool/GhcPipeline.hs` | 1,908 | S | Feeds both translators from one GHC compile; named in `plans/stg-completion.md`'s step-1 owners list for "compiler validity" applicable to both routes |
+| `src/Tidepool/GhcPipeline.hs` | 1,908 | S | Feeds both translators from one GHC compile; named in the STG completion sequence's step-1 owners list for "compiler validity" applicable to both routes |
 | `src/Tidepool/ExecutionIR.hs`, `ExecutionEncode.hs`, `CborEncode.hs` | 422, 401, 382 | **uncertain** | Names suggest prepared-schema IR/encoder; not individually grepped for Core coupling |
 | `test-prepared-stg/*.hs` (7 files) + `execution-schema-encode`/`execution-schema-projection`/`execution-corpus-projection`/`prepared-stg-pipeline-test` cabal suites | — | P | Entirely prepared-only |
 | `test/ConstructorArityTest.hs`, `IntrospectionSearchTest.hs`, `Suite.hs`, `TextSuite.hs`, `Identity.hs`, `SibDict.hs`, `test-cell-splitter`, `test-display-tree` | — | S | Extractor/GHC-Core-plumbing tests (shared substrate), not the Core JIT execution route |
@@ -206,13 +204,13 @@ comment, so treat as probable-but-not-exhaustively-checked.
 
 | Item | Location | Class | Note |
 |---|---|---|---|
-| `TIDEPOOL_ENGINE` env var | `tidepool-runtime/src/session/persistent.rs:81` | routing switch | `core` opts out; unset/`prepared`/anything else → prepared (default since `27137a928`). This is exactly what step 5 of `plans/stg-completion.md` deletes "with the Core engine" |
+| `TIDEPOOL_ENGINE` env var | `tidepool-runtime/src/session/persistent.rs:81` | routing switch | `core` opts out; unset/`prepared`/anything else → prepared (default since `27137a928`). This is exactly what step 5 of the STG completion sequence deletes "with the Core engine" |
 | `TIDEPOOL_CORE_TESTS` env var | `scripts/lib-extract.sh:154-163`, `scripts/battery.sh:73`, `scripts/battery-shard.sh:66` | Core-only test gate | `TIDEPOOL_CORE_TESTS=1` makes the battery scripts run the excluded Core-engine tests instead of skipping them (verified directly) |
 | `[profile.default]`/`[profile.battery]` `default-filter` | `.config/nextest.toml:19-30` | **the authoritative Core-only test-exclusion list** | Comment (verified verbatim): *"Core-engine tests are excluded from every tier: the Core JIT is being replaced by prepared STG and its tests only cost time. The Core set is the Core-JIT codegen suites (codegen, gc, resident, properties), the Core-only codegen library modules, the Core optimizer, and every `_on_core` dual-run variant."* Filter expression excludes, by name: `tidepool-codegen` binaries `codegen`/`gc`/`resident`/`properties`; `kind(lib)` test modules matching `/^(jit_machine\|emit\|lower\|nursery\|datacon_env\|heap_bridge\|effect_machine\|host_fns::errors\|host_fns::primops)::/`; all of `package(tidepool-optimize)`; and `test(/_on_core$/)`. This is a stronger, more precise source than grep-based classification for exactly these modules — used above to resolve `nursery.rs`/`effect_machine.rs` uncertainty. |
 | `--all-closed` extractor flag | `tidepool-extract-cmd/src/request.rs:114,455`; consumed `haskell/app/Main.hs:~420-429` | C | Full-module Core CBOR dump, used by `scripts/fixtures.sh`'s corpus regeneration |
 | `--prepared-turn` extractor flag | `tidepool-extract-cmd/src/request.rs:511` | P | |
 | `--dump-core` extractor flag | `tidepool-extract-cmd/src/request.rs:50,113,454,730` | C, likely **retained** | Introspection dump; root `CLAUDE.md` step 5 language: "retain Core work still needed for... introspection" |
-| `TIDEPOOL_TEST_DROP_DC` | `haskell/src/Tidepool/Artifacts.hs:155` (approx) | S | Per `plans/handoff/continuation-2026-09-15.md:259-261`, the check applies to "either a Core-emitted or prepared-admitted constructor" — not Core-only |
+| `TIDEPOOL_TEST_DROP_DC` | `haskell/src/Tidepool/Artifacts.hs:155` (approx) | S | The check applies to "either a Core-emitted or prepared-admitted constructor" — not Core-only |
 | Artifact cache | `tidepool-toolchain/src/cache.rs:277-394` | **S, unified format, blocker** | `CachedArtifactParts` is a hardcoded 4-tuple `(expr, meta, asks, prepared)`; `cache_store`/`cache_load` write/read one entry with all four, one sentinel (`blake3(...) || blake3(prepared_bytes)`, 128 raw bytes). A cache entry with only one artifact kind is treated as absent. Cannot drop the Core third without a cache-format version bump. |
 | `CompiledTarget` | `tidepool-toolchain/src/artifacts.rs:271-291` | **S, unified format, blocker** | `pub expr: CoreExpr` field; comment already says "Per-target legacy Core + prepared program + asks sidecar" |
 | No `[features]` in any workspace `Cargo.toml` | checked `tidepool-codegen`, `-runtime`, `-heap`, `-repr`, `-toolchain`, `-actor`, `-harness` | — | Confirms `TIDEPOOL_ENGINE` is the only gate; the Core/prepared split is at the module/crate level, not compile-time features |
@@ -238,10 +236,9 @@ comment, so treat as probable-but-not-exhaustively-checked.
    prepared arm** (`run_transient_with_sites:2505`, `run_binding_with_sites:2625`,
    `run_projected_bind_with_sites:2741`, `run_rooted_fragment:3081`,
    `reenter:3174`), each calling `engine.require_core()?`. These implement
-   handle/framed-answer and rooted-fragment turn shapes that
-   `plans/handoff/continuation-2026-09-15.md`'s F5 section lists as not
-   landed (handle/framed answers, Either/list wires, some ordinary-effect
-   reply sites). `TIDEPOOL_ENGINE=core` is not just a test knob — it is the
+   handle/framed-answer and rooted-fragment turn shapes not yet landed on the
+   prepared route (handle/framed answers, Either/list wires, some
+   ordinary-effect reply sites). `TIDEPOOL_ENGINE=core` is not just a test knob — it is the
    only way to reach these code paths in production today, and it is a
    supported, tested opt-out (`TIDEPOOL_CORE_TESTS=1` runs the whole
    `_on_core` suite against it).
@@ -259,8 +256,8 @@ comment, so treat as probable-but-not-exhaustively-checked.
    (`STG_KNOWN_ISSUES.md` "Residency" section): external payloads not swept
    from old space, nursery/old-space retirement cycles deferred and
    untested, shadowed bindings pin their programs indefinitely. Blocks
-   calling prepared "at parity," the stated precondition
-   (`plans/stg-completion.md` step 4) before a confident Core removal — not
+   calling prepared "at parity," the stated precondition the STG completion
+   sequence's step 4 set before a confident Core removal — not
    independently re-verified against current source beyond this doc.
 6. **`old_space.rs` (`tidepool-codegen`, 1,571 lines) is genuinely shared**,
    not Core-only despite its "persistent binding store" framing —
@@ -268,7 +265,7 @@ comment, so treat as probable-but-not-exhaustively-checked.
    `prepared_program::{invocation,forcing,roots,machine}.rs`. It cannot be
    deleted wholesale in an early "leaves first" pass the way `jit_machine.rs`
    can.
-7. **`plans/stg-completion.md`'s own step sequence puts default-routing
+7. **The STG completion sequence's own step ordering put default-routing
    (step 4) before deletion (step 5)**, and step 4's exit criteria (pinned-
    GHC oracle under the real notebook dialect, the full production corpus
    through projection/validation/compile/execution/comparison, passing
@@ -277,8 +274,8 @@ comment, so treat as probable-but-not-exhaustively-checked.
    as sufficient. This survey performed no builds and cannot resolve
    whether step 4 is actually done; treat as the single largest open
    question.
-8. **`plans/README.md`, `stg-completion.md`, `stg-production-cutover.md` are
-   stale generally** (see State-of-play correction): plan removal order off
+8. **The earlier plan docs were stale generally** (see State-of-play
+   correction, and they are since pruned): plan removal order off
    `STG_KNOWN_ISSUES.md` and direct source, not those docs.
 
 ## 3. Dependency-ordered removal (leaves first)
@@ -297,7 +294,7 @@ onward is gated on closing §2.
 | **3. Core-JIT emission layer (blocked on §2)** | `tidepool-codegen/src/{emit/{mod,expr,primop,case,apply,join},jit_machine,lower,datacon_env,debug,signal_safety,yield_type,effect_machine,nursery}.rs` | ~15,900 | The 3 Core-only call sites in `pipeline.rs` (~131,233,572); `binding_table.rs`'s `crate::emit::ExternalEnv` import; `tidepool-runtime/src/session/persistent.rs`'s `ResidentEngine::Core` variant and every `require_core`/`core_mut`/`.core()` call site; `EngineKind`/`TIDEPOOL_ENGINE` itself (step 6 below, or fold in here) | Everything from step 1 not already deleted; the exact lib-test module names in the nextest filter (`jit_machine`, `emit`, `lower`, `nursery`, `datacon_env`, `heap_bridge`, `effect_machine`, `host_fns::errors`, `host_fns::primops` — note the last three are shared *files* whose *test modules* need separate handling, not blanket deletion) |
 | **4. Delete the 5 `resident.rs` Core-only functions** (now dead once no `EngineKind::Core` construction remains) | `run_transient_with_sites`, `run_binding_with_sites`, `run_projected_bind_with_sites`, `run_rooted_fragment`, `reenter` | not separately counted (part of a ~4,000+ line file) | `mount.rs`'s `ActorRunTarget` impl (already engine-neutral, likely untouched) | `resident_session.rs`, `session_scope_retirement.rs`'s remaining `_on_core` bodies if step 2 didn't already remove them |
 | **5. `tidepool-repr` Core IR** | `frame.rs` (156), `free_vars.rs` (506), `normalize.rs` (1,316), `subst.rs`/`builder.rs`/`pretty.rs`/`varid_check.rs` (1,453), `serial/*` (2,172), `tree.rs` if nothing else instantiates `RecursiveTree` (529, **verify first**) | ~6,100-6,600 | Nothing outside `CoreExpr`-consuming files was found importing it — checked clean in `execution_schema*`, `prepared_program/*`; `tidepool-toolchain/src/artifacts.rs:39,276` (`CompiledTarget.expr: CoreExpr`) must already be gone via step 7 | `tidepool-repr` unit tests referencing `CoreExpr`; `golden_wire_contract.rs`, `stack_safety.rs` in `tidepool-repr/tests/` (**unverified** whether these test the Core wire format specifically or `execution_schema`'s) |
-| **6. Haskell: delete `Translate.hs` (2,705) and `Artifacts.hs`'s Core-writing functions** (`writeWholeModuleClosed`, `runMultiTargetClosed`, `translateTargetClosed`; keep `renderAsksJson` and site/metadata plumbing) | ~2,900 | `Main.hs:420-441,599-608,716`; drop `--all-closed` CLI flag from `tidepool-extract-cmd/src/request.rs`; keep `--dump-core` if introspection still needs it | `scripts/fixtures.sh` (stop requesting `--all-closed`); any cabal test asserting on `.cbor` Core artifact shape; `proptest_cache_layer` (already `MissingOutput` for prepared-only fake-extractor output per `plans/stg-completion.md:231-236` — this is a live, pre-existing gate break to reconcile, not a new one this step introduces) |
+| **6. Haskell: delete `Translate.hs` (2,705) and `Artifacts.hs`'s Core-writing functions** (`writeWholeModuleClosed`, `runMultiTargetClosed`, `translateTargetClosed`; keep `renderAsksJson` and site/metadata plumbing) | ~2,900 | `Main.hs:420-441,599-608,716`; drop `--all-closed` CLI flag from `tidepool-extract-cmd/src/request.rs`; keep `--dump-core` if introspection still needs it | `scripts/fixtures.sh` (stop requesting `--all-closed`); any cabal test asserting on `.cbor` Core artifact shape; `proptest_cache_layer` (already `MissingOutput` for prepared-only fake-extractor output per the STG completion sequence's own notes — this is a live, pre-existing gate break to reconcile, not a new one this step introduces) |
 | **7. Retire `TIDEPOOL_ENGINE`/`EngineKind`/`ResidentEngine`, and shrink `cache.rs`/`artifacts.rs` from a 4-tuple to a 3-tuple** | small (`persistent.rs`'s enum + accessors, ~100-200 in the toolchain crate) | every construction site listed in step 3's callers column; every `cache_load`/`cache_store` call site | `legacy_cache_sentinel_misses_after_prepared_cutover` (already tests this exact transition — keep the test, update its assertion) |
 | **8. Port GC/realm test suites** in `tidepool-codegen/tests/` (`gc`, `resident` binaries — dozens of files, several hundred to 1,000+ lines each: `array_gc_safety`, `gc_write_barrier`, `realm_*`, `continuation_gc_root`, `stackmap_*`, `con_midfill_gc_safety`, `apply_cont_heap_composition_gc`) from Core-compiled fixtures to prepared-compiled fixtures | not a deletion — a rewrite; budget this as the largest test-porting cost in the whole removal | `tidepool-codegen/tests/` `session_scaffold` support harness (currently built on Core compile) | all Core-route GC/heap-safety tests; `tidepool-heap`'s own GC tests already have zero engine markers and need no porting, so this step is specifically about the codegen-layer integration tests that exercise the shared heap mechanism only through Core-compiled entry points today |
 

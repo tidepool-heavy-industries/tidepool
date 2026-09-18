@@ -17,10 +17,9 @@ Optimize expressions for agent utility and legibility; the operator is also
 comfortable reading lens code. Do not simplify away useful composition merely
 to make all agent-authored code introductory Haskell.
 
-This supports the shared human/agent workbench envisioned for shoal-repl and
-[recursive context collaboration](recursive-context-collaboration.md): useful
-investigations leave executable functions and values behind, and those become
-material for later scaffold/fork/fold cycles.
+This supports the shared human/agent workbench envisioned for shoal-repl:
+useful investigations leave executable functions and values behind, and those
+become material for later scaffold/fork/fold cycles.
 
 ## Existing foothold and discovery
 

@@ -8,70 +8,43 @@ archive).
 
 ## Active work
 
-- [Programs using the agent’s own context](jev-own-context.md): critical-path
-  Codex integration experiment for Jev programs that use recent conversation and
-  native tool interactions alongside exact artifacts.
-- [TypeSafe patterns and cookbook adaptations](jev-typesafe-patterns.md):
-  primary research agenda for Jev experiments, advanced compositions, source map,
-  and corrections from reading the published examples.
-- [Continuous improvement of the agent's tools](jev-tool-improvement.md):
-  guiding principle, connected experiment plans, and the critical path from
-  small interaction improvements to useful Jev-driven worker loops.
-- [More useful swarm work through Jev-driven programs](jev-swarm-leverage.md):
-  strategy for the 10× ambition, with supervision, evidence preparation,
-  smaller contexts, shared components, investigation branches, and concrete trials.
-- [Swarms sharing and improving System 1 code](jev-shared-components.md):
-  agents develop, exchange, compose, and revise Jev-backed Haskell functions.
-  Begin with project source, short usage notes, and frequent dogfood restarts;
-  then try the same useful components as live callable values.
-- [Recovered Jev experiments](jev-recovered-experiments.md): small trials for
-  semantic investigation, decision reuse, conditional worker admission,
-  executable criteria, migration archaeology, and revisable memory behavior.
-- [Jev effect and Haskell DSL](jev-dsl.md): recorded design decisions and API
-  uncertainties; isolated experiments live in the `jev-integration` workspace crate.
-  Its [core Shoal examples](jev-core-shoal-uses.md) show paired Haskell DSL and
-  Jev request sketches for the intended semantic-control-plane capabilities.
-  The [Jev in Shoal set](jev/README.md) changes altitude: what was learned
-  about the provider, a DSL review, eight workflow-reshaping capabilities with
-  traces and a ranking, typed request triage as the first implementation,
-  run-ahead as the emergent mechanism, authoring patterns, replayable
-  evaluation, and open questions.
-- [Shoal implementation handoff](../NEXT.md): complete the programmable foundation
-  and a usable workspace orchestration package. Model/context selection, frozen
-  customization, routes, scoped observations, launch previews and the executable
-  planned Sol recipes have landed. The [workbench curation pass](next/package-curation.md)
-  supplies substantive owners, complete contexts/handoffs and a fluent resident
-  Haskell toolbox with portable candidate checks. Its [review](next/evidence/workbench-curation.md)
-  records implementation readiness and the separate live-acceptance boundary.
-  Ordinary human-requested RSI improves the next swarm.
-  The [plan-understanding follow-up](next/plan-readback.md) adds Sol-authored branch
-  interpretations, questions and original Astra planner review before implementation
-  fan-out; the current application wave is exercising the checkpoint through steering.
-  The [vision](next/planned-swarm.md), [workspace design](next/workspace-pilot.md)
-  and [Haskell reference](next/sol-worker-routing.md) define the chosen direction.
-  Live acceptance uses fresh actors on `shoal-repl` (the standalone TUI app) or
-  another non-self-hosting project, using authored guidance rather than knowledge
-  inherited from implementing Shoal. Keep normal Codex TUIs for worker interaction.
-- [Persistent coordination actors](next/coordination-actors.md): replace progress
-  watch rearming with typed sources and owned Haskell handlers, normal TUI steering,
-  recoverable handler failure and atomic typed replacement; migrate the curated
-  dogfood helpers and prompts alongside the runtime. The
-  [next coordination pass](next/coordination-rsi.md) targets fluent effectful actor
-  routing, useful current views and scoped completion of the actual integration loop.
-- [Sleep and supervised interactive applications integration](interactive-applications/README.md):
-  resident sleep and applications are accepted together on unified main, paired
-  with native Codex `d0e5fd48e0`. The
-  [main integration record](interactive-applications/main-integration.md) owns the
-  final source and evidence. Do not recommission the completed sleep or applications
-  branches from their historical checkpoints. Shared-server migration remains separate.
+- [Agent spec and System 1 slots](jev-lab/agent-spec-design.md): one Haskell
+  module per checkout names an agent's tools and the slot applied after every
+  tool call; edited with file tools and reloaded live. After-tool is the first
+  slot. [Alpha smoke run](jev-lab/alpha-smoke-brief.md) is the brief that
+  exercises it with Jev in every layer.
+- [Jev lab](jev-lab/README.md): the live measurement lab behind the
+  `shoal-jev` skill. [Results](jev-lab/RESULTS.md) and the
+  [intent experiment](jev-lab/INTENT-EXPERIMENT.md) cover programs that turn
+  failed builds into source investigations; [wording A/B](jev-lab/wording-ab.md)
+  has the before/after numbers behind the skill's wording rule. The breadth
+  survey's [recognizing fit](jev-lab/breadth/RECOGNIZING-FIT.md) and
+  [unrun ideas](jev-lab/breadth/NOT-RUN.md) are read from `NEXT.md`. The
+  [observation-budget finding](jev-lab/observation-limit/FINDING.md) is fixed,
+  kept as regression evidence for `observation_budget_tests.rs`.
+- [Core removal order](core-removal-order.md): live, verified survey of
+  exactly what still blocks deleting the Core engine now that prepared STG is
+  the default — evidence-backed blockers, not a stale checkpoint.
+- [Shared execution server](interactive-applications/shared-server.md):
+  direction for one native execution server per swarm shared across ordinary
+  interactive TUIs, reusing the existing app-server/client boundary.
+- [Shoal implementation handoff](../NEXT.md): the current programmable
+  workspace direction — model/context selection, frozen customization,
+  routes, scoped observations, launch previews and executable planned Sol
+  recipes.
 - [Haskell command workbench](next/haskell-command-workbench.md): in-progress
   design for inspectable bash values, memory-weighted execution, typed process
   interaction and gradual migration from native shell orchestration.
-  [Implementation checkpoints](next/command-jobs-implementation.md) track the
-  matched native/resident acceptance and release.
-- [Haskell-backed native tools](next/hosted-haskell-tools.md): frozen typed
-  handlers beside the workbench, raw Bash without per-call compilation, and
-  native-quality execution, session input and output reads through the existing command owner.
+  [Implementation checkpoints](next/command-jobs-implementation.md) (with its
+  [wave delivery contract](next/WaveContract.hs)) track the matched
+  native/resident acceptance and release.
+- [Shoal commit-and-fork operating model](next/shoal-commit-forks.md): a
+  proposed operating model from user interview, not an implementation
+  commitment — when delegation pays, keeping planning infodense with the
+  parent, and Luna's recursive-delegation shape.
+- [Small typed workers](next/small-workers.md): a later, optional application
+  of a typed numeric-discrepancy worker as a small read-only Sol worker,
+  reusing existing fixtures rather than a comparative evaluation campaign.
 - [Typed file tools](typed-file-tools.md): composable resident Haskell reads,
   edit previews and stale-source-checked mutations over existing tool owners.
 - [Small typed agents](small-agents.md): parent-pane, shared-worktree workers
@@ -80,57 +53,39 @@ archive).
   they do not gate the current orchestration package without a concrete consumer.
 - [JIT memory lifetime](actor-model/jit-memory-lifetime.md): executable-memory
   reclamation and honest recovery after removing the fixed JIT arena ceiling.
-- [Haskell engine through prepared STG](haskell-engine-stg.md): reuse GHC
-  CorePrep and STG preparation throughout the Rust/Cranelift engine: typed
-  calls, compact layouts, full collection, explicit optimization choices,
-  and required code deletion with semantic and performance gates.
 - [Test-time cut](test-time-cut.md): diagnosis landed; family bundling
   merged, turn-count top-5 lane in flight.
-- [Wave 6](stg-wave6.md): prepared-STG effect suspension, retained imports
-  and resume. Wave 6A landed the persistent-heap and closure-decode substrate
-  (rung 0); Wave 6B landed single-turn suspend/resume and retained-binding
-  imports (rungs 1-2) plus machine-wide constructor descriptor interning;
-  Wave 6C landed cross-program call/force dispatch and import-holding
-  top-level constructors (closing the rest of rung 2 for exact application),
-  interleaved parked work across programs (rung 3), realm-scoped
-  cancellation (rung 4, with the reusable-vs-latch failure distinction this
-  found and fixed), retained-generation unfoldings withheld without a user
-  pragma (S5), a `PreparedRuntime` hostable in the session registry with
-  realm-scoped leases (rung 5's substrate), a composite test proving rungs
-  2-5 together through that registry, and a live session-turn mechanism
-  through the real prepared-STG projection (rung 6's substrate). Stage G adds
-  direct import admission, program-declared import leases and actor-placement
-  retirement. The current implementation adds foreign PAP/partial/excess
-  dispatch using full signatures and non-mutating probes, plus retained-set
-  compiler/interface invalidation. Production notebook/actor integration and
-  program reclamation remain distinct from these substrate proofs; see the
-  completion plan and the closing implementation evidence in the Wave 6 plan.
-- [Finish the STG engine](stg-completion.md): review at `344ecd59a` and proposed
-  completion sequence: sound foreign application, the production notebook and
-  actor boundary, complete retirement/collection, parity/default routing, and
-  removal of the old engine. Identifies gaps in the G1 proposal and distinguishes
-  Wave 6 substrate evidence from production acceptance.
 
-## Supporting actor designs and separate harness work
+## Supporting actor designs
 
 These references do not replace NEXT.md or prescribe the current swarm topology.
 Verify mechanics against owning source; old dispatch and acceptance instructions
 are not current assignments.
 
-- [Self-writing Haskell actors](actor-model/README.md) and
-  [persistent applications, replies and watches](actor-model/persistent-applications-replies-and-watches.md):
-  actor, request and residency design references.
-- [Context unfold](actor-model/cache-preserving-context-unfold.md) and
-  [live follow-ups](actor-model/live-context-unfold-dogfood-followups.md):
-  earlier interaction design and runtime findings.
-- [Context-tree surface](actor-model/context-tree-emergent-haskell-ux.md),
-  [scaffold campaign](actor-model/recursive-scaffold-campaign.md) and
-  [recursive collaboration](actor-model/recursive-context-collaboration.md):
-  supporting context, ownership and integration ideas. The planned Astra/Sol
-  vision owns current model placement, decomposition and guidance.
-- [DevSwarm](devswarm-haskell-dsl.md) and
-  [flight campaign](flight-dogfood-campaign.md): separate self-harness designs;
-  their migration proposals and dogfood loops are not current Shoal gates.
+- [Self-writing Haskell actors](actor-model/README.md),
+  [architecture](actor-model/architecture.md) and
+  [implementation status](actor-model/implementation.md): the canonical
+  actor, request and residency design references, and the maintained
+  landed-versus-pending inventory. The request/reply/watch contract and
+  cache-preserving context unfold they once specified have landed; their
+  stable user contracts are in `SHOAL.md` and `tidepool-actor/CLAUDE.md`.
+- [Live values and authority](actor-model/live-values-and-authority.md):
+  same-machine value transfer, caller identity, launch grants, and the
+  distinction between invoking a closure and calling an actor.
+- [JSON optics in the resident workbench](actor-model/json-lens.md): future
+  direction, not an implementation commitment — schema-aware discovery,
+  retained JSON data, and composable lens/Aeson-style investigations.
+- [Context-tree human acceptance](actor-model/context-tree-human-acceptance.md):
+  the human-run acceptance guide for inhabiting a tree of work; the campaign
+  itself is not yet recorded.
+- [Astra UX exploration field report](actor-model/astra-ux-exploration-field-report.md):
+  a computation-driven exploration session, still cited as source evidence by
+  other active plans.
+- [Other useful uses of resident Haskell](actor-model/resident-haskell-side-quests.md):
+  a brainstorm of resident-Haskell experiments to try in a campaign, not a
+  proposal to ship another DSL.
+- [DevSwarm](devswarm-haskell-dsl.md): the earlier self-harness design for
+  `harness-dogfooding/devswarm/`; `NEXT.md` owns the current direction.
 
 ## Carried-forward one-liners
 
@@ -169,6 +124,42 @@ Small still-open items whose originating plan doc has been retired:
 - Companion memory Phase 3 (recall verb, async spawn, digest work) remains,
   friction-driven — no fixed schedule. Phases 1–2 (outer-row `Subagent`
   servicing, store bootstrap, curator wiring) are landed.
+- Workbench friction still open as of the 2026-09-17 lab: no `T.decimal`
+  (or a `readInt :: Text -> Maybe Int`) in the Prelude; a declaration in a
+  cell cannot see a value bound earlier in the same cell (declarations
+  compile in a separate plane from statements); an authored project module
+  is invisible to the agent's own `lookup`/`doc`, so a human must name the
+  file path by hand; a Shoal session's workspace binding lock is keyed on
+  the worktree path, not the session name, so several distinctly-named
+  sessions cannot launch concurrently against one shared `--workspace`
+  (`tidepool-worktree/src/binding.rs`) — the second session gets a hard
+  storage-failure error, not a queue.
+- `doc <topic>` now names the covering skill on a refusal (fixed), but a
+  few 2026-09-17 lab findings were not reverified before this prune:
+  `renderGitOid` (exported at `haskell/lib/Tidepool/Worktree.hs:131`)
+  reportedly came back `no match` from `lookup`; `R.start`/`R.client` came
+  back tagged `[unknown]` because their `Derive`/`Generic`/`GActor`
+  constraints don't fit the `Member X effs` shape lookup classifies by; and
+  no child was ever told in its task template to commit its work, which was
+  the root cause of at least one child reporting success over an uncommitted
+  change.
+- Across 57 harness transcripts and 207 rejections (2026-09-17 measurement),
+  "a value of the wrong type or arity" was the largest failure class in
+  every run and had not fallen after two fix waves, while fixing one
+  constructor's ergonomics (`IsString GitRef`) removed its whole failure
+  class outright. The lever that measurement pointed at: advice naming the
+  smart constructor for the expected type, plus one worked example per shape.
+- Gated successor work from the live context-unfold hardening wave, still
+  open: reattaching a failed external child application to its still-live
+  actor/machine incarnation needs a durable provider idle/reattachment
+  contract that makes duplicate turns impossible; generalizing root
+  source-only successor recovery to independently-owned child machines needs
+  Shoal's machine-boundary work first; a durable actor/request/watch/fork
+  transition ledger (with replay tests at every commit point) should be
+  owner-emitted, not inferred from composition-root observations; and
+  handle-filtered `:trace`/campaign renderers are worth adding only once a
+  live campaign shows the existing `observeCampaign`/`:lineage`/`:status!`/
+  `:trace` views are insufficient.
 
 ## Reference
 
@@ -177,3 +168,7 @@ Small still-open items whose originating plan doc has been retired:
   would invite re-tripping a hazard already fixed once. Current architecture
   contracts belong in owning source, `AGENTS.md`, and focused design references,
   not historical charters.
+- [Notebook cell compile-count reduction](handoff/designs/cell-compiles.md)
+  and [descriptor dispatch](handoff/designs/descriptor-dispatch.md): the two
+  still-live designs from a since-retired handoff bundle, cited by
+  `STG_KNOWN_ISSUES.md` for open cost and perf issues.

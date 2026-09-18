@@ -452,6 +452,11 @@ pub(crate) enum LookupOutcome {
         matches: Vec<LookupEntry>,
         truncated: bool,
     },
+    /// GHC's diagnostic here is already a bare rendered string by the time it
+    /// reaches Rust (span and severity are dropped in Haskell before any wire
+    /// encoding, earlier than the cell-compile path's structured `Diag`
+    /// report). Widening this to a structured field needs a Haskell/extractor
+    /// change first, not a Rust-only one.
     Rejected {
         diagnostic: String,
     },

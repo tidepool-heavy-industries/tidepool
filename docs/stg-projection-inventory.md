@@ -505,8 +505,7 @@ a second call begin before the first returns. The evaluator-identity /
 blackhole-vs-loop distinction this section already names remains required
 before any design admits concurrent native-stack suspension on one heap, and
 before rung 3's registry-generalization work (porting the old engine's
-parked-continuation registry onto this heap) is attempted -- see
-`plans/stg-wave6.md`'s acceptance ladder and "Remaining rung owners".
+parked-continuation registry onto this heap) is attempted.
 
 `MutVar#` has its own object descriptor but reuses the external boxed-storage
 owner. Any future external-value observation must classify by descriptor

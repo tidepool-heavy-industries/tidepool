@@ -5,9 +5,10 @@ repo `~/dev/shoal-evals/tui-test-app` at two real failed builds:
 `f726882` (five non-exhaustive match errors) and `4610b5e` (one clippy lint
 promoted to an error by `-D warnings`, inside a test).
 
-The cells are in this directory in the order they were run. `13-final.hs` holds
-`look`, the investigation function; `14-route.hs` holds `routeFindings`, which
-turns its answers into prepared next steps.
+The cells that produced this ran here, in order, and have since been
+promoted: the investigation function (`look` below) lives on as `investigate`
+in `.shoal/Project/Investigate.hs`, and `routeFindings`, which turns its
+answers into prepared next steps, lives on in `.shoal/Project/Review.hs`.
 
 ## The result
 
@@ -65,5 +66,6 @@ moved the same judgments to 0.72/0.12, 0.98/0.02 across the two fixtures.
 
 ## Friction hit while doing this
 
-See `friction.md`. Eight items, all reproducible, several with fixes already
-identified.
+Eight items were hit and reproduced while driving this; most already have
+fixes landed. The still-open ones are carried forward in
+[the top-level plans index](../README.md#carried-forward-one-liners).

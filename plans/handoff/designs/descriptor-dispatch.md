@@ -1,16 +1,16 @@
 # Descriptor dispatch: calls and enter through the object's info table
 
-Refines step 1 of `stg-completion.md` ("If header chains dominate…"). The G1
-application semantics are fixed and must not regress: full-signature
+Refines the "if header chains dominate…" step of the STG completion sequence.
+The G1 application semantics are fixed and must not regress: full-signature
 resolution, non-failing probes, exact PAP completion, terminal saturation,
 excess application, logical `Void`, and `NoSuccess`. This note changes how a
 dynamic call or force finds its code, not what it does.
 
-**Decision owner: sol.** This fixes the program/runtime call boundary. The
-descriptor dispatch row (decision 1) and machine-wide signature ids
-(decision 2) are one-way doors: once generated code of several installed
-programs reads the row layout and compares ids, a change requires rebuilding
-every artifact that one machine can hold. Everything else here is reversible.
+This fixes the program/runtime call boundary. The descriptor dispatch row
+(decision 1) and machine-wide signature ids (decision 2) are one-way doors:
+once generated code of several installed programs reads the row layout and
+compares ids, a change requires rebuilding every artifact that one machine
+can hold. Everything else here is reversible.
 
 ## Problem
 

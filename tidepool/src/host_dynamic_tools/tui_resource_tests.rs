@@ -358,9 +358,253 @@ async fn run_shell_fixture(shell: tidepool_agent::InteractiveShellTools) {
     .unwrap();
     let plan_dir = work.join("plans/parallel-dogfood");
     std::fs::create_dir_all(plan_dir.join("next-wave")).unwrap();
-    let resume = include_str!("../../../plans/parallel-dogfood/next-wave/resume.md");
-    let readme = include_str!("../../../plans/parallel-dogfood/next-wave/README.md");
-    let planner = include_str!("../../../plans/parallel-dogfood/planner.md");
+    // Frozen snapshot of three real plan documents (a since-pruned campaign
+    // record), kept here only as realistic multi-file markdown content for
+    // the presentation-budget fixture below; their originals are gone from
+    // `plans/` and git history is the archive.
+    let resume = r#"# Historical resume record: sleep and applications
+
+This file preserves the source selection and settled decisions used to resume the
+resident-sleep and interactive-applications campaign. It is no longer an active
+resume instruction. Both implementations are accepted on unified Tidepool main,
+paired with native Codex `d0e5fd48e0`. The
+[main integration record](../../interactive-applications/main-integration.md) owns
+the matched source, evidence and limitations.
+
+Do not recreate the sleep or applications leads from these refs. A later campaign
+must choose a new scope and launch from then-current unified main. Git preserves
+the earlier actors' source and handoffs; it does not recreate live TUI or Haskell
+handles, authority, or checked build state.
+
+## Preserved source provenance
+
+The campaign began from R7 coordinator
+`0c1fb83f2285775cb16b212ce2e152bbe9a07374`, containing applications handoff
+`8eda2640b5047786f5dcf2af8b7eae9760e5e767`, engine handoff
+`0c1ff8d9995dddfc30756a2d26d5278749571826`, and fixture baseline
+`6bef6363d95ef5c9bb4749cfd5304c89767d9cb7`. Its original native applications
+candidate was `d84cda697a8dac2842bec09dbd7562a3fab4c926`.
+
+Those hashes explain provenance only. Applications and sleep were reconciled with
+main rather than preserving every historical patch. Engine M0–M5 and the bounded
+M6 seam remain preserved on their own refs; general M6/M7 work was excluded from
+the applications and sleep integration. Structured engine introspection remains
+part of that preserved engine work, not an unfinished obligation in this release.
+
+There are no external TPLR consumers. The campaign used a coordinated format
+cutover and required matched extractor/runtime checks against Shoal usage. The
+only available native platform was x86_64; historical evidence must not be widened
+into an aarch64 acceptance claim.
+
+## Reusable operating guidance
+
+For a future recursive Sol campaign, start from one explicit main and package
+selection. Give each substantial owner a real integration responsibility and fork
+related work after shared contracts are concrete. Related children should inherit
+the useful completed reasoning prefix and current bound source; choose fresh
+context for unrelated mechanisms or independent review. Keep effort stable across
+related Sol forks unless the new scope gives a reason to change it.
+
+Use Haskell collectors for mechanical progress and terminal routing. Send model
+turns only useful checkpoints, changed decisions, failures, or final outcomes.
+Retain uncertain receipts and exact source evidence. External supervision can own
+build, cache, disk, usage, and harness observation while product owners run the
+decisive product checks. Do not hot-change a running package or treat a completed
+build snapshot as authority for different source.
+"#;
+    let readme = r#"# Resident sleep and applications wrapup: campaign record
+
+This directory records the completed implementation campaign. Resident sleep and
+interactive applications are accepted together on unified Tidepool main, paired
+with native Codex `d0e5fd48e0`. Source and check evidence is recorded in the
+[applications main integration record](../../interactive-applications/main-integration.md).
+
+[Ready](ready.md), [resume](resume.md), and [commission](commission.md) preserve
+the launch selection, checkpoints, and allocation used by this campaign. They are
+historical evidence, not authority to launch or recommission the completed sleep
+and applications branches. Engine work remains preserved and excluded from this
+integration. A later campaign requires a new chosen scope and launch record.
+Use the [new RSI commissioning template](new-rsi-commission.md) for an Astra
+planning partner and Sol execution tree driven by newly agreed human ideas.
+
+The [resident sleep PRD](../../next/resident-sleep.md), applications
+[mechanism router](../../interactive-applications/README.md), and retained engine
+[map](engine.md) remain design and provenance references. They do not describe
+unfinished lane commissioning.
+
+## Reusable recursive planning guidance
+
+Each substantial assignment should contain:
+
+- A concrete integrated outcome, relevant plan sections and source/file ownership.
+- The shared decisions children need, and what minimum wiring makes them usable.
+- Independent child outcomes, their own likely decomposition, and the work the
+  parent retains. Name actual dependencies and the joins that unlock later work.
+- Which reasoning prefix children inherit, what they read afterward, and the
+  declared Astra decision/repair slots. Default related work to inherited context
+  and live bound source; choose fresh context explicitly where useful.
+
+Plan the first two implementation levels concretely where source supports it.
+For distant work, name contracts and outcomes, not speculative file-level tickets.
+Ask leads to explain or challenge the decomposition once, then correct material
+misunderstandings and let them implement. Existing accepted decisions and saved
+scaffolds should shorten this checkpoint; do not regenerate historical plans.
+
+## Package context at the fork
+
+For example, a native-admission owner first establishes operation identity,
+transaction boundaries and failure semantics. Fork queue/store implementation and
+host-contract fixtures from that completed reasoning; give each a short assignment
+and links to its files. The parent implements dispatch integration while they work.
+Do not first read every queue bug and host fixture into the common prefix. On the
+next cycle, incorporate returned source and summarize changed contracts before
+forking dependent work: children inherit a snapshot, not later parent knowledge.
+
+Keep the authored document tree equally small: shared decisions in the execution
+contract, branch plans beside their owner's work, deeper sections only where a
+subtree needs them. A child packet names outcome, ownership, shared contract,
+relevant references and decisive check. A return names commit, behavior, checks
+and remaining uncertainty. Link detailed evidence rather than reciting the log.
+
+## Execute continuously
+
+A substantial Sol owner implements shared decisions and difficult joins, forks
+independent work while its reasoning is useful, then integrates and repeats.
+Once the minimum shared contract works, children can implement and extend owning
+fixtures concurrently. A complete subsystem or broad green battery is not a
+prerequisite for every fork. Conversely, parallelism does not authorize siblings
+to invent incompatible signatures, custody protocols or root/layout rules.
+
+Use a dependency graph, not globally synchronized rounds. One subtree can start
+its next local cycle while another repairs its previous result. Review useful
+integrated boundaries and consequential risks; reuse reviewers for repairs.
+Keep independent engineering moving while a review is pending. Do not build a
+standing reviewer/manager hierarchy solely to create more actors.
+
+If a substantial node is heading into prolonged independent investigations or
+multiple owning mechanisms, split that work before unrelated debugging fills its
+context. If it cannot split, name the concrete coupling in one sentence and keep
+working; this is judgment, not a quota or a new approval gate. No headcount cap.
+
+Astra can plan the graph and check Sol's execution understanding once, then idle
+without routine progress subscriptions. Sol owns implementation, integration and
+ordinary choices. Fresh Astra consultations own bounded hard decisions or repairs
+and return directly to the requesting Sol. Haskell handles mechanical collection,
+cursor advancement and routing; use .shoal/plans/coordination.md. Keep routine
+evidence out of Attention and use compact projections at decision boundaries.
+Return compact commits/checks/gates; exact transport and source
+incorporation still matter without a paragraph of acknowledgment history.
+
+## Historical inputs and external supervision
+
+Earlier execution-contract.md, planner-review.md and restart-review.md describe
+older launches. Their actor handles, release messages, source pins and frozen-helper
+workarounds remain evidence only. The applications integration record
+supersedes them as the release source. Historical check results are never fresh
+integrated evidence.
+
+In a future campaign, external supervision can handle build/cache/usage/disk
+monitoring and harness issues. Product workers run checks with the supplied
+toolchain and explicit candidate selection; they do not start environment
+archaeology or hot-patch the running harness.
+Keep ordinary TUIs, one frozen canonical `.shoal`, and fixed running tools during
+any future campaign. Platform gaps must be reported honestly. There are no external
+TPLR consumers; coordinate format cutovers and validate Shoal usage before changing
+the selected main or running package.
+"#;
+    let planner = r#"# Initial Astra planner: make this tree effective
+
+You are the Shoal-managed planning root, working with the human in your ordinary
+Codex TUI. The external setup conversation only supervises the harness. Both
+product designs already exist; focus your substantial reasoning on executing them
+well, rather than rewriting them or repeating the product interview.
+
+Start with next-wave/README.md and its selected task maps/PRD. Read final checkpoint
+evidence supplied by the launch, then deeper mechanisms only for consequential
+dependencies or uncertainties. Preserve the full product acceptance.
+
+## Decisions to make before commissioning
+
+- What must each shared context establish before forking? Which reasoning should
+  descendants inherit, and which tasks need fresh selected contexts? Separate
+  source dependencies from context ancestry. Avoid loading both designs in every
+  ancestor; fork before unrelated debugging consumes the useful common prefix.
+- What goes in each node's small task packet, linked reference material and upward
+  result? Arrange progressive discovery. Keep event handling, routine integration
+  and bookkeeping with Sol; reserve your attention for high-leverage decisions.
+- Where does Sol have enough shared structure to implement independently? Refine
+  the lane maps' Astra slots around actual hard semantic decisions. Give experts
+  bounded evidence-rich tasks; do not create standing Astra managers or kill
+  useful in-flight work at arbitrary token limits.
+- Which scaffold unlocks each ready frontier, and where must results consolidate
+  before the next fork? Plan the near frontier precisely and later waves by
+  dependencies/outcomes. Preserve local discretion and useful parallelism.
+
+Name useful second-level implementation branches, not only a milestone per lead.
+A substantial parent retains shared engineering and integration while its children
+advance independent mechanisms. Explain concrete coupling when a large task must
+stay serial; do not create additional relay managers to make the tree look deeper.
+
+Record the compact decisions in `execution-contract.md` here, with deeper branch
+information linked only where needed. Ask the human about consequential direction
+changes; the existing goals and two-lane implementation are already authorized.
+
+## Commission and review inside Shoal
+
+The selected package loads `Project.Types`, `Project.Work`, `Project.Plan`,
+`Project.Actors`, `Project.Routing` and `Project.Observe` unqualified. `Task` is a type, not a
+module: its source accessor is `taskSource :: Task -> Text`. Use the supplied
+signatures and recipe; query types only when a concrete missing fact blocks work.
+
+```haskell
+Project.Plan.componentLeadFrom
+  :: BranchLabel -> WorktreeSeed -> Task -> Branch CodingEffects Task Delivery
+Project.Work.projectPrompt :: Text -> Text
+Project.Work.taskContext :: Task -> Text
+```
+
+After authoring the plan, bind `task :: Task` to the coordinator's assignment,
+with its exact source, plan path and fork group. The following is executable
+resident Haskell once that assignment exists; it launches one Sol Medium
+coordinator and retains its progress/reply collector. Names are local bindings,
+not extra roles or required workflow stages.
+
+```haskell
+import qualified Project.Plan as Plan
+import qualified Project.Work as Work
+let Right coordinatorLabel = branchLabel "coordinator"
+let coordinatorBranch = withInstructions (Work.projectPrompt "coordinator") $ withEffort Medium $ withContext (selected Work.taskContext) $ Plan.componentLeadFrom coordinatorLabel projectHead task
+(coordinator, coordinatorProgress) <- unfold (taskGroup task) (childWithProgress @WorkProgress @Delivery coordinatorBranch)
+owner <- actorContext
+review <- followWork [("coordinator", forkedResponse coordinator, coordinatorProgress)] (notifyWork owner (workMessage deliverySummary))
+```
+
+The coordinator commissions both Sol leads and consolidates their initial
+execution proposals. `review` has type
+`ActorHandle (WorkActor Delivery)`; it receives ordered
+progress and final replies without rearming. Inspect it only when needed:
+
+```haskell
+proposal <- readWork review
+```
+
+Read the referenced proposal artifacts. Send specific corrections and authority
+to proceed through `updateRequest (forkedResponse coordinator) correction`,
+where `correction :: Text` contains your actual decision. Retain the returned
+`Either ReplyError RequestUpdate`; presentation is not checked incorporation.
+Do not issue a second delivery request behind its pending first request.
+
+After the initial planning corrections are incorporated and Sol owns execution,
+retire only this planner's review collector:
+
+```haskell
+reviewExit <- finishWork review
+```
+
+The coordinator and its tree continue independently. Remain idle for human
+steering or explicit planning work. Hard technical questions go directly from
+Sol to fresh selected Astra consultations; routine progress stays with Sol.
+"#;
     let skill_text = std::fs::read_to_string(skill.join("SKILL.md")).unwrap();
     let skill_description = skill_text
         .lines()

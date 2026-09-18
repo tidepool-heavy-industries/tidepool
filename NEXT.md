@@ -135,8 +135,7 @@ value, preserve the failing example and report the missing capability.
 
 ## Start with the examples, then change them
 
-Read [Try these first](plans/jev-lab/breadth/TRY-THESE.md) and
-[Recognizing fit](plans/jev-lab/breadth/RECOGNIZING-FIT.md). Consult the
+Read [Recognizing fit](plans/jev-lab/breadth/RECOGNIZING-FIT.md). Consult the
 [TypeSafe cookbooks](https://docs.typesafe.ai/llms.txt) for current patterns;
 explore their advanced compositions as well as simple classification. The lab
 is evidence and worked code, not a list of universal laws.
@@ -147,13 +146,15 @@ The most useful entry points are:
   commands; three investigation steps executed without an intervening model
   turn. **These examples truncate their own evidence to 700 characters. Fix that
   before adapting them. Autonomous termination was not demonstrated.**
-- `33-threeway.hs` / `35-threeway-fair.hs`: the same routing problem before and
-  after repairing the alternatives. A confident error became a correct answer
-  on the tested fixture. Debug the semantic program before rejecting the pattern.
+- `.shoal/examples/33-threeway.hs` / `.shoal/examples/35-threeway-fair.hs`: the
+  same routing problem before and after repairing the alternatives. A
+  confident error became a correct answer on the tested fixture. Debug the
+  semantic program before rejecting the pattern.
 - `32-traverse-content.hs`: repository navigation supplied with actual branch
   contents, rather than asking filenames to stand in for evidence.
-- `37-reflect-intent.hs`: simulated history supplies intent missing from the
-  artifacts. Superseded instructions remain an open failure in those examples.
+- `.shoal/examples/37-reflect-intent.hs`: simulated history supplies intent
+  missing from the artifacts. Superseded instructions remain an open failure
+  in those examples.
 
 The lab's [unrun ideas](plans/jev-lab/breadth/NOT-RUN.md) are a menu. Pick one
 when it helps your task; finishing the survey is not a prerequisite for use.
@@ -171,8 +172,8 @@ when it helps your task; finishing the survey is not a prerequisite for use.
   or depending on an earlier answer may require another request.
 - Choice compares alternatives, Noul asks independent conditions, and Score
   describes degree on a rubric. Select the primitive for the question's meaning.
-- `J.accept` accepts the selected answer under a policy. It does not mean
-  “approve the candidate.” Handle the accepted alternative explicitly.
+- `J.settle` takes the selected answer through its handler under a policy. It
+  does not mean “approve the candidate.” Let the handler that ran decide.
 - Questions and action mappings are editable code. Keep alternatives comparable,
   describe an unresolved case, and inspect the actual supplied state on failure.
   A confident wrong result can be a wording or evidence bug.

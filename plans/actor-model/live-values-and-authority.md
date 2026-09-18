@@ -1,8 +1,8 @@
 # Live values and authority
 
 The canonical interactive context-fork surface is now
-[cache-preserving context unfold](cache-preserving-context-unfold.md). It
-shares an immutable declaration/binding snapshot into new persistent actor
+[cache-preserving context unfold](../../SHOAL.md#cache-preserving-context-unfold).
+It shares an immutable declaration/binding snapshot into new persistent actor
 activations; it does not clone the parent's public control continuation. The
 value/authority rules below remain the substrate for that design.
 

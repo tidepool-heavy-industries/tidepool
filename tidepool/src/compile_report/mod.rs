@@ -10,8 +10,27 @@
 //! evolves as an optimization loop") is driven by counted, ranked evidence
 //! instead of an anecdote from the last dogfood round. See
 //! `tidepool-compile-report` (`src/bin/tidepool-compile-report.rs`) for the
-//! CLI entry point, and `plans/flight-dogfood-campaign.md`'s "Compile-failure
-//! report cadence" section for when to run it.
+//! CLI entry point.
+//!
+//! **When to run it.** After any long dogfood/harness session, and
+//! periodically against the live evidence logs outside a session, to catch
+//! drift. The ranked bucket counts are raw material for a human aggregate
+//! step, not a replacement for it: the report ranks WHAT broke, a person
+//! still judges WHY and what to do about it.
+//!
+//! **Ranked entry -> pave-or-dam decision.** A bucket's top identifiers are
+//! candidate constructs to either PAVE (add real support — a missing stdlib
+//! function, a new effect, a JIT primop) or DAM (the model is reaching for
+//! something that should not exist here — tighten the prompt/docs to steer
+//! away from it instead). Which one depends on the identifier, not the
+//! bucket: `variable-not-in-scope` naming a real stdlib gap is a pave; the
+//! same bucket naming a hallucinated verb from a different codebase's
+//! vocabulary is a dam. A bucket with a persistently non-zero count and the
+//! SAME top identifier across multiple independent runs is the strong
+//! signal — a one-off in a single run is noise, a repeat across several runs
+//! is a desire path. `other` growing without a clear identifier pattern is
+//! itself a finding: the classifier's bucket set no longer covers what is
+//! actually failing.
 //!
 //! **Placement note** (flagged per this feature's spec): this logic lives in
 //! the facade crate rather than `tidepool-harness` (whose `transcript.jsonl`

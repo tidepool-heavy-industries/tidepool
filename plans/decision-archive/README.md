@@ -24,5 +24,5 @@ look there.
   module-listing wording) is no longer pointed at from anywhere — it is
   superseded prose kept only because archive pages are append-only.
 
-`plans/decision-archive/RESTRUCTURE-RECEIPT.md` holds the per-file inventory
-from the 2026-08-08 restructure that created this directory.
+The per-file inventory from the 2026-08-08 restructure that created this
+directory is git history, not a standing page.

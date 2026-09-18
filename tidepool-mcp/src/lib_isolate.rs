@@ -127,6 +127,10 @@ fn compute_layer(lib_src: &str, include: &[PathBuf], snapshot: &str) -> LibLayer
 /// forces GHC to build `module` (and its transitive deps) via the include path;
 /// a broken module fails the extract. Salting by the lib snapshot hash means an
 /// on-disk edit busts the (otherwise source-identical) probe's cache entry.
+/// Callers keep only `is_ok()`/`is_err()` from this result (see
+/// `compute_layer` below): the actual GHC diagnostic for a broken re-export
+/// is never rendered or surfaced to the model, which instead sees only a
+/// generic brick note naming the broken module.
 fn probe_import(
     module: &str,
     include: &[PathBuf],

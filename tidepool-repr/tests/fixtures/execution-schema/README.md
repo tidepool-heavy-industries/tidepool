@@ -6,10 +6,8 @@ with `cd haskell && cabal run execution-schema-projection -- test-prepared-stg/f
 The envelope has 13 fields: field 10 is a program-wide postorder expression
 arena, field 11 holds top binding groups with body indices into that arena,
 and field 12 is the entry value ID. Each structural child index precedes its
-parent. The older
-`plans/parallel-dogfood/next-wave/m3-wire-contract-r7.md` records the M3
-contract before this flat encoding revision.
-It retains an
+parent, an encoding revision past the older CBOR wire contract this fixture
+once recorded (git history has that version). It retains an
 imported value, a recursive local control path and a strict constructor field.
 The projection test must inspect the prepared form before claiming those shapes.
 

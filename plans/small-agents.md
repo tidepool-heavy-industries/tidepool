@@ -1,10 +1,10 @@
 # Small agents as typed, programmable components
 
-Implementation entry: [current next-run priority](../NEXT.md) and
-[the Shoal pilot vision](next/sol-worker-routing.md). The latter
-supersedes the older default-full-prefix and numeric-first sequencing in this
-document. This document retains broader typed-worker and authority requirements;
-the numeric [read-only tranche](next/small-workers.md) is a later application.
+Implementation entry: [current next-run priority](../NEXT.md). The Shoal
+pilot vision it describes supersedes the older default-full-prefix and
+numeric-first sequencing in this document. This document retains broader
+typed-worker and authority requirements; the numeric
+[read-only tranche](next/small-workers.md) is a later application.
 Build for practical efficacy and improve recursively through real work; a
 comparative evaluation campaign is not the implementation method.
 
@@ -170,8 +170,6 @@ provider-input equality. Build the effective design directly and improve it
 through use, without making a comparative evaluation campaign a prerequisite.
 
 ## Later application: numeric repair work
-
-See [the floating-point bug report](../FLOATING_POINT_BUG_REPORT.md).
 
 1. A full-context coordinator defines numeric cases, observations and discrepancy
    semantics, along with real engine/oracle adapters.

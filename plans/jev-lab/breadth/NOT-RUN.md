@@ -1,9 +1,9 @@
 # Ideas not run, and the ones I would pick up first
 
 The survey is closed. This is what was on the list and did not get run, so that
-a later wave does not re-derive it. `PLAN.md` holds the full original list with
-each item's basis and fixture; this file records what happened to it and adds
-what today's results suggest.
+a later wave does not re-derive it. The full original list with each item's
+basis and fixture is git history; this file records what happened to it and
+adds what today's results suggest.
 
 ## The five I would run first
 
@@ -37,16 +37,16 @@ fact.
 report formats, judged from named perspectives that disagree: a newcomer's
 comprehension, an experienced user's precision, whether the repair is
 actionable. The disagreement between perspectives is likely more useful than any
-single quality score. `50-error-message-lint.hs` is the starting point and it
-already found two messages worth rewriting.
+single quality score. A cell over the repository's own error messages already
+found two worth rewriting, and is the starting point for this.
 
 ## Also worth doing, lower priority
 
 **Contextual tool-output selection.** Current task plus recent turns plus a tool
 output, selecting the useful passages and keeping addresses for everything
-omitted. Half of this exists as the adaptive view idea in `PLAN.md` and was
-never run. The consumer interview already told us a count warns and does not
-help, while an address list does both.
+omitted. Half of this exists as an adaptive-view idea from the closed survey
+and was never run. The consumer interview already told us a count warns and
+does not help, while an address list does both.
 
 **Steering fan-out that actually forwards.** Run 7's root received operator
 steering and forwarded none of it. Per live child, whether the steering changes
@@ -107,7 +107,8 @@ effect row carries no generation effect, so this needs a real child actor and a
 turn of its time. Not worth a session on its own; fold it into a dogfood run if
 it still looks interesting.
 
-**Position in the survey for its own sake.** Several items in `PLAN.md` were
-variations on patterns that had already answered their question, among them the
-novelty check on progress notes, friction deduplication, and the handoff brief
-to action list. They are cheap and none of them would change a decision we face.
+**Position in the survey for its own sake.** Several items in the closed
+survey's original list were variations on patterns that had already answered
+their question, among them the novelty check on progress notes, friction
+deduplication, and the handoff brief to action list. They are cheap and none
+of them would change a decision we face.

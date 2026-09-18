@@ -4,7 +4,7 @@
 
 This is the earlier self-harness design for `harness-dogfooding/devswarm/`.
 It is not the current Shoal implementation plan or a live campaign assignment.
-[NEXT.md](../NEXT.md) and the [planned-swarm vision](next/planned-swarm.md) own
+[NEXT.md](../NEXT.md) owns
 the current direction: Astra-authored plans, Sol execution and tagged Astra work,
 with application acceptance outside the self-hosting repository. The migration
 proposals below concern this self-harness and are not prerequisites for that mode.

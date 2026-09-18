@@ -2,13 +2,13 @@
 
 Status: the actor substrate and persistent reply/watch vertical are landed.
 The `Complete`/interactive `AgentAction` portions later in this document are a
-superseded design record; the current contract is
-[persistent applications, typed replies, and watches](persistent-applications-replies-and-watches.md)
-and the current inventory is [implementation status](implementation.md).
-The older process-fork-shaped `forkActors` discussion is refined by
-[cache-preserving context unfold](cache-preserving-context-unfold.md), which
-is canonical for interactive application forks, effect-list narrowing, and
-the model-facing unfold/fold surface.
+superseded design record; the current contract lives in
+`tidepool-actor/src/request.rs` and `tidepool-actor/CLAUDE.md`, and the
+current inventory is [implementation status](implementation.md). The older
+process-fork-shaped `forkActors` discussion is refined by
+[cache-preserving context unfold](../../SHOAL.md#cache-preserving-context-unfold),
+which is canonical for interactive application forks, effect-list narrowing,
+and the model-facing unfold/fold surface.
 
 ## 1. The unit of execution
 
@@ -389,8 +389,9 @@ Reusable structures such as OODA, research, review, or revision loops are
 ordinary Haskell libraries. They may expose typed points at which the actor's
 model can supply judgment or new code. The authored loop fixes the replacement
 interface, validation, and rollback policy; the model may define any private
-types or helpers needed to satisfy it. Concrete Haskell patterns live in
-[haskell-surface.md](haskell-surface.md#8-self-improving-behavior).
+types or helpers needed to satisfy it. Concrete Haskell patterns for this are
+in the shipped `Tidepool.Actors`/`Tidepool.Agent` surface, not a planning
+document.
 
 This is the central abstraction boundary: dynamic model-authored work happens
 inside typed holes in a fixed program, while the values produced there can
@@ -407,8 +408,8 @@ data Reviewer result where
 ```
 
 An `ActorRef Reviewer ReviewerExit` can then be used without a JSON schema.
-The concrete typed operations are defined in
-[haskell-surface.md](haskell-surface.md).
+The concrete typed operations are defined in the shipped Haskell effect
+surface, not a planning document.
 
 The request and result may contain closures, actor references, or opaque
 capabilities. The Haskell type relates each request constructor to its result.
@@ -755,8 +756,8 @@ Starting a definition is not ambient inheritance.
 ### Fork
 
 For interactive agent applications, the canonical public contract is now
-[cache-preserving context unfold](cache-preserving-context-unfold.md). It
-supersedes this section's public process-style continuation wrapper and its
+[cache-preserving context unfold](../../SHOAL.md#cache-preserving-context-unfold).
+It supersedes this section's public process-style continuation wrapper and its
 requirement to preserve the exact effect profile: the parent receives typed
 persistent handles, children begin new request activations, and each child's
 effect list may narrow. The immutable provider/Haskell snapshot and
