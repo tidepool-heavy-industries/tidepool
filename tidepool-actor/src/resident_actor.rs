@@ -4663,6 +4663,12 @@ where
                     crate::lookup_tool::PreparedLookupKind::Name(name) => {
                         Some(InspectionQuery::Info(name.clone()))
                     }
+                    crate::lookup_tool::PreparedLookupKind::Module(module) => {
+                        Some(InspectionQuery::Browse {
+                            module: module.clone(),
+                            expanded: false,
+                        })
+                    }
                     crate::lookup_tool::PreparedLookupKind::Type(query) => {
                         Some(InspectionQuery::TypeSearch(query.clone()))
                     }
@@ -4678,7 +4684,12 @@ where
                     .await
                     .map_err(|error| workbench_failure(&[], 0, 1, error))?
             };
-            let response = lookup_response(prepared, inspected, &live_modules);
+            let response = lookup_response(
+                prepared,
+                inspected,
+                &live_modules,
+                workbench.workspace_modules(),
+            );
             return Ok(KernelStep::Continue(workbench_response(
                 WorkbenchRunStatus::Committed,
                 vec![WorkbenchItemReceipt {
@@ -7189,6 +7200,7 @@ fn lookup_response(
     prepared: Vec<crate::lookup_tool::PreparedLookup>,
     inspected: Vec<InspectionResult>,
     live_modules: &[String],
+    workspace_modules: &[String],
 ) -> crate::lookup_tool::LookupResponse {
     use crate::lookup_tool::{
         LookupEntry, LookupEntryKind, LookupOrigin, LookupOutcome, LookupResult, MatchQuality,
@@ -7204,7 +7216,10 @@ fn lookup_response(
                 query: prepared.query,
                 outcome: LookupOutcome::Rejected { diagnostic },
             },
-            PreparedLookupKind::Doc(topic) => match crate::prompt_catalog::workbench_doc(&topic) {
+            PreparedLookupKind::Doc(topic) => match crate::prompt_catalog::workbench_doc(
+                &topic,
+                workspace_modules,
+            ) {
                 Ok(body) => LookupResult::found(
                     prepared.query,
                     vec![LookupEntry {
@@ -7241,6 +7256,36 @@ fn lookup_response(
                     MATCH_LIMIT,
                 ),
                 Some(InspectionResult::NotFound { .. }) => LookupResult {
+                    query: prepared.query,
+                    outcome: LookupOutcome::NotFound,
+                },
+                Some(InspectionResult::Rejected { diagnostic }) => LookupResult {
+                    query: prepared.query,
+                    outcome: LookupOutcome::Rejected { diagnostic },
+                },
+                Some(other) => LookupResult {
+                    query: prepared.query,
+                    outcome: LookupOutcome::Rejected {
+                        diagnostic: format!("lookup worker returned unexpected result: {other:?}"),
+                    },
+                },
+                None => LookupResult {
+                    query: prepared.query,
+                    outcome: LookupOutcome::Rejected {
+                        diagnostic: "lookup worker omitted a result".into(),
+                    },
+                },
+            },
+            PreparedLookupKind::Module(_) => match inspected.next() {
+                Some(InspectionResult::Browse { entries, .. }) => LookupResult::found(
+                    prepared.query,
+                    entries
+                        .into_iter()
+                        .map(|entry| info_lookup_entry(entry, live_modules))
+                        .collect(),
+                    MATCH_LIMIT,
+                ),
+                Some(InspectionResult::ModuleNotFound { .. }) => LookupResult {
                     query: prepared.query,
                     outcome: LookupOutcome::NotFound,
                 },
@@ -7397,6 +7442,7 @@ mod tests {
                 },
             ],
             &[],
+            &[],
         );
         assert_eq!(response.results.len(), 3);
         assert!(matches!(
@@ -7423,6 +7469,64 @@ mod tests {
             structured["results"][2]["outcome"]["matches"][0]["availability"],
             "available"
         );
+    }
+
+    #[test]
+    fn module_shaped_lookup_renders_a_browse_result() {
+        let prepared = crate::lookup_tool::prepare(serde_json::json!({
+            "queries": ["Project.Investigate"]
+        }))
+        .unwrap();
+        assert_eq!(
+            prepared[0].kind,
+            crate::lookup_tool::PreparedLookupKind::Module("Project.Investigate".into())
+        );
+        let response = lookup_response(
+            prepared,
+            vec![InspectionResult::Browse {
+                module: "Project.Investigate".into(),
+                expanded: false,
+                entries: vec![InfoEntry {
+                    name: "investigate".into(),
+                    module: Some("Project.Investigate".into()),
+                    kind: "value".into(),
+                    display: "investigate :: FilePath -> IO ()".into(),
+                    availability: InspectionAvailability::Available,
+                }],
+            }],
+            &[],
+            &[],
+        );
+        assert_eq!(response.results.len(), 1);
+        assert!(matches!(
+            response.results[0].outcome,
+            crate::lookup_tool::LookupOutcome::Found { .. }
+        ));
+        assert!(response
+            .render_text()
+            .contains("investigate :: FilePath -> IO ()"));
+    }
+
+    #[test]
+    fn unresolved_module_shaped_lookup_is_a_clean_no_match_not_an_error() {
+        let prepared = crate::lookup_tool::prepare(serde_json::json!({
+            "queries": ["No.Such.Module"]
+        }))
+        .unwrap();
+        let response = lookup_response(
+            prepared,
+            vec![InspectionResult::ModuleNotFound {
+                module: "No.Such.Module".into(),
+            }],
+            &[],
+            &[],
+        );
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(
+            response.results[0].outcome,
+            crate::lookup_tool::LookupOutcome::NotFound
+        );
+        assert_eq!(response.render_text(), "No.Such.Module\n  no match");
     }
 
     #[test]

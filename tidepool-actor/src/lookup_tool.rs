@@ -16,6 +16,9 @@ Prefix a type query with `::`; use `doc` for topics or `doc <topic>` for a topic
 Type search is Hoogle-like and needs a complete type: use `_` to wildcard an \
 unknown part and qualify types as they are imported, e.g. \
 `:: Cmd.Command -> _` finds functions from `Cmd.Command` to anything. \
+A dotted capitalized name, e.g. `Project.Investigate`, browses that module's \
+exports instead of looking up one identifier; see `doc topics` for the \
+workspace's own modules. \
 Callable results show current-row availability; `unknown` needs more type \
 information. Resource grants are checked when an operation executes. \
 A bare string is also accepted as one query. \
@@ -37,9 +40,32 @@ pub(crate) struct PreparedLookup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PreparedLookupKind {
     Name(String),
+    Module(String),
     Type(String),
     Doc(String),
     Rejected(String),
+}
+
+/// A dotted, capitalized identifier such as `Project.Investigate` names a
+/// module and is browsed rather than looked up by name. A qualified value or
+/// constructor reference (`Cmd.run`, `Data.Text.pack`) has a lowercase-led
+/// final segment and is left as a `Name` query exactly as before; so does a
+/// bare capitalized word (`Maybe`) with no dot at all, since that is how a
+/// type or constructor is already found today.
+fn looks_like_module(candidate: &str) -> bool {
+    let mut segments = 0;
+    for segment in candidate.split('.') {
+        segments += 1;
+        let mut chars = segment.chars();
+        match chars.next() {
+            Some(first) if first.is_ascii_uppercase() => {}
+            _ => return false,
+        }
+        if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\'') {
+            return false;
+        }
+    }
+    segments >= 2
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -127,6 +153,8 @@ pub(crate) fn prepare(
                         PreparedLookupKind::Rejected("documentation query accepts one topic".into())
                     }
                 }
+            } else if looks_like_module(trimmed) {
+                PreparedLookupKind::Module(trimmed.into())
             } else {
                 PreparedLookupKind::Name(trimmed.into())
             };
@@ -382,6 +410,38 @@ mod tests {
             prepared[4].kind,
             PreparedLookupKind::Name("awaitSettled".into())
         );
+    }
+
+    #[test]
+    fn dotted_capitalized_query_is_a_module_lookup_and_other_names_are_unchanged() {
+        let prepared = prepare(serde_json::json!({
+            "queries": [
+                "Project.Investigate",
+                "Tidepool.Actor.Record",
+                "Cmd.run",
+                "awaitSettled",
+                "Maybe",
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            prepared[0].kind,
+            PreparedLookupKind::Module("Project.Investigate".into())
+        );
+        assert_eq!(
+            prepared[1].kind,
+            PreparedLookupKind::Module("Tidepool.Actor.Record".into())
+        );
+        // A qualified value (lowercase-led final segment) is a Name query,
+        // exactly as before module detection existed.
+        assert_eq!(prepared[2].kind, PreparedLookupKind::Name("Cmd.run".into()));
+        assert_eq!(
+            prepared[3].kind,
+            PreparedLookupKind::Name("awaitSettled".into())
+        );
+        // A bare capitalized word with no dot stays a Name query too — that is
+        // how a type or constructor is already found today.
+        assert_eq!(prepared[4].kind, PreparedLookupKind::Name("Maybe".into()));
     }
 
     #[test]
