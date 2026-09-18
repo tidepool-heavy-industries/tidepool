@@ -44,6 +44,7 @@ pub mod recipe_check;
 pub mod reflect;
 pub mod run_llm_turn;
 pub mod sleep;
+pub mod source;
 pub mod subagent;
 pub mod worktree;
 pub mod worktree_facades;
@@ -93,6 +94,7 @@ pub fn all() -> Vec<Effect> {
         agent_tools::agent_tools(),
         agent_session::agent_session(),
         reflect::reflect(),
+        source::source(),
         worktree_facades::bound_worktree(),
         worktree_facades::worktree_registry(),
         worktree_facades::worktree_allocation(),

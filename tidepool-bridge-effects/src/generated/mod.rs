@@ -3,9 +3,11 @@
 pub mod commands;
 pub mod reflect;
 pub mod repo_event;
+pub mod source;
 pub mod worktree;
 
 pub use commands::*;
 pub use reflect::*;
 pub use repo_event::*;
+pub use source::*;
 pub use worktree::*;

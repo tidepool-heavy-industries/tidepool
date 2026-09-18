@@ -130,12 +130,15 @@ const APPLICATION_TASK_GRACE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 type ShoalHandlerStack = HCons<
-    ActorBoundWorktreeHandler,
+    tidepool_handlers::SourceHandler,
     HCons<
-        ActorWorktreeRegistryHandler,
+        ActorBoundWorktreeHandler,
         HCons<
-            ActorWorktreeAllocationHandler,
-            HCons<ActorWorktreeIntegrationHandler, HCons<ActorWorktreeHandler, HNil>>,
+            ActorWorktreeRegistryHandler,
+            HCons<
+                ActorWorktreeAllocationHandler,
+                HCons<ActorWorktreeIntegrationHandler, HCons<ActorWorktreeHandler, HNil>>,
+            >,
         >,
     >,
 >;
@@ -737,7 +740,11 @@ impl DurableActorEvent {
             .and_then(|start| i64::try_from(occurred).ok()?.checked_sub(start))
             .filter(|elapsed| *elapsed >= 0)
         {
-            Some(ms) => format!("+{}m{:02}s into your session", ms / 60_000, (ms / 1000) % 60),
+            Some(ms) => format!(
+                "+{}m{:02}s into your session",
+                ms / 60_000,
+                (ms / 1000) % 60
+            ),
             None => "elapsed time unavailable".to_owned(),
         };
         match self {
@@ -1751,6 +1758,7 @@ pub(crate) fn shoal_effect_declarations() -> Vec<tidepool_mcp::EffectDecl> {
         tidepool_mcp::actor_kernel_decl(),
         tidepool_mcp::actor_local_decl(),
         tidepool_mcp::reflect_decl(),
+        tidepool_mcp::source_decl(),
         tidepool_mcp::sleep_decl(),
         tidepool_mcp::fs_read_decl(),
         tidepool_mcp::worktree_decl(),
@@ -1795,16 +1803,43 @@ pub(crate) fn typecheck_candidate_revision(
     candidate: &[PathBuf],
     extra_modules: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    compile_driver(
+    // A scratch session root, never the live swarm's. The check compiles a
+    // driver turn, and a turn writes generated modules under its session root;
+    // pointing that at the running session would let a rejected candidate
+    // disturb the very graph this check exists to protect.
+    let scratch = run_root
+        .join("reload-checks")
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&scratch)?;
+    let checked = compile_driver(
         haskell_root,
         Some(inputs),
-        run_root,
+        &scratch,
         Some(CandidateSources {
             include: candidate,
             extra_modules,
         }),
-    )?;
+    );
+    let _ = std::fs::remove_dir_all(&scratch);
+    checked?;
     Ok(())
+}
+
+/// The run's `Source` handler. A run without a frozen workspace has no
+/// declared source roots, so there is nothing a reload could honestly read;
+/// that case answers `SourceUnavailable` rather than reloading nothing.
+fn source_handler(config: &ActorHostConfig, run_root: &Path) -> tidepool_handlers::SourceHandler {
+    match &config.workspace_inputs {
+        Some(inputs) => tidepool_handlers::SourceHandler::new(std::sync::Arc::new(
+            crate::shoal::source::ShoalSourceReload::new(
+                inputs.clone(),
+                config.workspace.clone(),
+                run_root.to_path_buf(),
+                config.haskell_root.clone(),
+            ),
+        )),
+        None => tidepool_handlers::SourceHandler::unavailable(),
+    }
 }
 
 /// The active source layer a driver compile reads, when it is not the one the
@@ -1941,6 +1976,7 @@ fn compile_root(
         &compiled.expr,
         compiled.table.clone(),
         hlist![
+            source_handler(config, run_root),
             ActorBoundWorktreeHandler::new(worktree_handler.clone()),
             ActorWorktreeRegistryHandler::new(worktree_handler.clone()),
             ActorWorktreeAllocationHandler::new(worktree_handler.clone()),
@@ -5912,7 +5948,8 @@ mod tests {
         // the send itself. It used to be accepted, leaving the caller to learn
         // from a second observation that nobody would ever see it — which is
         // too late to steer anything.
-        let late = dispatch_haskell_script(root.as_ref(), "updateRequest answer \"too late\"").await;
+        let late =
+            dispatch_haskell_script(root.as_ref(), "updateRequest answer \"too late\"").await;
         assert!(
             late.to_string().contains("Left ReplyAlreadySettled"),
             "{late:?}"

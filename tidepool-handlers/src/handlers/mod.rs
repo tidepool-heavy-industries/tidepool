@@ -12,6 +12,7 @@ mod journal_version;
 pub mod kv;
 pub mod llm;
 pub mod meta;
+pub mod source;
 pub mod time;
 pub mod worktree;
 
@@ -28,5 +29,6 @@ pub use journal::*;
 pub use kv::*;
 pub use llm::*;
 pub use meta::*;
+pub use source::*;
 pub use time::*;
 pub use worktree::*;

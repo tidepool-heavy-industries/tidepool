@@ -205,8 +205,8 @@ impl JevClient {
             });
         }
 
-        let parsed: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|e| JevFailure::Malformed(e.to_string()))?;
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| JevFailure::Malformed(e.to_string()))?;
 
         let resolved = parsed
             .get("model")
@@ -280,13 +280,11 @@ mod tests {
             r#"{"model":"jev-latest","usage":{"tokens":3}}"#,
             Duration::ZERO,
         );
-        let client =
-            JevClient::with_key(config(url), Some("test-key".to_string())).unwrap();
+        let client = JevClient::with_key(config(url), Some("test-key".to_string())).unwrap();
         let result = client.ask(serde_json::json!({"q": "hi"})).await.unwrap();
         assert_eq!(result["model"], "jev-latest");
 
-        let received = String::from_utf8_lossy(&task.join().unwrap())
-            .to_ascii_lowercase();
+        let received = String::from_utf8_lossy(&task.join().unwrap()).to_ascii_lowercase();
         assert!(received.starts_with("post /v1/systemone"));
         assert!(received.contains("authorization: bearer test-key"));
     }
@@ -294,8 +292,7 @@ mod tests {
     #[tokio::test]
     async fn non_2xx_is_http_failure() {
         let (url, task) = server("422 Unprocessable Entity", "bad request", Duration::ZERO);
-        let client =
-            JevClient::with_key(config(url), Some("test-key".to_string())).unwrap();
+        let client = JevClient::with_key(config(url), Some("test-key".to_string())).unwrap();
         let err = client.ask(serde_json::json!({})).await.unwrap_err();
         assert_eq!(
             err,
@@ -311,8 +308,7 @@ mod tests {
     async fn oversized_body_is_body_limit() {
         let body = "x".repeat(MAX_BODY + 1);
         let (url, task) = server("200 OK", &body, Duration::ZERO);
-        let client =
-            JevClient::with_key(config(url), Some("test-key".to_string())).unwrap();
+        let client = JevClient::with_key(config(url), Some("test-key".to_string())).unwrap();
         let err = client.ask(serde_json::json!({})).await.unwrap_err();
         assert_eq!(err, JevFailure::BodyLimit);
         task.join().unwrap();
@@ -382,6 +378,11 @@ mod tests {
         let answer = &response["answers"]["place"];
         assert_eq!(answer["type"], "choice", "{response}");
         assert_eq!(answer["choice"], "windowsill", "{response}");
-        assert!(response["model"].as_str().is_some_and(|m| m.starts_with("jev")), "{response}");
+        assert!(
+            response["model"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("jev")),
+            "{response}"
+        );
     }
 }

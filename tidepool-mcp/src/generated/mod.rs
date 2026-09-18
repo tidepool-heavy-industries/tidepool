@@ -27,6 +27,7 @@ pub mod reflect;
 pub mod repo_event;
 pub mod run_l_l_m_turn;
 pub mod sleep;
+pub mod source;
 pub mod worktree;
 pub mod worktree_allocation;
 pub mod worktree_integration;
@@ -59,6 +60,7 @@ pub use reflect::*;
 pub use repo_event::*;
 pub use run_l_l_m_turn::*;
 pub use sleep::*;
+pub use source::*;
 pub use worktree::*;
 pub use worktree_allocation::*;
 pub use worktree_integration::*;
@@ -94,6 +96,7 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         agent_tools_decl(),
         agent_session_decl(),
         reflect_decl(),
+        source_decl(),
         bound_worktree_decl(),
         worktree_registry_decl(),
         worktree_allocation_decl(),

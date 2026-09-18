@@ -1665,6 +1665,8 @@ pub enum OuterEffect {
     Exec,
     /// The durable run journal.
     Journal,
+    /// The run's live workspace source layer.
+    Source,
 }
 
 /// The extractor's per-verb call-site policy, for the few verbs it rewrites.

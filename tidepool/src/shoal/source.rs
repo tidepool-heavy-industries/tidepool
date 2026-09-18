@@ -169,7 +169,11 @@ impl SourceLayer {
         self.capture_roots(frozen, &roots)
     }
 
-    fn capture_roots(&self, frozen: &FrozenWorkspace, roots: &[PathBuf]) -> Result<PendingRevision> {
+    fn capture_roots(
+        &self,
+        frozen: &FrozenWorkspace,
+        roots: &[PathBuf],
+    ) -> Result<PendingRevision> {
         let pending = self
             .revisions()
             .join(format!(".pending-{}", uuid::Uuid::new_v4()));
@@ -192,10 +196,10 @@ impl SourceLayer {
         // the same ordering `freeze` uses for `Shoal/Workspace.hs`.
         let mut domain = DOMAIN.to_vec();
         domain.extend_from_slice(frozen.identity().as_bytes());
-        let captured_roots: Vec<PathBuf> =
-            (0..roots.len()).map(|index| pending.join(index.to_string())).collect();
-        let identity =
-            tidepool_runtime::cache::source_roots_identity(&domain, &captured_roots);
+        let captured_roots: Vec<PathBuf> = (0..roots.len())
+            .map(|index| pending.join(index.to_string()))
+            .collect();
+        let identity = tidepool_runtime::cache::source_roots_identity(&domain, &captured_roots);
         let modules = revision_modules(&pending, roots.len());
 
         std::fs::create_dir_all(pending.join("resources/Shoal/Source"))?;
@@ -267,6 +271,118 @@ impl SourceLayer {
         candidate: &SourceRevision,
     ) -> Vec<String> {
         candidate.changed_since(active)
+    }
+}
+
+/// The run's answer to the `Source` effect.
+///
+/// It owns the three things a reload needs and nothing else: the run's frozen
+/// workspace, where its authored source lives, and the source layer it
+/// publishes into. The compile that decides whether a candidate is acceptable
+/// is the run's ordinary driver compile, so a reload is checked by exactly the
+/// compiler the run uses.
+pub(crate) struct ShoalSourceReload {
+    frozen: FrozenWorkspace,
+    workspace: PathBuf,
+    run_root: PathBuf,
+    haskell_root: PathBuf,
+    layer: SourceLayer,
+    /// One reload at a time: step 5 and step 6 of a publication must not
+    /// interleave with another actor's.
+    gate: parking_lot::Mutex<()>,
+}
+
+impl ShoalSourceReload {
+    pub(crate) fn new(
+        frozen: FrozenWorkspace,
+        workspace: PathBuf,
+        run_root: PathBuf,
+        haskell_root: PathBuf,
+    ) -> Self {
+        let layer = SourceLayer::new(&run_root);
+        Self {
+            frozen,
+            workspace,
+            run_root,
+            haskell_root,
+            layer,
+            gate: parking_lot::Mutex::new(()),
+        }
+    }
+
+    fn wire(revision: &SourceRevision) -> tidepool_bridge_effects::SrRevision {
+        tidepool_handlers::revision_to_wire(
+            &revision.identity,
+            revision.generation,
+            &revision.modules,
+        )
+    }
+}
+
+fn unreadable(error: Box<dyn std::error::Error>) -> tidepool_handlers::SourceError {
+    tidepool_handlers::SourceError::SourceUnreadable(error.to_string())
+}
+
+impl tidepool_handlers::SourceReloadService for ShoalSourceReload {
+    fn reload(
+        &self,
+        also_check: &[String],
+    ) -> std::result::Result<tidepool_bridge_effects::SrReloadOutcome, tidepool_handlers::SourceError>
+    {
+        use tidepool_bridge_effects::SrReloadOutcome;
+        let _one_at_a_time = self.gate.lock();
+        let active = self.layer.ensure_active(&self.frozen).map_err(unreadable)?;
+        let pending = self
+            .layer
+            .capture_from_workspace(&self.frozen, &self.workspace)
+            .map_err(unreadable)?;
+        if pending.revision().identity == active.identity {
+            return Ok(SrReloadOutcome::ReloadUnchanged(Self::wire(&active)));
+        }
+        let candidate = pending.include_paths(self.frozen.captured_source_roots().len());
+        if let Err(error) = crate::actor_host::typecheck_candidate_revision(
+            &self.frozen,
+            &self.run_root,
+            &self.haskell_root,
+            &candidate,
+            also_check,
+        ) {
+            // Nothing moved: the active symlink still points where it did, and
+            // the edited files are exactly as the caller wrote them.
+            return Ok(SrReloadOutcome::ReloadRejected(
+                Self::wire(&active),
+                Self::wire(pending.revision()),
+                error.to_string(),
+            ));
+        }
+        let changed = self.layer.changed_modules(&active, pending.revision());
+        let published = self.layer.publish(pending).map_err(unreadable)?;
+        Ok(SrReloadOutcome::ReloadPublished(
+            Self::wire(&active),
+            Self::wire(&published),
+            changed,
+        ))
+    }
+
+    fn status(
+        &self,
+    ) -> std::result::Result<tidepool_bridge_effects::SrStatus, tidepool_handlers::SourceError>
+    {
+        let _one_at_a_time = self.gate.lock();
+        let active = self.layer.ensure_active(&self.frozen).map_err(unreadable)?;
+        let disk = self
+            .layer
+            .capture_from_workspace(&self.frozen, &self.workspace)
+            .map_err(unreadable)?;
+        let disk = if disk.revision().identity == active.identity {
+            active.clone()
+        } else {
+            disk.revision().clone()
+        };
+        Ok(tidepool_bridge_effects::SrStatus {
+            active: Self::wire(&active),
+            disk: Self::wire(&disk),
+        })
     }
 }
 

@@ -1857,9 +1857,9 @@ pub fn render_worktree_error(error: &WorktreeError) -> String {
              lost",
             id.raw
         ),
-        WorktreeError::InvalidRegistryRoot(root, detail) => format!(
-            "registry root {root} must live outside every source repository: {detail}"
-        ),
+        WorktreeError::InvalidRegistryRoot(root, detail) => {
+            format!("registry root {root} must live outside every source repository: {detail}")
+        }
         WorktreeError::StorageFailure(path, detail) => {
             format!("Tidepool's own storage failed at {path}: {detail}")
         }
