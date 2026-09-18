@@ -16,6 +16,21 @@ fn examples(document: &str) -> impl Iterator<Item = &str> {
         .map(|block| block.split_once("```").unwrap().0)
 }
 
+/// The shown part of a paged cell display, with its trailing selection marker
+/// removed. The marker names the binding the rest stays in, so its exact text
+/// varies with the cell's generation; what every paged display must say is
+/// that the view is a selection and how to continue it.
+fn selection_page<'a>(output: &'a str, context: &str) -> &'a str {
+    let (page, marker) = output
+        .split_once("\n[selection of ")
+        .unwrap_or_else(|| panic!("a paged display must mark its selection: {context}"));
+    assert!(
+        marker.ends_with("; display continues: cellDisplay.more]"),
+        "{context}"
+    );
+    page
+}
+
 async fn committed(
     policy: &dyn tidepool_actor::ResidentToolEndpoint,
     source: &str,
@@ -45,9 +60,7 @@ async fn notebook_display_pages_large_text_and_exhausts_continuation() {
     let output = first["items"].as_array().unwrap().last().unwrap()["output"]
         .as_str()
         .unwrap();
-    let marker = "\n[display continues: cellDisplay.more]";
-    assert!(output.ends_with(marker), "{first}");
-    let page = output.strip_suffix(marker).unwrap();
+    let page = selection_page(output, "{first}");
     assert_eq!(page.len(), 8192, "{first}");
     assert!(page.bytes().all(|byte| byte == b'x'), "{first}");
     assert!(!output.contains("Display failed"), "{first}");
@@ -69,10 +82,8 @@ async fn notebook_display_shares_one_allowance_between_console_and_result() {
     let first = committed(policy, include_str!("notebook_display_console_budget.hs")).await;
     assert_eq!(first["items"][0]["kind"], "declaration", "{first}");
     let output = first["items"][1]["output"].as_str().unwrap();
-    let marker = "\n[display continues: cellDisplay.more]";
-    assert!(output.ends_with(marker), "{first}");
     assert!(!output.contains("Display failed"), "{first}");
-    let visible = output.strip_suffix(marker).unwrap();
+    let visible = selection_page(output, "{first}");
     let printed = visible.bytes().filter(|byte| *byte == b'p').count();
     let shown = visible.bytes().filter(|byte| *byte == b'v').count();
     assert_eq!(printed, 6000, "{first}");
@@ -167,7 +178,7 @@ async fn notebook_display_page_capture_survives_observation_window() {
         first["items"][0]["output"]
             .as_str()
             .unwrap()
-            .contains("[display continues: cellDisplay.more]"),
+            .contains("; display continues: cellDisplay.more]"),
         "{first}"
     );
     committed(policy, "savedPage <- pure cellDisplay").await;

@@ -3076,8 +3076,20 @@ where
         .run_inspection_with_sites(compiled.code())
         .map_err(ResidentActorWorkbenchError::Resident)?
     {
-        ResidentOutcome::Completed { result, .. } => T::from_value(result.value(), result.table())
-            .map_err(|error| ResidentActorWorkbenchError::Inspection(error.to_string())),
+        ResidentOutcome::Completed { result, .. } => {
+            // A bounded observation cuts what it cannot afford to materialize
+            // and marks the cut. That is a size answer, not a shape one, so
+            // report it as such rather than letting the decoder call it a type
+            // mismatch.
+            if tidepool_codegen::heap_bridge::contains_oversize_sentinel(result.value()) {
+                return Err(ResidentActorWorkbenchError::Inspection(format!(
+                    "reading {expression} exceeded the observation budget; only a selection of it \
+                     could be materialized"
+                )));
+            }
+            T::from_value(result.value(), result.table())
+                .map_err(|error| ResidentActorWorkbenchError::Inspection(error.to_string()))
+        }
         _ => Err(ResidentActorWorkbenchError::Inspection(
             "pure preview unexpectedly suspended".into(),
         )),
@@ -3172,7 +3184,15 @@ where
         ));
     }
     let lease = session.lease_bindings(&[tidepool_repr::VarId(page.var_id)]);
-    let metadata = format!("(TidepoolInspection.text {page_name}, TidepoolInspection.pageHasMore {page_name}, TidepoolInspection.pageUnavailable {page_name})");
+    // `T.copy` is load-bearing, not decoration. A page's text is built by
+    // `renderTree`, which ends in `T.concat`, and `T.concat` of a single piece
+    // is the identity — so displaying one big `Text` hands back a SLICE
+    // (`Text ByteArray# off len`) of the whole value's backing array. The host
+    // then has to copy that entire array to read the allowance-sized window,
+    // and a value past the observation budget could never be displayed at all,
+    // however small its bounded rendering was. Crossing a copy means the host
+    // pays for what it shows.
+    let metadata = format!("(T.copy (TidepoolInspection.text {page_name}), TidepoolInspection.pageHasMore {page_name}, TidepoolInspection.pageUnavailable {page_name})");
     let (text, more, unavailable): (String, bool, bool) = inspect_rendered_value(
         session,
         context,
@@ -3224,7 +3244,14 @@ where
         .map_err(ResidentActorWorkbenchError::Resident)?;
     let mut output = text;
     if more {
-        output.push_str("\n[display continues: cellDisplay.more]");
+        // A partial view must never read as the whole one. Say that it is a
+        // selection, name the binding that holds the rest, and give the one
+        // call that continues it. The binding is the retained observation
+        // applied to `()` — the same expression this page was rendered from —
+        // so what is named here is what a later cell can paste.
+        output.push_str(&format!(
+            "\n[selection of {observation} (); display continues: cellDisplay.more]"
+        ));
     }
     if unavailable {
         output.push_str("\n[custom renderer omitted detail without a continuation]");

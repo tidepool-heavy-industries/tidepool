@@ -874,21 +874,40 @@ fn finish_prepared<H: DispatchEffect<O>, O>(
         realm = resumed.realm;
         settlement = resumed.settlement;
     };
-    let observe =
-        |engine: &mut super::prepared::PreparedEngine, handle: PreparedHandle| match engine
-            .observe(program, handle)
-        {
-            Ok(value) => Ok(value),
+    match plan {
+        // A bare expression's value is DISPLAYED, so unlike a bind this arm
+        // really does need a `Value`. But the budget that bounds
+        // materialization is a display limit, and a display limit must not
+        // discard a run whose effects are already committed. So an exhausted
+        // budget is answered with a bounded SELECTION of the value rather than
+        // a rejection: the walk is redone under
+        // `BudgetPolicy::Bounded`, which stops where the budget ran out and
+        // leaves `OVERSIZE_SENTINEL` at each cut. The handle is kept on that
+        // path exactly as on the successful one, so the part the cut omitted
+        // stays reachable through the binding the caller installs (a workbench
+        // expression is named `observationN` and bound before it is shown).
+        //
+        // The full materializer runs FIRST and unchanged: every observation
+        // the budget can afford behaves to the byte as it always did, and the
+        // second, bounded walk only ever happens where the old code was about
+        // to fail outright. Forcing is memoized, so redoing the walk re-reads
+        // what the first one already evaluated instead of recomputing it.
+        SettlePlan::Observe => match engine.observe(program, handle) {
+            Ok(value) => Ok(PreparedRun::Done { handle, value }),
+            Err(error) if is_observation_budget_exhausted(&error) => {
+                match engine.observe_bounded(program, handle) {
+                    Ok(value) => Ok(PreparedRun::Done { handle, value }),
+                    Err(error) => {
+                        engine.release(handle);
+                        Err(error)
+                    }
+                }
+            }
             Err(error) => {
                 engine.release(handle);
                 Err(error)
             }
-        };
-    match plan {
-        SettlePlan::Observe => {
-            let value = observe(engine, handle)?;
-            Ok(PreparedRun::Done { handle, value })
-        }
+        },
         // A bind's value is the RETAINED HANDLE, which
         // `run_entry_retained` produced without consulting any budget, and
         // whose receipt renders binder names rather than the value

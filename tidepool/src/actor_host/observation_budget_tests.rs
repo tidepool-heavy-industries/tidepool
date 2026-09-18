@@ -12,7 +12,13 @@
 //! budget discarded a sound binding — along with every effect already
 //! committed to produce it.
 //!
-//! Both tests below are drawn from cells that failed in a live session on
+//! A bare expression — a cell with no `x <-` of its own — is displayed, so
+//! unlike a bind it really does need a host `Value`. It still must not be
+//! rejected for size: the cell is bound under its automatic `observationN`
+//! name and shown through the ordinary `cellDisplay` paging, with the view
+//! marked as a selection that names the binding holding the rest.
+//!
+//! The tests below are drawn from cells that failed in a live session on
 //! 2026-09-17; the originals are preserved under
 //! `plans/jev-lab/observation-limit/`. One lost 45 committed operations
 //! (10 Jev calls, 35 command jobs). The other was `reflect 3`, which cannot
@@ -87,6 +93,85 @@ async fn an_effectful_result_past_the_observation_budget_still_binds() {
         backend.executions(),
         1,
         "recovering the value must not re-run the command that produced it"
+    );
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn an_oversized_bare_expression_is_bound_and_shown_as_a_selection() {
+    let mut campaign = TestCampaign::start().await;
+    let policy = campaign.root_installation.policy.clone();
+    // The same committed-effect shape as the bind case above: one command job
+    // whose output is past the budget. The difference is the cell that DISPLAYS
+    // it — a bare expression, with no binder the author wrote.
+    const CELL: &str = "transcript <- do\n  \
+        job <- Cmd.quiet (Cmd.run (Cmd.argv [\"cat\", \"sources.txt\"]))\n  \
+        pure (either (const \"\") id (Cmd.stdout job))";
+    let mut running =
+        tokio::spawn(async move { dispatch_haskell_script(policy.as_ref(), CELL).await });
+    let backend = TestCommands::completed(&"x".repeat(OVERSIZED_BYTES));
+    tokio::select! {
+        request = backend_request(&mut campaign) => request.supply(Ok(backend.clone())),
+        result = &mut running => panic!("the cell ended before requesting a command backend: {result:?}"),
+    }
+    assert_eq!(running.await.unwrap()["status"], "committed");
+
+    let policy = campaign.root_installation.policy.clone();
+    let shown = dispatch_haskell_script(policy.as_ref(), "transcript").await;
+    assert_eq!(
+        shown["status"], "committed",
+        "an oversized bare expression must be shown, not rejected: {shown}"
+    );
+    let item = &shown["items"][0];
+    let output = item["output"].as_str().unwrap();
+    assert!(!output.contains("Display failed"), "{shown}");
+    // It is bound under the automatic name a bare expression always gets.
+    let name = item["installedBindings"][0]
+        .as_str()
+        .unwrap_or_else(|| panic!("a bare expression must leave a binding: {shown}"))
+        .to_owned();
+    // What the model sees says it is a selection and names the binding that
+    // holds the rest — a bounded view must never read as the whole value.
+    assert!(
+        output.ends_with(&format!(
+            "\n[selection of {name} (); display continues: cellDisplay.more]"
+        )),
+        "{shown}"
+    );
+    assert!(
+        output.len() < OVERSIZED_BYTES,
+        "the shown part must be bounded: {} characters",
+        output.len()
+    );
+
+    // The rest of the display continues through the existing paging. This is
+    // the next cell on purpose: every displayed cell republishes `cellDisplay`.
+    let more = dispatch_haskell_script(policy.as_ref(), "cellDisplay.more").await;
+    assert_eq!(more["status"], "committed", "{more}");
+    assert!(
+        more["items"][0]["output"]
+            .as_str()
+            .unwrap()
+            .starts_with('x'),
+        "the continuation must carry the rest of the value: {more}"
+    );
+
+    // The binding is a real one, and it is the expression the marker named: a
+    // later cell uses it and gets the WHOLE value, not the shown selection.
+    let used = dispatch_haskell_script(policy.as_ref(), &format!("T.length ({name} ())")).await;
+    assert_eq!(
+        used["items"][0]["output"],
+        OVERSIZED_BYTES.to_string(),
+        "the binding behind a selection must hold the complete value: {used}"
+    );
+
+    // None of that re-ran the command whose output is being shown.
+    assert_eq!(
+        backend.executions(),
+        1,
+        "displaying a committed result must not replay the effect that produced it"
     );
 
     campaign.forest.shutdown().await;

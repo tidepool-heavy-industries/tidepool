@@ -823,7 +823,7 @@ async fn command_result_pages_retained_stdout_without_launching_again() {
     let first = committed(&campaign, "paged").await;
     let first_output = first["items"][0]["output"].as_str().unwrap();
     assert!(
-        first_output.contains("[display continues: cellDisplay.more]"),
+        first_output.contains("; display continues: cellDisplay.more]"),
         "{first}"
     );
     assert!(!first_output.contains("Display failed"), "{first}");
