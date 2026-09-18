@@ -2327,10 +2327,18 @@ where
             .await
     }
 
+    /// `build_queries` receives the exact imports text this turn's inspection
+    /// module will compile with
+    /// ([`ActorWorkbenchSource::prepare`]-assembled, one import spec per
+    /// line) and returns the queries to run — so a query that needs to know
+    /// what a short qualifier actually resolves to (see
+    /// `crate::lookup_tool::resolve_qualifier_module`) can be built with that
+    /// answer in hand, in the same batch and the same extractor round trip as
+    /// every other query in the lookup.
     pub(crate) async fn lookup_inspections(
         &self,
         context: crate::ActorSessionContext,
-        queries: Vec<InspectionQuery>,
+        build_queries: impl FnOnce(&str) -> Vec<InspectionQuery> + Send + 'static,
     ) -> Result<
         (
             Vec<tidepool_runtime::session::InspectionResult>,
@@ -2357,6 +2365,7 @@ where
                 source.preamble = actor_preamble(&source.preamble, context).into();
                 let compile_view = actor_compile_view(session, context, &source, &type_modules)?;
                 let prepared = source.prepare(&compile_view);
+                let queries = build_queries(&prepared.imports);
                 let include = prepared
                     .include
                     .iter()

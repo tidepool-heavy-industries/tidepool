@@ -19,10 +19,12 @@ unknown part and qualify types as they are imported, e.g. \
 A dotted capitalized query, e.g. `Cmd.RunResult` or `Project.Investigate`, is \
 resolved first as a qualified name and, only when no such name is in scope, \
 browsed as a module's exports; see `doc topics` for the workspace's own modules. \
+A qualified value or field that misses instead, e.g. `Cmd.exitCode`, suggests \
+close exports under that qualifier. \
 Callable results show current-row availability: `polymorphic` fits your row and \
 its remaining constraint is decided by the call site, so it is usable; `unknown` \
-needs more type information. Resource grants are checked when an operation \
-executes. \
+needs more type information; a found callable may point to a worked example. \
+Resource grants are checked when an operation executes. \
 A bare string is also accepted as one query. \
 Each query reports independently in deterministic text, so one bad query does \
 not hide other results.";
@@ -71,6 +73,108 @@ fn is_dotted_capitalized(candidate: &str) -> bool {
         }
     }
     segments >= 2
+}
+
+/// Split a dotted, lowercase-final `Name` query into its qualifier prefix and
+/// final identifier: the shape a qualified value or field has (`Cmd.exitCode`,
+/// `R.await`), as opposed to the dotted-capitalized shape already classified
+/// `Qualified` (`Cmd.RunResult`) or a bare name with no dot at all. `None` when
+/// the query has no dot, either side is empty, the qualifier segments are not
+/// each capitalized-alias shaped, or the final identifier is not itself a
+/// plain lowercase-led Haskell identifier.
+pub(crate) fn qualifier_and_identifier(name: &str) -> Option<(&str, &str)> {
+    let (qualifier, identifier) = name.rsplit_once('.')?;
+    if qualifier.is_empty() || identifier.is_empty() {
+        return None;
+    }
+    let mut identifier_chars = identifier.chars();
+    match identifier_chars.next() {
+        Some(first) if first.is_ascii_lowercase() || first == '_' => {}
+        _ => return None,
+    }
+    if !identifier_chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\'') {
+        return None;
+    }
+    let qualifier_shaped = qualifier.split('.').all(|segment| {
+        let mut chars = segment.chars();
+        matches!(chars.next(), Some(first) if first.is_ascii_uppercase())
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\'')
+    });
+    qualifier_shaped.then_some((qualifier, identifier))
+}
+
+/// Find the real module a turn's own assembled imports bind to `qualifier`
+/// (`qualified Tidepool.Command as Cmd` binds `Cmd`), so a qualifier-shaped
+/// miss can browse the module it actually names instead of the short alias,
+/// which is never itself a real module. `imports` is
+/// [`crate::mount::ActorCompileView::turn_imports`]-shaped: one import spec
+/// per line, no leading `import`. Derived from the turn's own imports rather
+/// than a hand-maintained alias table, so it tracks whatever an actor's
+/// workbench source actually imports.
+pub(crate) fn resolve_qualifier_module(imports: &str, qualifier: &str) -> Option<String> {
+    imports.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("qualified ")?;
+        let (module, alias) = rest.split_once(" as ")?;
+        (alias.trim() == qualifier).then(|| module.trim().to_string())
+    })
+}
+
+/// Classic full-matrix edit distance. Batches here are short — tens of
+/// exported names from one module — so the O(n*m) table needs no crate.
+fn edit_distance(left: &str, right: &str) -> usize {
+    let left: Vec<char> = left.chars().collect();
+    let right: Vec<char> = right.chars().collect();
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    let mut current = vec![0usize; right.len() + 1];
+    for (row, &lc) in left.iter().enumerate() {
+        current[0] = row + 1;
+        for (col, &rc) in right.iter().enumerate() {
+            let cost = usize::from(lc != rc);
+            current[col + 1] = (previous[col + 1] + 1)
+                .min(current[col] + 1)
+                .min(previous[col] + cost);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
+}
+
+fn shared_prefix_len(left: &str, right: &str) -> usize {
+    left.chars()
+        .zip(right.chars())
+        .take_while(|(l, r)| l == r)
+        .count()
+}
+
+/// The exported names in `candidates` closest to `query`: edit distance
+/// (catches a typo or a near-miss) plus a shared-prefix or substring bonus
+/// (catches a rename that keeps a recognizable stem), capped at `limit` and
+/// sorted closest-first. Empty when nothing is close enough to be worth
+/// suggesting — a long list of unrelated names is worse than none.
+pub(crate) fn near_matches(query: &str, candidates: &[String], limit: usize) -> Vec<String> {
+    let mut scored: Vec<(usize, &String)> = candidates
+        .iter()
+        .filter(|candidate| candidate.as_str() != query)
+        .filter_map(|candidate| {
+            let distance = edit_distance(query, candidate);
+            // Case-insensitive substring, so a rename that only shifts a
+            // word to a capitalized suffix (`exitCode` -> `commandExitCode`)
+            // still counts as related, not just a verbatim substring.
+            let candidate_lower = candidate.to_lowercase();
+            let query_lower = query.to_lowercase();
+            let related = candidate_lower.contains(&query_lower)
+                || query_lower.contains(candidate_lower.as_str())
+                || shared_prefix_len(query, candidate) >= 3;
+            let threshold = (query.chars().count().max(candidate.chars().count()) / 2).max(2);
+            (related || distance <= threshold).then_some((distance, candidate))
+        })
+        .collect();
+    scored.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)));
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, name)| name.clone())
+        .collect()
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -213,6 +317,13 @@ pub(crate) struct LookupEntry {
     pub(crate) origin: LookupOrigin,
     pub(crate) quality: MatchQuality,
     pub(crate) availability: InspectionAvailability,
+    /// A locator for one worked use of this callable — a shipped Shoal
+    /// example (`.shoal/checks/<file>.hs`) or skill (`skill: <name>`) that
+    /// actually uses the qualified name. `None` when no shipped example uses
+    /// it. Derived from the shipped examples/skills at build time; see
+    /// `crate::usage_pointer`. Not populated for non-callable kinds (types,
+    /// constructors, coercions, documentation).
+    pub(crate) usage_pointer: Option<String>,
 }
 
 fn availability_rank(availability: InspectionAvailability) -> u8 {
@@ -332,6 +443,10 @@ pub(crate) enum LookupOutcome {
     },
     NotFound {
         attempted: Vec<LookupInterpretation>,
+        /// The closest exported names under a missed qualifier
+        /// (`crate::lookup_tool::near_matches`), empty when the miss was not
+        /// qualifier-shaped or nothing was close enough to suggest.
+        suggestions: Vec<String>,
     },
     Ambiguous {
         matches: Vec<LookupEntry>,
@@ -417,10 +532,16 @@ impl LookupResponse {
                                 match entry.kind {
                                     LookupEntryKind::Value
                                     | LookupEntryKind::ClassMethod
-                                    | LookupEntryKind::RecordSelector => format!(
-                                        "  [{}] {signature}",
-                                        availability_label(entry.availability)
-                                    ),
+                                    | LookupEntryKind::RecordSelector => {
+                                        let mut line = format!(
+                                            "  [{}] {signature}",
+                                            availability_label(entry.availability)
+                                        );
+                                        if let Some(pointer) = entry.usage_pointer.as_deref() {
+                                            line.push_str(&format!(" (see: {pointer})"));
+                                        }
+                                        line
+                                    }
                                     _ => format!("  {signature}"),
                                 }
                             })
@@ -430,8 +551,15 @@ impl LookupResponse {
                         }
                         lines.join("\n")
                     }
-                    LookupOutcome::NotFound { attempted } => {
-                        format!("  no match: {}", describe_misses(attempted))
+                    LookupOutcome::NotFound {
+                        attempted,
+                        suggestions,
+                    } => {
+                        let mut body = format!("  no match: {}", describe_misses(attempted));
+                        if !suggestions.is_empty() {
+                            body.push_str(&format!("; close: {}", suggestions.join(", ")));
+                        }
+                        body
                     }
                     LookupOutcome::Rejected { diagnostic } => {
                         format!(
@@ -461,6 +589,7 @@ mod tests {
             origin: LookupOrigin::ModuleExport,
             quality,
             availability: InspectionAvailability::Available,
+            usage_pointer: None,
         }
     }
 
@@ -742,6 +871,7 @@ mod tests {
                     query: "missing".into(),
                     outcome: LookupOutcome::NotFound {
                         attempted: vec![LookupInterpretation::Name],
+                        suggestions: Vec::new(),
                     },
                 },
             ],
@@ -763,6 +893,7 @@ mod tests {
                 query: "Cmd.CommandResult".into(),
                 outcome: LookupOutcome::NotFound {
                     attempted: vec![LookupInterpretation::Name, LookupInterpretation::Module],
+                    suggestions: Vec::new(),
                 },
             }],
         };
@@ -772,7 +903,11 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(&response).unwrap()["results"][0]["outcome"],
-            serde_json::json!({"status": "not_found", "attempted": ["name", "module"]})
+            serde_json::json!({
+                "status": "not_found",
+                "attempted": ["name", "module"],
+                "suggestions": []
+            })
         );
         // One interpretation reports only its own miss; a type query says which
         // search came back empty.
@@ -782,11 +917,108 @@ mod tests {
                     query: ":: Int -> Cmd.RunResult".into(),
                     outcome: LookupOutcome::NotFound {
                         attempted: vec![LookupInterpretation::TypeSearch],
+                        suggestions: Vec::new(),
                     },
                 }],
             }
             .render_text(),
             ":: Int -> Cmd.RunResult\n  no match: no value with that type"
+        );
+    }
+
+    #[test]
+    fn lookup_description_stays_within_the_hosted_tool_limit() {
+        // No hosted-limit constant exists for this description specifically
+        // (unlike `HOSTED_DESCRIPTION_LIMIT` in `prompt_catalog`, which is a
+        // different tool's): this pins its length so a future addition
+        // notices it is growing, rather than silently drifting.
+        let length = LOOKUP_DESCRIPTION.chars().count();
+        assert!(length <= 1250, "lookup description is {length} chars");
+    }
+
+    #[test]
+    fn qualifier_and_identifier_recognizes_a_qualified_value_and_rejects_other_shapes() {
+        assert_eq!(
+            qualifier_and_identifier("Cmd.exitCode"),
+            Some(("Cmd", "exitCode"))
+        );
+        assert_eq!(qualifier_and_identifier("R.await"), Some(("R", "await")));
+        // Dotted-capitalized (a type or constructor, or a module) is a
+        // different, already-handled shape.
+        assert_eq!(qualifier_and_identifier("Cmd.RunResult"), None);
+        // No dot at all.
+        assert_eq!(qualifier_and_identifier("awaitSettled"), None);
+        // A qualifier segment that is not capitalized-alias shaped.
+        assert_eq!(qualifier_and_identifier("cmd.exitCode"), None);
+    }
+
+    #[test]
+    fn resolve_qualifier_module_reads_the_turns_own_qualified_imports() {
+        let imports = "qualified Tidepool.Command as Cmd\n\
+                        qualified Tidepool.Actor.Record as R\n\
+                        Tidepool.Command (bash, withMemory, Memory(..))";
+        assert_eq!(
+            resolve_qualifier_module(imports, "Cmd").as_deref(),
+            Some("Tidepool.Command")
+        );
+        assert_eq!(
+            resolve_qualifier_module(imports, "R").as_deref(),
+            Some("Tidepool.Actor.Record")
+        );
+        assert_eq!(resolve_qualifier_module(imports, "Unknown"), None);
+    }
+
+    #[test]
+    fn near_matches_finds_a_cmd_exit_code_style_miss() {
+        let candidates: Vec<String> = ["exitStatus", "commandExitCode", "readStdout", "bash"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let matches = near_matches("exitCode", &candidates, 5);
+        assert!(matches.contains(&"commandExitCode".to_string()), "{matches:?}");
+        assert!(matches.len() <= 5);
+    }
+
+    #[test]
+    fn near_matches_is_empty_when_nothing_is_close() {
+        let candidates: Vec<String> = ["bash", "withMemory", "run"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(near_matches("resultOf", &candidates, 5), Vec::<String>::new());
+    }
+
+    #[test]
+    fn render_text_shows_suggestions_on_a_qualifier_miss_and_a_usage_pointer_on_a_hit() {
+        let response = LookupResponse {
+            results: vec![
+                LookupResult {
+                    query: "Cmd.exitCode".into(),
+                    outcome: LookupOutcome::NotFound {
+                        attempted: vec![LookupInterpretation::Name],
+                        suggestions: vec!["commandExitCode".into(), "exitStatus".into()],
+                    },
+                },
+                LookupResult::found(
+                    "Cmd.readOutput".into(),
+                    vec![LookupEntry {
+                        usage_pointer: Some(".shoal/checks/handler-call.hs".into()),
+                        ..entry("readOutput", MatchQuality::Exact)
+                    }],
+                    8,
+                ),
+            ],
+        };
+        let rendered = response.render_text();
+        assert!(
+            rendered.contains(
+                "Cmd.exitCode\n  no match: not in scope as a name; close: commandExitCode, exitStatus"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("(see: .shoal/checks/handler-call.hs)"),
+            "{rendered}"
         );
     }
 }

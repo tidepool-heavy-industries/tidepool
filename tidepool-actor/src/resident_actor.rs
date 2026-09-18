@@ -17,9 +17,10 @@ use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::{
     InspectionQuery, InspectionResult, OutputSink, ParsedBlock, ResidentHole, ResidentOutcome,
     ResidentSession, RootCustody, TurnKind, TypeMatchQuality, WorkbenchCellItemKind,
-    WorkbenchCellSourceItem, WorkbenchExecutionId, WorkbenchItemReceipt, WorkbenchItemStatus,
-    WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
-    WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
+    WorkbenchCellSourceItem, WorkbenchExecutionId, WorkbenchFailureLayer, WorkbenchItemReceipt,
+    WorkbenchItemStatus, WorkbenchOperationDisposition, WorkbenchOperationId,
+    WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
+    WorkbenchTerminalTransfer,
 };
 use tokio::sync::mpsc;
 use tracing::Instrument;
@@ -462,6 +463,7 @@ fn workbench_failure_after_operations(
     mut operations: Vec<WorkbenchOperationReceipt>,
 ) -> WorkbenchExecutionFailure {
     settle_prepared_operations(&mut operations, WorkbenchOperationDisposition::Unknown);
+    let failure_layer = resident_actor_failure_layer(&source);
     let mut receipts = completed.to_vec();
     if !operations.is_empty() {
         receipts.push(WorkbenchItemReceipt {
@@ -471,13 +473,18 @@ fn workbench_failure_after_operations(
             span: None,
             source_items: Vec::new(),
             status: WorkbenchItemStatus::Rejected,
-            // The failure owns its diagnostic separately; this field retains
-            // output committed before the failing continuation.
-            output: String::new(),
+            // The failure's own diagnostic lives on `source`/`detail`
+            // instead of here; this field otherwise stays empty. The one
+            // exception is a short, human-facing framing sentence for the
+            // failure layer — the one piece of the failure this item alone
+            // can say plainly, since a reader sees this receipt without
+            // necessarily reading `detail`.
+            output: failure_layer_output_hint(failure_layer),
             warnings: Vec::new(),
             installed_bindings: Vec::new(),
             operations,
             terminal_transfer: None,
+            failure_layer,
         });
     }
     WorkbenchExecutionFailure {
@@ -485,6 +492,49 @@ fn workbench_failure_after_operations(
         failed_index,
         total,
         source,
+    }
+}
+
+/// A short, human-facing framing sentence for a failure layer — the tool
+/// text this item's own (otherwise empty) `output` can say plainly, matching
+/// what the layer means on [`WorkbenchFailureLayer`]. `Compile`/`None` add
+/// nothing: a compile rejection already carries its own text, and an
+/// unclassified failure has nothing this function can say honestly.
+fn failure_layer_output_hint(layer: Option<WorkbenchFailureLayer>) -> String {
+    match layer {
+        Some(WorkbenchFailureLayer::Observation) => {
+            "effects committed; observing the result failed".to_owned()
+        }
+        Some(WorkbenchFailureLayer::Effect) => {
+            "an effect failed, or did not finish committing before the unit ended".to_owned()
+        }
+        Some(WorkbenchFailureLayer::Compile) | None => String::new(),
+    }
+}
+
+/// Which failure layer produced `error`, for a receipt built from it.
+/// `Compile`/`CellCheck`/`CompileInfrastructure` never ran an effect at all;
+/// `Resident`/`Delivered` wrap a [`tidepool_runtime::session::ResidentError`],
+/// which already distinguishes an effect failure from an observation one —
+/// see [`tidepool_runtime::session::ResidentError::failure_layer`]. A
+/// `Delivered` error whose inner error that classification does not cover is
+/// still known to be post-commit (its doc: the response was already handed
+/// to the machine before this failed), so it defaults to `Effect` rather
+/// than staying unclassified.
+fn resident_actor_failure_layer(
+    error: &ResidentActorWorkbenchError,
+) -> Option<WorkbenchFailureLayer> {
+    match error {
+        ResidentActorWorkbenchError::Compile(_)
+        | ResidentActorWorkbenchError::CellCheck(_)
+        | ResidentActorWorkbenchError::CompileInfrastructure(_) => {
+            Some(WorkbenchFailureLayer::Compile)
+        }
+        ResidentActorWorkbenchError::Resident(inner) => inner.failure_layer(),
+        ResidentActorWorkbenchError::Delivered(inner) => {
+            Some(inner.failure_layer().unwrap_or(WorkbenchFailureLayer::Effect))
+        }
+        _ => None,
     }
 }
 
@@ -4719,6 +4769,7 @@ where
                     installed_bindings: Vec::new(),
                     operations: Vec::new(),
                     terminal_transfer: None,
+                    failure_layer: None,
                 }],
                 1,
                 1,
@@ -4734,39 +4785,82 @@ where
                     ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
                 )
             })?;
-            let queries = prepared
-                .iter()
-                .flat_map(|query| match &query.kind {
-                    crate::lookup_tool::PreparedLookupKind::Name(name) => {
-                        vec![InspectionQuery::Info(name.clone())]
-                    }
-                    // Only GHC knows whether `Cmd.RunResult` is a name in this
-                    // scope or a module. Both interpretations go out in this
-                    // batch, in this order, and `lookup_response` picks per
-                    // result: the worker isolates rejection per query, so a
-                    // module browse still costs one round trip and a qualified
-                    // name is no longer answered `no match` for being dotted.
-                    crate::lookup_tool::PreparedLookupKind::Qualified(name) => vec![
-                        InspectionQuery::Info(name.clone()),
-                        InspectionQuery::Browse {
-                            module: name.clone(),
-                            expanded: false,
-                        },
-                    ],
-                    crate::lookup_tool::PreparedLookupKind::Type(query) => {
-                        vec![InspectionQuery::TypeSearch(query.clone())]
-                    }
-                    crate::lookup_tool::PreparedLookupKind::Doc(_) => Vec::new(),
-                    crate::lookup_tool::PreparedLookupKind::Rejected(_) => Vec::new(),
-                })
-                .collect::<Vec<_>>();
-            let (inspected, live_modules) = if queries.is_empty() {
-                (Vec::new(), Vec::new())
-            } else {
+            // Whether the batch needs the extractor at all is decided by query
+            // shape alone (a `doc`/rejected query needs nothing), so that
+            // check does not need this turn's imports and can run before the
+            // machine is checked out.
+            let needs_inspection = prepared.iter().any(|query| {
+                !matches!(
+                    query.kind,
+                    crate::lookup_tool::PreparedLookupKind::Doc(_)
+                        | crate::lookup_tool::PreparedLookupKind::Rejected(_)
+                )
+            });
+            let prepared_for_queries = prepared.clone();
+            let (inspected, live_modules) = if needs_inspection {
                 workbench
-                    .lookup_inspections(context.clone(), queries)
+                    .lookup_inspections(context.clone(), move |imports: &str| {
+                        prepared_for_queries
+                            .iter()
+                            .flat_map(|query| match &query.kind {
+                                crate::lookup_tool::PreparedLookupKind::Name(name) => {
+                                    // A dotted, lowercase-final name is a
+                                    // qualified value or field
+                                    // (`Cmd.exitCode`); a miss on it browses
+                                    // the qualifier's real module (resolved
+                                    // from this turn's own imports, never a
+                                    // hand-maintained alias table) in the same
+                                    // batch, so `lookup_response` can suggest
+                                    // the closest export without a second
+                                    // round trip. The pairing is decided here
+                                    // by shape alone, matching how
+                                    // `lookup_response` decides how many
+                                    // results to consume for this query.
+                                    match crate::lookup_tool::qualifier_and_identifier(name) {
+                                        Some((qualifier, _identifier)) => {
+                                            let module = crate::lookup_tool::resolve_qualifier_module(
+                                                imports, qualifier,
+                                            )
+                                            .unwrap_or_else(|| qualifier.to_string());
+                                            vec![
+                                                InspectionQuery::Info(name.clone()),
+                                                InspectionQuery::Browse {
+                                                    module,
+                                                    expanded: false,
+                                                },
+                                            ]
+                                        }
+                                        None => vec![InspectionQuery::Info(name.clone())],
+                                    }
+                                }
+                                // Only GHC knows whether `Cmd.RunResult` is a
+                                // name in this scope or a module. Both
+                                // interpretations go out in this batch, in
+                                // this order, and `lookup_response` picks per
+                                // result: the worker isolates rejection per
+                                // query, so a module browse still costs one
+                                // round trip and a qualified name is no
+                                // longer answered `no match` for being
+                                // dotted.
+                                crate::lookup_tool::PreparedLookupKind::Qualified(name) => vec![
+                                    InspectionQuery::Info(name.clone()),
+                                    InspectionQuery::Browse {
+                                        module: name.clone(),
+                                        expanded: false,
+                                    },
+                                ],
+                                crate::lookup_tool::PreparedLookupKind::Type(query) => {
+                                    vec![InspectionQuery::TypeSearch(query.clone())]
+                                }
+                                crate::lookup_tool::PreparedLookupKind::Doc(_) => Vec::new(),
+                                crate::lookup_tool::PreparedLookupKind::Rejected(_) => Vec::new(),
+                            })
+                            .collect::<Vec<_>>()
+                    })
                     .await
                     .map_err(|error| workbench_failure(&[], 0, 1, error))?
+            } else {
+                (Vec::new(), Vec::new())
             };
             let response = lookup_response(
                 prepared,
@@ -4788,6 +4882,7 @@ where
                     installed_bindings: Vec::new(),
                     operations: Vec::new(),
                     terminal_transfer: None,
+                    failure_layer: None,
                 }],
                 1,
                 1,
@@ -4851,6 +4946,11 @@ where
                             installed_bindings: Vec::new(),
                             operations: Vec::new(),
                             terminal_transfer: None,
+                            failure_layer: if prior == index {
+                                Some(WorkbenchFailureLayer::Compile)
+                            } else {
+                                None
+                            },
                         })
                         .collect();
                     return Ok(KernelStep::Continue(workbench_response(
@@ -5097,6 +5197,7 @@ where
                             installed_bindings: Vec::new(),
                             operations: unit_operations,
                             terminal_transfer: None,
+                            failure_layer: Some(WorkbenchFailureLayer::Effect),
                         });
                         return Ok(KernelStep::Continue(workbench_response(
                             WorkbenchRunStatus::Rejected,
@@ -5118,6 +5219,7 @@ where
                         installed_bindings,
                         operations: unit_operations,
                         terminal_transfer: None,
+                        failure_layer: None,
                     });
                 }
                 ResidentWorkbenchStep::Rejected(rejection) => {
@@ -5157,6 +5259,7 @@ where
                         installed_bindings: Vec::new(),
                         operations: unit_operations,
                         terminal_transfer: None,
+                        failure_layer: Some(WorkbenchFailureLayer::Compile),
                     });
                     return Ok(KernelStep::Continue(workbench_response(
                         WorkbenchRunStatus::Rejected,
@@ -5227,6 +5330,7 @@ where
                         installed_bindings: vec![binding],
                         operations: unit_operations,
                         terminal_transfer: Some(WorkbenchTerminalTransfer::CommandBackgrounded),
+                        failure_layer: None,
                     });
                     return Ok(KernelStep::Continue(workbench_response(
                         WorkbenchRunStatus::Backgrounded,
@@ -5263,6 +5367,7 @@ where
                         installed_bindings: Vec::new(),
                         operations: unit_operations,
                         terminal_transfer: Some(WorkbenchTerminalTransfer::ReplyAccepted),
+                        failure_layer: None,
                     });
                     return Ok(KernelStep::ContinueLater(workbench_response(
                         WorkbenchRunStatus::Replied,
@@ -5409,6 +5514,7 @@ where
                         terminal_transfer: Some(
                             WorkbenchTerminalTransfer::CancellationAcknowledged,
                         ),
+                        failure_layer: None,
                     });
                     return Ok(KernelStep::ContinueLater(workbench_response(
                         WorkbenchRunStatus::RequestCancelled,
@@ -7160,6 +7266,7 @@ fn cell_check_rejection(
             installed_bindings: Vec::new(),
             operations: Vec::new(),
             terminal_transfer: None,
+            failure_layer: None,
         })
         .collect::<Vec<_>>();
     match &failure.error {
@@ -7197,6 +7304,7 @@ fn cell_check_rejection(
                     items[index].warnings.push(rejection.output);
                 } else {
                     items[index].status = WorkbenchItemStatus::Rejected;
+                    items[index].failure_layer = Some(WorkbenchFailureLayer::Compile);
                     if !items[index].output.is_empty() {
                         items[index].output.push_str("\n\n");
                     }
@@ -7208,6 +7316,7 @@ fn cell_check_rejection(
             let rejection =
                 tidepool_runtime::session::render_cell_compile_rejection(error, source);
             items[0].status = WorkbenchItemStatus::Rejected;
+            items[0].failure_layer = Some(WorkbenchFailureLayer::Compile);
             items[0].output = rejection.output;
             items[0].diagnostics = rejection.diagnostics;
         }
@@ -7305,6 +7414,7 @@ fn workbench_response(
             installed_bindings: Vec::new(),
             operations: Vec::new(),
             terminal_transfer: None,
+            failure_layer: None,
         }
     }));
     // Every terminal path through `execute_workbench` renders its receipts
@@ -7406,6 +7516,7 @@ fn lookup_response(
                         origin: LookupOrigin::Documentation,
                         quality: MatchQuality::Exact,
                         availability: tidepool_runtime::session::InspectionAvailability::Unknown,
+                        usage_pointer: None,
                     }],
                     MATCH_LIMIT,
                 ),
@@ -7414,46 +7525,64 @@ fn lookup_response(
                     outcome: LookupOutcome::Rejected { diagnostic },
                 },
             },
-            PreparedLookupKind::Name(_) => match inspected.next() {
-                Some(InspectionResult::Info { entries, .. }) => LookupResult::found(
-                    prepared.query,
-                    entries
-                        .into_iter()
-                        .map(|entry| info_lookup_entry(entry, live_modules))
-                        .collect(),
-                    MATCH_LIMIT,
-                ),
-                Some(InspectionResult::Ambiguous { entries, .. }) => LookupResult::ambiguous(
-                    prepared.query,
-                    entries
-                        .into_iter()
-                        .map(|entry| info_lookup_entry(entry, live_modules))
-                        .collect(),
-                    MATCH_LIMIT,
-                ),
-                Some(InspectionResult::NotFound { .. }) => LookupResult {
-                    query: prepared.query,
-                    outcome: LookupOutcome::NotFound {
-                        attempted: vec![LookupInterpretation::Name],
+            PreparedLookupKind::Name(ref name) => {
+                // A dotted, lowercase-final name (`Cmd.exitCode`) sent a
+                // paired qualifier `Browse` in the same batch (built above,
+                // in `execute_workbench`); every other `Name` shape consumes
+                // exactly one result. This mirrors that same shape-based
+                // decision so the two stay aligned without threading a count
+                // through the response.
+                let qualifier_shaped = crate::lookup_tool::qualifier_and_identifier(name).is_some();
+                let info_result = inspected.next();
+                let browse_result = if qualifier_shaped {
+                    inspected.next()
+                } else {
+                    None
+                };
+                match info_result {
+                    Some(InspectionResult::Info { entries, .. }) => LookupResult::found(
+                        prepared.query,
+                        entries
+                            .into_iter()
+                            .map(|entry| info_lookup_entry(entry, live_modules))
+                            .collect(),
+                        MATCH_LIMIT,
+                    ),
+                    Some(InspectionResult::Ambiguous { entries, .. }) => LookupResult::ambiguous(
+                        prepared.query,
+                        entries
+                            .into_iter()
+                            .map(|entry| info_lookup_entry(entry, live_modules))
+                            .collect(),
+                        MATCH_LIMIT,
+                    ),
+                    Some(InspectionResult::NotFound { .. }) => LookupResult {
+                        query: prepared.query,
+                        outcome: LookupOutcome::NotFound {
+                            attempted: vec![LookupInterpretation::Name],
+                            suggestions: near_match_suggestions(name, browse_result),
+                        },
                     },
-                },
-                Some(InspectionResult::Rejected { diagnostic }) => LookupResult {
-                    query: prepared.query,
-                    outcome: LookupOutcome::Rejected { diagnostic },
-                },
-                Some(other) => LookupResult {
-                    query: prepared.query,
-                    outcome: LookupOutcome::Rejected {
-                        diagnostic: format!("lookup worker returned unexpected result: {other:?}"),
+                    Some(InspectionResult::Rejected { diagnostic }) => LookupResult {
+                        query: prepared.query,
+                        outcome: LookupOutcome::Rejected { diagnostic },
                     },
-                },
-                None => LookupResult {
-                    query: prepared.query,
-                    outcome: LookupOutcome::Rejected {
-                        diagnostic: "lookup worker omitted a result".into(),
+                    Some(other) => LookupResult {
+                        query: prepared.query,
+                        outcome: LookupOutcome::Rejected {
+                            diagnostic: format!(
+                                "lookup worker returned unexpected result: {other:?}"
+                            ),
+                        },
                     },
-                },
-            },
+                    None => LookupResult {
+                        query: prepared.query,
+                        outcome: LookupOutcome::Rejected {
+                            diagnostic: "lookup worker omitted a result".into(),
+                        },
+                    },
+                }
+            }
             // The batch carried `Info` then `Browse` for this one query, so the
             // name answer is taken when GHC has one and the module browse is
             // read only when it does not. Both results are consumed either way,
@@ -7491,6 +7620,7 @@ fn lookup_response(
                         query: prepared.query,
                         outcome: LookupOutcome::NotFound {
                             attempted: vec![LookupInterpretation::TypeSearch],
+                            suggestions: Vec::new(),
                         },
                     }
                 }
@@ -7512,6 +7642,8 @@ fn lookup_response(
                                 TypeMatchQuality::Usable => MatchQuality::Usable,
                             },
                             availability: entry.availability,
+                            usage_pointer: crate::usage_pointer::pointer_for(&entry.name)
+                                .map(str::to_owned),
                         })
                         .collect(),
                     MATCH_LIMIT,
@@ -7547,6 +7679,7 @@ fn lookup_response(
             "coercion" => LookupEntryKind::Coercion,
             _ => LookupEntryKind::Value,
         };
+        let usage_pointer = crate::usage_pointer::pointer_for(&entry.name).map(str::to_owned);
         LookupEntry {
             name: entry.name,
             defining_module: entry.module.clone(),
@@ -7555,7 +7688,25 @@ fn lookup_response(
             origin: lookup_origin(entry.module.as_deref(), live_modules),
             quality: MatchQuality::Exact,
             availability: entry.availability,
+            usage_pointer,
         }
+    }
+
+    /// The closest exported names under a missed qualifier, read from the
+    /// same-batch `Browse` of that qualifier's real module (see
+    /// `crate::lookup_tool::resolve_qualifier_module`). Empty when the query
+    /// was not qualifier-shaped, the browse itself failed (an unresolvable
+    /// qualifier, most likely), or nothing in it was close enough to suggest.
+    fn near_match_suggestions(name: &str, browse: Option<InspectionResult>) -> Vec<String> {
+        let Some((_qualifier, identifier)) = crate::lookup_tool::qualifier_and_identifier(name)
+        else {
+            return Vec::new();
+        };
+        let Some(InspectionResult::Browse { entries, .. }) = browse else {
+            return Vec::new();
+        };
+        let candidates: Vec<String> = entries.into_iter().map(|entry| entry.name).collect();
+        crate::lookup_tool::near_matches(identifier, &candidates, 5)
     }
 
     /// Neither interpretation of a dotted capitalized query produced entries.
@@ -7585,6 +7736,7 @@ fn lookup_response(
                 Some(diagnostic) => LookupOutcome::Rejected { diagnostic },
                 None => LookupOutcome::NotFound {
                     attempted: vec![LookupInterpretation::Name, LookupInterpretation::Module],
+                    suggestions: Vec::new(),
                 },
             },
         }
@@ -7950,12 +8102,130 @@ mod tests {
                     crate::lookup_tool::LookupInterpretation::Name,
                     crate::lookup_tool::LookupInterpretation::Module,
                 ],
+                suggestions: Vec::new(),
             }
         );
         assert_eq!(
             response.render_text(),
             "No.Such.Module\n  no match: not in scope as a name, and no module of that name"
         );
+    }
+
+    /// A dotted, lowercase-final `Name` miss (`Cmd.exitCode`) sent a paired
+    /// qualifier `Browse` in the same batch; its entries seed near-match
+    /// suggestions on the `NotFound` outcome, and the query right after it in
+    /// the batch must still land on its own result — the pairing consumes
+    /// exactly two results, same as the already-landed `Qualified` shape.
+    #[test]
+    fn qualifier_shaped_name_miss_suggests_close_exports_without_misaligning_the_batch() {
+        let prepared = crate::lookup_tool::prepare(serde_json::json!({
+            "queries": ["Cmd.exitCode", "awaitSettled"]
+        }))
+        .unwrap();
+        assert_eq!(
+            prepared[0].kind,
+            crate::lookup_tool::PreparedLookupKind::Name("Cmd.exitCode".into())
+        );
+        let response = lookup_response(
+            prepared,
+            vec![
+                InspectionResult::NotFound {
+                    query: "Cmd.exitCode".into(),
+                },
+                InspectionResult::Browse {
+                    module: "Tidepool.Command".into(),
+                    expanded: false,
+                    entries: vec![
+                        info_entry(
+                            "commandExitCode",
+                            "Tidepool.Command",
+                            "value",
+                            "commandExitCode :: CommandResult -> Int",
+                        ),
+                        info_entry(
+                            "readStdout",
+                            "Tidepool.Command",
+                            "value",
+                            "readStdout :: Job -> IO Text",
+                        ),
+                    ],
+                },
+                InspectionResult::Info {
+                    query: "awaitSettled".into(),
+                    entries: vec![info_entry(
+                        "awaitSettled",
+                        "Tidepool.Agent.Watch",
+                        "value",
+                        "awaitSettled :: Int",
+                    )],
+                },
+            ],
+            &[],
+            &[],
+        );
+        assert_eq!(response.results.len(), 2);
+        assert_eq!(
+            response.results[0].outcome,
+            crate::lookup_tool::LookupOutcome::NotFound {
+                attempted: vec![crate::lookup_tool::LookupInterpretation::Name],
+                suggestions: vec!["commandExitCode".into()],
+            }
+        );
+        assert!(matches!(
+            response.results[1].outcome,
+            crate::lookup_tool::LookupOutcome::Found { .. }
+        ));
+        let rendered = response.render_text();
+        assert!(
+            rendered.contains("Cmd.exitCode\n  no match: not in scope as a name; close: commandExitCode"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("awaitSettled :: Int"), "{rendered}");
+    }
+
+    /// A qualifier-shaped `Name` query that GHC does resolve still consumes
+    /// both results in the batch (the paired browse is discarded, not left
+    /// for the next query to accidentally consume).
+    #[test]
+    fn qualifier_shaped_name_hit_discards_its_paired_browse_result() {
+        let prepared = crate::lookup_tool::prepare(serde_json::json!({
+            "queries": ["Cmd.readOutput"]
+        }))
+        .unwrap();
+        let response = lookup_response(
+            prepared,
+            vec![
+                InspectionResult::Info {
+                    query: "Cmd.readOutput".into(),
+                    entries: vec![info_entry(
+                        "readOutput",
+                        "Tidepool.Command",
+                        "value",
+                        "readOutput :: Job -> IO Text",
+                    )],
+                },
+                InspectionResult::Browse {
+                    module: "Tidepool.Command".into(),
+                    expanded: false,
+                    entries: vec![info_entry(
+                        "readOutput",
+                        "Tidepool.Command",
+                        "value",
+                        "readOutput :: Job -> IO Text",
+                    )],
+                },
+            ],
+            &[],
+            &[],
+        );
+        assert_eq!(response.results.len(), 1);
+        assert!(matches!(
+            response.results[0].outcome,
+            crate::lookup_tool::LookupOutcome::Found { .. }
+        ));
+        assert!(response
+            .render_text()
+            .contains("readOutput :: Job -> IO Text"));
     }
 
     /// Queries answered locally consume no compiler result and a dotted
@@ -8051,6 +8321,7 @@ mod tests {
                     crate::lookup_tool::LookupInterpretation::Name,
                     crate::lookup_tool::LookupInterpretation::Module,
                 ],
+                suggestions: Vec::new(),
             }
         );
         let rendered = response.render_text();
@@ -8206,6 +8477,7 @@ mod tests {
             installed_bindings: vec!["prior".into()],
             operations: Vec::new(),
             terminal_transfer: None,
+            failure_layer: None,
         };
         let response = workbench_response(
             WorkbenchRunStatus::Rejected,
@@ -8223,6 +8495,7 @@ mod tests {
                     installed_bindings: Vec::new(),
                     operations: Vec::new(),
                     terminal_transfer: None,
+                    failure_layer: None,
                 },
             ],
             1,

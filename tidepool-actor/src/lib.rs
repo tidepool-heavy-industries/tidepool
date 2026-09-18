@@ -57,6 +57,7 @@ pub use hosted_lifecycle::{
     CleanupComponentOutcome, HostedWorkSeal, ResidentCleanupOutcome, ResidentShutdown,
 };
 mod typed_request;
+mod usage_pointer;
 mod wait;
 mod workbench_display;
 pub use workbench_display::bounded_output as bound_workbench_display;
