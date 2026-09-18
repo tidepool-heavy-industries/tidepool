@@ -34,12 +34,13 @@ module Project.Watchdog
   , destructiveCommand
   , stayWithin
   , preferTool
+  , escalationEvidence
   ) where
 
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Tidepool.Aeson.Value (Value, object, (.=))
+import Tidepool.Aeson.Value (Value, encodeValue, object, (.=))
 import Tidepool.Agent.Contract
 import Tidepool.Actors.Shoal (parentAgent, sendMessage)
 import Tidepool.Effects.Core
@@ -175,7 +176,8 @@ watchBy heuristicsFor call result = do
                 else do
                   target <- if null escalated then pure Nothing else parentAgent
                   case target of
-                    Just parent -> sendMessage parent (escalationNote context call escalated) >> pure ()
+                    Just parent -> sendMessage parent
+                      (escalationNote context call escalated <> "\n" <> escalationEvidence call result) >> pure ()
                     Nothing -> pure ()
                   pure (Annotated (annotationText advised escalated))
 
@@ -210,3 +212,22 @@ escalationNote context call escalated =
          [ heuristicName h <> " (" <> T.pack (show likelihood) <> "): " <> reason
          | (h, likelihood, reason) <- escalated
          ]
+
+-- | Bounded source excerpts, not model-generated citations. Line numbers refer
+-- to the displayed tool output, not a source file or a command's full stdout.
+-- Handles are child-local; a parent requests further evidence from that child.
+escalationEvidence :: ToolCall -> ToolResult -> Text
+escalationEvidence call result =
+  "Parent decision requested: inspect this observation and decide whether to steer the child. "
+    <> "The tool has already run; this is not a pre-execution safety gate.\n"
+    <> "Tool arguments (JSON prefix, at most 1200 characters):\n"
+    <> T.take 1200 (encodeValue (toolCallArguments call))
+    <> "\nResult reference (child-local): " <> toolResultHandle result
+    <> "\nDisplayed-output excerpt (first 12 lines; each capped at 240 characters):\n"
+    <> T.unlines
+         [ T.pack (show n) <> ": " <> T.take 240 line
+             <> if T.length line > 240 then " [line truncated]" else ""
+         | (n, line) <- zip ([1..] :: [Int]) (take 12 (T.lines (toolResultOutput result)))
+         ]
+    <> "This prefix may omit the triggering evidence. Ask the named child for the "
+    <> "full retained result and relevant history before deciding if the excerpt is insufficient."
