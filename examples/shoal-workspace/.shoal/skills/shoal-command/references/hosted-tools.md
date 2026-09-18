@@ -41,15 +41,25 @@ modules = ["Project.Tools"]
 tools = "Project.Tools.tools"
 ```
 
-The shared `haskell` tool remains available. Field names become snake_case tool
+The shared `haskell` tool remains available. A record named this way REPLACES
+the shell record an actor gets by default, so `bash`, `exec_command`,
+`write_stdin`, `read_output` and `cancel_command` are gone unless you carry
+them: give your record a field of type `Shell.ShellTools mode` set to
+`Shell.tools`, and the whole shell surface is spliced in at that field's
+position under its own names, while the field name itself declares nothing.
+
+Field names become snake_case tool
 names; `RawCall` receives literal Text, while `Call` derives its input schema
 from the same types used for decoding. Returned Text displays literally.
-Schemas and handler code freeze at actor startup; calls apply retained compiled
-code to input data, so an accepted call always finishes under the
-implementation it started with. `reloadSource` publishes an edited tool module
-as the revision later cells compile against, but it does not re-derive an
-actor's already-installed tool record: that record refreshes at the actor's
-next incarnation, not on a live file edit.
+The declared surface (names, descriptions, schemas, order) is fixed at actor
+startup. Calls apply retained compiled code to input data, so an accepted call
+always finishes under the implementation it started with. `reloadSource`
+publishes an edited tool module as the revision later cells compile against;
+`reload_agent_spec` also rebuilds your installed tool record, so later calls
+run the edited bodies. A reload that would change the declared surface is
+refused with the difference, and that change takes effect at your next
+incarnation. Load `shoal-agent-spec` for the spec module and the after-tool
+slot.
 
 `Shell.execute` composes `Cmd.start` and bounded `Cmd.observe`, allowing the
 handler to continue even when the command is still running. The resulting

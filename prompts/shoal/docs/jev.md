@@ -16,11 +16,12 @@ read-then-judge model turns is a much bigger one. Plan loops against the
 200 ms; prefer building one packet-rich cell over stepping through evidence
 by hand.
 
-The vendored library is `jev-dsl`, in scope qualified as `J`
+The library is `jev-dsl`, compiled from the revision this workspace pins and in
+scope qualified as `J`
 (`import qualified Jev.Operators as J`). The two packet operators `:=` and
 `:&` are also in scope unqualified; everything else is `J.`-qualified,
-including `J.Nil`, `J..|` and `J.++.`. A packet or offer bound in one cell
-and reused in a later one keeps its inferred type.
+including `J..|`. A packet or offer bound in one cell and reused in a later one
+keeps its inferred type.
 
 ## The call
 
@@ -31,10 +32,13 @@ post:
 - `J.ask state packet` — a whole packet, many questions, one round trip.
 - `J.askWith model state packet` — a packet against an explicit model.
 
-`J.state someValue` wraps the JSON context every question in the packet
-sees; build the value with `object`/`.=` (from `Tidepool.Aeson`) for
-anything beyond a single field. `J.ask1` returns `Either J.JevError answer`;
-`J.ask`/`J.askWith` return `Either J.JevError (J.Response ...)`. `JevError`
+`J.state fieldPacket` is the shared context every question in the packet sees,
+written exactly as a question packet is — `#task := ("…" :: Text) :& #checks
+:= someList` — with each field keeping its own Haskell type. `J.rawState value`
+sends a `Value` built with `object`/`.=` (from `Tidepool.Aeson`) as given, for a
+shape the field packet leaves out; its fields cannot then be named. `J.ask1`
+returns `Either J.JevError answer`; `J.ask`/`J.askWith` return
+`Either J.JevError (J.Response ...)`. `JevError`
 covers both call failures and decode problems — an unconfigured key, a cap,
 a transport failure, a bad HTTP status, a timeout, and a malformed body are
 all distinct cases a cell should branch on, typically by falling back to its
@@ -43,50 +47,67 @@ don't retry blindly.
 
 ## Authoring essentials
 
+- **Packets, not records.** The DSL is packet-shaped (`#key := question`)
+  rather than a declared-record front, because a stateful session writes a
+  new packet every turn and per-packet field declarations would shadow
+  selectors and pollute scope across turns.
 - **One packet per semantic boundary.** Put everything the current evidence
   can answer into it; don't ask a second packet just because the first
   answer arrived — ask again only when a read, a command, or a reply has
   changed the world.
 - **`choice`** offers alternatives built from `J.alt #key "wording" payload`
-  chained with `.|`, plus `J.many [(key, wording, payload), ...]` for
-  runtime-computed candidates (lines, edges, diagnostics). Always chain in an
+  chained with `J..|`, plus `J.many #key rowKey rowWording rows` for
+  runtime-computed candidates (lines, edges, diagnostics), whose handler
+  receives the row itself. Always chain in an
   exit alternative — a no-match key, or a `defer_to_model`-style key when
   resolving needs judgment the packet can't supply. A `choice` without an
   exit still picks something; it can't say "none of these."
 - **`noul`** asks a yes/no likelihood question; read it as `a.thing.yes`.
 - **`score`** grades against an ordered rubric built from
-  `J.level #key "wording"` chained with `.|`; read `.nearest`, `.expectation`
-  and `.confidence`, or `J.massAtOrAbove` for a movable threshold.
-- **Packets** are built as `#key := question :& ... :& J.Nil`; two packets
-  join with `J.++.`. Nested packets flatten to dotted wire paths. A
-  duplicate label is a compile error naming it.
-- **Reading answers** uses record dot on the `Answers` value: `a.next`,
-  `a.enough`, `a.children` (a list of `(key, subAnswers)`). Each answer cell
+  `J.level #key "wording" result` chained with `J..|`; `J.grade floor a`
+  returns the result written beside the level the score landed on,
+  `J.graded` returns it with that level's label, and `J.massAtOrAbove #key a`
+  gives a movable threshold. The fields are `.expectation`, `.confidence`
+  and `.masses`.
+- **`each`** asks one question — or one nested packet — per row:
+  `#per := J.each rowKey (\row -> J.noul (wordingFor row)) rows`. Each row
+  comes back beside its own answer, so there is nothing to look up.
+- **Packets** are built as `#key := question :& #other := question`. Nothing
+  terminates the chain, and two packets join with the same `:&`, so a shared
+  set of questions is an ordinary value. Nested packets flatten to dotted wire
+  paths. A duplicate label is a compile error naming it.
+- **Reading answers** uses record dot straight off the `Response`: `r.next`,
+  `r.enough`, `r.children` (a list of `(row, subAnswers)`), with `J.answers r`
+  for handing the whole packet to a function. Each answer cell
   carries its own fields: a choice has `.key`, `.mass`, `.margin`,
   `.confidence` and `.masses`; a noul has `.yes`; a score has `.expectation`,
-  `.nearest`, `.masses` and `.confidence`; a `Selected` has `.key`. A whole
+  `.masses` and `.confidence`. A whole
   `Response` displays as an object of those fields, so ending a cell with the
   bound `answer` shows every question's distribution without a projection.
-- **`J.handle`/`J.onMany`** eliminate a choice exhaustively, in the
-  alternatives' declaration order — a handler list is an ordinary value, so
+- **`J.handle answer handlers`** eliminates a choice exhaustively, handlers
+  found by label rather than position — a handler list is an ordinary value, so
   bind it once and reuse it for the winner and for every contender.
-- **`J.contenders floor answer`** reads every alternative at or above a mass
-  floor, best first, not just `J.chosen`; a near tie is itself a typed
+- **`J.contenders floor answer handlers`** reads every alternative at or above a
+  mass floor, best first, not just the winner; a near tie is itself a typed
   outcome worth branching on.
-- **`J.accept policy answer`** applies one of the three named policies —
-  `J.routing`, `J.spawning`, `J.merging` — and returns the selection or a
-  typed `J.Doubt` (`NearTie`, `Underweight`, `Unconfident`). Choose the
+- **`J.settle policy answer handlers`** applies one of the three named policies —
+  `J.lenient`, `J.careful`, `J.strict` — and returns
+  `Either J.Doubt (J.Settled p r)`: the handler's result for the alternative
+  that won, or a typed `J.Doubt { cause, why }` (`NearTie`, `Underweight`,
+  `Unconfident`). Choose the
   policy by what the answer authorizes, not by the question's wording.
-  `fmap J.selectedKey` turns an accepted selection into plain `Text`, and
-  `J.explain policy answer` states in one line why it was accepted or
+  `J.takenUnder policy answer` is the same without handlers when every
+  alternative carries the same type of payload, `J.judge`/`J.holds` do it for a
+  noul, and `J.explain policy answer` states in one line why it settled or
   doubted — put that in the notice, not the raw distribution.
 - Keys and wording are model-facing: name alternatives by what choosing them
   means (`use_witness`, `not_in_file`, `defer_to_model`), never `a`/`b`/a
-  counter. State is structured JSON context, built once and reused across
-  the questions that need it.
-- **`J.pool #name [...]`** declares a shared candidate set once when several
-  questions in the same packet range over the same alternatives; draw on it
-  with `J.manyFrom`/`J.eachIn`/`J.askAbout` instead of repeating wording.
+  counter. State is a typed field packet, built once and reused across
+  the questions that need it; `J.field #name state` renders a checked
+  reference to one of its fields inside wording.
+- **A shared candidate set is an ordinary Haskell list.** Bind the rows once and
+  draw both a `J.many` and a `J.each` from them when several questions in the
+  same packet range over the same candidates.
 
 ## Evidence, intent, and uncertainty
 
@@ -98,15 +119,17 @@ Write alternatives as comparable conditions on the supplied state. Include a
 described exit when none may fit. A mass of 1.0 means no offered alternative
 competes; inadequate evidence or options can still produce that result.
 
-J.accept returns the accepted winning selection, whatever it means. A confident
-item_missing is a Right too. Dispatch with J.handle, and handle doubt and service
-failure explicitly. Confidence does not establish evidence coverage or authority.
+J.settle returns the winning alternative through its handler, whatever that
+alternative means. A confident item_missing is a Right too. The handler that ran
+is what decides; handle doubt and service failure explicitly. Confidence does not
+establish evidence coverage or authority.
 Use the named policies as starting points and evaluate the resulting behavior
 for your actual task and consequences.
 
 Bundle independent and speculative questions over the same state. They cannot
-see one another's answers. A second call is useful when a previous answer leads
-to new evidence. Keep raw judgments available for inspection and reuse.
+see one another's answers, so a question that only holds under a premise states
+that premise in its own wording. A second call is useful when a previous answer
+leads to new evidence. Keep raw judgments available for inspection and reuse.
 
 Preserve full evidence or recoverable references. Excerpts need scope and source
 addresses. A display budget must not silently delete the fact a judgment needs.
@@ -114,54 +137,49 @@ Use Cmd.quiet and small output projections to keep large retained values out of
 the conversation.
 
 See shoal-jev for worked patterns. Historical lab results apply to their fixtures;
-they are not universal rules about question wording, thresholds, or pool size.
+they are not universal rules about question wording, thresholds, or candidate count.
 
 ## A worked cell
 
 Choosing which of several retained child results to inspect first, from a
-handback exit and one `choice` over the children:
+handback exit and one `choice` over the children. Every alternative carries the
+same kind of payload — what to do next — so the winner is read with
+`J.takenUnder` and there is no handler list to keep in step:
 
 ```haskell
-pickChild :: [(Text, Text, Response Report)] -> Eff effects (Maybe (Response Report))
-pickChild results = do
-  let ctx = J.state (object ["failing_check" .= "test-target actor retry"])
-      offers = J.alt #inspect_none "None of these looks relevant yet" Nothing
-        J..| J.many [(label, String summary, Just r) | (label, summary, r) <- results]
-  answer <- J.ask1 ctx
-    (J.choice "Which retained child result is most likely to explain the failure?" offers)
-  case answer of
-    Left err -> do
-      say ("jev unavailable (" <> show err <> "), falling back to reading in order")
-      pure (fmap (\(_, _, r) -> r) (listToMaybe results))
-    Right a -> pure (J.handle a.chosen (J.onMany (\_ payload -> payload)))
+let results = [("child-1", "retry test failed in the fetch target"), ("child-2", "unrelated formatting diff")] :: [(Text, Text)]
+answer <- J.ask1 (J.state (#failing_check := ("test-target actor retry" :: Text)))
+  (J.choice "Which retained child result is most likely to explain the failure?"
+    (J.alt #inspect_none "None of these looks relevant yet" ("", "read them in order")
+      J..| J.many #child fst snd results))
+either (\err -> "jev unavailable (" <> T.pack (show err) <> "), reading in order")
+  (\a -> either (.why) (\(J.Settled (label, summary)) -> label <> ": " <> summary) (J.takenUnder J.lenient a)) answer
 ```
 
 A `Left` here is not fatal: the cell falls back to its own policy (read in
 order) and keeps going. Nothing about the fallback needs Jev; that is the
 point — the tree runs without it, and Jev makes it faster.
 
-## A packet with a pool
+## A packet over one candidate list
 
 A cell that asks one packet over a shared candidate set: a choice drawn from
-the pool, one relevance question per entry, and a question under a premise.
-Continuation lines of a multi-line `let` must be indented past the bound
-name; a line that starts at the name's column begins a new binding and
-fails to parse.
+the rows, and one relevance question per row. Continuation lines of a multi-line
+`let` must be indented past the bound name; a line that starts at the name's
+column begins a new binding and fails to parse.
 
 ```haskell
 let candidates = [("retry", "src/Retry.hs: retry loop and backoff" :: Text), ("fetch", "src/Fetch.hs: HTTP client and timeouts")]
-let files = J.pool #files [(k, String d, k) | (k, d) <- candidates]
 let packet =
-      #files := files
-        :& #best := J.choice "Which file explains the timeout?" (J.manyFrom files J..| J.alt #none "None of these files" "")
-        :& #per := J.eachIn files (\r -> #relevant := J.askAbout r "Is this file relevant to the timeout?" :& J.Nil)
-        :& #fixed := J.given "The retry loop changed yesterday" (J.noul "Is the timeout already fixed?")
-        :& J.Nil
-answer <- J.ask (J.state (object ["failure" .= ("fetch times out after 3 retries" :: Text)])) packet
-fmap (\r -> let a = J.answers r in (fmap J.selectedKey (J.accept J.routing a.best), [(k, s.relevant.yes) | (k, s) <- a.per], a.fixed.yes)) answer
+      #best := J.choice "Which file explains the timeout?"
+             (J.alt #none "No file in this set is on the timeout path" ("none", "")
+               J..| J.many #file fst snd candidates)
+        :& #per := J.each fst (\(k, d) -> #relevant := J.noul ("Is " <> k <> " (" <> d <> ") on the path the timeout takes?")) candidates
+        :& #fixed := J.noul "Given that the retry loop changed yesterday, is the timeout already fixed?"
+answer <- J.ask (J.state (#failure := ("fetch times out after 3 retries" :: Text))) packet
+fmap (\r -> (either (.why) (\(J.Settled (k, _)) -> k) (J.takenUnder J.lenient r.best), [(k, s.relevant.yes) | ((k, _), s) <- r.per], r.fixed.yes)) answer
 ```
 
-The last line keeps only plain values: the accepted key or the doubt, a
+The last line keeps only plain values: the settled key or the doubt's line, a
 relevance likelihood per file, and the likelihood under the premise. Ending
 the cell with the bound `answer` instead displays every distribution, which
 is what you want the first few times you write a packet.
@@ -183,14 +201,11 @@ previews <- forM names $ \n ->
 Then one packet judges all of them and one round trip returns the shortlist:
 
 ```haskell
-let files = J.pool #files [(n, String p, n) | (n, p) <- previews]
 let packet =
-      #files := files
-        :& #enough := J.noul "Is a 20-line preview enough to judge each file?"
-        :& #worth_reading := J.eachIn files (\r -> #keep := J.askAbout r "Worth reading in full for this review?" :& J.Nil)
-        :& J.Nil
-answer <- J.ask (J.state (object ["task" .= ("triage files before a focused review" :: Text)])) packet
-fmap (\r -> let a = J.answers r in (a.enough.yes, [(k, s.keep.yes) | (k, s) <- a.worth_reading])) answer
+      #enough := J.noul "Is a 20-line preview enough to judge each file?"
+        :& #worth_reading := J.each fst (\(n, p) -> #keep := J.noul ("Worth reading " <> n <> " in full for this review? Its first 20 lines are:\n" <> p)) previews
+answer <- J.ask (J.state (#task := ("triage files before a focused review" :: Text))) packet
+fmap (\r -> (r.enough.yes, [(n, s.keep.yes) | ((n, _), s) <- r.worth_reading])) answer
 ```
 
 Two cells replace the several model turns it takes to read files one by one
@@ -200,22 +215,24 @@ the model's own context.
 ## Patterns
 
 - **Locate, then edit.** Number the lines, hunks, or declarations
-  deterministically and offer them as `many` candidates with a no-match
-  exit; the retained payload is the exact reference the edit runs against.
+  deterministically and offer them as `J.many` candidates with a no-match
+  exit; the retained payload is the exact row the edit runs against.
   The file text never has to enter the model's own context.
 - **Independent membership, not a ranking.** When several items may each
   qualify (which children are relevant, which posters match), ask one
-  `noul` per item over a `pool`, not one `choice` over the items — a
+  `noul` per item with `J.each`, not one `choice` over the items — a
   `choice` distribution is relative, a `noul` per item is not.
   Use a `choice` alongside only when exactly one must win.
 - **Ordered ladders as `score`.** For alternatives ordered by cost or
   urgency, write levels as concrete situations ("no action depends on this"
-  … "continuing now invalidates work"); `expectation` and `massAtOrAbove`
-  give a movable threshold without a second call.
+  … "continuing now invalidates work") and carry the outcome beside each
+  level; `J.grade`, `expectation` and `J.massAtOrAbove` give a movable
+  threshold without a second call.
 - **Batch related questions into one packet.** A packet is a map of
   independent questions evaluated over one shared state, not a sequence —
-  they can't see each other's answers. Ask a dependent question under
-  `J.given premise` for each likely premise instead of a follow-up call.
+  they can't see each other's answers. A question that only makes sense under
+  a premise carries that premise in its own wording, instead of a follow-up
+  call.
 - **Always offer an exit.** Every `choice` that might have no good answer
   needs a no-match key; every packet whose resolution might need judgment
   beyond the state needs a `defer_to_model`-shaped key that hands back to

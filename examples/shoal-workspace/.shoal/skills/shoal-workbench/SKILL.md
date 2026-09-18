@@ -92,14 +92,17 @@ let packet =
       #enough := J.noul "Is the preview enough to judge the file?"
         :& #next := J.choice "Which file first?"
              (J.alt #none "No file in this set is on the path" ("" :: Text)
-               J..| J.many [("retry", String "src/Retry.hs", "src/Retry.hs")])
-        :& J.Nil
-let described = "packet bound" :: Text
-described
+               J..| J.many #file fst snd [("src/Retry.hs", "the retry loop and its backoff")])
+answer <- J.ask (J.rawState (String "one file, one preview")) packet
+either (const ("packet bound" :: Text)) (const "answered") answer
 ```
 
 Parentheses around the whole chain work equally well and survive reindentation
 better. The same rule governs `<$>`/`<*>` chains inside an `unfold`.
+
+A packet stays polymorphic in whether it holds questions, answers or state
+fields, so one bound and never asked has no mode to settle on and fails to
+compile. Ask it in the same cell, as above, or pin the binding with a signature.
 
 ## Shell arguments are positional
 

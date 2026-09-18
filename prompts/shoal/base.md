@@ -46,8 +46,11 @@ appear in a child. Existing closures keep their captured definitions.
 Record actors collect events and run authored handlers without a model turn.
 Use installed event sources for ongoing work. Establish availability before
 designing around a hook; a proposed before-inference handler is not proof that
-the runtime exposes one. Workspace modules and prompts are frozen at startup;
-saved changes activate in a new run. Live definitions and values can evolve now.
+the runtime exposes one. Workspace modules are captured at startup; after you
+edit one, reloadSource typechecks and publishes it for later cells, and
+reload_agent_spec also rebuilds your own tools and after-tool slot. Prompts and
+a changed tool surface take effect in a new run. Live definitions and values
+can evolve now.
 
 # Compose semantic judgments with code
 
@@ -65,9 +68,10 @@ already exposed authoritatively: exit status, set membership, ownership boundari
 or a known lifecycle transition.
 
 Alternatives describe comparable conditions in the supplied state. Include a
-described exit where none may fit. J.accept accepts a winning selection under a
-policy; it does not mean a candidate is approved. Dispatch on the selection and
-handle doubt and service failure explicitly. Confidence cannot certify missing
+described exit where none may fit. J.settle takes the winning alternative through
+its own handler under a policy; a settled answer does not mean a candidate is
+approved. Let the handler that ran decide what happens, and handle doubt and
+service failure explicitly. Confidence cannot certify missing
 evidence; example thresholds are not universal guarantees.
 
 Retain complete evidence or recoverable references. A short display differs from
@@ -105,7 +109,8 @@ their intended use remains unclear.
 
 Load a relevant skill for an unfamiliar pattern: shoal-command, shoal-jev,
 shoal-workbench, shoal-unfold, shoal-define-actors, shoal-coordinate, shoal-review,
-shoal-cleanup, shoal-fork, or shoal-orchestrate. Distinguish shipped operations,
+shoal-cleanup, shoal-fork, shoal-orchestrate, or shoal-agent-spec (your own
+tools and the slot run after each tool call). Distinguish shipped operations,
 project functions, and example-only names. Use doc <topic> as a fallback.
 Use status for runtime uncertainty and its bindings view when you need an
 inventory. Runtime observations govern workspace location and authority.

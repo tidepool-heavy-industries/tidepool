@@ -33,8 +33,8 @@ Availability of the names used here:
   `assignment`, `atRef`, `GitRef`, `BranchName`, `mkBranchName`,
   `requestWithProgressInto`, `updateRequest`, `sendMessage`, `responseWorktree`,
   `renderGitOid`, `tryMerge`, `MergeRequest`, `Cmd.run`, `Cmd.withArguments`,
-  `J.ask`, `J.ask1`, `J.choice`, `J.alt`, `J.accept`, `J.merging`, `J.routing`,
-  `J.spawning`.
+  `J.ask`, `J.ask1`, `J.choice`, `J.alt`, `J.many`, `J.settle`, `J.takenUnder`,
+  `J.judge`, `J.explain`, `J.state`, `J.lenient`, `J.careful`, `J.strict`.
 - **Needs an import in the cell**: `Jev` and `Commands` are effect types from
   `Tidepool.Effects.Core`, not re-exported by the workbench surface. Add
   `import Tidepool.Effects.Core (Jev, Commands)` before the row.
@@ -217,14 +217,16 @@ candidate was accepted at 0.90 while missing the empty-list case.
 ```haskell
 let items = "every changed file is inside the owned paths; every required test name appears passing in the check output; the empty-list case of the new filter is handled" :: Text
 let gate = J.choice "Which statement describes the candidate?"
-      (J.alt #all_present ("Every item of the checklist holds: " <> items) ()
-        J..| J.alt #item_missing "At least one item does not hold: a changed file outside the owned paths, a required test missing or failing in the check output, or the empty-list case of the new filter left unhandled" ()
-        J..| J.alt #conflicting "The items are all present but contradict each other, for example the report claims a required test passes that the check output shows failing" ()
-        J..| J.alt #insufficient_evidence "The state does not carry what the checklist needs to be decided: a file named in `diff_stat` has no hunk, or `test_output` does not name the required tests at all" ())
-answer <- J.ask1 (J.state (object ["owned_paths" .= (["src/app.rs"] :: [Text]), "acceptance_checklist" .= ([items] :: [Text]), "base" .= ("abc1230" :: Text), "candidate" .= ("def4560" :: Text), "diff_stat" .= ("src/app.rs | 4 ++--" :: Text), "hunks" .= ("diff --git a/src/app.rs b/src/app.rs\n@@\n+    if items.is_empty() { return Vec::new(); }" :: Text), "test_output" .= ("test app::tests::tag_filter_empty ... ok\ntest result: ok. 18 passed; 0 failed" :: Text)])) gate
+      (J.alt #all_present ("Every item of the checklist holds: " <> items) ("merge" :: Text)
+        J..| J.alt #item_missing "At least one item does not hold: a changed file outside the owned paths, a required test missing or failing in the check output, or the empty-list case of the new filter left unhandled" "repair"
+        J..| J.alt #conflicting "The items are all present but contradict each other, for example the report claims a required test passes that the check output shows failing" "escalate"
+        J..| J.alt #insufficient_evidence "The state does not carry what the checklist needs to be decided: a file named in `diff_stat` has no hunk, or `test_output` does not name the required tests at all" "ask again")
+answer <- J.ask1 (J.state (#owned_paths := (["src/app.rs"] :: [Text]) :& #acceptance_checklist := ([items] :: [Text]) :& #base := ("abc1230" :: Text) :& #candidate := ("def4560" :: Text) :& #diff_stat := ("src/app.rs | 4 ++--" :: Text) :& #hunks := ("diff --git a/src/app.rs b/src/app.rs\n@@\n+    if items.is_empty() { return Vec::new(); }" :: Text) :& #test_output := ("test app::tests::tag_filter_empty ... ok\ntest result: ok. 18 passed; 0 failed" :: Text))) gate
 case answer of
   Left err -> "jev unavailable: " <> T.pack (show err)
-  Right a -> either (\doubt -> "hold: " <> T.pack (show doubt) <> "; " <> J.explain J.merging a) J.selectedKey (J.accept J.merging a)
+  Right a -> case J.takenUnder J.strict a of
+    Left doubt -> "hold: " <> doubt.why
+    Right (J.Settled action) -> a.key <> " -> " <> action <> "; " <> J.explain J.strict a
 ```
 
 `insufficient_evidence` is not a failure of the candidate. It means the packet
@@ -233,13 +235,13 @@ it back — to the child with `updateRequest` when the child can supply it, to
 the root as wake 2 when it cannot. Never merge on it and never repair on it.
 
 The other seams take the same shape, each recorded in the state, each with the exit, each
-under a named policy: unmatched check output → `J.routing` over the reflex
-classes; reviewer findings → `J.routing` over
+under a named policy: unmatched check output → `J.lenient` over the reflex
+classes; reviewer findings → `J.lenient` over
 `{addresses_named_checklist_item, contract_change_needed, style_only,
 insufficient_evidence}`; "is this the same defect as the last one" → a Noul
-over both texts, escalating on a repeat instead of a third repair; which
-evidence the reviewer's brief needs → `J.routing`; admitting a reviewer at all
-→ `J.spawning`; the merge gate above → `J.merging`.
+over both texts read with `J.judge`, escalating on a repeat instead of a third
+repair; which evidence the reviewer's brief needs → `J.lenient`; admitting a
+reviewer at all → `J.careful`; the merge gate above → `J.strict`.
 
 ## The state is the wake
 

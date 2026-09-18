@@ -95,7 +95,7 @@ pub(crate) struct PromptArtifact {
 /// workspace modules existed.
 /// The skills a Shoal workspace ships, named so an unknown topic can point at
 /// the one that answers it. These are the same names the `topics` body lists.
-const SHIPPED_SKILLS: [&str; 10] = [
+const SHIPPED_SKILLS: [&str; 11] = [
     "shoal-jev",
     "shoal-orchestrate",
     "shoal-unfold",
@@ -106,6 +106,7 @@ const SHIPPED_SKILLS: [&str; 10] = [
     "shoal-review",
     "shoal-command",
     "shoal-define-actors",
+    "shoal-agent-spec",
 ];
 
 /// A topic naming a shipped skill, either bare (`command`) or in full
@@ -161,7 +162,7 @@ pub(crate) fn workbench_doc(
         "help" | "topics" => {
             let mut body = String::from(
                 "Shoal topics: tree (worktree), workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors, reflect. Use hosted `lookup` with `doc <topic>`.\n\
-                 Load the skill first where one exists; a topic is the fallback. Workspace skills: shoal-jev (judgment-model packets and gates), shoal-orchestrate (the implement/review/repair/merge loop as one record actor), shoal-unfold (multi-child unfolds and reading a child's commit), shoal-workbench (cells that typecheck the first time), shoal-cleanup (retiring workers and groups), shoal-fork, shoal-coordinate, shoal-review, shoal-command, shoal-define-actors.",
+                 Load the skill first where one exists; a topic is the fallback. Workspace skills: shoal-jev (judgment-model packets and gates), shoal-orchestrate (the implement/review/repair/merge loop as one record actor), shoal-unfold (multi-child unfolds and reading a child's commit), shoal-workbench (cells that typecheck the first time), shoal-cleanup (retiring workers and groups), shoal-agent-spec (your own tools and after-tool slot, edited and reloaded live), shoal-fork, shoal-coordinate, shoal-review, shoal-command, shoal-define-actors.",
             );
             if !workspace_modules.is_empty() {
                 body.push_str(
