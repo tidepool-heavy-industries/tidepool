@@ -464,6 +464,7 @@ fn workbench_failure_after_operations(
     let mut receipts = completed.to_vec();
     if !operations.is_empty() {
         receipts.push(WorkbenchItemReceipt {
+            diagnostics: Vec::new(),
             index: failed_index,
             kind: None,
             span: None,
@@ -4318,9 +4319,9 @@ where
                                     WorkbenchOperationDisposition::Rejected,
                                 );
                                 drop(attempt.result);
-                                return Ok(ResidentWorkbenchStep::Rejected(format!(
-                                    "reply rejected: {error:?}"
-                                )));
+                                return Ok(ResidentWorkbenchStep::Rejected(
+                                    format!("reply rejected: {error:?}").into(),
+                                ));
                             }
                         },
                         ResidentActorBoundary::CancellationAcknowledgement(acknowledgement) => {
@@ -4374,9 +4375,10 @@ where
                                         &effect,
                                         WorkbenchOperationDisposition::Rejected,
                                     );
-                                    return Ok(ResidentWorkbenchStep::Rejected(format!(
-                                        "cancellation acknowledgement rejected: {error:?}"
-                                    )));
+                                    return Ok(ResidentWorkbenchStep::Rejected(
+                                        format!("cancellation acknowledgement rejected: {error:?}")
+                                            .into(),
+                                    ));
                                 }
                             }
                         }
@@ -4682,6 +4684,7 @@ where
             return Ok(KernelStep::Continue(workbench_response(
                 WorkbenchRunStatus::Committed,
                 vec![WorkbenchItemReceipt {
+                    diagnostics: Vec::new(),
                     index: 0,
                     kind: None,
                     span: None,
@@ -4750,6 +4753,7 @@ where
             return Ok(KernelStep::Continue(workbench_response(
                 WorkbenchRunStatus::Committed,
                 vec![WorkbenchItemReceipt {
+                    diagnostics: Vec::new(),
                     index: 0,
                     kind: None,
                     span: None,
@@ -4800,6 +4804,11 @@ where
                 PreparedCell::Rejected { index, diagnostic } => {
                     let items = (0..=index)
                         .map(|prior| WorkbenchItemReceipt {
+                            diagnostics: if prior == index {
+                                diagnostic.diagnostics.clone()
+                            } else {
+                                Vec::new()
+                            },
                             index: prior,
                             kind: None,
                             span: None,
@@ -4810,7 +4819,7 @@ where
                                 WorkbenchItemStatus::NotRun
                             },
                             output: if prior == index {
-                                diagnostic.clone()
+                                diagnostic.output.clone()
                             } else {
                                 String::new()
                             },
@@ -5029,6 +5038,7 @@ where
                             WorkbenchOperationDisposition::Rejected,
                         );
                         receipts.push(WorkbenchItemReceipt {
+                            diagnostics: Vec::new(),
                             index,
                             kind: None,
                             span: None,
@@ -5050,6 +5060,7 @@ where
                         )));
                     }
                     receipts.push(WorkbenchItemReceipt {
+                        diagnostics: Vec::new(),
                         index,
                         kind: None,
                         span: None,
@@ -5062,7 +5073,11 @@ where
                         terminal_transfer: None,
                     });
                 }
-                ResidentWorkbenchStep::Rejected(output) => {
+                ResidentWorkbenchStep::Rejected(rejection) => {
+                    let tidepool_runtime::session::CompileRejection {
+                        output,
+                        diagnostics,
+                    } = rejection;
                     let output = if request.tool_call().is_some() {
                         crate::bound_workbench_display(&output, display_remaining)
                     } else {
@@ -5084,6 +5099,7 @@ where
                     )
                     .await;
                     receipts.push(WorkbenchItemReceipt {
+                        diagnostics,
                         index,
                         kind: None,
                         span: None,
@@ -5153,6 +5169,7 @@ where
                         )),
                     }
                     receipts.push(WorkbenchItemReceipt {
+                        diagnostics: Vec::new(),
                         index,
                         kind: None,
                         span: None,
@@ -5188,6 +5205,7 @@ where
                             )
                         })?;
                     receipts.push(WorkbenchItemReceipt {
+                        diagnostics: Vec::new(),
                         index,
                         kind: None,
                         span: None,
@@ -5331,6 +5349,7 @@ where
                     self.pending_program = Some(outcome);
                     self.pending_cancellation = Some(request_id);
                     receipts.push(WorkbenchItemReceipt {
+                        diagnostics: Vec::new(),
                         index,
                         kind: None,
                         span: None,
@@ -7083,6 +7102,7 @@ fn cell_check_rejection(
     let total = checked.map_or(1, |analysis| analysis.len().max(1));
     let mut items = (0..total)
         .map(|index| WorkbenchItemReceipt {
+            diagnostics: Vec::new(),
             index,
             kind: None,
             span: None,
@@ -7115,24 +7135,34 @@ fn cell_check_rejection(
                         })
                     })
                     .unwrap_or(0);
-                let rendered = tidepool_runtime::session::render_cell_compile_error(
+                let rejection = tidepool_runtime::session::render_cell_compile_rejection(
                     &tidepool_runtime::CompileError::Diagnostics(vec![diagnostic.clone()]),
                     source,
                 );
+                // The structured form follows the diagnostic to the item the
+                // rendered text was just attributed to — the span walk above
+                // already decided which item that is, and this is the same
+                // decision, not a second one.
+                items[index]
+                    .diagnostics
+                    .extend(rejection.diagnostics.iter().cloned());
                 if diagnostic.severity == tidepool_runtime::diag::DiagnosticSeverity::Warning {
-                    items[index].warnings.push(rendered);
+                    items[index].warnings.push(rejection.output);
                 } else {
                     items[index].status = WorkbenchItemStatus::Rejected;
                     if !items[index].output.is_empty() {
                         items[index].output.push_str("\n\n");
                     }
-                    items[index].output.push_str(&rendered);
+                    items[index].output.push_str(&rejection.output);
                 }
             }
         }
         error => {
+            let rejection =
+                tidepool_runtime::session::render_cell_compile_rejection(error, source);
             items[0].status = WorkbenchItemStatus::Rejected;
-            items[0].output = tidepool_runtime::session::render_cell_compile_error(error, source);
+            items[0].output = rejection.output;
+            items[0].diagnostics = rejection.diagnostics;
         }
     }
     workbench_response(WorkbenchRunStatus::Rejected, items, 0, total, checked)
@@ -7201,6 +7231,7 @@ fn workbench_response(
     let recorded_through = items.last().map_or(0, |item| item.index + 1);
     items.extend((first_not_run.max(recorded_through)..total).map(|index| {
         WorkbenchItemReceipt {
+            diagnostics: Vec::new(),
             index,
             kind: cell_check.and_then(|checked| {
                 checked
@@ -7983,6 +8014,7 @@ mod tests {
             checked_source: String::new(),
         };
         let committed = WorkbenchItemReceipt {
+            diagnostics: Vec::new(),
             index: 0,
             kind: None,
             span: None,
@@ -7999,6 +8031,7 @@ mod tests {
             vec![
                 committed.clone(),
                 WorkbenchItemReceipt {
+                    diagnostics: Vec::new(),
                     index: 1,
                     kind: None,
                     span: None,

@@ -18,6 +18,7 @@ tidepool-extract-report.workspace = true
 tidepool-codegen.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 tempfile.workspace = true
 blake3.workspace = true
 which = "8"

@@ -95,10 +95,11 @@ pub use turn::{
     assemble_inspection_module, assemble_opaque_expression_module, check_cell,
     check_cell_preferring_effectful, classify_block,
     enable_no_monomorphism_restriction, insert_preamble_imports, place_turn_stmt,
-    prepared_scaffold_binding, render_cell_compile_error, render_template,
-    render_turn_compile_error, resume_import_targets, run_turn, run_turn_pinned,
+    prepared_scaffold_binding, render_cell_compile_error, render_cell_compile_rejection,
+    render_template, render_turn_compile_error, render_turn_compile_rejection,
+    resume_import_targets, run_turn, run_turn_pinned,
     runtime_failure_advice, turn_user_code_line_range, turn_user_code_offset, with_resume_import,
-    BoundBinder,
+    BoundBinder, CompileRejection,
     CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellCheckFailure, CellCheckRequest,
     CellSourceSpan, CheckedBinderPin, CompiledTurn, DeclarationReceipt, DeclarationSource,
     ExpressionLift, LocatedImport, LocatedPragma, PragmaKind, PreparedTurn, SourcePrologue,
@@ -184,6 +185,19 @@ impl DeclarationValidationFailure {
     /// coordinates without parsing Haskell or relabeling foreign diagnostics.
     #[must_use]
     pub fn render_for_input(&self, label: &str, input: &str) -> String {
+        self.rejection_for_input(label, input).output
+    }
+
+    /// [`Self::render_for_input`]'s text plus the same GHC diagnostics as
+    /// data, in the coordinates the text shows. The declaration path and the
+    /// cell path converge on one receipt type, so they converge on one
+    /// rejection shape too.
+    #[must_use]
+    pub fn rejection_for_input(
+        &self,
+        label: &str,
+        input: &str,
+    ) -> crate::session::CompileRejection {
         let offset = self
             .diagnostics
             .iter()
@@ -200,11 +214,19 @@ impl DeclarationValidationFailure {
                     .and_then(|local| (span.start_line as usize).checked_sub(local + 1))
             })
             .unwrap_or(self.line_offset);
-        self.render_with_offset(label, offset)
+        self.rejection_with_offset(label, offset)
     }
 
     fn render_with_offset(&self, label: &str, line_offset: usize) -> String {
-        crate::diag::render_diagnostics(
+        self.rejection_with_offset(label, line_offset).output
+    }
+
+    fn rejection_with_offset(
+        &self,
+        label: &str,
+        line_offset: usize,
+    ) -> crate::session::CompileRejection {
+        let rendered = crate::diag::render_diagnostics_structured(
             &self.diagnostics,
             &crate::diag::RenderOpts {
                 anchor: &self.anchor,
@@ -215,7 +237,11 @@ impl DeclarationValidationFailure {
                 drop_foreign_gen_warnings_except: Some(&self.anchor),
                 source: &self.source,
             },
-        )
+        );
+        crate::session::CompileRejection {
+            output: rendered.text,
+            diagnostics: rendered.diagnostics,
+        }
     }
 }
 

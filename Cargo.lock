@@ -4125,6 +4125,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "filetime",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
  "serial_test",

@@ -328,6 +328,19 @@ pub struct WorkbenchItemReceipt {
     pub source_items: Vec<WorkbenchCellSourceItem>,
     pub status: WorkbenchItemStatus,
     pub output: String,
+    /// The compiler diagnostics behind this unit's `output` and `warnings`,
+    /// kept as data: severity, the coordinate the rendered header shows, and
+    /// the message body. Populated on the compile-rejection paths (cell check
+    /// and declaration validation); empty for a unit that committed, was
+    /// never run, or failed for a reason that is not a GHC diagnostics report
+    /// at all.
+    ///
+    /// This never replaces `output`, and reading `output` is unaffected by
+    /// its presence. It exists so a reader that needs the span, the severity,
+    /// or the message on its own does not have to recover them by parsing
+    /// text the compiler already handed over structured.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<crate::diag::StructuredDiagnostic>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     /// Names installed into the persistent lexical environment by this unit.
@@ -1129,6 +1142,7 @@ mod tests {
                 source_items: Vec::new(),
                 status: WorkbenchItemStatus::Committed,
                 output: "bound `answer`".into(),
+                diagnostics: Vec::new(),
                 warnings: Vec::new(),
                 installed_bindings: vec!["answer".into()],
                 operations: vec![WorkbenchOperationReceipt {
@@ -1156,6 +1170,23 @@ mod tests {
         );
         assert_eq!(encoded["items"][0]["terminalTransfer"], "replyAccepted");
         assert_eq!(encoded["nextIndex"], 1);
+        // A committed unit has nothing to say structurally, and says nothing:
+        // the field is absent rather than an empty array.
+        assert!(encoded["items"][0].get("diagnostics").is_none());
+    }
+
+    /// The receipt is schema-backed for the model-facing tool description.
+    /// The added structured field must appear in that schema, including its
+    /// representable-unknown location case — a schema that omitted it would
+    /// tell the model the field cannot be there.
+    #[test]
+    fn receipt_schema_describes_the_structured_diagnostics_field() {
+        let schema = serde_json::to_value(schemars::schema_for!(WorkbenchItemReceipt))
+            .expect("the receipt schema serializes");
+        let text = schema.to_string();
+        assert!(text.contains("diagnostics"), "{schema:#}");
+        assert!(text.contains("authored"), "{schema:#}");
+        assert!(text.contains("unlocated"), "{schema:#}");
     }
 
     #[tokio::test]

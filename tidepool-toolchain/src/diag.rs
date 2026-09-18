@@ -127,6 +127,111 @@ pub struct RenderOpts<'a> {
     pub source: &'a str,
 }
 
+/// Severity as the rendered header spells it. A projection of the wire
+/// [`DiagnosticSeverity`] into the model-facing schema; the wire crate stays
+/// dependency-light and owns no serialization direction but decoding.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagnosticLevel {
+    Error,
+    Warning,
+}
+
+impl From<DiagnosticSeverity> for DiagnosticLevel {
+    fn from(severity: DiagnosticSeverity) -> Self {
+        match severity {
+            DiagnosticSeverity::Error => Self::Error,
+            DiagnosticSeverity::Warning => Self::Warning,
+        }
+    }
+}
+
+impl std::fmt::Display for DiagnosticLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Error => f.write_str("error"),
+            Self::Warning => f.write_str("warning"),
+        }
+    }
+}
+
+/// Where a rendered diagnostic block says it points, as data rather than as a
+/// `label:line:col` prefix the reader has to parse back out. Exactly the
+/// coordinate the header printed, in exactly the space the header printed it:
+/// never the raw generated-module line when the header showed a remapped one,
+/// and never a remapped line when the header showed the raw one.
+///
+/// [`Unlocated`](Self::Unlocated) is the case that keeps an unrecognised
+/// diagnostic representable — GHC supplied no usable span, or the worker died
+/// before one existed. The diagnostic still carries its whole message; only
+/// the pointer is missing. Nothing here requires a diagnostic to be
+/// classified beyond "did the header have a coordinate, and was it in the
+/// submitted text's own space".
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum DiagnosticLocation {
+    /// A coordinate in the submitted text's own space. `label` is the display
+    /// name the header printed (`<cell>`, `<item>`, `<cell item 3>`), and the
+    /// line/column are already offset-corrected the same way the header
+    /// corrected them.
+    #[serde(rename_all = "camelCase")]
+    Authored {
+        label: String,
+        start_line: u32,
+        start_col: u32,
+        end_line: u32,
+        end_col: u32,
+    },
+    /// The header printed a raw `file:line:col` because the span is not in
+    /// the submitted text: the generated preamble, a library module, a
+    /// compiler backtrace. Raw coordinates, unremapped, as rendered.
+    #[serde(rename_all = "camelCase")]
+    Foreign {
+        file: String,
+        start_line: u32,
+        start_col: u32,
+        end_line: u32,
+        end_col: u32,
+    },
+    /// No span. The message is intact; there is nothing to point at.
+    Unlocated,
+}
+
+/// One rendered diagnostic block, kept as data: the same severity, the same
+/// message body, and the same coordinate its text shows. Produced alongside
+/// the rendered text by [`render_diagnostics_structured`] so the two can
+/// never disagree, and so a reader never has to recover by regex what the
+/// renderer already knew.
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct StructuredDiagnostic {
+    pub severity: DiagnosticLevel,
+    pub location: DiagnosticLocation,
+    /// The message body as the block prints it — scaffold-relevant bindings
+    /// already scrubbed — without the four-space block indent.
+    pub message: String,
+}
+
+/// The rendered text and the same diagnostics as data. One pass, one set of
+/// partition/remap decisions, two views of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderedDiagnostics {
+    /// Byte-for-byte what [`render_diagnostics`] returns.
+    pub text: String,
+    /// One entry per block present in `text`, in the same order. Diagnostics
+    /// the render policy dropped (foreign gen warnings, the wrapper-fallout
+    /// partition's suppressed tail) are absent here exactly as they are
+    /// absent from the text; the fallout footer line, being a count and not a
+    /// diagnostic, has no entry.
+    pub diagnostics: Vec<StructuredDiagnostic>,
+}
+
 /// Render surviving diagnostics (after the fallout partition + foreign-gen
 /// warning drop) into human-facing text: one block per diagnostic (a
 /// `{label}:{line}:{col}[-{end_col}]: {severity}:` header, the message body,
@@ -142,6 +247,20 @@ pub struct RenderOpts<'a> {
 /// always gets SOMETHING actionable: never bare suppression.
 #[must_use]
 pub fn render_diagnostics(diags: &[ExtractDiag], opts: &RenderOpts<'_>) -> String {
+    render_diagnostics_structured(diags, opts).text
+}
+
+/// [`render_diagnostics`]'s text plus the same diagnostics as data.
+///
+/// The text is produced by the identical code path — [`render_diagnostics`]
+/// is this function's `.text` — so the rendered form cannot drift from the
+/// structured one, and adding structure cannot change a single byte of what
+/// already-existing readers see.
+#[must_use]
+pub fn render_diagnostics_structured(
+    diags: &[ExtractDiag],
+    opts: &RenderOpts<'_>,
+) -> RenderedDiagnostics {
     // Foreign-gen-warning drop: no "never empty" guard — dropping a warning
     // can legitimately leave zero total diagnostics.
     let after_gen_drop: Vec<&ExtractDiag> = diags
@@ -176,14 +295,24 @@ pub fn render_diagnostics(diags: &[ExtractDiag], opts: &RenderOpts<'_>) -> Strin
              generated framing. Underlying GHC diagnostic(s):",
             fallout.len()
         );
+        let mut structured = Vec::with_capacity(fallout.len());
         for d in &fallout {
             out.push_str("\n\n");
             out.push_str(&render_one_raw(d, opts));
+            structured.push(structure_one_raw(d, opts));
         }
-        return out;
+        return RenderedDiagnostics {
+            text: out,
+            diagnostics: structured,
+        };
     }
 
-    let mut blocks: Vec<String> = kept.iter().map(|d| render_one(d, opts)).collect();
+    let mut blocks: Vec<String> = Vec::with_capacity(kept.len() + 1);
+    let mut structured: Vec<StructuredDiagnostic> = Vec::with_capacity(kept.len());
+    for d in &kept {
+        blocks.push(render_one(d, opts));
+        structured.push(structure_one(d, opts));
+    }
     if !fallout.is_empty() {
         blocks.push(format!(
             "({} further error(s) reported on generated workbench wrapper lines; locations \
@@ -191,7 +320,10 @@ pub fn render_diagnostics(diags: &[ExtractDiag], opts: &RenderOpts<'_>) -> Strin
             fallout.len()
         ));
     }
-    blocks.join("\n\n")
+    RenderedDiagnostics {
+        text: blocks.join("\n\n"),
+        diagnostics: structured,
+    }
 }
 
 fn is_dropped_foreign_gen_warning(d: &ExtractDiag, keep_path: Option<&str>) -> bool {
@@ -296,6 +428,87 @@ fn looks_like_wrapper_scaffold(line: &str) -> bool {
         "[user-lines]",
     ];
     MARKERS.iter().any(|m| line.contains(m))
+}
+
+/// The data form of the header [`render_one`] prints, computed from the same
+/// [`display_coord`] decision and the same column-strip rule. Held to that by
+/// `structured_location_matches_rendered_header` below, which re-parses the
+/// rendered header and compares.
+fn structure_one(d: &ExtractDiag, opts: &RenderOpts<'_>) -> StructuredDiagnostic {
+    let location = match &d.span {
+        None => DiagnosticLocation::Unlocated,
+        Some(span) => match display_coord(span, opts) {
+            // In the user's own region: header and gutter both show the
+            // offset-corrected line, and only here is the wrapper indent
+            // stripped from the column.
+            Some(coord) if coord.in_user_region => {
+                let strip_col = |c: u32| {
+                    let c = c as usize;
+                    if c > opts.col_indent {
+                        c - opts.col_indent
+                    } else {
+                        c
+                    }
+                };
+                let strip_line = |l: u32| {
+                    let l = l as usize;
+                    if l > opts.line_offset {
+                        l - opts.line_offset
+                    } else {
+                        l
+                    }
+                };
+                DiagnosticLocation::Authored {
+                    label: coord.label.to_string(),
+                    start_line: coord.line as u32,
+                    start_col: strip_col(span.start_col) as u32,
+                    end_line: strip_line(span.end_line) as u32,
+                    end_col: strip_col(span.end_col) as u32,
+                }
+            }
+            // The anchor file's generated preamble: the header shows the
+            // anchor's own name and raw, unshifted coordinates.
+            Some(coord) => DiagnosticLocation::Foreign {
+                file: coord.label.to_string(),
+                start_line: coord.line as u32,
+                start_col: span.start_col,
+                end_line: span.end_line,
+                end_col: span.end_col,
+            },
+            // Some other file entirely: raw path, raw coordinates.
+            None => DiagnosticLocation::Foreign {
+                file: span.file.clone(),
+                start_line: span.start_line,
+                start_col: span.start_col,
+                end_line: span.end_line,
+                end_col: span.end_col,
+            },
+        },
+    };
+    StructuredDiagnostic {
+        severity: d.severity.into(),
+        location,
+        message: drop_scaffold_relevant_binds(&d.message, opts),
+    }
+}
+
+/// The data form of [`render_one_raw`]'s header: never remapped, because the
+/// all-wrapper appendix never remaps either.
+fn structure_one_raw(d: &ExtractDiag, opts: &RenderOpts<'_>) -> StructuredDiagnostic {
+    StructuredDiagnostic {
+        severity: d.severity.into(),
+        location: match &d.span {
+            Some(span) => DiagnosticLocation::Foreign {
+                file: span.file.clone(),
+                start_line: span.start_line,
+                start_col: span.start_col,
+                end_line: span.end_line,
+                end_col: span.end_col,
+            },
+            None => DiagnosticLocation::Unlocated,
+        },
+        message: drop_scaffold_relevant_binds(&d.message, opts),
+    }
 }
 
 fn render_one(d: &ExtractDiag, opts: &RenderOpts<'_>) -> String {
@@ -1259,5 +1472,247 @@ mod tests {
         assert!(got.contains("Ambiguous type variable"), "{got}");
         assert!(!got.contains("__anchor"), "{got}");
         assert!(!got.contains(" | "), "no gutter/caret at all: {got}");
+    }
+
+    // ---- structured diagnostics alongside the rendered text ----
+
+    /// Every rendered block's header is a coordinate the renderer already
+    /// computed. Parsing it back out is exactly the work the structured form
+    /// exists to remove, so this test does that parse ONCE, here, to hold the
+    /// two forms together — and nowhere else in the system.
+    fn header_of(block: &str) -> &str {
+        block.lines().next().expect("a block has a header line")
+    }
+
+    #[test]
+    fn structured_location_matches_rendered_header() {
+        let source = "line1\nline2\nageDays now c = _\nline4\n";
+        let opts = RenderOpts {
+            anchor: "Expr.hs",
+            label: "<item>",
+            user_lines: Some(&[(1, 40)]),
+            line_offset: 33,
+            col_indent: 2,
+            drop_foreign_gen_warnings_except: None,
+            source,
+        };
+        // One in the user's own region (remapped), one in the anchor's
+        // generated preamble (raw, anchor-labelled), one in a foreign file.
+        let authored = diag(
+            "/tmp/x/Expr.hs",
+            35,
+            8,
+            35,
+            14,
+            DiagnosticSeverity::Error,
+            "No instance for HasField",
+        );
+        let preamble = diag(
+            "/tmp/x/Expr.hs",
+            4,
+            1,
+            4,
+            9,
+            DiagnosticSeverity::Warning,
+            "Redundant import",
+        );
+        let foreign = diag(
+            "compiler/GHC/Tc.hs",
+            77,
+            3,
+            77,
+            9,
+            DiagnosticSeverity::Error,
+            "panic",
+        );
+        let rendered = render_diagnostics_structured(&[authored, preamble, foreign], &opts);
+        let blocks: Vec<&str> = rendered.text.split("\n\n").collect();
+        assert_eq!(rendered.diagnostics.len(), 3, "{}", rendered.text);
+
+        // The header the model reads and the structure it no longer has to
+        // parse agree, field by field.
+        assert_eq!(header_of(blocks[0]), "<item>:2:6-12: error:");
+        assert_eq!(
+            rendered.diagnostics[0].location,
+            DiagnosticLocation::Authored {
+                label: "<item>".into(),
+                start_line: 2,
+                start_col: 6,
+                end_line: 2,
+                end_col: 12,
+            }
+        );
+        assert_eq!(rendered.diagnostics[0].severity, DiagnosticLevel::Error);
+        assert_eq!(rendered.diagnostics[0].message, "No instance for HasField");
+
+        assert_eq!(header_of(blocks[1]), "Expr.hs:4:1-9: warning:");
+        assert_eq!(
+            rendered.diagnostics[1].location,
+            DiagnosticLocation::Foreign {
+                file: "Expr.hs".into(),
+                start_line: 4,
+                start_col: 1,
+                end_line: 4,
+                end_col: 9,
+            }
+        );
+        assert_eq!(rendered.diagnostics[1].severity, DiagnosticLevel::Warning);
+
+        assert_eq!(header_of(blocks[2]), "compiler/GHC/Tc.hs:77:3: error:");
+        assert_eq!(
+            rendered.diagnostics[2].location,
+            DiagnosticLocation::Foreign {
+                file: "compiler/GHC/Tc.hs".into(),
+                start_line: 77,
+                start_col: 3,
+                end_line: 77,
+                end_col: 9,
+            }
+        );
+    }
+
+    /// GHC's `UnhelpfulSpan`, and any worker failure that never had a span,
+    /// must stay representable rather than be dropped or forced into a
+    /// location it does not have. The message is what must survive whole.
+    #[test]
+    fn unspanned_diagnostic_stays_unlocated_with_its_message_intact() {
+        let unspanned = ExtractDiag {
+            span: None,
+            severity: DiagnosticSeverity::Error,
+            message: "compiler worker stderr:\nghc: panic! (the 'impossible' happened)".into(),
+        };
+        let rendered = render_diagnostics_structured(
+            &[unspanned],
+            &RenderOpts {
+                anchor: "Expr.hs",
+                label: "<cell>",
+                user_lines: None,
+                line_offset: 0,
+                col_indent: 0,
+                drop_foreign_gen_warnings_except: None,
+                source: "",
+            },
+        );
+        assert_eq!(rendered.diagnostics.len(), 1);
+        assert_eq!(
+            rendered.diagnostics[0].location,
+            DiagnosticLocation::Unlocated
+        );
+        assert_eq!(
+            rendered.diagnostics[0].message,
+            "compiler worker stderr:\nghc: panic! (the 'impossible' happened)"
+        );
+        assert_eq!(header_of(&rendered.text), "error:");
+    }
+
+    /// Requirement: adding structure changes not one byte of the rendered
+    /// text. Held by construction (`render_diagnostics` IS
+    /// `render_diagnostics_structured(..).text`) and by a literal golden for
+    /// a case that predates the change.
+    #[test]
+    fn rendered_text_is_byte_identical_beside_the_structure() {
+        // 34 filler lines so the diagnostic's raw line 35 exists in the
+        // source and the gutter/caret excerpt renders too.
+        let mut source = String::new();
+        for n in 1..=34 {
+            source.push_str(&format!("filler{n}\n"));
+        }
+        source.push_str("ageDays now c = _\n");
+        let d = diag(
+            "/tmp/x/Expr.hs",
+            35,
+            8,
+            35,
+            14,
+            DiagnosticSeverity::Error,
+            "No instance for HasField",
+        );
+        let opts = || RenderOpts {
+            anchor: "Expr.hs",
+            label: "<item>",
+            user_lines: Some(&[(33, 40)]),
+            line_offset: 33,
+            col_indent: 2,
+            drop_foreign_gen_warnings_except: None,
+            source: &source,
+        };
+        let text = render_diagnostics(std::slice::from_ref(&d), &opts());
+        let structured = render_diagnostics_structured(std::slice::from_ref(&d), &opts());
+        assert_eq!(text, structured.text);
+        assert_eq!(
+            text,
+            "<item>:2:6-12: error:\n    No instance for HasField\n  |\n2 | ageDays now c = _\n  |        ^^^^^^"
+        );
+        // ...and the same coordinates the text just showed, as data.
+        assert_eq!(
+            structured.diagnostics[0].location,
+            DiagnosticLocation::Authored {
+                label: "<item>".into(),
+                start_line: 2,
+                start_col: 6,
+                end_line: 2,
+                end_col: 12,
+            }
+        );
+    }
+
+    /// The structured list mirrors the blocks actually rendered: a dropped
+    /// foreign gen warning is absent from both, and the wrapper-fallout
+    /// footer — a count, not a diagnostic — adds no entry.
+    #[test]
+    fn structure_mirrors_only_the_blocks_that_were_rendered() {
+        let source = "userLine\n";
+        let kept = diag(
+            "Expr.hs",
+            1,
+            1,
+            1,
+            5,
+            DiagnosticSeverity::Error,
+            "kept in range",
+        );
+        let fell_out = diag(
+            "Expr.hs",
+            9,
+            1,
+            9,
+            5,
+            DiagnosticSeverity::Error,
+            "wrapper fallout",
+        );
+        let gen_warning = diag(
+            "Tidepool/Session/Lib/G4.hs",
+            1,
+            1,
+            1,
+            2,
+            DiagnosticSeverity::Warning,
+            "dependency noise",
+        );
+        let rendered = render_diagnostics_structured(
+            &[kept, fell_out, gen_warning],
+            &RenderOpts {
+                anchor: "Expr.hs",
+                label: "<cell>",
+                user_lines: Some(&[(1, 1)]),
+                line_offset: 0,
+                col_indent: 0,
+                drop_foreign_gen_warnings_except: Some(""),
+                source,
+            },
+        );
+        assert!(rendered.text.contains("kept in range"), "{}", rendered.text);
+        assert!(
+            rendered.text.contains("1 further error(s)"),
+            "{}",
+            rendered.text
+        );
+        assert!(
+            !rendered.text.contains("dependency noise"),
+            "{}",
+            rendered.text
+        );
+        assert_eq!(rendered.diagnostics.len(), 1, "{:?}", rendered.diagnostics);
+        assert_eq!(rendered.diagnostics[0].message, "kept in range");
     }
 }

@@ -1920,6 +1920,7 @@ pub(crate) mod tests {
                 source_items: Vec::new(),
                 status: WorkbenchItemStatus::Rejected,
                 output: output.clone(),
+                diagnostics: Vec::new(),
                 warnings: vec![],
                 installed_bindings: vec![],
                 terminal_transfer: None,
@@ -1949,6 +1950,77 @@ pub(crate) mod tests {
         );
         assert!(text.contains("input unit 2 of 3 failed"));
         assert!(text.contains("additional operation receipts omitted"));
+    }
+
+    /// A structured field that never reaches the model is worthless. This
+    /// takes a receipt through the same `workbench_reply` the host serves
+    /// every workbench reply through, and reads the diagnostics back out of
+    /// the JSON — span, severity, and message addressable on their own, with
+    /// the rendered `output` still present and unchanged beside them.
+    #[test]
+    fn workbench_reply_json_carries_structured_diagnostics_beside_the_rendered_output() {
+        use tidepool_runtime::diag::{
+            DiagnosticLevel, DiagnosticLocation, StructuredDiagnostic,
+        };
+        use tidepool_runtime::session::{
+            WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchResponse, WorkbenchRunStatus,
+        };
+        let rendered = "<cell>:1:1-8: error:\n    Variable not in scope: missing";
+        let reply = Ok(WorkbenchResponse {
+            status: WorkbenchRunStatus::Rejected,
+            summary: None,
+            items: vec![WorkbenchItemReceipt {
+                index: 0,
+                kind: None,
+                span: None,
+                source_items: Vec::new(),
+                status: WorkbenchItemStatus::Rejected,
+                output: rendered.into(),
+                diagnostics: vec![
+                    StructuredDiagnostic {
+                        severity: DiagnosticLevel::Error,
+                        location: DiagnosticLocation::Authored {
+                            label: "<cell>".into(),
+                            start_line: 1,
+                            start_col: 1,
+                            end_line: 1,
+                            end_col: 8,
+                        },
+                        message: "Variable not in scope: missing".into(),
+                    },
+                    // The unrecognised case travels too, message intact.
+                    StructuredDiagnostic {
+                        severity: DiagnosticLevel::Error,
+                        location: DiagnosticLocation::Unlocated,
+                        message: "compiler worker stderr: panic".into(),
+                    },
+                ],
+                warnings: Vec::new(),
+                installed_bindings: Vec::new(),
+                operations: Vec::new(),
+                terminal_transfer: None,
+            }],
+            next_index: 0,
+            total: 1,
+        });
+        let response = workbench_reply(reply);
+        let CallContent::InputText { text } = &response.content_items[0];
+        let json: serde_json::Value = serde_json::from_str(text).expect("a JSON reply");
+        let item = &json["items"][0];
+        assert_eq!(item["output"], rendered, "the rendered text still stands");
+        let diagnostics = item["diagnostics"]
+            .as_array()
+            .expect("diagnostics reach the model as an array");
+        assert_eq!(diagnostics.len(), 2, "{json}");
+        assert_eq!(diagnostics[0]["severity"], "error");
+        assert_eq!(diagnostics[0]["message"], "Variable not in scope: missing");
+        assert_eq!(diagnostics[0]["location"]["kind"], "authored");
+        assert_eq!(diagnostics[0]["location"]["label"], "<cell>");
+        assert_eq!(diagnostics[0]["location"]["startLine"], 1);
+        assert_eq!(diagnostics[0]["location"]["startCol"], 1);
+        assert_eq!(diagnostics[0]["location"]["endCol"], 8);
+        assert_eq!(diagnostics[1]["location"]["kind"], "unlocated");
+        assert_eq!(diagnostics[1]["message"], "compiler worker stderr: panic");
     }
 
     #[test]

@@ -18,7 +18,7 @@ use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
     check_cell_preferring_effectful, hide_preamble_exports, insert_preamble_imports,
-    render_turn_compile_error,
+    render_turn_compile_error, render_turn_compile_rejection,
     resident_cell_check_template, resident_workbench_templates, run_inspections, run_turn,
     run_turn_pinned, CellCheck, CellCheckRequest, CheckedBinderPin, DeclarationReceipt,
     InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, ResidentError, ResidentHole,
@@ -406,7 +406,7 @@ pub(crate) enum ResidentWorkbenchStep {
         warnings: Vec<String>,
         installed_bindings: Vec<String>,
     },
-    Rejected(String),
+    Rejected(tidepool_runtime::session::CompileRejection),
     CommandBackgrounded {
         job: String,
         binding: String,
@@ -1902,7 +1902,7 @@ where
                 )?;
                 let ResidentWorkbenchStep::Running { outcome, .. } = step else {
                     let detail = match step {
-                        ResidentWorkbenchStep::Rejected(detail) => detail,
+                        ResidentWorkbenchStep::Rejected(detail) => detail.output,
                         _ => "installer completed without publishing its handler".into(),
                     };
                     return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
@@ -2068,7 +2068,7 @@ where
                 )? {
                     CompiledBlock::Ready(compiled) => compiled,
                     CompiledBlock::Rejected(diagnostic) => {
-                        return Err(ResidentActorWorkbenchError::InputMount(diagnostic));
+                        return Err(ResidentActorWorkbenchError::InputMount(diagnostic.output));
                     }
                 };
                 let ReadyBlock {
@@ -2650,13 +2650,13 @@ where
                         installed_bindings: receipt.binders.clone(),
                     },
                     Err(tidepool_runtime::session::SessionError::ValidationFailed(failure)) => {
-                        ResidentWorkbenchStep::Rejected(failure.render_for_input(
+                        ResidentWorkbenchStep::Rejected(failure.rejection_for_input(
                             &format!("<cell item {}>", block.ordinal),
                             &block.source,
                         ))
                     }
                     Err(error) if classify_session(&error).class == FailureClass::UserHaskell => {
-                        ResidentWorkbenchStep::Rejected(classify_session(&error).message)
+                        ResidentWorkbenchStep::Rejected(classify_session(&error).message.into())
                     }
                     Err(error) => {
                         return Err(ResidentActorWorkbenchError::Resident(
@@ -2753,7 +2753,7 @@ where
             outcome,
         ),
         Err(ResidentError::Run(error)) => Ok(ResidentWorkbenchStep::Rejected(
-            render_runtime_rejection(input_ordinal, &error, &cell_text),
+            render_runtime_rejection(input_ordinal, &error, &cell_text).into(),
         )),
         // A prepared-route Haskell failure is the same user-level rejection Core
         // reports as `ResidentError::Run`; integrity and infrastructure failures
@@ -2761,11 +2761,9 @@ where
         Err(ResidentError::Prepared(error))
             if error.kind() == tidepool_runtime::session::PreparedFailureKind::Language =>
         {
-            Ok(ResidentWorkbenchStep::Rejected(render_cell_runtime_failure(
-                input_ordinal,
-                &error.to_string(),
-                &cell_text,
-            )))
+            Ok(ResidentWorkbenchStep::Rejected(
+                render_cell_runtime_failure(input_ordinal, &error.to_string(), &cell_text).into(),
+            ))
         }
         Err(error) => Err(ResidentActorWorkbenchError::Resident(error)),
     }
@@ -3144,7 +3142,7 @@ where
     )? {
         CompiledBlock::Ready(ready) => ready,
         CompiledBlock::Rejected(diagnostic) => {
-            return Err(ResidentActorWorkbenchError::Inspection(diagnostic))
+            return Err(ResidentActorWorkbenchError::Inspection(diagnostic.output))
         }
     };
     let TurnResult::Bind { bound: aliases, .. } = alias.result else {
@@ -6017,13 +6015,13 @@ pub(crate) enum PreparedCell {
     },
     Rejected {
         index: usize,
-        diagnostic: String,
+        diagnostic: tidepool_runtime::session::CompileRejection,
     },
 }
 
 enum CompiledBlock {
     Ready(Box<ReadyBlock>),
-    Rejected(String),
+    Rejected(tidepool_runtime::session::CompileRejection),
 }
 
 fn prepare_cell_in_session<H, O>(
@@ -6063,7 +6061,7 @@ where
             Err(error) if classify_session(&error).class == FailureClass::UserHaskell => {
                 return Ok(PreparedCell::Rejected {
                     index: 0,
-                    diagnostic: classify_session(&error).message,
+                    diagnostic: classify_session(&error).message.into(),
                 });
             }
             Err(error) => {
@@ -6380,7 +6378,7 @@ where
         }))),
         Err(failure) if classify_compile(&failure.error).class == FailureClass::UserHaskell => {
             let label = format!("<cell item {}>", block.ordinal);
-            Ok(CompiledBlock::Rejected(render_turn_compile_error(
+            Ok(CompiledBlock::Rejected(render_turn_compile_rejection(
                 &failure.error,
                 failure.attempted_source.as_deref(),
                 &block.source,
@@ -6955,7 +6953,9 @@ mod request_tests {
     fn describe_step(step: &ResidentWorkbenchStep) -> String {
         match step {
             ResidentWorkbenchStep::Committed { output, .. } => format!("Committed({output})"),
-            ResidentWorkbenchStep::Rejected(text) => format!("Rejected({text})"),
+            ResidentWorkbenchStep::Rejected(rejection) => {
+                format!("Rejected({})", rejection.output)
+            }
             ResidentWorkbenchStep::CommandBackgrounded { .. } => "CommandBackgrounded".into(),
             ResidentWorkbenchStep::Running { .. } => "Running".into(),
             ResidentWorkbenchStep::Replied { .. } => "Replied".into(),
@@ -7088,7 +7088,8 @@ mod request_tests {
 
         // 3. a failing cell is a rejection, not an infrastructure error
         match run("Just impossible <- pure (Nothing :: Maybe Int)") {
-            ResidentWorkbenchStep::Rejected(text) => {
+            ResidentWorkbenchStep::Rejected(rejection) => {
+                let text = rejection.output;
                 assert!(text.contains("runtime error"), "{engine:?}: {text}");
             }
             other => panic!(

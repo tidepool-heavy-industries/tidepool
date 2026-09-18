@@ -1104,6 +1104,45 @@ fn is_name_character(character: char) -> bool {
     character.is_alphanumeric() || character == '_' || character == '\''
 }
 
+/// A compile rejection as its reader gets it: the rendered text exactly as
+/// before, and the diagnostics that produced it kept as data beside it.
+///
+/// `output` is authoritative for display and is never derived from
+/// `diagnostics`. `diagnostics` is GHC's own report as
+/// [`crate::diag::render_diagnostics_structured`] resolved it — the same
+/// coordinates the text shows. The two can differ in one direction only: the
+/// advice layer below may REPLACE GHC's text with a plain-language
+/// explanation when the diagnostic is an artifact of how a turn is wrapped
+/// (see [`Diagnostic::Artifact`]), and in that case `diagnostics` still
+/// carries the underlying GHC report the text dropped. It is never the other
+/// way round — `diagnostics` never says less than `output`.
+///
+/// A rejection that is not a GHC diagnostics report at all (a missing
+/// artifact, a toolchain skew) renders its classified message with an empty
+/// `diagnostics`: there is no diagnostic to structure, and inventing one
+/// would be worse than saying so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompileRejection {
+    pub output: String,
+    pub diagnostics: Vec<crate::diag::StructuredDiagnostic>,
+}
+
+impl CompileRejection {
+    /// A rejection with nothing structured behind it.
+    fn unstructured(output: String) -> Self {
+        Self {
+            output,
+            diagnostics: Vec::new(),
+        }
+    }
+}
+
+impl From<String> for CompileRejection {
+    fn from(output: String) -> Self {
+        Self::unstructured(output)
+    }
+}
+
 /// Render a failed resident turn against the submitted input unit rather than
 /// the generated wrapper module. Diagnostics from other files retain their
 /// original coordinates.
@@ -1114,18 +1153,29 @@ pub fn render_turn_compile_error(
     turn_text: &str,
     label: &str,
 ) -> String {
+    render_turn_compile_rejection(error, attempted_source, turn_text, label).output
+}
+
+/// [`render_turn_compile_error`]'s text plus its diagnostics as data.
+#[must_use]
+pub fn render_turn_compile_rejection(
+    error: &CompileError,
+    attempted_source: Option<&str>,
+    turn_text: &str,
+    label: &str,
+) -> CompileRejection {
     let CompileError::Diagnostics(diagnostics) = error else {
-        return crate::classify_compile(error).message;
+        return CompileRejection::unstructured(crate::classify_compile(error).message);
     };
     let Some(source) = attempted_source else {
-        return crate::classify_compile(error).message;
+        return CompileRejection::unstructured(crate::classify_compile(error).message);
     };
     let anchor = extract_module_name(source)
         .map(|module| format!("{}.hs", module.replace('.', "/")))
         .unwrap_or_else(|| "Expr.hs".into());
     let (line_offset, col_indent) = turn_user_code_offset(source).unwrap_or((0, 0));
     let user_lines = turn_user_code_line_range(source, turn_text);
-    let rendered = crate::diag::render_diagnostics(
+    let rendered = crate::diag::render_diagnostics_structured(
         diagnostics,
         &crate::diag::RenderOpts {
             anchor: &anchor,
@@ -1137,7 +1187,10 @@ pub fn render_turn_compile_error(
             source,
         },
     );
-    with_advice(rendered, |text| advice_for(text, turn_text))
+    CompileRejection {
+        output: with_advice(rendered.text, |text| advice_for(text, turn_text)),
+        diagnostics: rendered.diagnostics,
+    }
 }
 
 /// Render whole-cell diagnostics against the submitted cell coordinates.
@@ -1145,10 +1198,16 @@ pub fn render_turn_compile_error(
 /// offset is involved.
 #[must_use]
 pub fn render_cell_compile_error(error: &CompileError, cell_text: &str) -> String {
+    render_cell_compile_rejection(error, cell_text).output
+}
+
+/// [`render_cell_compile_error`]'s text plus its diagnostics as data.
+#[must_use]
+pub fn render_cell_compile_rejection(error: &CompileError, cell_text: &str) -> CompileRejection {
     let CompileError::Diagnostics(diagnostics) = error else {
-        return crate::classify_compile(error).message;
+        return CompileRejection::unstructured(crate::classify_compile(error).message);
     };
-    let rendered = crate::diag::render_diagnostics(
+    let rendered = crate::diag::render_diagnostics_structured(
         diagnostics,
         &crate::diag::RenderOpts {
             anchor: "<cell>",
@@ -1160,7 +1219,10 @@ pub fn render_cell_compile_error(error: &CompileError, cell_text: &str) -> Strin
             source: cell_text,
         },
     );
-    with_advice(rendered, |text| advice_for(text, cell_text))
+    CompileRejection {
+        output: with_advice(rendered.text, |text| advice_for(text, cell_text)),
+        diagnostics: rendered.diagnostics,
+    }
 }
 
 /// Whether GHC's own text is worth keeping beside the advice.
@@ -2976,6 +3038,95 @@ mod ambiguity_advice_tests {
             severity: crate::diag::DiagnosticSeverity::Error,
             message: message.to_owned(),
         }])
+    }
+
+    /// A cell rejection hands over both forms at once: the rendered text
+    /// unchanged, and the same diagnostics as data — including the one GHC
+    /// gave no span for, which stays representable rather than being dropped
+    /// or given a coordinate it never had.
+    #[test]
+    fn cell_rejection_carries_the_same_spans_as_its_rendered_text() {
+        use crate::diag::{DiagnosticLevel, DiagnosticLocation};
+        let cell_text = "let x = 1\n  missing thing\n";
+        let error = CompileError::Diagnostics(vec![
+            crate::diag::ExtractDiag {
+                span: Some(crate::diag::DiagSpan {
+                    file: "<cell>".into(),
+                    start_line: 2,
+                    start_col: 3,
+                    end_line: 2,
+                    end_col: 10,
+                }),
+                severity: crate::diag::DiagnosticSeverity::Error,
+                message: "Variable not in scope: missing".into(),
+            },
+            crate::diag::ExtractDiag {
+                span: None,
+                severity: crate::diag::DiagnosticSeverity::Warning,
+                message: "compiler worker stderr: no location".into(),
+            },
+        ]);
+        let rejection = super::render_cell_compile_rejection(&error, cell_text);
+
+        // 1. The rendered text is exactly what the existing entry point
+        //    already returns — same function, same bytes.
+        assert_eq!(
+            rejection.output,
+            render_cell_compile_error(&error, cell_text)
+        );
+        assert!(
+            rejection
+                .output
+                .starts_with("<cell>:2:3-10: error:\n    Variable not in scope: missing"),
+            "{}",
+            rejection.output
+        );
+
+        // 2. The structure says the same thing, without anyone parsing it
+        //    back out of that header.
+        assert_eq!(
+            rejection.diagnostics.len(),
+            2,
+            "{:?}",
+            rejection.diagnostics
+        );
+        assert_eq!(rejection.diagnostics[0].severity, DiagnosticLevel::Error);
+        assert_eq!(
+            rejection.diagnostics[0].location,
+            DiagnosticLocation::Authored {
+                label: "<cell>".into(),
+                start_line: 2,
+                start_col: 3,
+                end_line: 2,
+                end_col: 10,
+            }
+        );
+        assert_eq!(
+            rejection.diagnostics[0].message,
+            "Variable not in scope: missing"
+        );
+
+        // 3. The unspanned one survives whole.
+        assert_eq!(rejection.diagnostics[1].severity, DiagnosticLevel::Warning);
+        assert_eq!(
+            rejection.diagnostics[1].location,
+            DiagnosticLocation::Unlocated
+        );
+        assert_eq!(
+            rejection.diagnostics[1].message,
+            "compiler worker stderr: no location"
+        );
+    }
+
+    /// A rejection that is not a GHC diagnostics report has no structure to
+    /// offer and says so, rather than manufacturing an entry. The rendered
+    /// message is unchanged.
+    #[test]
+    fn a_non_diagnostic_compile_failure_renders_as_before_with_no_structure() {
+        let error = CompileError::MalformedDiagnostics("stale deployed extract-bin".into());
+        let rejection = super::render_cell_compile_rejection(&error, "x = 1");
+        assert_eq!(rejection.output, render_cell_compile_error(&error, "x = 1"));
+        assert!(rejection.diagnostics.is_empty());
     }
 
     /// The live diagnostic reproduced against a real resident cell whose
