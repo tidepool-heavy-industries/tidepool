@@ -34,6 +34,12 @@ and say what is missing. The execution plan is `astra-fix-waves.md`.
 7. **Lookup returns a starting point.** Signature, availability label, and one
    link to a worked usage topic, derived from the shipped examples. A `no match`
    suggests the nearest exported names under that qualifier.
+7a. **`replace` already exists.** You wanted a handler revisable while work
+   continues and started a second collector instead.
+   `haskell/lib/Tidepool/Actor/Record.hs:361` exports
+   `replace :: ActorHandle api -> ActorSpec api effects -> Eff parent (ActorHandle api)`.
+   It is a discovery failure, not a missing mechanism: two skill files mention it
+   and no worked example uses it. We add the example and the lookup pointer.
 
 ## Primitives the harness will own
 
@@ -82,3 +88,23 @@ and say what is missing. The execution plan is `astra-fix-waves.md`.
 - Which three of these would change your next flight the most?
 - Is item 11 right? Would a job binding you never asked for help, or clutter scope?
 - For item 17, what made the native subagent the easier choice at that moment?
+- You proposed a revisable decision tree and said Shoal's replacement mechanism
+  would have to be used correctly. `replace` is at
+  `/home/inanna/dev/tidepool-jev/haskell/lib/Tidepool/Actor/Record.hs:361`. Did
+  you see it? If so, what stopped you using it?
+- When you replace a running collector's handler, what should happen to work
+  already in flight? Name the behaviour you want, not the one you would tolerate.
+- Where should a shared question battery live so two consumers import the same
+  one: a module under `/home/inanna/dev/tidepool-astra/.shoal/Project/`, a file
+  under `/home/inanna/dev/tidepool-astra/.shoal/discoveries/`, or elsewhere?
+- Your port candidates are saved as
+  `/home/inanna/dev/tidepool-astra/.shoal/discoveries/select-useful-example.hs`
+  and `/home/inanna/dev/tidepool-astra/.shoal/discoveries/run-ahead.hs`. Are those
+  the right starting points, or is a live version better?
+- Which line of run-ahead's paging would you delete first, given one call that
+  returns both complete streams with outcome and cleanup?
+- `/home/inanna/dev/tidepool-astra/.shoal/checks/reflex-unresolved.hs` routes
+  unresolved names to inspection, but three other files still describe the removed
+  add-import step. Do you want to finish that, or should we?
+- For the small revisable do-the-obvious-thing program: what is the smallest
+  version that would survive one real failure and one real repair?

@@ -125,6 +125,13 @@ Base: `tidepool/src/shoal.rs:1254-1299` already builds a layered registry.
   hand-maintained index.
 - **Near-match on `no match`**: `Cmd.resultOf`, `Cmd.exitCode`, `R.await`,
   `R.lift` all missed; suggest the closest exported names in that qualifier.
+- **`replace` is undiscovered.** `haskell/lib/Tidepool/Actor/Record.hs:361`
+  exports `replace :: ActorHandle api -> ActorSpec api effects -> Eff parent
+  (ActorHandle api)`. Astra wanted exactly this ("a handler I can revise while
+  work continues"), assumed it might not exist, and started a second collector.
+  Only two skill files mention it; no worked example uses it. Add one tested
+  example that replaces a running handler and states what happens to work already
+  in flight, and point lookup at it.
 - **Reflex table follow-through** (if adopted with the patch): remove `add_import`
   from `tableVocabulary`, `plans/jev/reflex_table.json` and the addendum.
 - Live cell: `lookup ["Cmd.CommandResult","Cmd.RunResult","Tidepool.Command"]`.
