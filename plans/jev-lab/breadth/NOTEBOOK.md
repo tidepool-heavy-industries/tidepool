@@ -339,3 +339,54 @@ fact.
 
 The third row is the most reusable: a packet can screen its own questions
 before they are sent, using one axis, at the cost of one extra request.
+
+---
+
+## B8b. The escalation trigger I proposed does not work either
+
+After routing was confidently wrong on the ambiguous failure, the obvious
+repair was to ask the structural fact directly rather than hope confidence
+would reveal it. Two literal questions per failure, neither of which asks
+whether the case is ambiguous; code was to call for a person when both whole
+repairs scored above a half. This is atomic decomposition, and it is the shape
+the published guidance recommends.
+
+Questions, over the diagnostic lines of each failed build:
+
+- "Would putting back the code at the location these diagnostics name as the
+  definition make every reported error go away, without editing any of the
+  reported sites?"
+- "Would editing every site these diagnostics report make every error go away,
+  without changing the code at the location they name as the definition?"
+
+| fixture | revert would fix | editing the sites would fix |
+|---|---|---|
+| `4610b5e` lint | 0.42 | 0.64 |
+| `f726882` missing arms | 0.42 | 0.63 |
+| `53ad43c` **the ambiguous one** | **0.22** | 0.66 |
+
+**No separation, and the ambiguous case scored lowest of the three on the
+revert question**, which is the opposite of what the test needed.
+
+**Why, and this is the useful part.** Reverting is only a visible repair if you
+know what the definition changed *from*, and a diagnostic never says that. The
+state carried diagnostic lines only. The model was answering about a
+counterfactual it had no evidence for, and it answered low for all three, which
+is reasonable.
+
+This closes a loop across three experiments in this notebook. B2b asked the
+strategy question with the commit message, the definition's diff and the call
+sites in hand, and got the right answer at 0.75. B8 asked for a routing
+decision from diagnostics alone and was confidently wrong. B8b asked the
+structural question from diagnostics alone and got nothing.
+
+**The conclusion is about evidence, not about wording or thresholds.** Whether
+a failure admits two repairs is not a property of its diagnostics. It is a
+property of the change that caused it. A program that wants to know when to
+stop and ask a person has to fetch the diff first, and once it has the diff it
+can ask the strategy question directly and does not need a separate trigger at
+all. The dispatcher in A1 already fetches exactly that. The pieces compose;
+routing on diagnostics alone was the mistake.
+
+**Outcome: interesting failure**, and it retires the idea of a cheap
+diagnostics-only escalation trigger.
