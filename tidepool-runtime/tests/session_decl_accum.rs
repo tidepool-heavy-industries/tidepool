@@ -154,3 +154,80 @@ fn declarations_accumulate_and_types_coexist() {
     );
     assert_eq!(r, serde_json::json!("X Y"), "newest gen re-exports `slug`");
 }
+
+/// The workbench "define, run, refine, re-run" loop: a function re-declared
+/// in a later cell must shadow the earlier one (not raise `ambiguous
+/// occurrence`, GHC's error when an unqualified name resolves through two
+/// live generations at once — see `turn::redeclared_type_advice`), and a
+/// name declared exactly once must stay visible from every later cell,
+/// including ones that redeclare something else entirely.
+#[test]
+fn function_redeclaration_shadows_and_a_single_declaration_stays_visible() {
+    let lib_dir = setup();
+    let cache_root = tempfile::tempdir().unwrap();
+    // SAFETY: set before any compile/thread activity in this test process.
+    unsafe { std::env::set_var("XDG_CACHE_HOME", cache_root.path()) };
+    assert!(paths::cache_dir().starts_with(cache_root.path()));
+
+    let session_root = tempfile::tempdir().unwrap();
+    let mut lib = SessionLib::open(
+        SessionId(43),
+        session_root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .expect("open session")
+    .with_validation_include(vec![lib_dir.clone()]);
+
+    // Cell 1: declare `greet` once.
+    lib.define("greet t = T.append \"hi \" t")
+        .expect("define greet");
+
+    // Cell 2: an unrelated cell, declaring `shout`. `greet` was declared
+    // exactly once and must still be visible here, unchanged.
+    let g2 = lib.define("shout t = T.toUpper t").expect("define shout");
+    let r = run_probe(
+        &lib_dir,
+        lib.include_dir(),
+        &lib.cache_salt(),
+        &probe(g2, "T.Text", "greet \"a\""),
+    );
+    assert_eq!(
+        r,
+        serde_json::json!("hi a"),
+        "a name declared once stays visible from a later cell"
+    );
+
+    // Cell 3: the refinement loop — re-run `greet` with a fix, as a LATER
+    // cell. This must shadow, not error.
+    let g3 = lib
+        .define("greet t = T.append \"hello \" t")
+        .expect("redefining a function in a later cell must shadow, not error");
+
+    // A later cell referencing `greet` unqualified resolves to the NEW
+    // definition, not the one from cell 1.
+    let r = run_probe(
+        &lib_dir,
+        lib.include_dir(),
+        &lib.cache_salt(),
+        &probe(g3, "T.Text", "greet \"a\""),
+    );
+    assert_eq!(
+        r,
+        serde_json::json!("hello a"),
+        "a later cell resolves the redeclared name to the new definition"
+    );
+
+    // `shout`, declared once and never redeclared, survives an unrelated
+    // redeclaration happening elsewhere in the session.
+    let r = run_probe(
+        &lib_dir,
+        lib.include_dir(),
+        &lib.cache_salt(),
+        &probe(g3, "T.Text", "shout \"a\""),
+    );
+    assert_eq!(
+        r,
+        serde_json::json!("A"),
+        "an unrelated once-declared name survives a later redeclaration elsewhere"
+    );
+}

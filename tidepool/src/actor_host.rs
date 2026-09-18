@@ -1905,7 +1905,7 @@ fn compile_root(
             .with_imports("qualified Tidepool.Actor.Record as R")
             .with_imports("qualified Tidepool.Command as Cmd")
             .with_imports("qualified Jev.Operators as J")
-            .with_imports("Jev.Operators (Cell ((:=)), Packet ((:&)))")
+            .with_imports("Jev.Operators (Cell ((:=)), Packet ((:&), Nil))")
             .with_imports("qualified Jev.Core")
             .with_imports("qualified Jev.Core.Contract")
             .with_imports("qualified Jev.Core.Schema")
@@ -1919,6 +1919,13 @@ fn compile_root(
                     .as_ref()
                     .and_then(|inputs| inputs.tools.as_deref())
                     .unwrap_or("Tidepool.Command.Tools.tools"),
+            )
+            .with_workspace_modules(
+                config
+                    .workspace_inputs
+                    .as_ref()
+                    .map(|inputs| inputs.modules.clone())
+                    .unwrap_or_default(),
             ),
         ResidentActorRoot::new(descriptor, machine, outcome),
         Arc::new(compiled),

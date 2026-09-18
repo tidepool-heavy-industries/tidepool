@@ -695,6 +695,41 @@ pub const AMBIGUOUS_TYPE_ADVICE: &str =
 pub const LITERAL_ANNOTATION_ADVICE: &str =
     "this literal's type is ambiguous; annotate the literal: `(\"src/app.rs\" :: Text)`";
 
+/// The advice for [`is_cell_pure_dispatch_ambiguity`]'s shape: a signature
+/// repairs nothing here, because nothing the reader wrote is actually
+/// polymorphic — `pure`/`return` on a cell's final unit is the ordinary,
+/// correct habit inside a `do` block, and [`check_cell_preferring_effectful`]
+/// already runs that unit as a workbench action for every cell this
+/// diagnostic alone describes. A reader sees this only alongside a genuine,
+/// separate error on the same statement — the pinned retry failed too — so
+/// the advice still needs to name the real repair rather than send them
+/// chasing a signature that fixes nothing.
+pub const CELL_PURE_DISPATCH_ADVICE: &str =
+    "this cell's last statement is a plain value wrapped in `pure`/`return`, not an action \
+     — drop the `pure`/`return` and write the action directly, the way it already works as \
+     the last line of an ordinary `do` block";
+
+/// Whether `message` is GHC's diagnostic for the resident workbench's
+/// whole-cell preflight (see
+/// [`super::workbench::resident_cell_check_template`]) failing to decide
+/// whether a cell's final expression is a plain value or a workbench action:
+/// an unsolved `Applicative`/`Monad` constraint left open by `pure`/`return`
+/// on a type the `TidepoolCellExpression`/`TidepoolCellPure` overlap could
+/// not pin down first.
+///
+/// Deliberately narrow — narrower than the general "Ambiguous type variable"
+/// family [`ambiguous_type_advice`] otherwise handles — because
+/// [`check_cell_preferring_effectful`] spends a whole extra compile on a
+/// positive answer. An ordinary ambiguous binding (an unconstrained `Render
+/// a0`, say) does not carry an `Applicative`/`Monad` constraint and does not
+/// match.
+#[must_use]
+fn is_cell_pure_dispatch_ambiguity(message: &str) -> bool {
+    message.contains("Ambiguous type variable")
+        && message.contains("prevents the constraint")
+        && (message.contains("(Applicative ") || message.contains("(Monad "))
+}
+
 /// The advice for a cell item that carries a signature whose equation was
 /// submitted as a separate item. Each item compiles as its own
 /// `module SessionDecls where`, so the signature installs nothing and the
@@ -749,6 +784,9 @@ pub fn ambiguous_type_advice(message: &str, submitted: &str) -> Option<String> {
     if message.contains("Ambiguous type variable") {
         if message.contains("arising from the literal") || message.contains("IsString") {
             return Some(LITERAL_ANNOTATION_ADVICE.to_owned());
+        }
+        if is_cell_pure_dispatch_ambiguity(message) {
+            return Some(CELL_PURE_DISPATCH_ADVICE.to_owned());
         }
         let Some(name) = quoted_name_after(message, "In an equation for")
             .or_else(|| quoted_name_after(message, "In a pattern binding for"))
@@ -844,22 +882,35 @@ fn refutable_binds(cell_text: &str) -> Vec<(usize, String, Option<String>)> {
 }
 
 /// Recognize GHC's `Ambiguous occurrence` diagnostic when the competing
-/// candidates include field/constructor selectors from two different cell
-/// generations (`Tidepool.Session.Lib.G<n>`). Each cell's declarations
-/// compile into their own `Tidepool.Session.Lib.G<n>` module, so re-running a
-/// `data` declaration a prior cell already installed leaves its selectors
-/// live in two generations at once, plus any bound value of the same name —
+/// candidates come from two different cell generations
+/// (`Tidepool.Session.Lib.G<n>`). Each cell's declarations compile into their
+/// own `Tidepool.Session.Lib.G<n>` module, so re-running a declaration a
+/// prior cell already installed leaves it live in two generations at once —
 /// GHC reports this as an ordinary ambiguous-occurrence error, which names a
 /// scope problem the model created, not a type it needs to add. A signature
 /// repairs nothing here, so this is a separate advice family from
 /// [`ambiguous_type_advice`]'s ambiguous-type shapes, called from it as one
 /// more recognized diagnostic.
+///
+/// The two candidate shapes need DIFFERENT advice, so this distinguishes
+/// them from GHC's own wording rather than treating every hit as a type:
+/// - "the field `f' of record `M.T'" (or "the method … of class `M.C'") is a
+///   genuine TYPE/class re-declaration — the harder case: values already
+///   bound in the session's value plane were built against the OLD shape, so
+///   re-declaring it stays refused (see the module doc on `redeclared_type_advice`).
+/// - a bare `M.name` occurrence (no "of record"/"of class" framing) is a
+///   plain VALUE re-declared across generations. A value redeclaration is
+///   meant to shadow silently with no error at all (GHCi parity — see
+///   `render_module`'s `hidden_prior`); seeing GHC still report one here
+///   means that shadowing didn't apply for this turn, which is a
+///   session-scoping gap, not a type the reader introduced. The message must
+///   say so plainly instead of telling them never to re-declare "a type".
 fn redeclared_type_advice(message: &str) -> Option<String> {
     if !message.contains("Ambiguous occurrence") {
         return None;
     }
     let occurrence = quoted_name_after(message, "Ambiguous occurrence")?;
-    let mut generations: Vec<(&str, &str)> = Vec::new();
+    let mut generations: Vec<(&str, &str, bool)> = Vec::new();
     for (position, _) in message.match_indices("Tidepool.Session.Lib.G") {
         let rest = &message[position..];
         let after_prefix = &rest["Tidepool.Session.Lib.G".len()..];
@@ -874,30 +925,123 @@ fn redeclared_type_advice(message: &str) -> Option<String> {
         let Some(after_module) = after_prefix[digits_len..].strip_prefix('.') else {
             continue;
         };
-        let type_name = after_module
+        let name = after_module
             .split(|character: char| !(character.is_alphanumeric() || character == '_'))
             .next()
             .unwrap_or("");
-        if !type_name.is_empty() && !generations.contains(&(module, type_name)) {
-            generations.push((module, type_name));
+        if name.is_empty() {
+            continue;
+        }
+        let is_type_member = names_a_type_member(&message[..position]);
+        if !generations
+            .iter()
+            .any(|(m, n, _)| *m == module && *n == name)
+        {
+            generations.push((module, name, is_type_member));
         }
     }
-    let type_name = generations.first()?.1;
-    let modules = generations
+    let name = generations.first()?.1;
+    let matches: Vec<&(&str, &str, bool)> = generations
         .iter()
-        .filter(|(_, candidate)| *candidate == type_name)
-        .map(|(module, _)| *module)
-        .collect::<Vec<_>>();
-    if modules.len() < 2 {
+        .filter(|(_, candidate, _)| *candidate == name)
+        .collect();
+    if matches.len() < 2 {
         return None;
     }
-    Some(format!(
-        "`{occurrence}` is ambiguous because `{type_name}` was re-declared in this session \
-         ({} both define it); reuse the earlier `{type_name}` declaration instead of re-running \
-         it — never re-declare a type that already exists in this session — or rename this one \
-         and its fields if you meant a distinct type",
-        modules.join(" and ")
-    ))
+    let modules = matches
+        .iter()
+        .map(|(module, _, _)| *module)
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let is_type_redeclaration = matches.iter().any(|(_, _, is_type_member)| *is_type_member);
+    Some(if is_type_redeclaration {
+        format!(
+            "`{occurrence}` is ambiguous because `{name}` was re-declared in this session \
+             ({modules} both define it); values already in the session were built with the \
+             earlier `{name}`, so re-declaring a type is refused here — reuse the earlier \
+             `{name}` declaration instead of re-running it, or rename this one and its fields \
+             if you meant a distinct type"
+        )
+    } else {
+        format!(
+            "`{occurrence}` is ambiguous because `{name}` was declared again in this session \
+             ({modules} both define it); an ordinary declaration is meant to shadow the earlier \
+             one automatically, so this is a session-scoping gap, not something wrong with your \
+             code — reuse `{name}` as already declared, or give this one a different name to \
+             work around it for now"
+        )
+    })
+}
+
+/// Whether the `Tidepool.Session.Lib.G<n>.<name>` occurrence ending right
+/// before `before` names a record field or class method — GHC's own words
+/// for "this identifies an actual TYPE", which a bare qualified value
+/// occurrence never carries.
+fn names_a_type_member(before: &str) -> bool {
+    [
+        "of record `",
+        "of record \u{2018}",
+        "of class `",
+        "of class \u{2018}",
+    ]
+    .iter()
+    .any(|marker| before.ends_with(marker))
+}
+
+/// Plain-VALUE names ambiguous between exactly `previous_module` and
+/// `candidate_module` in a GHC `Ambiguous occurrence` diagnostic.
+///
+/// This is the shape [`redeclared_type_advice`] alone cannot repair: a cell
+/// that both RE-DECLARES a name and USES it from a bind statement in the
+/// SAME cell. The whole-cell preflight check (`resident_workbench::
+/// prepare_cell`) compiles the cell's own fresh declarations directly into a
+/// module already named for the NEXT generation (`candidate_module`),
+/// alongside an unqualified import of the CURRENT generation
+/// (`previous_module`) that was built before this cell's own redeclarations
+/// were known — so both are visible at once and GHC reports the ambiguity
+/// this function recognizes. The caller retries with `previous_module
+/// hiding (...)` naming exactly what this returns — the same shadowing
+/// every other generation boundary already gets via `render_module`'s
+/// `hidden_prior`.
+///
+/// Excludes any occurrence GHC frames as "the field ... of record"/"the
+/// method ... of class" — those name a genuine type/class collision, which
+/// must stay refused rather than silently hidden (see
+/// [`redeclared_type_advice`]).
+#[must_use]
+pub fn same_cell_value_collisions(
+    message: &str,
+    previous_module: &str,
+    candidate_module: &str,
+) -> Vec<String> {
+    if !message.contains("Ambiguous occurrence") || previous_module == candidate_module {
+        return Vec::new();
+    }
+    let names_in = |module: &str| -> Vec<&str> {
+        let prefix = format!("{module}.");
+        let mut names: Vec<&str> = Vec::new();
+        for (position, _) in message.match_indices(prefix.as_str()) {
+            if names_a_type_member(&message[..position]) {
+                continue;
+            }
+            let after = &message[position + prefix.len()..];
+            let name = after
+                .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+                .next()
+                .unwrap_or("");
+            if !name.is_empty() && !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        names
+    };
+    let previous_names = names_in(previous_module);
+    let candidate_names = names_in(candidate_module);
+    previous_names
+        .into_iter()
+        .filter(|name| candidate_names.contains(name))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The identifier GHC prints immediately after `prefix`, quoted as `‘name’` or,
@@ -1763,6 +1907,114 @@ pub fn check_cell(req: CellCheckRequest<'_>) -> Result<CellCheck, CellCheckFailu
     }
     let bytes = std::fs::read(&out_path)?;
     decode_cell_out(&bytes).map_err(Into::into)
+}
+
+/// [`check_cell`], but a cell whose only problem is
+/// [`is_cell_pure_dispatch_ambiguity`] is admitted rather than rejected.
+///
+/// `TidepoolCellExpression`'s OVERLAPPING `Eff effects value` head and
+/// OVERLAPPABLE bare-`value` head cannot be arranged to prefer the effectful
+/// reading themselves: GHC's overlap resolution always settles an ambiguous
+/// choice on the unconditionally-matching head (bare `value`) once forced to
+/// pick, which is backwards from what a cell ending in `pure <expr>` wants,
+/// and no combination of `OVERLAPPING`/`OVERLAPPABLE`/`INCOHERENT` pragmas
+/// changes which side wins — only which side is allowed to win silently.
+/// So instead: on exactly this diagnostic, retry once with the cell's final
+/// expression wrapped in `__tidepoolInEffectRow` (the check template defines
+/// it — see [`super::workbench::resident_cell_check_template`]), which pins
+/// the ambiguous metavariable to the workbench's own effect row before
+/// `TidepoolCellExpression` ever has to choose. A genuinely pure final
+/// expression (its own concrete, non-`Eff` type) fails that pin and keeps
+/// today's behavior; a genuine type error never carries this diagnostic
+/// shape, so it costs the one compile [`check_cell`] always cost.
+///
+/// The retry is a scratch compile only: on success, the returned
+/// [`CellCheck`]'s final item keeps the author's own source and span, not the
+/// pinned scratch text, so a per-unit compile downstream still runs the
+/// unmodified turn through the unrelated, already-correct
+/// [`ExpressionLift::Effectful`]-then-[`ExpressionLift::Pure`] selection
+/// (`assemble_display_expression_module` et al.) — this function only gets
+/// the cell admitted, and does not decide how the final unit actually runs.
+pub fn check_cell_preferring_effectful(
+    req: CellCheckRequest<'_>,
+) -> Result<CellCheck, CellCheckFailure> {
+    let CellCheckRequest {
+        cell_text,
+        template,
+        include,
+        session_root,
+        inject_modules,
+    } = req;
+    let failure = match check_cell(CellCheckRequest {
+        cell_text,
+        template,
+        include,
+        session_root,
+        inject_modules,
+    }) {
+        Ok(checked) => return Ok(checked),
+        Err(failure) => failure,
+    };
+    let Some((retry_text, original_final_item)) = pin_final_cell_expression(&failure, cell_text)
+    else {
+        return Err(failure);
+    };
+    match check_cell(CellCheckRequest {
+        cell_text: &retry_text,
+        template,
+        include,
+        session_root,
+        inject_modules,
+    }) {
+        Ok(mut checked) => {
+            // The pin exists only to get the preflight past the ambiguity;
+            // restore the author's own text/span so nothing downstream (a
+            // per-unit compile, a receipt echoed back to the reader) ever
+            // sees the scratch wrapper this function invented.
+            if let Some(slot) = checked.items.last_mut() {
+                *slot = original_final_item;
+            }
+            Ok(checked)
+        }
+        // The pinned retry's diagnostics are anchored to scratch text the
+        // reader never wrote; report the original failure, whose spans still
+        // match `cell_text`.
+        Err(_) => Err(failure),
+    }
+}
+
+/// Build a scratch copy of `cell_text` with its final item's expression
+/// wrapped in `__tidepoolInEffectRow`, alongside that item exactly as
+/// originally classified — for [`check_cell_preferring_effectful`] to restore
+/// after a successful pinned retry. `None` unless `failure` is exactly
+/// [`is_cell_pure_dispatch_ambiguity`]'s shape, classification produced at
+/// least one item, and that final item is a bare expression whose source GHC
+/// reported can still be found verbatim in `cell_text` (it always can — see
+/// [`CellAnalysisItem::source`] — this is a defensive `None`, not an expected
+/// one).
+fn pin_final_cell_expression(
+    failure: &CellCheckFailure,
+    cell_text: &str,
+) -> Option<(String, CellAnalysisItem)> {
+    let envelope = crate::classify_compile(&failure.error);
+    if envelope.class != crate::FailureClass::UserHaskell
+        || !is_cell_pure_dispatch_ambiguity(&envelope.message)
+    {
+        return None;
+    }
+    let last = failure.items.as_ref()?.last()?;
+    if last.verdict.kind != TurnKind::Expr {
+        return None;
+    }
+    let start = cell_text.rfind(last.source.as_str())?;
+    let end = start + last.source.len();
+    let mut retry_text = String::with_capacity(cell_text.len() + 32);
+    retry_text.push_str(&cell_text[..start]);
+    retry_text.push_str("__tidepoolInEffectRow (\n");
+    retry_text.push_str(&cell_text[start..end]);
+    retry_text.push_str("\n)\n");
+    retry_text.push_str(&cell_text[end..]);
+    Some((retry_text, last.clone()))
 }
 
 /// The one entry point for a session-eval turn. Writes the turn text and
@@ -2700,8 +2952,11 @@ fn parse_classify_export_item(v: &serde_json::Value) -> Result<ExportItem, Compi
 #[cfg(test)]
 mod ambiguity_advice_tests {
     use super::{
-        ambiguous_type_advice, constructor_advice, refutable_binds, render_cell_compile_error,
-        runtime_failure_advice, AMBIGUOUS_TYPE_ADVICE, LITERAL_ANNOTATION_ADVICE,
+        ambiguous_type_advice, constructor_advice, is_cell_pure_dispatch_ambiguity,
+        pin_final_cell_expression, refutable_binds, render_cell_compile_error,
+        runtime_failure_advice, same_cell_value_collisions, CellAnalysisItem,
+        CellAnalysisSourceItem, CellCheckFailure, CellSourceSpan, TurnClassification, TurnKind,
+        AMBIGUOUS_TYPE_ADVICE, CELL_PURE_DISPATCH_ADVICE, LITERAL_ANNOTATION_ADVICE,
         SPLIT_SIGNATURE_ADVICE,
     };
     use crate::CompileError;
@@ -2721,6 +2976,103 @@ mod ambiguity_advice_tests {
             severity: crate::diag::DiagnosticSeverity::Error,
             message: message.to_owned(),
         }])
+    }
+
+    /// The live diagnostic reproduced against a real resident cell whose
+    /// final unit is `pure (1 :: Int)`. Distinct from [`BARE_ERROR_CELL`]
+    /// (also a `TidepoolCellExpression` overlap, but over a fully polymorphic
+    /// `error "…"` with no `Applicative`/`Monad` constraint left open) —
+    /// only this shape is [`check_cell_preferring_effectful`]'s to fix.
+    const AMBIGUOUS_PURE_DISPATCH: &str = "<cell>:1:1: error: [GHC-39999]\n    \u{2022} Ambiguous type variable \u{2018}f0\u{2019} arising from a use of \u{2018}pure\u{2019}\n      prevents the constraint \u{2018}(Applicative f0)\u{2019} from being solved.\n      Probable fix: use a type annotation to specify what \u{2018}f0\u{2019} should be.";
+
+    #[test]
+    fn pure_dispatch_ambiguity_is_recognized_narrowly() {
+        assert!(is_cell_pure_dispatch_ambiguity(AMBIGUOUS_PURE_DISPATCH));
+        // Every other ambiguity family in this module — including the other
+        // `TidepoolCellExpression` overlap, which carries no
+        // Applicative/Monad constraint — is left alone.
+        for message in [ZONK_ANY, HIGHER_KINDED_RENDER, BARE_ERROR_CELL] {
+            assert!(
+                !is_cell_pure_dispatch_ambiguity(message),
+                "unrelated ambiguity misclassified as a pure/effect dispatch: {message}"
+            );
+        }
+    }
+
+    /// The whole point of the new advice: no signature repairs this, so the
+    /// reader is told to drop `pure`/`return` instead — and only when a
+    /// genuine error survives [`check_cell_preferring_effectful`]'s pinned
+    /// retry does this text ever reach anyone (see that function's own
+    /// tests for the common case, where the cell is admitted and no advice
+    /// is shown at all).
+    #[test]
+    fn a_pure_dispatch_ambiguity_is_told_to_drop_pure_not_add_a_signature() {
+        assert_eq!(
+            ambiguous_type_advice(AMBIGUOUS_PURE_DISPATCH, "pure (1 :: Int)").as_deref(),
+            Some(CELL_PURE_DISPATCH_ADVICE)
+        );
+        let rendered = render_cell_compile_error(&cell_error(AMBIGUOUS_PURE_DISPATCH), "pure (1 :: Int)");
+        assert!(
+            rendered.contains("Ambiguous type variable"),
+            "GHC's own text must survive: {rendered}"
+        );
+        assert!(rendered.ends_with(CELL_PURE_DISPATCH_ADVICE), "{rendered}");
+    }
+
+    #[test]
+    fn pin_final_cell_expression_wraps_only_the_final_expression_item() {
+        let bind_item = CellAnalysisItem {
+            span: CellSourceSpan { start_line: 1, start_column: 1, end_line: 1, end_column: 12 },
+            source: "h <- pure 1".to_owned(),
+            verdict: TurnClassification {
+                kind: TurnKind::Bind,
+                binders: vec!["h".to_owned()],
+                items: Vec::new(),
+            },
+            source_items: vec![CellAnalysisSourceItem {
+                ordinal: 0,
+                span: CellSourceSpan { start_line: 1, start_column: 1, end_line: 1, end_column: 12 },
+                kind: TurnKind::Bind,
+            }],
+        };
+        let final_item = CellAnalysisItem {
+            span: CellSourceSpan { start_line: 2, start_column: 1, end_line: 2, end_column: 16 },
+            source: "pure (1 :: Int)".to_owned(),
+            verdict: TurnClassification {
+                kind: TurnKind::Expr,
+                binders: Vec::new(),
+                items: Vec::new(),
+            },
+            source_items: vec![CellAnalysisSourceItem {
+                ordinal: 1,
+                span: CellSourceSpan { start_line: 2, start_column: 1, end_line: 2, end_column: 16 },
+                kind: TurnKind::Expr,
+            }],
+        };
+        let failure = CellCheckFailure {
+            error: cell_error(AMBIGUOUS_PURE_DISPATCH),
+            items: Some(vec![bind_item.clone(), final_item.clone()]),
+        };
+        let cell_text = "h <- pure 1\npure (1 :: Int)\n";
+        let (retry_text, restored) =
+            pin_final_cell_expression(&failure, cell_text).expect("this is exactly the pinnable shape");
+        assert_eq!(restored.source, final_item.source);
+        assert_eq!(restored.span, final_item.span);
+        assert!(
+            retry_text.starts_with("h <- pure 1\n__tidepoolInEffectRow (\npure (1 :: Int)\n)"),
+            "only the final item's own text is pinned, in place: {retry_text}"
+        );
+
+        // A genuine type error never carries this diagnostic shape, so it is
+        // never pinned — one compile, not two.
+        let ordinary_error = cell_error(
+            "<cell>:1:1: error: [GHC-83865]\n    \u{2022} Couldn't match type \u{2018}Int\u{2019} with \u{2018}Text\u{2019}",
+        );
+        let ordinary_failure = CellCheckFailure {
+            error: ordinary_error,
+            items: Some(vec![bind_item, final_item]),
+        };
+        assert!(pin_final_cell_expression(&ordinary_failure, cell_text).is_none());
     }
 
     #[test]
@@ -2856,10 +3208,10 @@ mod ambiguity_advice_tests {
         assert_eq!(
             advice,
             "`probe` is ambiguous because `Holder` was re-declared in this session \
-             (Tidepool.Session.Lib.G3 and Tidepool.Session.Lib.G4 both define it); reuse the \
-             earlier `Holder` declaration instead of re-running it — never re-declare a type \
-             that already exists in this session — or rename this one and its fields if you \
-             meant a distinct type"
+             (Tidepool.Session.Lib.G3 and Tidepool.Session.Lib.G4 both define it); values \
+             already in the session were built with the earlier `Holder`, so re-declaring a \
+             type is refused here — reuse the earlier `Holder` declaration instead of \
+             re-running it, or rename this one and its fields if you meant a distinct type"
         );
         // The compiler's own text survives: it names the occurrence, both
         // generations, and the line. The advice is added after it, not
@@ -2867,6 +3219,78 @@ mod ambiguity_advice_tests {
         let rendered = render_cell_compile_error(&cell_error(AMBIGUOUS_REDECLARED_FIELD), "probe holder");
         assert!(rendered.contains("Ambiguous occurrence"), "{rendered}");
         assert!(rendered.ends_with(&advice), "{rendered}");
+    }
+
+    /// The same diagnostic shape, but for a plain VALUE re-declared across two
+    /// generations (no "of record"/"of class" framing anywhere in GHC's
+    /// text) — e.g. re-running a helper function definition to refine it, the
+    /// exact workbench workflow the session is meant to support. A value
+    /// redeclaration is supposed to shadow silently (see `render_module`'s
+    /// `hidden_prior`); GHC still reporting an ambiguity here means shadowing
+    /// didn't apply for this turn. The advice must not call `symA` "a type" —
+    /// that was the asymmetry bug: the old message always said "never
+    /// re-declare a type that already exists", even for a plain function.
+    const AMBIGUOUS_REDECLARED_VALUE: &str = "<cell>:8:1: error:\n    Ambiguous occurrence `symA'.\n    It could refer to\n       either `Tidepool.Session.Lib.G7.symA',\n              imported from `Tidepool.Session.Lib.G7' at <cell>:8:1\n              (and originally defined at <cell>:3:1),\n           or `Tidepool.Session.Lib.G8.symA',\n              defined at <cell>:8:1.";
+
+    #[test]
+    fn a_redeclared_value_names_it_as_a_value_not_a_type() {
+        let advice = ambiguous_type_advice(AMBIGUOUS_REDECLARED_VALUE, "symA").unwrap();
+        assert_eq!(
+            advice,
+            "`symA` is ambiguous because `symA` was declared again in this session \
+             (Tidepool.Session.Lib.G7 and Tidepool.Session.Lib.G8 both define it); an ordinary \
+             declaration is meant to shadow the earlier one automatically, so this is a \
+             session-scoping gap, not something wrong with your code — reuse `symA` as already \
+             declared, or give this one a different name to work around it for now"
+        );
+        assert!(
+            !advice.contains("type"),
+            "a plain value must never be called a type: {advice}"
+        );
+        let rendered = render_cell_compile_error(&cell_error(AMBIGUOUS_REDECLARED_VALUE), "symA");
+        assert!(rendered.contains("Ambiguous occurrence"), "{rendered}");
+        assert!(rendered.ends_with(&advice), "{rendered}");
+    }
+
+    /// The same-cell shape: a cell re-declares `sh` AND uses it from a bind
+    /// statement in that same cell. The whole-cell preflight check names
+    /// itself as the CANDIDATE next generation (G8, holding the cell's own
+    /// fresh `sh`) while importing the CURRENT generation (G7, the earlier
+    /// `sh`) unqualified — both visible at once. `same_cell_value_collisions`
+    /// must name exactly `sh` as the retry target.
+    const AMBIGUOUS_SAME_CELL_VALUE: &str = "<cell>:16:12-15: error:\n    Ambiguous occurrence `sh'.\n    It could refer to\n       either `Tidepool.Session.Lib.G7.sh',\n              imported from `Tidepool.Session.Lib.G7' at <cell>:3:1-2,\n           or `Tidepool.Session.Lib.G8.sh',\n              defined at <cell>:4:1.";
+
+    #[test]
+    fn same_cell_value_collisions_names_the_redeclared_bind_target() {
+        assert_eq!(
+            same_cell_value_collisions(
+                AMBIGUOUS_SAME_CELL_VALUE,
+                "Tidepool.Session.Lib.G7",
+                "Tidepool.Session.Lib.G8",
+            ),
+            vec!["sh".to_string()]
+        );
+        // Swapping the module roles yields nothing — the collision is only
+        // reported between the two modules actually named in the diagnostic.
+        assert!(same_cell_value_collisions(
+            AMBIGUOUS_SAME_CELL_VALUE,
+            "Tidepool.Session.Lib.G3",
+            "Tidepool.Session.Lib.G8",
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn same_cell_value_collisions_ignores_a_genuine_type_redeclaration() {
+        // The Holder/probe case is a TYPE collision (a field "of record") —
+        // it must stay refused, never handed to the same-cell retry as a
+        // value to hide.
+        assert!(same_cell_value_collisions(
+            AMBIGUOUS_REDECLARED_FIELD,
+            "Tidepool.Session.Lib.G3",
+            "Tidepool.Session.Lib.G4",
+        )
+        .is_empty());
     }
 
     /// Run 7's first friction: `unfold "run7/wave1"`. A fork group path is a
@@ -3192,6 +3616,132 @@ mod tests {
             panic!("same-cell nominal staged item was not a bind");
         };
         assert_eq!(bound[0].type_display, "Maybe G");
+    }
+
+    /// A local, minimal `Eff` so these two tests can exercise the REAL
+    /// [`super::super::workbench::resident_cell_check_template`] — the exact
+    /// `TidepoolCellExpression`/`TidepoolCellPure` overlap the bug lives in —
+    /// without standing up the actual workbench effect row. The cell's own
+    /// declarations carry it (via `{{CELL_DECLS}}`), so the preamble stays
+    /// the ordinary shape every other whole-cell-check test in this module
+    /// already uses.
+    fn eff_cell_preamble() -> String {
+        format!(
+            "{}\nmodule CellCheck where\nimport Prelude\nimport Data.Text (Text)\n\
+             default (Int, Double, Text)\n",
+            crate::session::EVAL_PRAGMAS,
+        )
+    }
+    const EFF_DECLS: &str = concat!(
+        "data Eff (effects :: [*]) value = Eff value\n",
+        "instance Functor (Eff effects) where { fmap f (Eff a) = Eff (f a) }\n",
+        "instance Applicative (Eff effects) where { pure = Eff ; (Eff f) <*> (Eff a) = Eff (f a) }\n",
+        "instance Monad (Eff effects) where { (Eff a) >>= f = f a }\n",
+    );
+    const EFF_ROW: &str = "'[]";
+
+    /// The bug: a resident cell whose only unit is `pure (1 :: Int)` is
+    /// exactly [`is_cell_pure_dispatch_ambiguity`]'s shape against the real
+    /// check template, [`check_cell`] alone rejects it, and
+    /// [`check_cell_preferring_effectful`] admits it — with the author's own
+    /// text and span preserved, not the scratch pin — by retrying with the
+    /// final expression pinned into the effect row.
+    #[test]
+    fn a_final_pure_cell_is_accepted_as_effectful() {
+        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
+            return;
+        };
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
+        let root = tempfile::tempdir().unwrap();
+        let prelude = tidepool_testing::eval_harness::prelude_path();
+        let effects = tidepool_testing::eval_harness::effects_include();
+        let include = [prelude.as_path(), effects[0].as_path(), effects[1].as_path()];
+        let template = super::super::workbench::resident_cell_check_template(
+            &eff_cell_preamble(),
+            EFF_ROW,
+            "",
+        );
+        let cell = format!("{EFF_DECLS}pure (1 :: Int)\n");
+
+        // Without the fix: the whole-cell preflight alone rejects this cell.
+        let bare_failure = check_cell(CellCheckRequest {
+            cell_text: &cell,
+            template: &template,
+            include: &include,
+            session_root: root.path(),
+            inject_modules: &[],
+        })
+        .expect_err("an unpinned `pure` final expression is ambiguous against the real template");
+        assert!(
+            is_cell_pure_dispatch_ambiguity(&crate::classify_compile(&bare_failure.error).message),
+            "the reproduced failure must be exactly the shape the fix targets: {}",
+            crate::classify_compile(&bare_failure.error).message
+        );
+
+        // With the fix: the cell is admitted, and the final item keeps the
+        // author's own source/span rather than the scratch pin.
+        let checked = check_cell_preferring_effectful(CellCheckRequest {
+            cell_text: &cell,
+            template: &template,
+            include: &include,
+            session_root: root.path(),
+            inject_modules: &[],
+        })
+        .expect("a final `pure <expr>` cell must be accepted as effectful");
+        let final_item = checked.items.last().expect("cell has at least one item");
+        assert_eq!(final_item.verdict.kind, TurnKind::Expr);
+        assert_eq!(final_item.source, "pure (1 :: Int)\n");
+    }
+
+    /// A genuinely pure final expression (no `Applicative`/`Monad` ambiguity
+    /// at all — `1 + 1 :: Int` is not `Eff` anything) takes exactly the same
+    /// path it always has: accepted on the first [`check_cell`] attempt, no
+    /// retry involved.
+    #[test]
+    fn a_genuinely_pure_final_expression_still_takes_the_pure_path() {
+        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
+            return;
+        };
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
+        let root = tempfile::tempdir().unwrap();
+        let prelude = tidepool_testing::eval_harness::prelude_path();
+        let effects = tidepool_testing::eval_harness::effects_include();
+        let include = [prelude.as_path(), effects[0].as_path(), effects[1].as_path()];
+        let template = super::super::workbench::resident_cell_check_template(
+            &eff_cell_preamble(),
+            EFF_ROW,
+            "",
+        );
+        let cell = format!("{EFF_DECLS}1 + 1 :: Int\n");
+
+        let checked = check_cell(CellCheckRequest {
+            cell_text: &cell,
+            template: &template,
+            include: &include,
+            session_root: root.path(),
+            inject_modules: &[],
+        })
+        .expect("a genuinely pure final expression must still be accepted outright");
+        let final_item = checked.items.last().expect("cell has at least one item");
+        assert_eq!(final_item.verdict.kind, TurnKind::Expr);
+        assert_eq!(final_item.source, "1 + 1 :: Int\n");
+
+        // check_cell_preferring_effectful must behave identically — no retry
+        // is ever attempted for a cell that already succeeds outright.
+        let via_wrapper = check_cell_preferring_effectful(CellCheckRequest {
+            cell_text: &cell,
+            template: &template,
+            include: &include,
+            session_root: root.path(),
+            inject_modules: &[],
+        })
+        .expect("the wrapper must not reject what check_cell already accepts");
+        assert_eq!(
+            via_wrapper.items.last().unwrap().source,
+            final_item.source
+        );
     }
 
     /// [`PREAMBLE_DEFAULT_MARKER`] is duplicated (not depended-on) from

@@ -17,7 +17,8 @@ use tidepool_effect::dispatch::{request_constructor, DispatchEffect};
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
-    check_cell, hide_preamble_exports, insert_preamble_imports, render_turn_compile_error,
+    check_cell_preferring_effectful, hide_preamble_exports, insert_preamble_imports,
+    render_turn_compile_error,
     resident_cell_check_template, resident_workbench_templates, run_inspections, run_turn,
     run_turn_pinned, CellCheck, CellCheckRequest, CheckedBinderPin, DeclarationReceipt,
     InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, ResidentError, ResidentHole,
@@ -101,6 +102,106 @@ fn cell_module_preamble(
     }
 }
 
+/// Add `hiding (names)` to the exact line in `imports` (a
+/// [`crate::mount::ActorCompileView::turn_imports`]-shaped spec text, one
+/// entry per line, no leading `import`) that unqualifiedly names
+/// `library_module` bare — the shape it always has here, since this patch
+/// only ever runs against the FIRST (unstaged) whole-cell preflight
+/// attempt, before any per-item staging has had a chance to hide anything.
+/// Returns `None` (no retry) when `names` is empty or that exact bare line
+/// isn't found, so a caller that can't safely patch simply keeps the
+/// original diagnostic instead of silently doing nothing.
+fn hide_same_cell_collisions(
+    imports: &str,
+    library_module: &str,
+    names: &[String],
+) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let mut found = false;
+    let hidden = names.join(", ");
+    let patched = imports
+        .lines()
+        .map(|line| {
+            if line == library_module {
+                found = true;
+                format!("{library_module} hiding ({hidden})")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    found.then_some(patched)
+}
+
+/// The same cell-check failure mapping every `prepare_cell` exit uses:
+/// a genuine Haskell error becomes a rejectable [`CellCheck`] failure the
+/// caller can present, anything else is infrastructure trouble.
+fn cell_check_error(
+    failure: tidepool_runtime::session::CellCheckFailure,
+    cell_source: &str,
+) -> ResidentActorWorkbenchError {
+    if classify_compile(&failure.error).class == FailureClass::UserHaskell {
+        ResidentActorWorkbenchError::CellCheck(failure)
+    } else {
+        ResidentActorWorkbenchError::CompileInfrastructure(
+            tidepool_runtime::session::render_cell_compile_error(&failure.error, cell_source),
+        )
+    }
+}
+
+#[cfg(test)]
+mod same_cell_collision_tests {
+    use super::hide_same_cell_collisions;
+
+    #[test]
+    fn hides_the_named_collisions_from_the_bare_library_line() {
+        let imports = "qualified Data.Set as Set\nTidepool.Session.Lib.G7\nqualified Tidepool.Inspection as TidepoolInspection";
+        let patched =
+            hide_same_cell_collisions(imports, "Tidepool.Session.Lib.G7", &["sh".to_string()])
+                .expect("the bare library line is present and must be patched");
+        assert_eq!(
+            patched,
+            "qualified Data.Set as Set\nTidepool.Session.Lib.G7 hiding (sh)\nqualified Tidepool.Inspection as TidepoolInspection"
+        );
+        // Every other line is untouched.
+        assert!(patched.contains("qualified Data.Set as Set"));
+        assert!(patched.contains("qualified Tidepool.Inspection as TidepoolInspection"));
+    }
+
+    #[test]
+    fn multiple_collisions_join_into_one_hiding_clause() {
+        let patched = hide_same_cell_collisions(
+            "Tidepool.Session.Lib.G7",
+            "Tidepool.Session.Lib.G7",
+            &["sh".to_string(), "symA".to_string()],
+        )
+        .unwrap();
+        assert_eq!(patched, "Tidepool.Session.Lib.G7 hiding (sh, symA)");
+    }
+
+    #[test]
+    fn no_collisions_or_no_matching_line_means_no_retry() {
+        assert_eq!(
+            hide_same_cell_collisions("Tidepool.Session.Lib.G7", "Tidepool.Session.Lib.G7", &[]),
+            None
+        );
+        // The library line isn't bare (already qualified/hidden some other
+        // way) — patching it here could silently do the wrong thing, so this
+        // conservatively declines the retry rather than guessing.
+        assert_eq!(
+            hide_same_cell_collisions(
+                "qualified Tidepool.Session.Lib.G7 as Prev",
+                "Tidepool.Session.Lib.G7",
+                &["sh".to_string()],
+            ),
+            None
+        );
+    }
+}
+
 /// Trusted source environment supplied by actor deployment. The canonical
 /// `ActorEffects` alias itself lives in the imported Haskell facade; Rust does
 /// not reflect or authorize its row entries.
@@ -110,6 +211,7 @@ pub struct ActorWorkbenchSource {
     base_include: Arc<[PathBuf]>,
     workbench_imports: SourceImports,
     tools: Option<Arc<str>>,
+    workspace_modules: Arc<[String]>,
 }
 
 /// One prepared import environment for evaluation and inspection. Name
@@ -147,7 +249,21 @@ impl ActorWorkbenchSource {
                 "Tidepool.Inspection (print, cellDisplay)",
             ]),
             tools: None,
+            workspace_modules: Arc::from([]),
         }
+    }
+
+    /// Name the workspace-authored Haskell modules already compiled into
+    /// every session and imported into every actor's preamble, so the doc
+    /// catalog can list them beside the built-in topics. Absent for the
+    /// operator workbench and tests, which have no `FrozenWorkspace`.
+    #[must_use]
+    pub fn with_workspace_modules(
+        mut self,
+        modules: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.workspace_modules = modules.into_iter().map(Into::into).collect();
+        self
     }
 
     /// Preload the small quasiquoter vocabulary promised by a hosted
@@ -1522,6 +1638,13 @@ impl<H, O> ResidentActorWorkbench<H, O> {
         self.json_input = input;
         self
     }
+
+    /// The workspace's own Haskell modules, for `doc` to name beside its
+    /// built-in topics. Empty when this session has no `FrozenWorkspace`.
+    #[must_use]
+    pub(crate) fn workspace_modules(&self) -> &[String] {
+        &self.access.source.workspace_modules
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2043,25 +2166,69 @@ where
                     .iter()
                     .map(PathBuf::as_path)
                     .collect::<Vec<_>>();
-                let checked = check_cell(CellCheckRequest {
+                let cell_check_request = || CellCheckRequest {
                     cell_text: &cell_source,
                     template: &template,
                     include: &include,
                     session_root: compile_view.session_root(),
                     inject_modules: &prepared.injected,
-                })
-                .map_err(|failure| {
-                    if classify_compile(&failure.error).class == FailureClass::UserHaskell {
-                        ResidentActorWorkbenchError::CellCheck(failure)
-                    } else {
-                        ResidentActorWorkbenchError::CompileInfrastructure(
-                            tidepool_runtime::session::render_cell_compile_error(
-                                &failure.error,
-                                &cell_source,
-                            ),
-                        )
+                };
+                let checked = match check_cell_preferring_effectful(cell_check_request()) {
+                    Ok(checked) => checked,
+                    Err(failure) => {
+                        // The same-cell shape: this cell both RE-DECLARES a
+                        // name and USES it from a bind statement in the SAME
+                        // cell. The check module above is already named for
+                        // the CANDIDATE next generation (`candidate_module`,
+                        // holding the cell's own fresh declaration) while
+                        // `prepared.imports` still names the CURRENT
+                        // generation unqualified (built before this cell's
+                        // own redeclarations were known) — both visible at
+                        // once. Retry exactly once with that collision
+                        // hidden, the same shadowing every other generation
+                        // boundary already gets via `render_module`.
+                        let mut patched_imports = None;
+                        if classify_compile(&failure.error).class == FailureClass::UserHaskell {
+                            if let Some(previous_module) = compile_view.library() {
+                                let previous_module = previous_module.module_name();
+                                let message = tidepool_runtime::session::render_cell_compile_error(
+                                    &failure.error,
+                                    &cell_source,
+                                );
+                                let names =
+                                    tidepool_runtime::session::turn::same_cell_value_collisions(
+                                        &message,
+                                        &previous_module,
+                                        &candidate_module.module_name(),
+                                    );
+                                patched_imports = hide_same_cell_collisions(
+                                    &prepared.imports,
+                                    &previous_module,
+                                    &names,
+                                );
+                            }
+                        }
+                        match patched_imports {
+                            Some(patched_imports) => {
+                                let retried_template = resident_cell_check_template(
+                                    &check_preamble,
+                                    &context.haskell_effects_alias,
+                                    &patched_imports,
+                                );
+                                match check_cell_preferring_effectful(CellCheckRequest {
+                                    template: &retried_template,
+                                    ..cell_check_request()
+                                }) {
+                                    Ok(checked) => checked,
+                                    Err(failure) => {
+                                        return Err(cell_check_error(failure, &cell_source))
+                                    }
+                                }
+                            }
+                            None => return Err(cell_check_error(failure, &cell_source)),
+                        }
                     }
-                })?;
+                };
                 let prepared = prepare_cell_in_session(
                     session,
                     context,
@@ -6918,5 +7085,196 @@ mod request_tests {
     #[test]
     fn notebook_cells_run_on_prepared_stg() {
         notebook_cells_on(tidepool_runtime::session::EngineKind::Prepared);
+    }
+
+    /// The same-cell shape from a live Shoal session (2026-09-17): one cell
+    /// that both RE-DECLARES a name and USES it from a bind statement in
+    /// that SAME cell. `notebook_cells_on`'s per-statement `run` closure
+    /// drives each text through `begin_fragment` as its own independent
+    /// "cell" — which is exactly why it cannot catch this: the
+    /// redeclaration and its use never share one whole-cell preflight check
+    /// there. This test drives the real `prepare_cell` machinery instead —
+    /// `actor_compile_view` + `cell_module_preamble` +
+    /// `resident_cell_check_template` + `check_cell_preferring_effectful` —
+    /// exactly as `ResidentActorWorkbench::prepare_cell` assembles them,
+    /// without the registry/actor-runner scaffolding that method also needs.
+    #[test]
+    fn same_cell_redeclaration_and_use_needs_hiding_to_resolve() {
+        use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+        use tidepool_runtime::session::{ModuleEnv, SessionLib};
+
+        tidepool_testing::eval_harness::require_extract();
+        let declarations = [tidepool_mcp::notifications_decl()];
+        let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
+        let mut include = effects.include_paths().to_vec();
+        include.push(tidepool_testing::eval_harness::prelude_path());
+        include.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../haskell/actors"));
+        let preamble = insert_preamble_imports(
+            &tidepool_mcp::build_preamble(&declarations, false),
+            "qualified Tidepool.Actors.Shoal as Shoal",
+        );
+        let effects_alias = "'[Shoal.Notifications]";
+        let session_id = tidepool_repr::SessionId((u64::from(std::process::id()) << 16) | 4_243);
+        let session_root = tempfile::tempdir().expect("session root");
+        let lib = SessionLib::open(
+            session_id,
+            session_root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .expect("declaration plane")
+        .with_validation_include(include.clone());
+        let mut session = ResidentSession::unbootstrapped_on(
+            tidepool_runtime::session::EngineKind::Core,
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput::new(),
+            include.clone(),
+            tidepool_runtime::DEFAULT_NURSERY_SIZE,
+            Some(lib),
+        );
+        let lexical_scope = session.mint_isolated_scope();
+        let resource_scope = RealmId::fresh();
+        session
+            .set_actor_execution(
+                tidepool_runtime::session::SessionRunContext {
+                    lexical_scope,
+                    resource_scope,
+                    ..tidepool_runtime::session::SessionRunContext::ROOT
+                },
+                EffectRunPolicy::HandleOrSuspend,
+                LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            )
+            .expect("actor execution context");
+        let context = crate::ActorSessionContext {
+            actor: crate::ActorRef::first(crate::ActorId(1)),
+            placement: crate::ActorPlacement {
+                session: session_id,
+                resource_scope,
+                lexical_scope,
+            },
+            effect_policy: EffectRunPolicy::HandleOrSuspend,
+            live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            source_imports: crate::ActorSourceImports::default(),
+            haskell_effects_alias: effects_alias.into(),
+        };
+        let source = ActorWorkbenchSource::new(preamble, include);
+
+        // Cell 1: declare `sh`, as its own earlier cell — exactly the
+        // "generation 7" of the live incident.
+        let step = begin_fragment(
+            &mut session,
+            &context,
+            &source,
+            RequestWorkbenchScope {
+                response: None,
+                request: None,
+                type_modules: &[],
+            },
+            ParsedBlock {
+                ordinal: 1,
+                total: 1,
+                source: "sh args = length (args :: [Int])".into(),
+            },
+            None,
+        )
+        .unwrap_or_else(|error| panic!("cell 1 (define sh): {error}"));
+        assert!(
+            matches!(step, ResidentWorkbenchStep::Committed { .. }),
+            "cell 1 must commit: {}",
+            describe_step(&step)
+        );
+
+        // Cell 2: the exact friction shape — RE-DECLARE `sh` AND use it from
+        // a bind statement, both in the SAME cell text (the corrected
+        // resubmission after a partial failure, in the live incident).
+        let cell_2 = "sh args = 2 * length (args :: [Int])\nrecentA <- pure (sh [1, 2, 3])";
+
+        let candidate_module = session
+            .next_declaration_module()
+            .expect("resident session has a declaration plane");
+        let compile_view =
+            actor_compile_view(&session, &context, &source, &[]).expect("compile view");
+        let prepared = source.prepare(&compile_view);
+        let check_preamble =
+            cell_module_preamble(&prepared.preamble, &candidate_module.module_name())
+                .expect("preamble names a module");
+        let template = resident_cell_check_template(
+            &check_preamble,
+            &context.haskell_effects_alias,
+            &prepared.imports,
+        );
+        let include_refs: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
+        fn request<'a>(
+            cell_2: &'a str,
+            template: &'a str,
+            include_refs: &'a [&'a std::path::Path],
+            compile_view: &'a crate::ActorCompileView,
+            prepared: &'a WorkbenchCompilation,
+        ) -> CellCheckRequest<'a> {
+            CellCheckRequest {
+                cell_text: cell_2,
+                template,
+                include: include_refs,
+                session_root: compile_view.session_root(),
+                inject_modules: &prepared.injected,
+            }
+        }
+
+        // Without hiding, this reproduces exactly today's live-session
+        // failure: GHC reports the redeclared `sh` ambiguous between the
+        // cell's own fresh declaration and the unqualified import of the
+        // current generation built before this cell's redeclaration was
+        // known.
+        let failure = check_cell_preferring_effectful(request(
+            cell_2,
+            &template,
+            &include_refs,
+            &compile_view,
+            &prepared,
+        ))
+        .expect_err("without hiding, the same-cell redeclaration is still ambiguous today");
+        let message = tidepool_runtime::session::render_cell_compile_error(&failure.error, cell_2);
+        assert!(message.contains("Ambiguous occurrence"), "{message}");
+
+        let previous_module = compile_view
+            .library()
+            .expect("a prior generation exists")
+            .module_name();
+        let names = tidepool_runtime::session::turn::same_cell_value_collisions(
+            &message,
+            &previous_module,
+            &candidate_module.module_name(),
+        );
+        assert_eq!(names, vec!["sh".to_string()]);
+
+        // The fix: patch the previous-generation import with the SAME
+        // shadowing `render_module` already applies across ordinary
+        // generation boundaries, and retry — exactly what `prepare_cell`
+        // now does.
+        let patched_imports =
+            hide_same_cell_collisions(&prepared.imports, &previous_module, &names)
+                .expect("the bare library import line is present to patch");
+        let retried_template = resident_cell_check_template(
+            &check_preamble,
+            &context.haskell_effects_alias,
+            &patched_imports,
+        );
+        let checked = check_cell_preferring_effectful(request(
+            cell_2,
+            &retried_template,
+            &include_refs,
+            &compile_view,
+            &prepared,
+        ))
+        .unwrap_or_else(|failure| {
+            panic!(
+                "retry with hiding must resolve `sh` unambiguously: {}",
+                tidepool_runtime::session::render_cell_compile_error(&failure.error, cell_2)
+            )
+        });
+        assert_eq!(
+            checked.items.len(),
+            2,
+            "a decl item and a bind item: {checked:?}"
+        );
     }
 }

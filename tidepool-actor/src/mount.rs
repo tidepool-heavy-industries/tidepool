@@ -4,7 +4,7 @@ use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
-use tidepool_repr::{Generation, PrincipalId, SessionId};
+use tidepool_repr::{Generation, PrincipalId, SessionId, SessionModule};
 use tidepool_runtime::session::{
     MaterializedFacade, OutputSink, ResidentError, ResidentSession, SessionCompileView,
     SessionRunContext, SourceImports,
@@ -114,6 +114,15 @@ impl ActorCompileView {
     #[must_use]
     pub fn next_value_generation(&self) -> Generation {
         self.session.next_value_generation()
+    }
+
+    /// The declaration module this view currently imports unqualified for
+    /// this scope (`None` before the first declaration ever lands). Needed to
+    /// name the exact "current" generation a same-cell redeclaration retry
+    /// must hide from — see `resident_workbench::prepare_cell`.
+    #[must_use]
+    pub fn library(&self) -> Option<SessionModule> {
+        self.session.library()
     }
 
     #[must_use]

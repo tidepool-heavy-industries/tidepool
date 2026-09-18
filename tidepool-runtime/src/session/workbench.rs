@@ -684,6 +684,19 @@ pub fn resident_workbench_templates(
 /// Runtime-authored module template for GHC's whole-cell preflight. The
 /// compiler worker only fills the declaration/body placeholders after its own
 /// lexer and parser classify the submitted source.
+///
+/// `__tidepoolInEffectRow` is the same no-op-at-runtime pin used by the
+/// per-unit expression templates ([`assemble_expression_module`] and
+/// friends, in `super::turn`) — same name, same
+/// `Eff effect_stack value -> Eff effect_stack value` type in every module
+/// that might see it. `TidepoolCellExpression`'s two instance heads cannot
+/// themselves prefer the effectful reading of an ambiguous final expression
+/// (GHC always resolves the overlap toward the unconditionally-matching bare
+/// `value` head once forced to choose — the opposite of what a cell whose
+/// final unit is `pure <expr>` wants), so
+/// [`super::turn::check_cell_preferring_effectful`] retries a failed check
+/// once with the cell's final expression wrapped in this pin, which settles
+/// the ambiguity outright rather than adjudicating it here.
 #[must_use]
 pub fn resident_cell_check_template(preamble: &str, effect_stack: &str, imports: &str) -> String {
     let preamble = insert_preamble_imports(
@@ -695,6 +708,8 @@ pub fn resident_cell_check_template(preamble: &str, effect_stack: &str, imports:
         .replacen("\nmodule ", "\n{{CELL_PRAGMAS}}\nmodule ", 1);
     format!(
         "{preamble}\n\
+         __tidepoolInEffectRow :: Eff {effect_stack} value -> Eff {effect_stack} value\n\
+         __tidepoolInEffectRow = id\n\
          class TidepoolCellPure value\n\
          instance {{-# OVERLAPPABLE #-}} TidepoolCellPure value\n\
          instance {{-# OVERLAPPING #-}} TidepoolWorkbenchTypeError.Unsatisfiable \
