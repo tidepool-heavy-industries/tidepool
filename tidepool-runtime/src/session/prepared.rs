@@ -1255,6 +1255,13 @@ impl PreparedEngine {
         bindings: &BindingTable,
         index: &BindingIndex,
     ) -> Result<ProgramId, PreparedRuntimeError> {
+        let mut clock = std::time::Instant::now();
+        let mut lap = || {
+            let now = std::time::Instant::now();
+            let elapsed = now.duration_since(clock);
+            clock = now;
+            elapsed.as_millis() as u64
+        };
         let mut values = MachineImports::default();
         let mut imports = ImportBindings::new();
         for declaration in prepared.globals() {
@@ -1285,20 +1292,36 @@ impl PreparedEngine {
             );
             imports.insert(identity.clone(), handle);
         }
+        let resolve_imports_ms = lap();
+        let import_count = imports.len();
         let facts = ProgramFacts::of(&prepared);
         // Site evidence is checked before anything is compiled or published:
         // a conflicting duplicate leaves the machine, its programs and the
         // site index exactly as they were.
         let plan = self.plan_evidence(&facts)?;
+        let evidence_ms = lap();
         let linked = link_program(prepared, &values)?;
+        let link_ms = lap();
         let compiled = self
             .machine
             .compile_for_install(&linked)
             .map_err(PreparedRuntimeError::Compile)?;
+        let compile_ms = lap();
         let program = self
             .machine
             .install_program(compiled, imports)
             .map_err(PreparedRuntimeError::Run)?;
+        let install_ms = lap();
+        tracing::info!(
+            target: "tidepool_runtime::prepared_install",
+            resolve_imports_ms,
+            evidence_ms,
+            link_ms,
+            compile_ms,
+            install_ms,
+            imports = import_count,
+            "prepared install"
+        );
         self.programs.insert(program, facts);
         self.publish_evidence(program, plan);
         // Held live across the install-to-first-run gap; the turn's
@@ -2474,6 +2497,17 @@ impl PreparedEngine {
     #[must_use]
     pub fn residency(&self) -> tidepool_codegen::prepared_program::ResidencyCounts {
         self.machine.residency()
+    }
+
+    /// Lifetime Cranelift work this session's installs have paid for:
+    /// `(functions, code_bytes)`. Diff it across one turn to see how much
+    /// code generation that turn caused.
+    #[must_use]
+    pub fn codegen_totals(&self) -> (u64, u64) {
+        (
+            self.machine.compiled_functions(),
+            self.machine.compiled_code_bytes(),
+        )
     }
 
     /// Release a pin taken at install time ([`Self::install`],

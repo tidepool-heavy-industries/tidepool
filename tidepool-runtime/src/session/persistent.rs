@@ -240,6 +240,16 @@ impl ResidentEngine {
         }
     }
 
+    /// Lifetime `(functions, code_bytes)` of Cranelift work this engine's
+    /// installs caused; `None` on the Core route.
+    #[must_use]
+    pub fn codegen_totals(&self) -> Option<(u64, u64)> {
+        match self {
+            Self::Core(_) => None,
+            Self::Prepared(engine) => Some(engine.codegen_totals()),
+        }
+    }
+
     /// Prepared old-space bytes as of the last successful between-turn
     /// collection; `None` on the Core route.
     #[must_use]
@@ -605,6 +615,13 @@ impl PersistentSession {
     #[must_use]
     pub fn residency(&self) -> Option<ResidencyCounts> {
         self.machine.as_ref()?.residency()
+    }
+
+    /// Lifetime `(functions, code_bytes)` of Cranelift work this session's
+    /// installs caused; `None` on the Core route or before bootstrap.
+    #[must_use]
+    pub fn codegen_totals(&self) -> Option<(u64, u64)> {
+        self.machine.as_ref()?.codegen_totals()
     }
 
     /// Prepared old-space bytes as of the last successful between-turn

@@ -213,6 +213,16 @@ pub struct PreparedMachine<'code> {
     /// Interned/shared headers are never inserted (no single owner), same as
     /// `owned_headers` itself.
     header_owners: HashMap<usize, ProgramId>,
+    /// Lifetime totals of the Cranelift work this machine's installs caused:
+    /// functions `define_function` accepted, and the machine-code bytes they
+    /// occupy. Never decremented, including by retirement -- they answer
+    /// "how much code generation did this machine pay for", not "how much
+    /// code is live now" (which is `residency()`'s job). A session that
+    /// reuses an earlier unit's code shows a small delta per install; one
+    /// that regenerates the same reachable program shows the same large
+    /// delta every time.
+    compiled_functions: u64,
+    compiled_code_bytes: u64,
     /// Each installed program's static region paired with its owner, in
     /// install order, for [`Self::mark_live_programs`]'s
     /// `observation_heap_and_starts` call: a `Traced::Static { region }` hit is an
@@ -433,7 +443,22 @@ impl<'code> PreparedMachine<'code> {
             interner: super::DescriptorInterner::default(),
             header_owners: HashMap::new(),
             region_owners: Vec::new(),
+            compiled_functions: 0,
+            compiled_code_bytes: 0,
         })
+    }
+
+    /// Lifetime Cranelift functions compiled for this machine's installs.
+    /// See the `compiled_functions` field doc for how to read a delta.
+    #[must_use]
+    pub fn compiled_functions(&self) -> u64 {
+        self.compiled_functions
+    }
+
+    /// Lifetime machine-code bytes generated for this machine's installs.
+    #[must_use]
+    pub fn compiled_code_bytes(&self) -> u64 {
+        self.compiled_code_bytes
     }
 
     /// Compile a program to install next on this machine: against this
@@ -537,6 +562,8 @@ impl<'code> PreparedMachine<'code> {
             .iter()
             .map(|callable| callable.header)
             .collect();
+        self.compiled_functions += compiled.pipeline.functions_defined();
+        self.compiled_code_bytes += compiled.pipeline.code_bytes();
         let id = ProgramId(self.next_program);
         self.next_program += 1;
         self.header_owners

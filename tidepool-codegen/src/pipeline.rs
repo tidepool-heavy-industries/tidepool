@@ -145,6 +145,11 @@ pub struct CodegenPipeline {
     /// that turn's functions — read it the same snapshot-before/diff-after
     /// way as [`Self::functions_defined`].
     blocks_emitted: u64,
+    /// Session-lifetime sum of machine-code bytes Cranelift emitted for the
+    /// functions this pipeline defined. Read the same snapshot-before/
+    /// diff-after way as [`Self::functions_defined`]; it is the size half of
+    /// the same question — how much executable memory one turn cost.
+    code_bytes: u64,
     /// String-intern arena for diagnostic strings (e.g. enclosing-function
     /// names) that compiled code holds a raw pointer to.
     ///
@@ -233,6 +238,7 @@ impl CodegenPipeline {
             lit_wrappers: crate::emit::LitWrapperIds::default(),
             functions_defined: 0,
             blocks_emitted: 0,
+            code_bytes: 0,
             name_arena: HashSet::new(),
         })
     }
@@ -285,6 +291,12 @@ impl CodegenPipeline {
     /// `blocks_emitted` field doc for how to read a delta.
     pub fn blocks_emitted(&self) -> u64 {
         self.blocks_emitted
+    }
+
+    /// Session-lifetime machine-code bytes emitted. See the `code_bytes`
+    /// field doc for how to read a delta.
+    pub fn code_bytes(&self) -> u64 {
+        self.code_bytes
     }
 
     /// Largest native stack reserve among finalized functions.
@@ -449,6 +461,7 @@ impl CodegenPipeline {
             .push((func_id, func_size, native_frame_reserve, raw_maps));
         self.functions_defined += 1;
         self.blocks_emitted += ctx.func.layout.blocks().count() as u64;
+        self.code_bytes += u64::from(func_size);
         Ok(())
     }
 
