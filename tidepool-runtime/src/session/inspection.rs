@@ -1290,6 +1290,23 @@ mod tests {
         assert!(grouped.contains("class Service"));
         assert!(grouped.contains("exportedValue :: Int"));
         assert!(!grouped.lines().any(|line| line.starts_with("First ::")));
+
+        // A browse must not advertise a constructor the module keeps to itself.
+        // `Abstract` and `Opaque` are exported without `(..)`, so a cell cannot
+        // write `Hidden`; showing it sent a live agent into four rounds of
+        // recovery after `Data constructor not in scope`.
+        assert!(!grouped.contains("Hidden"), "{grouped}");
+        assert!(grouped.contains("data Abstract"), "{grouped}");
+        // The type `Opaque` is exported and its like-named data constructor is
+        // not; they differ by namespace and must be treated separately.
+        assert!(
+            !grouped.lines().any(|line| line.contains("newtype Opaque")
+                && line.contains('=')
+                && !line.contains("...")),
+            "{grouped}"
+        );
+        // A constructor the module does export still renders in place.
+        assert!(grouped.contains("First"), "{grouped}");
         let expanded = results[5].render();
         assert!(expanded.contains("First :: Public"), "{expanded}");
         assert!(expanded.contains("service ::"), "{expanded}");

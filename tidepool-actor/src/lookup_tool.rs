@@ -218,6 +218,59 @@ fn availability_rank(availability: InspectionAvailability) -> u8 {
     }
 }
 
+/// A type query is compiled as a generated `Expr.hs` under a temporary
+/// directory, and GHC's diagnostic arrives carrying that path. A model reading
+/// `/tmp/nix-shell.abc/.tmpXYZ/query-5/Expr.hs:60:33: Not in scope: …` cannot
+/// tell the file is not its own, and the coordinates describe generated source
+/// it never wrote. Keep the message and drop the location.
+///
+/// `tidepool-toolchain`'s `render_diagnostics` does this properly for ordinary
+/// compiles, but it needs structured spans and this path is a flat string by the
+/// time it leaves the worker, so the same anchor rule is applied here.
+fn strip_generated_query_locations(diagnostic: &str) -> String {
+    diagnostic
+        .lines()
+        .map(strip_generated_query_location)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn strip_generated_query_location(line: &str) -> &str {
+    const ANCHOR: &str = "Expr.hs";
+    let Some((head, message)) = line.split_once(": ") else {
+        return line;
+    };
+    let mut segments = head.trim_start().rsplitn(3, ':');
+    let (Some(column), Some(row), Some(path)) =
+        (segments.next(), segments.next(), segments.next())
+    else {
+        return line;
+    };
+    if !is_span_coordinate(column) || !is_span_coordinate(row) {
+        return line;
+    }
+    // The anchor must end a path component, never be an embedded suffix, so
+    // a real `SomeExpr.hs` in the workspace keeps its location.
+    let matches_anchor = path == ANCHOR
+        || (path.ends_with(ANCHOR)
+            && path.len() > ANCHOR.len()
+            && matches!(path.as_bytes()[path.len() - ANCHOR.len() - 1], b'/' | b'\\'));
+    if matches_anchor {
+        message
+    } else {
+        line
+    }
+}
+
+/// A GHC span coordinate: `60`, or `33-41` for a range.
+fn is_span_coordinate(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'-')
+        && text.bytes().any(|byte| byte.is_ascii_digit())
+}
+
 fn availability_label(availability: InspectionAvailability) -> &'static str {
     match availability {
         InspectionAvailability::Available => "available",
@@ -333,7 +386,10 @@ impl LookupResponse {
                     }
                     LookupOutcome::NotFound => "  no match".into(),
                     LookupOutcome::Rejected { diagnostic } => {
-                        format!("  error: {}", diagnostic.trim())
+                        format!(
+                            "  error: {}",
+                            strip_generated_query_locations(diagnostic).trim()
+                        )
                     }
                 };
                 format!("{}\n{body}", result.query)
@@ -566,6 +622,49 @@ mod tests {
         .render_text();
         assert!(text.contains("[available] usable-available :: Int"));
         assert!(text.contains("[unknown] exact-unknown :: Int"));
+    }
+
+    #[test]
+    fn a_rejection_keeps_its_message_and_drops_the_generated_query_location() {
+        // The exact string a live lead was shown. The path is the lookup tool's
+        // own scratch module; nothing about it is actionable, and a reader
+        // cannot tell the file is not theirs.
+        let response = LookupResponse {
+            results: vec![LookupResult {
+                query: ":: _ -> Command".into(),
+                outcome: LookupOutcome::Rejected {
+                    diagnostic: "/tmp/nix-shell.1bCMmT/.tmpQMOXBc/query-5/Expr.hs:60:33: \
+                                 Not in scope: type constructor or class `Command'"
+                        .into(),
+                },
+            }],
+        };
+        let rendered = response.render_text();
+        assert_eq!(
+            rendered,
+            ":: _ -> Command\n  error: Not in scope: type constructor or class `Command'"
+        );
+        assert!(!rendered.contains("nix-shell"), "{rendered}");
+        assert!(!rendered.contains("Expr.hs"), "{rendered}");
+
+        // A column range is still a span, and every line of a multi-line
+        // diagnostic is cleaned.
+        assert_eq!(
+            strip_generated_query_locations(
+                "/tmp/q/Expr.hs:12:1-9: first\n/tmp/q/Expr.hs:13:2: second"
+            ),
+            "first\nsecond"
+        );
+
+        // A real file in the workspace keeps its location, including one whose
+        // name merely ends in the anchor.
+        for untouched in [
+            "src/store.rs:14:2: Not in scope: thing",
+            "/home/me/SomeExpr.hs:3:4: Not in scope: thing",
+            "Not in scope: thing",
+        ] {
+            assert_eq!(strip_generated_query_locations(untouched), untouched);
+        }
     }
 
     #[test]

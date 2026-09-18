@@ -53,7 +53,7 @@ import GHC.Core.DataCon (dataConDisplayType, dataConFieldType, dataConOrigArgTys
 import GHC.Core.Multiplicity (scaledThing)
 import GHC.Core.TyCon (isAlgTyCon)
 import GHC.Core.Unify (tcMatchTy)
-import GHC.Iface.Type (ShowForAllFlag (..), ShowHowMuch (..), ShowSub (..))
+import GHC.Iface.Type (AltPpr (..), ShowForAllFlag (..), ShowHowMuch (..), ShowSub (..))
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name (isDataConName, isTyConName, isVarName)
 import GHC.Types.Name.Occurrence (isSymOcc, mkTyVarOcc, occNameString)
@@ -681,7 +681,11 @@ inspectName context rdrEnv query = do
         | gre <- globalRdrEnvElts rdrEnv,
           any (matchesQuery query) (greRdrNames gre)
         ]
-  entries <- entriesFor context (nubBy (==) names)
+  -- Everything the query module can name. A constructor hidden behind an
+  -- abstract export is not in this environment, which is exactly the set the
+  -- rendering must respect.
+  let inScope = nub (map greName (globalRdrEnvElts rdrEnv))
+  entries <- entriesFor context inScope (nubBy (==) names)
   let preferred =
         if any ((== "type") . infoKind) entries
           then filter ((/= "constructor") . infoKind) entries
@@ -705,16 +709,37 @@ inspectModule context requested expanded = handleSourceError
     sameDisplay left right = infoDisplay left == infoDisplay right
     entryKey entry = (infoName entry, infoKind entry, infoDisplay entry)
 
-entriesFor :: (GhcMonad m) => AvailabilityContext -> [Name] -> m [InfoEntry]
-entriesFor context names = fmap concat $ forM names $ \name -> do
+-- | Render a declaration showing only the sub-components the asker can name.
+--
+-- `pprTyThingInContext` overwrites `ss_how_much` with an unfiltered
+-- `ShowSome Nothing` whenever the thing has no parent, so an abstractly
+-- exported type printed every hidden constructor as though a cell could write
+-- one. A live agent did exactly that, was told `Data constructor not in scope`,
+-- and spent four discovery rounds recovering. With a real predicate GHC's
+-- `ppr_trim` collapses the hidden run to `...`, which is what `:browse` shows.
+--
+-- A thing that does have a parent keeps the context rendering unchanged: there
+-- the filter is the parent chain, which is already the right answer.
+visibleDisplay :: [Name] -> TyThing -> String
+visibleDisplay visible thing =
+  renderWithContext defaultSDocContext $ case tyThingParent_maybe thing of
+    Just _ -> pprTyThingInContext showEverything thing
+    Nothing -> pprTyThing showOnlyVisible thing
+  where
+    visibleOccs = map nameOccName visible
+    showOnlyVisible =
+      ShowSub
+        { ss_how_much = ShowSome (Just (`elem` visibleOccs)) (AltPpr Nothing),
+          ss_forall = ShowForAllWhen
+        }
+
+entriesFor :: (GhcMonad m) => AvailabilityContext -> [Name] -> [Name] -> m [InfoEntry]
+entriesFor context visible names = fmap concat $ forM names $ \name -> do
   found <- getInfo False name
   case found of
     Nothing -> pure []
     Just (thing, _fixity, _instances, _families, _extra) ->
-      let display =
-            renderWithContext
-              defaultSDocContext
-              (pprTyThingInContext showEverything thing)
+      let display = visibleDisplay visible thing
           definingModule = moduleNameString . moduleName <$> nameModule_maybe name
        in do
           availability <- thingAvailability context thing
@@ -740,11 +765,10 @@ browseEntries context expanded names = do
           else filter (not . hasExportedParent exportedNames . snd) found
   forM visible $ \(name, thing) -> do
     availability <- thingAvailability context thing
-    let document =
+    let display =
           if expanded
-            then pprTyThing showEverything thing
-            else pprTyThingInContext showEverything thing
-        display = renderWithContext defaultSDocContext document
+            then renderWithContext defaultSDocContext (pprTyThing showEverything thing)
+            else visibleDisplay exportedNames thing
         definingModule = moduleNameString . moduleName <$> nameModule_maybe name
     pure InfoEntry
           { infoName = occNameString (nameOccName name),
