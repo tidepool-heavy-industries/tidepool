@@ -71,8 +71,24 @@ static INDEX: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
 
 /// A locator for one shipped worked use of the bare callable `name`, or
 /// `None` when no shipped check or skill uses it.
-pub(crate) fn pointer_for(name: &str) -> Option<&'static str> {
-    INDEX.get_or_init(build_index).get(name).copied()
+pub(crate) fn pointer_for(name: &str) -> Option<String> {
+    let locator = INDEX.get_or_init(build_index).get(name).copied()?;
+    present(locator, std::path::Path::new("."))
+}
+
+/// A locator as a reader in `workspace` can follow it, or `None` when they
+/// cannot. The index is built from the shipped example workspace, and the
+/// reader may be anywhere: a skill is loaded by name wherever it is shipped, so
+/// it is named; a check file is a path, so it is offered only where that path
+/// exists.
+fn present(locator: &str, workspace: &std::path::Path) -> Option<String> {
+    if let Some(skill) = locator
+        .strip_prefix(".shoal/skills/")
+        .and_then(|rest| rest.strip_suffix("/SKILL.md"))
+    {
+        return Some(format!("skill {skill}"));
+    }
+    workspace.join(locator).is_file().then(|| locator.to_owned())
 }
 
 #[cfg(test)]
@@ -103,6 +119,24 @@ mod tests {
         assert_eq!(index.get("Reply"), None);
     }
 
+    /// A pointer is only worth a reader's context if they can follow it from
+    /// where they are, which is rarely the workspace the index was built from.
+    #[test]
+    fn a_pointer_is_offered_only_where_it_can_be_followed() {
+        let elsewhere = tempfile::tempdir().unwrap();
+        assert_eq!(
+            present(".shoal/skills/shoal-command/SKILL.md", elsewhere.path()).as_deref(),
+            Some("skill shoal-command")
+        );
+        assert_eq!(present(".shoal/checks/handler-call.hs", elsewhere.path()), None);
+        std::fs::create_dir_all(elsewhere.path().join(".shoal/checks")).unwrap();
+        std::fs::write(elsewhere.path().join(".shoal/checks/handler-call.hs"), "").unwrap();
+        assert_eq!(
+            present(".shoal/checks/handler-call.hs", elsewhere.path()).as_deref(),
+            Some(".shoal/checks/handler-call.hs")
+        );
+    }
+
     #[test]
     fn first_shipped_occurrence_wins_when_two_sources_use_the_same_bare_name() {
         let sources: &[(&str, &str)] = &[
@@ -130,6 +164,10 @@ mod sanity {
         // A cheap live sanity check on the real generated index (not the
         // synthetic fixtures above): `R.call` is used in
         // `.shoal/checks/handler-call.hs` today.
-        assert!(super::pointer_for("call").is_some());
+        // Read from the index rather than through `pointer_for`, which only
+        // offers a check file where the reader could open it.
+        assert!(super::INDEX
+            .get_or_init(super::build_index)
+            .contains_key("call"));
     }
 }
