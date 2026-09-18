@@ -566,6 +566,42 @@ fn resident_jit(error: JitError) -> ResidentError {
     ResidentError::Run(RuntimeError::Jit(error))
 }
 
+impl ResidentError {
+    /// Which of the two post-compile failure layers this error belongs to —
+    /// see [`crate::session::workbench::WorkbenchFailureLayer`]. `None` covers an
+    /// ordinary program-language fault (a pattern match failure, a case
+    /// trap, a bootstrap or table-merge failure) that never reached either
+    /// an effect boundary or the observation step, and any error this
+    /// classification does not yet cover.
+    ///
+    /// Both engines keep the same two failure shapes at their own effect
+    /// boundary: the Core engine's `JitError::Effect` (effect dispatch) vs.
+    /// `JitError::HeapBridge` (heap-to-`Value` decoding, i.e. observing a
+    /// completed run), and the prepared engine's `PreparedRuntimeError::Handler`
+    /// vs. `ExecutionError::Observation` (including the tolerated
+    /// budget-exhausted case [`is_observation_budget_exhausted`] handles
+    /// separately, before a hard error like this one is ever produced).
+    #[must_use]
+    pub fn failure_layer(&self) -> Option<crate::session::workbench::WorkbenchFailureLayer> {
+        use crate::session::workbench::WorkbenchFailureLayer;
+        match self {
+            Self::Run(RuntimeError::Jit(JitError::HeapBridge(_))) => {
+                Some(WorkbenchFailureLayer::Observation)
+            }
+            Self::Run(RuntimeError::Jit(JitError::Effect(_))) => {
+                Some(WorkbenchFailureLayer::Effect)
+            }
+            Self::Prepared(PreparedRuntimeError::Run(
+                tidepool_codegen::prepared_program::ExecutionError::Observation(_),
+            )) => Some(WorkbenchFailureLayer::Observation),
+            Self::Prepared(PreparedRuntimeError::Handler { .. }) => {
+                Some(WorkbenchFailureLayer::Effect)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// What the prepared arm of a resident turn does with its settled value.
 enum PreparedTurnMode<'a> {
     /// Observe the value and return it as the turn's result.
@@ -3898,6 +3934,44 @@ mod tests {
             heads: Vec::new(),
             inputs: Vec::new(),
         }
+    }
+
+    /// A decode failure while materializing an already-run result is the
+    /// exact scenario the enum exists to name: every effect the unit ran
+    /// already committed (the heap bridge only ever runs after a fragment
+    /// completes), and only turning the answer into a `Value` failed.
+    #[test]
+    fn failure_layer_is_observation_for_a_heap_bridge_error() {
+        let error = ResidentError::Run(RuntimeError::Jit(JitError::HeapBridge(
+            tidepool_codegen::heap_bridge::BridgeError::UnexpectedHeapTag(0),
+        )));
+        assert_eq!(
+            error.failure_layer(),
+            Some(crate::session::workbench::WorkbenchFailureLayer::Observation)
+        );
+    }
+
+    /// A handler itself failing is the effect layer, whether or not any
+    /// earlier effect in the same unit already committed.
+    #[test]
+    fn failure_layer_is_effect_for_a_jit_effect_dispatch_error() {
+        let error = ResidentError::Run(RuntimeError::Jit(JitError::Effect(
+            EffectError::Handler("boom".into()),
+        )));
+        assert_eq!(
+            error.failure_layer(),
+            Some(crate::session::workbench::WorkbenchFailureLayer::Effect)
+        );
+    }
+
+    /// An ordinary program-language fault (here: a stale/foreign artifact
+    /// error, chosen only because it is trivial to construct) never reached
+    /// an effect boundary or the observation step, so it classifies as
+    /// neither — `None`, not a guess.
+    #[test]
+    fn failure_layer_is_none_for_an_unrelated_runtime_fault() {
+        let error = ResidentError::Run(RuntimeError::Jit(JitError::MissingConTags("Cons")));
+        assert_eq!(error.failure_layer(), None);
     }
 
     #[test]

@@ -268,6 +268,30 @@ pub enum WorkbenchOperationDisposition {
     Unknown,
 }
 
+/// Which layer produced an item's failure, kept as data instead of leaving a
+/// reader to infer it from `output`'s prose.
+///
+/// `Compile` never reached an effect at all: the cell or declaration was
+/// rejected before anything ran. `Effect` covers an effect that itself
+/// failed, or a unit that ended before every effect it started crossed its
+/// commit point (an incomplete fork-group admission, a handler failure).
+/// `Observation` is narrower and more reassuring than either: every effect
+/// this unit ran already committed, and only materializing the result
+/// afterward failed — a bound name, if any, is sound and the failure is
+/// about display, not about what happened.
+///
+/// `None` on the receipt (not a variant here) covers an ordinary
+/// program-language fault that never reached either boundary (a pattern
+/// match failure, a case trap), and any failure this classification does
+/// not yet cover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkbenchFailureLayer {
+    Compile,
+    Effect,
+    Observation,
+}
+
 /// One effect boundary observed while evaluating an input unit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -341,6 +365,12 @@ pub struct WorkbenchItemReceipt {
     /// text the compiler already handed over structured.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<crate::diag::StructuredDiagnostic>,
+    /// Which layer produced this item's failure, when `status` reports one
+    /// (`Rejected`, or `Stopped`/`Diagnostic` for a mid-run fault). `None`
+    /// for a committed/not-run item, and for a failure this classification
+    /// does not cover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_layer: Option<WorkbenchFailureLayer>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     /// Names installed into the persistent lexical environment by this unit.
@@ -1594,6 +1624,7 @@ mod tests {
                 status: WorkbenchItemStatus::Committed,
                 output: "bound `answer`".into(),
                 diagnostics: Vec::new(),
+                failure_layer: None,
                 warnings: Vec::new(),
                 installed_bindings: vec!["answer".into()],
                 operations: vec![WorkbenchOperationReceipt {

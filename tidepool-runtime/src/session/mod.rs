@@ -83,10 +83,10 @@ pub use workbench::{
     run_block_sequence, workbench_input_binding, workbench_json_to_haskell, BlockExecution,
     BlockSequenceOutcome, CommittedBlock, MetaCommandLine, ParsedBlock, SourceOrderCollision,
     WorkSequence, WorkbenchBinding, WorkbenchBindingKind, WorkbenchCellItemKind,
-    WorkbenchCellSourceItem, WorkbenchDiscovery, WorkbenchExecutionId, WorkbenchForkBoundary,
-    WorkbenchItem, WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition,
-    WorkbenchOperationId, WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse,
-    WorkbenchRunStatus, WorkbenchTerminalTransfer,
+    WorkbenchCellSourceItem, WorkbenchDiscovery, WorkbenchExecutionId, WorkbenchFailureLayer,
+    WorkbenchForkBoundary, WorkbenchItem, WorkbenchItemReceipt, WorkbenchItemStatus,
+    WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
+    WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
 };
 
 pub use turn::{

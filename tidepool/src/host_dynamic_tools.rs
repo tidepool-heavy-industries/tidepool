@@ -1939,6 +1939,7 @@ pub(crate) mod tests {
                 warnings: vec![],
                 installed_bindings: vec![],
                 terminal_transfer: None,
+                failure_layer: None,
                 operations: (0..1000)
                     .map(|effect_ordinal| WorkbenchOperationReceipt {
                         id: WorkbenchOperationId {
@@ -2014,6 +2015,7 @@ pub(crate) mod tests {
                 installed_bindings: Vec::new(),
                 operations: Vec::new(),
                 terminal_transfer: None,
+                failure_layer: None,
             }],
             next_index: 0,
             total: 1,

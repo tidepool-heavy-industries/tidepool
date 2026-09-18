@@ -683,6 +683,7 @@ mod tests {
                 installed_bindings: vec!["spotTaskText".into()],
                 operations: Vec::new(),
                 terminal_transfer: None,
+                failure_layer: None,
             }],
             failed_index: 1,
             total: 3,
