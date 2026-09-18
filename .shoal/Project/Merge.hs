@@ -110,6 +110,10 @@ data Merge mode = Merge
 
 data MergeState = MergeState
   { mergeAdvanceBranch :: Maybe BranchName
+  , mergeCheckCommand :: [Text]
+    -- ^ what this actor runs to decide a merged head is green. Supplied at
+    -- start, never guessed, and shown in the state so a receipt always says
+    -- which command produced its verdict.
   , mergeTree :: Maybe WorktreeHandle
   , mergeBlocked :: Maybe Text
   , mergeHistory :: [HistoryEntry]
@@ -119,20 +123,33 @@ instance Show MergeState where
   show state = unlines $
     ( "merge tree=" ++ maybe "unbound" (Text.unpack . cwd . handleReceipt) (mergeTree state)
       ++ " advance=" ++ maybe "-" (\(BranchName branch) -> Text.unpack branch) (mergeAdvanceBranch state)
+      ++ " check=" ++ Text.unpack (Text.unwords (mergeCheckCommand state))
       ++ " blocked=" ++ maybe "no" Text.unpack (mergeBlocked state)
     ) : map show (mergeHistory state)
 
 type MergeEffects = R.LocalEffects Merge
   '[Replies, BoundWorktree, WorktreeIntegration, Commands, Actor]
 
--- | Start with the id of a worktree the parent created and did not bind:
+-- | Start with the id of a worktree the parent created and did not bind, and
+-- the command that decides a merged head is green:
 --
 -- > Right tree <- createWorktree (fromRef "shoal/integration" "integration")
--- > merge <- R.start (mergeInto (worktreeId tree) (Just "shoal/integration"))
-mergeInto :: WorktreeId -> Maybe BranchName -> ActorSpec Merge MergeEffects
-mergeInto tree advance =
+-- > merge <- R.start (mergeInto (worktreeId tree) (Just "shoal/integration")
+-- >                     ["just", "test-lib", "tidepool-actor", "test(request::updates)"])
+--
+-- The check is an argument because only the caller knows what green means for
+-- the change in hand. Name the narrowest command that would actually catch a
+-- regression in it — a crate and a test filter, not a whole workspace.
+--
+-- This actor came from a project whose entire check was a one-second script, so
+-- running it after every merge cost nothing. That is not true here: a
+-- workspace-wide run in a fresh worktree compiles the world first. Do not pass
+-- `just verify`; it is the pre-review gate, budgeted at up to two hours, and an
+-- actor must not start it unattended.
+mergeInto :: WorktreeId -> Maybe BranchName -> [Text] -> ActorSpec Merge MergeEffects
+mergeInto tree advance check =
   R.withWorktree tree $ R.definition "integrator" (Actor.Selected knownEffects) Merge
-    { mergeState = MergeState advance Nothing Nothing []
+    { mergeState = MergeState advance check Nothing Nothing []
     , mergeView = \() -> R.get
     , publish = runPublish
     , reconcile = \note -> R.modify' (\state -> state
@@ -267,26 +284,13 @@ exitCode result = case Cmd.commandOutcome (Cmd.commandResult result) of
 outputOf :: Cmd.RunResult -> Text
 outputOf result = Cmd.outputText (Cmd.commandStdout (Cmd.capturedOutput result))
 
--- The command that decides whether an integrated head is green.
---
--- This came from a workspace whose whole check was `bash ./check.sh`, finishing
--- in about a second. This repository has no such script: `just quick` runs the
--- workspace library tests under nextest and is the nearest honest equivalent.
--- It is deliberately not `just verify`, which is the pre-review gate and is
--- budgeted at up to two hours — an actor must not start that on its own.
---
--- Keep this as the one place the assumption lives. If you want a different
--- check for a particular integration, pass it rather than editing this in
--- flight, so a receipt always says which command produced its verdict.
-projectCheck :: [Text]
-projectCheck = ["just", "quick"]
-
 checkedOutput :: Text -> Handler MergeState MergeEffects CheckResult
 checkedOutput path = do
-  result <- Cmd.run (Cmd.inDirectory path (Cmd.argv projectCheck))
+  check <- R.gets mergeCheckCommand
+  result <- Cmd.run (Cmd.inDirectory path (Cmd.argv check))
   -- A check that fails usually says why on stderr; classify over both streams
   -- so the reflex table sees the compiler's own words.
   let spoken = Text.strip (outputOf result <> "\n" <> Cmd.stderr result)
       code = exitCode result
-  pure (CheckResult (Text.unwords projectCheck) RanHere (code == 0)
+  pure (CheckResult (Text.unwords check) RanHere (code == 0)
     (maybe (Text.takeEnd 400 spoken) (Text.pack . show) (reflexFor code spoken)))

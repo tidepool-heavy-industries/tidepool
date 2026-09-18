@@ -171,7 +171,8 @@ reviewActor name = R.definition name (Actor.Selected knownEffects)
 -- implementer right after admission:
 --
 -- > Right tree <- createWorktree (fromRef "shoal/integration" "integration")
--- > merge <- R.start (mergeInto (worktreeId tree) (Just "shoal/integration"))
+-- > merge <- R.start (mergeInto (worktreeId tree) (Just "shoal/integration")
+-- >                     ["just", "test-lib", "tidepool-actor", "test(request::updates)"])
 -- > worker <- unfold group (childWithProgress @ImplNote @ImplReport branch)
 -- > review <- R.start (reviewOf contract worker (MergeTarget merge))
 reviewOf

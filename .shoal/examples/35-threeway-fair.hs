@@ -35,5 +35,5 @@ diagOnly2 t = T.unlines (take 26
 do
   let fx n = ".shoal/examples/fixtures/" <> n <> "-check.out"
   rs <- mapM (\n -> sh ["cat", fx n] >>= fairRoute n . diagOnly2)
-             ["4610b5e", "7a48345d61ee13f2a803547ae5c05040dc7ae37d", "7a48345d61ee13f2a803547ae5c05040dc7ae37d"]
+             ["4610b5e", "f726882", "53ad43c"]
   pure (String (T.intercalate " | " rs))

@@ -37,8 +37,8 @@ settledProbe obs = do
         ])
 
 do
-  msg <- sh ["git", "log", "-1", "--format=%B", "7a48345d61ee13f2a803547ae5c05040dc7ae37d"]
-  dif <- T.take 900 <$> sh ["git", "show", "7a48345d61ee13f2a803547ae5c05040dc7ae37d", "--", "tidepool-actor/src/request/updates.rs"]
-  cal <- sh ["git", "grep", "-n", "update_request(", "7a48345d61ee13f2a803547ae5c05040dc7ae37d"]
+  msg <- sh ["git", "log", "-1", "--format=%B", "53ad43c"]
+  dif <- T.take 900 <$> sh ["git", "show", "53ad43c", "--", "src/store.rs"]
+  cal <- sh ["git", "grep", "-n", "load(", "53ad43c"]
   settledProbe (T.intercalate "\n---\n"
     [ "commit message:\n" <> msg, "definition diff:\n" <> dif, "call sites:\n" <> cal ])

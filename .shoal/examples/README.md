@@ -1,6 +1,6 @@
 # Worked cells
 
-Eight cells that ran against real artifacts, kept because each one shows a
+Six cells kept because each shows a technique, kept because each one shows a
 technique rather than a result. They are reference to copy from, not modules to
 import — the programs themselves are in `.shoal/Project/`.
 
@@ -19,16 +19,19 @@ and show you almost none of its answer.
 
 ## What each one is for
 
-**`10-dispatch.hs`, `11-dispatch-loop.hs` — a typed action dispatcher whose
-alternatives carry real commands.** Three steps with no model turn between them:
-fetch a commit message, then a diff, then the call sites. The idiom to take is a
-payload that is an `Eff` action and a `J.handle` that dispatches into it. The
-loop version shows why a fetch loop stops repeating itself — each alternative
-names what the state lacks, so satisfying it removes its own reason to be chosen.
+**`dispatch-tidepool.hs` — a typed action dispatcher whose alternatives carry
+real commands.** The alternative the model picks *is* the command that runs, so
+there is no model turn between choosing and fetching. Each alternative also names
+what the state currently lacks, which is why a loop built from this does not
+repeat itself: satisfying one removes its own reason to be chosen.
+
+It asks about a real change here — commit `7a48345d6`, which changed
+`update_request` so a success carries its delivery instead of an `Option` — and
+every one of its four commands returns real evidence from this repository.
 
 A defect is left in deliberately: it truncates each fetch before feeding it back
-into its own observations, which can delete the deciding evidence. Fix that first
-if you build on it.
+into its own observations, which can delete the deciding line. Fix that first if
+you build a loop on it.
 
 **`33-threeway.hs` beside `35-threeway-fair.hs` — the same program before and
 after one wording repair.** Keep them together; this is the worked example of
@@ -37,11 +40,6 @@ alternatives describe what the state field contains. The ambiguous case goes fro
 confidently wrong to right at mass and confidence 1.00. The lesson generalises:
 mixed vocabulary across alternatives produces a confident wrong answer, not a
 weak one.
-
-**`32-traverse-content.hs` — navigation with contents as branch evidence.** Code
-lists the children, the model picks one, code descends. The earlier version of
-this scored branches by filename alone and went to the wrong file at 0.51 against
-0.47; supplying an excerpt of each branch fixed it.
 
 **`37-reflect-intent.hs` — an agent's own history answering what the diagnostics
 cannot.** Three separate named fields for instructions, history and repository
@@ -63,12 +61,19 @@ dogfood target. They are kept because they are genuine artifacts rather than
 invented ones, and because a compiler's own words are what the questions are
 about. The paths inside them name that application's files, not this one's.
 
-The cells that read those fixtures run here unchanged. The cells that walk live
-git have been repointed at this repository: commit
-`7a48345d61ee13f2a803547ae5c05040dc7ae37d`, which changed a function's signature
-in `tidepool-actor/src/request/updates.rs` and updated its callers — the same
-shape of question the originals were asking. Those have not been re-run since
-being repointed, so treat their wording as sound and their numbers as unverified.
+The cells that read those fixtures run here unchanged, and ask about those
+artifacts, which is coherent — the questions are about a compiler's own words and
+the fixtures are where those words are.
+
+The cells that walked live git could **not** be carried over by repointing them.
+A first attempt substituted a commit and a path mechanically, which left a cell
+asking whether an item limit had been requested while reading a commit about
+request updates: the artifacts moved and the question did not. Those experiments
+are kept exactly as they ran, with their recorded numbers, in
+`plans/jev-lab/breadth/` — `10-dispatch.hs`, `11-dispatch-loop.hs` and
+`32-traverse-content.hs`. `dispatch-tidepool.hs` here is a coherent invocation of
+the same pattern against this repository, written rather than substituted. It has
+not been executed, so its wording is deliberate and its numbers are unmeasured.
 
 Read `.shoal/plans/README.md` for what is specific to working in this repository,
 and load the `shoal-jev` skill for the question-writing rules.

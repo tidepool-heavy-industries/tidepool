@@ -66,4 +66,4 @@ diagLines t = T.unlines (take 40
 
 do
   let fx n = ".shoal/examples/fixtures/" <> n <> "-check.out"
-  sh ["cat", fx "7a48345d61ee13f2a803547ae5c05040dc7ae37d"] >>= routeCheck "7a48345d61ee13f2a803547ae5c05040dc7ae37d" . diagLines
+  sh ["cat", fx "53ad43c"] >>= routeCheck "53ad43c" . diagLines

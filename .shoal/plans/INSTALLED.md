@@ -25,7 +25,7 @@ git, arriving in a worktree by checkout rather than by being copied.
 | `Project.Evidence` | yes | `coverageCheck :: Text -> Text -> CheckResult`; `CheckSource` keeps `ChildReported` separate from `RanHere`. |
 | `Project.Contract` | yes | `Contract`, `ImplReport`, `ImplNote`, `defaultReviewPolicy`, `renderBrief :: ReviewBrief -> Text`. |
 | `Project.Investigate` | yes | `investigate :: (Member Jev effs, Member Commands effs) => InvestigationPolicy -> Text -> Text -> [Text] -> [Text] -> [Text] -> Text -> Int -> Text -> Eff effs Investigation` — policy, directory, oid, owned paths, requirements, intent, command, exit code, output. |
-| `Project.Merge` | yes | `mergeInto :: WorktreeId -> Maybe BranchName -> ActorSpec Merge MergeEffects`, started as `R.start (mergeInto (worktreeId tree) (Just "shoal/integration"))`. Checks a merged head with `projectCheck` before publishing and rolls a red one back. |
+| `Project.Merge` | yes | `mergeInto :: WorktreeId -> Maybe BranchName -> [Text] -> ActorSpec Merge MergeEffects`, started as `R.start (mergeInto (worktreeId tree) (Just "shoal/integration") ["just","test-lib","tidepool-actor","test(request::updates)"])`. The check is an argument: name the narrowest command that would catch a regression in the change at hand, never `just verify`. Checks a merged head before publishing and rolls a red one back. |
 | `Project.Review` | yes | `reviewOf :: Contract -> (Response ImplReport, Progress ImplNote) -> MergeTarget -> ActorSpec Review ReviewEffects`, started as `R.start (reviewOf contract worker (MergeTarget merge))`. |
 
 ## Not installed, deliberately
@@ -56,7 +56,7 @@ originals in this repository rather than at a second copy.
 
 ## Worked cells
 
-`.shoal/examples/` holds eight cells with the fixtures they read — reference to
+`.shoal/examples/` holds six cells with the fixtures they read — reference to
 copy from, not modules to import. Its README says which run here unchanged and
 which were repointed at this repository and not re-run.
 
