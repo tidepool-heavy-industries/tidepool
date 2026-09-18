@@ -54,11 +54,11 @@ data ReviewPolicy = ReviewPolicy
   , itemViolated :: Double      -- ^ at or below this is supported violation; between is unresolved
   , hunksBudget :: Int          -- ^ characters of hunks one Jev packet may carry
   , outputBudget :: Int         -- ^ characters of check output one Jev packet may carry
-  , policyAccept :: J.Policy    -- ^ (a) the acceptance gate: a receipt follows
-  , policyReflex :: J.Policy    -- ^ (b) reflex residue: read-only classification
-  , policyVerdict :: J.Policy   -- ^ (c) reviewer verdict routing
-  , policyBrief :: J.Policy     -- ^ (e) reviewer brief: it starts a worker
-  , policyStuck :: J.Policy     -- ^ (g) stuck detection: read-only
+  , policyAccept :: J.Policy J.Strict    -- ^ (a) the acceptance gate: a receipt follows
+  , policyReflex :: J.Policy J.Lenient   -- ^ (b) reflex residue: read-only classification
+  , policyVerdict :: J.Policy J.Lenient  -- ^ (c) reviewer verdict routing
+  , policyBrief :: J.Policy J.Careful    -- ^ (e) reviewer brief: it starts a worker
+  , policyStuck :: J.Policy J.Lenient    -- ^ (g) stuck detection: read-only
   }
 
 instance Show ReviewPolicy where
@@ -73,11 +73,11 @@ defaultReviewPolicy = ReviewPolicy
   , itemViolated = 0.3
   , hunksBudget = 24000
   , outputBudget = 4000
-  , policyAccept = J.merging
-  , policyReflex = J.routing
-  , policyVerdict = J.routing
-  , policyBrief = J.spawning
-  , policyStuck = J.routing
+  , policyAccept = J.strict
+  , policyReflex = J.lenient
+  , policyVerdict = J.lenient
+  , policyBrief = J.careful
+  , policyStuck = J.lenient
   }
 
 -- ---------------------------------------------------------------------------

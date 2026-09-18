@@ -69,10 +69,10 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 
 import qualified Jev.Operators as J
-import Jev.Operators (Cell ((:=)), Packet ((:&), Nil))
+import Jev.Operators (Packet ((:=), (:&)))
 import qualified Tidepool.Command as Cmd
 import Tidepool.Actors.Shoal (Eff, Member)
-import Tidepool.Aeson.Value (Value (String), object, (.=))
+import Tidepool.Aeson.Value (object, (.=))
 import Tidepool.Effects.Core (Commands, Jev)
 
 -- ---------------------------------------------------------------------------
@@ -104,9 +104,9 @@ data InvestigationPolicy = InvestigationPolicy
     --   occurrences are sifted before any of them become locations
   , sameMeaningFloor :: Double
     -- ^ at or above this, an occurrence of an ambiguous term is the same thing
-  , strategyPolicy :: J.Policy
+  , strategyPolicy :: J.Policy J.Strict
     -- ^ how sure the repair strategy has to be before the report commits to it.
-    --   A repair gets acted on, so this is `J.merging`, not a bare floor.
+    --   A repair gets acted on, so this is `J.strict`, not a bare floor.
   }
 
 instance Show InvestigationPolicy where
@@ -126,7 +126,7 @@ defaultInvestigationPolicy = InvestigationPolicy
   , excerptRadius = 4
   , commonNameHits = 25
   , sameMeaningFloor = 0.6
-  , strategyPolicy = J.merging
+  , strategyPolicy = J.strict
   }
 
 -- ---------------------------------------------------------------------------
@@ -761,34 +761,32 @@ askGroups
 askGroups policy owned intent command exit groups
   | null groups = pure ([], StrategyUnclear "the output carried no diagnostics", "")
   | otherwise = do
-      let pool = J.pool #groups [ (groupId g, String (renderGroup g), g) | g <- groups ]
-          packet =
-            #groups := pool
-              :& #legible := J.noul "Does `diagnostics` contain compiler diagnostics that name file locations?"
-              :& #each := J.eachIn pool (\ref ->
-                   #shared_is_correct := J.askAbout ref
-                     "Is the code at this group's shared location already correct, so that the repair must change the listed sites instead?"
-                     :& #each_site_separate := J.askAbout ref
-                          "Does each listed site need its own separate edit, because the sites are in different functions or files?"
-                     :& #outside_owned := J.askAbout ref
-                          "Is at least one listed site in a file that does not start with any prefix in `owned_paths`?"
-                     :& #help_text_placeholder := J.askAbout ref
-                          "Does the compiler's own suggested fix in the verbatim diagnostic insert a placeholder such as `todo!()` or `unimplemented!()` rather than working code?"
-                     :& Nil)
+      let packet =
+            #legible := J.noul "Does `diagnostics` contain compiler diagnostics that name file locations?"
+              :& #each := J.each groupId
+                   (\g ->
+                        #shared_is_correct := J.noul (renderGroup g
+                          <> "\n\nIs the code at this group's shared location already correct, so that the repair must change the listed sites instead?")
+                     :& #each_site_separate := J.noul (renderGroup g
+                          <> "\n\nDoes each listed site need its own separate edit, because the sites are in different functions or files?")
+                     :& #outside_owned := J.noul (renderGroup g
+                          <> "\n\nIs at least one listed site in a file that does not start with any prefix in `owned_paths`?")
+                     :& #help_text_placeholder := J.noul (renderGroup g
+                          <> "\n\nDoes the compiler's own suggested fix in the verbatim diagnostic insert a placeholder such as `todo!()` or `unimplemented!()` rather than working code?"))
+                   groups
               :& #strategy := J.choice
                    "Which repair was meant? Read `intent` first; the diagnostics alone cannot settle this."
                    ( J.alt #callers_catch_up
-                       (String "The code at the location the diagnostics point to as the definition was changed on purpose, and the sites the compiler reported are stale callers that have to catch up with it.")
+                       "The code at the location the diagnostics point to as the definition was changed on purpose, and the sites the compiler reported are stale callers that have to catch up with it."
                        ("callers_catch_up" :: Text)
                      J..| J.alt #restore_the_definition
-                       (String "The change at that definition was not meant, and putting it back is the repair; the reported sites are already correct as written.")
+                       "The change at that definition was not meant, and putting it back is the repair; the reported sites are already correct as written."
                        "restore_the_definition"
                      J..| J.alt #insufficient_evidence
-                       (String "Nothing in `intent` or the diagnostics says which of those two repairs was meant.")
+                       "Nothing in `intent` or the diagnostics says which of those two repairs was meant."
                        "insufficient_evidence" )
-              :& Nil
       answer <- J.ask
-        (J.state (object
+        (J.rawState (object
           [ "command" .= command
           , "exit_status" .= exit
           , "owned_paths" .= owned
@@ -803,8 +801,9 @@ askGroups policy owned intent command exit groups
                , "" )
         Right response ->
           let answers = J.answers response
+              perGroup = [ (groupId g', per) | (g', per) <- answers.each ]
               verdicts =
-                [ case lookup (groupId g) answers.each of
+                [ case lookup (groupId g) perGroup of
                     Nothing -> blankVerdict g
                     Just per -> GroupVerdict
                       { verdictGroup = g
@@ -818,9 +817,9 @@ askGroups policy owned intent command exit groups
               reasoning = J.explain (strategyPolicy policy) answers.strategy
               -- A repair is acted on, so it is held to the strictest of the
               -- three named policies rather than a bare probability.
-              chosen = case J.accept (strategyPolicy policy) answers.strategy of
+              chosen = case J.takenUnder (strategyPolicy policy) answers.strategy of
                 Left doubt -> StrategyUnclear (Text.pack (show doubt) <> "; " <> reasoning)
-                Right selection -> case J.selectedKey selection of
+                Right (J.Settled key) -> case key of
                   "callers_catch_up" -> CallersCatchUp
                   "restore_the_definition" ->
                     RestoreDefinition (definitionNamedBy groups)
@@ -850,24 +849,22 @@ askLocations
 askLocations symbol owned command exit locations
   | null locations = pure (0, [])
   | otherwise = do
-      let pool = J.pool #locations [ (locId loc, String (renderLocation loc), loc) | loc <- locations ]
-          packet =
-            #locations := pool
-              :& #grounded := J.noul
+      let packet =
+            #grounded := J.noul
                    ("Does `locations` contain source excerpts that mention " <> symbol <> "?")
-              :& #each := J.eachIn pool (\ref ->
-                   #must_change := J.askAbout ref
-                     "To make `command` succeed, must the code shown at this location be edited?"
-                     :& #already_handles := J.askAbout ref
-                          ("Does the code shown at this location already handle " <> symbol <> "?")
-                     :& #is_test := J.askAbout ref
-                          "Is the code shown at this location inside a test?"
-                     :& #declares := J.askAbout ref
-                          ("Does this location declare " <> symbol <> " rather than consume it?")
-                     :& Nil)
-              :& Nil
+              :& #each := J.each locId
+                   (\loc ->
+                        #must_change := J.noul (renderLocation loc
+                          <> "\n\nTo make `command` succeed, must the code shown at this location be edited?")
+                     :& #already_handles := J.noul (renderLocation loc
+                          <> "\n\nDoes the code shown at this location already handle " <> symbol <> "?")
+                     :& #is_test := J.noul (renderLocation loc
+                          <> "\n\nIs the code shown at this location inside a test?")
+                     :& #declares := J.noul (renderLocation loc
+                          <> "\n\nDoes this location declare " <> symbol <> " rather than consume it?"))
+                   locations
       answer <- J.ask
-        (J.state (object
+        (J.rawState (object
           [ "command" .= command
           , "exit_status" .= exit
           , "owned_paths" .= owned
@@ -879,9 +876,10 @@ askLocations symbol owned command exit locations
         Left _ -> pure (0, [ blankJudgment | _ <- locations ])
         Right response ->
           let answers = J.answers response
+              perLoc = [ (locId l, per) | (l, per) <- answers.each ]
           in pure
              ( answers.grounded.yes
-             , [ case lookup (locId loc) answers.each of
+             , [ case lookup (locId loc) perLoc of
                    Nothing -> blankJudgment
                    Just per -> Judgment
                      { mustChange = per.must_change.yes
@@ -907,19 +905,14 @@ askAssertions
 askAssertions requirements command bodies
   | null bodies = pure []
   | otherwise = do
-      let pool = J.pool #bodies
-            [ (locId loc, String (locId loc <> "| " <> locAt loc <> "\n" <> body), loc)
-            | (loc, body) <- bodies
-            ]
-          packet =
-            #bodies := pool
-              :& #each := J.eachIn pool (\ref ->
-                   #asserts := J.askAbout ref
-                     "Does this test assert an outcome listed in `requirements`, rather than only constructing state or calling the code?"
-                     :& Nil)
-              :& Nil
+      let packet =
+            #each := J.each (locId . fst)
+                   (\(loc, body) ->
+                        #asserts := J.noul (locId loc <> "| " <> locAt loc <> "\n" <> body
+                          <> "\n\nDoes this test assert an outcome listed in `requirements`, rather than only constructing state or calling the code?"))
+                   bodies
       answer <- J.ask
-        (J.state (object
+        (J.rawState (object
           [ "command" .= command
           , "requirements" .= requirements
           , "bodies" .= Text.intercalate "\n"
@@ -930,7 +923,7 @@ askAssertions requirements command bodies
         Left _ -> pure []
         Right response ->
           let answers = J.answers response
-          in pure [ (key, per.asserts.yes) | (key, per) <- answers.each ]
+          in pure [ (locId loc, per.asserts.yes) | ((loc, _), per) <- answers.each ]
 
 -- ---------------------------------------------------------------------------
 -- Rendering

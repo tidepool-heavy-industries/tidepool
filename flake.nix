@@ -19,6 +19,15 @@
     # Tidepool's Rust overlay: the two workspaces intentionally have distinct
     # MSRV/toolchain timelines.
     codex.url = "github:inanna-malick/codex/fc8e158d582d9f28767a94a76ccb45976e845977";
+    # Haskell this workspace compiles but does not carry: jev-dsl, pinned to
+    # the same revision `examples/shoal-workspace/flake.nix` pins. Nothing is
+    # built from it here; `[haskell.flake_sources]` in `.shoal/config.toml`
+    # names the directory inside it that holds modules, and Shoal captures
+    # them into a run as ordinary source roots.
+    jev-dsl = {
+      url = "github:inanna-malick/jev-dsl/f16f1363b4d389d6e34f9d695fbd254ca0735f2e";
+      flake = false;
+    };
   };
 
   outputs =
@@ -28,6 +37,7 @@
       flake-utils,
       rust-overlay,
       codex,
+      jev-dsl,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:

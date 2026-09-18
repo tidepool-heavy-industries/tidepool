@@ -34,6 +34,19 @@ modules = [
   "Project.Merge", "Project.Review",
 ]
 
+# jev-dsl is compiled from the revision `flake.nix` pins, not from a copy in
+# this repository. Only `core` is named: it is the JSON-polymorphic library,
+# and `.shoal/Jev/Operators.hs` in this package fixes its value type to
+# Tidepool's own. The input's `src` holds the same front over aeson, which
+# Tidepool does not have; naming it here would put a second `Jev.Operators`
+# on the search path that cannot compile.
+#
+# `Jev.Operators` is deliberately absent from `modules`: that list is imported
+# unqualified into every cell, and this surface reaches a cell as `J` through
+# the workbench, which offers it wherever this package supplies the module.
+[haskell.flake_sources]
+jev-dsl = ["core"]
+
 # No `[prompts] root` or `core`. Those keys displace the shipped `root.md` and
 # `base.md` wholesale, and the local copies drifted until they instructed the
 # opposite of what the shipped ones say — "become idle after accepted planning

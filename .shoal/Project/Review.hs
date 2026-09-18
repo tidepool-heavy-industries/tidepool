@@ -66,12 +66,12 @@ import qualified Data.Text as Text
 import GHC.Generics (Generic)
 
 import qualified Jev.Operators as J
-import Jev.Operators (Cell ((:=)), Packet ((:&), Nil))
+import Jev.Operators (Packet ((:=), (:&)), Settled (Settled))
 import qualified Tidepool.Actor as Actor
 import qualified Tidepool.Actor.Record as R
 import qualified Tidepool.Command as Cmd
 import Tidepool.Actors.Shoal
-import Tidepool.Aeson.Value (Value (String), object, (.=))
+import Tidepool.Aeson.Value (object, (.=))
 import Tidepool.Effects.Core (GitRef (..), Jev, Commands)
 import Tidepool.Worktree (renderGitOid)
 
@@ -397,12 +397,12 @@ classifyResidue evidence = case evidenceReflex evidence of
         pure Nothing
     | otherwise -> do
         policy <- currentPolicy
-        let options = J.many
-              [ (klass, String criteria, klass) | (klass, criteria) <- jevClasses ]
+        let classNames = map fst jevClasses
+            options = J.many #klass id (\k -> maybe "" id (lookup k jevClasses)) classNames
               J..| J.alt #insufficient_evidence
                     "`check_output` names no compiler code, lint name, test marker or environment marker, and no sentence in it describes a failure" ("insufficient_evidence" :: Text)
         answer <- J.ask1
-          (J.state (object
+          (J.rawState (object
             [ "check_output" .= Text.takeEnd 4000 (evidenceOutput evidence)
             , "matched_table" .= ("no entry in the reflex table matched" :: Text)
             ]))
@@ -413,22 +413,22 @@ classifyResidue evidence = case evidenceReflex evidence of
               ("jev unavailable: " <> Text.pack (show failure))
               "read the output yourself"
             pure Nothing
-          Right chosen -> case J.accept (policyReflex policy) chosen of
+          Right chosen -> case J.takenUnder (policyReflex policy) chosen of
             Left doubt -> do
               doubted "reflex" (Just (evidenceCandidate evidence))
                 (Text.pack (show doubt) <> "; " <> J.explain (policyReflex policy) chosen)
                 "read the output yourself"
               pure Nothing
-            Right selection
-              | J.selectedKey selection == "insufficient_evidence" -> do
+            Right (Settled key)
+              | key == "insufficient_evidence" -> do
                   doubted "reflex" (Just (evidenceCandidate evidence))
                     "no criterion applies to this output" "read the output yourself"
                   pure Nothing
               | otherwise -> do
                   void (record "reflex" (Just (evidenceCandidate evidence)) RanHere
-                    (J.selectedKey selection) (J.explain (policyReflex policy) chosen)
+                    key (J.explain (policyReflex policy) chosen)
                     "carried into the review state")
-                  pure (Just (J.selectedKey selection))
+                  pure (Just key)
 
 -- ---------------------------------------------------------------------------
 -- The honesty seam: honesty tie-breaker. One Noul per claimed test over the child's
@@ -444,18 +444,14 @@ honestyTieBreaker contract evidence
         "ask the child for the literal test output"
       pure False
   | otherwise = do
-      let tests = J.pool #tests
-            [ (name, String ("the test named " <> name), name)
-            | name <- contractRequiredTests contract ]
-          packet =
-            #tests := tests
-              :& #legible := J.noul "Does `test_output` contain lines in the form `test <name> ... ok` or `<name> ... FAILED`?"
-              :& #claimed := J.eachIn tests (\ref ->
-                   #reported := J.askAbout ref "Does `test_output` contain a line reporting this test as passing?"
-                     :& Nil)
-              :& Nil
+      let packet =
+            #legible := J.noul "Does `test_output` contain lines in the form `test <name> ... ok` or `<name> ... FAILED`?"
+              :& #claimed := J.each id
+                   (\name -> #reported := J.noul ("The test named " <> name
+                        <> ". Does `test_output` contain a line reporting this test as passing?"))
+                   (contractRequiredTests contract)
       answer <- J.ask
-        (J.state (object
+        (J.rawState (object
           [ "test_output" .= Text.takeEnd (outputBudget (contractPolicy contract)) (evidenceOutput evidence)
           , "test_output_truncated" .= (Text.length (evidenceOutput evidence) > outputBudget (contractPolicy contract))
           , "test_output_bytes" .= Text.length (evidenceOutput evidence)
@@ -526,23 +522,22 @@ runAcceptance own contract evidence = do
     else do
       -- One Noul per checklist item: narrow questions find what one broad
       -- choice confidently misses. The choice stays as the summary.
-      let itemPool = J.pool #items [ (key, String item, item) | (key, item) <- keyed ]
-          packet =
+      let packet =
             -- A canary with a known answer rides in every packet: a miss says
             -- the packet is broken, not the candidate (measured E37B).
             #canary := J.noul "Does `diff_stat` name at least one file?"
               :& #covered := J.noul "Does `hunks` contain a hunk for every file named in `diff_stat`?"
               :& #likely_miss := J.noul ("Reading `hunks` and `test_output`, does the candidate handle this condition: " <> contractLikelyMiss contract)
-              :& #items := itemPool
-              :& #each := J.eachIn itemPool (\ref ->
-                   #holds := J.askAbout ref "Reading `hunks` and `test_output`, does the candidate satisfy this checklist item?"
-                     :& Nil)
+              :& #each := J.each fst
+                   (\(_, item) -> #holds := J.noul (item
+                        <> "\n\nReading `hunks` and `test_output`, does the candidate satisfy this checklist item?"))
+                   keyed
               :& #gate := J.choice "Which statement describes the candidate?"
                    ( J.alt #all_present
-                       (String ("Every item of the checklist holds: " <> items <> "."))
+                       ("Every item of the checklist holds: " <> items <> ".")
                        ("all_present" :: Text)
                      J..| J.alt #item_missing
-                       (String ("At least one item does not hold: a changed file outside the owned paths, a failing or missing owned test, a deleted or weakened test, a remaining todo!(), an implementation that does not match the goal, or this condition: " <> contractLikelyMiss contract))
+                       ("At least one item does not hold: a changed file outside the owned paths, a failing or missing owned test, a deleted or weakened test, a remaining todo!(), an implementation that does not match the goal, or this condition: " <> contractLikelyMiss contract)
                        "item_missing"
                      J..| J.alt #conflicting
                        "The items are all present but contradict each other, for example the report claims a test passes that `test_output` shows failing."
@@ -550,9 +545,8 @@ runAcceptance own contract evidence = do
                      J..| J.alt #insufficient_evidence
                        "`hunks` or `test_output` is empty or truncated, so the items cannot be read off the state at all."
                        "insufficient_evidence" )
-              :& Nil
       answer <- J.ask
-        (J.state (object
+        (J.rawState (object
           [ "owned_paths" .= contractOwnedPaths contract
           , "acceptance_checklist" .= contractChecklist contract
           , "base" .= renderGitOid (contractBase contract)
@@ -574,7 +568,7 @@ runAcceptance own contract evidence = do
               -- Three outcomes per item: supported satisfaction, supported
               -- violation, unresolved. Only a supported violation becomes a
               -- repair instruction; unresolved items are a doubt.
-              verdicts = [ (item, per.holds.yes) | (key, per) <- a.each, Just item <- [lookup key keyed] ]
+              verdicts = [ (item, per.holds.yes) | ((_, item), per) <- a.each ]
               violated = [ item | (item, yes) <- verdicts, yes <= itemViolated policy ]
                 ++ [ "likely miss: " <> contractLikelyMiss contract | a.likely_miss.yes <= itemViolated policy ]
               unresolved = [ item | (item, yes) <- verdicts, yes > itemViolated policy, yes < itemSatisfied policy ]
@@ -592,14 +586,7 @@ runAcceptance own contract evidence = do
             then doubted "acceptance" (Just oid)
               "the tripwire says a file in `diff_stat` has no hunk"
               "re-derive the diff before asking again"
-            else case J.accept acceptPolicy a.gate of
-              Left doubt -> do
-                index <- record "acceptance" (Just oid) RanHere "doubt"
-                  (Text.pack (show doubt) <> "; " <> J.explain acceptPolicy a.gate) "notify the root"
-                notify' Alert (Just oid)
-                  ("the review doubted the candidate: " <> J.explain acceptPolicy a.gate)
-                  RanHere index "read the hunks, then accept or request repair"
-              Right selection -> J.handle selection
+            else case J.settle acceptPolicy a.gate
                 ( #all_present (\_ ->
                     if not (null violated) then do
                       void (record "acceptance" (Just oid) RanHere "item_violated"
@@ -628,7 +615,14 @@ runAcceptance own contract evidence = do
                       "compare the report with `test_output`; repair or drop the candidate")
                 J..| #insufficient_evidence (\_ -> doubted "acceptance" (Just oid)
                     "the review could not read the items off the state"
-                    "re-derive the evidence, then decide by hand") )
+                    "re-derive the evidence, then decide by hand") ) of
+              Left doubt -> do
+                index <- record "acceptance" (Just oid) RanHere "doubt"
+                  (Text.pack (show doubt) <> "; " <> J.explain acceptPolicy a.gate) "notify the root"
+                notify' Alert (Just oid)
+                  ("the review doubted the candidate: " <> J.explain acceptPolicy a.gate)
+                  RanHere index "read the hunks, then accept or request repair"
+              Right (Settled action) -> action
 
 -- ---------------------------------------------------------------------------
 -- The brief seam: reviewer brief composition. Which evidence fields the reviewer
@@ -642,7 +636,7 @@ admitReviewer
 admitReviewer own contract evidence = do
   let oid = evidenceCandidate evidence
   answer <- J.ask1
-    (J.state (object
+    (J.rawState (object
       [ "owned_paths" .= contractOwnedPaths contract
       , "diff_stat" .= evidenceStat evidence
       , "hunk_bytes" .= Text.length (evidenceHunks evidence)
@@ -674,21 +668,21 @@ admitReviewer own contract evidence = do
       void (record "brief" (Just oid) RanHere "jev_unavailable"
         (Text.pack (show failure)) "admit the reviewer with hunks and tests")
       startReviewer own contract (compose "hunks_and_tests") oid
-    Right chosen -> case J.accept (policyBrief (contractPolicy contract)) chosen of
+    Right chosen -> case J.takenUnder (policyBrief (contractPolicy contract)) chosen of
       Left doubt -> do
         void (record "brief" (Just oid) RanHere "doubt"
           (Text.pack (show doubt) <> "; " <> J.explain (policyBrief (contractPolicy contract)) chosen)
           "admit the reviewer with hunks and tests")
         startReviewer own contract (compose "hunks_and_tests") oid
-      Right selection
-        | J.selectedKey selection == "insufficient_evidence" ->
+      Right (Settled key)
+        | key == "insufficient_evidence" ->
             doubted "brief" (Just oid)
               "what the reviewer would read is not established"
               "compose the reviewer's brief by hand"
         | otherwise -> do
-            void (record "brief" (Just oid) RanHere (J.selectedKey selection)
+            void (record "brief" (Just oid) RanHere key
               (J.explain (policyBrief (contractPolicy contract)) chosen) "admit a read-only reviewer")
-            startReviewer own contract (compose (J.selectedKey selection)) oid
+            startReviewer own contract (compose key) oid
 
 startReviewer
   :: Review Self -> Contract -> ReviewBrief -> GitOid
@@ -749,7 +743,7 @@ routeFindings
 routeFindings own contract evidence findings = do
   let oid = evidenceCandidate evidence
   answer <- J.ask1
-    (J.state (object
+    (J.rawState (object
       [ "findings" .= findings
       , "acceptance_checklist" .= contractChecklist contract
       , "owned_paths" .= contractOwnedPaths contract
@@ -767,11 +761,7 @@ routeFindings own contract evidence findings = do
   case answer of
     Left failure -> doubted "verdict" (Just oid)
       ("jev unavailable: " <> Text.pack (show failure)) "read the findings yourself"
-    Right chosen -> case J.accept (policyVerdict (contractPolicy contract)) chosen of
-      Left doubt -> doubted "verdict" (Just oid)
-        (Text.pack (show doubt) <> "; " <> J.explain (policyVerdict (contractPolicy contract)) chosen)
-        "read the findings yourself"
-      Right selection -> J.handle selection
+    Right chosen -> case J.settle (policyVerdict (contractPolicy contract)) chosen
         ( #addresses_named_checklist_item (\_ -> do
             void (record "verdict" (Just oid) RanHere "addresses_named_checklist_item"
               (J.explain (policyVerdict (contractPolicy contract)) chosen) "same-child repair")
@@ -792,7 +782,11 @@ routeFindings own contract evidence findings = do
             publishCandidate own contract evidence)
         J..| #insufficient_evidence (\_ -> doubted "verdict" (Just oid)
             "no finding names a file or a checklist item"
-            "ask the reviewer for findings that name a file and an item") )
+            "ask the reviewer for findings that name a file and an item") ) of
+      Left doubt -> doubted "verdict" (Just oid)
+        (Text.pack (show doubt) <> "; " <> J.explain (policyVerdict (contractPolicy contract)) chosen)
+        "read the findings yourself"
+      Right (Settled action) -> action
 
 -- ---------------------------------------------------------------------------
 -- The repeat seam: repair sameness. Is this finding the same defect as the last one?
@@ -811,14 +805,13 @@ repeatedDefect own contract evidence findings = do
     [] -> requestRepair own oid findings
     previous : _ -> do
       answer <- J.ask
-        (J.state (object
+        (J.rawState (object
           [ "earlier_findings" .= previous
           , "new_findings" .= findings
           , "owned_paths" .= contractOwnedPaths contract
           ]))
         ( #comparable := J.noul "Do `earlier_findings` and `new_findings` each name a specific file and a specific symbol or test?"
-            :& #same := J.noul "Do `new_findings` describe the same defect in the same place as `earlier_findings`?"
-            :& Nil )
+            :& #same := J.noul "Do `new_findings` describe the same defect in the same place as `earlier_findings`?" )
       case answer of
         Left failure -> doubted "repeat" (Just oid)
           ("jev unavailable: " <> Text.pack (show failure))
@@ -880,7 +873,7 @@ scoreRisk :: Contract -> Evidence -> Handler ReviewState ReviewEffects ()
 scoreRisk contract evidence = do
   let oid = evidenceCandidate evidence
   answer <- J.ask
-    (J.state (object
+    (J.rawState (object
       [ "owned_paths" .= contractOwnedPaths contract
       , "diff_stat" .= evidenceStat evidence
       , "hunks" .= Text.take 24000 (evidenceHunks evidence)
@@ -889,8 +882,7 @@ scoreRisk contract evidence = do
         :& #touches_outside_ownership := J.noul "Does `diff_stat` name a file that is not in `owned_paths`?"
         :& #changes_public_item_used_elsewhere := J.noul "Do `hunks` change the name, signature or variants of a `pub` item?"
         :& #deletes_or_weakens_test := J.noul "Do `hunks` delete a `#[test]` function or replace an assertion with a weaker one?"
-        :& #leaves_todo := J.noul "Do `hunks` add or keep a `todo!()` or `unimplemented!()`?"
-        :& Nil )
+        :& #leaves_todo := J.noul "Do `hunks` add or keep a `todo!()` or `unimplemented!()`?" )
   case answer of
     Left failure -> doubted "risk" (Just oid)
       ("jev unavailable: " <> Text.pack (show failure)) "rank the merges yourself"
@@ -937,7 +929,7 @@ askStuck note
   | otherwise = do
       policy <- currentPolicy
       answer <- J.ask1
-        (J.state (object
+        (J.rawState (object
           [ "progress_text" .= noteText note
           , "evidence_added_since_last_update" .= ([] :: [Text])
           ]))
@@ -951,11 +943,7 @@ askStuck note
       case answer of
         Left failure -> doubted "stuck" Nothing
           ("jev unavailable: " <> Text.pack (show failure)) "read the progress note yourself"
-        Right chosen -> case J.accept (policyStuck policy) chosen of
-          Left doubt -> doubted "stuck" Nothing
-            (Text.pack (show doubt) <> "; " <> J.explain (policyStuck policy) chosen)
-            "read the progress note yourself"
-          Right selection -> J.handle selection
+        Right chosen -> case J.settle (policyStuck policy) chosen
             ( #blocked (\_ -> do
                 index <- record "stuck" Nothing ChildReported "blocked"
                   (noteText note) "notify the root"
@@ -966,7 +954,11 @@ askStuck note
                 (noteText note) "keep waiting"))
             J..| #insufficient_evidence (\_ -> doubted "stuck" Nothing
                 "the progress note names no step, command or error"
-                "ask the child for a concrete step") )
+                "ask the child for a concrete step") ) of
+          Left doubt -> doubted "stuck" Nothing
+            (Text.pack (show doubt) <> "; " <> J.explain (policyStuck policy) chosen)
+            "read the progress note yourself"
+          Right (Settled action) -> action
 
 -- ---------------------------------------------------------------------------
 -- Merge and the integrated check, through the merge actor
