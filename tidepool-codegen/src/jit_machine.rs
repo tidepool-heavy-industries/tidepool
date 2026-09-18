@@ -418,51 +418,13 @@ pub struct JitEffectMachine {
 // ownership across the suspend/resume thread boundary is sound.
 unsafe impl Send for JitEffectMachine {}
 
-/// External handle for cancelling a running `JitEffectMachine`.
-///
-/// `CancelHandle` is `Send + Sync + Clone`, so callers can hand clones to
-/// watchdog threads. Cancellation is observed at the next GC safepoint
-/// (heap check), which fires on essentially every non-trivial allocation in
-/// Haskell code. The running program unwinds via the normal error path with
-/// `JitError::Yield(YieldError::Cancelled)`.
-///
-/// The flag is per-`JitEffectMachine`, not per-run: call [`Self::reset`]
-/// between runs if you intend to reuse the machine after a cancellation.
-#[derive(Clone, Debug)]
-pub struct CancelHandle(Arc<AtomicBool>);
-
-impl CancelHandle {
-    /// Wrap an existing flag as a `CancelHandle`. Crate-internal: the
-    /// prepared engine's `PreparedMachine::realm_cancel_handle` reuses this
-    /// same handle type over its own realm-scoped flags
-    /// ([`crate::resource_ledger::ResourceLedger::cancel_flag`]) rather than
-    /// defining a second cancel-handle type.
-    pub(crate) fn from_flag(flag: Arc<AtomicBool>) -> Self {
-        Self(flag)
-    }
-
-    /// Request cancellation of the associated `JitEffectMachine`. The running
-    /// program (if any) will abort at its next GC safepoint with
-    /// `YieldError::Cancelled`.
-    pub fn cancel(&self) {
-        // SeqCst is overkill for correctness here (the JIT thread's relaxed
-        // load will observe the store eventually), but this is not a hot path
-        // — it is called once from a watchdog — so we prefer the stronger
-        // ordering for debuggability.
-        self.0.store(true, Ordering::SeqCst);
-    }
-
-    /// Returns `true` if cancellation has been requested.
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
-    }
-
-    /// Clear a previous cancellation request. Call this between runs if the
-    /// same `JitEffectMachine` is reused after a cancelled run.
-    pub fn reset(&self) {
-        self.0.store(false, Ordering::SeqCst);
-    }
-}
+/// `CancelHandle` now lives in [`crate::resource_ledger`] — the module that
+/// already owns the `Arc<AtomicBool>` cancel flag it wraps for both engines
+/// (`ResourceLedger::cancel_flag`) — and is re-exported here so every
+/// existing `crate::jit_machine::CancelHandle` / `tidepool_codegen::
+/// jit_machine::CancelHandle` path (including `tidepool-runtime`'s public
+/// re-export) keeps resolving unchanged.
+pub use crate::resource_ledger::CancelHandle;
 
 /// Session-level heap + cursor retained across runs.
 ///
@@ -724,7 +686,7 @@ impl JitEffectMachine {
     /// this machine's next (or in-flight) run. The handle remains valid for
     /// the lifetime of the machine; multiple handles may be held concurrently.
     pub fn cancel_handle(&self) -> CancelHandle {
-        CancelHandle(self.cancel_flag.clone())
+        CancelHandle::from_flag(self.cancel_flag.clone())
     }
 
     /// Obtain a clone-able cancellation handle scoped to ONE runtime resource scope,
@@ -741,7 +703,7 @@ impl JitEffectMachine {
     /// reuse"): the caller decides when a runtime resource scope is done retrying and calls
     /// `CancelHandle::reset` explicitly.
     pub fn realm_cancel_handle(&mut self, realm: RealmId) -> CancelHandle {
-        CancelHandle(self.realm_cancel_flag(realm))
+        CancelHandle::from_flag(self.realm_cancel_flag(realm))
     }
 
     /// This runtime resource scope's cancel flag, lazily minted on first park-path

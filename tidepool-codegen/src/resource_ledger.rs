@@ -8,7 +8,7 @@
 //! their rooted payloads back to that boundary for exact settlement.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
@@ -233,6 +233,54 @@ pub struct ResourceCounts {
     /// neither class can mask the other's growth.
     pub code_exports: usize,
     pub cancellation_scopes: usize,
+}
+
+/// External handle for cancelling a running machine — either engine's:
+/// `JitEffectMachine::cancel_handle`/`realm_cancel_handle` and
+/// `PreparedMachine::realm_cancel_handle` both wrap one of this module's own
+/// `cancel_flag` entries in this same handle type rather than each defining
+/// their own.
+///
+/// `CancelHandle` is `Send + Sync + Clone`, so callers can hand clones to
+/// watchdog threads. On Core, cancellation is observed at the next GC
+/// safepoint (heap check), which fires on essentially every non-trivial
+/// allocation in Haskell code, and the running program unwinds via the
+/// normal error path with `JitError::Yield(YieldError::Cancelled)`. On
+/// prepared, it's observed at the next `PreparedSafepoint`
+/// (`Allocation`/`FunctionEntry`/`Backedge`/`ThunkEntry`/`ThunkCommit`).
+///
+/// The flag is per-scope (per-`JitEffectMachine`, or per-`RealmId` on the
+/// prepared route), not per-run: call [`Self::reset`] between runs if you
+/// intend to reuse the machine/realm after a cancellation.
+#[derive(Clone, Debug)]
+pub struct CancelHandle(Arc<AtomicBool>);
+
+impl CancelHandle {
+    /// Wrap an existing flag as a `CancelHandle`.
+    pub(crate) fn from_flag(flag: Arc<AtomicBool>) -> Self {
+        Self(flag)
+    }
+
+    /// Request cancellation of the associated machine/scope. The running
+    /// program (if any) will abort at its next safepoint.
+    pub fn cancel(&self) {
+        // SeqCst is overkill for correctness here (the running thread's
+        // relaxed load will observe the store eventually), but this is not a
+        // hot path — it is called once from a watchdog — so we prefer the
+        // stronger ordering for debuggability.
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Returns `true` if cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// Clear a previous cancellation request. Call this between runs if the
+    /// same machine/scope is reused after a cancelled run.
+    pub fn reset(&self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 /// The process-local ownership ledger for one JIT machine.
