@@ -2894,8 +2894,16 @@ async fn frozen_prompt_bytes_round_trip_through_haskell() {
         "inspectFull (fmap (map fromEnum . T.unpack) (workspacePrompt \"literal\"))",
     )
     .await;
+    // The list layout breaks a line after every comma (`treeParts`, for
+    // line-based paging); this assertion cares about the exact byte values
+    // round-tripping, not the display's line breaks, so it strips them
+    // before comparing.
+    let output = result["items"][0]["output"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{result}"));
     assert_eq!(
-        result["items"][0]["output"], "Just [1,102,0,57,10,34,92,9,955,127]",
+        output.replace('\n', ""),
+        "Just [1,102,0,57,10,34,92,9,955,127]",
         "{result}"
     );
     campaign.forest.shutdown().await;

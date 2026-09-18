@@ -113,6 +113,14 @@ instance Display Text where
     | otherwise = TextLeaf value
   displayWith = renderText
 
+-- | A 'String' is text, and renders as 'Text' does. Without this the list
+-- instance answers for @[Char]@ and the result of 'show' displays as a list of
+-- characters, one to a line.
+instance {-# OVERLAPPING #-} Display [Char] where
+  displayTree = displayTree . Text.pack
+  displayTreePrec precedence = displayTreePrec precedence . Text.pack
+  displayWith budget = displayWith budget . Text.pack
+
 instance Display (a -> b) where
   displayTree _ = TextLeaf "<function>"
 
