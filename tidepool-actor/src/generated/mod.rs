@@ -14,4 +14,5 @@ pub mod console;
 pub mod forks;
 pub mod introspection;
 pub mod notifications;
+pub mod reflect;
 pub mod sleep;

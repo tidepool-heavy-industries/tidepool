@@ -251,6 +251,47 @@ pub struct ProviderObservation {
     pub confirmed_effort: Option<String>,
 }
 
+/// One item a provider recorded inside a turn.
+///
+/// A backend that pairs a call with its result in one record splits it here:
+/// the call and the result share a `call` identifier so a reader can rejoin
+/// them. Provider reasoning is not represented — it is opaque continuity
+/// state, not conversation content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TurnItem {
+    Message {
+        role: Role,
+        text: String,
+    },
+    ToolCall {
+        call: String,
+        tool: String,
+        arguments: String,
+    },
+    ToolResult {
+        call: String,
+        output: String,
+    },
+}
+
+/// One COMPLETED provider turn and the items belonging to it, in provider
+/// order.
+///
+/// A turn is the provider's own unit: one request and everything the model
+/// did in answering it. This is distinct from a [`Message`], since one turn
+/// holds several messages and their tool traffic. A turn still in progress
+/// has no completed form and is never represented here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationTurn {
+    /// The provider's own turn identifier.
+    pub turn: String,
+    /// When the provider opened and closed the turn, as it recorded them.
+    /// Absent means the record carried no timestamp, not an instant zero.
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub items: Vec<TurnItem>,
+}
+
 /// Endpoints and authoritative aggregates of the provider's response history.
 /// Older providers may expose observations without sufficiently identified
 /// records to support totals. Missing aggregates remain `None`.

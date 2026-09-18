@@ -75,6 +75,7 @@ pub enum ActorEffectKey {
     Commands,
     Console,
     Actor,
+    Reflect,
 }
 
 impl ActorEffectKey {
@@ -96,6 +97,7 @@ impl ActorEffectKey {
             Self::Commands => "Commands",
             Self::Console => "Console",
             Self::Actor => "Actor",
+            Self::Reflect => "Reflect",
         }
     }
 }
@@ -140,6 +142,7 @@ impl EffectiveRole {
                 ActorEffectKey::Commands,
                 ActorEffectKey::Console,
                 ActorEffectKey::Actor,
+                ActorEffectKey::Reflect,
             ],
         )
     }
@@ -168,6 +171,7 @@ impl EffectiveRole {
                 ActorEffectKey::Commands,
                 ActorEffectKey::Console,
                 ActorEffectKey::Actor,
+                ActorEffectKey::Reflect,
             ],
         )
     }
@@ -197,6 +201,7 @@ impl EffectiveRole {
                 ActorEffectKey::Commands,
                 ActorEffectKey::Console,
                 ActorEffectKey::Actor,
+                ActorEffectKey::Reflect,
             ],
         )
     }
@@ -236,6 +241,7 @@ impl EffectiveRole {
                 ActorEffectKey::Commands,
                 ActorEffectKey::Console,
                 ActorEffectKey::Actor,
+                ActorEffectKey::Reflect,
             ],
         )
     }

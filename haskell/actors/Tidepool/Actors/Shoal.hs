@@ -47,6 +47,12 @@ module Tidepool.Actors.Shoal
   , WorktreeAllocation
   , WorktreeIntegration
   , Forks
+  , Reflect
+  , reflect
+  , ConversationTurn (..)
+  , ConversationRole (..)
+  , TurnItem (..)
+  , ReflectError (..)
   , Effects
   , KnownEffect
   , KnownEffects (knownEffects)
@@ -338,6 +344,12 @@ import Tidepool.Effects.Core
   , GitOid (..)
   , GitFailureReceipt
   , AgentStopControlOutcome (..)
+  , Reflect
+  , reflect
+  , ConversationTurn (..)
+  , ConversationRole (..)
+  , TurnItem (..)
+  , ReflectError (..)
   )
 import Tidepool.Worktree hiding
   ( boundWorktree

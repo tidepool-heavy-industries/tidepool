@@ -22,6 +22,7 @@ pub mod journal;
 pub mod notifications;
 pub mod read_state;
 pub mod recipe_check;
+pub mod reflect;
 pub mod repo_event;
 pub mod run_l_l_m_turn;
 pub mod sleep;
@@ -52,6 +53,7 @@ pub use journal::*;
 pub use notifications::*;
 pub use read_state::*;
 pub use recipe_check::*;
+pub use reflect::*;
 pub use repo_event::*;
 pub use run_l_l_m_turn::*;
 pub use sleep::*;
@@ -88,6 +90,7 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         forks_decl(),
         agent_tools_decl(),
         agent_session_decl(),
+        reflect_decl(),
         bound_worktree_decl(),
         worktree_registry_decl(),
         worktree_allocation_decl(),

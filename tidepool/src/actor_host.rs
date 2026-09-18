@@ -858,6 +858,42 @@ fn native_tool_policy(
     }
 }
 
+/// Read an actor's OWN conversation, or report that it has none.
+///
+/// The actor identity arrives from the executing turn, so the lookup can only
+/// find the caller's own binding. An actor with no bound application — an
+/// operator proxy, a context whose application has not started, a retired one
+/// — is `Unbound`; no other actor's conversation, the root's included, stands
+/// in for it.
+fn conversation_reader(
+    owners: InteractiveOwners,
+    backend: Arc<dyn InteractiveAgentBackend>,
+) -> tidepool_actor::ConversationReader {
+    Arc::new(move |actor, count| {
+        let bound = owners
+            .lock()
+            .get(&actor)
+            .filter(|owner| owner.terminal.is_none())
+            .and_then(|owner| owner.creator_workspace.as_ref())
+            .map(|workspace| workspace.thread.clone());
+        let backend = Arc::clone(&backend);
+        Box::pin(async move {
+            let Some(thread) = bound else {
+                return Err(tidepool_actor::ConversationUnavailable::Unbound);
+            };
+            match backend.conversation(&thread, count).await {
+                Ok(Some(turns)) => Ok(turns),
+                Ok(None) => Err(tidepool_actor::ConversationUnavailable::Unreadable(
+                    "this conversation keeps no readable durable record".into(),
+                )),
+                Err(error) => Err(tidepool_actor::ConversationUnavailable::Unreadable(
+                    error.to_string(),
+                )),
+            }
+        })
+    })
+}
+
 impl NativeForkAdmission {
     async fn build_snapshot(
         &self,
@@ -1319,6 +1355,10 @@ pub async fn run(
         host_incarnation.incarnation(),
         Some(worker_launch_resolver(&config)),
     );
+    let forest = forest.with_conversation_reader(conversation_reader(
+        application_owners.clone(),
+        backend.clone(),
+    ));
     let forest = Arc::new(forest);
     let (mut root_actor, mut root_task) = forest.admit_root(descriptor, outcome).await?;
     worktree_authority.install_grant(root_actor.identity().into(), ActorWorktreeGrant::Repository);
@@ -1610,6 +1650,7 @@ pub(crate) fn shoal_effect_declarations() -> Vec<tidepool_mcp::EffectDecl> {
         tidepool_mcp::forks_decl(),
         tidepool_mcp::actor_kernel_decl(),
         tidepool_mcp::actor_local_decl(),
+        tidepool_mcp::reflect_decl(),
         tidepool_mcp::sleep_decl(),
         tidepool_mcp::fs_read_decl(),
         tidepool_mcp::worktree_decl(),

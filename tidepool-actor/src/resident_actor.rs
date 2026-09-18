@@ -128,6 +128,7 @@ struct ResidentEnvironment<H, O> {
     fork_workspaces: Option<crate::fork_workspace::SharedForkWorkspaceAdmission>,
     root_admission_closed: Arc<tokio::sync::RwLock<bool>>,
     launch_resolver: Option<crate::WorkerLaunchResolver>,
+    conversation_reader: Option<crate::ConversationReader>,
 }
 
 #[derive(Clone)]
@@ -264,6 +265,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             fork_workspaces: self.fork_workspaces.clone(),
             root_admission_closed: self.root_admission_closed.clone(),
             launch_resolver: self.launch_resolver.clone(),
+            conversation_reader: self.conversation_reader.clone(),
         }
     }
 }
@@ -1893,6 +1895,27 @@ where
                     .runner
                     .application_workbench()
                     .resume_structured_introspection(context.clone(), continuation, query, kind)
+                    .await
+            }),
+            ResidentActorBoundary::ReflectConversation {
+                continuation,
+                count,
+            } => Box::pin(async move {
+                // The reader is called with the executing actor and nothing
+                // else, so a caller cannot reach another conversation.
+                let outcome = match self.environment.conversation_reader.clone() {
+                    Some(reader) => {
+                        reader(context.actor, crate::conversation::requested(count)).await
+                    }
+                    None => Err(crate::ConversationUnavailable::Unbound),
+                };
+                self.environment
+                    .runner
+                    .resume_value(
+                        context.clone(),
+                        continuation,
+                        crate::conversation::reflection(outcome),
+                    )
                     .await
             }),
             ResidentActorBoundary::AgentList(continuation) => Box::pin(async move {
@@ -6506,6 +6529,7 @@ where
             fork_workspaces,
             root_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
             launch_resolver,
+            conversation_reader: None,
         };
         (
             Self {
@@ -6516,6 +6540,14 @@ where
             },
             receiver,
         )
+    }
+
+    /// Install the host's reader for an actor's own conversation. Without one,
+    /// `reflect` reports every context unbound rather than reading anything.
+    #[must_use]
+    pub fn with_conversation_reader(mut self, reader: crate::ConversationReader) -> Self {
+        self.environment.conversation_reader = Some(reader);
+        self
     }
 
     /// Observe only actors the exact requester can inspect. This does not enter

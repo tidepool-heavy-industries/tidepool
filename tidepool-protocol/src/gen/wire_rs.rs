@@ -86,11 +86,13 @@ fn body(e: &Effect) -> String {
         out.push_str(&format!("use crate::{{{}}};\n", names.join(", ")));
     }
 
+    // rustfmt unwraps a single-name brace list, so emit the unwrapped form
+    // directly: this file has to be a rustfmt fixed point.
     let idents = used_bridge_derives(e);
-    out.push_str(&format!(
-        "use tidepool_bridge_derive::{{{}}};\n",
-        idents.join(", ")
-    ));
+    out.push_str(&match idents.as_slice() {
+        [only] => format!("use tidepool_bridge_derive::{only};\n"),
+        many => format!("use tidepool_bridge_derive::{{{}}};\n", many.join(", ")),
+    });
     out.push('\n');
 
     if let Some(err) = wire_error_enum(e) {

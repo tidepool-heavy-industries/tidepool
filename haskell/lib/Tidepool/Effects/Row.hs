@@ -28,6 +28,7 @@ import Tidepool.Effects.Core
   , AgentLaunch
   , BoundWorktree
   , Forks
+  , Reflect
   , WorktreeAllocation
   , WorktreeIntegration
   , WorktreeRegistry
@@ -80,3 +81,4 @@ instance KnownEffect Commands where effectWitness = EffectWitness EffectCommands
 instance KnownEffect Console where effectWitness = EffectWitness EffectConsole
 instance KnownEffect Notifications where effectWitness = EffectWitness EffectNotifications
 instance KnownEffect Actor where effectWitness = EffectWitness EffectActor
+instance KnownEffect Reflect where effectWitness = EffectWitness EffectReflect

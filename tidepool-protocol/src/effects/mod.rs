@@ -40,6 +40,7 @@ pub mod journal;
 pub mod notifications;
 pub mod read_state;
 pub mod recipe_check;
+pub mod reflect;
 pub mod run_llm_turn;
 pub mod sleep;
 pub mod subagent;
@@ -89,6 +90,7 @@ pub fn all() -> Vec<Effect> {
         forks::forks(),
         agent_tools::agent_tools(),
         agent_session::agent_session(),
+        reflect::reflect(),
         worktree_facades::bound_worktree(),
         worktree_facades::worktree_registry(),
         worktree_facades::worktree_allocation(),
