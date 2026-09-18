@@ -951,6 +951,60 @@ fn same_session_identifiers(source: &str) -> std::collections::HashSet<String> {
     names
 }
 
+/// The three source-drift rows of the what-is-live status view: is what is
+/// running still what is on disk. Each row is independently `None` when it
+/// has not been observed for this actor (see
+/// `runtime_observation::ActorSourceDriftObservation`) and renders as
+/// "not observed" rather than as clean — an unread row must never look like
+/// a checked-and-identical one. A pure formatter, directly testable without
+/// an actor.
+fn render_source_drift_section(drift: &crate::ActorSourceDriftObservation) -> String {
+    let layer = match &drift.layer {
+        None => "  source layer: not observed".to_owned(),
+        Some(layer) if layer.changed_modules.is_empty() => format!(
+            "  source layer: active={}@{} disk={}@{} (checked, identical)",
+            layer.active_identity, layer.active_generation,
+            layer.disk_identity, layer.disk_generation,
+        ),
+        Some(layer) => {
+            let mut changed = layer.changed_modules.clone();
+            changed.sort();
+            format!(
+                "  source layer: active={}@{} disk={}@{} changed_modules={changed:?}",
+                layer.active_identity, layer.active_generation,
+                layer.disk_identity, layer.disk_generation,
+            )
+        }
+    };
+    let checkout = match &drift.checkout {
+        None => "  checkout: not observed".to_owned(),
+        Some(checkout) if checkout.dirty_files.is_empty() => format!(
+            "  checkout: head={} (checked, clean); binary_build_revision=unavailable (not recorded by this build)",
+            checkout.head,
+        ),
+        Some(checkout) => {
+            let mut dirty = checkout.dirty_files.clone();
+            dirty.sort();
+            format!(
+                "  checkout: head={} dirty_files={dirty:?}; binary_build_revision=unavailable (not recorded by this build)",
+                checkout.head,
+            )
+        }
+    };
+    let frozen = match &drift.frozen {
+        None => "  frozen workspace: not observed".to_owned(),
+        Some(frozen) if frozen.changed_modules.is_empty() => {
+            "  frozen workspace: (checked, identical)".to_owned()
+        }
+        Some(frozen) => {
+            let mut changed = frozen.changed_modules.clone();
+            changed.sort();
+            format!("  frozen workspace: changed_modules={changed:?}")
+        }
+    };
+    format!("{layer}\n{checkout}\n{frozen}")
+}
+
 /// One collectors-section line of the what-is-live status view: a job, its
 /// owner, the actors observing its completion ("collectors", in
 /// `Tidepool.Actor` usage), and whether it has finished. A pure formatter so
@@ -1646,14 +1700,20 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     /// `same_session_identifiers` just above `impl WorkbenchExecutions`'s
     /// closing brace for the pure helpers this leans on.
     ///
-    /// Two things this view does NOT show, left out rather than guessed at:
-    /// the running binary's build revision against the worktree head (and
-    /// dirty files), and frozen workspace modules that differ from disk.
-    /// Both live in `tidepool::shoal::source`; `tidepool` depends on
-    /// `tidepool-actor` (see `tidepool/Cargo.toml`), never the reverse, and
-    /// no existing `ActorRuntimeObservation` channel carries that data down
-    /// into this crate. Which agent-spec revision each actor activated is
-    /// omitted for the same reason: no such tracking exists in
+    /// Source drift (is what is running still what is on disk) is published
+    /// from `tidepool`'s composition root into
+    /// `ActorRuntimeObservation::source_drift`, since the data — the source
+    /// layer's active/disk revision, the checkout's Git state, and the
+    /// frozen workspace's — lives in `tidepool::shoal::source` and
+    /// `tidepool` depends on `tidepool-actor` (see `tidepool/Cargo.toml`),
+    /// never the reverse. See `render_source_drift_section` just below
+    /// `same_session_identifiers`. One piece is left out rather than
+    /// guessed at even there: no build script or embedded string anywhere in
+    /// this system records the running binary's build revision, so the
+    /// checkout row reports Git's own head and dirty files and says plainly
+    /// that the binary-revision comparison is unavailable, rather than
+    /// inventing one. Which agent-spec revision each actor activated is
+    /// omitted for a similar reason: no such tracking exists in
     /// `tidepool-actor` today, and this view does not invent any.
     fn live_status_text(
         &self,
@@ -1686,9 +1746,11 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let journal = self.workbench_executions.lock();
         let executions = journal.terminal_entries();
         let binding_lines = render_bindings_section(bindings, &executions);
+        let source_drift =
+            render_source_drift_section(&self.runtime_observation.snapshot().source_drift);
 
         format!(
-            "actor {}@{} what-is-live\ncollectors:\n{jobs}\nbindings:\n{binding_lines}",
+            "actor {}@{} what-is-live\ncollectors:\n{jobs}\nbindings:\n{binding_lines}\nsource drift:\n{source_drift}",
             actor.id.0, actor.incarnation.0,
         )
     }
@@ -8084,9 +8146,9 @@ fn lookup_response(
 mod tests {
     use super::{
         defining_execution, disposition_for_non_command_failure, lookup_response,
-        render_bindings_section, render_job_line, same_session_identifiers, slice_cell_span,
-        workbench_failure_after_operations, workbench_response, ChildExitObservations,
-        WorkbenchBoundaryRecord, WorkbenchExecutions,
+        render_bindings_section, render_job_line, render_source_drift_section,
+        same_session_identifiers, slice_cell_span, workbench_failure_after_operations,
+        workbench_response, ChildExitObservations, WorkbenchBoundaryRecord, WorkbenchExecutions,
     };
     use crate::command_jobs::CommandJobSnapshot;
     use crate::{ActorId, ActorRef, Incarnation};
@@ -9216,6 +9278,108 @@ mod tests {
         assert!(
             finished_line.contains("collectors=[\"2@1\"]"),
             "{finished_line}"
+        );
+    }
+
+    #[test]
+    fn source_drift_section_marks_every_unobserved_row_as_not_observed() {
+        // No row has been published for this actor yet: the honest render is
+        // "not observed" for all three, never "clean" or a guessed value.
+        let text = render_source_drift_section(&crate::ActorSourceDriftObservation::default());
+        assert!(text.contains("source layer: not observed"), "{text}");
+        assert!(text.contains("checkout: not observed"), "{text}");
+        assert!(text.contains("frozen workspace: not observed"), "{text}");
+    }
+
+    #[test]
+    fn source_drift_section_names_a_changed_module_in_the_layer_row() {
+        let drift = crate::ActorSourceDriftObservation {
+            layer: Some(crate::SourceLayerDrift {
+                active_identity: "rev-a".into(),
+                active_generation: 3,
+                disk_identity: "rev-b".into(),
+                disk_generation: 0,
+                changed_modules: vec!["Project.Work".into()],
+            }),
+            ..Default::default()
+        };
+        let text = render_source_drift_section(&drift);
+        assert!(text.contains("active=rev-a@3"), "{text}");
+        assert!(text.contains("disk=rev-b@0"), "{text}");
+        assert!(
+            text.contains("changed_modules=[\"Project.Work\"]"),
+            "{text}"
+        );
+        assert!(!text.contains("checked, identical"), "{text}");
+    }
+
+    #[test]
+    fn source_drift_section_reports_identical_revisions_as_checked_not_skipped() {
+        let drift = crate::ActorSourceDriftObservation {
+            layer: Some(crate::SourceLayerDrift {
+                active_identity: "rev-a".into(),
+                active_generation: 2,
+                disk_identity: "rev-a".into(),
+                disk_generation: 2,
+                changed_modules: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let text = render_source_drift_section(&drift);
+        assert!(
+            text.contains("source layer: active=rev-a@2 disk=rev-a@2 (checked, identical)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn source_drift_section_lists_a_dirty_checkouts_files() {
+        let drift = crate::ActorSourceDriftObservation {
+            checkout: Some(crate::CheckoutGitDrift {
+                head: "abc123".into(),
+                dirty_files: vec!["src/lib.rs".into(), "Cargo.toml".into()],
+            }),
+            ..Default::default()
+        };
+        let text = render_source_drift_section(&drift);
+        assert!(text.contains("checkout: head=abc123"), "{text}");
+        assert!(
+            text.contains("dirty_files=[\"Cargo.toml\", \"src/lib.rs\"]"),
+            "{text}"
+        );
+        // The binary's build revision is never recorded, so this says so
+        // rather than pairing the head with a guessed value.
+        assert!(text.contains("binary_build_revision=unavailable"), "{text}");
+    }
+
+    #[test]
+    fn source_drift_section_reports_a_clean_checkout_as_checked() {
+        let drift = crate::ActorSourceDriftObservation {
+            checkout: Some(crate::CheckoutGitDrift {
+                head: "abc123".into(),
+                dirty_files: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let text = render_source_drift_section(&drift);
+        assert!(
+            text.contains("checkout: head=abc123 (checked, clean)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn source_drift_section_names_frozen_modules_that_differ_from_disk() {
+        let drift = crate::ActorSourceDriftObservation {
+            frozen: Some(crate::FrozenSourceDrift {
+                changed_modules: vec!["Project.Types".into()],
+            }),
+            ..Default::default()
+        };
+        let text = render_source_drift_section(&drift);
+        assert!(
+            text.contains("frozen workspace: changed_modules=[\"Project.Types\"]"),
+            "{text}"
         );
     }
 }

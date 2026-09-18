@@ -90,6 +90,68 @@ pub enum ActorWorkbenchTransfer {
     CancellationAcknowledgement,
 }
 
+/// One source layer's active revision against the latest observed on-disk
+/// capture, and which modules' digests differ between them.
+///
+/// Part of the what-is-live status view's source-drift rows
+/// (`resident_actor::live_status_text`). The data lives in
+/// `tidepool::shoal::source`, which this crate cannot depend on (`tidepool`
+/// depends on `tidepool-actor`, never the reverse); `tidepool`'s composition
+/// root publishes this into the observation channel instead. Absence of a
+/// value for this field (`ActorSourceDriftObservation::layer` is `None`)
+/// means the layer has not been observed yet — never means it was checked
+/// and found identical.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLayerDrift {
+    pub active_identity: String,
+    pub active_generation: u64,
+    pub disk_identity: String,
+    pub disk_generation: u64,
+    /// Module names whose digest differs between the active and on-disk
+    /// revisions, including a module present in one and absent from the
+    /// other. Empty means checked and identical.
+    pub changed_modules: Vec<String>,
+}
+
+/// A managed checkout's Git head and dirty files, observed on the same poll
+/// as [`SourceLayerDrift`].
+///
+/// There is no recorded build revision for the running binary anywhere in
+/// this system: no build script or embedded string captures the Git commit
+/// the binary was built from (`CARGO_PKG_VERSION`, where it appears, is the
+/// crate's semver, not a commit). A status view over this data can report
+/// what Git itself observes about the checkout; it cannot honestly compare
+/// that to a binary revision that was never recorded, and does not invent
+/// one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckoutGitDrift {
+    pub head: String,
+    /// Staged, unstaged and untracked paths, sorted. Empty means checked and
+    /// clean.
+    pub dirty_files: Vec<String>,
+}
+
+/// Frozen workspace modules whose digest differs from the same module read
+/// live off disk right now. The frozen capture is the run's immutable floor;
+/// this is independent of any layer republished in front of it
+/// ([`SourceLayerDrift`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrozenSourceDrift {
+    /// Empty means checked and identical.
+    pub changed_modules: Vec<String>,
+}
+
+/// The three source-drift rows of the what-is-live status view, each
+/// observed and published independently. A field left `None` means that row
+/// has not been observed for this actor, which the view renders distinctly
+/// from an observed-and-empty (no drift) result.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ActorSourceDriftObservation {
+    pub layer: Option<SourceLayerDrift>,
+    pub checkout: Option<CheckoutGitDrift>,
+    pub frozen: Option<FrozenSourceDrift>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderUsageSample {
     pub observation_id: String,
@@ -136,6 +198,9 @@ pub struct ActorRuntimeObservation {
     /// Set by the host while it launches this actor's provider application
     /// (the current launch phase); cleared once the provider binds.
     pub launch_pending: Option<String>,
+    /// Whether what is running still matches what is on disk. See
+    /// [`ActorSourceDriftObservation`].
+    pub source_drift: ActorSourceDriftObservation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -395,6 +460,22 @@ impl ActorRuntimeObservationHandle {
         observation.prompt_profile = Some(profile.into());
         observation.prompt_catalog_version = Some(catalog_version);
         observation.prompt_fingerprint = Some(fingerprint.into());
+    }
+
+    /// Publish row 1 of the source-drift view: this actor's source layer,
+    /// active vs. latest observed disk.
+    pub fn publish_source_layer_drift(&self, drift: SourceLayerDrift) {
+        self.inner.write().source_drift.layer = Some(drift);
+    }
+
+    /// Publish row 2: the checkout's Git head and dirty files.
+    pub fn publish_checkout_git_drift(&self, drift: CheckoutGitDrift) {
+        self.inner.write().source_drift.checkout = Some(drift);
+    }
+
+    /// Publish row 3: frozen workspace modules that differ from disk.
+    pub fn publish_frozen_source_drift(&self, drift: FrozenSourceDrift) {
+        self.inner.write().source_drift.frozen = Some(drift);
     }
 
     pub fn publish_cache_usage(&self, usage: tidepool_model::ProviderUsageSnapshot) {
