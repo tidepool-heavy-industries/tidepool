@@ -29,6 +29,7 @@ const STATUS_VERSION: u32 = 4;
 // Root startup includes up to five minutes of resource admission before launch.
 const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(420);
 pub mod resources;
+pub(crate) mod source;
 pub mod workspace;
 
 const SHOAL_CONFIG: &str = ".shoal/config.toml";

@@ -1778,14 +1778,47 @@ pub(crate) fn validate_workspace_program(
         &crate::haskell_sources::ensure_shoal_haskell()?,
         Some(inputs),
         run_root,
+        None,
     )?;
     Ok(())
+}
+
+/// Compile the driver with a CANDIDATE source revision standing in for the
+/// active one. This is the whole reload check: GHC's own module graph, rooted
+/// at the driver and every configured workspace module, decides whether the
+/// candidate's reverse-dependency closure typechecks. Nothing is published
+/// unless it does.
+pub(crate) fn typecheck_candidate_revision(
+    inputs: &crate::shoal::workspace::FrozenWorkspace,
+    run_root: &Path,
+    haskell_root: &Path,
+    candidate: &[PathBuf],
+    extra_modules: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    compile_driver(
+        haskell_root,
+        Some(inputs),
+        run_root,
+        Some(CandidateSources {
+            include: candidate,
+            extra_modules,
+        }),
+    )?;
+    Ok(())
+}
+
+/// The active source layer a driver compile reads, when it is not the one the
+/// run has published.
+struct CandidateSources<'a> {
+    include: &'a [PathBuf],
+    extra_modules: &'a [String],
 }
 
 fn compile_driver(
     haskell_root: &Path,
     inputs: Option<&crate::shoal::workspace::FrozenWorkspace>,
     run_root: &Path,
+    candidate: Option<CandidateSources<'_>>,
 ) -> Result<CompiledShoalDriver, Box<dyn std::error::Error>> {
     let declarations = shoal_effect_declarations();
     let effects = tidepool_mcp::ensure_effects_module(&declarations)?;
@@ -1802,8 +1835,23 @@ fn compile_driver(
         DRIVER_MODULE,
     );
     if let Some(inputs) = inputs {
+        // The live source layer goes AHEAD of the run's frozen capture, so a
+        // reloaded module shadows the copy the run started from. The frozen
+        // capture stays on the path beneath it as the verified floor.
+        let layer = crate::shoal::source::SourceLayer::new(run_root);
+        let roots = inputs.captured_source_roots().len();
+        match &candidate {
+            Some(candidate) => include.extend(candidate.include.iter().cloned()),
+            None => {
+                layer.ensure_active(inputs)?;
+                include.extend(layer.include_paths(roots));
+            }
+        }
         include.extend(inputs.include.iter().cloned());
         for module in inputs.import_modules() {
+            preamble = insert_preamble_imports(&preamble, module);
+        }
+        for module in candidate.iter().flat_map(|c| c.extra_modules.iter()) {
             preamble = insert_preamble_imports(&preamble, module);
         }
     }
@@ -1862,6 +1910,7 @@ fn compile_root(
         &config.haskell_root,
         config.workspace_inputs.as_ref(),
         run_root,
+        None,
     )?;
     let declarations = shoal_effect_declarations();
     let session_root = run_root.join("haskell-session");

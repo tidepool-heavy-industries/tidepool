@@ -95,11 +95,7 @@ impl FrozenWorkspace {
         // Failed captures have no manifest. A retry selects fresh directories,
         // so deleted modules from a partial attempt cannot remain importable.
         let capture = uuid::Uuid::new_v4();
-        let mut roots = Vec::new();
-        for root in &config.haskell.source_roots {
-            roots.push(base.join(root).canonicalize()?);
-        }
-        roots.extend(flake_source_roots(workspace, &config.haskell)?);
+        let roots = resolve_source_roots(workspace, &config.haskell)?;
         for (index, source) in roots.iter().enumerate() {
             let relative = PathBuf::from(format!("sources/{capture}/{index}"));
             capture_sources(source, &relative, &directory, &mut files)?;
@@ -186,10 +182,10 @@ impl FrozenWorkspace {
         .to_string();
         let resources = resource_module(&identity, &config.haskell.modules, &prompts);
         let resources_path = PathBuf::from("resources/Shoal/Workspace.hs");
-        if include.iter().any(|root| {
-            root.join("Shoal/Workspace.hs").exists() || root.join("Shoal/Workspace.lhs").exists()
-        }) {
-            return Err("Shoal.Workspace is reserved for the frozen workspace interface".into());
+        if include.iter().any(|root| root.join("Shoal").is_dir()) {
+            return Err(
+                "the Shoal.* module prefix is reserved for generated workspace interfaces".into(),
+            );
         }
         std::fs::create_dir_all(directory.join("resources/Shoal"))?;
         tidepool_atomic_write::write_durable(
@@ -220,6 +216,13 @@ impl FrozenWorkspace {
 
     pub(crate) fn identity(&self) -> &str {
         &self.identity
+    }
+
+    /// This run's verified capture of the workspace's source roots, in search
+    /// order. The generated resources directory `freeze` appends is not one of
+    /// them: it holds the workspace interface, not authored source.
+    pub(crate) fn captured_source_roots(&self) -> &[PathBuf] {
+        &self.include[..self.include.len().saturating_sub(1)]
     }
 
     pub(crate) fn imports(&self) -> Vec<String> {
@@ -276,6 +279,26 @@ fn valid_module(module: &str) -> bool {
             chars.next().is_some_and(|c| c.is_ascii_uppercase())
                 && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\'')
         })
+}
+
+/// The workspace's Haskell source roots, in search order: the authored
+/// `[haskell] source_roots` relative to `.shoal`, then whatever
+/// `[haskell.flake_sources]` selects out of the project's flake inputs.
+///
+/// One resolver, used both when a run freezes its capture and when a live
+/// reload re-reads the same roots, so a reload cannot silently read a
+/// different set of directories than the run started from.
+pub(super) fn resolve_source_roots(
+    workspace: &Path,
+    config: &HaskellConfig,
+) -> Result<Vec<PathBuf>> {
+    let base = workspace.join(".shoal");
+    let mut roots = Vec::new();
+    for root in &config.source_roots {
+        roots.push(base.join(root).canonicalize()?);
+    }
+    roots.extend(flake_source_roots(workspace, config)?);
+    Ok(roots)
 }
 
 /// Fetch the project's flake inputs and return the Haskell source directories
@@ -412,7 +435,7 @@ pub(crate) fn copy_authored(workspace: &Path, destination: &Path) -> Result<()> 
     )
 }
 
-fn capture_sources(
+pub(super) fn capture_sources(
     source: &Path,
     relative: &Path,
     destination: &Path,

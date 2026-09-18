@@ -141,6 +141,57 @@ fn dependency_source_manifest(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     files
 }
 
+/// The same per-file content manifest a compiled artifact is keyed by, as
+/// readable data: each Haskell home-module source under `root`, by its path
+/// RELATIVE to `root`, paired with the hex digest of its bytes. Unreadable
+/// files carry an empty digest, exactly as they contribute an absent-marker to
+/// the key.
+///
+/// Callers that need a content identity for a set of source roots — a live
+/// source revision, say — must build it from this rather than from a second
+/// directory walk, so "what the compiler keys on" and "what a revision is
+/// named by" cannot drift apart.
+#[must_use]
+pub fn source_root_manifest(root: &Path) -> Vec<(PathBuf, String)> {
+    dependency_source_manifest(root)
+        .into_iter()
+        .map(|(rel, digest)| {
+            let hex = match digest.split_first() {
+                Some((1, bytes)) => hex_digest(bytes),
+                _ => String::new(),
+            };
+            (rel, hex)
+        })
+        .collect()
+}
+
+/// One content identity for an ORDERED set of source roots, framed exactly as
+/// [`invocation_key`] frames its `--include` list: root count, then each root's
+/// relative-path manifest in argument order. `domain` separates one caller's
+/// identities from another's.
+///
+/// Order matters for the same reason it matters to the cache key: GHC's search
+/// path decides module shadowing, so `[A, B]` and `[B, A]` are different
+/// compilations and must not share an identity.
+#[must_use]
+pub fn source_roots_identity(domain: &[u8], roots: &[PathBuf]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    frame(&mut hasher, domain);
+    frame(&mut hasher, &(roots.len() as u64).to_le_bytes());
+    for root in roots {
+        fingerprint_dir_relative(root, &mut hasher);
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
+}
+
 fn collect_dependency_sources(
     root: &Path,
     dir: &Path,
