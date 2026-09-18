@@ -197,6 +197,9 @@
           TIDEPOOL_INTERACTIVE_CODEX_BIN = "${interactiveCodex}/bin/codex";
           TIDEPOOL_SHOAL_CODEX_CLOSURE = "${interactiveCodex}";
           TIDEPOOL_SHOAL_NIX_STORE_BIN = "${pkgs.nix}/bin/nix-store";
+          # Fetches the project's flake inputs when `[haskell.flake_sources]`
+          # pins Haskell source outside the workspace.
+          TIDEPOOL_SHOAL_NIX_BIN = "${pkgs.nix}/bin/nix";
           shellHook = ''
             export TIDEPOOL_GHC_LIBDIR="$(ghc --print-libdir)"
             echo "shoal dev shell"
@@ -296,7 +299,8 @@
               --set TIDEPOOL_EXTRACT "${self.packages.${system}.tidepool-extract}/bin/tidepool-extract" \
               --set TIDEPOOL_INTERACTIVE_CODEX_BIN "${interactiveCodex}/bin/codex" \
               --set TIDEPOOL_SHOAL_CODEX_CLOSURE "${interactiveCodex}" \
-              --set TIDEPOOL_SHOAL_NIX_STORE_BIN "${pkgs.nix}/bin/nix-store"
+              --set TIDEPOOL_SHOAL_NIX_STORE_BIN "${pkgs.nix}/bin/nix-store" \
+              --set TIDEPOOL_SHOAL_NIX_BIN "${pkgs.nix}/bin/nix"
           '';
         };
 
