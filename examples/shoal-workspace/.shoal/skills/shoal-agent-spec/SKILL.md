@@ -88,6 +88,20 @@ leaves your spec compiling. `specTools` is the same tools record as before: one
 field per tool (or per nested record), `mode :- Call input output`, the field
 name is the tool name, and schemas derive from the types.
 
+## What the slot is given
+
+```haskell
+data ToolCall   = ToolCall   { toolCallName :: Text, toolCallArguments :: Value }
+data ToolResult = ToolResult { toolResultName :: Text, toolResultHandle :: ResultHandle, toolResultOutput :: Text }
+```
+
+`toolCallArguments` is the call's arguments as the model sent them: a JSON object
+for a `Call` tool, a JSON string for a `RawCall` tool such as `bash`.
+`toolResultOutput` is the text the model would be shown. `ResultHandle` is
+`Text`, and is the name the whole result is bound under if you answer `Pruned`.
+All of this is `Tidepool.Agent.Contract`, which cells do not import, so `lookup`
+will not find these names; they are listed here instead.
+
 ## What the slot may answer
 
 | Answer | The model is shown |
@@ -109,12 +123,34 @@ with one line naming `after-tool#N`; `status` has the rest. A slot's own tool
 use never triggers the slot. `lookup`, `status`, `reload_agent_spec` and
 authored cells are never shown to it, so a broken slot cannot block its repair.
 
+## Writing a slot you would leave on
+
+A pruning slot is only worth keeping if you would trust it without checking.
+What a first attempt gets wrong:
+
+- **Judge passages, not lines.** A line such as `impl SurfaceChange {` means
+  nothing alone. Split the result into chunks of a dozen or so lines, or at
+  blank lines, ask about each chunk, and keep whole chunks.
+- **Keep line numbers** in what you return, so the selection can be found in the
+  whole result.
+- **Abstain when the judgment is weak.** A `noul` gives only a likelihood, so
+  treat the middle band, roughly 0.35 to 0.65, as no answer rather than cutting
+  at 0.5. A `choice` also gives margin and confidence; settle it under a policy.
+  Answer `Abstained` rather than a selection you would not defend: an unpruned
+  result costs context, and a wrong pruning costs the task.
+- **Trigger on size that hurts**, a few hundred lines or several kilobytes. Forty
+  lines is cheap to read and not worth a judgment.
+- **Say what you were looking for.** Give the question the call's arguments and,
+  when it matters, your recent turns from `reflect`.
+
 ## Asking Jev from a tool or the slot
 
 A module is not a cell, and three things a cell gives you for free have to be
 written out:
 
-- `import qualified Jev.Operators as J`. Only cells get `J` from the workbench.
+- `import qualified Jev.Operators as J`, and `import Jev.Operators (Packet ((:=), (:&)))`
+  when you build a packet or a typed state, since those two operators are
+  written unqualified. Only cells get either import from the workbench.
 - `{-# LANGUAGE OverloadedLabels #-}` for `#yes`, and `OverloadedRecordDot` if
   you read answers as `a.key`.
 - `Member Jev effects` on every signature that asks Jev or wraps something that

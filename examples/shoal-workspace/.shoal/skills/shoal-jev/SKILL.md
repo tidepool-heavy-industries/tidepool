@@ -71,6 +71,16 @@ do not discard deciding evidence merely to shorten its display.
 
 ## Reading the answer
 
+The answer has the packet's shape. A cell labelled `#enough := J.noul …` is read
+as `a.enough.yes`, a likelihood from 0 to 1. A cell labelled
+`#per_file := J.each key question rows` is read as `a.per_file`, a list of
+`(row, answer)` pairs in row order, where `row` is the value you passed in, not
+its key, and `answer` has the shape of what `question` built: with
+`\row -> #on_path := J.noul … :& #enough := J.noul …` each answer is read as
+`ans.on_path.yes` and `ans.enough.yes`. So
+`[(name, ans.on_path.yes) | ((name, _), ans) <- a.per_file]` projects one
+likelihood per row.
+
 Answers are data, read with record dot straight off the response — `r.enough`,
 `r.worth_reading` — with no projection first; `J.answers r` hands the whole
 packet to a function that wants it as one value. A choice answer has `.key`,

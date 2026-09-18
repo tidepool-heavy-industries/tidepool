@@ -17,9 +17,9 @@ with Jev, live, in this session. Everything below is a body edit followed by
    the files that matter for `looking_for` and says briefly why. Reload, then
    call `triage_search` and compare it with what your cell said.
 3. Give the after-tool slot a body. When a `bash` or `exec_command` result is
-   longer than forty lines, read your last few turns, ask Jev which lines bear
-   on what you have been doing, and prune to those. Abstain when the result is
-   short. Reload, run something noisy, and check the pruned view against the
+   long enough to hurt, a few hundred lines, read your last few turns, ask Jev
+   which passages bear on what you have been doing, and prune to those. Abstain
+   when the result is short or the judgment is weak. Reload, run something noisy, and check the pruned view against the
    whole result through its handle.
 4. It will be too aggressive or too timid the first time. Adjust it and reload
    until you would want to keep it. Use `status` with the detailed view to see

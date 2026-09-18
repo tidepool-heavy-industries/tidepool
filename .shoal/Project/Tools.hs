@@ -44,7 +44,8 @@ tools =
     }
 
 -- | The starting body: every file that matches, with a count, and no judgment
--- about which of them matter. `looking_for` is not used yet.
+-- about which of them matter. `looking_for` is not used yet, and the answer says
+-- so, because the description already promises the judgment a better body makes.
 triageSearchBody :: Member Cmd.Commands effects => TriageSearch -> Eff effects Text
 triageSearchBody request = do
   result <-
@@ -52,5 +53,7 @@ triageSearchBody request = do
       Cmd.withArguments [pattern request] (Cmd.bashCommand "rg --count-matches --sort path -- \"$1\" || true")
   pure $ case Cmd.stdout result of
     Right found | T.null (T.strip found) -> "no file matches " <> pattern request
-    Right found -> found
+    Right found ->
+      "unfiltered: this body does not use looking_for yet, so every matching file is listed with its match count.\n"
+        <> found
     Left _ -> "the search did not finish cleanly: " <> Cmd.stderr result

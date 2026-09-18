@@ -37,6 +37,13 @@ A small branch that handles a recurring case can save whole model turns even
 when other cases return to you. Keep enough evidence to inspect what happened;
 return unresolved cases explicitly rather than inventing success.
 
+Three cell habits prevent most rejections. Start every statement-level binding
+with its own `let`; a second binding indented under a multiline `let` is a parse
+error. Give a reusable helper a type signature, because an empty-list pattern or
+an overloaded operator otherwise defaults its element type to something you did
+not mean. A cell that fails to typecheck installs nothing, so resubmit every
+binding you still need along with the repair.
+
 Write task-local functions and types when they help. Revise them as you work;
 save useful ones in project modules when there is a concrete reason to share
 or retain them. Agents share Haskell as an interaction language, but a fork
