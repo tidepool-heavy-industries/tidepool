@@ -19,6 +19,13 @@ and show you almost none of its answer.
 
 ## What each one is for
 
+The dedicated `checks/supervision-profiles.hs` fixture compiles an explicit
+named reviewer policy, extends it with a task-specific rule, and maps one exact
+child path to it. Nothing infers a role from path spelling. Today the shared
+agent spec must install that selector before the child's source snapshot is
+captured; launching a role does not itself select or hot-reload a policy, and
+changing the parent's live spec does not update an already-running child.
+
 **`dispatch-tidepool.hs` — a typed action dispatcher whose alternatives carry
 real commands.** The alternative the model picks *is* the command that runs, so
 there is no model turn between choosing and fetching. Each alternative also names

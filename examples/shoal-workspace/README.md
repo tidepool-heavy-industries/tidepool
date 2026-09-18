@@ -157,6 +157,15 @@ Validate a candidate selection without providers or a swarm restart:
 shoal check --workspace /path/to/project
 ```
 
+`Project.SupervisionProfiles` offers explicit named implementer, reviewer, and
+researcher watchdog policies over one shared tool surface. A parent composes a
+role policy with task-specific heuristics and installs it through
+`Project.Watchdog`; no role is inferred from actor-path spelling. The
+`checks/supervision-profiles.hs` fixture shows an exact-path selector. This is
+source inheritance, not live policy delivery: the spec must contain the
+selector before the child snapshot, and a later parent reload does not update
+an already-running child.
+
 This compiles configuration and selected worker modules. Add `--recipes` to run
 the `[haskell].checks` entry points against the candidate's own code and fixtures.
 The model-free driver uses the same resident admission, workbench, request and
