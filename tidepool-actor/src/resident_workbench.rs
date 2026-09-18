@@ -2430,6 +2430,7 @@ where
                     &type_modules,
                     &block,
                     None,
+                    Some(&generated_bind_verdict(name)),
                 )? {
                     CompiledBlock::Ready(compiled) => compiled,
                     CompiledBlock::Rejected(diagnostic) => {
@@ -2989,6 +2990,7 @@ where
         scope.type_modules,
         &block,
         pins,
+        None,
     )? {
         CompiledBlock::Ready(compiled) => compiled,
         CompiledBlock::Rejected(diagnostic) => {
@@ -3496,6 +3498,7 @@ where
             type_modules,
             &block,
             None,
+            Some(&generated_bind_verdict(&page_name)),
         )? {
             CompiledBlock::Ready(ready) => {
                 candidate = Some(ready);
@@ -3561,6 +3564,7 @@ where
         type_modules,
         &alias_block,
         None,
+        Some(&generated_bind_verdict("cellDisplay")),
     )? {
         CompiledBlock::Ready(ready) => ready,
         CompiledBlock::Rejected(diagnostic) => {
@@ -6646,6 +6650,22 @@ where
         .with_type_modules(type_modules))
 }
 
+/// The verdict for a block this runtime wrote itself: `<binder> <- pure …`,
+/// one bound name, no declaration exports. Classification is its own compiler
+/// round trip, and for a generated block it can only answer what the
+/// generator already knows — so a generated block states its shape instead of
+/// asking. Authored source still classifies; only these fixed shapes skip it.
+fn generated_bind_verdict(binder: &str) -> TurnClassification {
+    TurnClassification {
+        kind: TurnKind::Bind,
+        binders: vec![binder.to_string()],
+        items: Vec::new(),
+    }
+}
+
+/// `verdict` is `None` for authored source, whose shape only GHC can answer,
+/// and `Some` for a block this runtime generated (see
+/// [`generated_bind_verdict`]).
 fn compile_block<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
@@ -6654,6 +6674,7 @@ fn compile_block<H, O>(
     type_modules: &[String],
     block: &ParsedBlock,
     pins: Option<&[CheckedBinderPin]>,
+    verdict: Option<&TurnClassification>,
 ) -> Result<CompiledBlock, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
@@ -6670,7 +6691,7 @@ where
         pins,
         compile_view,
         &[],
-        None,
+        verdict,
         None,
     )
 }

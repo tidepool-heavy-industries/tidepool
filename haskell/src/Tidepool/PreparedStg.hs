@@ -14,12 +14,16 @@ module Tidepool.PreparedStg
   , RecoveredModuleFailure(..)
   , prepareRecoveredModule
   , prepareRecoveredBodies
+  , PreparedBodyCache, newPreparedBodyCache, evictPreparedBodyMatching
   ) where
 
 import Control.Exception
   ( SomeAsyncException, SomeException, displayException, fromException
   , throwIO, try )
+import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, readMVar)
 import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
+import Data.Word (Word64)
 import GHC.Core.Lint (displayLintResults)
 import GHC.Core (CoreBind, Bind(..), bindersOfBinds)
 import GHC.Core.FVs (exprSomeFreeVars)
@@ -42,7 +46,8 @@ import GHC.Stg.Syntax (CgStgTopBinding)
 import GHC.Tc.Utils.Monad (initIfaceCheck)
 import GHC.Types.Var.Set (IdSet, elemVarSet, mkVarSet, unionVarSets)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
-import GHC.Types.Var (Id, isId, varName)
+import GHC.Types.Unique (getKey)
+import GHC.Types.Var (Id, isId, varName, varUnique)
 import GHC.Types.Name (isExternalName, nameModule_maybe)
 import GHC.Unit.Types (Module)
 import GHC.Unit.Module.Location (ModLocation)
@@ -196,6 +201,61 @@ recoveredSubsetScope owner bindings =
     bodies (NonRec _ rhs) = [rhs]
     bodies (Rec pairs) = map snd pairs
 
+-- | Daemon-lifetime cache of already prepared recovered bodies, keyed by the
+-- owner and the exact binding groups asked for. Both halves of that key are
+-- exact: a group is identified by its binders' 'Unique's, which are stable
+-- for one process, and a binder's body comes from the owner's single cached
+-- fat interface, so one key names one body set for as long as the cache
+-- lives.
+--
+-- What the value does NOT depend on is what makes this sound to reuse across
+-- requests: 'prepareBindingsWithScope' reads only CorePrep/STG configuration
+-- from 'HscEnv', and a resident request changes nothing there — it changes
+-- import paths, build-products flags, and the retained-generation set, which
+-- steer GHC's own compile of the request's home module, not the preparation
+-- of Core that was already read from an interface.
+--
+-- Evicted at the request boundary under the SAME predicate as the two caches
+-- next to it (see 'Tidepool.FatIface.evictOwnerInterfaceMatching'): an owner
+-- whose interface can change between requests must not keep prepared bodies
+-- read from the old one.
+newtype PreparedBodyCache =
+  PreparedBodyCache (MVar (Map (Module, [[Word64]]) PreparedModule))
+
+newPreparedBodyCache :: IO PreparedBodyCache
+newPreparedBodyCache = PreparedBodyCache <$> newMVar Map.empty
+
+evictPreparedBodyMatching :: PreparedBodyCache -> (Module -> Bool) -> IO ()
+evictPreparedBodyMatching (PreparedBodyCache cacheRef) stale =
+  modifyMVar_ cacheRef (pure . Map.filterWithKey (\(owner, _) _ -> not (stale owner)))
+
+preparedBodyKey :: Module -> [CoreBind] -> (Module, [[Word64]])
+preparedBodyKey owner bindings =
+  (owner, [map (getKey . varUnique) (bindersOf binding) | binding <- bindings])
+  where
+    bindersOf (NonRec binder _) = [binder]
+    bindersOf (Rec pairs) = map fst pairs
+
+-- | Prepare one owner's recovered bodies, answering from 'PreparedBodyCache'
+-- when this daemon has already prepared exactly these groups for this owner.
+-- A failure is never cached: it may simply not have been attempted with the
+-- right toolchain state yet, the same rule 'OwnerInterfaceCache' follows.
+prepareRecoveredBodies :: HscEnv -> OwnerInterfaceCache -> PreparedBodyCache
+  -> Module -> [CoreBind] -> IO (Either RecoveredModuleFailure PreparedModule)
+prepareRecoveredBodies hscEnv ownerCache bodyCache owner bindings = do
+  let PreparedBodyCache bodyRef = bodyCache
+      key = preparedBodyKey owner bindings
+  alreadyPrepared <- Map.lookup key <$> readMVar bodyRef
+  case alreadyPrepared of
+    Just hit -> pure (Right hit)
+    Nothing -> do
+      outcome <- prepareRecoveredBodiesUncached hscEnv ownerCache owner bindings
+      case outcome of
+        Right prepared ->
+          modifyMVar_ bodyRef (pure . Map.insert key prepared)
+        Left _ -> pure ()
+      pure outcome
+
 -- | Acquire the defining context for an exact recovered group and prepare it
 -- through the same owner as source modules.  In particular, this does not
 -- manufacture a 'ModSummary' for a package module (whose source path may be
@@ -205,13 +265,11 @@ recoveredSubsetScope owner bindings =
 -- ('loadDefiningDetails') are the expensive, owner-only part of this call and
 -- do not depend on 'bindings'; a daemon-lifetime 'OwnerInterfaceCache' lets a
 -- re-preparation of the same owner (a later recovery round finds more of its
--- bindings) skip straight to 'prepareRecoveredModule', which still runs the
--- CorePrep/coreToStg/stg2stg pipeline over the (possibly larger) group list
--- every call, unchanged from before. Only a successful read+typecheck is
--- cached; see 'OwnerInterfaceCache'.
-prepareRecoveredBodies :: HscEnv -> OwnerInterfaceCache -> Module -> [CoreBind]
+-- bindings) skip straight to 'prepareRecoveredModule'. Only a successful
+-- read+typecheck is cached; see 'OwnerInterfaceCache'.
+prepareRecoveredBodiesUncached :: HscEnv -> OwnerInterfaceCache -> Module -> [CoreBind]
   -> IO (Either RecoveredModuleFailure PreparedModule)
-prepareRecoveredBodies hscEnv ownerCache owner bindings = do
+prepareRecoveredBodiesUncached hscEnv ownerCache owner bindings = do
   cached <- lookupOwnerInterface ownerCache owner
   resolved <- case cached of
     Just hit -> pure (Right hit)

@@ -34,7 +34,7 @@ import Tidepool.GhcPipeline
 import Tidepool.FatIface (newFatIfaceCache, newOwnerInterfaceCache)
 import Tidepool.PreparedBuiltins (DeferredFunction(..), deferredFunction)
 import Tidepool.PreparedRecovery (RecoveredClosure(..), recoverPreparedClosure)
-import Tidepool.PreparedStg (PreparedModule)
+import Tidepool.PreparedStg (PreparedModule, newPreparedBodyCache)
 
 data Expected = Expected
   { expectedTarget :: String
@@ -77,7 +77,8 @@ verifyImported prepared expected = do
   let context = fixtureContext (expectedTarget expected)
   cache <- newFatIfaceCache
   ownerCache <- newOwnerInterfaceCache
-  closure <- recoverPreparedClosure (prHscEnv (pprPipelineResult prepared)) cache ownerCache context
+  bodyCache <- newPreparedBodyCache
+  closure <- recoverPreparedClosure (prHscEnv (pprPipelineResult prepared)) cache ownerCache bodyCache context
     (pprModules prepared)
   let references = preparedTargetReferences context (closureModules closure)
   binder <- case filter (matches expected) references of
@@ -160,7 +161,8 @@ verifyWorkerLookalike prepared = do
   let context = fixtureContext "decodeStackEntriesLookalike"
   cache <- newFatIfaceCache
   ownerCache <- newOwnerInterfaceCache
-  closure <- recoverPreparedClosure (prHscEnv (pprPipelineResult prepared)) cache ownerCache context
+  bodyCache <- newPreparedBodyCache
+  closure <- recoverPreparedClosure (prHscEnv (pprPipelineResult prepared)) cache ownerCache bodyCache context
     (pprModules prepared)
   program <- projectOrFail context (closureModules closure)
   let matching =

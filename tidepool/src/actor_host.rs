@@ -8,6 +8,8 @@
 mod command_jobs_tests;
 mod commands;
 #[cfg(test)]
+mod cell_compile_cost_tests;
+#[cfg(test)]
 mod compiler_warmup_tests;
 #[cfg(test)]
 mod custody_tests;

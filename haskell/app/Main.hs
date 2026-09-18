@@ -53,7 +53,9 @@ import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..),
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..) )
-import Tidepool.PreparedStg (PreparedModule(..))
+import Tidepool.PreparedStg
+  ( PreparedModule(..), PreparedBodyCache, newPreparedBodyCache
+  , evictPreparedBodyMatching )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), recoverPreparedClosure )
 import qualified Tidepool.WorkerServer as WorkerServer
@@ -116,10 +118,12 @@ type Compiler =
 data RecoveryCaches = RecoveryCaches
   { rcFatIface :: FatIfaceCache
   , rcOwnerIface :: OwnerInterfaceCache
+  , rcPreparedBodies :: PreparedBodyCache
   }
 
 freshRecoveryCaches :: IO RecoveryCaches
-freshRecoveryCaches = RecoveryCaches <$> newFatIfaceCache <*> newOwnerInterfaceCache
+freshRecoveryCaches = RecoveryCaches
+  <$> newFatIfaceCache <*> newOwnerInterfaceCache <*> newPreparedBodyCache
 
 -- | True for a 'Module' whose cached recovery state must not survive past
 -- this request: the request's own target module, or any
@@ -138,6 +142,7 @@ registerRecoveryCacheEviction caches =
   registerResidentEvictionHook $ \targetModName' -> do
     evictFatIfaceMatching (rcFatIface caches) (staleRecoveryModule targetModName')
     evictOwnerInterfaceMatching (rcOwnerIface caches) (staleRecoveryModule targetModName')
+    evictPreparedBodyMatching (rcPreparedBodies caches) (staleRecoveryModule targetModName')
 
 data LocatedCellRejection = LocatedCellRejection CellSourceSpan String
   deriving Show
@@ -546,7 +551,8 @@ prepareArtifacts caches input hscEnv modules targets auxiliaryRoots retainedGene
     -- Projection is pure and only forced to weak head normal form here, so
     -- part of its cost lands in 'prepared_encode'; read the two together.
     recovered <- timePhase timing "prepared_recover"
-      (recoverPreparedClosure hscEnv (rcFatIface caches) (rcOwnerIface caches) context modules)
+      (recoverPreparedClosure hscEnv (rcFatIface caches) (rcOwnerIface caches)
+        (rcPreparedBodies caches) context modules)
     reportRecoveryResiduals target (closureFailures recovered)
     (program, constructors) <- timePhase timing "prepared_project" $
       case projectPreparedTargetWithConstructors context (closureModules recovered) of

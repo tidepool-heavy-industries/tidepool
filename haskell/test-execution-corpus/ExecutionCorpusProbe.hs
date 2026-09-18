@@ -45,6 +45,7 @@ import Tidepool.GhcPipeline
   , runPipelineSelected )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), recoverPreparedClosure )
+import Tidepool.PreparedStg (newPreparedBodyCache)
 import Tidepool.PreparedFormatting
   ( FormattingAuthority, resolveFormattingAuthority )
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
@@ -223,8 +224,9 @@ projectOneIdentity prepared formattingAuthority textAuthority outputDir index se
         (Record name Nothing residuals (Rejected reason), inventory)
   cache <- newFatIfaceCache
   ownerCache <- newOwnerInterfaceCache
+  bodyCache <- newPreparedBodyCache
   recovered <- trySync (recoverPreparedClosure
-    (prHscEnv (pprPipelineResult prepared)) cache ownerCache context (pprModules prepared))
+    (prHscEnv (pprPipelineResult prepared)) cache ownerCache bodyCache context (pprModules prepared))
   case recovered of
     Left failure -> let reason = "target " <> show (symbolOccurrence selected) <> " recovery failed: " <> show failure
       in reject [] (unavailable [] reason) reason
