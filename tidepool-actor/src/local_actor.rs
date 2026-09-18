@@ -813,6 +813,19 @@ where
         Ok(state)
     }
 
+    /// The actor level of the run's span tree: one span per inbound
+    /// dispatch. An actor runs in its own task, so this span is a root of the
+    /// trace rather than a child of the tool call that sent the message; the
+    /// cell span's `execution` is what joins the two.
+    #[tracing::instrument(
+        name = "actor",
+        skip_all,
+        fields(
+            actor = %state.context.identity,
+            incarnation = state.context.identity.incarnation.0,
+            message = message.kind(),
+        )
+    )]
     async fn handle(
         &self,
         myself: RactorRef<Self::Msg>,

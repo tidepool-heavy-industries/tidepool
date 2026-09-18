@@ -1139,6 +1139,15 @@ fn request_from_wire(
             worktree_id_from_wire(&wire_id).map_err(allocating_worktree_failure)?,
         ),
     };
+    // The assignment a parent hands a child is the one piece of a spawn that
+    // a later reader cannot reconstruct from anywhere else.
+    tracing::info!(
+        target: "shoal::content",
+        agent_label = %spec.spawn_agent_label,
+        tools = tools.len(),
+        task = %spec.spawn_task,
+        "child assignment"
+    );
     Ok(SpawnRequest {
         workspace,
         agent_label: spec.spawn_agent_label,

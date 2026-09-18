@@ -22,6 +22,7 @@ use tidepool_runtime::session::{
     WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus, WorkbenchTerminalTransfer,
 };
 use tokio::sync::mpsc;
+use tracing::Instrument;
 
 use crate::mailbox::{InstalledReceiver, ResidentOutbound};
 use crate::request::RequestRegistry;
@@ -4267,6 +4268,16 @@ where
                     );
                     let ordinal = effect_ordinal;
                     effect_ordinal += 1;
+                    // The effect level. The boundary's own service work is
+                    // spread across the match below, so this is an event on
+                    // the input-unit span rather than a span of its own;
+                    // its disposition arrives with the unit's receipt.
+                    tracing::info!(
+                        input_unit_index = unit.input_unit_index,
+                        ordinal,
+                        effect = %effect,
+                        "effect boundary captured"
+                    );
                     match boundary {
                         ResidentActorBoundary::ReplyAttempt(attempt) => match self
                             .environment
@@ -4569,6 +4580,19 @@ where
         }
     }
 
+    /// The cell level of the run's span tree. `execution` is the tool call's
+    /// own identity carried into the actor task, and is how a reconstructed
+    /// cell joins back to the provider call that asked for it.
+    #[tracing::instrument(
+        name = "cell",
+        skip_all,
+        fields(
+            actor = %context.actor,
+            execution = request.execution_id().map_or("", |id| id.as_str()),
+            tool = request.tool_call().map_or("", |call| call.name.as_str()),
+            items = request.items.len(),
+        )
+    )]
     async fn execute_workbench(
         &mut self,
         kernel: &KernelContext,
@@ -4869,6 +4893,26 @@ where
                 total: request.items.len(),
                 source,
             };
+            // The input-unit level of the span tree. Held across this
+            // iteration's two await points by instrumenting the futures
+            // themselves, never by a guard.
+            let unit_span = tracing::info_span!(
+                "unit",
+                index,
+                total = request.items.len(),
+                kind = if request.tool_call().is_some() {
+                    "tool"
+                } else {
+                    "cell"
+                },
+            );
+            tracing::info!(
+                target: "shoal::content",
+                parent: &unit_span,
+                index,
+                source = %block.source,
+                "input unit source"
+            );
             self.runtime_observation.publish_workbench_posture(
                 crate::ActorWorkbenchPosture::RunningUnit {
                     input_unit_index: index,
@@ -4884,6 +4928,7 @@ where
                             call.name.clone(),
                             call.arguments.clone(),
                         )
+                        .instrument(unit_span.clone())
                         .await
                 } else {
                     match prepared_cell.as_mut() {
@@ -4905,6 +4950,7 @@ where
                                     prepared,
                                     cell_display_remaining,
                                 )
+                                .instrument(unit_span.clone())
                                 .await
                         }
                         None => Err(ResidentActorWorkbenchError::CompileInfrastructure(
@@ -4947,6 +4993,7 @@ where
                             command_output: &mut command_output,
                         },
                     )
+                    .instrument(unit_span.clone())
                     .await
                 {
                     Ok(step) => step,
@@ -7260,6 +7307,38 @@ fn workbench_response(
             terminal_transfer: None,
         }
     }));
+    // Every terminal path through `execute_workbench` renders its receipts
+    // here exactly once, so this is the one place a reconstruction can read
+    // what each input unit actually produced.
+    for item in &items {
+        tracing::info!(
+            target: "shoal::content",
+            index = item.index,
+            status = ?item.status,
+            output_bytes = item.output.len(),
+            operations = item.operations.len(),
+            diagnostics = item.diagnostics.len(),
+            output = %item.output,
+            "input unit receipt"
+        );
+        for operation in &item.operations {
+            tracing::info!(
+                input_unit_index = item.index,
+                ordinal = operation.id.effect_ordinal,
+                effect = %operation.effect,
+                disposition = ?operation.disposition,
+                "effect settled"
+            );
+        }
+        for diagnostic in &item.diagnostics {
+            tracing::info!(
+                target: "shoal::content",
+                index = item.index,
+                diagnostic = ?diagnostic,
+                "input unit diagnostic"
+            );
+        }
+    }
     WorkbenchResponse {
         status,
         summary: cell_check.map(|checked| {
@@ -7519,7 +7598,18 @@ fn lookup_response(
         }
     }
 
-    crate::lookup_tool::LookupResponse { results }
+    let response = crate::lookup_tool::LookupResponse { results };
+    // Discovery is part of a cell's story: what was asked, and what the model
+    // was actually shown in reply. Rendering costs an allocation, so ask
+    // first whether anything is listening.
+    if tracing::enabled!(target: "shoal::content", tracing::Level::INFO) {
+        tracing::info!(
+            target: "shoal::content",
+            rendered = %response.render_text(),
+            "lookup answered"
+        );
+    }
+    response
 }
 
 #[cfg(test)]
@@ -7537,6 +7627,97 @@ mod tests {
         WorkbenchOperationId, WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse,
         WorkbenchRunStatus,
     };
+
+    #[derive(Clone, Default)]
+    struct CapturedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct CapturedGuard(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedGuard {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedWriter {
+        type Writer = CapturedGuard;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedGuard(std::sync::Arc::clone(&self.0))
+        }
+    }
+
+    #[test]
+    fn a_settled_cell_renders_its_receipts_and_effects_into_the_trace() {
+        let trace = CapturedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_current_span(true)
+            .with_span_list(true)
+            .with_ansi(false)
+            .with_writer(trace.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let cell = tracing::info_span!("cell", execution = "exec-3");
+            let _cell = cell.enter();
+            workbench_response(
+                WorkbenchRunStatus::Committed,
+                vec![WorkbenchItemReceipt {
+                    diagnostics: Vec::new(),
+                    index: 0,
+                    kind: None,
+                    span: None,
+                    source_items: Vec::new(),
+                    status: WorkbenchItemStatus::Committed,
+                    output: "42".into(),
+                    warnings: Vec::new(),
+                    installed_bindings: Vec::new(),
+                    operations: vec![WorkbenchOperationReceipt {
+                        id: WorkbenchOperationId {
+                            execution: WorkbenchExecutionId::from_digest([3; 16]),
+                            input_unit_index: 0,
+                            effect_ordinal: 0,
+                        },
+                        effect: "commandRun".into(),
+                        disposition: WorkbenchOperationDisposition::Committed,
+                    }],
+                    terminal_transfer: None,
+                }],
+                1,
+                1,
+                None,
+            );
+        });
+
+        let lines: Vec<serde_json::Value> = String::from_utf8(trace.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let receipt = lines
+            .iter()
+            .find(|line| line["fields"]["message"] == "input unit receipt")
+            .expect("every terminal path renders its receipts once");
+        assert_eq!(receipt["target"], "shoal::content");
+        assert_eq!(receipt["spans"][0]["execution"], "exec-3");
+        assert_eq!(receipt["fields"]["index"], 0);
+        assert_eq!(receipt["fields"]["status"], "Committed");
+        assert_eq!(receipt["fields"]["output"], "42");
+        assert_eq!(receipt["fields"]["output_bytes"], 2);
+        let effect = lines
+            .iter()
+            .find(|line| line["fields"]["message"] == "effect settled")
+            .expect("each operation receipt names its effect and disposition");
+        assert_eq!(effect["fields"]["ordinal"], 0);
+        assert_eq!(effect["fields"]["effect"], "commandRun");
+        assert_eq!(effect["fields"]["disposition"], "Committed");
+    }
 
     #[test]
     fn lookup_response_preserves_mixed_batch_and_actual_signature() {

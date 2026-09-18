@@ -3733,6 +3733,7 @@ dependencies = [
  "tidepool-tool",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

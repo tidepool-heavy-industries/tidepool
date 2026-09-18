@@ -1857,6 +1857,49 @@ mod tests {
         assert!(!pane.text().contains("secret cell source"));
     }
 
+    /// The request-update proxy keeps its payload private by never passing it
+    /// to a logging call site: `not_presented` logs a bounded failure reason
+    /// and nothing else (`actor_host.rs`, the "Private baseline
+    /// clarification" assertion). That test runs against a `debug`-filtered
+    /// log; the trace layer added here is `info`-filtered over the same
+    /// events, so it can never show more. This pins the shape: what the call
+    /// site passes is what every layer gets.
+    #[test]
+    fn the_json_trace_shows_only_what_the_failure_call_site_passed_it() {
+        let detailed = CapturedWriter::default();
+        let pane = CapturedWriter::default();
+        let trace = CapturedWriter::default();
+        let subscriber = host_tracing_subscriber(
+            detailed.clone(),
+            pane.clone(),
+            trace.clone(),
+            detailed_filter_without_content(),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(
+                target: "tidepool::actor_host",
+                actor = "3@1",
+                update = 1,
+                error = "connecting update proxy: controlled transport failure",
+                "request update not presented"
+            );
+        });
+
+        let line = trace_lines(&trace)
+            .into_iter()
+            .find(|line| line["fields"]["message"] == "request update not presented")
+            .expect("the failure reaches the run-local trace");
+        assert_eq!(
+            line["fields"]["error"],
+            "connecting update proxy: controlled transport failure"
+        );
+        for rendered in [detailed.text(), pane.text(), trace.text()] {
+            assert!(rendered.contains("connecting update proxy"));
+            assert!(!rendered.contains("Private baseline clarification"));
+        }
+    }
+
     #[test]
     fn host_trace_reaches_the_jsonl_file_once_the_appender_guard_drops() {
         let directory = tempfile::tempdir().unwrap();

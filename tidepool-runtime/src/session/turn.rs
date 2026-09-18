@@ -1936,6 +1936,9 @@ fn forward_extract_timing(stderr: &str, prefix: &str) {
 /// effect is installed. The runtime supplies the exact next-cell scope as a
 /// source template; the worker owns Haskell parsing and post-zonk binder
 /// harvesting.
+/// One of the two compile granularities a cell pays for: the whole-cell
+/// check, once per cell. The other is `run_turn`'s per-input-unit compile.
+#[tracing::instrument(name = "cell_check", level = "info", skip_all, fields(cell_bytes = req.cell_text.len()))]
 pub fn check_cell(req: CellCheckRequest<'_>) -> Result<CellCheck, CellCheckFailure> {
     let temp = TempDir::new()?;
     let cell_path = temp.path().join("cell.txt");
@@ -2136,6 +2139,17 @@ pub fn run_turn_pinned(
     run_turn_with_pin(req, Some(&pin))
 }
 
+/// The second compile granularity: one per input unit, after the whole-cell
+/// check has accepted the cell.
+#[tracing::instrument(
+    name = "turn_compile",
+    level = "info",
+    skip_all,
+    fields(
+        kind = req.verdict.as_ref().map_or("", |verdict| turn_kind_wire_name(verdict.kind)),
+        pinned = pin.is_some(),
+    )
+)]
 fn run_turn_with_pin(req: TurnRequest<'_>, pin: Option<&str>) -> Result<TurnResult, TurnFailure> {
     let verdict_arg = match &req.verdict {
         Some(TurnClassification { kind, binders, .. }) => {

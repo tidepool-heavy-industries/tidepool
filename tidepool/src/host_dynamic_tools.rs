@@ -1005,6 +1005,21 @@ fn workbench_transcript(value: &serde_json::Value) -> Option<String> {
     Some(transcript)
 }
 
+/// The tool-call level of the run's span tree. Its identity is the model
+/// provider's own call id, which is what joins a reconstructed cell back to
+/// the provider transcript; `turn_id` is the coarser turn and is a field
+/// here, never the identity.
+#[tracing::instrument(
+    name = "tool_call",
+    skip_all,
+    fields(
+        call_id = %request.call_id,
+        context_call_id = request.context_call_id.as_deref().unwrap_or(""),
+        tool = %request.tool,
+        thread_id = %request.thread_id,
+        turn_id = %request.turn_id,
+    )
+)]
 async fn call(
     State(state): State<HostState>,
     Json(request): Json<CallRequest>,

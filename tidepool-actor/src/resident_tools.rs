@@ -595,6 +595,19 @@ impl ResidentToolClient {
             let operation = WorkbenchCallKey::from(invocation);
             let execution = execution_id(self.actor.identity(), &operation);
             request = request.with_execution_id(execution.clone());
+            // The cell runs in the actor's own task, so its span cannot be a
+            // child of the tool call. This event is the join: the provider's
+            // call id and the execution id the cell span carries, recorded
+            // while both are in one scope.
+            tracing::info!(
+                actor = %self.actor.identity(),
+                execution = %execution,
+                call_id = %operation.call_id,
+                context_call_id = operation.context_call_id.as_deref().unwrap_or(""),
+                turn_id = %operation.turn_id,
+                items = request.items.len(),
+                "workbench cell dispatched to its actor"
+            );
             let control = WorkbenchExecutionControl::new(Some(operation));
             *self.active_workbench.lock() = Some((execution, Arc::clone(&control)));
             return self.dispatch_registered_workbench(request, control).await;

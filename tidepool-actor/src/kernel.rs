@@ -220,6 +220,37 @@ pub enum KernelMessage {
     },
 }
 
+impl KernelMessage {
+    /// The variant name alone. The derived-style `Debug` above carries
+    /// request payloads with it; a trace field wants the shape of the
+    /// dispatch and none of its content.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Replace { .. } => "Replace",
+            Self::Drain { .. } => "Drain",
+            Self::DrainFence => "DrainFence",
+            Self::ReplacementFence => "ReplacementFence",
+            Self::AbortReplacement { .. } => "AbortReplacement",
+            Self::ActivateReplacement { .. } => "ActivateReplacement",
+            Self::Source(_) => "Source",
+            Self::RouteReady { .. } => "RouteReady",
+            Self::SealHostedWork { .. } => "SealHostedWork",
+            Self::Cast { .. } => "Cast",
+            Self::Call { .. } => "Call",
+            Self::Tool { .. } => "Tool",
+            Self::Workbench { .. } => "Workbench",
+            Self::ReconcileWorkbenchCancellation { .. } => "ReconcileWorkbenchCancellation",
+            Self::ReconcileWorkbenchBoundary { .. } => "ReconcileWorkbenchBoundary",
+            Self::ToolCompleted { .. } => "ToolCompleted",
+            Self::ReleaseFork { .. } => "ReleaseFork",
+            Self::DrainMailbox => "DrainMailbox",
+            Self::Resume => "Resume",
+            Self::ExternalApplicationFailed { .. } => "ExternalApplicationFailed",
+            Self::Shutdown { .. } => "Shutdown",
+        }
+    }
+}
+
 impl std::fmt::Debug for KernelMessage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
