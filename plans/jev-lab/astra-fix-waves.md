@@ -43,6 +43,14 @@ Decisions already taken by the user (do not reopen):
 | jev-dsl | workspace `flake_sources`; upstream front made JSON-generic; docs rewritten from upstream's authoring guide; parallel track |
 | Deferred | edit-a-draft-cell; loading model-written Haskell from a `.shoal` dir mid-session |
 
+Where model-written Haskell belongs, per Astra: `.shoal/discoveries/` holds
+experimental source, examples and observations; a battery two consumers genuinely
+share is promoted to one ordinary module under `.shoal/Project/` with a concrete
+purpose and explicit inputs. Discoveries must not become a competing library
+location. Inherited live bindings are snapshots, never the distribution
+mechanism. That promotion step is what the deferred load-from-a-directory idea
+should serve when it arrives.
+
 Guiding rule from Astra, adopted: a correction that can live in an error, a type,
 a discovery result or an executable example lives there, not in a new guidance
 paragraph. Items Astra filed as its own ordinary code (receipt type,
@@ -72,10 +80,20 @@ until the end.
   Needs a budget-bounded partial materializer in
   `tidepool-codegen/src/heap_bridge.rs` (the mechanism-index home for
   heap-to-`Value`), emitting `OVERSIZE_SENTINEL` at the cut.
-- **Receipt attribution** (`tidepool-actor/src/resident_actor.rs:4518-4528`): an
-  error raised after an effect's response was delivered must not mark that effect
-  `Unknown`. Record the effect `Committed` when its response was delivered; keep
-  `Unknown` for the documented case only (`workbench.rs:265-268`).
+- **Receipt attribution** — diagnosed exactly, do not re-investigate. Every
+  non-command arm of `resolve_effect` fuses producing the response with resuming
+  the machine past it: the Reflect arm at
+  `tidepool-actor/src/resident_actor.rs:2074-2094` reads the conversation and then
+  calls `runner.resume_value(...)` in the same future. So the value `resolve_effect`
+  returns reflects everything downstream, not the effect. At
+  `resident_actor.rs:4488-4529` the `Err` arm records
+  `command_disposition.unwrap_or(Unknown)`, so any downstream failure is
+  attributed to the last effect. That is how a successful `reflect 3` became
+  `Unknown (reflect)` when the later bind blew the display budget, contradicting
+  the documented meaning at `workbench.rs:265-268`. An effect whose response was
+  delivered is `Committed`; `Unknown` stays for failure before or during delivery.
+  The command path at `resident_actor.rs:4467-4476` computes its own disposition
+  and must keep winning.
 - **Failure layer as data**: one enum — compile, effect, observation — carried on
   the item receipt and rendered in the tool text ("effects committed; observing
   the result failed; the value is bound as …"). Same field feeds Wave 2 spans.
@@ -125,15 +143,36 @@ Base: `tidepool/src/shoal.rs:1254-1299` already builds a layered registry.
   hand-maintained index.
 - **Near-match on `no match`**: `Cmd.resultOf`, `Cmd.exitCode`, `R.await`,
   `R.lift` all missed; suggest the closest exported names in that qualifier.
-- **`replace` is undiscovered.** `haskell/lib/Tidepool/Actor/Record.hs:361`
+- **`replace` is untested, not undiscovered.** `haskell/lib/Tidepool/Actor/Record.hs:361`
   exports `replace :: ActorHandle api -> ActorSpec api effects -> Eff parent
-  (ActorHandle api)`. Astra wanted exactly this ("a handler I can revise while
-  work continues"), assumed it might not exist, and started a second collector.
-  Only two skill files mention it; no worked example uses it. Add one tested
-  example that replaces a running handler and states what happens to work already
-  in flight, and point lookup at it.
-- **Reflex table follow-through** (if adopted with the patch): remove `add_import`
-  from `tableVocabulary`, `plans/jev/reflex_table.json` and the addendum.
+  (ActorHandle api)`. Astra saw it and passed it over deliberately: its two
+  collectors were different command attempts, not a policy change on one
+  continuing workload. What it lacked was a worked account of event delivery,
+  pending work and old endpoints. So the deliverable is one TESTED example plus a
+  written contract, and the lookup pointer to it.
+
+  Astra's desired semantics, to be checked against actual behaviour — document
+  every divergence rather than quietly matching the list:
+  - a check still running delivers its eventual completion to the new handler;
+  - a handler already executing finishes under its original policy, neither
+    interrupted mid-effects nor replayed;
+  - accepted but unstarted events run under the new handler, in order;
+  - retained state survives replacement;
+  - reattaching subscriptions does not reprocess an already-consumed completion;
+  - outstanding commands and requests stay owned and observable, never orphaned
+    or implicitly cancelled;
+  - receipts identify which policy revision handled an event;
+  - invalidated endpoints are explicit, never silently retargeted.
+- **Reflex table follow-through** — ours to finish; Astra has paused its side to
+  avoid parallel edits. Its change removed the automatic add-import step and
+  routed unresolved-name diagnostics to inspection first, because a diagnostic
+  code alone does not establish that importing is the repair. Three artifacts
+  still describe the deleted step: `tableVocabulary` in the Reflex table, the
+  upstream `plans/jev/reflex_table.json`, and
+  `plans/jev/addendum-A-B-2026-09-17.md`. Remove the contradictions only. Do NOT
+  broaden this into an import-repair system, and before editing, check whether any
+  of the three is a live mechanism rather than documentation; if one is, inspect
+  that distinction instead of replacing words.
 - Live cell: `lookup ["Cmd.CommandResult","Cmd.RunResult","Tidepool.Command"]`.
 
 ## Wave 4 — a few harness-specific errors name the next valid operation
@@ -160,7 +199,16 @@ text by `render_cell_compile_error` (`tidepool-runtime::session`).
 
 - `Cmd.readStderr` beside `Cmd.readStdout` (`haskell/lib/Tidepool/Command.hs:235`),
   and one call returning both complete streams with outcome and cleanup, valid
-  for failed commands — replacing Astra's hand-rolled `captureStream` pager.
+  for failed commands — replacing the `captureStream` recursion in
+  `~/dev/tidepool-astra/.shoal/discoveries/run-ahead.hs`.
+
+  Astra's constraint on its result type, which decides the design: *"A convenient
+  call must not turn incomplete capture into apparently complete strings."* The
+  value must still express a stream-specific capture failure or retention gap,
+  carry the originating job, keep outcome and cleanup separate from any semantic
+  judgment, and distinguish complete evidence from a display excerpt. So the
+  result is not a pair of `Text`; the paging protocol's loss signals
+  (`outputLostBytes`, `outputLossy`, `outputFinished`) must survive into it.
 - Guarded text replace effect (compare-and-swap on prior content). Check
   `Tidepool.Patch` / `Tidepool.QQ.Patch` first; extend rather than add.
 - `Text`-returning show in `Tidepool.Prelude` (check for an existing name first).
@@ -205,6 +253,24 @@ write. Kill criterion: Astra still prefers native subagents in the next flight.
 3. `examples/shoal-workspace`: `flake.nix` input `jev-dsl` (`flake = false`),
    `[haskell.flake_sources] jev-dsl = ["core","src"]`, modules list; mechanism
    already exists in `tidepool/src/shoal/workspace.rs:282-390`.
+3a. **Port two real programs and fix what makes the ports awkward** — Astra's own
+   alpha priority, and worth more than a showcase written to flatter the API.
+   Starting points, corrected by Astra:
+   - contextual output selection: `contextualViews` in
+     `~/dev/tidepool-astra/.shoal/discoveries/attention-pilot.hs` together with
+     its completion-handler consumer. NOT `select-useful-example.hs`, which is the
+     older single-question selector; `example-for-use.hs` is its bundled successor
+     if an example-selection port is also wanted.
+   - run-ahead: `readAhead` in
+     `~/dev/tidepool-astra/.shoal/discoveries/run-ahead.hs`, the independent
+     relevance version. Do NOT port the older `Choice`-based `runAheadReads` as
+     the recommended pattern. The complete check-event wrapper was live-session
+     code and is not in the saved file.
+3b. **Version identity, or agents will mix the surfaces.** The running Shoal
+   surface and this revision differ materially, so ship an identified alpha
+   version, a concise old-to-new migration table upstream beside the changelog,
+   examples checked against that version, and a statement of which Shoal revision
+   supports it. Our skills name the exact revision they were checked against.
 4. Rewrite `prompts/shoal/docs/jev.md` and `shoal-jev/SKILL.md` from upstream
    `docs/authoring.md` and `examples/Guard.hs`; migrate about 38 old-API uses
    (`accept`, `onMany`, `Nil`, `pool`, `ref`) in the guide, skills, worked cells
@@ -213,6 +279,38 @@ write. Kill criterion: Astra still prefers native subagents in the next flight.
    strict; rules in Haskell, judgments in Jev.
 5. Merge conflicts with Waves 3-4 land in the skills and `jev.md`; this track
    rebases last.
+
+## The acceptance experiment (after Waves 1, 3 and 5)
+
+Astra's smallest program that would survive one real failure and one real repair.
+Astra writes it; we only have to make it possible. Run it on the failure that
+actually happened in the flight — the focused lookup check exiting 101 with five
+rustc errors.
+
+    focused check fails
+    → preserve both streams, outcome and cleanup
+    → extract the relevant diagnostic blocks
+    → fetch the enclosing test, its imports and a neighbouring invocation
+    → recognize a supported local API mismatch
+    → apply a guarded prepared correction
+    → rerun that focused check once
+    → retain the checked result, or return a precise unresolved receipt
+
+The concrete correction is narrow: the new test used `dispatch` where the
+surrounding policy uses `dispatch_boxed`, and invented a `tool_json` wrapper.
+Jev's job is to establish that the neighbouring example expresses the same
+intended invocation and result flow, not that the compiler mentioned a similar
+name. Code owns exact preimages, permitted edit locations, execution and
+exit-status checks. To exercise revision as well: start with a helper that
+gathers evidence and hands the case back, then add that one recognized repair
+branch and rerun on the same task without redesigning the controller.
+
+What it would establish: one complete interruption absorbed, with a real failure,
+a consequential action and verification. Not general repair ability, and not net
+productivity.
+
+Each wave is judged by whether it removes a step from this program that Astra
+would otherwise hand-roll.
 
 ## Verification
 
