@@ -38,6 +38,7 @@ module Tidepool.Actors.Shoal
   , Notifications
   , Actor
   , sendMessage
+  , parentAgent
   , pollNotification
   , NotificationReceipt
   , NotificationError (..)
@@ -328,6 +329,7 @@ import Tidepool.Actors.Internal.Agent
   , startAgent
   , stopAgent
   , sendMessage
+  , parentAgent
   , pollNotification
   , NotificationReceipt
   , NotificationError (..)

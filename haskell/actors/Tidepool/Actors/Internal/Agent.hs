@@ -53,6 +53,7 @@ module Tidepool.Actors.Internal.Agent
   , StopOutcome (..)
   , stopAgent
   , sendMessage
+  , parentAgent
   , pollNotification
   , NotificationReceipt
   , NotificationError (..)
@@ -87,6 +88,7 @@ import Tidepool.Agent.Ref
   , AgentProtocol (..)
   , agentIdentity
   , agentBoundWorktree
+  , internalAgentRef
   )
 import Tidepool.Agent.Assignment
   ( Assignment (..), Label, SettlementReporting (..)
@@ -702,6 +704,16 @@ sendMessage
   => AgentRef -> Text -> Eff effs (Either NotificationError NotificationReceipt)
 sendMessage recipient message =
   fmap (fmap NotificationReceipt) (send (NotifyWith (agentIdentity recipient) message))
+
+-- | The actor that spawned this one, if any. A root actor, which has no
+-- parent, answers 'Nothing'. The reference carries bare identity — no bound
+-- worktree — sufficient for 'sendMessage' and other identity-addressed calls.
+parentAgent :: Member Core.ActorContext effs => Eff effs (Maybe AgentRef)
+parentAgent = do
+  context <- Core.actorContext
+  pure $ case (contextParentId context, contextParentIncarnation context) of
+    (Just parent, Just incarnation) -> Just (internalAgentRef parent incarnation)
+    _ -> Nothing
 
 pollNotification :: Member Notifications effs => NotificationReceipt -> Eff effs (Either NotificationError NotificationState)
 pollNotification (NotificationReceipt receipt) = send (PollNotificationWith receipt)

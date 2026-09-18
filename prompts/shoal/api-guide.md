@@ -96,6 +96,8 @@ restating your history by hand. `doc reflect` has the worked example.
 `me` is the current actor's exact address. A closure captures the `me` in scope
 where it is defined; newly authored code in a child sees the child's address.
 Use `sendMessage me text` only when steering the current actor is intended.
+`parentAgent` answers the actor that spawned this one, `Nothing` for a root —
+use it to `sendMessage` upward, for example from an after-tool slot.
 
 Cancellation is acknowledged by the target through its activation binding.
 Stopping actors and releasing groups remain explicit supervision decisions.

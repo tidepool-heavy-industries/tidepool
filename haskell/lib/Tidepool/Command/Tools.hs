@@ -42,7 +42,8 @@ data Execute = Execute
     tty :: Maybe Bool,
     stdin :: Maybe Bool,
     yield_time_ms :: Maybe Int,
-    max_output_bytes :: Maybe Int
+    max_output_bytes :: Maybe Int,
+    intent :: Maybe Text
   }
   deriving (Generic, FromJSON, JsonSchema)
 
@@ -93,7 +94,7 @@ tools =
           (\script -> Cmd.run (Cmd.bashCommand script) >> pure ""),
       execCommand =
         tool
-          "Execute literal Bash once. Optional workdir/environment, memory_mib (default 256), tty or piped stdin. yield_time_ms: 0..30000 (default 30000); max_output_bytes: 1024..32768 (default 32768). Running/queued commands retain session_id; observation expiry does not cancel execution. Bash does not load shell profiles."
+          "Execute literal Bash once. Optional workdir/environment, memory_mib (default 256), tty or piped stdin. yield_time_ms: 0..30000 (default 30000); max_output_bytes: 1024..32768 (default 32768). Running/queued commands retain session_id; observation expiry does not cancel execution. Bash does not load shell profiles. intent: one line saying what you are looking for; your after-tool slot can read it."
           execute,
       writeStdin =
         tool

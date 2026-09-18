@@ -507,3 +507,395 @@ async fn a_tool_body_and_a_slot_can_both_ask_jev() {
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// A parent's watchdog: `Project.Watchdog` (the shipped worked example, read
+// verbatim from this repository's own `examples/shoal-workspace/.shoal`,
+// exactly as `Jev.Operators` is) asks one packet of heuristics about a
+// child's finished tool call. A tripped `Nudge` writes advice straight onto
+// the child's own result and sends nothing; a tripped `Escalate` sends the
+// parent one message naming the reason and the child's actor address and
+// leaves only a short record on the child's side.
+// ---------------------------------------------------------------------------
+
+/// Mirrors whatever the packet asked, answering every leaf question as a
+/// `noul` at one scripted likelihood. `Project.Watchdog` asks only nouls, so
+/// this is the whole shape the wire needs: same keys as `questions`, each
+/// answered `{"type": "noul", "noul": <likelihood>}`, exactly the transport
+/// `jev-dsl`'s own `test/Mini.hs` stub uses for an unrecognised question type.
+struct ScriptedNoulJev {
+    requests: Mutex<Vec<serde_json::Value>>,
+    likelihood: f64,
+}
+
+impl JevBackend for ScriptedNoulJev {
+    fn ask(
+        &self,
+        request: String,
+    ) -> futures_util::future::BoxFuture<'_, Result<String, JevCallFailure>> {
+        let parsed: serde_json::Value =
+            serde_json::from_str(&request).expect("request is JSON");
+        self.requests.lock().push(parsed.clone());
+        let keys: Vec<String> = parsed["questions"]
+            .as_object()
+            .map(|object| object.keys().cloned().collect())
+            .unwrap_or_default();
+        let likelihood = self.likelihood;
+        let answers: serde_json::Map<String, serde_json::Value> = keys
+            .into_iter()
+            .map(|key| (key, serde_json::json!({"type": "noul", "noul": likelihood})))
+            .collect();
+        let body = serde_json::json!({
+            "model": "jev-test",
+            "answers": answers,
+            "usage": {},
+        })
+        .to_string();
+        Box::pin(async move { Ok(body) })
+    }
+}
+
+/// One `probe` tool (shell tools nested beside it), and a spec whose slot is
+/// `Project.Watchdog.watchBy monitorsFor`: `monitorsFor` reads the calling
+/// actor's own path and gives an escalation heuristic to a child labelled
+/// `escalate-child`, an advisory one to a child labelled `nudge-child`, and
+/// nothing to anybody else — including the root, which has no such label.
+const WATCHDOG_TOOLS_MODULE: &str = r#"{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeOperators #-}
+module Project.Tools (WatchdogTools (..), Probe (..), probeBody, tools) where
+
+import Control.Monad.Freer (Eff, Member)
+import Data.Text (Text)
+import GHC.Generics (Generic)
+import Tidepool.Aeson.FromJSON (FromJSON)
+import Tidepool.Agent.Contract
+import qualified Tidepool.Command as Cmd
+import qualified Tidepool.Command.Tools as Shell
+
+newtype Probe = Probe { topic :: Text }
+  deriving (Generic, FromJSON, JsonSchema)
+
+data WatchdogTools mode = WatchdogTools
+  { shell :: Shell.ShellTools mode
+  , probe :: mode :- Call Probe Text
+  }
+  deriving (Generic)
+
+tools :: Member Cmd.Commands effects => WatchdogTools (AsServerT (Eff effects))
+tools = WatchdogTools { shell = Shell.tools, probe = tool "Answer one fixed question about a topic." probeBody }
+
+probeBody :: Probe -> Eff effects Text
+probeBody request = pure ("probed " <> topic request)
+"#;
+
+const WATCHDOG_SPEC_MODULE: &str = r#"{-# LANGUAGE OverloadedStrings #-}
+module AgentSpec (agentSpec) where
+
+import Control.Monad.Freer (Eff, Member)
+import Data.Text (Text)
+import qualified Data.Text as T
+import Tidepool.Agent.Contract
+import Tidepool.Effects.Core (ActorContext, Jev, Notifications)
+import qualified Tidepool.Command as Cmd
+import qualified Project.Tools as Tools
+import qualified Project.Watchdog as Watchdog
+
+agentSpec
+  :: (Member Cmd.Commands effects, Member Jev effects, Member ActorContext effects, Member Notifications effects)
+  => AgentSpec Tools.WatchdogTools effects
+agentSpec = defaultSpec
+  { specTools = Tools.tools
+  , afterTool = Just (Watchdog.watchBy monitorsFor)
+  }
+
+monitorsFor :: Text -> [Watchdog.Heuristic]
+monitorsFor path
+  | "escalate-child" `T.isInfixOf` path = [Watchdog.outOfScope]
+  | "nudge-child" `T.isInfixOf` path = [Watchdog.repeatingItself]
+  | otherwise = []
+"#;
+
+/// The shipped package's own `.shoal` (which carries `Jev/Operators.hs` AND
+/// `Project/Watchdog.hs`, the worked example this test exercises verbatim) as
+/// a second source root, beside a per-test `AgentSpec.hs` and `Project/Tools.hs`
+/// that install `Watchdog.watchBy` as the after-tool slot.
+fn pinned_watchdog_workspace(config: &mut ActorHostConfig) {
+    let package = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../examples/shoal-workspace")
+        .canonicalize()
+        .expect("the Shoal workspace package this repository ships");
+    let authored = config.workspace.join(".shoal");
+    std::fs::create_dir_all(authored.join("Project")).unwrap();
+    std::fs::write(
+        authored.join("config.toml"),
+        format!(
+            "[defaults]\nmodel = 'test-model'\n\n\
+             [haskell]\nsource_roots = ['.', '{}']\n\
+             modules = ['Project.Tools', 'AgentSpec']\n\
+             tools = 'Project.Tools.tools'\n\
+             spec = 'AgentSpec.agentSpec'\n\n\
+             [haskell.flake_sources]\njev-dsl = ['core']\n",
+            package.join(".shoal").display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(authored.join("Project/Tools.hs"), WATCHDOG_TOOLS_MODULE).unwrap();
+    std::fs::write(authored.join("AgentSpec.hs"), WATCHDOG_SPEC_MODULE).unwrap();
+    for name in ["flake.nix", "flake.lock"] {
+        std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
+    }
+    // `nix flake archive` reads only tracked files, and a child worktree
+    // admission refuses a dirty source repository.
+    super::test_campaign::commit_workspace(&config.workspace);
+    config.workspace_inputs = Some(
+        crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+            .expect("resolve the combined pinned + authored Haskell source"),
+    );
+}
+
+fn watchdog_child_script(label: &str) -> String {
+    format!(
+        "let campaign = \"watchdog\" :: CampaignLabel\n\
+         let group = \"children\" :: ForkGroupLabel\n\
+         let leaf = \"{label}\" :: Label\n\
+         worker <- unfold (batch campaign group) (child (coding @Text projectHead (assignment leaf ())))\n"
+    )
+}
+
+/// Local to this file: `agent_spec_tests::next_child` is private to its own
+/// module. Same wait-for-admission loop.
+async fn next_watchdog_child(
+    campaign: &mut TestCampaign,
+) -> tidepool_actor::LocalResidentInstallation {
+    tokio::time::timeout(Duration::from_secs(180), async {
+        loop {
+            match campaign.deployments.recv().await.unwrap() {
+                LocalResidentDeployment::PolicyInstalled(child) => {
+                    campaign.authority.install_grant(
+                        child.actor.identity().into(),
+                        worktree_grant(child.effective_role.role()),
+                    );
+                    child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+                    return *child;
+                }
+                LocalResidentDeployment::Retired { actor, terminal } => {
+                    panic!("{actor:?} retired: {terminal:?}")
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("child admission")
+}
+
+async fn watchdog_probe(
+    policy: &dyn tidepool_actor::ResidentToolEndpoint,
+    topic: &str,
+) -> String {
+    dispatch_structured_tool(policy, "probe", serde_json::json!({"topic": topic}))
+        .await
+        .to_string()
+}
+
+/// A child's own admission and turn-activation traffic (`SessionReady`,
+/// `ChildExited`, …) shares this campaign's one deployment channel with a
+/// watchdog's `NotificationSend`, and the two interleave in whatever order
+/// the resident host happens to schedule them. Waits up to `budget` for the
+/// next `NotificationSend` specifically, discarding any other event seen
+/// along the way; `None` means no `NotificationSend` arrived inside the
+/// budget (used to assert silence).
+async fn next_notification_send(
+    campaign: &mut TestCampaign,
+    budget: Duration,
+) -> Result<Arc<tidepool_actor::NotificationSend>, String> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut last_other = None;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(match last_other {
+                Some(kind) => format!("no NotificationSend within the budget; last other event: {kind}"),
+                None => "no event at all within the budget".to_string(),
+            });
+        }
+        match tokio::time::timeout(remaining, campaign.deployments.recv()).await {
+            Ok(Some(LocalResidentDeployment::NotificationSend(command))) => return Ok(command),
+            Ok(Some(other)) => {
+                last_other = Some(debug_deployment_kind(&other));
+                continue;
+            }
+            Ok(None) | Err(_) => {
+                return Err(match last_other {
+                    Some(kind) => {
+                        format!("no NotificationSend within the budget; last other event: {kind}")
+                    }
+                    None => "no event at all within the budget".to_string(),
+                })
+            }
+        }
+    }
+}
+
+/// Diagnostic description of a deployment event kind, for panic messages.
+fn debug_deployment_kind(event: &LocalResidentDeployment) -> String {
+    match event {
+        LocalResidentDeployment::PolicyInstalled(child) => {
+            format!("PolicyInstalled {:?}", child.actor.identity())
+        }
+        LocalResidentDeployment::SessionReady { activation } => {
+            format!("SessionReady {activation:?}")
+        }
+        LocalResidentDeployment::NotificationSend(_) => "NotificationSend".into(),
+        LocalResidentDeployment::CommandBackend(_) => "CommandBackend".into(),
+        LocalResidentDeployment::NotificationPoll(_) => "NotificationPoll".into(),
+        LocalResidentDeployment::RequestUpdate { .. } => "RequestUpdate".into(),
+        LocalResidentDeployment::ChildExited { notice } => format!(
+            "ChildExited owner={:?} child={:?} terminal={:?}",
+            notice.owner,
+            notice.child.identity(),
+            notice.terminal
+        ),
+        LocalResidentDeployment::WatchChanged { notification } => {
+            format!("WatchChanged {notification:?}")
+        }
+        LocalResidentDeployment::SettlementChanged { notification } => {
+            format!("SettlementChanged {notification:?}")
+        }
+        LocalResidentDeployment::RequestCancellation { notification } => {
+            format!("RequestCancellation {notification:?}")
+        }
+        LocalResidentDeployment::Retired { actor, terminal } => {
+            format!("Retired {actor:?} {terminal:?}")
+        }
+        LocalResidentDeployment::ReleaseAwait(release) => {
+            format!("ReleaseAwait {:?}", release.actor)
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_childs_watchdog_slot_escalates_to_its_parent() {
+    let backend = Arc::new(ScriptedNoulJev {
+        requests: Mutex::new(Vec::new()),
+        likelihood: 0.9,
+    });
+    let mut campaign = tokio::time::timeout(
+        Duration::from_secs(120),
+        TestCampaign::start_with_config(
+            tidepool_actor::ResearchPolicy::default(),
+            |admission| admission,
+            |config| {
+                config.jev = Some(Arc::clone(&backend) as tidepool_actor::JevBackendHandle);
+                pinned_watchdog_workspace(config);
+            },
+        ),
+    )
+    .await
+    .expect("campaign did not start within 120s");
+    let root = campaign.root_installation.policy.clone();
+    let root_identity = campaign.actor.identity();
+
+    // Launch the escalation child and the nudge child from the root.
+    let launch_escalate = {
+        let root = root.clone();
+        let script = watchdog_child_script("escalate-child");
+        tokio::spawn(async move { dispatch_haskell_script(root.as_ref(), &script).await })
+    };
+    let escalate_child = next_watchdog_child(&mut campaign).await;
+    assert_eq!(launch_escalate.await.unwrap()["status"], "committed");
+
+    let launch_nudge = {
+        let root = root.clone();
+        let script = watchdog_child_script("nudge-child");
+        tokio::spawn(async move { dispatch_haskell_script(root.as_ref(), &script).await })
+    };
+    let nudge_child = next_watchdog_child(&mut campaign).await;
+    assert_eq!(launch_nudge.await.unwrap()["status"], "committed");
+
+    // (a)+(b): an escalation heuristic trips on the labelled child. Its own
+    // result carries the short escalation record, and the PARENT (the root)
+    // actually receives a native message naming the reason and the child's
+    // actor address — observed the same way `sendMessage` is proven to reach
+    // its target elsewhere in this suite (see
+    // `notification_admission_and_poll_preserve_typed_request_bindings`).
+    let escalate_policy = escalate_child.policy.clone();
+    let escalate_call = tokio::spawn(async move {
+        tokio::time::timeout(
+            Duration::from_secs(120),
+            watchdog_probe(escalate_policy.as_ref(), "anything"),
+        )
+        .await
+        .expect("escalating probe did not answer within 120s")
+    });
+    let command = next_notification_send(&mut campaign, Duration::from_secs(120))
+        .await
+        .expect("the watchdog's escalation reaches the deployment channel");
+    assert_eq!(command.owner(), escalate_child.actor.identity());
+    assert_eq!(command.target(), root_identity);
+    assert!(command.message().contains("out_of_scope"), "{}", command.message());
+    assert!(
+        command
+            .message()
+            .contains(&escalate_child.actor.identity().id.0.to_string()),
+        "the child's own actor id is in the note: {}",
+        command.message()
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let inbox = ActorInbox::open(
+        directory.path().join("rows"),
+        directory.path().join("cursor"),
+    )
+    .unwrap();
+    admit_notification(&command, "watchdog-inbox".into(), &inbox);
+    let escalated_result = escalate_call.await.unwrap();
+    assert!(escalated_result.contains("[after-tool]"), "{escalated_result}");
+    assert!(
+        escalated_result.contains("escalated to your parent"),
+        "{escalated_result}"
+    );
+
+    // (c) a nudge heuristic trips on the OTHER labelled child: its own result
+    // carries the advice, and the parent receives NOTHING — no
+    // `NotificationSend` reaches the deployment channel at all.
+    let nudged_result = tokio::time::timeout(
+        Duration::from_secs(120),
+        watchdog_probe(nudge_child.policy.as_ref(), "anything"),
+    )
+    .await
+    .expect("nudged probe did not answer within 120s");
+    assert!(nudged_result.contains("[after-tool]"), "{nudged_result}");
+    assert!(
+        nudged_result.contains("Read the earlier failure"),
+        "{nudged_result}"
+    );
+    assert!(
+        next_notification_send(&mut campaign, Duration::from_millis(500))
+            .await
+            .is_err(),
+        "a nudge alone must never reach the parent"
+    );
+
+    // (d) the ROOT's own probe, same scripted answer: `monitorsFor` gives the
+    // root no heuristics at all (its own path matches neither label), so the
+    // slot abstains before ever asking Jev, and nothing is sent.
+    let root_result = tokio::time::timeout(
+        Duration::from_secs(120),
+        watchdog_probe(root.as_ref(), "anything"),
+    )
+    .await
+    .expect("root probe did not answer within 120s");
+    assert!(!root_result.contains("[after-tool]"), "{root_result}");
+    assert!(
+        next_notification_send(&mut campaign, Duration::from_millis(500))
+            .await
+            .is_err(),
+        "the root must never message a parent it does not have"
+    );
+
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
