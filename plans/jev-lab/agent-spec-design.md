@@ -109,6 +109,13 @@ One handler runs at a time per actor, structurally
    and returns the diff. The old record stays active.
 4. Otherwise swap the `Arc` between calls.
 
+Because the spec shares source roots with the modules a cell imports, these steps
+can end in different places, and the receipt says which. Step 1 publishing while
+step 2 fails is a real outcome, not an error: the revision is live for later
+cells, and this actor is still serving the previous record. A model repairing its
+spec can therefore still import and exercise the new modules from a cell while
+the spec itself does not yet compile.
+
 Gap 3 is why step 3 refuses rather than asks. The bridge cannot accept a changed
 tool list mid-session, so no confirmation flag could make one work; a schema
 change takes effect at the actor's next incarnation. The declaration comparison
