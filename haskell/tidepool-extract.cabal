@@ -209,28 +209,6 @@ test-suite execution-corpus-projection
   default-extensions: OverloadedStrings
   ghc-options:      -Wall
 
--- Not built by default: `cabal build` only builds tidepool-extract-bin.
--- Run: cabal test spike-extract  (needs the nix with-packages GHC on PATH;
--- `cabal build --enable-tests` builds it without running).
-test-suite spike-extract
-  type:             exitcode-stdio-1.0
-  main-is:          Spike.hs
-  hs-source-dirs:   spike-extract
-  build-depends:
-    base         >= 4.20 && < 5,
-    ghc          >= 9.12 && < 9.13,
-    ghc-boot     >= 9.12 && < 9.13,
-    tidepool-extract-internal,
-    bytestring,
-    containers,
-    filepath,
-    directory,
-    process,
-    text,
-    mtl
-  default-language: GHC2024
-  default-extensions: OverloadedStrings
-
 -- Wave-3a acceptance test: drives the PRODUCTION Option-C surface
 -- (Tidepool.Session + runPipelineSession + translateModuleClosed) and asserts
 -- a session-binder reference reaches Core as external NVar(stableVarId).

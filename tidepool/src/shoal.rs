@@ -1297,7 +1297,9 @@ fn host_trace_filter() -> tracing_subscriber::EnvFilter {
     let directives = configured
         .as_deref()
         .filter(|value| !value.is_empty())
-        .unwrap_or("info,shoal::content=trace");
+        // Cranelift logs the full text of every function it defines at
+        // `info`, hundreds of kilobytes each; one cell wrote 390 MB of it.
+        .unwrap_or("info,cranelift_jit=warn,cranelift_codegen=warn,shoal::content=trace");
     tracing_subscriber::EnvFilter::new(directives)
 }
 
