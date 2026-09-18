@@ -591,24 +591,7 @@ mod tests {
         let local = authored.join("local-ext");
         write_tiny_module(pinned.path(), "41");
         write_tiny_module(&local, "99");
-        std::fs::write(
-            project.path().join("flake.nix"),
-            format!(
-                "{{\n  inputs.tiny = {{ url = \"path:{}\"; flake = false; }};\n  outputs = _: {{ }};\n}}\n",
-                pinned.path().display()
-            ),
-        )
-        .unwrap();
-        // Nix resolves a bare directory through its enclosing Git tree, which
-        // every Shoal workspace has, and only reads files Git knows about.
-        for argv in [&["init", "-q"][..], &["add", "-A"][..]] {
-            assert!(std::process::Command::new("git")
-                .args(argv)
-                .current_dir(project.path())
-                .status()
-                .unwrap()
-                .success());
-        }
+        pin_tiny_input(project.path(), pinned.path());
         let config = |overridden: bool| {
             let mut text = String::from(
                 "[defaults]\nmodel = 'gpt-5.6-sol'\n[haskell]\nmodules = ['Ext.Tiny']\n[haskell.flake_sources]\ntiny = ['src']\n",
@@ -652,6 +635,33 @@ mod tests {
         assert_ne!(cache_key(&second.include), cache_key(&third.include));
     }
 
+    /// The pinned module is not merely captured. The resident machine compiles
+    /// it into the swarm's own program, every actor reaches it through the same
+    /// include list, and a prepared cell evaluates a value that only the
+    /// external source can supply.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_flake_pinned_module_answers_a_prepared_cell() {
+        let project = tempfile::tempdir().unwrap();
+        let pinned = tempfile::tempdir().unwrap();
+        let authored = project.path().join(".shoal/Project");
+        std::fs::create_dir_all(&authored).unwrap();
+        write_tiny_module(pinned.path(), "41");
+        std::fs::write(
+            project.path().join(".shoal/config.toml"),
+            "[defaults]\nmodel = 'gpt-5.6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Ext.Tiny']\nchecks = ['Project.Checks.pinned']\n[haskell.flake_sources]\ntiny = ['src']\n",
+        )
+        .unwrap();
+        std::fs::write(
+            authored.join("Checks.hs"),
+            include_str!("workspace_pinned_check.hs"),
+        )
+        .unwrap();
+        pin_tiny_input(project.path(), pinned.path());
+        crate::shoal::check(Some(project.path().to_path_buf()), true)
+            .await
+            .unwrap();
+    }
+
     fn write_tiny_module(root: &Path, value: &str) {
         std::fs::create_dir_all(root.join("src/Ext")).unwrap();
         std::fs::write(
@@ -659,6 +669,28 @@ mod tests {
             format!("module Ext.Tiny where\n\ntiny :: Int\ntiny = {value}\n"),
         )
         .unwrap();
+    }
+
+    /// Declare `tiny` as a non-flake source input of the project's own flake.
+    /// Nix resolves a project directory through its enclosing Git tree, which
+    /// every Shoal workspace has, and reads only files Git knows about.
+    fn pin_tiny_input(project: &Path, pinned: &Path) {
+        std::fs::write(
+            project.join("flake.nix"),
+            format!(
+                "{{\n  inputs.tiny = {{ url = \"path:{}\"; flake = false; }};\n  outputs = _: {{ }};\n}}\n",
+                pinned.display()
+            ),
+        )
+        .unwrap();
+        for argv in [&["init", "-q"][..], &["add", "-A"][..]] {
+            assert!(std::process::Command::new("git")
+                .args(argv)
+                .current_dir(project)
+                .status()
+                .unwrap()
+                .success());
+        }
     }
 
     /// The compiled-artifact key an extract over these include roots would get.
