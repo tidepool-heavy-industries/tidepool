@@ -523,6 +523,17 @@ impl EvalHarness {
         U: Send + 'static,
         H: DispatchEffect<U> + Send + 'static,
     {
+        // NOT yet migrated to run_prepared_program: a `compile_many`
+        // (multi-target, N targets from one module in one extraction)
+        // artifact's non-designated targets apparently lack a settled
+        // scaffold even when genuinely effectful — confirmed by running
+        // `effect_stack::effect_fold_regression::works_effect_fold_family`
+        // (7 targets, real `Eff '[Console]` effects) against
+        // `run_prepared_program`: `PreparedRuntimeError::UnsettledEntry` on
+        // the very first target. This is orthogonal to (and unlike)
+        // `compile_and_run`/`run`/`run_with`'s single-target
+        // `compile_haskell` path, verified working. Reported to main rather
+        // than guessed at; see `plans/core-engine-removal.md`.
         let expr = artifacts
             .targets
             .get(target)

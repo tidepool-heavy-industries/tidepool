@@ -252,6 +252,60 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
     nursery_size: usize,
     on_ready: impl FnOnce(CancelHandle),
 ) -> Result<EvalResult, RuntimeError> {
+    let CompileResult {
+        expr,
+        mut table,
+        warnings,
+        prepared,
+    } = compile_haskell(source, target, include)?;
+    if warnings.has_io {
+        return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
+    }
+    // Populate type-sibling groups from case branches so that get_companion
+    // can disambiguate constructors sharing unqualified names (e.g. Bin/Tip
+    // from Data.Map vs Data.Set) when a response value renders to JSON.
+    table.populate_siblings_from_expr(&expr);
+    let value = run_prepared_program(
+        prepared.prepared().clone(),
+        &table,
+        nursery_size,
+        handlers,
+        user,
+        on_ready,
+    )?;
+    Ok(EvalResult::new(value, table, warnings.warnings))
+}
+
+/// Run an ALREADY-COMPILED prepared program to completion against `handlers`,
+/// as a bare one-shot: no session, no actor, no decl plane. Bootstraps a
+/// standalone [`session::prepared::PreparedEngine`], settles the entry, and
+/// drives any parked request through `handlers` via the resident turn
+/// machinery's own suspend/dispatch/resume loop
+/// ([`session::resident`]'s `finish_prepared`, `pub(crate)` there) — reusing
+/// exactly what a resident session turn already uses, not a second engine.
+///
+/// [`compile_and_run_cancellable`] is this plus its own `compile_haskell`
+/// call; this lower-level entry point is for a caller that already holds a
+/// [`tidepool_repr::execution_schema::PreparedProgram`] from its own earlier
+/// compile (e.g. `tidepool-testing::eval_harness::EvalHarness::run_target*`,
+/// which extracts several targets from one `tidepool-extract` invocation and
+/// must not spawn a second one per target it runs).
+///
+/// `on_ready` receives the freshly-built engine's [`CancelHandle`] BEFORE
+/// the (blocking) run begins, exactly as [`compile_and_run_cancellable`]
+/// uses it. A request no installed handler recognizes is reported as
+/// [`JitError::Effect`]`(`[`tidepool_effect::error::EffectError::UnhandledEffect`]`)`,
+/// matching what a plain (non-suspendable) run has always reported for an
+/// unclaimed effect — there is no resume path here for a caller to answer
+/// it later.
+pub fn run_prepared_program<U, H: DispatchEffect<U>>(
+    prepared: tidepool_repr::execution_schema::PreparedProgram,
+    table: &DataConTable,
+    nursery_size: usize,
+    handlers: &mut H,
+    user: &U,
+    on_ready: impl FnOnce(CancelHandle),
+) -> Result<Value, RuntimeError> {
     use session::prepared::{ParkPolicy, PreparedEngine};
     use session::resident::{finish_prepared, PreparedRun, SettlePlan};
     use tidepool_codegen::suspension::RealmId;
@@ -260,17 +314,8 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
     use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
     use tidepool_repr::PrincipalId;
 
-    let CompileResult {
-        table,
-        warnings,
-        prepared,
-        ..
-    } = compile_haskell(source, target, include)?;
-    if warnings.has_io {
-        return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
-    }
     let (mut engine, program) =
-        PreparedEngine::bootstrap_with_nursery_bytes(prepared.prepared().clone(), nursery_size)?;
+        PreparedEngine::bootstrap_with_nursery_bytes(prepared, nursery_size)?;
     let realm = RealmId::ROOT;
     on_ready(engine.cancel_handle(realm));
     let park = ParkPolicy {
@@ -285,15 +330,15 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
         realm,
         SettlePlan::Observe,
         park,
-        &table,
+        table,
         handlers,
         user,
         settlement,
     )?;
     match run {
-        PreparedRun::Done { value, .. } => Ok(EvalResult::new(value, table, warnings.warnings)),
+        PreparedRun::Done { value, .. } => Ok(value),
         PreparedRun::Suspended { id, request } => {
-            let constructor = request_constructor(&request, &table);
+            let constructor = request_constructor(&request, table);
             // No handler claimed it and there is no resume path in a
             // one-shot run: release the parked frame rather than leak it.
             let _ = engine.abort_parked(id);
