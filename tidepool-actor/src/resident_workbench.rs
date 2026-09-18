@@ -3386,7 +3386,7 @@ where
                             label, role, profile, launch_worktrees: worktrees,
                             fork_group: None, fork_workspace: None, effect_keys: None,
                             fork_effort: None, fork_budget: None, model: None, instructions: None, context: crate::ForkContext::SelectedContext,
-                            lifetime: crate::WorkerLifetime::ParentOwned,
+                            lifetime: crate::start::ActorStartRequest::FRESH_LAUNCH_LIFETIME,
                             session_id: context.placement.session, parent_actor: context.actor,
                         },
                     )

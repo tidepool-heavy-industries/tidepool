@@ -135,6 +135,7 @@ module Tidepool.Actors.Shoal
   , attemptUnfold
   , unfold
   , spawnWatched
+  , errand
   , AgentSpec
   , AgentRef
   , AgentState (..)

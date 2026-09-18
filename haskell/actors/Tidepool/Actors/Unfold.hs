@@ -81,6 +81,7 @@ module Tidepool.Actors.Unfold
   , attemptUnfold
   , unfold
   , spawnWatched
+  , errand
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)
@@ -95,7 +96,8 @@ import qualified Tidepool.Actor as Actor
 import Tidepool.Agent.Reply (Replies, Response)
 import Tidepool.Agent.Watch (Settlement, Watch, WatchLabel, Watches, awaitSettled, watch)
 import Tidepool.Agent.Reply.Internal (Progress (..), responseRequestId, responseAdmission, withResponseAdmission)
-import Tidepool.Agent.Assignment (Assignment (..), Label, NameError (..), labelText)
+import Tidepool.Agent.Assignment (Assignment (..), Label, NameError (..), assignment, labelText)
+import Tidepool.Agent.Watch.Internal (WatchLabel (..))
 import Tidepool.Agent.Launch
   ( ActorPath (..), GitBranchPrefix (..), ForkRole (..)
   , ForkWorkspaceAccess (..), AdmissionReceipt (..)
@@ -104,7 +106,10 @@ import Tidepool.Actors.Internal.Agent
   ( AgentRef
   , agentIdentity
   , lookupAgent
+  , readonlyAgent
+  , requestWith
   , requestWithSited
+  , startAgent
   , startForkedAgent
   , roleCode
   )
@@ -123,6 +128,7 @@ import Tidepool.Effects.Core
   ( WorkerLaunchPreview (..)
   , ActorEffectKey (..)
   , AgentControl (..)
+  , AgentLaunch (..)
   , CleanupActorPlan (..)
   , CleanupActorState (..)
   , CleanupPlan (..)
@@ -646,6 +652,44 @@ spawnWatched label path planned = do
   response <- unfold path planned
   settled <- watch label (awaitSettled response)
   pure (response, settled)
+
+-- | One read-only errand: a name, a task, a reply.
+--
+-- @errand "repo-layout" "which crate owns the compile cache?"@ is the whole
+-- call. There is no record to define, no client to construct, no state to
+-- query and no retirement to write: the child holds no worktree, so it
+-- resolves to the research role (inspection-only native tools,
+-- inspection-only workspace, and a descendant budget of zero), and it is
+-- started parent-owned, so it goes when its owner does.
+--
+-- Deliberately NOT 'unfold'. A question needs no fork group, no source
+-- checkpoint, no @git worktree add@, and no wait for the enclosing cell to
+-- return before the child may start; @plans\/jev-lab\/child-startup-costs.md@
+-- is what each of those costs. Use 'unfold' when the child must inherit this
+-- conversation or own a checkout. Use 'errand' to ask.
+--
+-- The reply is prose, not a record: read it off the returned watch with
+-- @pollWatch@, then @settledValue@ on the settlement. That is the whole of
+-- the difference from 'child' and @request@, which hold a child to a schema
+-- derived from a result type you annotate. When the answer has structure
+-- worth typing, those are still the calls to make; an errand is for the
+-- answer you would have read yourself.
+errand
+  :: forall parent
+   . (Member AgentLaunch parent, Member Replies parent, Member Watches parent)
+  => Label
+  -> Text
+  -> Eff parent (Watch (Settlement Text))
+errand name task = do
+  agent <- startAgent (readonlyAgent (labelText name))
+  -- Both site types are fixed here, so this occurrence carries its own typed
+  -- site the way 'requestBranch' does. A result type left open for the caller
+  -- to fix would have no site at all in this module — the extractor walks the
+  -- library's Core, not only the authored cell's.
+  reply <- requestWith @Text @Text agent (assignment name task)
+  -- 'Label' and 'WatchLabel' validate by the same predicate, so the name that
+  -- built the first cannot fail the second.
+  watch (WatchLabel (labelText name)) (awaitSettled reply)
 
 startBranch
   :: forall effects child input result

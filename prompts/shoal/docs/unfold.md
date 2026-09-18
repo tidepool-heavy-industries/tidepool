@@ -109,6 +109,19 @@ validate the worktree seed. A leaf-sized assignment and zero fork authority are
 different things. `researchingLeaf` explicitly omits delegation; a researcher
 with an exhausted budget retains `Forks` in its row but cannot admit children.
 
+For a question rather than a contract, `errand` is the whole call:
+`w <- errand "repo-layout" "which crate owns the compile cache?"` starts an
+inspection-only child, gives it the task, and returns the watch that wakes you
+with its reply — `pollWatch w`, then `settledValue` on the settlement. Nothing
+else is yours to write: no record, no client, no state query, no retirement.
+It is not `unfold` and deliberately pays none of `unfold`'s admission: no fork
+group, no source checkpoint, no worktree, and no wait for this cell to return
+before the child may start. The child holds no checkout, so it resolves to the
+research role and can neither write nor fork, and it is parent-owned, so it
+goes when you do. The reply is prose. When the answer has structure worth
+typing, use `child` or `request` with a result annotation instead; when you
+would have read the answer yourself, use `errand`.
+
 Width counts active or reserved descendants across the subtree; all ancestor
 ceilings also apply. Setting `maximum_depth = 0` disables research recursion.
 Configuration is loaded at host startup and does not change existing actors.

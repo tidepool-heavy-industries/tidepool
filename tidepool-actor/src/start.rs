@@ -88,6 +88,14 @@ pub(crate) struct ActorStartRequest {
     pub parent_actor: crate::ActorRef,
 }
 
+impl ActorStartRequest {
+    /// A launch that opens no fork group — `startActor` and `startAgent`,
+    /// including the read-only errand — belongs to the actor that asked for
+    /// it. `ParentOwned` records a supervisor parent (below) and spawns the
+    /// child linked (`local_actor.rs`), so nothing has to retire it by hand.
+    pub(crate) const FRESH_LAUNCH_LIFETIME: WorkerLifetime = WorkerLifetime::ParentOwned;
+}
+
 #[derive(tidepool_bridge_derive::FromCore)]
 pub enum ActorEffectProfileWire {
     ActorReadWriteProfile,
@@ -285,7 +293,7 @@ impl ResidentActorStart {
                 model: None,
                 instructions: None,
                 context: ForkContext::SelectedContext,
-                lifetime: WorkerLifetime::ParentOwned,
+                lifetime: ActorStartRequest::FRESH_LAUNCH_LIFETIME,
                 fork_budget: None,
                 session_id,
                 parent_actor,
@@ -530,6 +538,46 @@ mod tests {
     fn empty_provenance_requires_no_child_facade() {
         let heads = facade_heads(&tidepool_runtime::session::ProgramProvenance::default());
         assert!(heads.is_empty());
+    }
+
+    /// The errand's authority comes from holding no worktree, not from a
+    /// request the caller makes: `AgentLaunchWith` carries the inherited role,
+    /// and a worktree-less launch resolves it to research. An errand child
+    /// cannot write, and cannot start a descendant of its own.
+    #[test]
+    fn a_worktree_less_launch_can_neither_write_nor_spawn() {
+        let errand = super::ActorLaunchRoleWire::ActorInheritedRole.effective_role(false);
+        assert_eq!(errand.role(), crate::ActorRole::Research);
+        assert_eq!(errand.native_tools(), crate::NativeToolClass::InspectionOnly);
+        assert_eq!(errand.workspace(), crate::WorkspaceAccess::InspectOnly);
+        assert_eq!(errand.descendants().maximum_active_children, Some(0));
+        assert_eq!(errand.descendants().maximum_depth, 0);
+        assert!(
+            !errand.permits_child(&crate::EffectiveRole::research()),
+            "an errand child must not admit a child of its own"
+        );
+        assert!(
+            !errand
+                .effect_keys()
+                .contains(&crate::ActorEffectKey::AgentLaunch),
+            "an errand child must not hold launch authority"
+        );
+
+        // The same launch WITH a worktree is the coding role, which is exactly
+        // what the errand declines to allocate.
+        let with_tree = super::ActorLaunchRoleWire::ActorInheritedRole.effective_role(true);
+        assert_eq!(with_tree.workspace(), crate::WorkspaceAccess::WritableBound);
+    }
+
+    /// Nothing has to retire an errand: `AgentLaunchWith` is captured as
+    /// `ParentOwned`, which records a supervisor parent and makes the child a
+    /// linked worker that goes with its owner.
+    #[test]
+    fn a_fresh_launch_is_parent_owned_so_no_retirement_is_authored() {
+        assert_eq!(
+            super::ActorStartRequest::FRESH_LAUNCH_LIFETIME,
+            crate::WorkerLifetime::ParentOwned
+        );
     }
 }
 

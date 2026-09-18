@@ -154,6 +154,39 @@ fn shoal_exports_persistent_agents_and_hides_turn_lifecycle_operations() {
     );
 }
 
+/// A read-only errand is one call: the cell names a task and reads a reply,
+/// with no record, client, state query or retirement of its own. Its typed
+/// site lives in `Tidepool.Actors.Unfold` rather than in the cell, which is
+/// why the reply is `Text` and not a caller-chosen result type. Only a row
+/// carrying `AgentLaunch` may issue one, so the inspection-only child an
+/// errand starts cannot start another.
+#[test]
+fn an_errand_is_one_call_and_only_a_launch_row_may_issue_one() {
+    eval_harness::require_extract();
+    let include = shoal_include_paths();
+    let include_refs = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let source = include_str!("shoal_action_surface/errand.hs");
+
+    for target in ["askText", "reply", "typedStillWorks"] {
+        compile_haskell(source, target, &include_refs).unwrap_or_else(|error| {
+            panic!("a read-only errand should be one callable statement ({target}): {error}")
+        });
+    }
+
+    let denied = include_str!("shoal_action_surface/errand_needs_launch.hs");
+    for target in ["result", "fromResearch"] {
+        let error = compile_haskell(denied, target, &include_refs)
+            .expect_err("a row without AgentLaunch must not be able to issue an errand");
+        let failure = tidepool_runtime::classify_compile(&error);
+        assert_eq!(
+            failure.class,
+            tidepool_runtime::FailureClass::UserHaskell,
+            "{}",
+            failure.message
+        );
+    }
+}
+
 #[test]
 fn unresolved_request_result_is_a_source_diagnostic_with_annotation_guidance() {
     eval_harness::require_extract();
