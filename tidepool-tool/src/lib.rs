@@ -3,6 +3,8 @@
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
+pub mod surface;
+
 /// One model-visible tool declaration, independent of who serves it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
