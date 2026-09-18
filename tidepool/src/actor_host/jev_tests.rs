@@ -885,10 +885,8 @@ async fn a_childs_watchdog_slot_escalates_to_its_parent() {
     assert!(traced.contains("out_of_scope"), "{traced}");
     assert!(traced.contains("escalated to your parent"), "{traced}");
     // The escalation itself: which child, and who it told.
-    assert!(
-        traced.contains("after-tool slot sent an actor notification"),
-        "{traced}"
-    );
+    assert!(traced.contains("actor notification sent"), "{traced}");
+    assert!(traced.contains("from_slot=true"), "{traced}");
     assert!(
         traced.contains(&escalate_child.actor.identity().id.0.to_string()),
         "the child's own actor id is traced: {traced}"

@@ -3457,21 +3457,21 @@ where
                 target,
                 message,
             } => Box::pin(async move {
-                // A slot's own effects never trigger a slot (see
-                // `annotate_tool_result`), but a slot's `Notifications` send
-                // — a watchdog escalating to its parent, in the shipped
-                // worked example — is exactly the judgment this actor made
-                // and otherwise leaves no trace beyond the recipient's inbox.
-                // `context.actor` here is the child the slot ran on; `target`
-                // is who it escalated to.
-                if self.after_tool_active {
-                    tracing::info!(
-                        actor = %context.actor,
-                        target = %target,
-                        reason = %crate::workbench_display::bounded_output(&message, 1024),
-                        "after-tool slot sent an actor notification"
-                    );
-                }
+                // A `Notifications` send otherwise leaves no trace beyond
+                // the recipient's inbox — most pointedly a slot's own send
+                // (a watchdog escalating to its parent, in the shipped
+                // worked example: `after_tool_slot` is on the span stack, so
+                // it need not be named again here), which is exactly the
+                // judgment this actor made. Traced the same whether it came
+                // from a slot body or ordinary tool-body code: `from_slot`
+                // is the one thing that distinguishes them.
+                tracing::info!(
+                    actor = %context.actor,
+                    target = %target,
+                    from_slot = self.after_tool_active,
+                    reason = %crate::workbench_display::bounded_output(&message, 1024),
+                    "actor notification sent"
+                );
                 let permitted = self
                     .descriptor
                     .effective_role()
