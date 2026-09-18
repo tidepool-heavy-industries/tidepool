@@ -190,13 +190,31 @@ result in the actor's own resident machine.
   its own repair.
 - Each annotation records the source revision the slot was compiled from.
 
-**After-turn** comes later and only if a pushed signal exists. Turn completion
-for a hosted actor is polled every ten seconds today
-(`tidepool/src/actor_host.rs:4703-4711`); a discrete `turn/completed`
-notification exists on the Codex process boundary
-(`tidepool-agent/src/backend/codex/process.rs:811-827`) but is projected only
-into the headless one-shot seam. Whether it is reachable on the interactive path
-is an open investigation, and the slot is not built on the poll.
+**After-turn** comes later. There is no protocol notification to hang it on: the
+`turn/completed` JSON-RPC notification (`process.rs:811-827`) is read only while a
+caller is blocked inside the headless one-shot seam, and the interactive path
+never spawns that subprocess at all. This is a Codex-only question by
+construction, since `CodexInteractiveBackend`
+(`tidepool-agent/src/backend/codex/node.rs:270`) is the sole interactive backend.
+
+The signal is nonetheless available, from the session's own rollout file. It
+carries an explicit `task_complete`/`turn_complete` record naming its turn
+(`tidepool-agent/src/backend/codex/rollout_conversation.rs:84`), and tailing that
+file for a boundary is already an accepted pattern here: presenting a native
+update seeks to the end and re-reads every 100 ms until the boundary line appears
+(`tidepool-agent/src/backend/codex/active_update.rs`). The ten-second interval at
+`tidepool/src/actor_host.rs:4703-4711` is a usage poll, not the only channel.
+
+A torn write is safe by the existing reader's own rule: a partial tail becomes
+readable on a later read, so skipping it can withhold a turn but never invent
+one. A detector that finds no complete record simply waits for the next write.
+
+So the after-turn slot is built on a rollout tail rather than a protocol push,
+delivering through a new `Source` variant beside `LifecycleSource`
+(`haskell/lib/Tidepool/Actor/Source.hs:34-47`). That variant is generated from
+`tidepool-protocol/src/effects/actor_kernel.rs`, so the plumbing is the schema,
+`Source.hs`, the four match sites in `tidepool-actor/src/resident_workbench.rs`,
+and one new detector. The one thing not to do is hang it on the ten-second poll.
 
 ### Where idle-time output waits, and how it enters
 
