@@ -682,8 +682,11 @@ pub fn detect_hoisted_declaration_collision(cell_source: &str) -> Option<SourceO
                 }
             }
             SourceUnitShape::Declaration { name, params, body } => {
-                let bound_locally: std::collections::HashSet<&str> =
-                    params.into_iter().chain(std::iter::once(name)).collect();
+                let bound_locally: std::collections::HashSet<&str> = params
+                    .into_iter()
+                    .chain(std::iter::once(name))
+                    .chain(locally_rebound_names(body))
+                    .collect();
                 for free_name in lowercase_identifier_tokens(body) {
                     if bound_locally.contains(free_name) {
                         continue;
@@ -817,7 +820,13 @@ fn classify_source_unit(text: &str) -> SourceUnitShape<'_> {
             binders: lowercase_identifier_tokens(pattern),
         };
     }
-    if let Some((pattern, _)) = split_at_top_level(trimmed, "<-") {
+    // Only a bind on the unit's own first line makes it a statement. A `<-`
+    // further down belongs to a nested `do` inside a declaration's body, and
+    // reading it as this unit's bind would both misclassify the declaration
+    // and publish its head as a statement binder — which a later declaration
+    // referring to that helper would then collide with.
+    let first_line = trimmed.split_once('\n').map_or(trimmed, |(line, _)| line);
+    if let Some((pattern, _)) = split_at_top_level(first_line, "<-") {
         return SourceUnitShape::Statement {
             binders: lowercase_identifier_tokens(pattern),
         };
@@ -906,6 +915,43 @@ fn split_at_top_level_eq(text: &str) -> Option<(&str, &str)> {
         }
     }
     None
+}
+
+/// Every name a declaration's own body rebinds, so a reference to one of them
+/// is local rather than a reach back at an earlier statement's binder.
+///
+/// A body may introduce names four ways, and all of them shadow: `let x = …`,
+/// a `where` clause's own equations, a lambda's parameters, and a nested `do`
+/// block's `x <- …`. None of these is visible to the unit classifier, which
+/// sees only the declaration's head. Missing them is what turns an ordinary
+/// reuse of a short name like `task` into a rejection of valid source, so this
+/// is deliberately generous: a name that appears bound anywhere in the body is
+/// treated as bound throughout it. Over-collecting here can only withhold a
+/// rejection, never invent one, which is the bias this detector wants.
+fn locally_rebound_names(body: &str) -> Vec<&str> {
+    let mut bound = Vec::new();
+    for (offset, _) in body.match_indices("let ") {
+        let rest = &body[offset + "let ".len()..];
+        let pattern = split_at_top_level_eq(rest).map_or(rest, |(lhs, _)| lhs);
+        bound.extend(lowercase_identifier_tokens(pattern));
+    }
+    for (offset, _) in body.match_indices("where") {
+        bound.extend(lowercase_identifier_tokens(&body[offset + "where".len()..]));
+    }
+    for (offset, _) in body.match_indices('\\') {
+        let rest = &body[offset + 1..];
+        if let Some((parameters, _)) = rest.split_once("->") {
+            bound.extend(lowercase_identifier_tokens(parameters));
+        }
+    }
+    for (offset, _) in body.match_indices("<-") {
+        let preceding = &body[..offset];
+        let pattern = preceding
+            .rfind('\n')
+            .map_or(preceding, |line_start| &preceding[line_start + 1..]);
+        bound.extend(lowercase_identifier_tokens(pattern));
+    }
+    bound
 }
 
 /// Every lowercase-leading identifier "root" referenced in `text`, skipping
@@ -1675,6 +1721,47 @@ mod tests {
     #[test]
     fn declaration_placed_first_is_accepted() {
         let cell = "resultText = describe job\njob <- Cmd.run \"ls\"\n";
+        assert_eq!(detect_hoisted_declaration_collision(cell), None);
+    }
+
+    /// Reusing a short name inside a declaration's own `let` is ordinary
+    /// Haskell and reaches nothing outside the declaration, so it is accepted
+    /// even when an earlier statement happens to bind the same name.
+    #[test]
+    fn a_name_rebound_by_the_declarations_own_let_is_not_a_collision() {
+        let cell = "task <- pickTask\nsummarize xs = let task = clean xs in go task\n";
+        assert_eq!(detect_hoisted_declaration_collision(cell), None);
+    }
+
+    /// The same, for a lambda parameter.
+    #[test]
+    fn a_name_rebound_by_a_lambda_parameter_is_not_a_collision() {
+        let cell = "task <- pickTask\nsummarize = map (\\task -> describe task)\n";
+        assert_eq!(detect_hoisted_declaration_collision(cell), None);
+    }
+
+    /// The same, for a `where` equation, which binds for the whole
+    /// declaration and is invisible to the head-only classifier.
+    #[test]
+    fn a_name_rebound_by_a_where_equation_is_not_a_collision() {
+        let cell = "task <- pickTask\nsummarize xs = describe task\n  where task = head xs\n";
+        assert_eq!(detect_hoisted_declaration_collision(cell), None);
+    }
+
+    /// A nested `do` block's own bind shadows too.
+    #[test]
+    fn a_name_rebound_by_a_nested_bind_is_not_a_collision() {
+        let cell = "task <- pickTask\nrunAll = do\n  task <- nextTask\n  describe task\n";
+        assert_eq!(detect_hoisted_declaration_collision(cell), None);
+    }
+
+    /// A declaration whose body is a `do` block is still a declaration. Were
+    /// its nested bind read as this unit's own, the helper's name would enter
+    /// scope as a statement binder and the next declaration to call it would
+    /// be rejected for using it.
+    #[test]
+    fn a_declaration_whose_body_is_a_do_block_binds_nothing_for_later_units() {
+        let cell = "runAll = do\n  task <- nextTask\n  describe task\nreport = summarize runAll\n";
         assert_eq!(detect_hoisted_declaration_collision(cell), None);
     }
 
