@@ -4,8 +4,35 @@ effort = "low"
 
 [haskell]
 source_roots = ["."]
-modules = ["Project.Types", "Project.Work", "Project.Plan", "Project.Observe"]
-checks = ["Project.Checks.workbench", "Project.CollaborationChecks.collaboration", "Project.RoutingChecks.routing"]
+# Everything here compiles against this revision and is imported into every
+# session. Two families that grew apart and now sit together:
+#
+#   Types, Actors, Work, Routing, Observe — the orchestration vocabulary and the
+#   implement/review/repair loop, on the current `Response`/`childWithProgress`
+#   surface. This workspace previously carried an older copy written against
+#   `Forked`, `RequestLabel` and a retired request API, which did not compile.
+#
+#   Reflex, Evidence, Contract, Investigate, Merge, Review — the Jev-era
+#   programs: a precedence-ordered classification table, typed check evidence, a
+#   task contract, failed-build investigation, a worktree-holding merge actor
+#   that checks before it publishes, and the review loop. These were authored
+#   against a small demo repository and are adapted, not copied: the hardcoded
+#   `./check.sh` is now `projectCheck` in Project.Merge, named once and pointing
+#   at this repository's own fast check.
+#
+# `Project.Plan` is deliberately absent. It generated assignments for a specific
+# graph-UI feature and is not a general tool; carrying it forward invited a
+# reader to treat an old campaign as the current goal.
+#
+# `checks` is unset. The recipe modules that were configured here import the
+# retired API generation, so `shoal check --recipes` cannot run until they are
+# ported. They were: Project.Checks.workbench,
+# Project.CollaborationChecks.collaboration, Project.RoutingChecks.routing.
+modules = [
+  "Project.Types", "Project.Actors", "Project.Work", "Project.Routing", "Project.Observe",
+  "Project.Reflex", "Project.Evidence", "Project.Contract", "Project.Investigate",
+  "Project.Merge", "Project.Review",
+]
 
 # No `[prompts] root` or `core`. Those keys displace the shipped `root.md` and
 # `base.md` wholesale, and the local copies drifted until they instructed the
@@ -15,11 +42,12 @@ checks = ["Project.Checks.workbench", "Project.CollaborationChecks.collaboration
 # genuinely needs on top of them belongs in `plans/`, which they can be pointed
 # at, not in a private fork of them.
 
-# Only entries this workspace's own Haskell reads. `Project.Work` reads task,
-# review, repair, incorporate and specialist; `Project.Plan` reads lead;
-# `Project.Observe` reads rsi. A `coordinator` entry was dropped because nothing
-# read it, and a `planner` entry with it — its file reached the root through the
-# `[prompts] root` key above rather than through this table.
+# Only entries this workspace's own Haskell reads, via `projectPrompt`.
+# `Project.Work` reads task, review, repair, incorporate and specialist;
+# `Project.Observe` reads rsi; lead is read by the component lead helper. A
+# `coordinator` entry was dropped because nothing read it, and a `planner` entry
+# with it — its file reached the root through the `[prompts] root` key above
+# rather than through this table.
 [prompts.files]
 lead = "prompts/lead.md"
 specialist = "prompts/specialist.md"

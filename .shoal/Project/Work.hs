@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
@@ -7,18 +8,19 @@
 -- when it is useful; importing this module prescribes no worker tree.
 module Project.Work
   ( projectPrompt, taskContext, reviewContext, decisionContext
-  , withDecision, raiseQuestion, resolveQuestion
+  , withDecision, updateDecision, designQuestion, sameQuestion, raiseQuestion, resolveQuestion
   , solTask, solTaskFrom, implement, reviewCandidate, reviewAgain, repair
-  , requestIncorporation, consultDesign, followAttention
+  , candidateAtSubmission
+  , requestIncorporation, consultDesign
   , settledValue
   ) where
 
 import Control.Monad.Freer (Eff, Member)
-import Control.Monad (void, when)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Actors.Shoal
 import Tidepool.Effects.Core (AgentInspection, Forks, GitRef (..))
+import Tidepool.Worktree (renderGitOid, renderWorktreeError)
 import Project.Types
 import Shoal.Workspace (workspacePrompt)
 
@@ -29,16 +31,10 @@ projectPrompt name = case workspacePrompt name of
   Just body -> body
   Nothing -> error ("Missing configured project prompt: " <> Text.unpack name)
 
-named :: Text -> BranchLabel
-named = either (error . show) id . branchLabel
-
-shown :: Show value => value -> Text
-shown = Text.pack . show
-
 taskContext :: Task -> Text
 taskContext task = Text.unlines $
   [ "Plan: " <> planPath task
-  , "Source: " <> taskSource task
+  , "Source: " <> renderGitOid (taskSource task)
   , "Obligation: " <> obligation task
   , "Why: " <> rationale task
   , "Owned source: " <> Text.intercalate ", " (ownedPaths task)
@@ -66,122 +62,130 @@ raiseQuestion question current = filter (not . sameQuestion question) current ++
 resolveQuestion :: AcceptedDecision -> Attention -> Attention
 resolveQuestion decision = filter (/= decisionQuestion decision)
 
+-- Render only the actionable answer and its exact correlation. Detailed question
+-- evidence remains recoverable from the retained question and named source.
 decisionContext :: AcceptedDecision -> Text
 decisionContext decision = Text.unlines
-  [ "Accepted decision for " <> questionKey (decisionQuestion decision)
-      <> " at " <> questionSource (questionDetails (decisionQuestion decision))
-  , "Question: " <> shown (decisionQuestion decision)
+  [ questionKey question <> " @" <> renderGitOid (questionSource details) <> " " <> questionPlan details
+  , questionFinding details
   , decisionSummary decision
-  , "Incorporated source: " <> decisionSource decision
-  , "Evidence: " <> Text.intercalate "; " (decisionEvidence decision)
+  , "incorporated " <> renderGitOid (decisionSource decision)
+  , Text.intercalate "; " (decisionEvidence decision)
   ]
+  where
+    question = decisionQuestion decision
+    details = questionDetails question
 
-solTask :: BranchLabel -> Task -> Branch CodingEffects Task result
+updateDecision
+  :: Member Replies effects
+  => Response result -> AcceptedDecision -> Eff effects (Either ReplyError RequestUpdate)
+updateDecision response = updateRequest response . decisionContext
+
+solTask :: Label -> Task -> Branch CodingEffects Task result
 solTask label = solTaskFrom label boundHead
 
 -- Source and context are independent choices. Roots use projectHead; an exact
 -- committed review seed uses atRef. Fresh context is an explicit withContext.
-solTaskFrom :: BranchLabel -> WorktreeSeed -> Task -> Branch CodingEffects Task result
+solTaskFrom :: Label -> WorktreeSeed -> Task -> Branch CodingEffects Task result
 solTaskFrom label source task = withInstructions (projectPrompt "task") $
-  withContext inherited $ withModel "gpt-5.6-sol" $ withEffort Low $
-  coding label source task
+  withContext inherited $ withModel "executor" $ withEffort Medium $
+  coding source ((assignment label task) { report = Silent })
 
 implement
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
-  => Task -> Eff effects (Forked (Outcome Candidate), Progress Attention)
+  => Task -> Eff effects (Response (Outcome Candidate), Progress WorkProgress)
 implement task = unfold (taskGroup task) $
-  childWithProgress @Attention @(Outcome Candidate) (solTask (named "implement") task)
+  childWithProgress @WorkProgress @(Outcome Candidate) (solTask "implement" task)
 
 reviewContext :: ReviewTask -> Text
 reviewContext task = Text.unlines
   [ taskContext (reviewAssignment task)
-  , "Candidate: " <> candidateCommit (reviewInput task)
+  , "Candidate: " <> renderGitOid (candidateCommit (reviewInput task))
   , "Claimed checks: " <> Text.intercalate "; " (checkedCommands (reviewInput task))
   , "Remaining product gates: " <> Text.intercalate "; " (remainingGates (reviewInput task))
   , case repairOwner task of
       OwnerRepairs -> "Repair owner: your requester. Return Repair findings; it will repair and reuse you. Do not queue work behind its pending delivery."
-      RetainedImplementer actor -> "Repair owner: retained implementer " <> shown (agentIdentity actor)
+      RetainedImplementer actor -> "Repair owner: retained implementer " <> Text.pack (show actor)
         <> ". Use repair for direct follow-up; keep your review pending while its separate request runs."
   ]
 
 reviewCandidate
   :: (Member Forks effects, Member Replies effects, Member AgentInspection effects, Subset CodingEffects effects)
-  => Task -> RepairOwner -> Candidate -> Eff effects (Forked (Outcome ReviewDecision), Progress Attention)
-reviewCandidate task owner candidate = unfold (taskGroup task) $ childWithProgress @Attention @(Outcome ReviewDecision) $
+  => Task -> RepairOwner -> Candidate -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
+reviewCandidate task owner candidate = unfold (taskGroup task) $ childWithProgress @WorkProgress @(Outcome ReviewDecision) $
   withInstructions (projectPrompt "review") $ withContext (selected reviewContext) $
-  withModel "gpt-5.6-sol" $ withEffort Low $
-  coding (named "review") (atRef (GitRef (candidateCommit candidate))) (ReviewTask task candidate owner)
+  withModel "executor" $ withEffort Medium $
+  coding (atRef (GitRef (renderGitOid (candidateCommit candidate))))
+    ((assignment "review" (ReviewTask task candidate owner)) { report = Silent })
+
+-- This project's automatic review edge selects the committed submission head.
+-- Other authored flows may deliberately select earlier artifacts instead.
+candidateAtSubmission :: Candidate -> WorktreeEvidence -> Either Text Candidate
+candidateAtSubmission candidate evidence = case evidence of
+  WorktreeObserved _ _ observation
+    | actual == candidateCommit candidate -> Right candidate
+    | otherwise -> Left ("candidate " <> renderGitOid (candidateCommit candidate) <> "; submitted " <> renderGitOid actual)
+    where actual = headOid (submittedHead observation)
+  NoBoundWorktree -> Left "candidate has no bound-source evidence"
+  WorktreeObservationFailed failure -> Left (renderWorktreeError failure)
 
 -- A completed review attempt leaves its actor available for the revised candidate.
 reviewAgain
   :: Member Replies effects
-  => AgentRef -> RequestLabel -> ReviewTask -> Eff effects (Response (Outcome ReviewDecision), Progress Attention)
-reviewAgain actor label task = requestWithProgress @Attention @(Outcome ReviewDecision) actor $
-  withRequestGuidance (projectPrompt "review" <> "\n" <> reviewContext task) $
-  requestOptions label task
+  => AgentRef -> Label -> ReviewTask -> Eff effects (Response (Outcome ReviewDecision), Progress WorkProgress)
+reviewAgain actor label task = requestWithProgress @WorkProgress @(Outcome ReviewDecision) actor $
+  (assignment label task) { guidance = Just (projectPrompt "review"), report = Silent }
 
 -- Left is the useful verdict to return to the implementing owner; Right is a
 -- separate request to an available implementer. No queue is created for Left.
 repair
   :: Member Replies effects
-  => RequestLabel -> ReviewTask -> Candidate -> [Text]
+  => Label -> ReviewTask -> Candidate -> [Text]
   -> Eff effects (Either ReviewDecision (Response (Outcome Candidate)))
 repair label task candidate findings = case repairOwner task of
   OwnerRepairs -> pure (Left (Repair candidate findings))
   RetainedImplementer actor -> Right <$> requestWith actor
-    (withRequestGuidance (Text.unlines
-      [ projectPrompt "repair", taskContext (reviewAssignment task)
-      , "Repair candidate: " <> candidateCommit candidate
-      , "Findings: " <> Text.intercalate "; " findings
-      , "Preserved gates: " <> Text.intercalate "; " (remainingGates candidate)
-      ]) $
-      requestOptions label (RepairTask (reviewAssignment task) candidate findings))
+    ((assignment label (RepairTask (reviewAssignment task) candidate findings))
+      { guidance = Just (projectPrompt "repair"), report = Silent })
 
 requestIncorporation
   :: Member Replies effects
-  => AgentRef -> RequestLabel -> Task -> PlanAmendment -> Eff effects (Response Incorporation)
-requestIncorporation recipient label assignment amendment = requestWith recipient $
-  withRequestGuidance (projectPrompt "incorporate" <> "\n" <> taskContext assignment) $
-  requestOptions label (IncorporationTask assignment amendment)
+  => AgentRef -> Label -> Task -> PlanAmendment -> Eff effects (Response Incorporation)
+requestIncorporation recipient label task amendment = requestWith recipient $
+  (assignment label (IncorporationTask task amendment))
+    { guidance = Just (projectPrompt "incorporate"), report = Silent }
 
--- Observe one cumulative question source, forwarding meaningful changes only.
--- The sink owns its scope: combining several sources needs their cumulative union,
--- not publication of each source as if it were the entire component's attention.
-followAttention
-  :: Member Watches effects
-  => Progress Attention -> ProgressCursor -> (Attention -> Eff effects ()) -> Eff effects Route
-followAttention updates cursor sink = follow cursor []
-  where
-    follow after previous = route (awaitProgressAfter updates after) $ \state -> case state of
-      ProgressUpdate next current -> do
-        when (current /= previous) (sink current)
-        void (follow next current)
-      ProgressClosed -> pure ()
-      ProgressRejected failure -> error (show failure)
-      ProgressPending -> error "attention dependency became ready without an observation"
+-- Build a complete packet from evidence already bound in the workbench. Record
+-- updates add alternatives or narrow the unblocked obligation when needed.
+designQuestion :: Task -> Candidate -> Text -> DesignQuestion
+designQuestion task candidate finding = DesignQuestion
+  { questionPlan = planPath task
+  , questionSource = candidateCommit candidate
+  , questionFinding = finding
+  , questionEvidence = checkedCommands candidate
+  , questionAlternatives = []
+  , questionUnblocks = [obligation task]
+  }
 
 consultDesign
   :: (Member Forks effects, Member Replies effects, Member Watches effects, Member AgentInspection effects, Subset CodingEffects effects)
-  => DesignSlot -> DesignQuestion -> Eff effects (Forked DesignAnswer, Watch (Settlement DesignAnswer))
+  => DesignSlot -> DesignQuestion -> Eff effects (Response DesignAnswer, Watch (Settlement DesignAnswer))
 consultDesign slot question = do
   expert <- unfold (specialistGroup slot) $ child $
     withInstructions (projectPrompt "specialist") $ withContext (selected (designContext slot)) $
     withModel (specialistModel slot) $ withEffort (specialistEffort slot) $
-    coding (specialistLabel slot) (atRef (GitRef (questionSource question))) question
-  ready <- watch (specialistWatch slot) (awaitSettledFork expert)
+    coding (atRef (GitRef (renderGitOid (questionSource question))))
+      (assignment (specialistLabel slot) question)
+  ready <- watch (specialistWatch slot) (awaitSettled expert)
   pure (expert, ready)
 
 designContext :: DesignSlot -> DesignQuestion -> Text
 designContext slot question = Text.unlines
   [ "Declared specialist plan: " <> specialistPlan slot
   , "Waiting component: " <> questionPlan question
-  , "Source: " <> questionSource question
+  , "Source: " <> renderGitOid (questionSource question)
   , "Finding: " <> questionFinding question
   , "Evidence: " <> Text.intercalate "; " (questionEvidence question)
   , "Alternatives: " <> Text.intercalate "; " (questionAlternatives question)
   , "Unblocks: " <> Text.intercalate "; " (questionUnblocks question)
   ]
-
-settledValue :: Settlement result -> Either ResponseFailure result
-settledValue (ReplyAvailable answer) = Right (responseValue answer)
-settledValue (ReplyUnavailable failure) = Left failure
