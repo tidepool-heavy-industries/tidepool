@@ -35,7 +35,7 @@ import Tidepool.PreparedRecovery
   , recoverPreparedClosure )
 import Tidepool.PreparedStg
   ( PreparedCoverage(..), PreparedModule(..), RecoveredModuleFailure(..)
-  , prepareModule, unelaboratedModule )
+  , newPreparedBodyCache, prepareModule, unelaboratedModule )
 
 assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
@@ -80,7 +80,8 @@ main = do
     closure <- liftIO $ do
       cache <- newFatIfaceCache
       ownerCache <- newOwnerInterfaceCache
-      recoverPreparedClosure hsc cache ownerCache context modules
+      bodyCache <- newPreparedBodyCache
+      recoverPreparedClosure hsc cache ownerCache bodyCache context modules
     liftIO $ assert (any recoveredFst (closureModules closure))
       "closure did not retain the newly prepared defining module for fst"
     liftIO $ assert (all (not . namedResidual) (closureFailures closure))
@@ -167,7 +168,8 @@ main = do
       let hiddenContext = context { projectionEntry = hiddenEntry }
       cache <- newFatIfaceCache
       ownerCache <- newOwnerInterfaceCache
-      closure <- recoverPreparedClosure hsc cache ownerCache hiddenContext [hidden]
+      bodyCache <- newPreparedBodyCache
+      closure <- recoverPreparedClosure hsc cache ownerCache bodyCache hiddenContext [hidden]
       let isTextShow owner = moduleNameString (moduleName owner) == "Data.Text.Show"
           preparedTextShow = [ prepared
             | prepared <- closureModules closure, isTextShow (pmModule prepared) ]

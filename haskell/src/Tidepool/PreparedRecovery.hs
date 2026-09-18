@@ -30,7 +30,8 @@ import Tidepool.ExecutionProjection
   , reachableTopUniques, topBinders )
 import Tidepool.FatIface (FatIfaceCache, FatIfaceMissing, OwnerInterfaceCache)
 import Tidepool.PreparedStg
-  (PreparedModule(..), RecoveredModuleFailure(..), prepareRecoveredBodies)
+  ( PreparedBodyCache, PreparedModule(..), RecoveredModuleFailure(..)
+  , prepareRecoveredBodies )
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
 import Tidepool.PreparedBuiltins (deferredFunction, wiredInErrorKind)
 import Tidepool.Timing (emitPhase, readTimingEnabled, timeSection)
@@ -72,21 +73,35 @@ data RecoveredClosure = RecoveredClosure
   , closureFailures :: [RecoveryFailure]
   }
 
+-- | Diagnostic split of 'prepared_recover' (flat sub-phases, summed over
+-- rounds): per-module fact computation, reference collection, body lookup,
+-- and defining-module preparation, plus the round and preparation counts.
+data Spent = Spent
+  { spentFacts :: !Integer
+  , spentRefs :: !Integer
+  , spentLookup :: !Integer
+  , spentPrepare :: !Integer
+  , spentRounds :: !Integer
+  , spentPreparations :: !Integer
+  }
+
 -- | Reprepare only defining modules whose exact body set grows. Attempted
 -- names include typed failures, so unavailable bodies terminate the worklist
 -- without a retry limit. New CorePrep references re-enter this same loop.
 --
--- 'cache' (fat-interface Core, keyed by defining module) and 'ownerCache'
--- (an owner's already-read-and-typechecked defining interface; see
--- 'Tidepool.PreparedStg.prepareRecoveredBodies') are both caller-owned so a
+-- 'cache' (fat-interface Core, keyed by defining module), 'ownerCache'
+-- (an owner's already-read-and-typechecked defining interface) and
+-- 'bodyCache' (the prepared bodies themselves; see
+-- 'Tidepool.PreparedStg.prepareRecoveredBodies') are all caller-owned so a
 -- resident daemon can hoist them to daemon lifetime across requests, with
 -- eviction at the request boundary for a request's own target module and any
 -- @Tidepool.Session.*@ module (see 'Tidepool.GhcPipeline.registerResidentEvictionHook'
 -- and its call site in app/Main.hs); a one-shot invocation instead passes a
 -- fresh cache created just for this call.
 recoverPreparedClosure :: HscEnv -> FatIfaceCache -> OwnerInterfaceCache
-  -> ProjectionContext -> [PreparedModule] -> IO RecoveredClosure
-recoverPreparedClosure env cache ownerCache context home = do
+  -> PreparedBodyCache -> ProjectionContext -> [PreparedModule]
+  -> IO RecoveredClosure
+recoverPreparedClosure env cache ownerCache bodyCache context home = do
   timing <- readTimingEnabled
   -- Per-module facts (external references per group, raw references per
   -- top) are pure in 'context' and a module's own bindings. Home modules
@@ -114,15 +129,22 @@ recoverPreparedClosure env cache ownerCache context home = do
             kept binding = any ((`elementOfUniqSet` reachable) . varUnique) (topBinders binding)
         in combinePreparedTargetReferences context kept
              [(prepared, references) | (prepared, (references, _)) <- entries]
-  -- Diagnostic split of 'prepared_recover' (flat sub-phases, summed over
-  -- rounds): reference collection, body lookup, defining-module preparation.
-  spent <- newIORef (0 :: Integer, 0 :: Integer, 0 :: Integer, 0 :: Integer, 0 :: Integer)
+  spent <- newIORef (Spent 0 0 0 0 0 0)
   let homeOwners = Set.fromList (map pmModule home)
       charge f = modifyIORef' spent f
       go attempted groups prepared failures = do
         let modules = home ++ Map.elems prepared
+        -- Forced here rather than left to 'roundReferences': the per-module
+        -- facts are the memoized half of this phase and the round-invariant
+        -- one, so charging them separately is what says whether a round costs
+        -- what it discovers or what it re-walks.
+        (recovered, factsMs) <- timeSection $ do
+          entries <- mapM (\m -> (,) m <$> factsFor m) (Map.elems prepared)
+          mapM_ (\(_, (references, reach)) -> do
+            _ <- evaluate (sum (map length (Map.elems references)))
+            evaluate (sum (map (length . snd) reach))) entries
+          pure entries
         (references, refsMs) <- timeSection $ do
-          recovered <- mapM (\m -> (,) m <$> factsFor m) (Map.elems prepared)
           refs <- evaluate (roundReferences modules recovered)
           _ <- evaluate (length refs)
           when checking $ do
@@ -131,13 +153,17 @@ recoverPreparedClosure env cache ownerCache context home = do
               throwIO (userError ("recovery reachability diverged from identity selection: "
                 ++ show (length refs) ++ " vs " ++ show (length expected) ++ " references"))
           pure refs
-        charge (\(r, l, p, n, d) -> (r + refsMs, l, p, n + 1, d))
+        charge (\s -> s { spentFacts = spentFacts s + factsMs
+                        , spentRefs = spentRefs s + refsMs
+                        , spentRounds = spentRounds s + 1 })
         let pending = filter (\binder -> not (Set.member (varName binder) attempted)
                 && typePrimRep_maybe (idType binder) /= Just [])
               references
         if null pending
           then do
-            (refsTotal, lookupTotal, prepareTotal, rounds, preparedModules) <- readIORef spent
+            Spent factsTotal refsTotal lookupTotal prepareTotal rounds preparedModules
+              <- readIORef spent
+            emitPhase timing "prepared_recover_facts" factsTotal
             emitPhase timing "prepared_recover_refs" refsTotal
             emitPhase timing "prepared_recover_lookup" lookupTotal
             emitPhase timing "prepared_recover_prepare" prepareTotal
@@ -149,8 +175,10 @@ recoverPreparedClosure env cache ownerCache context home = do
               (lookupOne cache homeOwners) (groups, Set.empty, failures) pending
             ((nextPrepared, finalFailures), prepareMs) <- timeSection $ foldM
               (prepareOne nextGroups) (prepared, nextFailures) (Set.toAscList dirty)
-            charge (\(r, l, p, n, d) ->
-              (r, l + lookupMs, p + prepareMs, n, d + fromIntegral (Set.size dirty)))
+            charge (\s -> s { spentLookup = spentLookup s + lookupMs
+                            , spentPrepare = spentPrepare s + prepareMs
+                            , spentPreparations =
+                                spentPreparations s + fromIntegral (Set.size dirty) })
             go (Set.union attempted (Set.fromList (map varName pending)))
               nextGroups nextPrepared finalFailures
       lookupOne _cacheRef homeOwnersRef (groups, dirty, failures) binder
@@ -177,7 +205,8 @@ recoverPreparedClosure env cache ownerCache context home = do
               UnsupportedBodyCapability name ->
                 (groups, dirty, failures ++ [UnsupportedExternalCapability name])
       prepareOne groups (prepared, failures) owner = do
-        result <- prepareRecoveredBodies env ownerCache owner (Map.findWithDefault [] owner groups)
+        result <- prepareRecoveredBodies env ownerCache bodyCache owner
+          (Map.findWithDefault [] owner groups)
         case result of
           Right modul -> do
             -- The module's pmBindings just changed; the memoized per-module
