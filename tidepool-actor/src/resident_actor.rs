@@ -559,8 +559,29 @@ fn record_workbench_operation(
     input_unit_index: usize,
     effect_ordinal: usize,
     effect: &str,
+    elapsed: std::time::Duration,
     disposition: WorkbenchOperationDisposition,
 ) {
+    // Every effect boundary funnels through here to record its outcome —
+    // this is the one place, not the many `resolve_effect`/`resolve_command`
+    // arms above, that "no effect type can go untraced" is enforced. A
+    // hosted tool call's effects (`execution` is `Some`) get their "effect
+    // settled" line later, batched with the rest of the cell's receipt (see
+    // the loop over `item.operations` in `execute_workbench`). An S1 slot's
+    // own effects (`execution` is `None`: a slot invocation is not itself a
+    // call the provider sees, so that later batching never runs for it)
+    // would otherwise report nothing at all past "effect boundary
+    // captured" — so they get their settlement, with timing, right here.
+    if execution.is_none() {
+        tracing::info!(
+            input_unit_index,
+            ordinal = effect_ordinal,
+            effect = %effect,
+            elapsed_ms = elapsed.as_millis(),
+            disposition = ?disposition,
+            "effect settled"
+        );
+    }
     let Some(execution) = execution else {
         return;
     };
@@ -2404,9 +2425,35 @@ where
                 request,
             } => Box::pin(async move {
                 let backend = Arc::clone(&self.environment.jev);
+                // The packet is opaque JSON from here: `Jev.Operators` on the
+                // Haskell side already carries the questions, labels and
+                // (on the way back) likelihoods. Full bodies are debug-only
+                // and bounded; `info` stays one compact line either way.
+                tracing::debug!(
+                    actor = %context.actor,
+                    packet = %crate::workbench_display::bounded_output(&request, 4096),
+                    "jev call packet"
+                );
+                let started = std::time::Instant::now();
                 let answer = backend.ask(request).await;
-                if let Err(failure) = &answer {
-                    tracing::info!(actor = ?context.actor, ?failure, "jev call failed");
+                let elapsed_ms = started.elapsed().as_millis();
+                match &answer {
+                    Ok(body) => {
+                        tracing::debug!(
+                            actor = %context.actor,
+                            answer = %crate::workbench_display::bounded_output(body, 4096),
+                            "jev call answer"
+                        );
+                        tracing::info!(actor = %context.actor, elapsed_ms, "jev call answered");
+                    }
+                    Err(failure) => {
+                        tracing::info!(
+                            actor = %context.actor,
+                            ?failure,
+                            elapsed_ms,
+                            "jev call failed"
+                        );
+                    }
                 }
                 self.environment
                     .runner
@@ -3410,6 +3457,21 @@ where
                 target,
                 message,
             } => Box::pin(async move {
+                // A slot's own effects never trigger a slot (see
+                // `annotate_tool_result`), but a slot's `Notifications` send
+                // — a watchdog escalating to its parent, in the shipped
+                // worked example — is exactly the judgment this actor made
+                // and otherwise leaves no trace beyond the recipient's inbox.
+                // `context.actor` here is the child the slot ran on; `target`
+                // is who it escalated to.
+                if self.after_tool_active {
+                    tracing::info!(
+                        actor = %context.actor,
+                        target = %target,
+                        reason = %crate::workbench_display::bounded_output(&message, 1024),
+                        "after-tool slot sent an actor notification"
+                    );
+                }
                 let permitted = self
                     .descriptor
                     .effective_role()
@@ -4863,6 +4925,11 @@ where
                     );
                     let ordinal = effect_ordinal;
                     effect_ordinal += 1;
+                    // Timed from here, not from `capture_boundary` above:
+                    // this brackets the boundary's own service work, which
+                    // is what `record_workbench_operation` reports as
+                    // `elapsed_ms` once the match below settles it.
+                    let effect_started = std::time::Instant::now();
                     // The effect level. The boundary's own service work is
                     // spread across the match below, so this is an event on
                     // the input-unit span rather than a span of its own;
@@ -4886,6 +4953,7 @@ where
                                     unit.input_unit_index,
                                     ordinal,
                                     &effect,
+                                    effect_started.elapsed(),
                                     WorkbenchOperationDisposition::Committed,
                                 );
                                 return Ok(ResidentWorkbenchStep::Replied {
@@ -4900,6 +4968,7 @@ where
                                     unit.input_unit_index,
                                     ordinal,
                                     &effect,
+                                    effect_started.elapsed(),
                                     WorkbenchOperationDisposition::Rejected,
                                 );
                                 drop(attempt.result);
@@ -4922,6 +4991,7 @@ where
                                     unit.input_unit_index,
                                     ordinal,
                                     &effect,
+                                    effect_started.elapsed(),
                                     WorkbenchOperationDisposition::Rejected,
                                 );
                                 drop(attempt.result);
@@ -4945,6 +5015,7 @@ where
                                         unit.input_unit_index,
                                         ordinal,
                                         &effect,
+                                        effect_started.elapsed(),
                                         WorkbenchOperationDisposition::Committed,
                                     );
                                     return Ok(ResidentWorkbenchStep::CancellationAcknowledged {
@@ -4958,6 +5029,7 @@ where
                                         unit.input_unit_index,
                                         ordinal,
                                         &effect,
+                                        effect_started.elapsed(),
                                         WorkbenchOperationDisposition::Rejected,
                                     );
                                     outcome = self
@@ -4979,6 +5051,7 @@ where
                                         unit.input_unit_index,
                                         ordinal,
                                         &effect,
+                                        effect_started.elapsed(),
                                         WorkbenchOperationDisposition::Rejected,
                                     );
                                     return Ok(ResidentWorkbenchStep::Rejected(
@@ -5136,6 +5209,7 @@ where
                                         unit.input_unit_index,
                                         ordinal,
                                         &effect,
+                                        effect_started.elapsed(),
                                         command_disposition
                                             .unwrap_or(WorkbenchOperationDisposition::Committed),
                                     );
@@ -5151,6 +5225,7 @@ where
                                         unit.input_unit_index,
                                         ordinal,
                                         &effect,
+                                        effect_started.elapsed(),
                                         command_disposition
                                             .unwrap_or(WorkbenchOperationDisposition::Committed),
                                     );
@@ -5165,6 +5240,7 @@ where
                                         unit.input_unit_index,
                                         ordinal,
                                         &effect,
+                                        effect_started.elapsed(),
                                         command_disposition.unwrap_or_else(|| {
                                             disposition_for_non_command_failure(&error)
                                         }),
@@ -5221,152 +5297,191 @@ where
         let provenance = tools.provenance();
         let revision = tools.revision.clone().unwrap_or_else(|| "(run)".to_owned());
         let ordinal = self.after_tool.begin();
-        // The handle is chosen before the slot runs, because the slot is shown
-        // it and names it back when it prunes. It is defined only if the slot
-        // actually prunes.
-        let handle = format!("toolResult{ordinal}");
-        let payload = serde_json::json!({
-            "call": { "name": call.name, "arguments": call.arguments },
-            "result": { "name": call.name, "handle": handle, "output": output },
-        });
-        let started = std::time::Instant::now();
-        let wait = crate::after_tool::wait();
-        let observation = self.runtime_observation.clone();
-        // What is parked before the slot runs, so a slot that is cut off can
-        // have exactly its own suspended turn aborted and nothing else.
-        let parked_before = workbench
-            .parked_continuations(context.clone())
-            .await
-            .unwrap_or_default();
-        self.after_tool_active = true;
-        let answer = {
-            let slot = self.run_after_tool(
-                kernel,
-                context,
-                workbench,
-                dispatch,
-                call.name.clone(),
-                payload,
-            );
-            tokio::pin!(slot);
-            let expiry = tokio::time::sleep(wait);
-            tokio::pin!(expiry);
-            let mut progress = tokio::time::interval_at(
-                tokio::time::Instant::now() + crate::after_tool::AFTER_TOOL_PROGRESS,
-                crate::after_tool::AFTER_TOOL_PROGRESS,
-            );
-            loop {
-                tokio::select! {
-                    biased;
-                    settled = &mut slot => break Some(settled),
-                    () = &mut expiry => break None,
-                    _ = progress.tick() => observation.publish_workbench_posture(
-                        crate::ActorWorkbenchPosture::AwaitingEffect {
-                            input_unit_index: 0,
-                            total: 1,
-                            effect: format!(
-                                "after-tool slot, {}s elapsed",
-                                started.elapsed().as_secs()
-                            ),
-                        },
-                    ),
-                }
-            }
-        };
-        self.after_tool_active = false;
-        let elapsed = started.elapsed();
-        if answer.is_none() {
-            // Nobody is driving the slot any more, so an effect it is
-            // suspended on would never be answered and its turn would hold
-            // the machine against the next call.
-            match workbench
-                .abort_parked_since(
-                    context.clone(),
-                    parked_before,
-                    "after-tool slot ran out of time".into(),
-                )
+        // The span every Jev call and effect a slot makes is attributed to:
+        // which slot, the tool call that triggered it, the actor it ran on,
+        // and the spec revision it was compiled from. `elapsed_ms` is filled
+        // in once the slot settles.
+        let slot_span = tracing::info_span!(
+            "after_tool_slot",
+            slot = %crate::after_tool::AFTER_TOOL_SLOT,
+            tool = %call.name,
+            actor = %context.actor,
+            revision = %revision,
+            ordinal,
+            elapsed_ms = tracing::field::Empty,
+        );
+        async {
+            // The handle is chosen before the slot runs, because the slot is shown
+            // it and names it back when it prunes. It is defined only if the slot
+            // actually prunes.
+            let handle = format!("toolResult{ordinal}");
+            let payload = serde_json::json!({
+                "call": { "name": call.name, "arguments": call.arguments },
+                "result": { "name": call.name, "handle": handle, "output": output },
+            });
+            let started = std::time::Instant::now();
+            let wait = crate::after_tool::wait();
+            let observation = self.runtime_observation.clone();
+            // What is parked before the slot runs, so a slot that is cut off can
+            // have exactly its own suspended turn aborted and nothing else.
+            let parked_before = workbench
+                .parked_continuations(context.clone())
                 .await
-            {
-                Ok(aborted) => tracing::info!(
-                    actor = %context.actor,
-                    ordinal,
-                    aborted,
-                    "after-tool slot cut off; its suspended turn was aborted"
-                ),
-                Err(error) => tracing::warn!(
-                    actor = %context.actor,
-                    ordinal,
-                    %error,
-                    "after-tool slot cut off and its suspended turn could not be aborted"
-                ),
-            }
-        }
-        let (delivered, disposition) = match answer {
-            None => {
-                let reason = format!(
-                    "no answer within {}",
-                    crate::after_tool::describe_wait(wait)
+                .unwrap_or_default();
+            self.after_tool_active = true;
+            let answer = {
+                let slot = self.run_after_tool(
+                    kernel,
+                    context,
+                    workbench,
+                    dispatch,
+                    call.name.clone(),
+                    payload,
                 );
-                let notice = self.after_tool.notice(ordinal, &reason);
-                (
-                    crate::after_tool::failed(&output, &notice),
-                    Disposition::TimedOut(wait),
-                )
-            }
-            Some(Err(error)) => {
-                let reason = crate::after_tool::compact_reason(&error.to_string());
-                let notice = self.after_tool.notice(ordinal, &reason);
-                (
-                    crate::after_tool::failed(&output, &notice),
-                    Disposition::Failed(reason),
-                )
-            }
-            Some(Ok(Annotation::Nothing)) => (output, Disposition::Silent),
-            // Silent to the model. It never asked for a judgement on this
-            // result, and a non-decision is not a refusal to announce.
-            Some(Ok(Annotation::Abstained(reason))) => (output, Disposition::Abstained(reason)),
-            Some(Ok(Annotation::Annotated(text))) => (
-                crate::after_tool::annotated(&output, &text, &revision),
-                Disposition::Annotated,
-            ),
-            Some(Ok(Annotation::Pruned { text, .. })) => {
-                match workbench
-                    .bind_tool_result(context.clone(), handle.clone(), output.clone())
-                    .await
-                {
-                    Ok(()) => (
-                        crate::after_tool::pruned(&text, &handle, &revision),
-                        Disposition::Pruned(handle),
-                    ),
-                    // A selection whose whole is unreachable would be a
-                    // rewrite, so the original is delivered instead.
-                    Err(error) => {
-                        let reason = crate::after_tool::compact_reason(&error.to_string());
-                        let notice = self.after_tool.notice(ordinal, &reason);
-                        (
-                            crate::after_tool::failed(&output, &notice),
-                            Disposition::Failed(reason),
-                        )
+                tokio::pin!(slot);
+                let expiry = tokio::time::sleep(wait);
+                tokio::pin!(expiry);
+                let mut progress = tokio::time::interval_at(
+                    tokio::time::Instant::now() + crate::after_tool::AFTER_TOOL_PROGRESS,
+                    crate::after_tool::AFTER_TOOL_PROGRESS,
+                );
+                loop {
+                    tokio::select! {
+                        biased;
+                        settled = &mut slot => break Some(settled),
+                        () = &mut expiry => break None,
+                        _ = progress.tick() => observation.publish_workbench_posture(
+                            crate::ActorWorkbenchPosture::AwaitingEffect {
+                                input_unit_index: 0,
+                                total: 1,
+                                effect: format!(
+                                    "after-tool slot, {}s elapsed",
+                                    started.elapsed().as_secs()
+                                ),
+                            },
+                        ),
                     }
                 }
+            };
+            self.after_tool_active = false;
+            let elapsed = started.elapsed();
+            tracing::Span::current().record("elapsed_ms", elapsed.as_millis() as u64);
+            if answer.is_none() {
+                // Nobody is driving the slot any more, so an effect it is
+                // suspended on would never be answered and its turn would hold
+                // the machine against the next call.
+                match workbench
+                    .abort_parked_since(
+                        context.clone(),
+                        parked_before,
+                        "after-tool slot ran out of time".into(),
+                    )
+                    .await
+                {
+                    Ok(aborted) => tracing::info!(
+                        actor = %context.actor,
+                        ordinal,
+                        aborted,
+                        "after-tool slot cut off; its suspended turn was aborted"
+                    ),
+                    Err(error) => tracing::warn!(
+                        actor = %context.actor,
+                        ordinal,
+                        %error,
+                        "after-tool slot cut off and its suspended turn could not be aborted"
+                    ),
+                }
             }
-        };
-        tracing::info!(
-            actor = %context.actor,
-            tool = %call.name,
-            ordinal,
-            elapsed_ms = elapsed.as_millis(),
-            disposition = ?disposition,
-            "after-tool slot invoked"
-        );
-        self.after_tool.record(Invocation {
-            ordinal,
-            tool: call.name.clone(),
-            elapsed,
-            provenance,
-            disposition,
-        });
-        delivered
+            // `outcome_detail` is the one bounded line of reason text a compact
+            // `info` event can carry for whichever the outcome was: nothing said
+            // (empty), a nudge written straight onto the child's own result, a
+            // selection, or a failure. An escalation's own detail — the tripped
+            // heuristics and the parent it went to — is traced separately where
+            // the `Notifications` send happens, gated on `after_tool_active`.
+            let (delivered, disposition, outcome_detail) = match answer {
+                None => {
+                    let reason = format!(
+                        "no answer within {}",
+                        crate::after_tool::describe_wait(wait)
+                    );
+                    let notice = self.after_tool.notice(ordinal, &reason);
+                    (
+                        crate::after_tool::failed(&output, &notice),
+                        Disposition::TimedOut(wait),
+                        reason,
+                    )
+                }
+                Some(Err(error)) => {
+                    let reason = crate::after_tool::compact_reason(&error.to_string());
+                    let notice = self.after_tool.notice(ordinal, &reason);
+                    (
+                        crate::after_tool::failed(&output, &notice),
+                        Disposition::Failed(reason.clone()),
+                        reason,
+                    )
+                }
+                Some(Ok(Annotation::Nothing)) => (output, Disposition::Silent, String::new()),
+                // Silent to the model. It never asked for a judgement on this
+                // result, and a non-decision is not a refusal to announce.
+                Some(Ok(Annotation::Abstained(reason))) => {
+                    let detail = reason.clone();
+                    (output, Disposition::Abstained(reason), detail)
+                }
+                Some(Ok(Annotation::Annotated(text))) => {
+                    let detail = crate::after_tool::compact_reason(&text);
+                    (
+                        crate::after_tool::annotated(&output, &text, &revision),
+                        Disposition::Annotated,
+                        detail,
+                    )
+                }
+                Some(Ok(Annotation::Pruned { text, .. })) => {
+                    match workbench
+                        .bind_tool_result(context.clone(), handle.clone(), output.clone())
+                        .await
+                    {
+                        Ok(()) => {
+                            let detail = crate::after_tool::compact_reason(&text);
+                            (
+                                crate::after_tool::pruned(&text, &handle, &revision),
+                                Disposition::Pruned(handle),
+                                detail,
+                            )
+                        }
+                        // A selection whose whole is unreachable would be a
+                        // rewrite, so the original is delivered instead.
+                        Err(error) => {
+                            let reason = crate::after_tool::compact_reason(&error.to_string());
+                            let notice = self.after_tool.notice(ordinal, &reason);
+                            (
+                                crate::after_tool::failed(&output, &notice),
+                                Disposition::Failed(reason.clone()),
+                                reason,
+                            )
+                        }
+                    }
+                }
+            };
+            tracing::info!(
+                actor = %context.actor,
+                tool = %call.name,
+                ordinal,
+                elapsed_ms = elapsed.as_millis(),
+                disposition = ?disposition,
+                detail = %outcome_detail,
+                "after-tool slot invoked"
+            );
+            self.after_tool.record(Invocation {
+                ordinal,
+                tool: call.name.clone(),
+                elapsed,
+                provenance,
+                disposition,
+            });
+            delivered
+        }
+        .instrument(slot_span)
+        .await
     }
 
     /// One slot invocation, in the actor's own resident machine: the retained
