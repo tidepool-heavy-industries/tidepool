@@ -131,3 +131,66 @@ defeats the point of shipping reusable project code for the next run to build on
 
 Wanted: `lookup` resolves names exported by workspace modules, and `doc` lists
 each authored module alongside the built-in topics.
+
+## 11. Shoal session launch is single-tenant per workspace, not per session name
+
+    Error: Custom { kind: Other, error: "Shoal host failed: tidepool storage
+    failure at .../actor-worktrees/2d9a56b8.../bindings/.owner.lock: another
+    process already owns this binding root; stop its Shoal session and wait
+    for shutdown before launching again (ownership was not changed); session
+    \"lab7\" retained for inspection; native execution may still be running." }
+
+Launching `lab7` against `--workspace $HOME/dev/shoal-evals/tui-test-app`
+failed immediately: lab5 already held the binding root for that same
+workspace path. lab6 and lab8 failed with the identical error at nearly the
+same timestamp. The lock is keyed on the workspace's worktree-binding hash,
+not on the `--session` name, so several distinctly-named sessions cannot run
+concurrently against one shared `--workspace` directory; only one Shoal
+session can be live against it at a time. A breadth survey that fans workers
+out with distinct session names but a shared workspace path will serialize
+at launch, not at the model layer, and workers 6/7/8 (at minimum) lost their
+launch attempt entirely with no cell run. Waiting for lab5 to end and
+retrying is the only path found; there is no `--workspace` isolation or
+queueing.
+
+## 12. A cell-level declaration silently collides with a stdlib name
+
+    <cell>:68:9-14: error: Ambiguous occurrence `route'.
+    It could refer to either `Tidepool.Actors.Shoal.route', imported from
+    `Tidepool.Actors.Shoal' ... or `Tidepool.Session.Lib.G12.route',
+    defined at <cell>:30:1.
+
+`route` is an ordinary word and an obvious name for a function that routes
+something. Nothing warns at declaration time; the collision surfaces at the
+first *use*, three lines from the bottom of a long cell, and the message names
+a generated module so it reads as an engine fault rather than a name clash.
+Declaring a name that shadows an import should either be accepted with the
+local winning, as GHCi does, or refused at the declaration with the suggestion
+to rename.
+
+## 13. The display budget is consumed by evidence, so a working cell fails at three items
+
+A cell that routed one artifact rendered its result. The same cell over three
+artifacts rendered `Array [String "4610b5` and stopped, having spent its
+allowance on the states it had already sent to the model. The budget is
+per-cell, not per-session: a one-line cell submitted immediately afterwards
+displayed fine.
+
+The failure mode is bad because the cell *succeeded* — it committed, the model
+calls were made and paid for, and the answers are simply not visible. Nothing
+says which binding consumed the allowance, and the obvious repairs (projecting
+a smaller result, shortening the returned strings) do not help, because the
+cost is in the evidence rather than the result. `Cmd.quiet` helps and is not
+mentioned anywhere near the relevant advice.
+
+Wanted: say what consumed the budget, and count a value sent to Jev separately
+from a value displayed.
+
+## 14. Truncating a check log from the front removes every diagnostic
+
+Mine, not the engine's, but worth recording because it will happen to anyone.
+`T.take 2500` of a `check.sh` log yields nix warnings and cargo progress; the
+compiler diagnostics are at the end. A packet built that way asked a model
+about preamble, and the model correctly answered that it contained no
+diagnostics, which looked like a model failure and was not. Filter to
+diagnostic lines, or take the tail.
