@@ -22,6 +22,7 @@
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
+mod conversation;
 mod descriptor;
 mod external_application;
 mod fork_workspace;
@@ -60,6 +61,7 @@ mod wait;
 mod workbench_display;
 pub use workbench_display::bounded_output as bound_workbench_display;
 
+pub use conversation::{ConversationFuture, ConversationReader, ConversationUnavailable};
 pub use descriptor::ActorDescriptor;
 pub use external_application::{
     ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,

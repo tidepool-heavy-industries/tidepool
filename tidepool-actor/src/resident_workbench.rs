@@ -1047,6 +1047,12 @@ pub(crate) enum ResidentActorBoundary {
     },
     AgentInspect(AgentInspectionBoundary),
     AgentList(ResidentHole),
+    /// The caller's own recent conversation. It carries no actor argument:
+    /// the boundary reads the executing actor's conversation or none.
+    ReflectConversation {
+        continuation: ResidentHole,
+        count: i64,
+    },
     AgentShareObservation {
         continuation: ResidentHole,
         recipient: crate::ActorRef,
@@ -1192,6 +1198,7 @@ impl ResidentActorBoundary {
             },
             Self::AgentInspect(_) => "observeAgent",
             Self::AgentList(_) => "listAgents",
+            Self::ReflectConversation { .. } => "reflect",
             Self::AgentShareObservation { .. } => "shareObservation",
             Self::AgentGroupList { .. } => "observeForkGroup",
             Self::AgentForget(_) => "forgetAgent",
@@ -1301,6 +1308,7 @@ enum ResidentRequest {
     ActorLocal(crate::generated::actor_local::ActorLocalReq),
     AgentTools(crate::generated::agent_tools::AgentToolsReq),
     AgentSession(crate::generated::agent_session::AgentSessionReq),
+    Reflect(crate::generated::reflect::ReflectReq),
     Replies(RepliesReq),
     Watches(WatchesReq),
 }
@@ -1372,6 +1380,7 @@ impl ResidentRequest {
             Self::AgentSession,
             crate::generated::agent_session::AgentSessionReq
         );
+        try_member!(Self::Reflect, crate::generated::reflect::ReflectReq);
         try_member!(Self::Replies, RepliesReq);
         try_member!(Self::Watches, WatchesReq);
 
@@ -1398,6 +1407,7 @@ impl ResidentRequest {
             Self::ActorContext(
                 crate::generated::actor_context::ActorContextReq::ActorContextWith,
             ) => "actorContext",
+            Self::Reflect(crate::generated::reflect::ReflectReq::ReflectWith(..)) => "reflect",
             Self::AgentControl(
                 crate::generated::agent_control::AgentControlReq::AgentControlStopWith(..),
             ) => "stopAgent",
@@ -3414,6 +3424,12 @@ where
                     ResidentRequest::AgentInspection(
                         crate::generated::agent_inspection::AgentInspectionReq::AgentListWith,
                     ) => Ok(ResidentActorBoundary::AgentList(hole)),
+                    ResidentRequest::Reflect(
+                        crate::generated::reflect::ReflectReq::ReflectWith(count),
+                    ) => Ok(ResidentActorBoundary::ReflectConversation {
+                        continuation: hole,
+                        count,
+                    }),
                     ResidentRequest::AgentInspection(crate::generated::agent_inspection::AgentInspectionReq::AgentShareObservationWith(recipient, scope)) => Ok(ResidentActorBoundary::AgentShareObservation {
                         continuation: hole,
                         recipient: crate::wait::decode_address(recipient.0, recipient.1)?,

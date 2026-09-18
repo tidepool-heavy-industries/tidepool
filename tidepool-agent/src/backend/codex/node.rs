@@ -23,13 +23,15 @@ use crate::{
     InteractiveNativeSandbox, InteractiveNativeToolPolicy, InteractivePolicyMount,
     QueueReadyThread, ReasoningEffort,
 };
-use tidepool_model::ProviderObservation;
+use tidepool_model::{ConversationTurn, ProviderObservation};
 
 #[path = "active_update.rs"]
 mod active_update;
 #[allow(dead_code)]
 #[path = "input_control.rs"]
 mod input_control;
+#[path = "rollout_conversation.rs"]
+mod rollout_conversation;
 #[path = "rollout_usage.rs"]
 mod rollout_usage;
 
@@ -388,6 +390,24 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
         })
     }
 
+    fn conversation<'a>(
+        &'a self,
+        thread: &'a QueueReadyThread,
+        count: usize,
+    ) -> InteractiveFuture<'a, Option<Vec<ConversationTurn>>> {
+        let sessions = super::isolation::codex_home().join("sessions");
+        let thread = thread.id().0.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                read_rollout_conversation(&sessions, &thread, count)
+            })
+            .await
+            .map_err(|error| AgentBackendError::BackendUnavailable {
+                detail: format!("Codex conversation reader task failed: {error}"),
+            })?
+        })
+    }
+
     fn archive<'a>(
         &'a self,
         cwd: &'a str,
@@ -395,6 +415,23 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
     ) -> InteractiveFuture<'a, ()> {
         Box::pin(archive_thread(&self.installation, Path::new(cwd), thread))
     }
+}
+
+/// `None` means this conversation has no durable rollout to read, which is not
+/// the same answer as a conversation whose completed turns are none.
+fn read_rollout_conversation(
+    sessions: &Path,
+    thread: &str,
+    count: usize,
+) -> Result<Option<Vec<ConversationTurn>>, AgentBackendError> {
+    let Some(path) = find_rollout(sessions, thread, 4)? else {
+        return Ok(None);
+    };
+    let file = std::fs::File::open(&path)
+        .map_err(|error| unavailable("open Codex rollout for conversation", error))?;
+    rollout_conversation::read_conversation(BufReader::new(file), thread, count)
+        .map(Some)
+        .map_err(|error| unavailable("read Codex rollout conversation", error))
 }
 
 fn read_rollout_usage(

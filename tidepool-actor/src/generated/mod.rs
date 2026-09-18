@@ -15,4 +15,5 @@ pub mod forks;
 pub mod introspection;
 pub mod jev;
 pub mod notifications;
+pub mod reflect;
 pub mod sleep;

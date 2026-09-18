@@ -135,6 +135,7 @@ pub fn forks() -> Effect {
                         "EffectNotifications",
                         "EffectJev",
                         "EffectActor",
+                        "EffectReflect",
                     ]
                     .into_iter()
                     .map(|ctor| SumVariant {

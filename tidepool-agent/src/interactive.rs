@@ -627,6 +627,19 @@ pub trait InteractiveAgentBackend: Send + Sync {
         Box::pin(async { Ok(None) })
     }
 
+    /// This conversation's last `count` COMPLETED turns, oldest first.
+    ///
+    /// The turn the caller is executing has not completed and is never
+    /// included. `None` means this backend keeps no readable conversation
+    /// record; an empty list means it keeps one with no completed turns yet.
+    fn conversation<'a>(
+        &'a self,
+        _thread: &'a QueueReadyThread,
+        _count: usize,
+    ) -> InteractiveFuture<'a, Option<Vec<tidepool_model::ConversationTurn>>> {
+        Box::pin(async { Ok(None) })
+    }
+
     fn archive<'a>(
         &'a self,
         cwd: &'a str,
