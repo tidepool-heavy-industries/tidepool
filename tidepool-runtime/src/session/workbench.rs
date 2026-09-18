@@ -672,8 +672,8 @@ pub fn classify_workbench_item(source: &str) -> Result<WorkbenchItem, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Pre-GHC source-order detection (astra-fix-waves.md Wave 4 / proposal 5,
-// stage one only — NOT source-order execution, which is a later experiment).
+// Pre-GHC source-order detection (stage one only — NOT source-order
+// execution, which is a later experiment).
 //
 // A notebook cell is split into units and its declaration-kind units are
 // hoisted above its statement-kind units once GHC assembles the checked
@@ -713,9 +713,8 @@ impl SourceOrderCollision {
         format!(
             "declaration `{decl}` (line {decl_line}) uses `{binder}`, but `{binder}` is bound \
              by an earlier statement in this cell (line {stmt_line}). This cell's declarations \
-             are hoisted above its statements, so `{decl}` cannot see `{binder}` there — GHC \
-             will either reject `{binder}` as out of scope, or, if a same-named import is also \
-             in scope, silently bind `{decl}` to that import instead. Put `{decl}`'s declaration \
+             are hoisted above its statements, so `{decl}` cannot see `{binder}` there. If that \
+             is what this failure is about, put `{decl}`'s declaration \
              before the statement that binds `{binder}`, or write it as `let {decl} = ...` \
              inside a statement instead of a top-level declaration.",
             decl = self.declaration_name,
@@ -800,7 +799,9 @@ fn split_source_units(cell_source: &str) -> Vec<SourceUnit> {
                 text: without_comment.trim_end().to_string(),
             });
         } else {
-            let last = units.last_mut().expect("just checked units is non-empty");
+            let Some(last) = units.last_mut() else {
+                continue;
+            };
             last.text.push('\n');
             last.text.push_str(without_comment.trim_end());
         }
@@ -913,7 +914,9 @@ fn split_at_top_level<'a>(text: &'a str, needle: &str) -> Option<(&'a str, &'a s
     let mut escaped = false;
     let mut idx = 0usize;
     while idx < text.len() {
-        let c = text[idx..].chars().next().expect("idx is a char boundary");
+        let Some(c) = text[idx..].chars().next() else {
+            break;
+        };
         if in_string {
             if escaped {
                 escaped = false;
@@ -1030,7 +1033,9 @@ fn lowercase_identifier_tokens(text: &str) -> Vec<&str> {
     let mut in_string = false;
     let mut escaped = false;
     while idx < text.len() {
-        let c = text[idx..].chars().next().expect("idx is a char boundary");
+        let Some(c) = text[idx..].chars().next() else {
+            break;
+        };
         if in_string {
             if escaped {
                 escaped = false;

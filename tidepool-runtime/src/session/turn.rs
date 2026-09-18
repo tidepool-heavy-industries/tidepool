@@ -1290,8 +1290,9 @@ fn is_command_result_stream_mismatch(message: &str) -> bool {
         && (names_quoted(message, "stdout") || names_quoted(message, "stderr"))
 }
 
-const STRING_TEXT_ADVICE: &str = "the stdlib is Text-first; a string literal here is already \
-    `Text`, not `String`/`[Char]` — pass it as written rather than converting it.";
+const STRING_TEXT_ADVICE: &str = "the stdlib is Text-first. A string literal is already \
+    `Text`, so pass it as written; a `String` value, such as the result of `show`, needs \
+    `T.pack`, and a `Text` going where `String` is wanted needs `T.unpack`.";
 
 /// `[Char]`/`String` vs `Text` at an argument of a stdlib function. Narrow:
 /// requires an actual "Couldn't match" block naming both `Text` and one of
