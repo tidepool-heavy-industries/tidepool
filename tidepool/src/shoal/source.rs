@@ -519,6 +519,23 @@ mod tests {
         assert!(std::fs::read_to_string(include[0].join("Project/Work.hs"))
             .unwrap()
             .contains("work = 2"));
+
+        // Compile-time provenance travels with the revision: the generated
+        // module on the search path names the snapshot that built whatever
+        // imports it.
+        let generated = std::fs::read_to_string(
+            include
+                .last()
+                .expect("the revision's resources are on the search path")
+                .join(REVISION_MODULE),
+        )
+        .unwrap();
+        assert!(
+            generated.contains(&published.identity),
+            "{generated}\n{}",
+            published.identity
+        );
+
         // …and the run still loads, which is the tamper check passing.
         FrozenWorkspace::load(project.path(), run.path()).unwrap();
     }
