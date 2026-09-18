@@ -178,6 +178,23 @@ fn test_lines() {
     assert_eq!(run_plain(r#"T.lines "a\nb\nc""#), json!(["a", "b", "c"]));
 }
 
+// --- Rendering ---
+
+#[test]
+fn test_tshow_int() {
+    assert_eq!(run_plain(r#"tshow (42 :: Int)"#), json!("42"));
+}
+
+#[test]
+fn test_tshow_matches_show() {
+    // tshow is the Text-returning twin of show (== pack . show), backed by
+    // the same Render instance -- not a separate implementation to drift.
+    assert_eq!(
+        run_plain(r#"tshow (Just (3 :: Int)) == T.pack (show (Just (3 :: Int)))"#),
+        json!(true)
+    );
+}
+
 // --- Parsing ---
 
 #[test]

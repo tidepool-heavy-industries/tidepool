@@ -50,6 +50,7 @@ module Tidepool.Prelude
   , (<$>)
     -- * Rendering
   , show
+  , tshow
     -- * read (String-based, works on the JIT since native bignum — see
     -- gotcha_registry stale_doc_read_now_works; parseInt/parseDouble are the
     -- Text-first equivalents)
@@ -370,6 +371,16 @@ import Text.Read (readMaybe)
 -- implementation (notably for 'Double').
 show :: Render a => a -> String
 show = T.unpack . Render.render
+
+-- | 'Text'-returning 'show' (the @tshow@ of relude\/protolude\/universum):
+-- @tshow = pack . show@ without the round-trip through 'String'. Same
+-- JIT-safe 'Render' implementation as 'show'; prefer this whenever the
+-- result feeds 'Text'-first code ('T.<>', '[fmt|...|]', an effect argument)
+-- instead of packing 'show' output by hand. 'Tidepool.Render.render' itself
+-- stays unexported here — it would collide with an author-defined @render@
+-- verb (see the harness contract) — so this is the unqualified spelling.
+tshow :: Render a => a -> Text
+tshow = Render.render
 
 -- | Polymorphic @pack@ (identity on 'Text', pack on 'String') now lives in
 -- 'Tidepool.Data.Text' so that the qualified @T.pack@ and this unqualified

@@ -1049,6 +1049,25 @@ mod tests {
             decode(writer.handle(req, &cx).unwrap(), &table),
             Err(Some(blake3_hex(b"v2")))
         );
+
+        // MISSING FILE, distinct from a content mismatch: the caller still
+        // holds a hash from when the file existed, but it has since been
+        // removed out from under them. `actual = None` is the "file missing"
+        // signal — never conflated with `actual = Some(other_hash)`
+        // ("content differs") — and the CAS must still write nothing.
+        let stale_v2_hash = blake3_hex(b"v2");
+        std::fs::remove_file(root.join("f.txt")).unwrap();
+        let req =
+            FsWriteReq::FsWriteCas("f.txt".to_string(), Some(stale_v2_hash), "v5".to_string());
+        assert_eq!(
+            decode(writer.handle(req, &cx).unwrap(), &table),
+            Err(None),
+            "a CAS against a since-deleted file must report actual = None, not a hash"
+        );
+        assert!(
+            !root.join("f.txt").exists(),
+            "a failed CAS must not recreate a missing file"
+        );
     }
 
     #[test]
