@@ -26,6 +26,12 @@ impl TestCommands {
         backend
     }
 
+    /// How many commands this backend actually executed. A regression that
+    /// asserts committed effects were not replayed reads this.
+    pub(super) fn executions(&self) -> usize {
+        self.specs.lock().len()
+    }
+
     fn new() -> Arc<Self> {
         Arc::new(Self {
             specs: Mutex::new(Vec::new()),

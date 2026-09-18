@@ -100,6 +100,16 @@ pub unsafe fn heap_to_value_forcing(
 /// a genuine constructor.
 pub const CLOSURE_SENTINEL: DataConId = DataConId(u64::MAX);
 
+/// Placeholder for a value that exists and is retained, but was too large to
+/// materialize into a `Value` within the observation budget. Like
+/// [`CLOSURE_SENTINEL`] it is deliberately out of the extract's `DataConId`
+/// range, and it means the same kind of thing: the REAL value is live in the
+/// heap and reachable by REFERENCE through its retained handle. It is not an
+/// error and not an empty result — a binding carrying this is a perfectly good
+/// binding, inspected through the ordinary bounded display path rather than by
+/// materializing it whole.
+pub const OVERSIZE_SENTINEL: DataConId = DataConId(u64::MAX - 1);
+
 /// Deep scan: whether `v` — or anything nested inside a `Con`'s fields — is
 /// the [`CLOSURE_SENTINEL`] placeholder. The ONE construction site
 /// ([`heap_to_value_inner`]'s `ClosurePolicy::Substitute` arm, below) always

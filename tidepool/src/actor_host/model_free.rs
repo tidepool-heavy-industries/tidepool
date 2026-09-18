@@ -22,6 +22,18 @@ impl ModelFreeSession {
         config: &ActorHostConfig,
         transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
     ) -> Result<Self> {
+        Self::start_with_conversation(config, transform, None).await
+    }
+
+    /// As [`Self::start`], with a reader for the root's own conversation.
+    /// Without one `reflect` reports every context unbound, so a test that
+    /// needs real history supplies it here — the same seam the host uses at
+    /// `actor_host.rs`'s `with_conversation_reader`.
+    pub async fn start_with_conversation(
+        config: &ActorHostConfig,
+        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        conversation: Option<tidepool_actor::ConversationReader>,
+    ) -> Result<Self> {
         let session_root = tempfile::tempdir()?;
         let (worktrees, bindings) = actor_worktree_resources_at(
             &config.run_root.join("check-worktrees"),
@@ -55,6 +67,9 @@ impl ModelFreeSession {
         );
         let mut forest = forest;
         forest.set_jev_backend(super::jev_backend(config));
+        if let Some(conversation) = conversation {
+            forest = forest.with_conversation_reader(conversation);
+        }
         let forest = Arc::new(forest);
         let (actor, hosted) = forest.admit_root(descriptor, outcome).await?;
         authority.install_grant(actor.identity().into(), ActorWorktreeGrant::Repository);

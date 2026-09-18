@@ -60,6 +60,17 @@ impl TestCampaign {
         transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
         configure: impl FnOnce(&mut ActorHostConfig),
     ) -> Self {
+        Self::start_with_conversation(research_policy, transform, configure, None).await
+    }
+
+    /// A campaign whose root can read its own conversation, so `reflect`
+    /// returns the supplied turns instead of reporting the context unbound.
+    pub async fn start_with_conversation(
+        research_policy: tidepool_actor::ResearchPolicy,
+        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        configure: impl FnOnce(&mut ActorHostConfig),
+        conversation: Option<tidepool_actor::ConversationReader>,
+    ) -> Self {
         tidepool_testing::eval_harness::require_extract();
         install_trace_file();
         let repository = tidepool_worktree::testing::TestRepo::init().unwrap();
@@ -103,9 +114,13 @@ impl TestCampaign {
             hosted,
             deployments,
             root_installation,
-        } = super::model_free::ModelFreeSession::start(&config, transform)
-            .await
-            .unwrap();
+        } = super::model_free::ModelFreeSession::start_with_conversation(
+            &config,
+            transform,
+            conversation,
+        )
+        .await
+        .unwrap();
         Self {
             _repository: repository,
             _runtime: runtime,

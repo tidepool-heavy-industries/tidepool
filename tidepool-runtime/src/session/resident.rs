@@ -849,10 +849,35 @@ fn finish_prepared<H: DispatchEffect<O>, O>(
             }
         };
     match plan {
-        SettlePlan::Observe | SettlePlan::Bind(ValueTier::Tier0Data) => {
+        SettlePlan::Observe => {
             let value = observe(engine, handle)?;
             Ok(PreparedRun::Done { handle, value })
         }
+        // A bind's value is the RETAINED HANDLE, which
+        // `run_entry_retained` produced without consulting any budget, and
+        // whose receipt renders binder names rather than the value
+        // (`WorkbenchDisplay::Binding`). Observation here is a forcing step
+        // whose materialized product this arm hands on but the binding does
+        // not need. So an exhausted observation budget is not a failure of
+        // anything: the program ran, its effects are committed, and the
+        // binding is sound. Rejecting the unit would discard both and demand
+        // that every committed effect be replayed to get the value back —
+        // a live session lost 45 committed operations (10 Jev calls, 35
+        // command jobs) that way, and `reflect 3` cannot bind at all, since
+        // three turns of conversation exceed 100_000 bytes on their own.
+        // Keep the handle and report the size, exactly as the closure tier
+        // below keeps a value that has no `Value` representation.
+        SettlePlan::Bind(ValueTier::Tier0Data) => match engine.observe(program, handle) {
+            Ok(value) => Ok(PreparedRun::Done { handle, value }),
+            Err(error) if is_observation_budget_exhausted(&error) => Ok(PreparedRun::Done {
+                handle,
+                value: Value::Con(tidepool_codegen::heap_bridge::OVERSIZE_SENTINEL, Vec::new()),
+            }),
+            Err(error) => {
+                engine.release(handle);
+                Err(error)
+            }
+        },
         SettlePlan::Bind(ValueTier::Tier1Closure) => Ok(PreparedRun::Done {
             handle,
             value: Value::Con(tidepool_codegen::heap_bridge::CLOSURE_SENTINEL, Vec::new()),
@@ -865,21 +890,47 @@ fn finish_prepared<H: DispatchEffect<O>, O>(
                 if *tier != ValueTier::Tier0Data {
                     continue;
                 }
-                if let Err(error) = observe(engine, *field) {
-                    // `observe` released the failing field; release the rest.
-                    engine.release_all(
-                        fields
-                            .iter()
-                            .enumerate()
-                            .filter(|(other, _)| *other != index)
-                            .map(|(_, field)| *field),
-                    );
-                    return Err(error);
+                // This lane discards the observed value outright — it forces
+                // and checks for an error. An exhausted budget is tolerated
+                // for the same reason as the whole-value bind above: each
+                // field stays retained and is a sound binding.
+                match engine.observe(program, *field) {
+                    Ok(_) => {}
+                    Err(error) if is_observation_budget_exhausted(&error) => {}
+                    Err(error) => {
+                        engine.release(*field);
+                        // The failing field is released; release the rest.
+                        engine.release_all(
+                            fields
+                                .iter()
+                                .enumerate()
+                                .filter(|(other, _)| *other != index)
+                                .map(|(_, field)| *field),
+                        );
+                        return Err(error);
+                    }
                 }
             }
             Ok(PreparedRun::Projected { fields })
         }
     }
+}
+
+/// Whether `error` is only the observation budget running out while
+/// materializing a value for display.
+///
+/// This is the one observation failure that says nothing about the program,
+/// the heap, or the value: the traversal simply stopped. Every other variant
+/// — an unauthenticated address, a descriptor integrity error, an
+/// unobservable object kind — reports that something is actually wrong, and
+/// must still fail the unit.
+fn is_observation_budget_exhausted(error: &PreparedRuntimeError) -> bool {
+    matches!(
+        error,
+        PreparedRuntimeError::Run(tidepool_codegen::prepared_program::ExecutionError::Observation(
+            tidepool_codegen::prepared_program::ObservationFailure::BudgetExceeded { .. }
+        ))
+    )
 }
 
 /// A resident JIT session: one long-lived [`JitEffectMachine`] whose heap and

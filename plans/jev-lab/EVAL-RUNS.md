@@ -465,3 +465,17 @@ stricter instructions for its children — adding "Modify no other file", "Do no
 delegate", and a required reply shape that the operator never asked for. The
 children received those as if they were the original ask. Worth knowing when
 reading a child's transcript as evidence of what was requested.
+
+## Astra run, 2026-09-17: the observation budget rejects committed work
+
+The test pilot hit `observation budget 100000 exhausted` twice, both on binds.
+One had already committed 45 operations — 10 Jev calls, 35 command jobs — and
+lost all of them. The other was `reflect 3`, a single operation, which cannot
+bind at all: the budget charges one unit per value node *and per payload byte*,
+so it is a ~100 KB ceiling, and three turns of a working session exceed it.
+
+The limit applies at display materialization, not at computing and not at
+retention — `run_entry_retained` issues the binding's handle without consulting
+any budget — but its failure was promoted to a unit-level rejection that
+discarded the handle. Full trace, both cells verbatim, and both tool outputs:
+`plans/jev-lab/observation-limit/`.

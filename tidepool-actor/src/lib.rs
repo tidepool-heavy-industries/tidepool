@@ -62,6 +62,11 @@ mod workbench_display;
 pub use workbench_display::bounded_output as bound_workbench_display;
 
 pub use conversation::{ConversationFuture, ConversationReader, ConversationUnavailable};
+// A `ConversationReader` resolves to `Vec<ConversationTurn>`, so anyone who
+// installs one has to be able to name what it yields. `ActorRole` and
+// `EffectiveRole` are this crate's own; a conversation's speaker is the
+// provider's, hence the alias.
+pub use tidepool_model::{ConversationTurn, Role as ConversationRole, TurnItem};
 pub use descriptor::ActorDescriptor;
 pub use external_application::{
     ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,

@@ -20,6 +20,8 @@ mod hosted_tools_tests;
 mod jev_tests;
 #[cfg(test)]
 mod lookup_availability_tests;
+#[cfg(test)]
+mod observation_budget_tests;
 mod overlay_resource;
 #[cfg(test)]
 #[path = "host_dynamic_tools/tui_resource_tests.rs"]
