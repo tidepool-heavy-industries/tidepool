@@ -1,7 +1,7 @@
 # Structured swarm experiments
 
-These synthetic worlds follow `plans/next/planned-swarm.md`,
-`plans/next/coordination-rsi.md`, and `plans/small-agents.md`: authored shared
+These synthetic worlds follow the planned-swarm, coordination and small-agent
+designs (now landed; their plan documents are in Git history): authored shared
 contracts, small-worker execution, consequential specialist consultation, distinct
 responsibility/context/supervision graphs, and evidence attached to exact revisions.
 They are not observations of a running Shoal instance.

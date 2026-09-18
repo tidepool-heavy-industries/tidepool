@@ -81,8 +81,8 @@ merged head before publishing, rolling a red one back; the command it runs is
 them.
 
 There is no `Project.Plan`: it generated assignments for one graph-UI feature and
-was retired rather than carried forward as if it were a general tool. The
-`graph/` campaign tree below it remains as a record of that work.
+was retired rather than carried forward as if it were a general tool. Its
+campaign tree is in Git history.
 
 Use the actual task/result contracts and callable signatures. Importing a module
 or binding a composition starts no worker.

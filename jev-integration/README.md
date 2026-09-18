@@ -3,8 +3,6 @@
 A focused **member of Tidepool's Cargo workspace** for TypeSafe API experiments.
 It has no Tidepool engine dependencies. The eventual Haskell effect remains a
 single operation; this executable is a research consumer, not a production SDK.
-For the complete pre-compaction inventory of decisions, evidence custody, live
-results, commits, caveats, and next work, see [the session handoff](SESSION-HANDOFF.md).
 
 Run commands from this worktree's repository root. Cargo uses the workspace
 lockfile and this worktree's `target/` directory. Build only this package:
@@ -101,8 +99,10 @@ every request the provider accepts; a declared-record front for humans is
 designed there but not implemented. The core is polymorphic over the JSON
 type with an aeson facade. It is tested against 71 curated captures from
 this directory's evidence and, with `JEV_EVIDENCE_DIR` pointed here, against
-every recorded success through a replay module in its test tree. Design and
-usage notes stay in this repository under `plans/jev/`.
+every recorded success through a replay module in its test tree. The mode-
+interpreted record front explored there was rejected as the agent-facing
+form and superseded by `Jev.Operators`; the earlier design and usage notes
+are git history, not a standing doc.
 
 ## Haskell feasibility sketches
 
@@ -123,9 +123,10 @@ with `coerce`. Ordinary Haskell missing record fields remain partial unless
 `-Werror=missing-fields` is enabled: the final DSL must settle that authoring
 contract or use a total builder. Positive tests use `-Wall -Werror`.
 
-See [the design handoff](../plans/jev-dsl.md) for user decisions and remaining
-questions. The TypeSafe skill's live-doc workflow informed the probe matrix; its
-batching suggestions are not part of this integration's design.
+The handoff recording the DSL's user decisions and open questions landed as
+the shipped `Jev.Operators` surface; its plan doc is git history, not a
+standing doc. The TypeSafe skill's live-doc workflow informed the probe
+matrix; its batching suggestions are not part of this integration's design.
 
 The publisher's TypeSafe skill is vendored under
 [`vendor/typesafe-ai`](vendor/typesafe-ai/UPSTREAM.md) at a recorded upstream

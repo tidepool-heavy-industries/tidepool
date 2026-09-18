@@ -31,8 +31,8 @@ git, arriving in a worktree by checkout rather than by being copied.
 ## Not installed, deliberately
 
 `Project.Plan` generated assignments for one graph-UI feature. It was retired
-rather than carried forward as though it were a general tool; `plans/graph/`
-remains as the record of that campaign.
+rather than carried forward as though it were a general tool. Its campaign
+tree is in Git history.
 
 `checks` is unset in `config.toml`. The recipe modules that were configured
 (`Project.Checks.workbench`, `Project.CollaborationChecks.collaboration`,
