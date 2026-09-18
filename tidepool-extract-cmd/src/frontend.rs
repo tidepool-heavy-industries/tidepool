@@ -18,7 +18,9 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
     }
     if args.first().is_some_and(|arg| arg == "--daemon") {
         let config = parse_daemon(&args[1..])?;
-        daemon::init_tracing(&config)?;
+        // Named binding: dropping the guard would close the trace appender's
+        // flush channel before the daemon serves its first request.
+        let _trace_guard = daemon::init_tracing(&config)?;
         let result = prepare_worker().and_then(|worker| daemon::serve(&config, worker));
         match &result {
             Ok(_) => tracing::info!(

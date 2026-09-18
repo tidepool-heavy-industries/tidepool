@@ -1248,18 +1248,48 @@ pub fn shoal_compiler_log_path(workspace: &Path, run_id: &str) -> PathBuf {
         .join(format!("{run_id}-compiler.log"))
 }
 
-fn host_pane_filter() -> tracing_subscriber::EnvFilter {
-    tracing_subscriber::EnvFilter::new("warn,tidepool::shoal=info,tidepool::actor_host=info")
+/// The run-local structured trace: one JSON object per line, holding the span
+/// tree (run, actor, tool call, cell, input unit) and the `shoal::content`
+/// target that carries cell source, receipts, lookup traffic and diagnostics.
+pub fn shoal_trace_path(workspace: &Path, run_id: &str) -> PathBuf {
+    shoal_state_root(workspace)
+        .join("logs")
+        .join(format!("{run_id}.jsonl"))
 }
 
-fn host_tracing_subscriber<D, P>(
+/// Target for the text a cell actually carried. It is written to the run-local
+/// JSONL file and to nothing else: the human log and the tmux pane switch it
+/// off explicitly, and no request-update payload is ever routed here.
+pub const CONTENT_TARGET: &str = "shoal::content";
+
+fn host_pane_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::new(
+        "warn,tidepool::shoal=info,tidepool::actor_host=info,shoal::content=off",
+    )
+}
+
+/// Directives for the JSON trace. Spans and their fields at `info`, the
+/// content target in full. `SHOAL_TRACE` replaces the whole set when a run
+/// wants more (or less).
+fn host_trace_filter() -> tracing_subscriber::EnvFilter {
+    let configured = std::env::var("SHOAL_TRACE").ok();
+    let directives = configured
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("info,shoal::content=trace");
+    tracing_subscriber::EnvFilter::new(directives)
+}
+
+fn host_tracing_subscriber<D, P, J>(
     detailed_writer: D,
     pane_writer: P,
+    trace_writer: J,
     detailed_filter: tracing_subscriber::EnvFilter,
 ) -> impl tracing::Subscriber + Send + Sync
 where
     D: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
     P: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
+    J: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
 {
     let detailed = tracing_subscriber::fmt::layer()
         .with_ansi(false)
@@ -1272,13 +1302,30 @@ where
         .with_target(false)
         .with_writer(pane_writer)
         .with_filter(host_pane_filter());
-    tracing_subscriber::registry().with(detailed).with(pane)
+    // Span close carries the duration and every field recorded during the
+    // span, which is what makes one cell reconstructable from this file
+    // alone.
+    let trace = tracing_subscriber::fmt::layer()
+        .json()
+        .with_current_span(true)
+        .with_span_list(true)
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+        .with_ansi(false)
+        .with_writer(trace_writer)
+        .with_filter(host_trace_filter());
+    tracing_subscriber::registry()
+        .with(detailed)
+        .with(pane)
+        .with(trace)
 }
 
+/// The returned guard owns the trace appender's flush thread. Bind it for the
+/// host process's whole life: dropping it closes the channel and every later
+/// span is lost.
 pub fn init_host_tracing(
     workspace: &Path,
     run_id: &str,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
+) -> Result<(PathBuf, tracing_appender::non_blocking::WorkerGuard), Box<dyn std::error::Error>> {
     let path = shoal_log_path(workspace, run_id);
     let parent = path
         .parent()
@@ -1288,15 +1335,28 @@ pub fn init_host_tracing(
         .create(true)
         .append(true)
         .open(&path)?;
+    let trace_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(shoal_trace_path(workspace, run_id))?;
+    let (trace_writer, guard) = tracing_appender::non_blocking(trace_file);
+    // Added after the environment's own directives so that content stays out
+    // of the human log even when `RUST_LOG` asks for it.
+    let detailed_filter = tidepool_codegen::debug::tracing_env_filter("info").add_directive(
+        format!("{CONTENT_TARGET}=off")
+            .parse()
+            .map_err(|error| runtime_error(format!("invalid content directive: {error}")))?,
+    );
     host_tracing_subscriber(
         Mutex::new(file),
         std::io::stderr,
-        tidepool_codegen::debug::tracing_env_filter("info"),
+        trace_writer,
+        detailed_filter,
     )
     .try_init()
     .map_err(|error| runtime_error(format!("could not initialize Shoal tracing: {error}")))?;
     tidepool_codegen::debug::init_logging();
-    Ok(path)
+    Ok((path, guard))
 }
 
 fn default_session_name(workspace: &Path) -> String {
@@ -1676,6 +1736,10 @@ mod tests {
             shoal_compiler_log_path(Path::new("/tmp/project"), "run-1"),
             Path::new("/tmp/project/.shoal/logs/run-1-compiler.log")
         );
+        assert_eq!(
+            shoal_trace_path(Path::new("/tmp/project"), "run-1"),
+            Path::new("/tmp/project/.shoal/logs/run-1.jsonl")
+        );
     }
 
     #[derive(Clone, Default)]
@@ -1708,6 +1772,121 @@ mod tests {
         }
     }
 
+    fn detailed_filter_without_content() -> tracing_subscriber::EnvFilter {
+        tracing_subscriber::EnvFilter::new("debug")
+            .add_directive(format!("{CONTENT_TARGET}=off").parse().unwrap())
+    }
+
+    fn trace_lines(trace: &CapturedWriter) -> Vec<serde_json::Value> {
+        trace
+            .text()
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line).unwrap_or_else(|error| {
+                    panic!("trace line is not JSON ({error}): {line}");
+                })
+            })
+            .collect()
+    }
+
+    fn span_names(line: &serde_json::Value) -> Vec<String> {
+        line["spans"]
+            .as_array()
+            .expect("a trace line carries its span list")
+            .iter()
+            .map(|span| span["name"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn host_trace_nests_one_cell_and_keeps_content_out_of_the_human_log() {
+        let detailed = CapturedWriter::default();
+        let pane = CapturedWriter::default();
+        let trace = CapturedWriter::default();
+        let subscriber = host_tracing_subscriber(
+            detailed.clone(),
+            pane.clone(),
+            trace.clone(),
+            detailed_filter_without_content(),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            let run = tracing::info_span!("shoal_host", run_id = "run-1");
+            let _run = run.enter();
+            let actor = tracing::info_span!("actor", actor = "3@1", incarnation = 1_u64);
+            let _actor = actor.enter();
+            let call = tracing::info_span!("tool_call", call_id = "call-x", tool = "haskell");
+            let _call = call.enter();
+            let cell = tracing::info_span!("cell", execution = "exec-9");
+            let _cell = cell.enter();
+            let unit = tracing::info_span!("unit", index = 0_u64, kind = "cell");
+            let _unit = unit.enter();
+            tracing::info!(
+                target: CONTENT_TARGET,
+                source = "putStrLn \"secret cell source\"",
+                "cell input unit source"
+            );
+        });
+
+        let lines = trace_lines(&trace);
+        let content = lines
+            .iter()
+            .find(|line| line["target"] == CONTENT_TARGET)
+            .expect("the content event reaches the run-local trace");
+        assert_eq!(
+            span_names(content),
+            ["shoal_host", "actor", "tool_call", "cell", "unit"]
+        );
+        assert_eq!(content["spans"][0]["run_id"], "run-1");
+        assert_eq!(content["spans"][2]["call_id"], "call-x");
+        assert_eq!(content["spans"][3]["execution"], "exec-9");
+        assert_eq!(content["span"]["kind"], "cell");
+        assert_eq!(
+            content["fields"]["source"],
+            "putStrLn \"secret cell source\""
+        );
+
+        let closed: Vec<String> = lines
+            .iter()
+            .filter(|line| line["fields"]["message"] == "close")
+            .map(|line| line["span"]["name"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        assert_eq!(closed, ["unit", "cell", "tool_call", "actor", "shoal_host"]);
+
+        assert!(!detailed.text().contains("secret cell source"));
+        assert!(!pane.text().contains("secret cell source"));
+    }
+
+    #[test]
+    fn host_trace_reaches_the_jsonl_file_once_the_appender_guard_drops() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = shoal_trace_path(directory.path(), "run-flush");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let (writer, guard) = tracing_appender::non_blocking(file);
+        let subscriber = host_tracing_subscriber(
+            CapturedWriter::default(),
+            CapturedWriter::default(),
+            writer,
+            detailed_filter_without_content(),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let run = tracing::info_span!("shoal_host", run_id = "run-flush");
+            let _run = run.enter();
+            tracing::info!(target: CONTENT_TARGET, receipt = "committed", "input unit receipt");
+        });
+        drop(guard);
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        let line: serde_json::Value = serde_json::from_str(written.lines().next().unwrap()).unwrap();
+        assert_eq!(line["target"], CONTENT_TARGET);
+        assert_eq!(line["spans"][0]["run_id"], "run-flush");
+    }
+
     #[test]
     fn host_tracing_fans_out_safe_info_but_keeps_source_debug_in_the_file() {
         let detailed = CapturedWriter::default();
@@ -1715,6 +1894,7 @@ mod tests {
         let subscriber = host_tracing_subscriber(
             detailed.clone(),
             pane.clone(),
+            CapturedWriter::default(),
             tracing_subscriber::EnvFilter::new("debug"),
         );
 

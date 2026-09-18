@@ -20,4 +20,11 @@ path = "src/main.rs"
 [dependencies]
 blake3 = "=1.8.6"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Tests only: the structured daemon trace is asserted field by field, not by
+# substring. The crate stays a dependency leaf — a dev-dependency is absent
+# from the graph every dependent builds.
+[dev-dependencies]
+serde_json = "1"

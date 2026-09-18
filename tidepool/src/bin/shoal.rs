@@ -310,7 +310,10 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             model,
             effort,
         } => {
-            let _log_path = tidepool::shoal::init_host_tracing(&workspace, &run_id)?;
+            // `_trace_guard` must stay a named binding: dropping it closes the
+            // trace appender's flush channel and the JSONL file stops growing.
+            let (_log_path, _trace_guard) =
+                tidepool::shoal::init_host_tracing(&workspace, &run_id)?;
             let interactive_agent = tidepool_agent::native_interactive_agent_from_parts(
                 interactive_agent_bin,
                 interactive_agent_version,

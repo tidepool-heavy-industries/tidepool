@@ -67,14 +67,16 @@ fn pane_filter() -> tracing_subscriber::EnvFilter {
     tracing_subscriber::EnvFilter::new("warn,tidepool_extract_cmd::daemon=info")
 }
 
-fn tracing_subscriber<D, P>(
+fn tracing_subscriber<D, P, J>(
     detailed_writer: D,
     pane_writer: P,
+    trace_writer: J,
     detailed_filter: tracing_subscriber::EnvFilter,
 ) -> impl tracing::Subscriber + Send + Sync
 where
     D: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
     P: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
+    J: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
 {
     let detailed = tracing_subscriber::fmt::layer()
         .with_ansi(false)
@@ -87,10 +89,36 @@ where
         .with_target(false)
         .with_writer(pane_writer)
         .with_filter(pane_filter());
-    tracing_subscriber::registry().with(detailed).with(pane)
+    // The structured sibling of the daemon's text log. Its `run_id` and
+    // `compile_request` fields are the two keys a Shoal run's host trace
+    // joins on.
+    let trace = tracing_subscriber::fmt::layer()
+        .json()
+        .with_current_span(true)
+        .with_span_list(true)
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+        .with_ansi(false)
+        .with_writer(trace_writer)
+        .with_filter(tracing_subscriber::EnvFilter::new(
+            "info,tidepool_extract_cmd=debug",
+        ));
+    tracing_subscriber::registry()
+        .with(detailed)
+        .with(pane)
+        .with(trace)
 }
 
-pub(crate) fn init_tracing(config: &DaemonConfig) -> Result<(), FrontendError> {
+/// The structured trace lands beside the daemon's text log, sharing its stem:
+/// `<run_id>-compiler.log` gets `<run_id>-compiler.jsonl`.
+pub(crate) fn trace_path(log_path: &Path) -> std::path::PathBuf {
+    log_path.with_extension("jsonl")
+}
+
+/// The returned guard owns the trace appender's flush thread; the daemon's
+/// entry point binds it for the process's life.
+pub(crate) fn init_tracing(
+    config: &DaemonConfig,
+) -> Result<Option<tracing_appender::non_blocking::WorkerGuard>, FrontendError> {
     let detailed: Box<dyn Write + Send> = match &config.log_path {
         Some(path) => {
             let parent = path.parent().ok_or_else(|| {
@@ -107,13 +135,31 @@ pub(crate) fn init_tracing(config: &DaemonConfig) -> Result<(), FrontendError> {
         }
         None => Box::new(io::sink()),
     };
+    let (trace, guard): (Box<dyn Write + Send>, _) = match &config.log_path {
+        Some(path) => {
+            let file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(trace_path(path))
+                .map_err(FrontendError::Io)?;
+            let (writer, guard) = tracing_appender::non_blocking(file);
+            (Box::new(writer), Some(guard))
+        }
+        None => (Box::new(io::sink()), None),
+    };
     let detailed_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug"));
-    tracing_subscriber(Mutex::new(detailed), io::stderr, detailed_filter)
-        .try_init()
-        .map_err(|error| {
-            FrontendError::Daemon(format!("could not initialize compiler tracing: {error}"))
-        })
+    tracing_subscriber(
+        Mutex::new(detailed),
+        io::stderr,
+        Mutex::new(trace),
+        detailed_filter,
+    )
+    .try_init()
+    .map_err(|error| {
+        FrontendError::Daemon(format!("could not initialize compiler tracing: {error}"))
+    })?;
+    Ok(guard)
 }
 
 pub(crate) struct DaemonBinding {
@@ -363,6 +409,9 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
 
     let result = (|| {
         let mut served = 0;
+        // Set whenever the worker is replaced, and read by the next request's
+        // span: that request recompiles every library module from cold.
+        let mut followed_rotation = false;
         loop {
             let (mut connection, _) = listener.accept().map_err(FrontendError::Io)?;
             if connection
@@ -434,6 +483,19 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                 continue;
             }
             let compile_request = compile_request_correlation(&cwd, &worker_argv);
+            // The span's own close carries the duration; `followed_rotation`
+            // says this request paid for a worker that lost its module memo,
+            // so an outlier need not be lined up against a prior log line by
+            // timestamp.
+            let request_span = tracing::info_span!(
+                "compile_request",
+                run_id,
+                %compile_request,
+                followed_rotation,
+                served,
+            );
+            let _entered = request_span.enter();
+            followed_rotation = false;
             let started = Instant::now();
             tracing::info!(run_id, %compile_request, "compiler request started");
             tracing::debug!(run_id, %compile_request, source_root = %cwd.display(), "compiler request source");
@@ -468,6 +530,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                     }
                     worker = Worker::spawn(&prepared)?;
                     served = 0;
+                    followed_rotation = true;
                     continue;
                 }
             };
@@ -494,6 +557,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                     worker.shutdown();
                     worker = Worker::spawn(&prepared)?;
                     served = 0;
+                    followed_rotation = true;
                 } else {
                     socket.retire()?;
                     break;
@@ -545,7 +609,12 @@ fn log_compile_timing(run_id: &str, compile_request: &str, stderr: &[u8]) {
     }
 }
 
-fn compile_request_correlation(cwd: &Path, worker_argv: &[OsString]) -> String {
+/// The join key between a client's compile span and the daemon's own
+/// `compile_request` span. Both sides hash the same bytes: the client sends
+/// `ExtractRequest::worker_argv`, which is already the two-element typed form
+/// `normalize_worker_argv` returns unchanged, so no id has to travel on the
+/// wire.
+pub(crate) fn compile_request_correlation(cwd: &Path, worker_argv: &[OsString]) -> String {
     let digest = blake3::hash(&encode_request(cwd, worker_argv));
     hex(&digest.as_bytes()[..8])
 }
@@ -1108,6 +1177,7 @@ mod tests {
         let subscriber = tracing_subscriber(
             detailed.clone(),
             pane.clone(),
+            CapturedWriter::default(),
             tracing_subscriber::EnvFilter::new("debug"),
         );
 
@@ -1132,6 +1202,80 @@ mod tests {
         assert!(!pane.contains("/sensitive/source"));
         assert!(!detailed.contains('\u{1b}'));
         assert!(!pane.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn the_client_and_the_daemon_name_one_compile_request_identically() {
+        // The client hashes what it is about to send; the daemon hashes what
+        // it normalized after reading. For the typed worker form those are
+        // the same bytes, which is what lets the two traces join without an
+        // id on the wire.
+        let cwd = Path::new("/tmp/work");
+        let request = ExtractRequest::from_cli(&["Expr.hs".into(), "--turn".into()]).unwrap();
+        let client_argv = request.worker_argv();
+        let daemon_argv = normalize_worker_argv(client_argv.clone()).unwrap();
+        assert_eq!(client_argv, daemon_argv);
+        assert_eq!(
+            compile_request_correlation(cwd, &client_argv),
+            compile_request_correlation(cwd, &daemon_argv)
+        );
+        let other = ExtractRequest::from_cli(&["Other.hs".into()]).unwrap();
+        assert_ne!(
+            compile_request_correlation(cwd, &client_argv),
+            compile_request_correlation(cwd, &other.worker_argv())
+        );
+    }
+
+    #[test]
+    fn the_daemon_trace_carries_the_compile_request_span_as_json() {
+        let trace = CapturedWriter::default();
+        let subscriber = tracing_subscriber(
+            CapturedWriter::default(),
+            CapturedWriter::default(),
+            trace.clone(),
+            tracing_subscriber::EnvFilter::new("debug"),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!(
+                target: "tidepool_extract_cmd::daemon",
+                "compile_request",
+                run_id = "run-7",
+                compile_request = "abcdef0123456789",
+                followed_rotation = true,
+                served = 256_u64,
+            );
+            let _entered = span.enter();
+            tracing::info!(target: "tidepool_extract_cmd::daemon", "compiler request started");
+        });
+
+        let lines: Vec<serde_json::Value> = trace
+            .text()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let started = lines
+            .iter()
+            .find(|line| line["fields"]["message"] == "compiler request started")
+            .expect("the daemon trace holds the request event");
+        assert_eq!(started["spans"][0]["name"], "compile_request");
+        assert_eq!(started["spans"][0]["run_id"], "run-7");
+        assert_eq!(started["spans"][0]["compile_request"], "abcdef0123456789");
+        assert_eq!(started["spans"][0]["followed_rotation"], true);
+        let closed = lines
+            .iter()
+            .find(|line| line["fields"]["message"] == "close")
+            .expect("the request span closes with its duration");
+        assert_eq!(closed["span"]["name"], "compile_request");
+        assert!(closed["fields"]["time.busy"].is_string());
+    }
+
+    #[test]
+    fn the_daemon_trace_file_sits_beside_the_compiler_log() {
+        assert_eq!(
+            trace_path(Path::new("/tmp/project/.shoal/logs/run-1-compiler.log")),
+            Path::new("/tmp/project/.shoal/logs/run-1-compiler.jsonl")
+        );
     }
 
     fn test_socket(name: &str) -> std::path::PathBuf {

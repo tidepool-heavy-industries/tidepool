@@ -127,6 +127,15 @@ enum Transport {
     Daemon { socket: PathBuf, epoch: [u8; 32] },
 }
 
+impl Transport {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Direct(_) => "direct",
+            Self::Daemon { .. } => "daemon",
+        }
+    }
+}
+
 #[derive(Debug)]
 struct DirectEndpoint {
     child: Child,
@@ -230,6 +239,15 @@ impl CompilerEndpoint {
     pub fn execute(mut self, cmd: &ExtractCmd) -> Result<ExtractRun, SpawnError> {
         let cwd = std::env::current_dir()
             .map_err(|source| SpawnError::not_submitted("current directory", source))?;
+        // The client side of the compile-request span. Its `compile_request`
+        // is the digest the daemon computes for the same request, so a run's
+        // host trace and compiler trace name one compile identically.
+        let span = tracing::info_span!(
+            "compile_request",
+            compile_request = %daemon::compile_request_correlation(&cwd, &cmd.request.worker_argv()),
+            transport = self.transport.name(),
+        );
+        let _entered = span.enter();
         let start = Instant::now();
         let output = match &mut self.transport {
             Transport::Direct(endpoint) => {

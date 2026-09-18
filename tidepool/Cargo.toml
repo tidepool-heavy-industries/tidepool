@@ -53,7 +53,8 @@ serde_json.workspace = true
 toml = "1.1"
 tokio = { workspace = true, features = ["rt-multi-thread", "signal", "net", "io-util", "time"] }
 tracing.workspace = true
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-appender.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 clap.workspace = true
 axum.workspace = true
 glob.workspace = true
