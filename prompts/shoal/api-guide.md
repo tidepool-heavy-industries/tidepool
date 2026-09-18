@@ -79,6 +79,11 @@ For progress, use `childWithProgress` or `requestWithProgress`, then
 they are not terminal replies. Record actors (`R.*`) can collect progress and
 settlements without model inference.
 
+`reflect n` returns your own last `n` completed conversation turns, oldest
+first, with their messages, tool calls, and tool results. Bind it once and reuse
+the value as the context argument for the questions that follow instead of
+restating your history by hand. `doc reflect` has the worked example.
+
 `me` is the current actor's exact address. A closure captures the `me` in scope
 where it is defined; newly authored code in a child sees the child's address.
 Use `sendMessage me text` only when steering the current actor is intended.

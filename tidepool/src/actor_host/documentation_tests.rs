@@ -766,6 +766,22 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     )
     .await;
     assert_eq!(outer_unavailable["items"][1]["output"], "True");
+
+    // The guide's companion `doc reflect` example, on this same campaign so it
+    // needs no compile of its own. This root has no conversation reader, which
+    // is the unbound case the example is written to survive: it continues with
+    // no history rather than being handed somebody else's.
+    let reflect = committed(
+        root.as_ref(),
+        example(include_str!("../../../prompts/shoal/docs/reflect.md")),
+    )
+    .await;
+    assert_eq!(reflect["items"][2]["output"], "[]", "{reflect}");
+    assert_eq!(
+        reflect["items"][1]["operations"][0]["effect"], "reflect",
+        "{reflect}"
+    );
+
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

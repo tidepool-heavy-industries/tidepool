@@ -101,8 +101,11 @@ pub(crate) fn workbench_doc(topic: &str) -> Result<&'static str, String> {
         }
         "lineage" | "status" | "trace" => Ok(include_str!("../../prompts/shoal/docs/lineage.md")),
         "recovery" | "recover" => Ok(include_str!("../../prompts/shoal/docs/recovery.md")),
+        "reflect" | "conversation" | "history" => {
+            Ok(include_str!("../../prompts/shoal/docs/reflect.md"))
+        }
         "help" | "topics" => Ok(
-            "Shoal topics: tree, workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery. Use hosted `lookup` with `doc <topic>`.",
+            "Shoal topics: tree, workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery, reflect. Use hosted `lookup` with `doc <topic>`.",
         ),
         other => Err(format!(
             "unknown Shoal documentation topic `{other}`; use hosted `lookup` with `doc`"
