@@ -598,13 +598,13 @@ import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Tidepool.Agent.Contract
-import Tidepool.Effects.Core (ActorContext, Jev, Notifications)
+import Tidepool.Effects.Core (ActorContext, Jev, Notifications, Reflect)
 import qualified Tidepool.Command as Cmd
 import qualified Project.Tools as Tools
 import qualified Project.Watchdog as Watchdog
 
 agentSpec
-  :: (Member Cmd.Commands effects, Member Jev effects, Member ActorContext effects, Member Notifications effects)
+  :: (Member Cmd.Commands effects, Member Jev effects, Member ActorContext effects, Member Notifications effects, Member Reflect effects)
   => AgentSpec Tools.WatchdogTools effects
 agentSpec = defaultSpec
   { specTools = Tools.tools
