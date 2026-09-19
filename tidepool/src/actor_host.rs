@@ -2251,6 +2251,7 @@ fn compile_root(
     let mut workbench = ActorWorkbenchSource::new(preamble, include)
         .with_imports(WORKBENCH_SURFACE_MODULE)
         .with_imports("qualified Tidepool.Actor.Record as R")
+        .with_imports("qualified Control.Monad.Freer.State as S")
         .with_imports("qualified Tidepool.Command as Cmd");
     if jev {
         workbench = workbench
