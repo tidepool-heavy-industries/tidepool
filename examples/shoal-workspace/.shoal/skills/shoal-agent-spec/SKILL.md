@@ -256,9 +256,11 @@ agentSpec = defaultSpec
   }
 
 monitorsFor :: Text -> [Watchdog.Heuristic]
-monitorsFor path
-  | "review-child" `T.isInfixOf` path = Watchdog.codingHeuristics
-  | otherwise = []
+monitorsFor path = case path of
+  "build-wave/implementer" -> Profiles.roleHeuristics Profiles.Implementer
+  "review-wave/reviewer" -> Profiles.roleHeuristics Profiles.Reviewer
+  "research-wave/researcher" -> Profiles.roleHeuristics Profiles.Researcher
+  _ -> []
 ```
 
 `watchBy` reads its own `contextActorPath` — the calling child's path — picks
@@ -266,7 +268,9 @@ heuristics with `heuristicsFor path`, and asks Jev one packet built from the
 finished call's name and arguments and the result's output. `watchWith
 heuristics` installs the same list for every child, skipping the lookup. A
 child whose path matches no heuristics (including the root, which has none)
-abstains before ever asking Jev.
+abstains before ever asking Jev. Import `Project.SupervisionProfiles` qualified
+as `Profiles` for the example above. Match identities exactly: substring or
+suffix matching can silently install reviewer policy on an unrelated child.
 
 A tripped heuristic does one of two things:
 

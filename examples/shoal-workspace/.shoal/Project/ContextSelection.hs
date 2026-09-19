@@ -188,7 +188,7 @@ selectRelevantChunks config intent call result =
             ]))
           (#chunks := J.each key question chunks)
       pure $ case answer of
-        Left _ -> Abstained "Jev unavailable; keeping the displayed tool result unchanged"
+        Left err -> Abstained (jevFailureSummary err)
         Right judged ->
           let rows = judged.chunks
               decisive answerRow =
@@ -200,8 +200,13 @@ selectRelevantChunks config intent call result =
                 | (chunk, answerRow) <- rows
                 , answerRow.relevant.yes >= relevanceFloor config
                 ]
+              ambiguous =
+                [ (chunk, answerRow.supported.yes, answerRow.relevant.yes)
+                | (chunk, answerRow) <- rows
+                , not (decisive answerRow)
+                ]
            in if length rows /= length chunks || not (all (decisive . snd) rows)
-                then Abstained "at least one chunk was ambiguous; keeping the displayed tool result unchanged"
+                then Abstained (ambiguousSummary (length chunks) (length rows) ambiguous)
                 else if null selected
                   then Abstained "no chunk was confidently relevant; keeping the displayed tool result unchanged"
                   else if length selected == length chunks
@@ -217,3 +222,35 @@ selectRelevantChunks config intent call result =
                             <> T.intercalate "\n" (map chunkText selected)
                         )
                         (toolResultHandle result)
+
+-- Keep provider/transport bodies out of status: they may contain request
+-- details. The class still identifies the failing boundary.
+jevFailureSummary :: J.JevError -> Text
+jevFailureSummary err =
+  case err of
+    J.Prepare _ -> "Jev request preparation failed; keeping the displayed tool result unchanged"
+    J.Transport _ -> "Jev transport failed; keeping the displayed tool result unchanged"
+    J.Decode _ -> "Jev response decoding failed; keeping the displayed tool result unchanged"
+
+-- Probabilities and chunk ranges are safe operational diagnostics: they reveal
+-- no chunk text. Cap the whole reason because status is an always-visible view.
+ambiguousSummary :: Int -> Int -> [(NumberedChunk, Double, Double)] -> Text
+ambiguousSummary expected actual ambiguous =
+  "ambiguous semantic selection; expected " <> tshow expected
+      <> " answers, received " <> tshow actual
+      <> "; undecided returned chunks "
+      <> T.take 420
+           (if null ambiguous
+              then "(none)"
+              else T.intercalate ", " (map render ambiguous))
+      <> "; keeping the displayed tool result unchanged"
+  where
+    render :: (NumberedChunk, Double, Double) -> Text
+    render (chunk, supported, relevant) =
+      tshow (chunkStart chunk) <> "-" <> tshow (chunkEnd chunk)
+        <> "(evidence=" <> shortProbability supported
+        <> ", relevance=" <> shortProbability relevant <> ")"
+    shortProbability :: Double -> Text
+    shortProbability = T.take 6 . tshow
+    tshow :: Show a => a -> Text
+    tshow = T.pack . show
