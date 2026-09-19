@@ -8,7 +8,8 @@ All implementation workers retired with StoppedNow; root owns final verification
   trees are excluded through shared policy, build storage remains independent.
 - Reload roots retain their namespace guard, are refreshed at native activation,
   and released on workspace retirement. These are root repairs to worker WIP.
-- Four source-reload tests passed before the final activation/lifetime repairs.
+- Final integrated recheck passed: four source-reload tests plus the retained-handler
+  regression, 5 passed / 370 skipped, 4 GiB, clean command and daemon cleanup.
 - Native workspace suite compiles: two tests pass, two stop during namespace
   preparation with Operation not permitted, before native isolation assertions.
   Host-level retry is required; this is not a passing isolation test.

@@ -1,3 +1,61 @@
+# Successor update — end of 2026-09-18 session
+
+This section supersedes the older handoff below. User wants one final Astra
+session to make the alpha something new users can actually try. Stop exploration;
+focus on implementation/release proof. No workers remain active. No release tag,
+cache upload, force-push, or final release build occurred.
+
+## Integrated now
+
+- Root live afterTurn acceptance passed: real text-only completion, marker A/B
+  reload, and a real Jev observation (316ms, 0.91). Temporary hooks removed.
+- Policy diagnostics/explicit exact-role examples and release checklist merged.
+- Qualified state default import plus actual retained notebook Handler regression.
+- Authored `.shoal` now forks in the ordinary COW source instead of a canonical
+  read-only shadow mount. Runtime trees excluded; build resource remains separate.
+  Root repaired source-view guard lifetime, active-view registration and retirement
+  release. Native edits and source reload are intended to share the view.
+- Final focused run: 5 passed / 370 skipped (source reload tests + retained Handler),
+  explicit 4 GiB; clean command and compile-daemon cleanup.
+- Native workspace suite: compiled; 2 passed, 2 failed at namespace preparation
+  with EPERM before native edit/isolation assertions. Run these from host context:
+  `just test-lib tidepool 'test(actor_host::workspace::tests::)'`.
+  Do NOT claim native child edit/reload or grandchild isolation is proven yet.
+
+## Must finish/verify
+
+1. Rebuild matched host; current run cannot hot-load Rust mount/import changes.
+2. Native workspace tests and real child edit AgentSpec -> reload -> distinct
+   parent/sibling behavior; check active-view rotation and retirement cleanup.
+3. Role-based reload-tool exposure is agreed but NOT implemented. Avoid model-name
+   restrictions. User proposed withholding reload tools from restricted roles.
+   Tool hiding is not runtime enforcement of notebook Source effects.
+4. One-nudge Luna experiment remains blocked-before-installation under old host.
+   No token, hook, or nudge was created. If retried, child-only explicit role,
+   LAB-only input, hard one-nudge cap consumed before send; no retries on uncertainty.
+5. Exact release revision/build, closure publication verification and isolated
+   clean-user smoke remain open; see plans/alpha-release-acceptance.md.
+
+## Git cleanup
+
+User authorized programmatic cleanup of last-month main commit messages/trailers
+and branded author attribution. Cutoff 2026-08-18T00:00:00-07:00. Audit found 840
+matching messages, no matching author/committer fields. Preserve human identities,
+trees and graph topology; keep recovery ref and old->new mapping; no force-push.
+Cleanup tooling/report/map are retained under the Git common directory's
+`history-cleanup/` after execution. Local worker branches retain old history.
+
+## Local evidence
+
+`.shoal/plans/alpha-live-acceptance.md`, `.shoal/experiments/alpha-fixup-status.md`,
+`.shoal/experiments/composition-lab.md`. Notebook handles do not survive restart.
+The last root test job was job488, session 5854be0f-2d9c-47f5-a6a6-5b079f1d8ef7.
+All record monitors and workers were drained/retired explicitly.
+
+---
+
+# Earlier handoff (historical context; superseded above)
+
 # Agent-to-agent handoff: alpha acceptance
 
 ## Mission / decisions
