@@ -50,16 +50,11 @@ pub(super) struct RootImport {
     snapshot: OverlaySnapshot,
 }
 
-fn authored_shoal_exclusions() -> [&'static std::ffi::OsStr; 7] {
-    [
-        std::ffi::OsStr::new("logs"),
-        std::ffi::OsStr::new("sessions"),
-        std::ffi::OsStr::new("runtime"),
-        std::ffi::OsStr::new("build"),
-        std::ffi::OsStr::new(".git"),
-        std::ffi::OsStr::new("dist-newstyle"),
-        std::ffi::OsStr::new("target"),
-    ]
+fn authored_shoal_exclusions() -> Vec<&'static std::ffi::OsStr> {
+    crate::shoal::workspace::RUNTIME_SOURCE_TREES
+        .iter()
+        .map(std::ffi::OsStr::new)
+        .collect()
 }
 
 fn authored_inventory(
@@ -99,6 +94,7 @@ enum Activation {
 
 pub(super) struct PreparedWorkspace {
     manager: WorktreeManager,
+    source_layers: Option<Arc<crate::shoal::source::ShoalSourceReload>>,
     activation: Mutex<Activation>,
     pub(super) host_path: PathBuf,
     pub(super) worktree: Option<WorktreeId>,
@@ -132,6 +128,9 @@ impl PreparedWorkspace {
         let publication = self.publication.lock().await;
         if publication.is_pending() {
             return Err(io::Error::other("workspace publication remains pending"));
+        }
+        if let (Some(layers), Some(id)) = (&self.source_layers, &self.worktree) {
+            layers.release_checkout_view(id);
         }
         let manager = self.manager.clone();
         let worktree = self.worktree.clone();
@@ -194,6 +193,14 @@ impl PreparedWorkspace {
                     "activated root Git identity differs from preparation",
                 ));
             }
+        }
+        if let (Some(layers), Some(id), Some(_)) =
+            (&self.source_layers, &self.worktree, &self.source)
+        {
+            let retained = view.retained_view_path(Path::new(ACTOR_PROJECT_ROOT))?;
+            layers
+                .register_checkout_view(id, view.clone(), retained.as_path().to_owned())
+                .map_err(io::Error::other)?;
         }
         *activation = Activation::Activated;
         drop(activation);
@@ -428,7 +435,10 @@ impl WorkspaceLayout {
             std::time::Instant::now() + PROCESS_OPERATION_TIMEOUT,
         )?;
         if let (Some(id), Some(layers), Some(_)) = (&worktree, &self.source_layers, &source) {
-            layers.register_checkout_view(id, view.retained_view_path(&visible)?);
+            let retained = view.retained_view_path(&visible)?;
+            layers
+                .register_checkout_view(id, view.clone(), retained.as_path().to_owned())
+                .map_err(io::Error::other)?;
         }
         for resource in source.iter_mut().chain(build.iter_mut()) {
             resource.record_bootstrap_upper()?;
@@ -442,6 +452,7 @@ impl WorkspaceLayout {
         }
         Ok(Arc::new(PreparedWorkspace {
             manager: self.worktrees.clone(),
+            source_layers: self.source_layers.clone(),
             activation: Mutex::new(Activation::Prepared),
             host_path,
             worktree,

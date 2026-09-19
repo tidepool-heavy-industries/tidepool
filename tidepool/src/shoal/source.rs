@@ -384,7 +384,10 @@ impl SourceLayer {
 /// One checkout's source layer, and the checkout it is read from.
 #[derive(Clone)]
 struct CheckoutSource {
+    worktree: String,
     layer: SourceLayer,
+    /// Keeps namespace-backed roots valid for this actor's source scope.
+    _view: Option<tidepool_node::MountNamespace>,
     /// The authored roots this checkout provides, resolved once, when the
     /// actor holding the checkout was constructed. Fixing them there is what
     /// makes the actor's search path and its reload target the same thing.
@@ -428,7 +431,7 @@ pub(crate) struct ShoalSourceReload {
     /// unit tests below, which exercise the run's own layer only.
     worktrees: Option<WorktreeManager>,
     /// Private merged views native tools edit, by managed worktree id.
-    checkout_views: Mutex<HashMap<String, PathBuf>>,
+    checkout_views: Mutex<HashMap<String, (tidepool_node::MountNamespace, PathBuf)>>,
     /// One layer per checkout, by worktree id, materialized on first use.
     /// `None` records a checkout that carries no source of its own, so the
     /// answer is not recomputed for every actor that holds it.
@@ -485,10 +488,44 @@ impl ShoalSourceReload {
     ///
     /// Admission calls this before actor construction asks for its source
     /// layer, so compilation and reload read the same authored files.
-    pub(crate) fn register_checkout_view(&self, id: &WorktreeId, root: PathBuf) {
+    pub(crate) fn register_checkout_view(
+        &self,
+        id: &WorktreeId,
+        namespace: tidepool_node::MountNamespace,
+        root: PathBuf,
+    ) -> std::io::Result<()> {
+        let _gate = self.gate.lock();
+        let config = self
+            .frozen
+            .config()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let roots: Arc<[PathBuf]> =
+            super::workspace::checkout_source_roots(&root, &config.haskell).into();
         self.checkout_views
             .lock()
-            .insert(id.as_str().to_owned(), root);
+            .insert(id.as_str().to_owned(), (namespace.clone(), root));
+        if let Some(Some(checkout)) = self.checkouts.lock().get_mut(id.as_str()) {
+            checkout.roots = roots.clone();
+            checkout._view = Some(namespace.clone());
+        }
+        for scope in self.scopes.write().values_mut() {
+            if let ActorSourceScope::Checkout(checkout) = scope {
+                if checkout.worktree == id.as_str() {
+                    checkout.roots = roots.clone();
+                    checkout._view = Some(namespace.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn release_checkout_view(&self, id: &WorktreeId) {
+        let _gate = self.gate.lock();
+        self.scopes.write().retain(|_, scope| {
+            !matches!(scope, ActorSourceScope::Checkout(checkout) if checkout.worktree == id.as_str())
+        });
+        self.checkouts.lock().remove(id.as_str());
+        self.checkout_views.lock().remove(id.as_str());
     }
 
     /// What `caller`'s own source calls reach.
@@ -543,12 +580,11 @@ impl ShoalSourceReload {
             return Ok(None);
         };
         let config = self.frozen.config()?;
-        let root = self
-            .checkout_views
-            .lock()
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| handle.cwd().to_owned());
+        let view = self.checkout_views.lock().get(id).cloned();
+        let root = view
+            .as_ref()
+            .map(|(_, root)| root.as_path())
+            .unwrap_or_else(|| handle.cwd());
         let roots = super::workspace::checkout_source_roots(&root, &config.haskell);
         if roots.is_empty() {
             return Ok(None);
@@ -558,7 +594,9 @@ impl ShoalSourceReload {
         // resolves `active/<index>` and the include list is well-formed.
         layer.ensure_active_from(self.frozen.identity(), &roots)?;
         Ok(Some(CheckoutSource {
+            worktree: id.to_owned(),
             layer,
+            _view: view.map(|(namespace, _)| namespace),
             roots: roots.into(),
         }))
     }

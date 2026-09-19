@@ -574,11 +574,19 @@ pub(crate) fn copy_authored_shoal(workspace: &Path, destination: &Path) -> Resul
     Ok(())
 }
 
+pub(crate) const RUNTIME_SOURCE_TREES: &[&str] = &[
+    "logs",
+    "sessions",
+    "runtime",
+    "build",
+    ".git",
+    "dist-newstyle",
+    "target",
+];
+
 pub(crate) fn is_runtime_source_tree(name: &std::ffi::OsStr) -> bool {
-    matches!(
-        name.to_str(),
-        Some("logs" | "sessions" | "runtime" | "build" | ".git" | "dist-newstyle" | "target")
-    )
+    name.to_str()
+        .is_some_and(|name| RUNTIME_SOURCE_TREES.contains(&name))
 }
 
 /// A cheap signature of what [`capture_sources`] would read from `roots`: every
