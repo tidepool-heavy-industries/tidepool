@@ -80,35 +80,6 @@ noted call result
     )
 }
 
-/// A production-shaped spec that names a record-actor `Handler` in authored
-/// source. The author intentionally does not import the handler's underlying
-/// state effect; the workbench's default imports must make the qualified
-/// `S.State` expansion available.
-fn spec_module_with_record_handler() -> String {
-    r#"{-# LANGUAGE OverloadedStrings #-}
-module AgentSpec (agentSpec) where
-
-import Control.Monad.Freer (Eff)
-import Data.Text (Text)
-import Tidepool.Agent.Contract
-import Tidepool.Actor.Record (Handler)
-import qualified Project.Tools as Tools
-
-agentSpec :: AgentSpec Tools.SpecTools effects
-agentSpec = defaultSpec
-  { specTools = Tools.tools
-  , afterTool = Just noted
-  }
-
-recordHandler :: Text -> Handler [Text] effects ()
-recordHandler _ = pure ()
-
-noted :: ToolCall -> ToolResult -> Eff effects Annotation
-noted _ _ = pure NoAnnotation
-"#
-    .to_owned()
-}
-
 /// A spec module whose slot can suspend on the resident `Sleep` effect: the
 /// same shape as `spec_module`, with a `Member Sleep effects` constraint and
 /// the imports that constraint needs. Kept separate so the plain
@@ -391,20 +362,16 @@ async fn after_turn_observation_uses_the_hot_reloaded_spec_revision() {
 }
 
 #[tokio::test]
-async fn default_workbench_imports_support_record_handler_signatures() {
+async fn default_workbench_imports_support_retained_record_handler() {
     let campaign = start_with_slot("one", ABSTAINS).await;
-    let authored = campaign._repository.path().join(".shoal");
-    std::fs::write(
-        authored.join("AgentSpec.hs"),
-        spec_module_with_record_handler(),
-    )
-    .unwrap();
     let policy = campaign.root_installation.policy.clone();
-    let receipt = reload(policy.as_ref()).await;
-    assert!(
-        receipt.contains("swapped"),
-        "record Handler signature should compile with production default imports: {receipt}"
-    );
+    let define = include_str!("record_handler_retention_fixture.hs");
+    let defined = dispatch_haskell_script(policy.as_ref(), define).await;
+    assert!(!defined.contains("error"), "definition cell failed: {defined}");
+    let used = dispatch_haskell_script(policy.as_ref(), r#"recordHandler "retained""#).await;
+    assert!(!used.contains("error"), "retained helper cell failed: {used}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
 }
 
 #[tokio::test]
