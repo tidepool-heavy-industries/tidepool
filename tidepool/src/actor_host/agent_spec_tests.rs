@@ -362,6 +362,19 @@ async fn after_turn_observation_uses_the_hot_reloaded_spec_revision() {
 }
 
 #[tokio::test]
+async fn default_workbench_imports_support_retained_record_handler() {
+    let campaign = start_with_slot("one", ABSTAINS).await;
+    let policy = campaign.root_installation.policy.clone();
+    let define = include_str!("record_handler_retention_fixture.hs");
+    let defined = dispatch_haskell_script(policy.as_ref(), define).await;
+    assert!(!defined.contains("error"), "definition cell failed: {defined}");
+    let used = dispatch_haskell_script(policy.as_ref(), r#"recordHandler "retained""#).await;
+    assert!(!used.contains("error"), "retained helper cell failed: {used}");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
 async fn after_turn_rejects_pruning_and_records_slot_failure() {
     let campaign = start_with_slot("one", ABSTAINS).await;
     let workspace = campaign._repository.path().to_path_buf();
