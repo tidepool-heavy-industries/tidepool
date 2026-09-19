@@ -547,6 +547,23 @@ fn archive_flake_sources(workspace: &Path, config: &HaskellConfig) -> Result<Vec
 /// build. The copy is files only; `nix` reads a Git tree's tracked files, so a
 /// destination that is a repository has to commit what it received.
 pub(crate) fn copy_authored(workspace: &Path, destination: &Path) -> Result<()> {
+    copy_authored_shoal(workspace, destination)?;
+    for name in ["flake.nix", "flake.lock"] {
+        if workspace.join(name).is_file() {
+            std::fs::copy(workspace.join(name), destination.join(name))?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy only the authored `.shoal` package into an existing source tree.
+///
+/// Runtime, build, and cache trees remain owned by their dedicated resources.
+pub(crate) fn copy_authored_shoal(workspace: &Path, destination: &Path) -> Result<()> {
+    if !workspace.join(".shoal").is_dir() {
+        std::fs::create_dir_all(destination.join(".shoal"))?;
+        return Ok(());
+    }
     capture_tree(
         &workspace.join(".shoal"),
         Path::new(".shoal"),
@@ -554,12 +571,14 @@ pub(crate) fn copy_authored(workspace: &Path, destination: &Path) -> Result<()> 
         &mut BTreeMap::new(),
         true,
     )?;
-    for name in ["flake.nix", "flake.lock"] {
-        if workspace.join(name).is_file() {
-            std::fs::copy(workspace.join(name), destination.join(name))?;
-        }
-    }
     Ok(())
+}
+
+pub(crate) fn is_runtime_source_tree(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some("logs" | "sessions" | "runtime" | "build" | ".git" | "dist-newstyle" | "target")
+    )
 }
 
 /// A cheap signature of what [`capture_sources`] would read from `roots`: every
@@ -573,12 +592,7 @@ pub(super) fn sources_signature(roots: &[PathBuf]) -> Result<String> {
         entries.sort_by_key(std::fs::DirEntry::file_name);
         for entry in entries {
             let name = entry.file_name();
-            if matches!(
-                name.to_str(),
-                Some(
-                    "logs" | "sessions" | "runtime" | "build" | ".git" | "dist-newstyle" | "target"
-                )
-            ) {
+            if is_runtime_source_tree(&name) {
                 continue;
             }
             let kind = entry.file_type()?;
@@ -636,10 +650,7 @@ fn capture_tree(
         let entry = entry?;
         let name = entry.file_name();
         // Source roots may be `.shoal` itself. Runtime/build trees are not inputs.
-        if matches!(
-            name.to_str(),
-            Some("logs" | "sessions" | "runtime" | "build" | ".git" | "dist-newstyle" | "target")
-        ) {
+        if is_runtime_source_tree(&name) {
             continue;
         }
         let kind = entry.file_type()?;

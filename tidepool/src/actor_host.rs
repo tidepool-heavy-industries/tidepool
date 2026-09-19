@@ -1487,6 +1487,7 @@ pub async fn run(
                     source_exclude: config.source_exclude.clone(),
                     root_imports: Arc::default(),
                     worktrees: worktrees.clone(),
+                    source_layers: source_layers.clone(),
                     backend: backend.clone(),
                     base_prompt: FrozenBasePrompt::materialize_selected(
                         &run_root,
@@ -3712,6 +3713,7 @@ async fn launch_prepared_interactive_application(
                 source_exclude: config.source_exclude.clone(),
                 root_imports: Arc::default(),
                 worktrees: worktrees.clone(),
+                source_layers: None,
                 base_prompt: base_prompt.clone(),
                 backend: backend.clone(),
             };
