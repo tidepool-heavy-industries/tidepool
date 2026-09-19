@@ -161,8 +161,9 @@ shoal check --workspace /path/to/project
 researcher watchdog policies over one shared tool surface. A parent composes a
 role policy with task-specific heuristics and installs it through
 `Project.Watchdog`; no role is inferred from actor-path spelling. The
-`checks/supervision-profiles.hs` fixture shows an exact-path selector. This is
-source inheritance, not live policy delivery: the spec must contain the
+`checks/supervision-profiles.hs` fixture compiles exact assigned actor paths for
+implementer, reviewer, and researcher, plus an unmatched near-collision. This
+is source inheritance, not live policy delivery: the spec must contain the
 selector before the child snapshot, and a later parent reload does not update
 an already-running child.
 
