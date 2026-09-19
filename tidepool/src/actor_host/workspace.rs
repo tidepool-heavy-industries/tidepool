@@ -43,9 +43,41 @@ struct CapturedSource {
 
 pub(super) struct RootImport {
     inventory: std::collections::BTreeMap<PathBuf, SourceStamp>,
+    authored_inventory: Option<std::collections::BTreeMap<PathBuf, SourceStamp>>,
     exclusions: Vec<OsString>,
     manifest: SourceManifest,
+    authored_manifest: Option<SourceManifest>,
     snapshot: OverlaySnapshot,
+}
+
+fn authored_shoal_exclusions() -> [&'static std::ffi::OsStr; 7] {
+    [
+        std::ffi::OsStr::new("logs"),
+        std::ffi::OsStr::new("sessions"),
+        std::ffi::OsStr::new("runtime"),
+        std::ffi::OsStr::new("build"),
+        std::ffi::OsStr::new(".git"),
+        std::ffi::OsStr::new("dist-newstyle"),
+        std::ffi::OsStr::new("target"),
+    ]
+}
+
+fn authored_inventory(
+    source: &Path,
+) -> io::Result<Option<std::collections::BTreeMap<PathBuf, SourceStamp>>> {
+    let authored = source.join(".shoal");
+    authored
+        .is_dir()
+        .then(|| source_inventory(&authored, &authored_shoal_exclusions()))
+        .transpose()
+}
+
+fn authored_manifest(source: &Path) -> io::Result<Option<SourceManifest>> {
+    let authored = source.join(".shoal");
+    authored
+        .is_dir()
+        .then(|| source_manifest(&authored, &authored_shoal_exclusions()))
+        .transpose()
 }
 
 #[derive(Clone)]
@@ -55,6 +87,7 @@ pub(super) struct WorkspaceLayout {
     pub(super) source_exclude: Vec<String>,
     pub(super) root_imports: Arc<Mutex<std::collections::BTreeMap<PathBuf, Arc<RootImport>>>>,
     pub(super) worktrees: WorktreeManager,
+    pub(super) source_layers: Option<Arc<crate::shoal::source::ShoalSourceReload>>,
     pub(super) base_prompt: FrozenBasePrompt,
     pub(super) backend: Arc<dyn InteractiveAgentBackend>,
 }
@@ -179,12 +212,22 @@ impl WorkspaceLayout {
         }
         let excluded = excluded.iter().map(OsString::as_os_str).collect::<Vec<_>>();
         let before = source_inventory(source, &excluded).ok()?;
+        let authored_before = authored_inventory(source).ok()?;
         if before != candidate.inventory {
             return None;
         }
+        if authored_before != candidate.authored_inventory {
+            return None;
+        }
         let manifest = source_manifest(source, &excluded).ok()?;
+        let authored_manifest = authored_manifest(source).ok()?;
         let after = source_inventory(source, &excluded).ok()?;
-        (before == after && manifest == candidate.manifest).then(|| candidate.snapshot.clone())
+        let authored_after = authored_inventory(source).ok()?;
+        (before == after
+            && authored_before == authored_after
+            && manifest == candidate.manifest
+            && authored_manifest == candidate.authored_manifest)
+            .then(|| candidate.snapshot.clone())
     }
 
     fn remember_import(
@@ -195,6 +238,7 @@ impl WorkspaceLayout {
     ) -> io::Result<()> {
         let excluded_refs = excluded.iter().map(OsString::as_os_str).collect::<Vec<_>>();
         let before = source_inventory(source_path, &excluded_refs)?;
+        let authored_before = authored_inventory(source_path)?;
         let original = match source_manifest(source_path, &excluded_refs) {
             Ok(manifest) => manifest,
             Err(error) => {
@@ -202,8 +246,10 @@ impl WorkspaceLayout {
                 return Ok(());
             }
         };
+        let authored_original = authored_manifest(source_path)?;
         let after = source_inventory(source_path, &excluded_refs)?;
-        if before != after {
+        let authored_after = authored_inventory(source_path)?;
+        if before != after || authored_before != authored_after {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "source changed while verifying imported base",
@@ -230,8 +276,10 @@ impl WorkspaceLayout {
             source_path.to_owned(),
             Arc::new(RootImport {
                 inventory: after,
+                authored_inventory: authored_after,
                 exclusions: excluded.to_vec(),
                 manifest: original,
+                authored_manifest: authored_original,
                 snapshot,
             }),
         );
@@ -344,13 +392,10 @@ impl WorkspaceLayout {
                 .map_err(io::Error::other)?;
         }
         let canonical = self.source_root.join(".shoal");
-        if canonical.is_dir() {
-            boundary = if root {
-                boundary.with_writable_overlay(&canonical, visible.join(".shoal"))
-            } else {
-                boundary.with_read_only_overlay(&canonical, visible.join(".shoal"))
-            }
-            .map_err(io::Error::other)?;
+        if root && canonical.is_dir() {
+            boundary = boundary
+                .with_writable_overlay(&canonical, visible.join(".shoal"))
+                .map_err(io::Error::other)?;
         }
         for InteractivePolicyMount { source, target } in mounts {
             boundary = boundary
@@ -382,6 +427,9 @@ impl WorkspaceLayout {
             BUBBLEWRAP_PROGRAM,
             std::time::Instant::now() + PROCESS_OPERATION_TIMEOUT,
         )?;
+        if let (Some(id), Some(layers), Some(_)) = (&worktree, &self.source_layers, &source) {
+            layers.register_checkout_view(id, view.retained_view_path(&visible)?);
+        }
         for resource in source.iter_mut().chain(build.iter_mut()) {
             resource.record_bootstrap_upper()?;
         }

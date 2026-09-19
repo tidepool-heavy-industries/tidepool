@@ -307,7 +307,8 @@ impl OverlayResourceLease {
         // Mount targets live in the immutable base so Bubblewrap does not
         // create them in the writable upper during view setup.
         std::fs::File::create_new(self.layers[0].path.join(".git"))?;
-        std::fs::create_dir(self.layers[0].path.join(".shoal"))?;
+        crate::shoal::workspace::copy_authored_shoal(source, &self.layers[0].path)
+            .map_err(|error| io::Error::other(error.to_string()))?;
         tidepool_node::copy_overlay_root_metadata(source, &self.layers[0].path)?;
         *self.latest.lock() = Some(OverlaySnapshot {
             layers: self.layers.clone().into(),

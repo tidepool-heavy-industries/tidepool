@@ -427,6 +427,8 @@ pub(crate) struct ShoalSourceReload {
     /// Resolves a launch worktree id to the checkout on disk. Absent in the
     /// unit tests below, which exercise the run's own layer only.
     worktrees: Option<WorktreeManager>,
+    /// Private merged views native tools edit, by managed worktree id.
+    checkout_views: Mutex<HashMap<String, PathBuf>>,
     /// One layer per checkout, by worktree id, materialized on first use.
     /// `None` records a checkout that carries no source of its own, so the
     /// answer is not recomputed for every actor that holds it.
@@ -457,6 +459,7 @@ impl ShoalSourceReload {
             haskell_root,
             layer,
             worktrees: None,
+            checkout_views: Mutex::new(HashMap::new()),
             checkouts: Mutex::new(HashMap::new()),
             scopes: RwLock::new(HashMap::new()),
             gate: Mutex::new(()),
@@ -476,6 +479,16 @@ impl ShoalSourceReload {
     /// and the host says which while admitting it.
     pub(crate) fn bind_run(&self, actor: PrincipalId) {
         self.scopes.write().insert(actor, ActorSourceScope::Run);
+    }
+
+    /// Register the private merged source view native tools edit for a checkout.
+    ///
+    /// Admission calls this before actor construction asks for its source
+    /// layer, so compilation and reload read the same authored files.
+    pub(crate) fn register_checkout_view(&self, id: &WorktreeId, root: PathBuf) {
+        self.checkout_views
+            .lock()
+            .insert(id.as_str().to_owned(), root);
     }
 
     /// What `caller`'s own source calls reach.
@@ -530,7 +543,13 @@ impl ShoalSourceReload {
             return Ok(None);
         };
         let config = self.frozen.config()?;
-        let roots = super::workspace::checkout_source_roots(handle.cwd(), &config.haskell);
+        let root = self
+            .checkout_views
+            .lock()
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| handle.cwd().to_owned());
+        let roots = super::workspace::checkout_source_roots(&root, &config.haskell);
         if roots.is_empty() {
             return Ok(None);
         }

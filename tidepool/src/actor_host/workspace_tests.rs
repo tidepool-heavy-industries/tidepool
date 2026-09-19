@@ -237,6 +237,7 @@ fn source_exclusions_keep_tracked_files_and_untagged_directories() {
         source_exclude: Vec::new(),
         root_imports: Arc::default(),
         worktrees: manager,
+        source_layers: None,
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
         backend: Arc::new(Backend::default()),
     };
@@ -280,6 +281,7 @@ fn root_import_reuse_requires_matching_content_and_exclusions() {
         source_exclude: Vec::new(),
         root_imports: Arc::default(),
         worktrees: manager,
+        source_layers: None,
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
         backend: Arc::new(Backend::default()),
     };
@@ -307,8 +309,10 @@ fn root_import_reuse_requires_matching_content_and_exclusions() {
         repo.path().to_path_buf(),
         Arc::new(RootImport {
             inventory: source_inventory(repo.path(), &excluded_refs).unwrap(),
+            authored_inventory: original.authored_inventory.clone(),
             exclusions: original.exclusions.clone(),
             manifest: original.manifest.clone(),
+            authored_manifest: original.authored_manifest.clone(),
             snapshot: original.snapshot.clone(),
         }),
     );
@@ -335,6 +339,7 @@ fn root_workspace_resources_are_isolated_between_runs() {
         source_exclude: Vec::new(),
         root_imports: Arc::default(),
         worktrees: manager,
+        source_layers: None,
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
         backend: Arc::new(Backend::default()),
     };
@@ -411,6 +416,9 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         .unwrap();
     std::fs::create_dir(repo.path().join(".shoal")).unwrap();
     std::fs::write(repo.path().join(".shoal/config"), "canonical").unwrap();
+    std::fs::write(repo.path().join(".shoal/AgentSpec.hs"), "root-spec").unwrap();
+    std::fs::create_dir(repo.path().join(".shoal/logs")).unwrap();
+    std::fs::write(repo.path().join(".shoal/logs/root.log"), "runtime-only").unwrap();
     std::fs::write(repo.path().join("file"), "staged").unwrap();
     repo.git().try_run(repo.path(), &["add", "file"]).unwrap();
     std::fs::write(repo.path().join("file"), "working").unwrap();
@@ -439,6 +447,7 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
         source_exclude: Vec::new(),
         root_imports: Arc::default(),
         worktrees: manager.clone(),
+        source_layers: None,
         base_prompt: FrozenBasePrompt::materialize(runtime.path()).unwrap(),
         backend: backend.clone(),
     };
@@ -575,9 +584,31 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     assert_eq!(
         shell(
             child,
-            "cat file; git show :file; cat untracked ignored .shoal/config"
+            "cat file; git show :file; cat untracked ignored .shoal/config .shoal/AgentSpec.hs; test ! -e .shoal/logs/root.log"
         ),
-        "workingworkinguntrackedignoredcanonical"
+        "workingworkinguntrackedignoredcanonicalroot-spec"
+    );
+    shell(
+        child,
+        "printf child-config > .shoal/config; printf child-spec > .shoal/AgentSpec.hs",
+    );
+    assert_eq!(
+        shell(&workspace, "cat .shoal/config .shoal/AgentSpec.hs"),
+        "canonicalroot-spec"
+    );
+    let sibling = admission
+        .admit(root, "root/sibling".into(), seed(), CODING)
+        .await
+        .unwrap()
+        .install(ActorRef::first(tidepool_actor::ActorId(5)))
+        .unwrap();
+    let sibling = (sibling.as_ref() as &dyn std::any::Any)
+        .downcast_ref::<ActorWorkspaceCustody>()
+        .unwrap();
+    let sibling = sibling.workspace.as_ref().unwrap();
+    assert_eq!(
+        shell(sibling, "cat .shoal/config .shoal/AgentSpec.hs"),
+        "canonicalroot-spec"
     );
     assert_eq!(
         shell(child, "stat -c '%y' file"),
@@ -854,17 +885,20 @@ async fn ordinary_admission_captures_root_before_startup_and_busy_uses_head() {
     assert_eq!(
         shell(
             grandchild,
-            "cat file; git show :file; cat .shoal/build/cargo/artifact .shoal/config"
+            "cat file; git show :file; cat .shoal/build/cargo/artifact .shoal/config .shoal/AgentSpec.hs"
         ),
-        "dirty-childdirty-childwarmcanonical"
+        "dirty-childdirty-childwarmchild-configchild-spec"
     );
     shell(
         child,
-        "printf later-child > file; printf later-build > .shoal/build/cargo/artifact",
+        "printf later-child > file; printf later-build > .shoal/build/cargo/artifact; printf later-spec > .shoal/AgentSpec.hs",
     );
     assert_eq!(
-        shell(grandchild, "cat file .shoal/build/cargo/artifact"),
-        "dirty-childwarm"
+        shell(
+            grandchild,
+            "cat file .shoal/build/cargo/artifact .shoal/AgentSpec.hs"
+        ),
+        "dirty-childwarmchild-spec"
     );
     shell(
         grandchild,
