@@ -2,7 +2,7 @@
 name = "tidepool-extract-cmd"
 version = "0.1.0"
 edition = "2021"
-license = "PolyForm-Noncommercial-1.0.0"
+license-file = "../LICENSE.md"
 repository = "https://github.com/tidepool-heavy-industries/tidepool"
 homepage = "https://github.com/tidepool-heavy-industries/tidepool"
 authors = ["Inanna Malick <inanna@recursion.wtf>"]
