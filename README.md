@@ -147,9 +147,9 @@ on discovering a useful procedure, then run the procedure cheaply.
 
 An **after-turn hook** extends the same idea to completed model turns,
 including text-only replies: a precompiled Haskell effect program can inspect
-the turn and ask Jev for a review. The observational implementation is integrated
-and focused-tested; live Codex acceptance is still pending, and automatic
-turn-level nudges are not yet enabled. Existing after-tool
+the turn and ask Jev for a review. Live Codex checks have exercised text-only
+completion, policy replacement across reload, and a Jev-backed observation.
+The hook remains observational; automatic turn-level nudges are not enabled. Existing after-tool
 hooks do not cover every operation, including notebook cells.
 
 **Same machine, same effects.** A tool body or a slot is not a sandboxed

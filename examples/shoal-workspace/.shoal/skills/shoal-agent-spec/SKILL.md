@@ -292,6 +292,24 @@ heuristic's judgment along with everything else in the call.
 Needs `Member Jev effects, Member ActorContext effects, Member Notifications
 effects` on the slot and on `agentSpec`, same as any other effect a slot uses.
 
+## Observing completed turns
+
+`afterTurn` accepts `TurnObservation -> Eff effects Annotation`. The observation
+contains `turnObservationThread` and `turnObservationTurn`; the latter uses the
+same typed conversation items as `reflect`. Install it through a `defaultSpec`
+record update, preserving tools and any after-tool policy.
+
+This slot is passive: `Annotated` text is retained in detailed status, not
+inserted into provider context. `Pruned` is invalid. Failures and timeouts are
+status-visible. The observer establishes an initial completion baseline and
+then deduplicates subsequent completions for the exact bound thread; it does
+not promise durable replay across restart. Reload affects later invocations,
+not already admitted ones or other actors. Automatic nudges are not enabled.
+
+Test live delivery with a real completed model turn and inspect detailed status
+on the next interaction. Directly calling a hook only proves its authored body,
+not provider-completion delivery.
+
 ## Reload
 
 `reload_agent_spec` publishes your source layer, recompiles the spec, and swaps
