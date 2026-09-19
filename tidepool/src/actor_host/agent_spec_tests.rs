@@ -367,9 +367,19 @@ async fn default_workbench_imports_support_retained_record_handler() {
     let policy = campaign.root_installation.policy.clone();
     let define = include_str!("record_handler_retention_fixture.hs");
     let defined = dispatch_haskell_script(policy.as_ref(), define).await;
-    assert!(!defined.contains("error"), "definition cell failed: {defined}");
-    let used = dispatch_haskell_script(policy.as_ref(), r#"recordHandler "retained""#).await;
-    assert!(!used.contains("error"), "retained helper cell failed: {used}");
+    assert_eq!(
+        defined["status"], "committed",
+        "definition cell failed: {defined}"
+    );
+    let used = dispatch_haskell_script(
+        policy.as_ref(),
+        r#"let retainedHandler = recordHandler "retained""#,
+    )
+    .await;
+    assert_eq!(
+        used["status"], "committed",
+        "retained helper cell failed: {used}"
+    );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
