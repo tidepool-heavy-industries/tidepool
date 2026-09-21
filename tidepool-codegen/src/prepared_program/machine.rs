@@ -114,7 +114,6 @@ struct InstalledProgram<'code> {
     program: ProgramCustody<'code>,
     statics: Arc<StaticRegion>,
     owned_headers: Vec<usize>,
-    callable_headers: Vec<usize>,
 }
 
 /// Proof that the machine is at a quiescent point: no generated frame is
@@ -561,11 +560,6 @@ impl<'code> PreparedMachine<'code> {
             .map(|descriptor| descriptor.initial_header_word())
             .filter(|header| !shared.contains(header))
             .collect();
-        let callable_headers = compiled
-            .callables
-            .iter()
-            .map(|callable| callable.header)
-            .collect();
         self.compiled_functions += compiled.pipeline.functions_defined();
         self.compiled_code_bytes += compiled.pipeline.code_bytes();
         let id = ProgramId(self.next_program);
@@ -579,7 +573,6 @@ impl<'code> PreparedMachine<'code> {
                 program,
                 statics,
                 owned_headers,
-                callable_headers,
             },
         );
         Ok(id)
@@ -918,7 +911,7 @@ impl<'code> PreparedMachine<'code> {
                 )
             }),
             compiled
-                .enter_owned_headers
+                .thunk_enter_headers
                 .iter()
                 .map(|&header| (header, compiled.pipeline.get_function_ptr(compiled.enter))),
         );
@@ -1263,7 +1256,7 @@ impl<'code> PreparedMachine<'code> {
         let block = &compiled.root_block;
         // 2. Call and enter rows.
         self.machine
-            .retire_prepared_entries(&installed.callable_headers, &compiled.enter_owned_headers);
+            .retire_prepared_entries(&compiled.dispatch_owned_headers);
         // 3. Descriptor rows and the descriptor space: only what this program
         //    owned; interned constructors stay shared.
         let owned: HashSet<usize> = installed.owned_headers.iter().copied().collect();
@@ -1990,17 +1983,16 @@ impl<'code> PreparedMachine<'code> {
     ///
     /// Every constructor resolves through the machine interner, so the built
     /// cells carry exactly the descriptors installed code dispatches on. The
-    /// whole tree is sized first; the nursery is collected once only when it
-    /// cannot hold it; the objects are then written children-first into the
-    /// span beyond the allocation cursor with no allocating call in between,
-    /// and only after every write succeeds does the cursor advance and the
-    /// root get promoted and rooted as a handle. A failure at any step leaves
-    /// the cursor, the ledger and every root count unchanged.
+    /// validated tree is built children-first, one object at a time. Completed
+    /// objects live in fixed-address temporary root slots, allowing collection
+    /// between steps and answers larger than one nursery span. Only the fully
+    /// initialized root is promoted and published as a handle.
     ///
-    /// Byte arrays in the plan are allocated in the machine's external
-    /// ledger before any object is written and released again if anything
-    /// later fails; their wrapper objects use the machine-shared `ByteArray#`
-    /// descriptor every installed program reads with.
+    /// Each byte payload is allocated only after capacity for its wrapper is
+    /// available. No collection occurs between payload initialization and
+    /// rooting the initialized wrapper. A payload whose wrapper was not
+    /// published is released immediately; later failures leave committed,
+    /// unreachable wrappers for ordinary collection.
     pub fn build_answer(
         &mut self,
         realm: RealmId,
@@ -2025,38 +2017,33 @@ impl<'code> PreparedMachine<'code> {
         let free = |vmctx: &VMContext| {
             (vmctx.alloc_limit as usize).saturating_sub(vmctx.alloc_ptr as usize)
         };
-        if free(&self.vmctx) < flattened.extent {
-            collect_on(
-                &self.machine,
-                &mut self.vmctx,
-                &self.old_space,
-                flattened.extent,
-            )?;
-            if free(&self.vmctx) < flattened.extent {
-                return Err(super::answer::AnswerBuildError::TooLarge(flattened.extent).into());
-            }
+        let roots = RootWords::new(flattened.root_count())?;
+        let mark = self.machine.rust_roots_len();
+        for index in 0..roots.len() {
+            let slot = roots
+                .slot_address(index)
+                .ok_or_else(|| runtime_error(&self.machine, RuntimeError::BadPointer))?;
+            self.machine.register_rust_root(slot);
         }
+        let _temporary_roots = TemporaryRoots {
+            machine: &self.machine,
+            mark,
+        };
         self.handles
             .try_reserve_handles(1)
             .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
         if unsafe { self.machine.prepared_old_space() }.is_some() {
             return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
         }
-        // Byte payloads first: ledger allocations that touch neither the
-        // nursery nor any root, so a failure here or below unwinds to exactly
-        // the ledger the caller saw.
-        let mut payloads: Vec<*mut u8> = Vec::new();
-        // No wrapper naming a payload is ever published on a failed build, so
-        // the payload is released outright rather than revoked for a sweep.
-        let revoke = |machine: &MachineState, payloads: &[*mut u8]| {
-            for &payload in payloads {
-                if !machine.release_external_storage(payload) {
-                    return Err(runtime_error(machine, RuntimeError::BadPointer));
+        for index in 0..flattened.byte_count() {
+            let extent = flattened.byte_extent();
+            if free(&self.vmctx) < extent {
+                collect_on(&self.machine, &mut self.vmctx, &self.old_space, extent)?;
+                if free(&self.vmctx) < extent {
+                    return Err(super::answer::AnswerBuildError::TooLarge(extent).into());
                 }
             }
-            Ok(())
-        };
-        for bytes in flattened.byte_arrays() {
+            let bytes = flattened.byte_data(index);
             let allocated = self
                 .machine
                 .allocate_external_storage(ExternalStorageKind::Bytes, bytes.len())
@@ -2065,51 +2052,52 @@ impl<'code> PreparedMachine<'code> {
                         .store_external_bytes(payload, 0, bytes)
                         .map(|()| payload)
                 });
-            match allocated {
-                Ok(payload) => payloads.push(payload),
+            let payload = allocated.map_err(super::answer::AnswerBuildError::Storage)?;
+            let pointer = self.vmctx.alloc_ptr;
+            let word = match unsafe { flattened.write_byte(pointer, payload) } {
+                Ok(word) => word,
                 Err(error) => {
-                    revoke(&self.machine, &payloads)?;
-                    return Err(super::answer::AnswerBuildError::Storage(error).into());
+                    if !self.machine.release_external_storage(payload) {
+                        return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
+                    }
+                    return Err(error.into());
+                }
+            };
+            self.vmctx.alloc_ptr = unsafe { pointer.add(extent) };
+            roots.write(index, word as u64)?;
+        }
+
+        for index in 0..flattened.object_count() {
+            let extent = flattened.object_extent(index);
+            if free(&self.vmctx) < extent {
+                collect_on(&self.machine, &mut self.vmctx, &self.old_space, extent)?;
+                if free(&self.vmctx) < extent {
+                    return Err(super::answer::AnswerBuildError::TooLarge(extent).into());
                 }
             }
+            // A collection can move borrowed handles and completed children,
+            // so read both only after capacity has been established.
+            let handle_words = flattened
+                .handles()
+                .map(|handle| {
+                    self.handles
+                        .handle(handle.raw)
+                        .map(|entry| unsafe { entry.slot.current() } as usize)
+                        .filter(|word| *word != 0)
+                        .ok_or(super::answer::AnswerBuildError::UnknownHandle)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let child_words = roots.snapshot();
+            let pointer = self.vmctx.alloc_ptr;
+            let word =
+                unsafe { flattened.write_object(index, pointer, &child_words, &handle_words) }?;
+            self.vmctx.alloc_ptr = unsafe { pointer.add(extent) };
+            roots.write(flattened.byte_count() + index, word as u64)?;
         }
-        // Borrowed handles' tagged words, resolved now (after any collection
-        // the sizing pass above triggered) rather than at `visit` time — the
-        // same reason byte payloads are allocated after sizing rather than
-        // during it: a compacting collection can move what a handle roots,
-        // and only the ledger's own slot is updated by that move, never a
-        // copy taken earlier.
-        let mut handle_words: Vec<usize> = Vec::with_capacity(flattened.handles().count());
-        for handle in flattened.handles() {
-            let word = self
-                .handles
-                .handle(handle.raw)
-                .map(|entry| unsafe { entry.slot.current() } as usize)
-                .filter(|word| *word != 0)
-                .ok_or(super::answer::AnswerBuildError::UnknownHandle)?;
-            handle_words.push(word);
-        }
-        let span = self.vmctx.alloc_ptr;
-        // SAFETY: `span..span + extent` lies inside the live nursery beyond
-        // the allocation cursor (checked above), so nothing reaches it until
-        // the cursor advances below.
-        let root = match unsafe { flattened.write(span, &payloads, &handle_words) } {
-            Ok(root) => root,
-            Err(error) => {
-                revoke(&self.machine, &payloads)?;
-                return Err(error.into());
-            }
-        };
-        self.vmctx.alloc_ptr = unsafe { span.add(flattened.extent) };
-        let words = RootWords::new(1)?;
-        words.write(0, root as u64)?;
-        let source = words.as_mut_ptr().cast::<*mut u8>();
-        let mark = self.machine.rust_roots_len();
-        self.machine.register_rust_root(source);
-        let _roots = TemporaryRoots {
-            machine: &self.machine,
-            mark,
-        };
+
+        let source = roots
+            .slot_address(flattened.root_slot())
+            .ok_or_else(|| runtime_error(&self.machine, RuntimeError::BadPointer))?;
         unsafe { self.machine.install_prepared_old_space(&self.old_space) };
         let retained = unsafe {
             self.old_space.retain_prepared(
@@ -4308,8 +4296,7 @@ mod tests {
     ///
     /// X2 closes it: `apply.rs::emit_dispatchers`' terminal fallback now
     /// calls the host fn `prepared_resolve_call(vmctx, header, demand)`,
-    /// and `PreparedMachine::install` fills the machine-wide
-    /// `prepared_callables`/`prepared_enters` maps via
+    /// and `PreparedMachine::install` publishes machine-wide dispatch records via
     /// `MachineState::register_prepared_entries` as its LAST step, so a
     /// foreign callee this machine actually owns resolves and its code runs
     /// with the caller's frame live. Only a genuine signature mismatch or an
@@ -6949,7 +6936,7 @@ mod tests {
     /// the write path, and `Int`/`Word`/`Float` all marshal as raw bytes -- so
     /// the genuine mismatch this test exercises is shape, not width.)
     #[test]
-    fn a_host_answer_with_scalar_fields_builds_and_a_bad_field_rolls_back() {
+    fn a_host_answer_with_scalar_fields_builds_and_a_bad_field_remains_reusable() {
         use crate::prepared_program::{AnswerBuildError, AnswerPlan};
         let (mut machine, program) = PreparedMachine::new(
             field_constructor_program(910),
@@ -7010,7 +6997,7 @@ mod tests {
                 ..
             }))
         ));
-        assert_eq!(machine.vmctx.alloc_ptr, cursor_after_good);
+        assert!(machine.vmctx.alloc_ptr > cursor_after_good);
         assert_eq!(machine.handle_count(), handles_after_good);
         assert_eq!(machine.total_persistent_roots(), roots_after_good);
 
@@ -7094,13 +7081,12 @@ mod tests {
         CompiledProgram::compile(&linked).expect("text_shaped_program fixture compiles")
     }
 
-    /// A byte-backed host answer (the `Text` shape) allocates its payload in
-    /// the external ledger, wraps it with the owner's `ByteArray#` descriptor
-    /// and observes back as the bytes it was given, surviving a collection;
-    /// a plan whose later field fails releases the payload again, leaving the
-    /// ledger, the cursor and every count exactly as before.
+    /// A byte-backed host answer allocates its payload only after wrapper
+    /// capacity is available and observes back as the bytes it was given. If
+    /// a later field fails, the initialized wrapper is unreachable and the
+    /// next collection reclaims its payload; the machine remains reusable.
     #[test]
-    fn a_byte_backed_host_answer_builds_or_releases_its_payload() {
+    fn a_byte_backed_host_answer_builds_and_failure_is_collectable() {
         use crate::prepared_program::{AnswerBuildError, AnswerPlan};
         let (mut machine, program) = PreparedMachine::new(
             text_shaped_program(920, 921),
@@ -7125,8 +7111,9 @@ mod tests {
             bits: int_bits(value),
         };
 
-        // A failing later field: the payload allocated for field 0 is
-        // released again, not left revoked in the ledger.
+        // A failing later field leaves the initialized byte wrapper
+        // unreachable. It publishes no answer root; normal collection owns
+        // reclamation rather than pretending to roll the nursery cursor back.
         let bad = AnswerPlan::Constructor {
             host_id: DataConId(921),
             fields: vec![
@@ -7148,11 +7135,28 @@ mod tests {
         ));
         assert_eq!(
             machine.machine.external_storage_stats().live_objects,
-            ledger_before.live_objects
+            ledger_before.live_objects + 1
         );
-        assert_eq!(machine.vmctx.alloc_ptr, cursor_before);
+        assert!(machine.vmctx.alloc_ptr > cursor_before);
         assert_eq!(machine.handle_count(), handles_before);
         assert_eq!(machine.total_persistent_roots(), roots_before);
+
+        machine
+            .run_entry(
+                program,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 100,
+                    collect_before_observation: true,
+                },
+                realm,
+            )
+            .expect("the machine remains usable and collects the refused wrapper");
+        assert_eq!(
+            machine.machine.external_storage_stats().live_objects,
+            ledger_before.live_objects
+        );
 
         let good = AnswerPlan::Constructor {
             host_id: DataConId(921),
@@ -7746,6 +7750,29 @@ mod tests {
             },
             _ => None,
         }
+    }
+
+    /// Incremental answer construction roots each completed child before it
+    /// asks the collector for the next object's space. The complete graph is
+    /// deliberately much larger than this nursery; the old contiguous-span
+    /// builder refused it as `TooLarge`.
+    #[test]
+    fn a_host_answer_larger_than_the_nursery_builds_across_collections() {
+        let (mut machine, program) = PreparedMachine::new(
+            boxed_shape_program(930, 931),
+            PreparedMachineOptions { nursery_bytes: 256 },
+        )
+        .expect("prepared machine");
+        let realm = RealmId::fresh();
+        let handle = machine
+            .build_answer(realm, &boxed(100, 930, 931))
+            .expect("incremental construction spans nursery collections");
+        let observed = machine
+            .observe_handle(program, handle, 1_000)
+            .expect("the incrementally built answer observes");
+        assert_eq!(boxed_depth(&observed, 930, 931), Some(100));
+        assert!(machine.release(handle));
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 
     /// `old_bytes_live` reads live promoted bytes without needing a major
