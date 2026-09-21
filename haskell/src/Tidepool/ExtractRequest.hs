@@ -58,6 +58,8 @@ data RequestField
   | InspectTypeBatch FilePath
   | RetainedGeneration SymbolIdentity Word64
   | PreparedTurn
+  | ActivationPreview
+  | InspectionStrict
   deriving (Eq, Show)
 
 -- | A decoded compiler-worker invocation. This is the Haskell boundary's
@@ -97,6 +99,8 @@ data WorkerRequest = WorkerRequest
   -- | A turn that also writes its target's prepared-STG program from the
   -- same compile, linked against 'requestRetainedGenerations'.
   , requestPreparedTurn :: Bool
+  , requestActivationPreview :: Bool
+  , requestInspectionStrict :: Bool
   }
   deriving (Eq, Show)
 
@@ -130,6 +134,8 @@ emptyWorkerRequest = WorkerRequest
   , requestInspectTypeBatch = Nothing
   , requestRetainedGenerations = Map.empty
   , requestPreparedTurn = False
+  , requestActivationPreview = False
+  , requestInspectionStrict = False
   }
 
 data InspectionRequest
@@ -215,9 +221,11 @@ requestFromFields = foldl apply emptyWorkerRequest
         { requestRetainedGenerations =
             Map.insert identity generation (requestRetainedGenerations request) }
       PreparedTurn -> request { requestPreparedTurn = True }
+      ActivationPreview -> request { requestActivationPreview = True }
+      InspectionStrict -> request { requestInspectionStrict = True }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v7"
+workerRequestFlag = "--worker-request-v8"
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -236,7 +244,7 @@ type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 decodeRequest :: BS.ByteString -> Either String [RequestField]
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ007"
+  if magic /= "TPREQ008"
     then Left "worker request: unsupported magic or version"
     else do
       (count, rest) <- pWord32 body
@@ -246,7 +254,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ007" <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = "TPREQ008" <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
@@ -285,6 +293,8 @@ encodeField field = case field of
     BS.singleton 38 <> encodeSymbolIdentity identity <> putU64 generation
   PreparedTurn -> BS.singleton 39
   InspectTypeBatch value -> taggedText 40 value
+  ActivationPreview -> BS.singleton 41
+  InspectionStrict -> BS.singleton 42
 
 encodeSymbolIdentity :: SymbolIdentity -> BS.ByteString
 encodeSymbolIdentity identity =
@@ -386,6 +396,8 @@ pField bytes = do
       Right (RetainedGeneration identity generation, rest'')
     39 -> Right (PreparedTurn, rest)
     40 -> mapParser InspectTypeBatch pText rest
+    41 -> Right (ActivationPreview, rest)
+    42 -> Right (InspectionStrict, rest)
     _  -> Left ("worker request: unknown field tag " ++ show tag)
   where
     retired tag = Left ("worker request: retired field tag " ++ show tag)

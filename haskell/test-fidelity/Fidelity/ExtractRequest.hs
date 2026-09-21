@@ -13,6 +13,8 @@ checks = pure
   , check "typed inspection request retains query and output" typedInspectionDecodes
   , check "structured inspection retains scope namespace and provenance" structuredInspectionDecodes
   , check "prepared turn field decodes beside turn mode" preparedTurnDecodes
+  , check "activation preview field decodes as an internal request" activationPreviewDecodes
+  , check "strict inspection field preserves request-level diagnostics" strictInspectionDecodes
   , check "unknown request versions are rejected" wrongVersionRejected
   , check "retired request flags are rejected" retiredFlagsRejected
   , check "unknown field tags are rejected" unknownTagRejected
@@ -68,43 +70,57 @@ preparedTurnDecodes = case (decoded [Input "turn.txt", Turn], decoded [Input "tu
   where
     decoded = workerRequestFromArgv . workerArgv
 
+activationPreviewDecodes :: Bool
+activationPreviewDecodes = case workerRequestFromArgv (workerArgv [ActivationPreview]) of
+  Right (Just request) -> requestActivationPreview request
+  _ -> False
+
+strictInspectionDecodes :: Bool
+strictInspectionDecodes = case workerRequestFromArgv (workerArgv [InspectionStrict]) of
+  Right (Just request) -> requestInspectionStrict request
+  _ -> False
+
 typedRequestDecodes :: Bool
-typedRequestDecodes = case workerRequestFromArgv ["--worker-request-v7", payload] of
+typedRequestDecodes = case workerRequestFromArgv ["--worker-request-v8", payload] of
   Right (Just request) -> requestFiles request == ["x"] && requestBindGen request == Just 42
   _ -> False
   where
-    payload = "5450524551303037020000000101000000780b2a00000000000000"
+    payload = "5450524551303038020000000101000000780b2a00000000000000"
 
 wrongVersionRejected :: Bool
 wrongVersionRejected = all rejected
-  ["5450524551303031", "5450524551303033", "5450524551303034", "5450524551303035", "5450524551303036"]
+  [ "5450524551303031", "5450524551303032", "5450524551303033"
+  , "5450524551303034", "5450524551303035", "5450524551303036"
+  , "5450524551303037"
+  ]
   where
-    rejected magic = isLeft (workerRequestFromArgv ["--worker-request-v7", magic ++ "00000000"])
+    rejected magic = isLeft (workerRequestFromArgv ["--worker-request-v8", magic ++ "00000000"])
 
 retiredFlagsRejected :: Bool
 retiredFlagsRejected = all rejected
   [ "--worker-request-v1", "--worker-request-v2", "--worker-request-v3"
   , "--worker-request-v4", "--worker-request-v5", "--worker-request-v6"
+  , "--worker-request-v7"
   ]
   where
     rejected flag = isLeft (workerRequestFromArgv [flag, validPayload])
-    validPayload = "545052455130303700000000"
+    validPayload = "545052455130303800000000"
 
 unknownTagRejected :: Bool
 unknownTagRejected = isLeft (workerRequestFromArgv
-  ["--worker-request-v7", "545052455130303701000000ff"])
+  ["--worker-request-v8", "545052455130303801000000ff"])
 
 retiredTagsRejected :: Bool
 retiredTagsRejected = all retired [9, 10, 14]
   where
     retired tag = workerRequestFromArgv
-      ["--worker-request-v7", "545052455130303701000000" ++ byteHex tag]
+      ["--worker-request-v8", "545052455130303801000000" ++ byteHex tag]
       == Left ("worker request: retired field tag " ++ show tag)
     byteHex n = ["0123456789abcdef" !! (n `div` 16), "0123456789abcdef" !! (n `mod` 16)]
 
 truncatedFieldRejected :: Bool
 truncatedFieldRejected = isLeft (workerRequestFromArgv
-  ["--worker-request-v7", "545052455130303701000000010500000078"])
+  ["--worker-request-v8", "545052455130303801000000010500000078"])
 
 isLeft :: Either a b -> Bool
 isLeft (Left _) = True

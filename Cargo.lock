@@ -3724,6 +3724,7 @@ dependencies = [
  "tidepool-bridge-effects",
  "tidepool-codegen",
  "tidepool-effect",
+ "tidepool-extract-cmd",
  "tidepool-handlers",
  "tidepool-mcp",
  "tidepool-model",

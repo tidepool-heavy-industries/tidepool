@@ -193,6 +193,45 @@ impl ActorCompileView {
         self.session.next_value_generation()
     }
 
+    /// Opaque identity for compiler evidence produced against this exact
+    /// immutable source/import/session snapshot.
+    #[must_use]
+    pub(crate) fn evidence_key(&self) -> String {
+        fn field(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+            hasher.update(&(bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        }
+        let mut hasher = blake3::Hasher::new();
+        field(&mut hasher, &self.session.session().0.to_le_bytes());
+        field(&mut hasher, &self.session.lexical_scope().0.to_le_bytes());
+        field(
+            &mut hasher,
+            self.session.session_root().as_os_str().as_encoded_bytes(),
+        );
+        field(
+            &mut hasher,
+            self.session.persistent_imports().template_text().as_bytes(),
+        );
+        field(&mut hasher, self.external.template_text().as_bytes());
+        field(
+            &mut hasher,
+            &self.session.next_value_generation().0.to_le_bytes(),
+        );
+        for module in self
+            .session
+            .library()
+            .into_iter()
+            .chain(self.session.visible_values().iter().copied())
+            .chain(self.session.injected_values().iter().copied())
+        {
+            field(&mut hasher, module.module_name().as_bytes());
+        }
+        for path in self.source_layer.iter() {
+            field(&mut hasher, path.as_os_str().as_encoded_bytes());
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
     /// The declaration module this view currently imports unqualified for
     /// this scope (`None` before the first declaration ever lands). Needed to
     /// name the exact "current" generation a same-cell redeclaration retry

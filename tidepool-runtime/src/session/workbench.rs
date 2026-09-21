@@ -460,6 +460,18 @@ impl WorkbenchBinding {
         }
     }
 
+    /// A declaration whose defining generation already retained GHC's type.
+    #[must_use]
+    pub fn typed_declaration(name: String, type_display: String) -> Self {
+        Self {
+            name,
+            type_display: Some(type_display),
+            kind: WorkbenchBindingKind::Declaration,
+            type_query: None,
+            defining_generation: None,
+        }
+    }
+
     /// Public for the same reason as [`Self::declaration`].
     #[must_use]
     pub fn materialized(name: String, type_display: Option<String>) -> Self {
@@ -1223,23 +1235,32 @@ pub fn resident_workbench_templates(
 /// themselves prefer the effectful reading of an ambiguous final expression
 /// (GHC always resolves the overlap toward the unconditionally-matching bare
 /// `value` head once forced to choose — the opposite of what a cell whose
-/// final unit is `pure <expr>` wants), so
-/// [`super::turn::check_cell_preferring_effectful`] retries a failed check
-/// once with the cell's final expression wrapped in this pin, which settles
-/// the ambiguity outright rather than adjudicating it here.
+/// final unit is `pure <expr>` wants). The named `Applicative` and `Monad`
+/// defaults below settle that ambiguity to the exact workbench effect row in
+/// the same whole-cell check.
 #[must_use]
 pub fn resident_cell_check_template(preamble: &str, effect_stack: &str, imports: &str) -> String {
     let preamble = insert_preamble_imports(
         &insert_preamble_imports(preamble, imports),
         "qualified GHC.TypeError as TidepoolWorkbenchTypeError",
     );
+    let preamble = insert_preamble_imports(
+        &preamble,
+        "qualified Tidepool.Inspection as TidepoolInspection",
+    );
     let preamble = insert_preamble_imports(&preamble, "{{CELL_IMPORTS}}")
         .replace("import {{CELL_IMPORTS}}", "{{CELL_IMPORTS}}")
-        .replacen("\nmodule ", "\n{{CELL_PRAGMAS}}\nmodule ", 1);
+        .replacen(
+            "\nmodule ",
+            "\n{-# LANGUAGE NamedDefaults #-}\n{{CELL_PRAGMAS}}\nmodule ",
+            1,
+        );
     format!(
         "{preamble}\n\
          __tidepoolInEffectRow :: Eff {effect_stack} value -> Eff {effect_stack} value\n\
          __tidepoolInEffectRow = id\n\
+         default Applicative (Eff {effect_stack})\n\
+         default Monad (Eff {effect_stack})\n\
          class TidepoolCellPure value\n\
          instance {{-# OVERLAPPABLE #-}} TidepoolCellPure value\n\
          instance {{-# OVERLAPPING #-}} TidepoolWorkbenchTypeError.Unsatisfiable \
@@ -1251,6 +1272,8 @@ pub fn resident_cell_check_template(preamble: &str, effect_stack: &str, imports:
            __tidepoolCellExpression action = action >> pure () }}\n\
          instance {{-# OVERLAPPABLE #-}} TidepoolCellPure value => TidepoolCellExpression value where {{ \
            __tidepoolCellExpression _ = pure () }}\n\
+         __tidepoolCellDisplayConstraint :: TidepoolInspection.PageDisplay {effect_stack} value => value -> ()\n\
+         __tidepoolCellDisplayConstraint _ = ()\n\
          {{{{CELL_DECLS}}}}\n\
          __tidepool_cell_check :: Eff {effect_stack} ()\n\
          __tidepool_cell_check = do {{\n\

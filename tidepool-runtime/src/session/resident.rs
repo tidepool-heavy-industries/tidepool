@@ -736,6 +736,7 @@ fn settle_prepared<H: DispatchEffect<O>, O>(
     engine: &mut ResidentEngine,
     program: ProgramId,
     realm: RealmId,
+    argument: Option<PreparedHandle>,
     plan: SettlePlan,
     park: ParkPolicy,
     table: &DataConTable,
@@ -745,7 +746,16 @@ fn settle_prepared<H: DispatchEffect<O>, O>(
     let engine = engine
         .require_prepared()
         .map_err(|_| PreparedRuntimeError::WrongEngine)?;
-    let settlement = engine.run_settled(program, realm)?;
+    let settlement = match argument {
+        Some(handle) => engine.run_settled_with_inputs(
+            program,
+            realm,
+            &[tidepool_codegen::prepared_program::PreparedInput::Managed(
+                handle,
+            )],
+        )?,
+        None => engine.run_settled(program, realm)?,
+    };
     finish_prepared(
         engine, program, realm, plan, park, table, handlers, captured, settlement,
     )
@@ -2107,11 +2117,13 @@ where
         let mut bindings = std::collections::BTreeMap::new();
         for (item, generation) in self.core.lib().current_declarations_in(scope) {
             if let super::ExportItem::Value { name } = &item {
-                bindings.insert(
-                    name.clone(),
-                    super::WorkbenchBinding::declaration(name.clone(), item.render_entry())
-                        .with_generation(Some(generation)),
-                );
+                let binding = match self.core.lib().declaration_value_type(generation, name) {
+                    Some(ty) => {
+                        super::WorkbenchBinding::typed_declaration(name.clone(), ty.to_owned())
+                    }
+                    None => super::WorkbenchBinding::declaration(name.clone(), item.render_entry()),
+                };
+                bindings.insert(name.clone(), binding.with_generation(Some(generation)));
             }
         }
         for name in self.binding_names_in(scope) {
@@ -2126,6 +2138,19 @@ where
             );
         }
         bindings.into_values().collect()
+    }
+
+    /// Retain one compatibility inspection batch against the exact declaration
+    /// generations it observed. Stale entries are ignored by the declaration
+    /// log owner.
+    pub fn retain_declaration_value_types_in(
+        &mut self,
+        scope: ScopeId,
+        types: &[(String, u64, String)],
+    ) {
+        self.core
+            .lib_mut()
+            .retain_declaration_value_types_in(scope, types);
     }
 
     /// Check exact current declaration source without evaluating a live value.
@@ -2286,6 +2311,24 @@ where
         self.run_transient_with_sites("actor_observation_preview", code)
     }
 
+    /// Run a compiler-generated pure preview against a committed binding.
+    /// The mounted binding retains its value if rendering fails.
+    pub fn run_mounted_inspection_with_sites(
+        &mut self,
+        code: TurnCode<'_>,
+        binding: SessionVarId,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        let entry = self
+            .core
+            .bindings()
+            .get(binding)
+            .ok_or(BindingAliasError::MissingSource(binding))?;
+        let BoundValue::Prepared { handle, .. } = &entry.value else {
+            return Err(PreparedRuntimeError::WrongEngine.into());
+        };
+        self.run_prepared_with_argument(code, PreparedTurnMode::Value, Some(*handle))
+    }
+
     /// The route this session runs on.
     #[must_use]
     pub fn engine_kind(&self) -> EngineKind {
@@ -2322,6 +2365,15 @@ where
         code: TurnCode<'_>,
         mode: PreparedTurnMode<'_>,
     ) -> Result<ResidentOutcome, ResidentError> {
+        self.run_prepared_with_argument(code, mode, None)
+    }
+
+    fn run_prepared_with_argument(
+        &mut self,
+        code: TurnCode<'_>,
+        mode: PreparedTurnMode<'_>,
+        argument: Option<PreparedHandle>,
+    ) -> Result<ResidentOutcome, ResidentError> {
         let prepared = code.prepared.ok_or(PreparedRuntimeError::MissingProgram)?;
         let provenance = self.provenance_for(code.expr, code.sites)?;
         self.core
@@ -2354,9 +2406,9 @@ where
         let run_exec_started = std::time::Instant::now();
         let ran = self.on_eval_thread(move |engine, table, handlers, captured| {
             Ok(settle_prepared(
-                engine, program, realm, plan, park, table, handlers, captured,
+                engine, program, realm, argument, plan, park, table, handlers, captured,
             ))
-        })?;
+        });
         timing::record_stage(
             timing::NO_NODE,
             timing::NO_ROUND,
@@ -2372,7 +2424,7 @@ where
         if let Some(engine) = self.core.prepared_mut() {
             engine.unpin(program);
         }
-        self.complete_prepared(ran?, mode, program, lexical_scope, provenance, None)
+        self.complete_prepared(ran??, mode, program, lexical_scope, provenance, None)
     }
 
     /// Finish one prepared run on the session thread, whichever entry
@@ -3966,7 +4018,7 @@ fn panic_to_run_error(payload: Box<dyn std::any::Any + Send>) -> ResidentError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_repr::{CoreFrame, Literal, TreeBuilder};
+    use tidepool_repr::{CoreFrame, Literal, SessionId, TreeBuilder};
 
     /// A no-op sink — these tests never suspend or produce output.
     #[derive(Clone, Default)]
@@ -4018,6 +4070,46 @@ mod tests {
             heads: Vec::new(),
             inputs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn retained_declaration_type_makes_binding_status_compiler_free() {
+        let root = tempfile::tempdir().unwrap();
+        let mut lib = SessionLib::open(
+            SessionId(1),
+            root.path(),
+            super::super::ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        lib.push_turn_in(
+            ScopeId::ROOT,
+            super::super::DeclTurn {
+                normalized: Default::default(),
+                external_imports: super::super::SourceImports::new(),
+                sources: vec!["answer = 42".into()],
+                workbench_imports: super::super::SourceImports::new(),
+                items: vec![super::super::ExportItem::Value {
+                    name: "answer".into(),
+                }],
+                value_types: std::collections::BTreeMap::from([("answer".into(), "Int".into())]),
+                retracts: Vec::new(),
+                parent: None,
+            },
+        );
+        let session = ResidentSession::unbootstrapped_on(
+            EngineKind::Prepared,
+            frunk::HNil,
+            NullSink,
+            Vec::new(),
+            crate::DEFAULT_NURSERY_SIZE,
+            Some(lib),
+        );
+
+        let bindings = session.workbench_bindings_in(ScopeId::ROOT);
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].name, "answer");
+        assert_eq!(bindings[0].type_display.as_deref(), Some("Int"));
+        assert_eq!(bindings[0].type_query(), None);
     }
 
     /// A decode failure while materializing an already-run result is the

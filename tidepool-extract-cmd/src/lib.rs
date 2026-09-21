@@ -28,7 +28,10 @@ pub mod exec_check;
 pub mod frontend;
 mod process;
 mod request;
-pub use endpoint::{CompilerEndpoint, CompilerIdentity};
+pub use endpoint::{
+    with_compiler_transaction, with_compiler_transaction_cancellable, CompilerEndpoint,
+    CompilerIdentity, CompilerTransaction, CompilerTransactionCancellation,
+};
 use exec_check::is_readable_executable_file;
 pub use request::{
     ExtractRequest, InspectionNamespace, InspectionScope, ProtocolError, StructuredInspection,
@@ -579,6 +582,12 @@ impl ExtractCmd {
         self
     }
 
+    /// Select the generated child-activation input/preview compile path.
+    pub fn activation_preview(&mut self) -> &mut Self {
+        self.request.activation_preview();
+        self
+    }
+
     /// Ask the compiler worker for GHC's type of an expression.
     pub fn inspect_type(&mut self, expression: &str) -> &mut Self {
         self.request.inspect_type(expression);
@@ -624,6 +633,14 @@ impl ExtractCmd {
     /// Individual input modules remain the per-query fallback on source errors.
     pub fn inspect_type_batch(&mut self, path: impl AsRef<Path>) -> &mut Self {
         self.request.inspect_type_batch(path.as_ref());
+        self
+    }
+
+    /// Preserve compiler source errors as request-level structured diagnostics.
+    /// Declaration staging uses this because rejection must retain exact spans;
+    /// ordinary interactive inspection keeps per-query failure isolation.
+    pub fn inspection_strict(&mut self) -> &mut Self {
+        self.request.inspection_strict();
         self
     }
 

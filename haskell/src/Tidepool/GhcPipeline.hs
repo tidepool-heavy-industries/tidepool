@@ -2,7 +2,7 @@
 {-# LANGUAGE RankNTypes #-}
 
 module Tidepool.GhcPipeline
-  ( PipelineSelection(..), PreparedPipelineResult(..)
+  ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
   , runPipeline, runPipelineSession, runPipelineSessionFor
   , runPipelineSelected, runPipelineSessionSelected
   , runPipelineSelectedRetaining
@@ -11,6 +11,7 @@ module Tidepool.GhcPipeline
   , stripMonadHead, isClosureType, renderType
   , splitTupleType
   , CellDisplayPass(..), cellDisplayDeclarations
+  , cellExpressionPlans, satisfiesCapturedConstraint
   , checkCellInstances
     -- * Resident session
   , withResidentPipeline, withResidentPipelineSelected
@@ -20,12 +21,13 @@ module Tidepool.GhcPipeline
 
 import GHC hiding (typeKind)
 import GHC.Driver.Main (hscDesugar, batchMsg, hscTidy)
-import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT)
-import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env))
+import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit)
+import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger))
 import GHC.Driver.Monad (reflectGhc, reifyGhc)
-import GHC.Unit.Home.ModInfo (HomeModInfo(..), emptyHomeModInfoLinkable, addToHpt)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), emptyHomeModInfoLinkable, addToHpt, lookupHpt)
 import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache)
 import GHC.Iface.Make (mkIfaceTc)
+import GHC.Iface.Tidy (mkBootModDetailsTc)
 import GHC.Types.SourceFile (HscSource(..))
 import GHC.Types.Error (mkUnknownDiagnostic, MessageClass(..), mkLocMessage, getMessages, errMsgDiagnostic)
 import GHC.Types.SourceError (SourceError, srcErrorMessages)
@@ -34,6 +36,7 @@ import GHC.Tc.Errors.Types (TcRnMessage(..), TcRnMessageDetailed(..), DeriveInst
 import GHC.Utils.Logger (LogAction)
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..))
+import GHC.Unit.Home (homeUnitId)
 import GHC.Data.Graph.Directed (flattenSCCs)
 import GHC.Core.Opt.Pipeline (core2core)
 import GHC.Core.Ppr (pprCoreBindings)
@@ -62,15 +65,18 @@ import GHC.Core.Type
   , splitAppTy_maybe
   , splitTyConApp_maybe
   , splitFunTy_maybe
-  , isLiftedTypeKind, mkTyVarTy, typeKind, isTauTy
+  , isLiftedTypeKind, mkTyVarTy, typeKind, isTauTy, tyCoVarsOfType
   )
+import GHC.Core.TyCo.Compare (eqType)
+import GHC.Core.TyCo.FVs (scopedSort, tyConsOfType)
 import GHC.Core.TyCon (isTupleTyCon, tyConDataCons_maybe, unwrapNewTyCon_maybe, tyConUnique, tyConName, tyConVisibleTyVars)
 import GHC.Types.SrcLoc (mkRealSrcSpan, mkRealSrcLoc)
 import GHC.Core.Class (className)
 import GHC.Core.InstEnv (is_cls, is_tys)
 import GHC.Core.FamInstEnv (fi_fam, fi_tys)
-import GHC.Core.Predicate (mkClassPred)
+import GHC.Core.Predicate (mkClassPred, getClassPredTys_maybe)
 import GHC.Builtin.Names (fUNTyConKey, unrestrictedFunTyConKey, genClassKey, repTyConKey)
+import GHC.Builtin.Types (zonkAnyTyCon)
 import GHC.Core.DataCon (dataConOrigArgTys, dataConName)
 import GHC.Types.FieldLabel (flLabel)
 import Language.Haskell.Syntax.Basic (field_label)
@@ -79,7 +85,7 @@ import GHC.Tc.Solver (tcCheckGivens, tcCheckWanteds)
 import GHC.Tc.Solver.InertSet (emptyInert)
 import GHC.Tc.Utils.Monad (initTcWithGbl)
 import GHC.Tc.Utils.TcMType (newEvVars)
-import GHC.Core.TyCo.Rep (Scaled(..))
+import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
 import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.TypeEnv (typeEnvIds, typeEnvTyCons)
@@ -87,15 +93,17 @@ import GHC.LanguageExtensions.Type qualified as LangExt
 import GHC.Tc.Types (TcGblEnv, tcg_dependent_files, tcg_binds, tcg_rdr_env, tcg_type_env, tcg_insts)
 import GHC.Types.Name.Reader (GlobalRdrEnv)
 import GHC.Types.Name.Ppr (mkNamePprCtx)
-import GHC.Types.Name (nameOccName, nameUnique, mkExternalName, nameModule_maybe)
-import GHC.Types.Name.Occurrence (mkOccName, occNameSpace, occNameString)
-import GHC.Types.Var (mkTyVarBinder, setVarName, tyVarKind, varName)
+import GHC.Types.Name (nameOccName, nameUnique, mkExternalName, mkInternalName, nameModule_maybe)
+import GHC.Types.Name.Occurrence (mkOccName, mkTyVarOcc, occNameSpace, occNameString)
+import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, takeUniqFromSupply)
+import GHC.Types.Var (mkTyVar, mkTyVarBinder, setVarName, tyVarKind, varName)
+import GHC.Types.Var.Set (isEmptyVarSet)
 import Language.Haskell.Syntax.Specificity (Specificity (SpecifiedSpec))
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
 import Control.Applicative ((<|>))
 import Control.Exception (finally, try, throwIO, IOException)
-import Data.Maybe (fromMaybe, isNothing)
-import Data.List (isPrefixOf, nub, sortOn, intercalate)
+import Data.Maybe (fromMaybe, isJust, isNothing)
+import Data.List (find, isPrefixOf, nub, nubBy, sortOn, intercalate)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef, writeIORef)
 import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName, takeFileName)
@@ -105,7 +113,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, forM_, when)
 import Data.Data (Data, cast, gmapQ)
 import Data.Foldable (toList)
-import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellDisplayTarget(..), CellGenericDeclaration(..), omitCellGenericDeclarations, omitCellDisplayDeclarations)
+import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellDisplayTarget(..), CellGenericDeclaration(..), CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), omitCellGenericDeclarations, omitCellDisplayDeclarations)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
 import Tidepool.Introspection (normalizeLookupWildcards)
@@ -125,10 +133,11 @@ import Tidepool.RetainedUnfoldings
 import Tidepool.TurnSource (extractModuleName)
 
 -- | Selects the compiler representation produced at the internal GHC API
--- boundary. Existing extraction entry points always select 'LegacyCore'.
+-- boundary. Metadata consumers stop at the checked environment.
 data PipelineSelection result where
   LegacyCore :: PipelineSelection PipelineResult
   PreparedStg :: PipelineSelection PreparedPipelineResult
+  CheckedEnvironment :: PipelineSelection CheckedEnvironmentResult
 
 data PreparationKind = KeepCore | PrepareStg
 
@@ -139,16 +148,21 @@ data PreparedPipelineResult = PreparedPipelineResult
   , pprModules :: [PreparedModule]
   }
 
-data CompileResult = CompileResult PipelineResult [PreparedModule]
+-- | Metadata has no executable projection or Core payload. The environment
+-- retains dependency interfaces and the target's exact checked reader scope.
+data CheckedEnvironmentResult = CheckedEnvironmentResult
+  { crHscEnv :: HscEnv
+  , crTargetTcGblEnv :: TcGblEnv
+  , crTargetRdrEnv :: GlobalRdrEnv
+  , crCapturedTypes :: Map.Map String String
+  , crResultType :: Maybe Type
+  , crCheckedBinderPins :: [CheckedBinderPin]
+  }
 
 selectionKind :: PipelineSelection result -> PreparationKind
 selectionKind LegacyCore = KeepCore
 selectionKind PreparedStg = PrepareStg
-
-selectCompileResult :: PipelineSelection result -> CompileResult -> result
-selectCompileResult LegacyCore (CompileResult result _) = result
-selectCompileResult PreparedStg (CompileResult result modules) =
-  PreparedPipelineResult result modules
+selectionKind CheckedEnvironment = KeepCore
 
 data PipelineResult = PipelineResult
   { prBinds  :: [CoreBind]
@@ -196,9 +210,9 @@ data CellDisplayPass = DisplayInstanceContexts | DisplayInstanceFields
   deriving (Eq, Show)
 
 checkCellInstances
-  :: (CellSourcePlan -> IO PipelineResult)
+  :: (CellSourcePlan -> IO CheckedEnvironmentResult)
   -> CellSourcePlan
-  -> IO (CellSourcePlan, PipelineResult)
+  -> IO (CellSourcePlan, CheckedEnvironmentResult)
 checkCellInstances compile plan = do
   attempted <- try (compile plan)
   case attempted of
@@ -208,6 +222,142 @@ checkCellInstances compile plan = do
       rejected -> checkCellInstances compile
         (omitCellDisplayDeclarations [name | (AutomaticDisplay, name) <- rejected]
           (omitCellGenericDeclarations [name | (AutomaticGeneric, name) <- rejected] plan))
+
+-- | Recover the exact, post-defaulting type of every generated expression
+-- lambda and ask GHC whether its result satisfies the generated display
+-- constraint under the same quantified givens and exact effect row. This is
+-- execution evidence: Rust selects one wrapper from it and never learns
+-- policy from a failed wrapper compile.
+cellExpressionPlans :: CheckedEnvironmentResult -> IO [CellExpressionPlan]
+cellExpressionPlans result = forM expressionIds $ \identifier -> do
+  effectConstructor <- maybe
+    (fail "effect-row helper type was not captured") pure
+    (capturedEffectConstructor environment)
+  uniqueSupply <- mkSplitUniqSupply 'z'
+  stableType <- maybe (fail "expression evidence contains a dependently-kinded unresolved type") pure
+    (stabilizeCellEvidenceType uniqueSupply (stabilizeEffectRows (idType identifier)))
+  when (zonkAnyTyCon `elementOfUniqSet` tyConsOfType stableType) $
+    fail "expression evidence still contains an unresolved internal type"
+  let occurrence = occNameString (nameOccName (idName identifier))
+      (outerBinders, outerPredicates, outerBody) = tcSplitSigmaTy stableType
+      (liftPlan, valueBody) = case effectResultType effectConstructor outerBody of
+        Just resultType -> (ExpressionEffectful, resultType)
+        Nothing -> (ExpressionPure, outerBody)
+      (innerBinders, innerPredicates, body) = tcSplitSigmaTy valueBody
+      binders = outerBinders ++ innerBinders
+      predicates = outerPredicates ++ innerPredicates
+      quantified = mkInvisForAllTys (map (mkTyVarBinder SpecifiedSpec) binders)
+        (mkInvisFunTys predicates body)
+  rendered <- satisfiesCapturedConstraint (crHscEnv result) environment
+    "__tidepoolCellDisplayConstraint" quantified
+  pure CellExpressionPlan
+    { expressionPlanKey = occurrence
+    , expressionPlanLift = liftPlan
+    , expressionPlanPresentation = if rendered then ExpressionRendered else ExpressionOpaque
+    , expressionPlanType = renderCellPinType names stableType
+    , expressionPlanHeads = nominalHeadsOfType stableType
+    }
+  where
+    environment = crTargetTcGblEnv result
+    names = mkNamePprCtx (PromTickCtx True True)
+      (hsc_unit_env (crHscEnv result)) (tcg_rdr_env environment)
+    expressionIds = Map.elems $ Map.fromList
+      [ (occurrence, identifier)
+      | identifier <- collectDataIds (tcg_binds environment)
+      , let occurrence = occNameString (nameOccName (idName identifier))
+      , "__tidepool_cell_expr_" `isPrefixOf` occurrence
+      ]
+
+-- | Solve the class predicate carried by a reserved generated helper after
+-- replacing its final type argument with the checked value type. This keeps
+-- multi-parameter context such as the exact effect row and uses the resolved
+-- class Name rather than source spelling.
+satisfiesCapturedConstraint :: HscEnv -> TcGblEnv -> String -> Type -> IO Bool
+satisfiesCapturedConstraint hsc environment helper valueType = do
+  (constraintClass, constraintArguments) <-
+    maybe (fail ("constraint helper was not captured: " ++ helper)) pure captured
+  let (_, predicates, body) = tcSplitSigmaTy valueType
+  (_, checked) <- initTcWithGbl hsc environment
+    (mkRealSrcSpan (mkRealSrcLoc (mkFastString "<display constraint>") 1 1)
+      (mkRealSrcLoc (mkFastString "<display constraint>") 1 1)) $ do
+      givens <- newEvVars predicates
+      inert <- tcCheckGivens emptyInert (listToBag givens)
+      case inert of
+        Nothing -> pure False
+        Just solved -> tcCheckWanteds solved
+          [mkClassPred constraintClass (replaceLast constraintArguments body)]
+  maybe (fail "captured constraint solver failed") pure checked
+  where
+    captured = case capturedBindingType helper environment of
+      Just helperType -> case tcSplitSigmaTy helperType of
+        (_, predicate : _, _) -> getClassPredTys_maybe predicate
+        _ -> Nothing
+      Nothing -> Nothing
+    replaceLast [] _ = []
+    replaceLast arguments replacement = init arguments ++ [replacement]
+
+capturedEffectConstructor :: TcGblEnv -> Maybe TyCon
+capturedEffectConstructor environment = do
+  helperType <- capturedBindingType "__tidepoolInEffectRow" environment
+  let (_, _, body) = tcSplitSigmaTy helperType
+  (_, _, argument, _) <- splitFunTy_maybe body
+  fst <$> splitTyConApp_maybe argument
+
+effectResultType :: TyCon -> Type -> Maybe Type
+effectResultType expected ty = do
+  (constructor, arguments) <- splitTyConApp_maybe ty
+  if tyConUnique constructor == tyConUnique expected
+    then case reverse arguments of
+      resultType : _ -> Just resultType
+      [] -> Nothing
+    else Nothing
+
+-- GHC closes unconstrained metavariables in a checked expression with its
+-- internal, unexported @ZonkAny@ type. Re-generalize equal placeholders into
+-- the same quantified variable before serializing the type into a later
+-- source module. This preserves parametric expressions such as @pure id@
+-- without exposing an internal type constructor or choosing an arbitrary
+-- concrete instantiation.
+stabilizeCellEvidenceType :: UniqSupply -> Type -> Maybe Type
+stabilizeCellEvidenceType supply ty
+  | all hasNoOriginalKindVariables zonkTypes = Just $
+      mkInvisForAllTys (map (mkTyVarBinder SpecifiedSpec) sortedVariables) (go ty)
+  | otherwise = Nothing
+  where
+    hasNoOriginalKindVariables zonk = isEmptyVarSet (tyCoVarsOfType kind)
+      where kind = typeKind zonk
+    zonkTypes = nubBy eqType (collect ty)
+    variables = zipWith3 variable [0 :: Int ..] uniques zonkTypes
+    sortedVariables = scopedSort variables
+    variable index unique zonk = mkTyVar
+      (mkInternalName unique
+        (mkTyVarOcc ("cell" ++ show index)) noSrcSpan)
+      (go (typeKind zonk))
+    uniques = let (unique, rest) = takeUniqFromSupply supply
+              in unique : uniquesFrom rest
+    uniquesFrom current = let (unique, rest) = takeUniqFromSupply current
+                          in unique : uniquesFrom rest
+    replacements = zip zonkTypes variables
+    go zonk@(TyConApp tc _)
+      | tc == zonkAnyTyCon
+      , Just (_, replacement) <- find (eqType zonk . fst) replacements
+      = mkTyVarTy replacement
+    go (TyConApp tc args) = TyConApp tc (map go args)
+    go (AppTy f x) = AppTy (go f) (go x)
+    go (ForAllTy binder body) = ForAllTy binder (go body)
+    go (FunTy flag mult arg result) =
+      FunTy flag (go mult) (go arg) (go result)
+    go (CastTy inner coercion) = CastTy (go inner) coercion
+    go other = other
+    collect zonk@(TyConApp tc args)
+      | tc == zonkAnyTyCon = zonk : concatMap collect args
+      | otherwise = concatMap collect args
+    collect (AppTy f x) = collect f ++ collect x
+    collect (ForAllTy _ body) = collect body
+    collect (FunTy _ mult arg result) =
+      collect mult ++ collect arg ++ collect result
+    collect (CastTy inner _) = collect inner
+    collect _ = []
 
 data AutomaticInstance = AutomaticGeneric | AutomaticDisplay
   deriving (Eq)
@@ -247,7 +397,7 @@ isDisplayClass cls =
    in occNameString (nameOccName name) == "Display"
       && fmap (moduleNameString . moduleName) (nameModule_maybe name) == Just "Tidepool.Inspection"
 
-cellDisplayDeclarations :: CellDisplayPass -> PipelineResult -> CellSourcePlan -> IO String
+cellDisplayDeclarations :: CellDisplayPass -> CheckedEnvironmentResult -> CellSourcePlan -> IO String
 cellDisplayDeclarations pass result plan = do
   displayClass <- case
       [ is_cls instance'
@@ -281,7 +431,7 @@ cellDisplayDeclarations pass result plan = do
               labels = map (unpackFS . field_label . flLabel) (dataConFieldLabels dataConstructor)
               constructorName = occNameString (nameOccName (dataConName dataConstructor))
               names = [ "__tidepoolDisplayField" ++ show index | index <- [0 :: Int .. length fields - 1] ]
-          (_, checked) <- initTcWithGbl (prHscEnv result) environment
+          (_, checked) <- initTcWithGbl (crHscEnv result) environment
             (mkRealSrcSpan (mkRealSrcLoc (mkFastString "<cell display>") 1 1)
               (mkRealSrcLoc (mkFastString "<cell display>") 1 1)) $ do
               givens <- newEvVars predicates
@@ -322,7 +472,7 @@ cellDisplayDeclarations pass result plan = do
           then "  displayTree _ = " ++ qualifier ++ ".TextLeaf " ++ textLiteral "<empty>" ++ "\n"
           else concatMap fst methods ++ precedence)
   where
-    environment = prTargetTcGblEnv result
+    environment = crTargetTcGblEnv result
     qualifier = cellPlanDisplayAlias plan
     textLiteral value = "(" ++ qualifier ++ "Text.pack " ++ show value ++ ")"
 
@@ -363,8 +513,7 @@ runPipelineSelectedRetaining
   :: PipelineSelection result -> Set.Set SymbolIdentity -> FilePath -> [FilePath] -> IO result
 runPipelineSelectedRetaining selection retained path includes = do
   variant <- normalVariant GeneralCompile path
-  selectCompileResult selection <$>
-    runCompile (selectionKind selection) retained variant path includes Nothing
+  runCompile selection retained variant path includes Nothing
 
 -- ---------------------------------------------------------------------------
 -- The shared compile loop and its two seams
@@ -414,7 +563,7 @@ data PipelineVariant = PipelineVariant
   }
 
 data CompilePurpose = GeneralCompile | LookupTypeCompile
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 transformFor :: CompilePurpose -> ModuleName -> ModSummary -> ParsedModule -> ParsedModule
 transformFor GeneralCompile _ _ = id
@@ -467,8 +616,8 @@ data ModuleFront = ModuleFront
   , mfResultType :: Maybe Type
   }
 
-runCompile :: PreparationKind -> Set.Set SymbolIdentity -> PipelineVariant -> FilePath -> [FilePath] -> Maybe FilePath -> IO CompileResult
-runCompile preparation retained variant path includes buildProductsDir = do
+runCompile :: PipelineSelection result -> Set.Set SymbolIdentity -> PipelineVariant -> FilePath -> [FilePath] -> Maybe FilePath -> IO result
+runCompile selection retained variant path includes buildProductsDir = do
   timing <- readTimingEnabled
   (libdir, startupMs) <- timeSection getLibdir
   emitPhase timing "startup" startupMs
@@ -511,7 +660,7 @@ runCompile preparation retained variant path includes buildProductsDir = do
     -- DynFlags bootstrap (above) so the default-on per-compile summary's
     -- wall-clock figure covers it too, exactly as it always has. See
     -- 'runCompileCycle''s haddock for what each argument controls.
-    runCompileCycle preparation Nothing Nothing retained timing sessionT0 variant path
+    runCompileCycle selection Nothing Nothing retained timing sessionT0 variant path
 
 -- | Compile with an optional active session scope and an optional persistent
 -- build-products directory. Inert scopes use the normal pipeline.
@@ -534,8 +683,7 @@ runPipelineSessionSelected selection retained purpose mscope path includes build
   variant <- case mscope of
     Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
     _ -> normalVariant purpose path
-  selectCompileResult selection <$>
-    runCompile (selectionKind selection) retained variant path includes buildProductsDir
+  runCompile selection retained variant path includes buildProductsDir
 
 -- ---------------------------------------------------------------------------
 -- Resident compilation state
@@ -606,9 +754,10 @@ type GutsMemo = Map.Map ModuleName GutsMemoEntry
 -- installed withholding pass ran -- never re-read per module, since it is
 -- constant for the whole cycle.
 runCompileCycle
-  :: PreparationKind -> Maybe ModIfaceCache -> Maybe (IORef GutsMemo)
-  -> Set.Set SymbolIdentity -> Bool -> Double -> PipelineVariant -> FilePath -> Ghc CompileResult
-runCompileCycle preparation mCache mMemoRef retained timing sessionT0 variant path = do
+  :: PipelineSelection result -> Maybe ModIfaceCache -> Maybe (IORef GutsMemo)
+  -> Set.Set SymbolIdentity -> Bool -> Double -> PipelineVariant -> FilePath -> Ghc result
+runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path = do
+    let preparation = selectionKind selection
     target <- guessTarget path Nothing Nothing
     setTargets [target]
     -- Install target-diagnostic capture before load/typecheck. Warnings become
@@ -662,14 +811,47 @@ runCompileCycle preparation mCache mMemoRef retained timing sessionT0 variant pa
     -- backend and ignores a field patched onto a summary here.
     let unpoison ms =
           ms { ms_hspp_opts = gopt_unset (ms_hspp_opts ms) Opt_IgnoreInterfacePragmas }
+    targetName <- liftIO (targetModuleNameFor path)
+    let plannedLoadGraph = cpLoadGraph plan
+        (loadGraph, loadHowMuch) = case selection of
+          CheckedEnvironment ->
+            -- Keep the graph intact and ask GHC for the target's dependencies.
+            -- Removing the source node by hand also invalidates its hs-boot
+            -- cycle; LoadDependenciesOf retains the boot interface without
+            -- compiling the metadata target itself. Session plans that defer
+            -- the target for value-interface injection have already removed it
+            -- and therefore keep their dependency-only LoadAllTargets graph.
+            case [ mkModule (homeUnitId (hsc_home_unit previous)) (ms_mod_name ms)
+                 | ModuleNode _ ms <- mgModSummaries' plannedLoadGraph
+                 , ms_mod_name ms == targetName
+                 , ms_hsc_src ms == HsSrcFile ] of
+              targetHomeModule : _ ->
+                (plannedLoadGraph, LoadDependenciesOf targetHomeModule)
+              [] -> (plannedLoadGraph, LoadAllTargets)
+          _ -> (plannedLoadGraph, LoadAllTargets)
     loadT0 <- monotonicTime
-    loadFlag <- load' mCache LoadAllTargets mkUnknownDiagnostic (Just batchMsg)
-               (scopeRetainedModuleGraph (mapMG unpoison (cpLoadGraph plan)))
+    loadFlag <- load' mCache loadHowMuch mkUnknownDiagnostic (Just batchMsg)
+               (scopeRetainedModuleGraph (mapMG unpoison loadGraph))
     loadT1 <- monotonicTime
     -- 'ghc_load' phase (TIDEPOOL_TIMING): the 'load'' call alone, nothing
     -- else. FLAT — see 'ghc_setup' above; the two rows partition the work,
     -- they do not nest inside each other.
     liftIO (emitPhase timing "ghc_load" (elapsedMs loadT0 loadT1))
+    when (timing && case selection of CheckedEnvironment -> True; _ -> False) $ do
+      loadedEnv <- getSession
+      forM_ (mgModSummaries' loadGraph) $ \node -> case node of
+          ModuleNode _ summary
+            | ms_hsc_src summary == HsSrcFile
+            , ms_mod_name summary /= targetName
+            , Just hmi <- lookupHpt (hsc_HPT loadedEnv) (ms_mod_name summary)
+            , let linkable = hm_linkable hmi
+            , isJust (homeMod_bytecode linkable) || isJust (homeMod_object linkable) ->
+                liftIO $ hPutStrLn stderr $
+                  "tidepool-checked-dependency-executable module="
+                    ++ moduleNameString (ms_mod_name summary)
+                    ++ " bytecode=" ++ show (isJust (homeMod_bytecode linkable))
+                    ++ " object=" ++ show (isJust (homeMod_object linkable))
+          _ -> pure ()
     cpAfterLoad plan loadFlag
     -- Exclude hs-boot summaries in one shared site for both variants:
     -- a boot node shares its ModuleName with the real module, so its
@@ -686,400 +868,448 @@ runCompileCycle preparation mCache mMemoRef retained timing sessionT0 variant pa
     let summaries = [ ms | ms <- summaries0, ms_hsc_src ms == HsSrcFile ]
     when (null summaries) $
       liftIO $ ioError (userError (pvLabel variant ++ ": empty module graph"))
-    -- 'typecheck'/'core' are summed ACROSS the loop (one line each, emitted
-    -- after) rather than timed per-module: the wire grammar is one line per
-    -- phase per process, and a turn module always compiles alongside its
-    -- preamble/stdlib dep modules in the same loop. 'core' is desugar time
-    -- for EVERY module plus 'core2core' time for the modules 'cpTier' let
-    -- through — one flat phase, unchanged by the tier.
-    tcMsRef   <- liftIO (newIORef (0 :: Integer))
-    coreMsRef <- liftIO (newIORef (0 :: Integer))
-    -- Diagnostic-only accounting (NOT part of the 'tidepool-timing phase=…'
-    -- wire grammar 'emitPhase' owns — see the line emitted below, distinctly
-    -- prefixed 'e6-tier', deliberately outside that contract so
-    -- 'ExtractTiming::parse' never has to know about it): the desugar/
-    -- core2core split WITHIN the 'core' phase, plus how many modules the tier
-    -- actually spared. 'core' stays one flat phase per the timing contract;
-    -- this line exists purely so E6's own report can size its win against what
-    -- it actually removed (core2core) rather than the whole 'core' bucket
-    -- (desugar + core2core), which is a larger, unmeasured-by-this-item
-    -- quantity.
-    dsMsRef  <- liftIO (newIORef (0 :: Integer))
-    c2cMsRef <- liftIO (newIORef (0 :: Integer))
-    -- Per-module wall time: front (typecheck +
-    -- desugar) and back (core2core) halves keyed by module name and SUMMED
-    -- into one entry per module via 'Map.insertWith'. The compile summary uses
-    -- the top three; detailed per-module output remains timing-gated.
-    moduleMsRef <- liftIO (newIORef (Map.empty :: Map.Map String Integer))
-    targetModName' <- liftIO (targetModuleNameFor path)
-    let targetModName = moduleNameString targetModName'
-        -- The ONE per-module front half. Re-canonicalize the module's
-        -- DynFlags first (see canonicalizeDFlags): the load phase may have
-        -- downgraded them for TH/QQ bytecode provisioning. NOTE: 'hscDesugar'
-        -- does not consume the optLevel/unfolding-exposure flags
-        -- 'canonicalizeDFlags' sets (those govern 'core2core' alone), so
-        -- applying it unconditionally here costs nothing extra even for a
-        -- module the tier goes on to skip.
-        compileFront modSum0 = do
-          let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
-          (typechecked, tcMs) <- timeSection $ do
-            parsed <- parseModule modSum
-            typecheckModule (pvTransformParsed variant modSum parsed)
-          liftIO (modifyIORef' tcMsRef (+ tcMs))
-          hscEnv0 <- getSession
-          let hscEnv   = hscUpdateFlags canonicalizeDFlags hscEnv0
-              tcGblEnv = fst (tm_internals_ typechecked)
-              -- Capture the inferred type of the eval's top expression NOW,
-              -- before optimization can inline/rename @__user@ away. Types
-              -- live on the Id in the typechecked type env; our CBOR drops
-              -- them downstream (Translate.hs).
-              capturedTypes = capturedTopLevelTypes tcGblEnv
-              checkedBinderPins = capturedCellBinderPins hscEnv tcGblEnv
-              -- 'cpResultBinders' is the @result@-vs-@__result@ convention:
-              -- the one-shot eval wrapper names @result@ while resident-turn
-              -- templates use the scaffold-reserved @__result@.
-              mResTy   = foldr (<|>) Nothing
-                           [ capturedBindingType occ tcGblEnv
-                           | occ <- cpResultBinders plan ]
-          (desugared, dsMs) <- timeSection $ liftIO (hscDesugar hscEnv modSum tcGblEnv)
-          liftIO (modifyIORef' coreMsRef (+ dsMs))
-          liftIO (modifyIORef' dsMsRef (+ dsMs))
-          liftIO (modifyIORef' moduleMsRef
-                    (Map.insertWith (+) (moduleNameString (ms_mod_name modSum)) (tcMs + dsMs)))
-          pure ModuleFront { mfSummary    = modSum
-                           , mfHscEnv     = hscEnv
-                           , mfTcGblEnv   = tcGblEnv
-                           , mfDesugared  = desugared
-                           , mfCapturedTypes = capturedTypes
-                           , mfCheckedBinderPins = checkedBinderPins
-                           , mfResultType = mResTy }
-        -- The per-module back half: the optimized-Core pass, the
-        -- variant's post-compile hook (session: HPT registration of a
-        -- deferred module, which is why it sees the PRE-externalize guts and
-        -- the module's own typechecked env), then stable name
-        -- externalization. Returns the pre-externalize 'simplified' guts so a
-        -- resident session can repeat HPT registration on later requests;
-        -- direct compilation discards it.
-        compileBack mf = do
-          (simplified, coreMs) <- timeSection $
-            liftIO (core2core (mfHscEnv mf) (mfDesugared mf))
-          liftIO (modifyIORef' coreMsRef (+ coreMs))
-          liftIO (modifyIORef' c2cMsRef (+ coreMs))
-          liftIO (modifyIORef' moduleMsRef
-                    (Map.insertWith (+) (moduleNameString (ms_mod_name (mfSummary mf))) coreMs))
-          cpAfterModule plan (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
-          pure
-            ( simplified
-            , ( externalizeInternalTops simplified
-              , mfCapturedTypes mf
-              , mfCheckedBinderPins mf
-              , mfResultType mf
-              )
-            )
-        prepareSelected mf simplified = case preparation of
-          KeepCore -> pure Nothing
-          PrepareStg -> do
-            (cgGuts, _details) <- liftIO $ hscTidy (mfHscEnv mf) simplified
-            siblings <- liftIO $ atomicModifyIORef' preparedSiblingsRef $ \known ->
-              let known' = Map.union (resolvePreparedSiblings (cg_binds cgGuts)) known
-              in (known', known')
-            siteAuthority <- liftIO (resolveSiteAuthority (mfHscEnv mf))
-            (elaboratedBindings, yieldSites, preparedSites, typeGraph, rejections) <- liftIO $
-              elaboratePreparedSites siteAuthority siblings (cg_binds cgGuts)
-            let elaboration = PreparedElaboration
-                  { peGuts = cgGuts
-                  , peBindings = elaboratedBindings
-                  , peSitedSiblings = siblings
-                  , peYieldSites = yieldSites
-                  , pePreparedSites = preparedSites
-                  , peTypeGraph = typeGraph
-                  , peSiteRejections = rejections
-                  }
-            Just <$> liftIO (prepareModule (mfHscEnv mf) (mfSummary mf) elaboration)
-        rememberPreparedSiblings prepared = liftIO $
-          modifyIORef' preparedSiblingsRef (\known -> Map.union known (pmSitedSiblings prepared))
-    -- Module names do not identify generated content across independent
-    -- requests. A memo hit therefore requires both the current source hash
-    -- and valid direct home-module imports. Summaries are visited in
-    -- dependency order, so import validity has already been recorded when a
-    -- dependent is checked. A mismatch is an ordinary miss and overwrites the
-    -- cached entry after recompilation.
-    let cycleModNames = Set.fromList (map ms_mod_name summaries)
-        directHomeDeps modSum =
-          [ mn | (_, lmn) <- ms_textual_imps modSum
-               , let mn = unLoc lmn
-               , mn `Set.member` cycleModNames ]
-    validThisCycleRef <- liftIO (newIORef (Map.empty :: Map.Map ModuleName Bool))
-    -- The withholding pass can change only a module's own retained
-    -- definitions; retained identities defined elsewhere reach it through
-    -- a dependency, whose invalidity is already covered by 'depsValidSoFar'.
-    let retainedFor modSum = retainedDefinedBy (ms_mod modSum) retained
-    let depsValidSoFar modSum = liftIO $ do
-          validMap <- readIORef validThisCycleRef
-          pure (all (\d -> Map.findWithDefault False d validMap) (directHomeDeps modSum))
-        recordValidity modSum isValid =
-          liftIO (modifyIORef' validThisCycleRef (Map.insert (ms_mod_name modSum) isValid))
-    -- Under TIDEPOOL_TIMING, name why a memoized module was recompiled.
-    let memoMiss modSum reason = when timing $ liftIO $ hPutStrLn stderr $
-          "tidepool-memo-miss module=" ++ moduleNameString (ms_mod_name modSum)
-            ++ " reason=" ++ reason
-    let lookupValidMemo modSum = case mMemoRef of
-          Nothing  -> pure Nothing
-          Just ref -> do
-            depsOk <- depsValidSoFar modSum
-            if not depsOk || xopt LangExt.Cpp (ms_hspp_opts modSum)
-              then do
-                memoMiss modSum (if depsOk then "cpp" else "dependency-miss:" ++ unwords
-                  [ moduleNameString d | d <- directHomeDeps modSum ])
-                pure Nothing
-              else do
-                m <- liftIO (readIORef ref)
-                case Map.lookup (ms_mod_name modSum) m of
-                  Nothing -> memoMiss modSum "absent" >> pure Nothing
+    let compileExecutable = do
+          -- 'typecheck'/'core' are summed ACROSS the loop (one line each, emitted
+          -- after) rather than timed per-module: the wire grammar is one line per
+          -- phase per process, and a turn module always compiles alongside its
+          -- preamble/stdlib dep modules in the same loop. 'core' is desugar time
+          -- for EVERY module plus 'core2core' time for the modules 'cpTier' let
+          -- through — one flat phase, unchanged by the tier.
+          tcMsRef   <- liftIO (newIORef (0 :: Integer))
+          coreMsRef <- liftIO (newIORef (0 :: Integer))
+          -- Diagnostic-only accounting (NOT part of the 'tidepool-timing phase=…'
+          -- wire grammar 'emitPhase' owns — see the line emitted below, distinctly
+          -- prefixed 'e6-tier', deliberately outside that contract so
+          -- 'ExtractTiming::parse' never has to know about it): the desugar/
+          -- core2core split WITHIN the 'core' phase, plus how many modules the tier
+          -- actually spared. 'core' stays one flat phase per the timing contract;
+          -- this line exists purely so E6's own report can size its win against what
+          -- it actually removed (core2core) rather than the whole 'core' bucket
+          -- (desugar + core2core), which is a larger, unmeasured-by-this-item
+          -- quantity.
+          dsMsRef  <- liftIO (newIORef (0 :: Integer))
+          c2cMsRef <- liftIO (newIORef (0 :: Integer))
+          -- Per-module wall time: front (typecheck +
+          -- desugar) and back (core2core) halves keyed by module name and SUMMED
+          -- into one entry per module via 'Map.insertWith'. The compile summary uses
+          -- the top three; detailed per-module output remains timing-gated.
+          moduleMsRef <- liftIO (newIORef (Map.empty :: Map.Map String Integer))
+          targetModName' <- liftIO (targetModuleNameFor path)
+          let targetModName = moduleNameString targetModName'
+              -- The ONE per-module front half. Re-canonicalize the module's
+              -- DynFlags first (see canonicalizeDFlags): the load phase may have
+              -- downgraded them for TH/QQ bytecode provisioning. NOTE: 'hscDesugar'
+              -- does not consume the optLevel/unfolding-exposure flags
+              -- 'canonicalizeDFlags' sets (those govern 'core2core' alone), so
+              -- applying it unconditionally here costs nothing extra even for a
+              -- module the tier goes on to skip.
+              compileFront modSum0 = do
+                let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
+                (typechecked, tcMs) <- timeSection $ do
+                  parsed <- parseModule modSum
+                  typecheckModule (pvTransformParsed variant modSum parsed)
+                liftIO (modifyIORef' tcMsRef (+ tcMs))
+                hscEnv0 <- getSession
+                let hscEnv   = hscUpdateFlags canonicalizeDFlags hscEnv0
+                    tcGblEnv = fst (tm_internals_ typechecked)
+                    -- Capture the inferred type of the eval's top expression NOW,
+                    -- before optimization can inline/rename @__user@ away. Types
+                    -- live on the Id in the typechecked type env; our CBOR drops
+                    -- them downstream (Translate.hs).
+                    capturedTypes = capturedTopLevelTypes tcGblEnv
+                    checkedBinderPins = capturedCellBinderPins hscEnv tcGblEnv
+                    -- 'cpResultBinders' is the @result@-vs-@__result@ convention:
+                    -- the one-shot eval wrapper names @result@ while resident-turn
+                    -- templates use the scaffold-reserved @__result@.
+                    mResTy   = foldr (<|>) Nothing
+                                 [ capturedBindingType occ tcGblEnv
+                                 | occ <- cpResultBinders plan ]
+                when (ms_mod_name modSum == targetModName') $ liftIO $ hPutStrLn stderr $
+                  "tidepool-target phase=desugar module=" ++ targetModName
+                (desugared, dsMs) <- timeSection $ liftIO (hscDesugar hscEnv modSum tcGblEnv)
+                liftIO (modifyIORef' coreMsRef (+ dsMs))
+                liftIO (modifyIORef' dsMsRef (+ dsMs))
+                liftIO (modifyIORef' moduleMsRef
+                          (Map.insertWith (+) (moduleNameString (ms_mod_name modSum)) (tcMs + dsMs)))
+                pure ModuleFront { mfSummary    = modSum
+                                 , mfHscEnv     = hscEnv
+                                 , mfTcGblEnv   = tcGblEnv
+                                 , mfDesugared  = desugared
+                                 , mfCapturedTypes = capturedTypes
+                                 , mfCheckedBinderPins = checkedBinderPins
+                                 , mfResultType = mResTy }
+              -- The per-module back half: the optimized-Core pass, the
+              -- variant's post-compile hook (session: HPT registration of a
+              -- deferred module, which is why it sees the PRE-externalize guts and
+              -- the module's own typechecked env), then stable name
+              -- externalization. Returns the pre-externalize 'simplified' guts so a
+              -- resident session can repeat HPT registration on later requests;
+              -- direct compilation discards it.
+              compileBack mf = do
+                (simplified, coreMs) <- timeSection $
+                  liftIO (core2core (mfHscEnv mf) (mfDesugared mf))
+                liftIO (modifyIORef' coreMsRef (+ coreMs))
+                liftIO (modifyIORef' c2cMsRef (+ coreMs))
+                liftIO (modifyIORef' moduleMsRef
+                          (Map.insertWith (+) (moduleNameString (ms_mod_name (mfSummary mf))) coreMs))
+                cpAfterModule plan (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
+                pure
+                  ( simplified
+                  , ( externalizeInternalTops simplified
+                    , mfCapturedTypes mf
+                    , mfCheckedBinderPins mf
+                    , mfResultType mf
+                    )
+                  )
+              prepareSelected mf simplified = case preparation of
+                KeepCore -> pure Nothing
+                PrepareStg -> do
+                  (cgGuts, _details) <- liftIO $ hscTidy (mfHscEnv mf) simplified
+                  siblings <- liftIO $ atomicModifyIORef' preparedSiblingsRef $ \known ->
+                    let known' = Map.union (resolvePreparedSiblings (cg_binds cgGuts)) known
+                    in (known', known')
+                  siteAuthority <- liftIO (resolveSiteAuthority (mfHscEnv mf))
+                  (elaboratedBindings, yieldSites, preparedSites, typeGraph, rejections) <- liftIO $
+                    elaboratePreparedSites siteAuthority siblings (cg_binds cgGuts)
+                  let elaboration = PreparedElaboration
+                        { peGuts = cgGuts
+                        , peBindings = elaboratedBindings
+                        , peSitedSiblings = siblings
+                        , peYieldSites = yieldSites
+                        , pePreparedSites = preparedSites
+                        , peTypeGraph = typeGraph
+                        , peSiteRejections = rejections
+                        }
+                  Just <$> liftIO (prepareModule (mfHscEnv mf) (mfSummary mf) elaboration)
+              rememberPreparedSiblings prepared = liftIO $
+                modifyIORef' preparedSiblingsRef (\known -> Map.union known (pmSitedSiblings prepared))
+          -- Module names do not identify generated content across independent
+          -- requests. A memo hit therefore requires both the current source hash
+          -- and valid direct home-module imports. Summaries are visited in
+          -- dependency order, so import validity has already been recorded when a
+          -- dependent is checked. A mismatch is an ordinary miss and overwrites the
+          -- cached entry after recompilation.
+          let cycleModNames = Set.fromList (map ms_mod_name summaries)
+              directHomeDeps modSum =
+                [ mn | (_, lmn) <- ms_textual_imps modSum
+                     , let mn = unLoc lmn
+                     , mn `Set.member` cycleModNames ]
+          validThisCycleRef <- liftIO (newIORef (Map.empty :: Map.Map ModuleName Bool))
+          -- The withholding pass can change only a module's own retained
+          -- definitions; retained identities defined elsewhere reach it through
+          -- a dependency, whose invalidity is already covered by 'depsValidSoFar'.
+          let retainedFor modSum = retainedDefinedBy (ms_mod modSum) retained
+          let depsValidSoFar modSum = liftIO $ do
+                validMap <- readIORef validThisCycleRef
+                pure (all (\d -> Map.findWithDefault False d validMap) (directHomeDeps modSum))
+              recordValidity modSum isValid =
+                liftIO (modifyIORef' validThisCycleRef (Map.insert (ms_mod_name modSum) isValid))
+          -- Under TIDEPOOL_TIMING, name why a memoized module was recompiled.
+          let memoMiss modSum reason = when timing $ liftIO $ hPutStrLn stderr $
+                "tidepool-memo-miss module=" ++ moduleNameString (ms_mod_name modSum)
+                  ++ " reason=" ++ reason
+          let lookupValidMemo modSum = case mMemoRef of
+                Nothing  -> pure Nothing
+                Just ref -> do
+                  depsOk <- depsValidSoFar modSum
+                  if not depsOk || xopt LangExt.Cpp (ms_hspp_opts modSum)
+                    then do
+                      memoMiss modSum (if depsOk then "cpp" else "dependency-miss:" ++ unwords
+                        [ moduleNameString d | d <- directHomeDeps modSum ])
+                      pure Nothing
+                    else do
+                      m <- liftIO (readIORef ref)
+                      case Map.lookup (ms_mod_name modSum) m of
+                        Nothing -> memoMiss modSum "absent" >> pure Nothing
+                        Just entry -> do
+                          dependentFiles <- liftIO (readIORef (tcg_dependent_files (mfTcGblEnv (gmeFront entry))))
+                          let cachedSummary = mfSummary (gmeFront entry)
+                              sameHash = ms_hs_hash cachedSummary == ms_hs_hash modSum
+                              sameRetained = gmeRetained entry == retainedFor modSum
+                          -- Source hashes do not cover CPP includes or TH's
+                          -- addDependentFile inputs. Recompile these modules until
+                          -- the memo owns fingerprints for those dependencies.
+                          if null dependentFiles
+                              && not (xopt LangExt.Cpp (ms_hspp_opts cachedSummary))
+                              && sameHash
+                              && sameRetained
+                            then pure (Just entry)
+                            else do
+                              memoMiss modSum $ unwords
+                                [ "dependent-files=" ++ show (length dependentFiles)
+                                , "same-hash=" ++ show sameHash
+                                , "same-retained=" ++ show sameRetained ]
+                              pure Nothing
+          (fronts, results, preparedModules, mReachable) <- case cpTier plan of
+            OptimizeEveryModule -> do
+              pairs <- forM summaries $ \modSum -> do
+                cpBeforeModule plan modSum
+                let mn = ms_mod_name modSum
+                cached <- lookupValidMemo modSum
+                case cached of
+                  -- Memo hit: skip parse/typecheck/desugar/core2core entirely —
+                  -- this is the win (§7.6: 3114ms -> 9ms per reused cycle). Still
+                  -- re-run 'cpAfterModule' unconditionally: it is a no-op for any
+                  -- module not deferred THIS cycle (the overwhelming common case —
+                  -- see the haddock above), and for a module that IS deferred
+                  -- again this cycle (the incremental-population gap this memo
+                  -- closes) it cheaply re-registers the already-computed iface
+                  -- into the HPT that 'load'' just wiped.
                   Just entry -> do
-                    dependentFiles <- liftIO (readIORef (tcg_dependent_files (mfTcGblEnv (gmeFront entry))))
-                    let cachedSummary = mfSummary (gmeFront entry)
-                        sameHash = ms_hs_hash cachedSummary == ms_hs_hash modSum
-                        sameRetained = gmeRetained entry == retainedFor modSum
-                    -- Source hashes do not cover CPP includes or TH's
-                    -- addDependentFile inputs. Recompile these modules until
-                    -- the memo owns fingerprints for those dependencies.
-                    if null dependentFiles
-                        && not (xopt LangExt.Cpp (ms_hspp_opts cachedSummary))
-                        && sameHash
-                        && sameRetained
-                      then pure (Just entry)
-                      else do
-                        memoMiss modSum $ unwords
-                          [ "dependent-files=" ++ show (length dependentFiles)
-                          , "same-hash=" ++ show sameHash
-                          , "same-retained=" ++ show sameRetained ]
-                        pure Nothing
-    (fronts, results, preparedModules, mReachable) <- case cpTier plan of
-      OptimizeEveryModule -> do
-        pairs <- forM summaries $ \modSum -> do
-          cpBeforeModule plan modSum
-          let mn = ms_mod_name modSum
-          cached <- lookupValidMemo modSum
-          case cached of
-            -- Memo hit: skip parse/typecheck/desugar/core2core entirely —
-            -- this is the win (§7.6: 3114ms -> 9ms per reused cycle). Still
-            -- re-run 'cpAfterModule' unconditionally: it is a no-op for any
-            -- module not deferred THIS cycle (the overwhelming common case —
-            -- see the haddock above), and for a module that IS deferred
-            -- again this cycle (the incremental-population gap this memo
-            -- closes) it cheaply re-registers the already-computed iface
-            -- into the HPT that 'load'' just wiped.
-            Just entry -> do
-              recordValidity modSum True
-              mapM_ rememberPreparedSiblings (gmePrepared entry)
-              cpAfterModule plan modSum (mfTcGblEnv (gmeFront entry)) (mfHscEnv (gmeFront entry)) (gmeSimplified entry)
-              prepared <- case (preparation, gmePrepared entry) of
-                (KeepCore, _) -> pure Nothing
-                (PrepareStg, Just cachedPrepared) -> pure (Just cachedPrepared)
-                (PrepareStg, Nothing) -> do
-                  freshPrepared <- prepareSelected (gmeFront entry) (gmeSimplified entry)
-                  case mMemoRef of
-                    Just ref -> liftIO (modifyIORef' ref
-                      (Map.adjust (\e -> e { gmePrepared = freshPrepared }) mn))
-                    Nothing -> pure ()
-                  pure freshPrepared
-              pure (gmeFront entry, gmeResult entry, prepared)
-            Nothing -> do
-              recordValidity modSum False
-              mf <- compileFront modSum
-              (simplified, r) <- compileBack mf
-              prepared <- prepareSelected mf simplified
-              case mMemoRef of
-                Just ref -> liftIO (modifyIORef' ref
-                  (Map.insert mn (GutsMemoEntry mf simplified r prepared (retainedFor modSum))))
-                Nothing  -> pure ()
-              pure (mf, r, prepared)
-        pure ([f | (f, _, _) <- pairs], [r | (_, r, _) <- pairs],
-              [p | (_, _, Just p) <- pairs], Nothing)
-      OptimizeCoreReachable -> do
-        -- A resident-session memo hit reuses a module's cached front (needed for the
-        -- reachability walk below, since it carries 'mfDesugared') without
-        -- redoing parse/typecheck/desugar. A hit's cached RESULT is reused
-        -- outright if the module turns out reachable this cycle — safe even
-        -- though the cached entry was core2core'd (optimized) in whatever
-        -- EARLIER cycle populated it: a module OUTSIDE the reachable
-        -- closure contributes nothing to the wire regardless of whether its
-        -- Core was ever optimized (see the un-memoized comment below this
-        -- tier has always carried), so reusing a MORE-optimized cached
-        -- version for a module this cycle finds non-reachable would still
-        -- be safe — but it can't even arise: a NON-reachable module is
-        -- never core2core'd, so the memo is never asked to serve one where
-        -- reachability differs from what produced the entry.
-        pairs <- forM summaries $ \modSum -> do
-          cpBeforeModule plan modSum
-          cached <- lookupValidMemo modSum
-          case cached of
-            Just entry -> do
-              recordValidity modSum True
-              pure (gmeFront entry, Just entry)
-            Nothing    -> do
-              recordValidity modSum False
-              mf <- compileFront modSum
-              pure (mf, Nothing)
-        let fs = map fst pairs
-        -- Reachable-module rule (written down before implementation, per
-        -- spec): a home module is REACHABLE from the target iff it IS the
-        -- target, or its DESUGARED Core is transitively referenced — via a
-        -- real 'Var' occurrence at any depth — from the target module's own
-        -- desugared Core. Computed on desugared (pre-'core2core') Core
-        -- specifically: by desugar time, typeclass/instance selection is
-        -- already resolved to explicit dictionary-Var applications, so this
-        -- walk would NOT miss a module imported only for an orphan instance
-        -- the way a renamer/typecheck-level "used name" scan would — exactly
-        -- the silent ErrorSentinel-poisoning shape 'sessionVariant's
-        -- 'cpAfterModule' commentary documents. And because this codebase
-        -- defines no @{-# RULES #-}@ anywhere (grep-confirmed empty),
-        -- 'core2core' cannot introduce a genuinely NEW cross-module reference
-        -- that wasn't already visible at this desugared stage — dictionary/
-        -- instance selection is the only mechanism that could hide a
-        -- reference pre-Core, and it's already resolved by here. So the
-        -- desugar-stage reference graph is a sound (superset-or-equal)
-        -- approximation of what the fully optimized Core actually needs.
-        --
-        -- A module OUTSIDE this closure would contribute zero bindings the
-        -- target's Core can reach either way — Main.hs's own post-hoc,
-        -- binding-level reachability walk over the final merged 'allBinds'
-        -- ('Translate.reachableBinds', run from the target) would discard it
-        -- regardless — so skipping 'core2core' for it changes no wire byte on
-        -- a passing extraction; it only skips work whose result was always
-        -- going to be thrown away.
-        forceValidationOnly <- liftIO (lookupEnv "TIDEPOOL_TEST_FORCE_VALIDATION_ONLY")
-        let gutsByMod = Map.fromList [ (ms_mod_name (mfSummary f), mfDesugared f) | f <- fs ]
-            reachableMods0 = reachableModuleClosure targetModName' gutsByMod
-            -- E6 mis-tiering fault injection (detection-power demonstration,
-            -- see 00-spec.md's VERIFY section): forcibly deny a NAMED module
-            -- 'core2core' regardless of whether the real closure above found
-            -- it reachable — simulating exactly the mistake this tier could
-            -- make. Inert unless set; never set outside a deliberate test.
-            reachableMods = case forceValidationOnly of
-              Just m  -> Set.delete (mkModuleName m) reachableMods0
-              Nothing -> reachableMods0
-        rs <- fmap concat $ forM pairs $ \(f, mCachedResult) ->
-          if ms_mod_name (mfSummary f) `Set.member` reachableMods
-            then case mCachedResult of
-              -- Memo hit AND reachable: the cached RESULT (already
-              -- core2core'd by whatever cycle inserted it) is exactly what
-              -- a fresh 'compileBack' would recompute — reuse it, skipping
-              -- the optimizer pass entirely.
-              Just entry -> do
-                mapM_ rememberPreparedSiblings (gmePrepared entry)
-                prepared <- case (preparation, gmePrepared entry) of
-                  (KeepCore, _) -> pure Nothing
-                  (PrepareStg, Just cachedPrepared) -> pure (Just cachedPrepared)
-                  (PrepareStg, Nothing) -> do
-                    freshPrepared <- prepareSelected f (gmeSimplified entry)
+                    recordValidity modSum True
+                    mapM_ rememberPreparedSiblings (gmePrepared entry)
+                    cpAfterModule plan modSum (mfTcGblEnv (gmeFront entry)) (mfHscEnv (gmeFront entry)) (gmeSimplified entry)
+                    prepared <- case (preparation, gmePrepared entry) of
+                      (KeepCore, _) -> pure Nothing
+                      (PrepareStg, Just cachedPrepared) -> pure (Just cachedPrepared)
+                      (PrepareStg, Nothing) -> do
+                        freshPrepared <- prepareSelected (gmeFront entry) (gmeSimplified entry)
+                        case mMemoRef of
+                          Just ref -> liftIO (modifyIORef' ref
+                            (Map.adjust (\e -> e { gmePrepared = freshPrepared }) mn))
+                          Nothing -> pure ()
+                        pure freshPrepared
+                    pure (gmeFront entry, gmeResult entry, prepared)
+                  Nothing -> do
+                    recordValidity modSum False
+                    mf <- compileFront modSum
+                    (simplified, r) <- compileBack mf
+                    prepared <- prepareSelected mf simplified
                     case mMemoRef of
                       Just ref -> liftIO (modifyIORef' ref
-                        (Map.adjust (\e -> e { gmePrepared = freshPrepared })
-                          (ms_mod_name (mfSummary f))))
-                      Nothing -> pure ()
-                    pure freshPrepared
-                pure [(gmeResult entry, prepared)]
-              Nothing -> do
-                (simplified, r) <- compileBack f
-                prepared <- prepareSelected f simplified
-                case mMemoRef of
-                  Just ref -> liftIO (modifyIORef' ref
-                    (Map.insert (ms_mod_name (mfSummary f))
-                      (GutsMemoEntry f simplified r prepared (retainedFor (mfSummary f)))))
-                  Nothing  -> pure ()
-                pure [(r, prepared)]
-            -- Not reachable: never core2core'd this cycle (matches every
-            -- pre-existing caller byte for byte) and never inserted into
-            -- the memo — a module a LATER cycle finds reachable must still
-            -- get a real 'compileBack', never a validation-only stand-in.
-            else pure []
-        pure (fs, map fst rs, [p | (_, Just p) <- rs], Just reachableMods)
-    totalTcMs   <- liftIO (readIORef tcMsRef)
-    totalCoreMs <- liftIO (readIORef coreMsRef)
-    liftIO (emitPhase timing "typecheck" totalTcMs)
-    liftIO (emitPhase timing "core" totalCoreMs)
-    summaryT1 <- monotonicTime
-    liftIO $ do
-      moduleTimes <- readIORef moduleMsRef
-      let topModules = take 3 (sortOn (negate . snd) (Map.toList moduleTimes))
-      emitCompileSummary (length summaries) (elapsedMs sessionT0 summaryT1) totalTcMs totalCoreMs topModules
-      emitModuleTiming timing (sortOn (negate . snd) (Map.toList moduleTimes))
-    -- Diagnostic-only (see 'dsMsRef'/'c2cMsRef' haddock above): NOT part of
-    -- the tidepool-timing wire grammar, so 'ExtractTiming::parse' never sees
-    -- it and there is nothing to keep in sync there. Emitted only under
-    -- 'OptimizeCoreReachable' (there is no tier to report otherwise), and
-    -- AFTER the phase lines, exactly where it has always been.
-    case mReachable of
-      Just reachableMods | timing -> liftIO $ do
-        totalDsMs  <- readIORef dsMsRef
-        totalC2cMs <- readIORef c2cMsRef
-        let allModNames = [ ms_mod_name (mfSummary f) | f <- fronts ]
-            moduleCount = length allModNames
-            reachableCount = Set.size reachableMods
-            validationOnly = [ moduleNameString m | m <- allModNames, not (m `Set.member` reachableMods) ]
-        hPutStrLn stderr $
-          "e6-tier modules=" ++ show moduleCount
-          ++ " reachable=" ++ show reachableCount
-          ++ " desugar_ms=" ++ show totalDsMs
-          ++ " core2core_ms=" ++ show totalC2cMs
-          ++ " validation_only=" ++ show validationOnly
-          ++ " reachable_names=" ++ show (map moduleNameString (Set.toList reachableMods))
-      _ -> pure ()
-    capturedErrors <- liftIO (nub . reverse <$> readIORef errorRef)
-    cpBeforeMerge plan loadFlag capturedErrors
-    -- Merge: dependency module bindings first, target module last
-    let isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
-        resultGuts (g, _, _, _) = g
-        allGuts = map resultGuts results
-    (targetGuts, depGuts, capturedTypes, checkedBinderPins, resultTy) <-
-      case filter (isTargetMod . resultGuts) results of
-      ((tgt, types, pins, rty):_) ->
-        return
-          ( tgt
-          , [g | g <- allGuts, mg_module g /= mg_module tgt]
-          , types
-          , pins
-          , rty
-          )
-      []      -> liftIO $ ioError $ userError $
-        pvLabel variant ++ ": target module '" ++ targetModName
-        ++ "' not found among compiled modules: "
-        ++ show (map (moduleNameString . moduleName . mg_module) allGuts)
-    -- 'allTyCons' unconditionally covers EVERY compiled module, not just the
-    -- tier's reachable set: TyCon/DataCon declarations are populated by the
-    -- typechecker and are never touched by 'core2core' (which transforms
-    -- 'mg_binds' only — the back half never re-derives 'mg_tcs'), so reading
-    -- them off the DESUGARED guts costs nothing extra and keeps a
-    -- validation-only module's data types available to metadata validation.
-    -- Order is summary order, which on the session variant (topologically
-    -- sorted over the target's own import closure, so the target is last) is
-    -- the dependencies-then-target order it used to build by hand.
-    let allBinds  = concatMap mg_binds depGuts ++ mg_binds targetGuts
-        allTyCons = concatMap (mg_tcs . mfDesugared) fronts
-    targetEnvironment <- case [ mfTcGblEnv front
-                         | front <- fronts
-                         , ms_mod_name (mfSummary front) == targetModName' ] of
-      env : _ -> pure env
-      [] -> liftIO $ ioError $ userError $
-        pvLabel variant ++ ": target module '" ++ targetModName
-        ++ "' was typechecked without a retained reader environment"
-    hscFinal <- getSession
-    warnings <- liftIO (nub . reverse <$> readIORef warnRef)
-    let legacyResult = PipelineResult
-          { prBinds  = allBinds
-          , prTyCons = allTyCons
-          , prHscEnv = cpFinalEnv plan hscFinal
-          , prCapturedType = Map.lookup evalUserBinder capturedTypes
-          , prCapturedTypes = capturedTypes
-          , prCheckedBinderPins = checkedBinderPins
-          , prResultType   = resultTy
-          , prWarnings     = warnings
-          , prTargetRdrEnv = tcg_rdr_env targetEnvironment
-          , prTargetTcGblEnv = targetEnvironment
-          }
-    pure (CompileResult legacyResult preparedModules)
+                        (Map.insert mn (GutsMemoEntry mf simplified r prepared (retainedFor modSum))))
+                      Nothing  -> pure ()
+                    pure (mf, r, prepared)
+              pure ([f | (f, _, _) <- pairs], [r | (_, r, _) <- pairs],
+                    [p | (_, _, Just p) <- pairs], Nothing)
+            OptimizeCoreReachable -> do
+              -- A resident-session memo hit reuses a module's cached front (needed for the
+              -- reachability walk below, since it carries 'mfDesugared') without
+              -- redoing parse/typecheck/desugar. A hit's cached RESULT is reused
+              -- outright if the module turns out reachable this cycle — safe even
+              -- though the cached entry was core2core'd (optimized) in whatever
+              -- EARLIER cycle populated it: a module OUTSIDE the reachable
+              -- closure contributes nothing to the wire regardless of whether its
+              -- Core was ever optimized (see the un-memoized comment below this
+              -- tier has always carried), so reusing a MORE-optimized cached
+              -- version for a module this cycle finds non-reachable would still
+              -- be safe — but it can't even arise: a NON-reachable module is
+              -- never core2core'd, so the memo is never asked to serve one where
+              -- reachability differs from what produced the entry.
+              pairs <- forM summaries $ \modSum -> do
+                cpBeforeModule plan modSum
+                cached <- lookupValidMemo modSum
+                case cached of
+                  Just entry -> do
+                    recordValidity modSum True
+                    pure (gmeFront entry, Just entry)
+                  Nothing    -> do
+                    recordValidity modSum False
+                    mf <- compileFront modSum
+                    pure (mf, Nothing)
+              let fs = map fst pairs
+              -- Reachable-module rule (written down before implementation, per
+              -- spec): a home module is REACHABLE from the target iff it IS the
+              -- target, or its DESUGARED Core is transitively referenced — via a
+              -- real 'Var' occurrence at any depth — from the target module's own
+              -- desugared Core. Computed on desugared (pre-'core2core') Core
+              -- specifically: by desugar time, typeclass/instance selection is
+              -- already resolved to explicit dictionary-Var applications, so this
+              -- walk would NOT miss a module imported only for an orphan instance
+              -- the way a renamer/typecheck-level "used name" scan would — exactly
+              -- the silent ErrorSentinel-poisoning shape 'sessionVariant's
+              -- 'cpAfterModule' commentary documents. And because this codebase
+              -- defines no @{-# RULES #-}@ anywhere (grep-confirmed empty),
+              -- 'core2core' cannot introduce a genuinely NEW cross-module reference
+              -- that wasn't already visible at this desugared stage — dictionary/
+              -- instance selection is the only mechanism that could hide a
+              -- reference pre-Core, and it's already resolved by here. So the
+              -- desugar-stage reference graph is a sound (superset-or-equal)
+              -- approximation of what the fully optimized Core actually needs.
+              --
+              -- A module OUTSIDE this closure would contribute zero bindings the
+              -- target's Core can reach either way — Main.hs's own post-hoc,
+              -- binding-level reachability walk over the final merged 'allBinds'
+              -- ('Translate.reachableBinds', run from the target) would discard it
+              -- regardless — so skipping 'core2core' for it changes no wire byte on
+              -- a passing extraction; it only skips work whose result was always
+              -- going to be thrown away.
+              forceValidationOnly <- liftIO (lookupEnv "TIDEPOOL_TEST_FORCE_VALIDATION_ONLY")
+              let gutsByMod = Map.fromList [ (ms_mod_name (mfSummary f), mfDesugared f) | f <- fs ]
+                  reachableMods0 = reachableModuleClosure targetModName' gutsByMod
+                  -- E6 mis-tiering fault injection (detection-power demonstration,
+                  -- see 00-spec.md's VERIFY section): forcibly deny a NAMED module
+                  -- 'core2core' regardless of whether the real closure above found
+                  -- it reachable — simulating exactly the mistake this tier could
+                  -- make. Inert unless set; never set outside a deliberate test.
+                  reachableMods = case forceValidationOnly of
+                    Just m  -> Set.delete (mkModuleName m) reachableMods0
+                    Nothing -> reachableMods0
+              rs <- fmap concat $ forM pairs $ \(f, mCachedResult) ->
+                if ms_mod_name (mfSummary f) `Set.member` reachableMods
+                  then case mCachedResult of
+                    -- Memo hit AND reachable: the cached RESULT (already
+                    -- core2core'd by whatever cycle inserted it) is exactly what
+                    -- a fresh 'compileBack' would recompute — reuse it, skipping
+                    -- the optimizer pass entirely.
+                    Just entry -> do
+                      mapM_ rememberPreparedSiblings (gmePrepared entry)
+                      prepared <- case (preparation, gmePrepared entry) of
+                        (KeepCore, _) -> pure Nothing
+                        (PrepareStg, Just cachedPrepared) -> pure (Just cachedPrepared)
+                        (PrepareStg, Nothing) -> do
+                          freshPrepared <- prepareSelected f (gmeSimplified entry)
+                          case mMemoRef of
+                            Just ref -> liftIO (modifyIORef' ref
+                              (Map.adjust (\e -> e { gmePrepared = freshPrepared })
+                                (ms_mod_name (mfSummary f))))
+                            Nothing -> pure ()
+                          pure freshPrepared
+                      pure [(gmeResult entry, prepared)]
+                    Nothing -> do
+                      (simplified, r) <- compileBack f
+                      prepared <- prepareSelected f simplified
+                      case mMemoRef of
+                        Just ref -> liftIO (modifyIORef' ref
+                          (Map.insert (ms_mod_name (mfSummary f))
+                            (GutsMemoEntry f simplified r prepared (retainedFor (mfSummary f)))))
+                        Nothing  -> pure ()
+                      pure [(r, prepared)]
+                  -- Not reachable: never core2core'd this cycle (matches every
+                  -- pre-existing caller byte for byte) and never inserted into
+                  -- the memo — a module a LATER cycle finds reachable must still
+                  -- get a real 'compileBack', never a validation-only stand-in.
+                  else pure []
+              pure (fs, map fst rs, [p | (_, Just p) <- rs], Just reachableMods)
+          totalTcMs   <- liftIO (readIORef tcMsRef)
+          totalCoreMs <- liftIO (readIORef coreMsRef)
+          liftIO (emitPhase timing "typecheck" totalTcMs)
+          liftIO (emitPhase timing "core" totalCoreMs)
+          summaryT1 <- monotonicTime
+          liftIO $ do
+            moduleTimes <- readIORef moduleMsRef
+            let topModules = take 3 (sortOn (negate . snd) (Map.toList moduleTimes))
+            emitCompileSummary (length summaries) (elapsedMs sessionT0 summaryT1) totalTcMs totalCoreMs topModules
+            emitModuleTiming timing (sortOn (negate . snd) (Map.toList moduleTimes))
+          -- Diagnostic-only (see 'dsMsRef'/'c2cMsRef' haddock above): NOT part of
+          -- the tidepool-timing wire grammar, so 'ExtractTiming::parse' never sees
+          -- it and there is nothing to keep in sync there. Emitted only under
+          -- 'OptimizeCoreReachable' (there is no tier to report otherwise), and
+          -- AFTER the phase lines, exactly where it has always been.
+          case mReachable of
+            Just reachableMods | timing -> liftIO $ do
+              totalDsMs  <- readIORef dsMsRef
+              totalC2cMs <- readIORef c2cMsRef
+              let allModNames = [ ms_mod_name (mfSummary f) | f <- fronts ]
+                  moduleCount = length allModNames
+                  reachableCount = Set.size reachableMods
+                  validationOnly = [ moduleNameString m | m <- allModNames, not (m `Set.member` reachableMods) ]
+              hPutStrLn stderr $
+                "e6-tier modules=" ++ show moduleCount
+                ++ " reachable=" ++ show reachableCount
+                ++ " desugar_ms=" ++ show totalDsMs
+                ++ " core2core_ms=" ++ show totalC2cMs
+                ++ " validation_only=" ++ show validationOnly
+                ++ " reachable_names=" ++ show (map moduleNameString (Set.toList reachableMods))
+            _ -> pure ()
+          capturedErrors <- liftIO (nub . reverse <$> readIORef errorRef)
+          cpBeforeMerge plan loadFlag capturedErrors
+          -- Merge: dependency module bindings first, target module last
+          let isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
+              resultGuts (g, _, _, _) = g
+              allGuts = map resultGuts results
+          (targetGuts, depGuts, capturedTypes, checkedBinderPins, resultTy) <-
+            case filter (isTargetMod . resultGuts) results of
+            ((tgt, types, pins, rty):_) ->
+              return
+                ( tgt
+                , [g | g <- allGuts, mg_module g /= mg_module tgt]
+                , types
+                , pins
+                , rty
+                )
+            []      -> liftIO $ ioError $ userError $
+              pvLabel variant ++ ": target module '" ++ targetModName
+              ++ "' not found among compiled modules: "
+              ++ show (map (moduleNameString . moduleName . mg_module) allGuts)
+          -- 'allTyCons' unconditionally covers EVERY compiled module, not just the
+          -- tier's reachable set: TyCon/DataCon declarations are populated by the
+          -- typechecker and are never touched by 'core2core' (which transforms
+          -- 'mg_binds' only — the back half never re-derives 'mg_tcs'), so reading
+          -- them off the DESUGARED guts costs nothing extra and keeps a
+          -- validation-only module's data types available to metadata validation.
+          -- Order is summary order, which on the session variant (topologically
+          -- sorted over the target's own import closure, so the target is last) is
+          -- the dependencies-then-target order it used to build by hand.
+          let allBinds  = concatMap mg_binds depGuts ++ mg_binds targetGuts
+              allTyCons = concatMap (mg_tcs . mfDesugared) fronts
+          targetEnvironment <- case [ mfTcGblEnv front
+                               | front <- fronts
+                               , ms_mod_name (mfSummary front) == targetModName' ] of
+            env : _ -> pure env
+            [] -> liftIO $ ioError $ userError $
+              pvLabel variant ++ ": target module '" ++ targetModName
+              ++ "' was typechecked without a retained reader environment"
+          hscFinal <- getSession
+          warnings <- liftIO (nub . reverse <$> readIORef warnRef)
+          let legacyResult = PipelineResult
+                { prBinds  = allBinds
+                , prTyCons = allTyCons
+                , prHscEnv = cpFinalEnv plan hscFinal
+                , prCapturedType = Map.lookup evalUserBinder capturedTypes
+                , prCapturedTypes = capturedTypes
+                , prCheckedBinderPins = checkedBinderPins
+                , prResultType   = resultTy
+                , prWarnings     = warnings
+                , prTargetRdrEnv = tcg_rdr_env targetEnvironment
+                , prTargetTcGblEnv = targetEnvironment
+                }
+          pure (legacyResult, preparedModules)
+    case selection of
+      LegacyCore -> fst <$> compileExecutable
+      PreparedStg -> uncurry PreparedPipelineResult <$> compileExecutable
+      CheckedEnvironment -> do
+        -- load' may need executable dependencies for TH; it never sees the
+        -- metadata target. Restore the full graph for instance visibility.
+        environment <- getSession
+        setSession environment { hsc_mod_graph = modGraphRaw }
+        checked <- forM summaries $ \summary -> do
+          cpBeforeModule plan summary
+          current <- getSession
+          let isTarget = ms_mod_name summary == targetName
+              loaded = lookupHpt (hsc_HPT current) (ms_mod_name summary)
+          if not isTarget && not (isNothing loaded)
+            then pure Nothing
+            else do
+              liftIO $ hPutStrLn stderr $
+                "tidepool-checked module=" ++ moduleNameString (ms_mod_name summary)
+                  ++ " target=" ++ show isTarget
+              parsed <- parseModule summary
+              typed <- typecheckModule (pvTransformParsed variant summary parsed)
+              let tcg = fst (tm_internals_ typed)
+              -- Both deferred dependencies and the target need interfaces:
+              -- GHC lookupName resolves local names through the target HPT.
+              -- These type-only interfaces require neither Core nor STG.
+              env <- getSession
+              details <- liftIO (mkBootModDetailsTc (hsc_logger env) tcg)
+              iface <- liftIO (mkIfaceTc env Sf_None details summary Nothing tcg)
+              let hmi = HomeModInfo iface details emptyHomeModInfoLinkable
+              setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name summary) hmi) env)
+              pure (if isTarget then Just tcg else Nothing)
+        errors <- liftIO (nub . reverse <$> readIORef errorRef)
+        cpBeforeMerge plan loadFlag errors
+        case [tcg | Just tcg <- checked] of
+          [tcg] -> do
+            env <- getSession
+            pure CheckedEnvironmentResult
+              { crHscEnv = cpFinalEnv plan env
+              , crTargetTcGblEnv = tcg
+              , crTargetRdrEnv = tcg_rdr_env tcg
+              , crCapturedTypes = capturedTopLevelTypes tcg
+              , crResultType = foldr (<|>) Nothing [capturedBindingType name tcg | name <- cpResultBinders plan]
+              , crCheckedBinderPins = capturedCellBinderPins (cpFinalEnv plan env) tcg
+              }
+          _ -> liftIO $ ioError $ userError "metadata target missing from checked module graph"
 
 
 -- ---------------------------------------------------------------------------
@@ -1092,8 +1322,8 @@ runCompileCycle preparation mCache mMemoRef retained timing sessionT0 variant pa
 -- ---------------------------------------------------------------------------
 
 -- | Boot one GHC session and provide a compiler closure that reuses stable
--- dependency interfaces and Core. Request-local targets and session modules
--- are removed from the memo after each cycle. Include paths and build-product
+-- dependency interfaces and Core. Transaction-local targets and session modules
+-- are removed from the memo after each transaction. Include paths and build-product
 -- paths are applied per request without reinitializing the unit state.
 withResidentPipeline
   :: [FilePath]
@@ -1128,8 +1358,8 @@ withResidentPipelineSelected baseIncludes useCompiler =
       runRequest $ \compile ->
         compile selection retained purpose mscope path extraIncludes buildProductsDir
 
--- | Keep request-scoped compiler state across every compile needed to serve
--- one framed worker request, then remove it before admitting the next request.
+-- | Keep transaction-scoped compiler state across every compile needed to
+-- prepare one cell, then remove it before admitting the next transaction.
 -- A cell check can compile repeatedly while rejecting generated instances;
 -- treating each retry as a request boundary discards the memo entries the
 -- next retry was meant to reuse. The scoped runner owns cleanup so a caller
@@ -1167,14 +1397,13 @@ withResidentPipelineSelectedRequests baseIncludes useRequests = do
             -- example, lookup compilation normalizes wildcards). Source and
             -- dependency hashes cannot distinguish those variants, so never
             -- reuse a target entry across internal compiles. Session
-            -- dependencies remain warm until the framed request ends.
+            -- dependencies remain warm until the compiler transaction ends.
             evictTargetMemo targetModName' memoRef
-            compiled <- (writeIORef retainedRef retained >>
+            (writeIORef retainedRef retained >>
               reflectGhc
-                (residentCompileOne (selectionKind selection) cache memoRef retainedRef dflags' baseImportPaths timing purpose mscope path extraIncludes buildProductsDir)
+                (residentCompileOne selection cache memoRef retainedRef dflags' baseImportPaths timing purpose mscope path extraIncludes buildProductsDir)
                 session)
               `finally` writeIORef retainedRef Set.empty
-            pure (selectCompileResult selection compiled)
           runRequest :: RequestRunner
           runRequest action = action compile `finally` finishRequest
       in useRequests runRequest
@@ -1195,9 +1424,9 @@ type RequestRunner = forall requestResult.
 -- | One resident-session compile cycle, against the ALREADY-OPEN session
 -- 'withResidentPipeline' booted. Patches @importPaths@ for THIS cycle only
 -- (see 'withResidentPipeline'), compiles with the shared 'ModIfaceCache' +
--- 'GutsMemo'. The request boundary established by
+-- 'GutsMemo'. The transaction boundary established by
 -- 'withResidentPipelineSelectedRequests' sanitizes the memo after both
--- successful and exceptional requests (see 'sanitizeMemo').
+-- successful and exceptional transactions (see 'sanitizeMemo').
 -- Captures a fresh start time so every request gets its own compile summary.
 --
 -- The resident and direct paths select the same pipeline variant. This is an
@@ -1210,10 +1439,10 @@ type RequestRunner = forall requestResult.
 -- 'runCompileCycle'/the 'GutsMemo' validity check; it is never re-read
 -- per module.
 residentCompileOne
-  :: PreparationKind -> ModIfaceCache -> IORef GutsMemo -> IORef (Set.Set SymbolIdentity) -> DynFlags -> [FilePath]
+  :: PipelineSelection result -> ModIfaceCache -> IORef GutsMemo -> IORef (Set.Set SymbolIdentity) -> DynFlags -> [FilePath]
   -> Bool -> CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath
-  -> Ghc CompileResult
-residentCompileOne preparation cache memoRef retainedRef baseDFlags baseImportPaths timing purpose mscope path extraIncludes buildProductsDir = do
+  -> Ghc result
+residentCompileOne selection cache memoRef retainedRef baseDFlags baseImportPaths timing purpose mscope path extraIncludes buildProductsDir = do
   sessionT0 <- monotonicTime
   retained <- liftIO (readIORef retainedRef)
   hsc0 <- getSession
@@ -1224,17 +1453,16 @@ residentCompileOne preparation cache memoRef retainedRef baseDFlags baseImportPa
   variant <- liftIO $ case mscope of
     Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
     _                                        -> normalVariant purpose path
-  runCompileCycle preparation (Just cache) (Just memoRef) retained timing sessionT0 variant path
+  runCompileCycle selection (Just cache) (Just memoRef) retained timing sessionT0 variant path
 
--- | Strip every request-scoped entry from the shared 'GutsMemo' after a
--- framed worker request: every target module compiled by that request and any
+-- | Strip every transaction-scoped entry from the shared 'GutsMemo' after a
+-- compiler transaction: every target module compiled by it and any
 -- @Tidepool.Session.*@ module ('parseSessionModule' recognizes both @Val@
 -- and @Lib@ kinds — the ONE existing session-module-name recognizer, reused
 -- rather than a second hand-rolled prefix check).
 --
--- | Remove request-scoped modules after each framed worker request. Reusable
--- library entries stay warm, while @__result@ and session-value guts cannot
--- leak into a later request that reuses the same module name.
+-- Reusable library entries stay warm, while @__result@ and session-value
+-- guts cannot leak into a later transaction that reuses the same module name.
 sanitizeMemo :: ModuleName -> IORef GutsMemo -> IO ()
 sanitizeMemo targetModName' memoRef =
   modifyIORef' memoRef $ Map.filterWithKey $ \mn _ ->
@@ -1249,7 +1477,7 @@ evictTargetMemo targetModName' memoRef =
 -- 'Tidepool.FatIface.FatIfaceCache', hoisted to daemon lifetime by
 -- app/Main.hs around 'withResidentPipelineSelectedRequests'). A hook decides for
 -- itself, from the request's target 'ModuleName', which of its own cache
--- entries to drop -- the same request-boundary invalidation 'sanitizeMemo'
+-- entries to drop -- the same transaction-boundary invalidation 'sanitizeMemo'
 -- performs for 'GutsMemo', run at the same point in the resident cycle.
 -- A global 'IORef' (rather than another parameter on the compiler closure)
 -- keeps every existing caller of that function -- including test suites this
@@ -1259,7 +1487,7 @@ evictTargetMemo targetModName' memoRef =
 residentEvictionHooks :: IORef [ModuleName -> IO ()]
 residentEvictionHooks = unsafePerformIO (newIORef [])
 
--- | Register a hook to run at every resident request boundary, alongside
+-- | Register a hook to run at every resident transaction boundary, alongside
 -- 'sanitizeMemo'. Intended to be called once, before entering
 -- 'withResidentPipelineSelectedRequests', by the daemon entry point that owns the
 -- cache being registered (see app/Main.hs).

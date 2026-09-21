@@ -1,8 +1,9 @@
 //! Versioned transport for bound resident compiler endpoints.
 //!
 //! External wire: little-endian, length-prefixed frames over a Unix domain
-//! socket, one request/response per connection. This module owns both ends of
-//! that transport; the Haskell worker sees only a private stdin/stdout loop.
+//! socket. An ordinary connection carries one request; a transaction
+//! connection carries ordered requests while retaining one worker. This
+//! module owns both ends; the Haskell worker sees a private stdin/stdout loop.
 //!
 //! ```text
 //! frame     ::= u32-LE length, then that many raw bytes (UTF-8 text)
@@ -10,6 +11,8 @@
 //! identity  ::= "TPDPI001" producer[32] boot_epoch[32]
 //! request   ::= "TPDRQ001" expected_epoch[32]
 //!               frame(cwd) u32-LE(argc) frame(argv[0]) .. frame(argv[n-1])
+//! transaction ::= "TPDTR001" expected_epoch[32]
+//!                 (request-tag request)* end-tag
 //! decision  ::= accepted:u8 | rejected:u8 frame(reason)
 //! response  ::= i32-LE(exit_code) frame(stdout) frame(stderr)
 //! ```
@@ -22,6 +25,7 @@ use std::cell::Cell;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -54,6 +58,9 @@ const MAX_REQUEST_ARGS: u32 = 4096;
 const PREFLIGHT: &[u8; 8] = b"TPDPF001";
 const PREFLIGHT_RESPONSE: &[u8; 8] = b"TPDPI001";
 const REQUEST: &[u8; 8] = b"TPDRQ001";
+pub(crate) const TRANSACTION: &[u8; 8] = b"TPDTR001";
+pub(crate) const TRANSACTION_END: u8 = 0;
+pub(crate) const TRANSACTION_REQUEST: u8 = 1;
 /// Requests one worker serves before the daemon replaces it.
 const DEFAULT_ROTATE_AFTER: u64 = 256;
 /// Worker RSS above which the daemon replaces it after a request. A warm
@@ -62,6 +69,7 @@ const DEFAULT_ROTATE_AFTER: u64 = 256;
 const DEFAULT_RSS_CEILING_MB: u64 = 6 * 1024;
 const ACCEPTED: u8 = 1;
 const REJECTED: u8 = 0;
+type WorkerResponse = (i32, Vec<u8>, Vec<u8>);
 
 fn pane_filter() -> tracing_subscriber::EnvFilter {
     tracing_subscriber::EnvFilter::new("warn,tidepool_extract_cmd::daemon=info")
@@ -267,6 +275,68 @@ pub(crate) fn execute(
     }
 }
 
+pub(crate) fn begin_transaction(
+    socket_path: &Path,
+    epoch: &[u8; 32],
+) -> Result<UnixStream, DaemonError> {
+    let mut stream = UnixStream::connect(socket_path).map_err(DaemonError::Connect)?;
+    stream
+        .set_read_timeout(Some(IO_TIMEOUT))
+        .map_err(|error| DaemonError::NotAccepted(error.to_string()))?;
+    stream
+        .set_write_timeout(Some(IO_TIMEOUT))
+        .map_err(|error| DaemonError::NotAccepted(error.to_string()))?;
+    stream.write_all(TRANSACTION).map_err(DaemonError::Io)?;
+    stream.write_all(epoch).map_err(DaemonError::Io)?;
+    stream.flush().map_err(DaemonError::Io)?;
+    let state = read_exact_or_crash(&mut stream, 1)?[0];
+    match state {
+        ACCEPTED => Ok(stream),
+        REJECTED => {
+            let message = String::from_utf8_lossy(&read_frame(&mut stream)?).into_owned();
+            Err(DaemonError::NotAccepted(message))
+        }
+        other => Err(DaemonError::Protocol(format!(
+            "unknown transaction acceptance marker {other}"
+        ))),
+    }
+}
+
+pub(crate) fn execute_transaction_request(
+    stream: &mut UnixStream,
+    cwd: &Path,
+    argv: &[OsString],
+) -> Result<Output, DaemonError> {
+    stream
+        .write_all(&[TRANSACTION_REQUEST])
+        .map_err(|error| DaemonError::AfterAcceptance(Box::new(DaemonError::Io(error))))?;
+    stream
+        .write_all(&encode_request(cwd, argv))
+        .map_err(|error| DaemonError::AfterAcceptance(Box::new(DaemonError::Io(error))))?;
+    stream
+        .flush()
+        .map_err(|error| DaemonError::AfterAcceptance(Box::new(DaemonError::Io(error))))?;
+    decode_output(stream).map_err(|error| DaemonError::AfterAcceptance(Box::new(error)))
+}
+
+pub(crate) fn end_transaction(stream: &mut UnixStream) -> Result<(), DaemonError> {
+    stream
+        .write_all(&[TRANSACTION_END])
+        .map_err(|error| DaemonError::AfterAcceptance(Box::new(DaemonError::Io(error))))?;
+    stream
+        .flush()
+        .map_err(|error| DaemonError::AfterAcceptance(Box::new(DaemonError::Io(error))))?;
+    let acknowledgement = read_exact_or_crash(stream, 1)
+        .map_err(|error| DaemonError::AfterAcceptance(Box::new(error)))?;
+    if acknowledgement == [ACCEPTED] {
+        Ok(())
+    } else {
+        Err(DaemonError::AfterAcceptance(Box::new(
+            DaemonError::Protocol("compiler transaction close was not acknowledged".to_owned()),
+        )))
+    }
+}
+
 fn explicit_rejection(stream: &mut UnixStream) -> Option<String> {
     let marker = read_exact_or_crash(stream, 1).ok()?;
     if marker[0] != REJECTED {
@@ -436,6 +506,132 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
                 let _ = connection.write_all(&response);
                 continue;
             }
+            if &kind == TRANSACTION {
+                let expected_epoch = match read_exact_or_crash(&mut connection, 32) {
+                    Ok(bytes) => bytes,
+                    Err(_) => continue,
+                };
+                if expected_epoch != epoch {
+                    let _ = write_rejected(&mut connection, "daemon boot epoch changed");
+                    continue;
+                }
+                match stamp_changed(config, &boot_stamp) {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        let _ = write_rejected(&mut connection, "watched deployment changed");
+                        socket.retire()?;
+                        break;
+                    }
+                    Err(error) => {
+                        let _ = write_rejected(&mut connection, "daemon stopping");
+                        return Err(error);
+                    }
+                }
+                if connection.write_all(&[ACCEPTED]).is_err() || connection.flush().is_err() {
+                    continue;
+                }
+                let _ = connection.set_read_timeout(Some(IO_TIMEOUT));
+                let mut transaction_failed = worker.begin_transaction().err();
+                let mut orderly_end = false;
+                while transaction_failed.is_none() {
+                    let mut command = [0u8; 1];
+                    if connection.read_exact(&mut command).is_err() {
+                        break;
+                    }
+                    match command[0] {
+                        TRANSACTION_END => {
+                            orderly_end = true;
+                            break;
+                        }
+                        TRANSACTION_REQUEST => {
+                            let (cwd, argv) = match read_request(&mut connection) {
+                                Ok(request) => request,
+                                Err(error) => {
+                                    tracing::warn!(run_id, %error, "compiler transaction request was malformed");
+                                    break;
+                                }
+                            };
+                            let worker_argv = match normalize_worker_argv(argv) {
+                                Ok(argv) => argv,
+                                Err(error) => {
+                                    tracing::warn!(run_id, %error, "compiler transaction request was invalid");
+                                    break;
+                                }
+                            };
+                            let compile_request = compile_request_correlation(&cwd, &worker_argv);
+                            let started = Instant::now();
+                            match worker.request_while_connected(&connection, &cwd, &worker_argv) {
+                                Ok((code, stdout, stderr)) => {
+                                    served += 1;
+                                    log_compile_timing(run_id, &compile_request, &stderr);
+                                    tracing::info!(
+                                        run_id,
+                                        %compile_request,
+                                        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                                        exit_code = code,
+                                        transaction = true,
+                                        "compiler request finished"
+                                    );
+                                    if write_response(&mut connection, code, &stdout, &stderr)
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                                Err(error) => transaction_failed = Some(error),
+                            }
+                        }
+                        other => {
+                            tracing::warn!(
+                                run_id,
+                                command = other,
+                                "unknown compiler transaction command"
+                            );
+                            break;
+                        }
+                    }
+                }
+                if transaction_failed.is_none() {
+                    transaction_failed = worker.end_transaction().err();
+                }
+                if let Some(error) = transaction_failed {
+                    tracing::error!(run_id, %error, "compiler transaction failed");
+                    drop(connection);
+                    worker.abort();
+                    if !config.persistent {
+                        return Err(error);
+                    }
+                    worker = Worker::spawn(&prepared)?;
+                    served = 0;
+                    followed_rotation = true;
+                    continue;
+                }
+                if orderly_end {
+                    let _ = connection.write_all(&[ACCEPTED]);
+                    let _ = connection.flush();
+                }
+                let worker_rss = worker_rss_mb(worker.child.id()).unwrap_or(0);
+                if served >= rotate_after || worker_rss > rss_ceiling_mb {
+                    tracing::info!(
+                        run_id,
+                        served,
+                        rotate_after,
+                        worker_rss_mb = worker_rss,
+                        rss_ceiling_mb,
+                        "replacing compiler worker after transaction"
+                    );
+                    if config.persistent {
+                        worker.shutdown();
+                        worker = Worker::spawn(&prepared)?;
+                        served = 0;
+                        followed_rotation = true;
+                    } else {
+                        socket.retire()?;
+                        break;
+                    }
+                }
+                continue;
+            }
             if &kind != REQUEST {
                 continue;
             }
@@ -499,7 +695,10 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
             let started = Instant::now();
             tracing::info!(run_id, %compile_request, "compiler request started");
             tracing::debug!(run_id, %compile_request, source_root = %cwd.display(), "compiler request source");
-            let response = worker.request(&cwd, &worker_argv);
+            let response = worker
+                .begin_transaction()
+                .and_then(|()| worker.request(&cwd, &worker_argv))
+                .and_then(|response| worker.end_transaction().map(|()| response));
             let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let (code, stdout, stderr) = match response {
                 Ok(response) => {
@@ -592,14 +791,18 @@ fn hex(bytes: &[u8]) -> String {
 /// level: the file, never the tmux pane), so a Shoal run's compiler log and a
 /// test battery's daemon log show where each request's time went. The worker always writes one `tidepool-compile-summary` line and,
 /// under `TIDEPOOL_TIMING=1`, one `tidepool-timing` line per phase and one
-/// `tidepool-memo-miss` line per memoized module it recompiled. The
+/// `tidepool-memo-miss` line per memoized module it recompiled. Structural
+/// `tidepool-checked` and `tidepool-target` lines distinguish metadata-only
+/// checks from executable target desugaring. The
 /// prefixes mirror `tidepool_toolchain::timing` (this crate is a dependency
 /// leaf and cannot name it).
 fn log_compile_timing(run_id: &str, compile_request: &str, stderr: &[u8]) {
-    const PREFIXES: [&str; 3] = [
+    const PREFIXES: [&str; 5] = [
         "tidepool-timing ",
         "tidepool-compile-summary ",
         "tidepool-memo-miss ",
+        "tidepool-checked ",
+        "tidepool-target ",
     ];
     for line in String::from_utf8_lossy(stderr).lines() {
         let line = line.trim();
@@ -909,6 +1112,46 @@ fn worker_rss_mb(pid: u32) -> io::Result<u64> {
         / 1024)
 }
 
+#[cfg(target_os = "linux")]
+fn peer_disconnected(stream: &UnixStream) -> bool {
+    const MSG_PEEK: std::os::raw::c_int = 0x2;
+    const MSG_DONTWAIT: std::os::raw::c_int = 0x40;
+    unsafe extern "C" {
+        fn recv(
+            socket: std::os::raw::c_int,
+            buffer: *mut std::ffi::c_void,
+            length: usize,
+            flags: std::os::raw::c_int,
+        ) -> isize;
+    }
+    let mut byte = 0u8;
+    // SAFETY: `byte` is writable for the one-byte length supplied, and the
+    // stream owns a live socket descriptor for the duration of this call.
+    let received = unsafe {
+        recv(
+            stream.as_raw_fd(),
+            (&mut byte as *mut u8).cast(),
+            1,
+            MSG_PEEK | MSG_DONTWAIT,
+        )
+    };
+    if received == 0 {
+        true
+    } else if received < 0 {
+        !matches!(
+            io::Error::last_os_error().kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+        )
+    } else {
+        false
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn peer_disconnected(_stream: &UnixStream) -> bool {
+    false
+}
+
 pub(crate) struct Worker {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -919,7 +1162,7 @@ impl Worker {
     pub(crate) fn spawn(prepared: &PreparedWorker) -> Result<Self, FrontendError> {
         let mut command = prepared.command();
         command
-            .arg("--worker-loop-v1")
+            .arg("--worker-loop-v2")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
@@ -940,6 +1183,23 @@ impl Worker {
         })
     }
 
+    pub(crate) fn begin_transaction(&mut self) -> Result<(), FrontendError> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| FrontendError::Daemon("worker stdin is closed".to_owned()))?;
+        stdin.write_all(&[1]).map_err(FrontendError::Io)?;
+        stdin.flush().map_err(FrontendError::Io)?;
+        let acknowledgement =
+            read_exact_or_crash(&mut self.stdout, 1).map_err(daemon_frontend_error)?;
+        if acknowledgement != [1] {
+            return Err(FrontendError::Daemon(
+                "worker rejected transaction protocol".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn request(
         &mut self,
         cwd: &Path,
@@ -950,9 +1210,66 @@ impl Worker {
             .stdin
             .as_mut()
             .ok_or_else(|| FrontendError::Daemon("worker stdin is closed".to_owned()))?;
+        stdin
+            .write_all(&[TRANSACTION_REQUEST])
+            .map_err(FrontendError::Io)?;
         stdin.write_all(&bytes).map_err(FrontendError::Io)?;
         stdin.flush().map_err(FrontendError::Io)?;
         decode_response(&mut self.stdout).map_err(daemon_frontend_error)
+    }
+
+    fn request_while_connected(
+        &mut self,
+        connection: &UnixStream,
+        cwd: &Path,
+        argv: &[OsString],
+    ) -> Result<WorkerResponse, FrontendError> {
+        let pid = self.child.id();
+        let result = std::thread::scope(|scope| {
+            let (completed_tx, completed_rx) = std::sync::mpsc::sync_channel(1);
+            scope.spawn(move || {
+                let _ = completed_tx.send(self.request(cwd, argv));
+            });
+            loop {
+                match completed_rx.recv_timeout(Duration::from_millis(50)) {
+                    Ok(result) => return result,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err(FrontendError::Daemon(
+                            "compiler worker request monitor disconnected".to_owned(),
+                        ));
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                if peer_disconnected(connection) {
+                    let _ = crate::process::kill_process(pid);
+                    return completed_rx.recv().unwrap_or_else(|_| {
+                        Err(FrontendError::Daemon(
+                            "compiler worker stopped after client disconnect".to_owned(),
+                        ))
+                    });
+                }
+            }
+        });
+        result
+    }
+
+    pub(crate) fn end_transaction(&mut self) -> Result<(), FrontendError> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| FrontendError::Daemon("worker stdin is closed".to_owned()))?;
+        stdin
+            .write_all(&[TRANSACTION_END])
+            .map_err(FrontendError::Io)?;
+        stdin.flush().map_err(FrontendError::Io)?;
+        let acknowledgement =
+            read_exact_or_crash(&mut self.stdout, 1).map_err(daemon_frontend_error)?;
+        if acknowledgement != [1] {
+            return Err(FrontendError::Daemon(
+                "worker did not close transaction".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     fn abort(&mut self) {
@@ -1271,7 +1588,7 @@ mod tests {
     }
 
     #[test]
-    fn compiler_phase_timings_are_structured_in_the_daemon_trace() {
+    fn compiler_timings_and_structure_are_forwarded_to_the_daemon_trace() {
         let trace = CapturedWriter::default();
         let subscriber = tracing_subscriber(
             CapturedWriter::default(),
@@ -1284,16 +1601,34 @@ mod tests {
             log_compile_timing(
                 "run-7",
                 "abcdef0123456789",
-                b"tidepool-timing phase=cycle_modules_wall ms=14700\n",
+                b"tidepool-timing phase=cycle_modules_wall ms=14700\n\
+tidepool-checked module=Inspect target=False\n\
+tidepool-target phase=desugar module=Execute\n",
             );
         });
 
-        let event: serde_json::Value = serde_json::from_str(trace.text().trim()).unwrap();
-        assert_eq!(event["fields"]["message"], "compiler phase timing");
+        let output = trace.text();
+        let mut events = output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap());
+        let event = events.next().unwrap();
+        assert_eq!(event["fields"]["message"], "compiler timing");
         assert_eq!(event["fields"]["run_id"], "run-7");
         assert_eq!(event["fields"]["compile_request"], "abcdef0123456789");
-        assert_eq!(event["fields"]["phase"], "cycle_modules_wall");
-        assert_eq!(event["fields"]["elapsed_ms"], 14_700);
+        assert_eq!(
+            event["fields"]["line"],
+            "tidepool-timing phase=cycle_modules_wall ms=14700"
+        );
+        let structural: Vec<_> = events
+            .map(|event| event["fields"]["line"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            structural,
+            [
+                "tidepool-checked module=Inspect target=False",
+                "tidepool-target phase=desugar module=Execute",
+            ]
+        );
     }
 
     #[test]
@@ -1374,7 +1709,7 @@ mod tests {
     #[test]
     fn compiler_request_correlation_is_stable_and_content_addressed() {
         let argv = [
-            OsString::from("--worker-request-v7"),
+            OsString::from("--worker-request-v8"),
             OsString::from("payload"),
         ];
         assert_eq!(
@@ -1406,7 +1741,7 @@ mod tests {
     fn malformed_typed_worker_request_is_rejected() {
         let malformed = vec![
             crate::request::WORKER_REQUEST_FLAG.into(),
-            "54505245513030370100000009".into(),
+            "54505245513030380100000009".into(),
         ];
         assert!(matches!(
             normalize_worker_argv(malformed),
@@ -1515,6 +1850,78 @@ mod tests {
         assert_eq!(binding.producer, [7; 32]);
         assert_eq!(binding.epoch, [9; 32]);
         std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn transaction_carries_ordered_requests_and_waits_for_close_acknowledgement() {
+        let socket = test_socket("transaction");
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut header = [0u8; 40];
+            connection.read_exact(&mut header).unwrap();
+            assert_eq!(&header[..8], TRANSACTION);
+            assert_eq!(&header[8..], &[3; 32]);
+            connection.write_all(&[ACCEPTED]).unwrap();
+            for expected in ["one", "two"] {
+                let mut command = [0u8; 1];
+                connection.read_exact(&mut command).unwrap();
+                assert_eq!(command, [TRANSACTION_REQUEST]);
+                let (_, argv) = read_request(&mut connection).unwrap();
+                assert_eq!(argv, [OsString::from(expected)]);
+                write_response(&mut connection, 0, expected.as_bytes(), b"").unwrap();
+            }
+            let mut command = [0u8; 1];
+            connection.read_exact(&mut command).unwrap();
+            assert_eq!(command, [TRANSACTION_END]);
+            connection.write_all(&[ACCEPTED]).unwrap();
+        });
+
+        let mut transaction = begin_transaction(&socket, &[3; 32]).unwrap();
+        for expected in ["one", "two"] {
+            let output = execute_transaction_request(
+                &mut transaction,
+                Path::new("/tmp"),
+                &[OsString::from(expected)],
+            )
+            .unwrap();
+            assert_eq!(output.stdout, expected.as_bytes());
+        }
+        end_transaction(&mut transaction).unwrap();
+        server.join().unwrap();
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn transaction_disconnect_interrupts_an_inflight_worker_request() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut worker = Worker {
+            child,
+            stdin: Some(stdin),
+            stdout,
+        };
+        let (connection, client) = UnixStream::pair().unwrap();
+        drop(client);
+        let started = Instant::now();
+        let result = worker.request_while_connected(
+            &connection,
+            Path::new("/tmp"),
+            &[OsString::from("request")],
+        );
+        assert!(result.is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "disconnect did not interrupt the worker promptly"
+        );
+        worker.abort();
     }
 
     #[test]

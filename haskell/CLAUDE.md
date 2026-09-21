@@ -17,7 +17,7 @@ cabal list-bin tidepool-extract-bin
 
 The executable is an internal compiler worker, not a user-facing CLI. It accepts
 only the versioned request protocol emitted by `tidepool-extract-cmd`, or
-`--worker-loop-v1` when run behind the resident daemon. A plain `cabal build`
+`--worker-loop-v2` when run behind the resident daemon. A plain `cabal build`
 builds the worker; `cabal build --enable-tests` also builds the extractor test
 components.
 
@@ -100,13 +100,13 @@ fault-injection controls for extractor tests, not debugging defaults.
 
 The Rust frontend owns CLI parsing, Unix sockets, daemon configuration, and
 process lifecycle. It either starts this worker for one typed request or keeps
-one worker alive with `--worker-loop-v1`. `Tidepool.WorkerServer` owns only the
+one worker alive with `--worker-loop-v2`. `Tidepool.WorkerServer` owns only the
 framed stdin/stdout loop; `Tidepool.GhcPipeline` owns the resident compiler
 state. `Main` decodes a typed request and dispatches compiler operations; it is
-not a second CLI or workflow engine. Request-local target and
-`Tidepool.Session.*` modules are removed from the shared memo after each
-request; reusable library interfaces remain warm. Requests are serialized and
-carry their own CWD and compiler options.
+not a second CLI or workflow engine. Transaction-local target and
+`Tidepool.Session.*` modules are removed from the shared memo when the
+transaction closes; reusable library interfaces remain warm. Transactions and
+their requests are serialized and carry their own CWD and compiler options.
 
 The worker process environment is fixed at startup. Restart the daemon after
 changing extractor diagnostic variables, GHC configuration, or its watched

@@ -20,6 +20,7 @@ import Tidepool.Binders
   ( TurnOut(..), BoundBinder(..), ExportItem(..), ValueTier(..)
   , CellSourcePlan(..), CellAnalysisItem(..), CellAnalysisSourceItem(..)
   , CellSourceSpan(..), CheckedBinderPin(..), SourcePrologue(..)
+  , CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..)
   , LocatedPragma(..), LocatedImport(..), PragmaKind(..), DeclarationSource(..)
   , StmtBinders(..), turnKindWireName )
 import Tidepool.EffectSchema (NominalHead(..), SiteType(..), YieldSite(..))
@@ -227,17 +228,39 @@ encodeTurnOut turnOut = toStrictByteString $ case turnOut of
 encodeCellOut
   :: CellSourcePlan
   -> [CheckedBinderPin]
+  -> [CellExpressionPlan]
   -> String
   -> ByteString
-encodeCellOut plan pins checkedSource = toStrictByteString $
+encodeCellOut plan pins expressions checkedSource = toStrictByteString $
   let items = cellPlanItems plan in
-  encodeListLen 4
+  encodeListLen 5
   <> encodeListLen (fromIntegral (length items))
   <> foldMap encodeCellItem items
   <> encodeListLen (fromIntegral (length pins))
   <> foldMap encodeCheckedBinderPin pins
   <> encodeString (T.pack checkedSource)
   <> encodeSourcePrologue (cellPlanPrologue plan)
+  <> encodeListLen (fromIntegral (length expressions))
+  <> foldMap encodeCellExpressionPlan expressions
+
+encodeCellExpressionPlan :: CellExpressionPlan -> Encoding
+encodeCellExpressionPlan CellExpressionPlan
+  { expressionPlanKey = key
+  , expressionPlanLift = liftPlan
+  , expressionPlanPresentation = presentation
+  , expressionPlanType = ty
+  , expressionPlanHeads = heads
+  } =
+  encodeListLen 5
+  <> encodeString (T.pack key)
+  <> encodeString (case liftPlan of
+       ExpressionEffectful -> "effectful"
+       ExpressionPure -> "pure")
+  <> encodeString (case presentation of
+       ExpressionRendered -> "rendered"
+       ExpressionOpaque -> "opaque")
+  <> encodeString (T.pack ty)
+  <> encodeHeads heads
 
 encodeDeclarationSource :: DeclarationSource -> Encoding
 encodeDeclarationSource (DeclarationSource prologue body) =

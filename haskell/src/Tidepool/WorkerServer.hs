@@ -19,25 +19,43 @@ import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 
 type RequestHandler = FilePath -> [String] -> IO ExitCode
 
-runWorkerLoop :: RequestHandler -> IO ()
-runWorkerLoop handler = go
+-- | Serve explicitly bracketed compiler transactions. The callback owns the
+-- compiler-state bracket and invokes its argument while that state may be
+-- reused. A truncated transaction throws through the callback, so its
+-- cleanup runs before the worker exits.
+runWorkerLoop :: ((RequestHandler -> IO ()) -> IO ()) -> IO ()
+runWorkerLoop withTransaction = go
   where
     go = do
-      first <- BS.hGet stdin 4
-      if BS.null first
+      command <- BS.hGet stdin 1
+      if BS.null command
         then pure ()
-        else do
-          header <- if BS.length first == 4
-            then pure first
-            else (first <>) <$> hGetExactly stdin (4 - BS.length first)
-          let cwdLen = fromIntegral (getU32LE header)
-          cwd <- decodeText <$> hGetExactly stdin cwdLen
+        else case BS.head command of
+          1 -> do
+            withTransaction serveTransaction
+            BS.hPut stdout (BS.singleton 1)
+            hFlush stdout
+            go
+          other -> throwIO (userError ("worker: unknown transaction command " ++ show other))
+
+    serveTransaction handler = do
+      BS.hPut stdout (BS.singleton 1)
+      hFlush stdout
+      requests handler
+
+    requests handler = do
+      command <- hGetExactly stdin 1
+      case BS.head command of
+        0 -> pure ()
+        1 -> do
+          cwd <- decodeText <$> hGetFrame stdin
           argc <- getU32LE <$> hGetExactly stdin 4
           argv <- replicateM (fromIntegral argc) (decodeText <$> hGetFrame stdin)
           (code, out, err) <- captureOutput (handler cwd argv)
           BS.hPut stdout (encodeResponse code out err)
           hFlush stdout
-          go
+          requests handler
+        other -> throwIO (userError ("worker: unknown request command " ++ show other))
 
 hGetFrame :: Handle -> IO BS.ByteString
 hGetFrame handle = do

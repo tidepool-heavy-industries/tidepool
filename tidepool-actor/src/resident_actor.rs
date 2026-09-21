@@ -4063,21 +4063,15 @@ where
             request.request,
             request.type_modules(),
         );
-        workbench
-            .mount_named_input(
+        let (input_preview, reply_preview) = workbench
+            .mount_activation_input(
                 context.clone(),
-                "sessionInput",
                 request.input_type.clone(),
                 input,
-            )
-            .await?;
-        let (input_preview, reply_preview) = workbench
-            .activation_preview(
-                context.clone(),
                 request.response.expected_type().to_owned(),
                 request.response.declaration.clone(),
             )
-            .await;
+            .await?;
         let contract = crate::interactive_session::ActivationContract {
             input_type: request.input_type.clone(),
             response: request.response.clone(),
@@ -9456,6 +9450,10 @@ mod tests {
             ],
             pins: Vec::new(),
             checked_source: String::new(),
+            checked_cell_text: String::new(),
+            compile_generation: 0,
+            compile_view_evidence: String::new(),
+            expression_plans: Vec::new(),
         };
         let committed = WorkbenchItemReceipt {
             diagnostics: Vec::new(),

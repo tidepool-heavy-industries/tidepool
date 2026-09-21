@@ -90,22 +90,20 @@ pub use workbench::{
 };
 
 pub use turn::{
-    ambiguous_type_advice, assemble_bind_module, constructor_advice, assemble_display_expression_module,
-    assemble_expression_module,
-    assemble_inspection_module, assemble_opaque_expression_module, check_cell,
-    check_cell_preferring_effectful, classify_block,
-    enable_no_monomorphism_restriction, insert_preamble_imports, place_turn_stmt,
-    prepared_scaffold_binding, render_cell_compile_error, render_cell_compile_rejection,
-    render_template, render_turn_compile_error, render_turn_compile_rejection,
-    resume_import_targets, run_turn, run_turn_pinned,
+    ambiguous_type_advice, assemble_bind_module, assemble_display_expression_module,
+    assemble_expression_module, assemble_inspection_module, assemble_opaque_expression_module,
+    check_cell, classify_block, constructor_advice, enable_no_monomorphism_restriction,
+    insert_preamble_imports, place_turn_stmt, prepared_scaffold_binding, render_cell_compile_error,
+    render_cell_compile_rejection, render_template, render_turn_compile_error,
+    render_turn_compile_rejection, resume_import_targets, run_turn, run_turn_pinned,
     runtime_failure_advice, turn_user_code_line_range, turn_user_code_offset, with_resume_import,
-    BoundBinder, CompileRejection,
-    CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellCheckFailure, CellCheckRequest,
-    CellSourceSpan, CheckedBinderPin, CompiledTurn, DeclarationReceipt, DeclarationSource,
-    ExpressionLift, LocatedImport, LocatedPragma, PragmaKind, PreparedTurn, SourcePrologue,
-    TemplateSelector, TurnClassification, TurnCode, TurnFailure, TurnKind, TurnRequest, TurnResult,
-    TurnTemplate, ValueTier, AMBIGUOUS_TYPE_ADVICE, CELL_PURE_DISPATCH_ADVICE,
-    DECL_TEMPLATE_SOURCE, PREPARED_SCAFFOLD_TARGET,
+    BoundBinder, CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellCheckFailure,
+    CellCheckRequest, CellSourceSpan, CheckedBinderPin, CheckedExpressionPlan, CompileRejection,
+    CompiledTurn, DeclarationReceipt, DeclarationSource, ExpressionLift, ExpressionPresentation,
+    LocatedImport, LocatedPragma, PragmaKind, PreparedTurn, SourcePrologue, TemplateSelector,
+    TurnClassification, TurnCode, TurnFailure, TurnKind, TurnRequest, TurnResult, TurnTemplate,
+    ValueTier, AMBIGUOUS_TYPE_ADVICE, CELL_PURE_DISPATCH_ADVICE, DECL_TEMPLATE_SOURCE,
+    PREPARED_SCAFFOLD_TARGET,
 };
 
 /// Host-visible reentry state for one resident session.
@@ -128,11 +126,10 @@ pub enum ResidentSessionState {
     Gone,
 }
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use tidepool_codegen::scope::ScopeId;
-use tidepool_extract_cmd::ExtractCmd;
 use tidepool_repr::{Generation, SessionId, SessionModule, SessionVarId};
 
 pub use render::{
@@ -698,6 +695,24 @@ impl SessionLib {
         self.log.current_items_at(self.scope_tip(scope))
     }
 
+    /// A declaration value's compiler-rendered type, retained with its exact
+    /// defining generation.
+    #[must_use]
+    pub fn declaration_value_type(&self, generation: u64, name: &str) -> Option<&str> {
+        self.log.value_type_at(Generation(generation), name)
+    }
+
+    /// Cache one compatibility inspection batch against the exact visible
+    /// generations it described. Stale entries are ignored.
+    pub fn retain_declaration_value_types_in(
+        &mut self,
+        scope: ScopeId,
+        types: &[(String, u64, String)],
+    ) {
+        let tip = self.scope_tip(scope);
+        self.log.retain_value_types_at(tip, types);
+    }
+
     /// Select a model-visible export membrane from the exact declaration
     /// module currently visible in `scope`. Names are declaration heads; a
     /// selected data type or class carries all GHC-reported constructors or
@@ -931,6 +946,7 @@ impl SessionLib {
                 sources: sources.clone(),
                 workbench_imports,
                 items: receipt.items.clone(),
+                value_types: BTreeMap::new(),
                 retracts: Vec::new(),
                 parent: None, // set inside push_turn_in from scope's tip
             },
@@ -948,13 +964,17 @@ impl SessionLib {
 
         // Validate ALL turns via GHC. On failure, roll back the log and delete
         // the gen module file so later turns don't import a poisoned module.
-        if let Err(e) = self.validate_candidate(&rendered, inject_modules) {
-            self.log.turns.pop();
-            let gen_path = self.root.join(rendered.module.relative_hs_path());
-            let _ = std::fs::remove_file(&gen_path);
-            self.restore_tip(scope, tip_before);
-            return Err(e);
-        }
+        let value_types = match self.validate_candidate(&rendered, &receipt.items, inject_modules) {
+            Ok(types) => types,
+            Err(error) => {
+                self.log.turns.pop();
+                let gen_path = self.root.join(rendered.module.relative_hs_path());
+                let _ = std::fs::remove_file(&gen_path);
+                self.restore_tip(scope, tip_before);
+                return Err(error);
+            }
+        };
+        self.log.turns[(gen.0 - 1) as usize].value_types = value_types;
 
         if scope == ScopeId::ROOT {
             self.record_recovery_turn(recovery::RecoveryTurn::new(
@@ -979,22 +999,27 @@ impl SessionLib {
         let sources = vec![receipt.source.replay_source(external)];
         let workbench_imports = receipt.source.prologue.workbench_imports();
         let mut log = self.log.clone();
-        let turn = DeclTurn {
+        let mut turn = DeclTurn {
             normalized: receipt.source.clone(),
             external_imports: external.clone(),
             sources,
             workbench_imports,
             items: receipt.items.clone(),
+            value_types: BTreeMap::new(),
             retracts: Vec::new(),
             parent: (self.scope_tip(scope).0 > 0).then_some(self.scope_tip(scope)),
         };
         let generation = log.push(turn.clone());
         let rendered = render::render_module_with_vals(&log, generation, &self.env, import_modules);
         self.write_module(&rendered)?;
-        if let Err(error) = self.validate_candidate(&rendered, inject_modules) {
-            self.discard_module_artifacts(rendered.module);
-            return Err(error);
-        }
+        turn.value_types = match self.validate_candidate(&rendered, &receipt.items, inject_modules)
+        {
+            Ok(types) => types,
+            Err(error) => {
+                self.discard_module_artifacts(rendered.module);
+                return Err(error);
+            }
+        };
         Ok(StagedDeclaration {
             generation,
             module: rendered.module,
@@ -1145,6 +1170,7 @@ impl SessionLib {
                 sources: Vec::new(),
                 workbench_imports: SourceImports::new(),
                 items: Vec::new(),
+                value_types: BTreeMap::new(),
                 retracts: retracts.clone(),
                 parent: None, // set inside push_turn_in from scope's tip
             },
@@ -1182,102 +1208,115 @@ impl SessionLib {
         }
     }
 
-    /// Validate that the candidate gen module compiles and type-checks by running
-    /// the extract in full-compile mode on a thin wrapper that imports it. The
-    /// candidate is already written on disk at this point; this just drives GHC on
-    /// it and surfaces any scope / type errors as a clean `SessionError`.
-    /// `inject_modules` are passed through as `--inject-val` so a decl
-    /// referencing a live session value resolves its `.hi` at validation time.
+    /// Validate one declaration generation and capture its visible value types
+    /// from the same checked environment. Importing the candidate forces GHC to
+    /// check the complete module; no executable target is produced.
     fn validate_candidate(
         &self,
         rendered: &RenderedModule,
+        items: &[ExportItem],
         inject_modules: &[String],
-    ) -> Result<(), SessionError> {
-        let temp = tempfile::TempDir::new()?;
-
-        // Thin wrapper: importing the candidate forces GHC to compile it and
-        // report any scope/type errors. `result = ()` is a trivial target.
-        let module_name = rendered.module.module_name();
-        let wrapper_src = format!(
-            "module TidepoolValidate where\nimport {module_name} ()\nresult :: ()\nresult = ()\n"
-        );
-        let wrapper_path = temp.path().join("TidepoolValidate.hs");
-        std::fs::write(&wrapper_path, &wrapper_src)?;
-
-        // The candidate imports stdlib sources; resolve the include BEFORE
-        // spawning so a misconfigured toolchain is a typed configuration error
-        // rather than a GHC "Could not find module" blamed on the declaration.
+    ) -> Result<BTreeMap<String, String>, SessionError> {
         let stdlib_include = stdlib_include_for_validation(&self.extra_include)?;
-
-        // A misconfigured $TIDEPOOL_EXTRACT is the same environment problem a
-        // spawn failure is (`Io` → Infra), never the user's declaration.
-        let mut cmd = ExtractCmd::new()
-            .map_err(|e| SessionError::Compile(crate::CompileError::Io(e.into())))?;
-        // Default build-products dir (see `crate::paths::apply_build_products_dir`'s
-        // doc) — this validation spawn does a real full typecheck of the
-        // candidate's stdlib closure, so it benefits from the same
-        // module-granular recompilation avoidance every other spawn gets.
-        cmd.input(&wrapper_path)
-            .output_dir(temp.path())
-            .target("result")
-            .include(&self.root);
-
-        // Caller-supplied include dirs (e.g. the generated `Tidepool.Effects`
-        // dir + stdlib `lib/` under the full-eval decl surface). Required so a
-        // decl importing `Tidepool.Effects` resolves at validation time.
-        cmd.includes(&self.extra_include);
-
-        cmd.includes(stdlib_include);
-
-        if !inject_modules.is_empty() {
-            // `--inject-val` ifaces are looked up under `--session-root`
-            // (`Tidepool.Session.ssRoot`) — required whenever we inject any,
-            // same as a statement's `run_turn` call.
-            cmd.session_root(&self.root).inject_vals(inject_modules);
+        let mut includes = vec![self.root.as_path()];
+        includes.extend(self.extra_include.iter().map(PathBuf::as_path));
+        if let Some(stdlib) = stdlib_include.as_deref() {
+            includes.push(stdlib);
         }
-
-        // Spawn failure is an environment problem (`CompileError::Io` →
-        // Infra), never a declaration diagnostic.
-        let endpoint = cmd.bind().map_err(|e| {
-            SessionError::Compile(crate::CompileError::Io(crate::extract_spawn_error(
-                e.source,
-            )))
-        })?;
-        crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
-        let run = endpoint.execute(&cmd).map_err(|e| {
-            SessionError::Compile(crate::CompileError::Io(crate::extract_spawn_error(
-                e.source,
-            )))
-        })?;
-        let output = &run.output;
-
-        if let Err(error) =
-            crate::diag::decode_extract_result(run.success(), &output.stdout, &output.stderr)
-        {
-            let crate::CompileError::Diagnostics(diags) = error else {
-                return Err(SessionError::Compile(error));
+        let mut values = Vec::new();
+        for item in items {
+            let term_names: &[String] = match item {
+                ExportItem::Value { name } => std::slice::from_ref(name),
+                ExportItem::Type { cons, .. } => cons,
+                ExportItem::Class { methods, .. } => methods,
             };
-            let rel = rendered.module.relative_hs_path();
-            // Speak item-relative coordinates: GHC's line numbers point into
-            // the rendered G<g>.hs (header + imports before the user's text).
-            // Anchored to the generated module's own path suffix only, so
-            // foreign .hs:L:C tokens (panic backtraces) pass through.
-            let line_offset = if rendered.body_line > 0 && !rendered.hoisted_lines {
-                rendered.body_line
-            } else {
-                0
-            };
-            return Err(SessionError::ValidationFailed(
-                DeclarationValidationFailure {
-                    diagnostics: diags,
-                    anchor: rel,
-                    line_offset,
-                    source: rendered.source.clone(),
-                },
-            ));
+            for name in term_names {
+                if !values.contains(name) {
+                    values.push(name.clone());
+                }
+            }
         }
+        let expressions = if values.is_empty() {
+            vec!["()".to_owned()]
+        } else {
+            values
+                .iter()
+                .map(|name| {
+                    let occurrence = name
+                        .strip_prefix('(')
+                        .and_then(|name| name.strip_suffix(')'))
+                        .unwrap_or(name);
+                    match occurrence.chars().next() {
+                        Some(c) if c.is_alphanumeric() || c == '_' => {
+                            format!("TidepoolCandidate.{occurrence}")
+                        }
+                        _ => format!("(TidepoolCandidate.{occurrence})"),
+                    }
+                })
+                .collect()
+        };
+        let queries = expressions
+            .iter()
+            .cloned()
+            .map(InspectionQuery::TypeOf)
+            .collect::<Vec<_>>();
+        let imports = format!(
+            "{}\nqualified {} as TidepoolCandidate\n",
+            rendered.module.module_name(),
+            rendered.module.module_name()
+        );
+        let preamble = format!(
+            "{}\nmodule TidepoolDeclarationTypes where\n",
+            self.env.pragmas
+        );
+        let results = match inspection::run_inspections_strict(InspectionRequest {
+            preamble: &preamble,
+            imports: &imports,
+            include: &includes,
+            session_root: &self.root,
+            inject_modules,
+            queries: &queries,
+            effects: None,
+        }) {
+            Ok(results) => results,
+            Err(crate::CompileError::Diagnostics(diagnostics)) => {
+                let line_offset = if rendered.body_line > 0 && !rendered.hoisted_lines {
+                    rendered.body_line
+                } else {
+                    0
+                };
+                return Err(SessionError::ValidationFailed(
+                    DeclarationValidationFailure {
+                        diagnostics,
+                        anchor: rendered.module.relative_hs_path(),
+                        line_offset,
+                        source: rendered.source.clone(),
+                    },
+                ));
+            }
+            Err(error) => return Err(SessionError::Compile(error)),
+        };
 
-        Ok(())
+        let mut types = BTreeMap::new();
+        for (index, result) in results.into_iter().enumerate() {
+            match result {
+                InspectionResult::Type { display, .. } if index < values.len() => {
+                    types.insert(values[index].clone(), display);
+                }
+                InspectionResult::Type { .. } => {}
+                InspectionResult::Rejected { diagnostic } => {
+                    return Err(SessionError::Compile(crate::CompileError::ExtractFailed(
+                        format!("strict declaration type capture was rejected: {diagnostic}"),
+                    )));
+                }
+                other => {
+                    return Err(SessionError::Compile(crate::CompileError::ExtractFailed(
+                        format!("declaration type capture returned {}", other.render()),
+                    )));
+                }
+            }
+        }
+        Ok(types)
     }
 
     /// Atomically write a rendered module to its place in the include tree.
@@ -1366,6 +1405,7 @@ mod tests {
                 sources: vec!["import qualified Data.Set as Set".into()],
                 workbench_imports: SourceImports::from_specs(["qualified Data.Set as Set"]),
                 items: Vec::new(),
+                value_types: BTreeMap::new(),
                 retracts: Vec::new(),
                 parent: None,
             },
@@ -1380,6 +1420,7 @@ mod tests {
                 sources: vec!["import Data.Proxy (Proxy (..))".into()],
                 workbench_imports: SourceImports::from_specs(["Data.Proxy (Proxy (..))"]),
                 items: Vec::new(),
+                value_types: BTreeMap::new(),
                 retracts: Vec::new(),
                 parent: None,
             },
@@ -1392,6 +1433,7 @@ mod tests {
                 sources: vec!["import qualified Data.Map.Strict as Map".into()],
                 workbench_imports: SourceImports::from_specs(["qualified Data.Map.Strict as Map"]),
                 items: Vec::new(),
+                value_types: BTreeMap::new(),
                 retracts: Vec::new(),
                 parent: None,
             },
@@ -1439,7 +1481,7 @@ mod tests {
     }
 
     fn validated_staged_answer(lib: &SessionLib) -> StagedDeclaration {
-        validated_staged_declaration(lib, "answer :: Int\nanswer = 42")
+        validated_staged_declaration(lib, "data Flag = On\nanswer :: Int\nanswer = 42")
     }
 
     fn staged_test_lib(root: &tempfile::TempDir) -> SessionLib {
@@ -1457,6 +1499,14 @@ mod tests {
         lib.attach_recovery_manifest(&manifest)
             .expect("attach empty recovery manifest");
         let staged = validated_staged_answer(&lib);
+        assert_eq!(
+            staged.turn.value_types.get("answer").map(String::as_str),
+            Some("Int")
+        );
+        assert_eq!(
+            staged.turn.value_types.get("On").map(String::as_str),
+            Some("Flag")
+        );
         let module_path = root.path().join(staged.module().relative_hs_path());
         assert!(
             module_path.exists(),
@@ -1469,6 +1519,7 @@ mod tests {
             Generation(1)
         );
         assert_eq!(lib.generation(), Generation(1));
+        assert_eq!(lib.declaration_value_type(1, "answer"), Some("Int"));
         assert!(
             manifest.exists(),
             "adoption records the durable recovery turn"
@@ -1480,6 +1531,31 @@ mod tests {
             module_path.exists(),
             "a copied post-adoption token cannot delete a committed module"
         );
+    }
+
+    #[test]
+    fn failed_staging_keeps_structured_diagnostics_and_publishes_no_types() {
+        let root = tempfile::tempdir().unwrap();
+        let lib = staged_test_lib(&root);
+        let receipt = lib
+            .declaration_receipt(&["bad :: Int\nbad = True"])
+            .expect("extract declaration receipt")
+            .expect("non-empty declaration receipt");
+        let error = lib
+            .stage_batch_with_receipt_and_vals_in(
+                ScopeId::ROOT,
+                &SourceImports::new(),
+                &receipt,
+                &[],
+                &[],
+            )
+            .expect_err("ill-typed declaration must fail staging");
+        let SessionError::ValidationFailed(failure) = error else {
+            panic!("expected structured validation failure, got {error:?}");
+        };
+        assert!(!failure.diagnostics.is_empty());
+        assert_eq!(lib.generation(), Generation(0));
+        assert_eq!(lib.declaration_value_type(1, "bad"), None);
     }
 
     #[test]

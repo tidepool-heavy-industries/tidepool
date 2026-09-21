@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v7";
-const MAGIC: &[u8; 8] = b"TPREQ007";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v8";
+const MAGIC: &[u8; 8] = b"TPREQ008";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InspectionScope {
@@ -84,6 +84,10 @@ enum Field {
     /// A `--turn` request that also writes its target's prepared-STG program
     /// (`<target>.prepared.cbor`), compiled against the retained generations.
     PreparedTurn,
+    ActivationPreview,
+    /// Inspection source failures reject the whole request with structured
+    /// diagnostics instead of becoming per-query `Rejected` results.
+    InspectionStrict,
 }
 
 /// A versioned, typed request for the Haskell compiler worker.
@@ -245,6 +249,8 @@ impl ExtractRequest {
                 }
                 39 => Field::PreparedTurn,
                 40 => Field::InspectTypeBatch(PathBuf::from(decoder.os_string()?)),
+                41 => Field::ActivationPreview,
+                42 => Field::InspectionStrict,
                 other => return Err(ProtocolError::UnknownFieldTag(other)),
             };
             fields.push(field);
@@ -411,6 +417,10 @@ impl ExtractRequest {
         self.fields.push(Field::PreparedTurn);
     }
 
+    pub(crate) fn activation_preview(&mut self) {
+        self.fields.push(Field::ActivationPreview);
+    }
+
     pub(crate) fn inspect_type(&mut self, expression: &str) {
         self.fields.push(Field::InspectType(expression.to_owned()));
     }
@@ -446,6 +456,10 @@ impl ExtractRequest {
 
     pub(crate) fn inspect_type_batch(&mut self, value: &Path) {
         self.fields.push(Field::InspectTypeBatch(value.to_owned()));
+    }
+
+    pub(crate) fn inspection_strict(&mut self) {
+        self.fields.push(Field::InspectionStrict);
     }
 
     pub(crate) fn cli_argv(&self) -> Vec<OsString> {
@@ -520,6 +534,8 @@ impl ExtractRequest {
                     )),
                 ),
                 Field::PreparedTurn => flags.push("--prepared-turn".into()),
+                Field::ActivationPreview => flags.push("--activation-preview".into()),
+                Field::InspectionStrict => flags.push("--inspection-strict".into()),
             }
         }
         inputs.extend(flags);
@@ -680,7 +696,7 @@ impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidWorkerArgv => {
-                f.write_str("worker argv must be exactly --worker-request-v7 PAYLOAD")
+                f.write_str("worker argv must be exactly --worker-request-v8 PAYLOAD")
             }
             Self::NonUtf8Payload => f.write_str("worker request payload is not UTF-8"),
             Self::InvalidHeader => f.write_str("invalid worker request header"),
@@ -782,6 +798,8 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
             out.push(40);
             push_frame(out, value.as_os_str());
         }
+        Field::ActivationPreview => out.push(41),
+        Field::InspectionStrict => out.push(42),
     }
 }
 
@@ -1012,6 +1030,28 @@ mod tests {
             .cli_argv()
             .iter()
             .any(|arg| arg == "--prepared-turn"));
+    }
+
+    #[test]
+    fn activation_preview_round_trips_through_the_typed_protocol() {
+        let mut request = ExtractRequest::default();
+        request.activation_preview();
+        let decoded = ExtractRequest::decode(&request.encode()).unwrap();
+        assert!(matches!(
+            decoded.fields.as_slice(),
+            [Field::ActivationPreview]
+        ));
+    }
+
+    #[test]
+    fn strict_inspection_round_trips_through_the_typed_protocol() {
+        let mut request = ExtractRequest::default();
+        request.inspection_strict();
+        let decoded = ExtractRequest::decode(&request.encode()).unwrap();
+        assert!(matches!(
+            decoded.fields.as_slice(),
+            [Field::InspectionStrict]
+        ));
     }
 
     #[test]

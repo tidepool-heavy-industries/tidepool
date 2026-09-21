@@ -118,6 +118,18 @@ pub struct CellAnalysisItem {
     pub source_items: Vec<CellAnalysisSourceItem>,
 }
 
+/// GHC-owned execution choice for one expression in a checked cell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckedExpressionPlan {
+    pub key: String,
+    pub lift: ExpressionLift,
+    pub presentation: ExpressionPresentation,
+    /// GHC-rendered full sigma type of the submitted expression. For an
+    /// effectful expression this includes its exact `Eff` row.
+    pub type_display: String,
+    pub heads: Vec<NominalHead>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CellAnalysisSourceItem {
     pub ordinal: usize,
@@ -218,9 +230,56 @@ pub struct CellCheck {
     pub pins: Vec<CheckedBinderPin>,
     /// Exact generated module GHC checked.
     pub checked_source: String,
+    /// Plans are valid only for this exact submitted source and compile-view
+    /// value generation.
+    pub checked_cell_text: String,
+    pub compile_generation: u64,
+    pub compile_view_evidence: String,
+    pub expression_plans: Vec<CheckedExpressionPlan>,
 }
 
 impl CellCheck {
+    pub fn expression_plan_for_item(
+        &self,
+        item_index: usize,
+        cell_text: &str,
+        compile_generation: u64,
+        compile_view_evidence: &str,
+    ) -> Result<CheckedExpressionPlan, CompileError> {
+        if self.checked_cell_text != cell_text
+            || self.compile_generation != compile_generation
+            || self.compile_view_evidence != compile_view_evidence
+        {
+            return Err(CompileError::ExtractFailed(
+                "whole-cell expression evidence is stale for this source or generation".into(),
+            ));
+        }
+        let item = self.items.get(item_index).ok_or_else(|| {
+            CompileError::ExtractFailed(format!("cell item index {item_index} is out of range"))
+        })?;
+        if item.verdict.kind != TurnKind::Expr {
+            return Err(CompileError::ExtractFailed(format!(
+                "cell item {} is not an expression",
+                item_index + 1
+            )));
+        }
+        let key = format!("__tidepool_cell_expr_{item_index}");
+        let mut matches = self.expression_plans.iter().filter(|plan| plan.key == key);
+        let plan = matches.next().cloned().ok_or_else(|| {
+            CompileError::ExtractFailed(format!(
+                "whole-cell check returned no execution plan for item {}",
+                item_index + 1
+            ))
+        })?;
+        if matches.next().is_some() {
+            return Err(CompileError::ExtractFailed(format!(
+                "whole-cell check returned duplicate execution plans for item {}",
+                item_index + 1
+            )));
+        }
+        Ok(plan)
+    }
+
     /// Resolve pins for one classified bind without parsing compiler output.
     /// Expected keys are derived from the source item and GHC-reported binder
     /// names; missing or duplicate pins reject preflight.
@@ -283,6 +342,8 @@ pub struct CellCheckRequest<'a> {
     pub include: &'a [&'a Path],
     pub session_root: &'a Path,
     pub inject_modules: &'a [String],
+    pub compile_generation: u64,
+    pub compile_view_evidence: &'a str,
 }
 
 /// Which wrapper template a verdict selects. A refinement of [`TurnKind`]:
@@ -698,12 +759,9 @@ pub const LITERAL_ANNOTATION_ADVICE: &str =
 /// The advice for [`is_cell_pure_dispatch_ambiguity`]'s shape: a signature
 /// repairs nothing here, because nothing the reader wrote is actually
 /// polymorphic — `pure`/`return` on a cell's final unit is the ordinary,
-/// correct habit inside a `do` block, and [`check_cell_preferring_effectful`]
-/// already runs that unit as a workbench action for every cell this
-/// diagnostic alone describes. A reader sees this only alongside a genuine,
-/// separate error on the same statement — the pinned retry failed too — so
-/// the advice still needs to name the real repair rather than send them
-/// chasing a signature that fixes nothing.
+/// correct habit inside a `do` block. The canonical cell template resolves
+/// this shape through its named `Eff` default, so a reader sees this advice
+/// only when another error prevents the whole cell from typechecking.
 pub const CELL_PURE_DISPATCH_ADVICE: &str =
     "this cell's last statement is a plain value wrapped in `pure`/`return`, not an action \
      — drop the `pure`/`return` and write the action directly, the way it already works as \
@@ -718,11 +776,9 @@ pub const CELL_PURE_DISPATCH_ADVICE: &str =
 /// not pin down first.
 ///
 /// Deliberately narrow — narrower than the general "Ambiguous type variable"
-/// family [`ambiguous_type_advice`] otherwise handles — because
-/// [`check_cell_preferring_effectful`] spends a whole extra compile on a
-/// positive answer. An ordinary ambiguous binding (an unconstrained `Render
-/// a0`, say) does not carry an `Applicative`/`Monad` constraint and does not
-/// match.
+/// family [`ambiguous_type_advice`] otherwise handles. An ordinary ambiguous
+/// binding (an unconstrained `Render a0`, say) does not carry an
+/// `Applicative`/`Monad` constraint and does not match.
 #[must_use]
 fn is_cell_pure_dispatch_ambiguity(message: &str) -> bool {
     message.contains("Ambiguous type variable")
@@ -1684,11 +1740,16 @@ pub enum ExpressionLift {
     Pure,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExpressionPresentation {
+    Rendered,
+    Opaque,
+}
+
 /// Assemble one expression-shaped session module while preserving the source
-/// text byte-for-byte inside an explicit-layout binding. The caller normally
-/// supplies two templates—[`ExpressionLift::Effectful`] then
-/// [`ExpressionLift::Pure`]—and the turn extractor selects the first one that
-/// typechecks.
+/// text byte-for-byte inside an explicit-layout binding. Prepared whole-cell
+/// execution supplies the single lift selected by its checked expression
+/// plan. Direct legacy callers may still supply ordered candidates.
 pub fn assemble_expression_module(
     preamble_with_imports: &str,
     target: &str,
@@ -1703,6 +1764,7 @@ pub fn assemble_expression_module(
         expression,
         lift,
         ExpressionResult::Raw,
+        None,
     )
 }
 
@@ -1721,6 +1783,7 @@ fn assemble_expression_module_with_result(
     expression: &str,
     lift: ExpressionLift,
     result: ExpressionResult,
+    checked_expression_type: Option<&str>,
 ) -> String {
     let mut out = if matches!(lift, ExpressionLift::Pure) {
         insert_preamble_imports(
@@ -1751,10 +1814,17 @@ fn assemble_expression_module_with_result(
         // Without this pin, the let-bound expression is
         // generalized before `__result` constrains it; polymorphic `Member`
         // actions then lose the exact workbench row needed for inference.
-        out.push_str("__workbenchValue = __tidepoolInEffectRow $ let {\n __value =\n");
+        out.push_str("__workbenchValue = __tidepoolInEffectRow $ let {\n");
     }
     if matches!(lift, ExpressionLift::Pure) {
-        out.push_str("__workbenchValue = let {\n __value = __tidepoolPureWorkbenchValue $ ");
+        out.push_str("__workbenchValue = let {\n");
+    }
+    if let Some(ty) = checked_expression_type {
+        out.push_str(&format!(" __value :: ({ty});\n"));
+    }
+    match lift {
+        ExpressionLift::Effectful => out.push_str(" __value =\n"),
+        ExpressionLift::Pure => out.push_str(" __value = __tidepoolPureWorkbenchValue $ "),
     }
     out.push_str(expression);
     if !expression.ends_with('\n') {
@@ -1797,6 +1867,7 @@ pub fn assemble_observation_module(
     effect_stack: &str,
     expression: &str,
     lift: ExpressionLift,
+    checked_expression_type: Option<&str>,
 ) -> String {
     assemble_expression_module_with_result(
         preamble,
@@ -1805,6 +1876,7 @@ pub fn assemble_observation_module(
         expression,
         lift,
         ExpressionResult::Observation,
+        checked_expression_type,
     )
 }
 
@@ -1826,6 +1898,7 @@ pub fn assemble_display_expression_module(
         expression,
         lift,
         ExpressionResult::HaskellDisplay,
+        None,
     )
 }
 
@@ -1847,6 +1920,7 @@ pub fn assemble_opaque_expression_module(
         expression,
         lift,
         ExpressionResult::OpaqueDisplay,
+        None,
     )
 }
 
@@ -2050,122 +2124,28 @@ pub fn check_cell(req: CellCheckRequest<'_>) -> Result<CellCheck, CellCheckFailu
         crate::diag::decode_extract_result(run.success(), &output.stdout, &output.stderr)
     {
         let items = match std::fs::read(&out_path) {
-            Ok(bytes) => Some(decode_cell_out(&bytes)?.items),
+            Ok(bytes) => Some(
+                decode_cell_out(
+                    &bytes,
+                    req.cell_text,
+                    req.compile_generation,
+                    req.compile_view_evidence,
+                )?
+                .items,
+            ),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),
         };
         return Err(CellCheckFailure { error, items });
     }
     let bytes = std::fs::read(&out_path)?;
-    decode_cell_out(&bytes).map_err(Into::into)
-}
-
-/// [`check_cell`], but a cell whose only problem is
-/// [`is_cell_pure_dispatch_ambiguity`] is admitted rather than rejected.
-///
-/// `TidepoolCellExpression`'s OVERLAPPING `Eff effects value` head and
-/// OVERLAPPABLE bare-`value` head cannot be arranged to prefer the effectful
-/// reading themselves: GHC's overlap resolution always settles an ambiguous
-/// choice on the unconditionally-matching head (bare `value`) once forced to
-/// pick, which is backwards from what a cell ending in `pure <expr>` wants,
-/// and no combination of `OVERLAPPING`/`OVERLAPPABLE`/`INCOHERENT` pragmas
-/// changes which side wins — only which side is allowed to win silently.
-/// So instead: on exactly this diagnostic, retry once with the cell's final
-/// expression wrapped in `__tidepoolInEffectRow` (the check template defines
-/// it — see [`super::workbench::resident_cell_check_template`]), which pins
-/// the ambiguous metavariable to the workbench's own effect row before
-/// `TidepoolCellExpression` ever has to choose. A genuinely pure final
-/// expression (its own concrete, non-`Eff` type) fails that pin and keeps
-/// today's behavior; a genuine type error never carries this diagnostic
-/// shape, so it costs the one compile [`check_cell`] always cost.
-///
-/// The retry is a scratch compile only: on success, the returned
-/// [`CellCheck`]'s final item keeps the author's own source and span, not the
-/// pinned scratch text, so a per-unit compile downstream still runs the
-/// unmodified turn through the unrelated, already-correct
-/// [`ExpressionLift::Effectful`]-then-[`ExpressionLift::Pure`] selection
-/// (`assemble_display_expression_module` et al.) — this function only gets
-/// the cell admitted, and does not decide how the final unit actually runs.
-pub fn check_cell_preferring_effectful(
-    req: CellCheckRequest<'_>,
-) -> Result<CellCheck, CellCheckFailure> {
-    let CellCheckRequest {
-        cell_text,
-        template,
-        include,
-        session_root,
-        inject_modules,
-    } = req;
-    let failure = match check_cell(CellCheckRequest {
-        cell_text,
-        template,
-        include,
-        session_root,
-        inject_modules,
-    }) {
-        Ok(checked) => return Ok(checked),
-        Err(failure) => failure,
-    };
-    let Some((retry_text, original_final_item)) = pin_final_cell_expression(&failure, cell_text)
-    else {
-        return Err(failure);
-    };
-    match check_cell(CellCheckRequest {
-        cell_text: &retry_text,
-        template,
-        include,
-        session_root,
-        inject_modules,
-    }) {
-        Ok(mut checked) => {
-            // The pin exists only to get the preflight past the ambiguity;
-            // restore the author's own text/span so nothing downstream (a
-            // per-unit compile, a receipt echoed back to the reader) ever
-            // sees the scratch wrapper this function invented.
-            if let Some(slot) = checked.items.last_mut() {
-                *slot = original_final_item;
-            }
-            Ok(checked)
-        }
-        // The pinned retry's diagnostics are anchored to scratch text the
-        // reader never wrote; report the original failure, whose spans still
-        // match `cell_text`.
-        Err(_) => Err(failure),
-    }
-}
-
-/// Build a scratch copy of `cell_text` with its final item's expression
-/// wrapped in `__tidepoolInEffectRow`, alongside that item exactly as
-/// originally classified — for [`check_cell_preferring_effectful`] to restore
-/// after a successful pinned retry. `None` unless `failure` is exactly
-/// [`is_cell_pure_dispatch_ambiguity`]'s shape, classification produced at
-/// least one item, and that final item is a bare expression whose source GHC
-/// reported can still be found verbatim in `cell_text` (it always can — see
-/// [`CellAnalysisItem::source`] — this is a defensive `None`, not an expected
-/// one).
-fn pin_final_cell_expression(
-    failure: &CellCheckFailure,
-    cell_text: &str,
-) -> Option<(String, CellAnalysisItem)> {
-    let envelope = crate::classify_compile(&failure.error);
-    if envelope.class != crate::FailureClass::UserHaskell
-        || !is_cell_pure_dispatch_ambiguity(&envelope.message)
-    {
-        return None;
-    }
-    let last = failure.items.as_ref()?.last()?;
-    if last.verdict.kind != TurnKind::Expr {
-        return None;
-    }
-    let start = cell_text.rfind(last.source.as_str())?;
-    let end = start + last.source.len();
-    let mut retry_text = String::with_capacity(cell_text.len() + 32);
-    retry_text.push_str(&cell_text[..start]);
-    retry_text.push_str("__tidepoolInEffectRow (\n");
-    retry_text.push_str(&cell_text[start..end]);
-    retry_text.push_str("\n)\n");
-    retry_text.push_str(&cell_text[end..]);
-    Some((retry_text, last.clone()))
+    decode_cell_out(
+        &bytes,
+        req.cell_text,
+        req.compile_generation,
+        req.compile_view_evidence,
+    )
+    .map_err(Into::into)
 }
 
 /// The one entry point for a session-eval turn. Writes the turn text and
@@ -2181,7 +2161,46 @@ fn pin_final_cell_expression(
 /// When `req.verdict` is supplied, a missing template for the verdict's
 /// selector is caught here, before any process is spawned.
 pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
-    run_turn_with_pin(req, None)
+    run_turn_with_pin(req, None, false)
+}
+
+/// Compile the internal input-mount/preview module. Its bind shape is known
+/// by construction, so no authored-source classification request is needed.
+pub fn run_activation_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
+    if req.prepared.is_none()
+        || !matches!(&req.verdict, Some(TurnClassification { kind: TurnKind::Bind, binders, .. }) if binders.len() == 1)
+        || req.templates.len() != 1
+    {
+        return Err(CompileError::ExtractFailed(
+            "activation requires one prepared bind template".into(),
+        )
+        .into());
+    }
+    run_turn_with_pin(req, None, true)
+}
+
+/// One module supplies the mount's checked type and an independently callable
+/// preview. The compiler replaces the reserved body using constraint evidence.
+pub fn assemble_activation_module(
+    preamble: &str,
+    effect_stack: &str,
+    input_type: &str,
+    budget: usize,
+) -> String {
+    let mut source = with_resume_import(preamble);
+    source.push_str(&format!(
+        "\n__result :: Eff {effect_stack} ({input_type})\n\
+         __result = pure undefined\n\
+         __activationPreview :: ({input_type}) -> Eff {effect_stack} ({TEXT_ALIAS}.Text, Bool)\n\
+         __activationPreview __activationInput = pure ({{{{ACTIVATION_PREVIEW}}}})\n\
+         __tidepoolActivationConstraint :: TidepoolInspection.WorkbenchDisplay value => value -> ()\n\
+         __tidepoolActivationConstraint _ = ()\n\
+         __activationBudget :: Int\n\
+         __activationBudget = {budget}\n\
+         {PREPARED_SCAFFOLD_TARGET} input = {RESUME_ALIAS}.settle (__activationPreview input)\n"
+    ));
+    source.push_str(&prepared_resume_decode_binding());
+    source
 }
 
 /// Compile one staged bind using the types inferred by 'check_cell'. This is
@@ -2222,7 +2241,7 @@ pub fn run_turn_pinned(
                 .join(", ")
         )
     };
-    run_turn_with_pin(req, Some(&pin))
+    run_turn_with_pin(req, Some(&pin), false)
 }
 
 /// The second compile granularity: one per input unit, after the whole-cell
@@ -2236,7 +2255,11 @@ pub fn run_turn_pinned(
         pinned = pin.is_some(),
     )
 )]
-fn run_turn_with_pin(req: TurnRequest<'_>, pin: Option<&str>) -> Result<TurnResult, TurnFailure> {
+fn run_turn_with_pin(
+    req: TurnRequest<'_>,
+    pin: Option<&str>,
+    activation_preview: bool,
+) -> Result<TurnResult, TurnFailure> {
     let verdict_arg = match &req.verdict {
         Some(TurnClassification { kind, binders, .. }) => {
             #[allow(
@@ -2265,6 +2288,9 @@ fn run_turn_with_pin(req: TurnRequest<'_>, pin: Option<&str>) -> Result<TurnResu
 
     let mut cmd = extract_cmd()?;
     cmd.input(&turn_path).turn();
+    if activation_preview {
+        cmd.activation_preview();
+    }
 
     for (i, tmpl) in req.templates.iter().enumerate() {
         let path = temp.path().join(format!("template-{i}.hs"));
@@ -2717,11 +2743,16 @@ fn decode_declaration_source(value: &CborValue) -> Result<DeclarationSource, Com
     })
 }
 
-fn decode_cell_out(bytes: &[u8]) -> Result<CellCheck, CompileError> {
+fn decode_cell_out(
+    bytes: &[u8],
+    cell_text: &str,
+    compile_generation: u64,
+    compile_view_evidence: &str,
+) -> Result<CellCheck, CompileError> {
     let value: CborValue = ciborium::de::from_reader(bytes).map_err(|error| {
         CompileError::ExtractFailed(format!("CellOut CBOR: malformed: {error}"))
     })?;
-    let root = cbor_expect_array_len(&value, 4, "CellOut")?;
+    let root = cbor_expect_array_len(&value, 5, "CellOut")?;
     let items = cbor_expect_array(&root[0], "cell items")?
         .iter()
         .map(decode_cell_item)
@@ -2732,11 +2763,50 @@ fn decode_cell_out(bytes: &[u8]) -> Result<CellCheck, CompileError> {
         .map(decode_checked_binder_pin)
         .collect::<Result<Vec<_>, _>>()?;
     let checked_source = cbor_expect_text(&root[2], "checked cell source")?.to_owned();
+    let expression_plans = cbor_expect_array(&root[4], "cell expression plans")?
+        .iter()
+        .map(decode_checked_expression_plan)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(CellCheck {
         items,
         pins,
         checked_source,
+        checked_cell_text: cell_text.to_owned(),
+        compile_generation,
+        compile_view_evidence: compile_view_evidence.to_owned(),
+        expression_plans,
         prologue: decode_source_prologue(&root[3])?,
+    })
+}
+
+fn decode_checked_expression_plan(
+    value: &CborValue,
+) -> Result<CheckedExpressionPlan, CompileError> {
+    let fields = cbor_expect_array_len(value, 5, "checked expression plan")?;
+    let lift = match cbor_expect_text(&fields[1], "expression lift")? {
+        "effectful" => ExpressionLift::Effectful,
+        "pure" => ExpressionLift::Pure,
+        other => {
+            return Err(CompileError::ExtractFailed(format!(
+                "CellOut CBOR: unknown expression lift {other:?}"
+            )))
+        }
+    };
+    let presentation = match cbor_expect_text(&fields[2], "expression presentation")? {
+        "rendered" => ExpressionPresentation::Rendered,
+        "opaque" => ExpressionPresentation::Opaque,
+        other => {
+            return Err(CompileError::ExtractFailed(format!(
+                "CellOut CBOR: unknown expression presentation {other:?}"
+            )))
+        }
+    };
+    Ok(CheckedExpressionPlan {
+        key: cbor_expect_text(&fields[0], "expression plan key")?.to_owned(),
+        lift,
+        presentation,
+        type_display: cbor_expect_text(&fields[3], "full expression type")?.to_owned(),
+        heads: decode_nominal_heads(&fields[4], "expression result nominal heads")?,
     })
 }
 
@@ -3115,11 +3185,9 @@ fn parse_classify_export_item(v: &serde_json::Value) -> Result<ExportItem, Compi
 mod ambiguity_advice_tests {
     use super::{
         ambiguous_type_advice, constructor_advice, is_cell_pure_dispatch_ambiguity,
-        pin_final_cell_expression, refutable_binds, render_cell_compile_error,
-        runtime_failure_advice, same_cell_value_collisions, CellAnalysisItem,
-        CellAnalysisSourceItem, CellCheckFailure, CellSourceSpan, TurnClassification, TurnKind,
-        AMBIGUOUS_TYPE_ADVICE, CELL_PURE_DISPATCH_ADVICE, LITERAL_ANNOTATION_ADVICE,
-        SPLIT_SIGNATURE_ADVICE,
+        refutable_binds, render_cell_compile_error, runtime_failure_advice,
+        same_cell_value_collisions, AMBIGUOUS_TYPE_ADVICE, CELL_PURE_DISPATCH_ADVICE,
+        LITERAL_ANNOTATION_ADVICE, SPLIT_SIGNATURE_ADVICE,
     };
     use crate::CompileError;
 
@@ -3233,7 +3301,7 @@ mod ambiguity_advice_tests {
     /// final unit is `pure (1 :: Int)`. Distinct from [`BARE_ERROR_CELL`]
     /// (also a `TidepoolCellExpression` overlap, but over a fully polymorphic
     /// `error "…"` with no `Applicative`/`Monad` constraint left open) —
-    /// only this shape is [`check_cell_preferring_effectful`]'s to fix.
+    /// only this shape is [`check_cell`]'s to fix.
     const AMBIGUOUS_PURE_DISPATCH: &str = "<cell>:1:1: error: [GHC-39999]\n    \u{2022} Ambiguous type variable \u{2018}f0\u{2019} arising from a use of \u{2018}pure\u{2019}\n      prevents the constraint \u{2018}(Applicative f0)\u{2019} from being solved.\n      Probable fix: use a type annotation to specify what \u{2018}f0\u{2019} should be.";
 
     #[test]
@@ -3252,7 +3320,7 @@ mod ambiguity_advice_tests {
 
     /// The whole point of the new advice: no signature repairs this, so the
     /// reader is told to drop `pure`/`return` instead — and only when a
-    /// genuine error survives [`check_cell_preferring_effectful`]'s pinned
+    /// genuine error survives [`check_cell`]'s pinned
     /// retry does this text ever reach anyone (see that function's own
     /// tests for the common case, where the cell is admitted and no advice
     /// is shown at all).
@@ -3268,62 +3336,6 @@ mod ambiguity_advice_tests {
             "GHC's own text must survive: {rendered}"
         );
         assert!(rendered.ends_with(CELL_PURE_DISPATCH_ADVICE), "{rendered}");
-    }
-
-    #[test]
-    fn pin_final_cell_expression_wraps_only_the_final_expression_item() {
-        let bind_item = CellAnalysisItem {
-            span: CellSourceSpan { start_line: 1, start_column: 1, end_line: 1, end_column: 12 },
-            source: "h <- pure 1".to_owned(),
-            verdict: TurnClassification {
-                kind: TurnKind::Bind,
-                binders: vec!["h".to_owned()],
-                items: Vec::new(),
-            },
-            source_items: vec![CellAnalysisSourceItem {
-                ordinal: 0,
-                span: CellSourceSpan { start_line: 1, start_column: 1, end_line: 1, end_column: 12 },
-                kind: TurnKind::Bind,
-            }],
-        };
-        let final_item = CellAnalysisItem {
-            span: CellSourceSpan { start_line: 2, start_column: 1, end_line: 2, end_column: 16 },
-            source: "pure (1 :: Int)".to_owned(),
-            verdict: TurnClassification {
-                kind: TurnKind::Expr,
-                binders: Vec::new(),
-                items: Vec::new(),
-            },
-            source_items: vec![CellAnalysisSourceItem {
-                ordinal: 1,
-                span: CellSourceSpan { start_line: 2, start_column: 1, end_line: 2, end_column: 16 },
-                kind: TurnKind::Expr,
-            }],
-        };
-        let failure = CellCheckFailure {
-            error: cell_error(AMBIGUOUS_PURE_DISPATCH),
-            items: Some(vec![bind_item.clone(), final_item.clone()]),
-        };
-        let cell_text = "h <- pure 1\npure (1 :: Int)\n";
-        let (retry_text, restored) =
-            pin_final_cell_expression(&failure, cell_text).expect("this is exactly the pinnable shape");
-        assert_eq!(restored.source, final_item.source);
-        assert_eq!(restored.span, final_item.span);
-        assert!(
-            retry_text.starts_with("h <- pure 1\n__tidepoolInEffectRow (\npure (1 :: Int)\n)"),
-            "only the final item's own text is pinned, in place: {retry_text}"
-        );
-
-        // A genuine type error never carries this diagnostic shape, so it is
-        // never pinned — one compile, not two.
-        let ordinary_error = cell_error(
-            "<cell>:1:1: error: [GHC-83865]\n    \u{2022} Couldn't match type \u{2018}Int\u{2019} with \u{2018}Text\u{2019}",
-        );
-        let ordinary_failure = CellCheckFailure {
-            error: ordinary_error,
-            items: Some(vec![bind_item, final_item]),
-        };
-        assert!(pin_final_cell_expression(&ordinary_failure, cell_text).is_none());
     }
 
     #[test]
@@ -3720,6 +3732,13 @@ mod tests {
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
         let root = tempfile::tempdir().unwrap();
+        let prelude = tidepool_testing::eval_harness::prelude_path();
+        let effects = tidepool_testing::eval_harness::effects_include();
+        let include = [
+            prelude.as_path(),
+            effects[0].as_path(),
+            effects[1].as_path(),
+        ];
         let template = concat!(
             "{-# LANGUAGE NoImplicitPrelude #-}\n",
             "{{CELL_PRAGMAS}}\n",
@@ -3728,6 +3747,10 @@ mod tests {
             "{{CELL_IMPORTS}}\n",
             "__tidepoolCellExpression :: value -> IO ()\n",
             "__tidepoolCellExpression _ = pure ()\n",
+            "__tidepoolInEffectRow :: IO value -> IO value\n",
+            "__tidepoolInEffectRow = id\n",
+            "__tidepoolCellDisplayConstraint :: Show value => value -> ()\n",
+            "__tidepoolCellDisplayConstraint _ = ()\n",
             "{{CELL_DECLS}}\n",
             "__cell = do {\n",
             "{{CELL_BODY}}\n",
@@ -3741,9 +3764,11 @@ mod tests {
         let checked = check_cell(CellCheckRequest {
             cell_text: cell,
             template,
-            include: &[],
+            include: &include,
             session_root: root.path(),
             inject_modules: &[],
+            compile_generation: 0,
+            compile_view_evidence: "",
         })
         .unwrap();
         assert_eq!(checked.items.len(), 3);
@@ -3822,6 +3847,13 @@ mod tests {
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
         let root = tempfile::tempdir().unwrap();
+        let prelude = tidepool_testing::eval_harness::prelude_path();
+        let effects = tidepool_testing::eval_harness::effects_include();
+        let include = [
+            prelude.as_path(),
+            effects[0].as_path(),
+            effects[1].as_path(),
+        ];
         let template = concat!(
             "{-# LANGUAGE NoImplicitPrelude #-}\n",
             "{{CELL_PRAGMAS}}\n",
@@ -3830,6 +3862,10 @@ mod tests {
             "{{CELL_IMPORTS}}\n",
             "__tidepoolCellExpression :: value -> IO ()\n",
             "__tidepoolCellExpression _ = pure ()\n",
+            "__tidepoolInEffectRow :: IO value -> IO value\n",
+            "__tidepoolInEffectRow = id\n",
+            "__tidepoolCellDisplayConstraint :: Show value => value -> ()\n",
+            "__tidepoolCellDisplayConstraint _ = ()\n",
             "{{CELL_DECLS}}\n",
             "__cell = do {\n",
             "{{CELL_BODY}}\n",
@@ -3844,9 +3880,11 @@ mod tests {
         let checked = check_cell(CellCheckRequest {
             cell_text: cell,
             template,
-            include: &[],
+            include: &include,
             session_root: root.path(),
             inject_modules: &[],
+            compile_generation: 0,
+            compile_view_evidence: "",
         })
         .unwrap();
         let pins = checked.pins_for_item(1).unwrap();
@@ -3863,9 +3901,16 @@ mod tests {
             .heads
             .iter()
             .any(|head| head.module == "CellCheck" && head.name == "G"));
+        let expression = checked
+            .expression_plan_for_item(3, cell, 0, "")
+            .expect("same-cell nominal expression plan");
+        assert_eq!(expression.type_display, "Maybe G");
+        assert!(expression
+            .heads
+            .iter()
+            .any(|head| head.module == "CellCheck" && head.name == "G"));
 
         let session = tidepool_repr::SessionId((u64::from(std::process::id()) << 32) | 0x4345_4c4c);
-        let prelude = tidepool_testing::eval_harness::prelude_path();
         let mut declarations = crate::session::SessionLib::open(
             session,
             root.path(),
@@ -3918,7 +3963,7 @@ mod tests {
     /// already uses.
     fn eff_cell_preamble() -> String {
         format!(
-            "{}\nmodule CellCheck where\nimport Prelude\nimport Data.Text (Text)\n\
+            "{}\n{{-# LANGUAGE PolyKinds #-}}\nmodule CellCheck where\nimport Prelude\nimport Data.Text (Text)\n\
              default (Int, Double, Text)\n",
             crate::session::EVAL_PRAGMAS,
         )
@@ -3931,12 +3976,123 @@ mod tests {
     );
     const EFF_ROW: &str = "'[]";
 
-    /// The bug: a resident cell whose only unit is `pure (1 :: Int)` is
-    /// exactly [`is_cell_pure_dispatch_ambiguity`]'s shape against the real
-    /// check template, [`check_cell`] alone rejects it, and
-    /// [`check_cell_preferring_effectful`] admits it — with the author's own
-    /// text and span preserved, not the scratch pin — by retrying with the
-    /// final expression pinned into the effect row.
+    fn runtime_eff_cell_preamble() -> String {
+        format!(
+            "{}\nmodule CellCheck where\nimport Prelude\nimport Data.Text (Text)\n\
+             import Control.Monad.Freer (Eff)\n\
+             import Data.Proxy (Proxy(..))\n\
+             default (Int, Double, Text)\n",
+            crate::session::EVAL_PRAGMAS,
+        )
+    }
+
+    /// The checked plan owns both independent choices for every expression:
+    /// whether to execute an `Eff` action and whether to invoke `PageDisplay`.
+    /// These are four successful whole-cell checks; no executable-wrapper
+    /// failure participates in either decision.
+    #[test]
+    fn checked_expression_plans_cover_all_execution_and_presentation_quadrants() {
+        let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
+            return;
+        };
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", extract);
+        let root = tempfile::tempdir().unwrap();
+        let prelude = tidepool_testing::eval_harness::prelude_path();
+        let effects = tidepool_testing::eval_harness::effects_include();
+        let include = [
+            prelude.as_path(),
+            effects[0].as_path(),
+            effects[1].as_path(),
+        ];
+        let template = super::super::workbench::resident_cell_check_template(
+            &runtime_eff_cell_preamble(),
+            EFF_ROW,
+            "",
+        );
+        for (cell, lift, presentation) in [
+            (
+                "1 :: Int\n",
+                ExpressionLift::Pure,
+                ExpressionPresentation::Rendered,
+            ),
+            (
+                "(pure (1 :: Int) :: IO Int)\n",
+                ExpressionLift::Pure,
+                ExpressionPresentation::Opaque,
+            ),
+            (
+                "pure (1 :: Int)\n",
+                ExpressionLift::Effectful,
+                ExpressionPresentation::Rendered,
+            ),
+            (
+                "pure (pure (1 :: Int) :: Eff '[] Int)\n",
+                ExpressionLift::Effectful,
+                ExpressionPresentation::Opaque,
+            ),
+            (
+                "pure Proxy\n",
+                ExpressionLift::Effectful,
+                ExpressionPresentation::Rendered,
+            ),
+            (
+                "pure (Proxy @3)\n",
+                ExpressionLift::Effectful,
+                ExpressionPresentation::Rendered,
+            ),
+            (
+                "pure const\n",
+                ExpressionLift::Effectful,
+                ExpressionPresentation::Rendered,
+            ),
+        ] {
+            let evidence = "compile-view-a";
+            let checked = check_cell(CellCheckRequest {
+                cell_text: cell,
+                template: &template,
+                include: &include,
+                session_root: root.path(),
+                inject_modules: &[],
+                compile_generation: 7,
+                compile_view_evidence: evidence,
+            })
+            .unwrap_or_else(|failure| panic!("{cell:?}: {:?}", failure.error));
+            let index = checked.items.len() - 1;
+            let plan = checked
+                .expression_plan_for_item(index, cell, 7, evidence)
+                .expect("fresh checked expression evidence");
+            assert_eq!((plan.lift, plan.presentation), (lift, presentation));
+            assert!(
+                !plan.type_display.contains("ZonkAny"),
+                "{}",
+                plan.type_display
+            );
+            if cell == "pure Proxy\n" {
+                assert!(
+                    plan.type_display.contains("forall cell0")
+                        && plan.type_display.contains("cell1 :: cell0"),
+                    "{}",
+                    plan.type_display
+                );
+            } else if cell == "pure const\n" {
+                assert!(
+                    plan.type_display.contains("forall cell0 cell1."),
+                    "{}",
+                    plan.type_display
+                );
+            }
+            assert!(checked
+                .expression_plan_for_item(index, "different source", 7, evidence)
+                .is_err());
+            assert!(checked
+                .expression_plan_for_item(index, cell, 7, "compile-view-b")
+                .is_err());
+        }
+    }
+
+    /// A polymorphic `pure` expression defaults its constructor to the exact
+    /// workbench effect row during the one whole-cell typecheck.
     #[test]
     fn a_final_pure_cell_is_accepted_as_effectful() {
         let Some(extract) = std::env::var_os("TIDEPOOL_CELL_TEST_EXTRACT") else {
@@ -3955,34 +4111,32 @@ mod tests {
         );
         let cell = format!("{EFF_DECLS}pure (1 :: Int)\n");
 
-        // Without the fix: the whole-cell preflight alone rejects this cell.
-        let bare_failure = check_cell(CellCheckRequest {
+        // Named class defaulting selects the exact effect row in the first
+        // whole-cell check; no diagnostic-triggered retry is involved.
+        let checked = check_cell(CellCheckRequest {
             cell_text: &cell,
             template: &template,
             include: &include,
             session_root: root.path(),
             inject_modules: &[],
+            compile_generation: 0,
+            compile_view_evidence: "",
         })
-        .expect_err("an unpinned `pure` final expression is ambiguous against the real template");
-        assert!(
-            is_cell_pure_dispatch_ambiguity(&crate::classify_compile(&bare_failure.error).message),
-            "the reproduced failure must be exactly the shape the fix targets: {}",
-            crate::classify_compile(&bare_failure.error).message
-        );
-
-        // With the fix: the cell is admitted, and the final item keeps the
-        // author's own source/span rather than the scratch pin.
-        let checked = check_cell_preferring_effectful(CellCheckRequest {
-            cell_text: &cell,
-            template: &template,
-            include: &include,
-            session_root: root.path(),
-            inject_modules: &[],
-        })
-        .expect("a final `pure <expr>` cell must be accepted as effectful");
+        .expect("a final `pure <expr>` cell must default in the compiler-owned row");
         let final_item = checked.items.last().expect("cell has at least one item");
         assert_eq!(final_item.verdict.kind, TurnKind::Expr);
         assert_eq!(final_item.source, "pure (1 :: Int)\n");
+        let plan = checked
+            .expression_plan_for_item(checked.items.len() - 1, &cell, 0, "")
+            .expect("checked expression plan");
+        // The helper type owns `Eff` identity, so this isolated fixture's
+        // local stand-in is still the exact constructor selected by its own
+        // cell template.
+        assert_eq!(plan.lift, ExpressionLift::Effectful);
+        assert_eq!(plan.presentation, ExpressionPresentation::Rendered);
+        assert!(checked
+            .expression_plan_for_item(checked.items.len() - 1, &cell, 1, "")
+            .is_err());
     }
 
     /// A genuinely pure final expression (no `Applicative`/`Monad` ambiguity
@@ -4013,26 +4167,31 @@ mod tests {
             include: &include,
             session_root: root.path(),
             inject_modules: &[],
+            compile_generation: 0,
+            compile_view_evidence: "",
         })
         .expect("a genuinely pure final expression must still be accepted outright");
         let final_item = checked.items.last().expect("cell has at least one item");
+        let plan = checked
+            .expression_plan_for_item(checked.items.len() - 1, &cell, 0, "")
+            .expect("checked expression plan");
+        assert_eq!(plan.lift, ExpressionLift::Pure);
+        assert_eq!(plan.presentation, ExpressionPresentation::Rendered);
         assert_eq!(final_item.verdict.kind, TurnKind::Expr);
         assert_eq!(final_item.source, "1 + 1 :: Int\n");
 
-        // check_cell_preferring_effectful must behave identically — no retry
-        // is ever attempted for a cell that already succeeds outright.
-        let via_wrapper = check_cell_preferring_effectful(CellCheckRequest {
+        // Repeating the same request makes the same compiler-owned decision.
+        let repeated = check_cell(CellCheckRequest {
             cell_text: &cell,
             template: &template,
             include: &include,
             session_root: root.path(),
             inject_modules: &[],
+            compile_generation: 0,
+            compile_view_evidence: "",
         })
-        .expect("the wrapper must not reject what check_cell already accepts");
-        assert_eq!(
-            via_wrapper.items.last().unwrap().source,
-            final_item.source
-        );
+        .expect("the repeated check must accept the same source");
+        assert_eq!(repeated.items.last().unwrap().source, final_item.source);
     }
 
     /// [`PREAMBLE_DEFAULT_MARKER`] is duplicated (not depended-on) from

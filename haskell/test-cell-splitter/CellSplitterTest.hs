@@ -42,8 +42,55 @@ main = do
       noStandaloneDerivingLeavesCellUntouched flags
   getArgs >>= \case
     [] -> pure ()
+    ["--metadata"] -> metadataCompilation
     ["--structural-display", effectsRoot] -> structuralDisplayCompilation effectsRoot
-    _ -> fail "expected optional --structural-display EFFECTS_INCLUDE"
+    _ -> fail "expected --metadata or --structural-display EFFECTS_INCLUDE"
+
+-- Metadata compilation must not enter the target's executable pipeline.
+-- A changed dependency must still be checked on the following request.
+metadataCompilation :: IO ()
+metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let dependency = root </> "MetadataDependency.hs"
+      target = root </> "MetadataTarget.hs"
+  writeFile dependency $ unlines
+    [ "module MetadataDependency where"
+    , "data Box a = Box a"
+    , "value :: Box Int"
+    , "value = Box 7"
+    ]
+  writeFile target $ unlines
+    [ "module MetadataTarget where"
+    , "import MetadataDependency"
+    , "__tidepool_inspect_0 = value"
+    ]
+  previousTiming <- lookupEnv "TIDEPOOL_TIMING"
+  setEnv "TIDEPOOL_TIMING" "1"
+  (withResidentPipelineSelectedRequests [root] $ \runRequest -> do
+      (checked, output) <- captureStderr root "metadata-check" $
+        runRequest $ \compiler ->
+          compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
+      assertContains "metadata captures the checked target's types" "Box Int"
+        (show (crCapturedTypes checked))
+      assertEqual "exactly one checked target" 1
+        (length (filter (isInfixOf "tidepool-checked module=MetadataTarget target=True") (lines output)))
+      unless (not ("tidepool-target phase=desugar" `isInfixOf` output || "phase=core " `isInfixOf` output)) $
+        fail "metadata target entered the executable pipeline"
+      writeFile dependency "module MetadataDependency where\nvalue = missingDependencyName\n"
+      rejected <- try (runRequest $ \compiler ->
+        compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing)
+        :: IO (Either SomeException CheckedEnvironmentResult)
+      case rejected of
+        Left _ -> pure ()
+        Right _ -> fail "metadata reused an invalid dependency")
+    `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-metadata"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
 
 structuralDisplayCompilation :: FilePath -> IO ()
 structuralDisplayCompilation effectsRoot = bracket temporary removeDirectoryRecursive $ \root -> do
@@ -56,7 +103,7 @@ structuralDisplayCompilation effectsRoot = bracket temporary removeDirectoryRecu
           rendered <- either fail pure (renderCellCheckSource template current)
           let path = root </> "CellCheck.hs"
           writeFile path rendered
-          compiler LegacyCore mempty GeneralCompile Nothing path includes Nothing
+          compiler CheckedEnvironment mempty GeneralCompile Nothing path includes Nothing
     (accepted, provisional) <- checkCellInstances compile plan
     assertEqual "resolved authored Display instances retained" False
       (any (`elem` map displayTargetName (cellPlanDisplayTargets accepted)) ["Custom", "Reexported"])
@@ -94,7 +141,7 @@ structuralDisplayCompilation effectsRoot = bracket temporary removeDirectoryRecu
     invalidSource <- readFile "test-cell-splitter/ExplicitInvalidGeneric.cell.hs"
     invalidPlan <- analyzeCell template invalidSource >>= either (fail . renderCellSplitError) pure
     invalid <- try (checkCellInstances compile invalidPlan)
-      :: IO (Either SourceError (CellSourcePlan, PipelineResult))
+      :: IO (Either SourceError (CellSourcePlan, CheckedEnvironmentResult))
     case invalid of
       Left _ -> pure ()
       Right _ -> fail "explicit invalid Generic instance must remain a user error"

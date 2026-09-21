@@ -19,6 +19,8 @@
 //! Binder names come from GHC (see `super::binders`), never a Rust-side Haskell
 //! parser — this module only *renders* the structured items.
 
+use std::collections::BTreeMap;
+
 use tidepool_repr::{Generation, SessionModule};
 
 use super::SourceImports;
@@ -139,6 +141,12 @@ pub struct DeclTurn {
     pub workbench_imports: SourceImports,
     /// The exportable binders this turn introduces (from GHC).
     pub items: Vec<ExportItem>,
+    /// GHC-rendered types for the term exports introduced by this generation.
+    ///
+    /// Empty is a supported compatibility state for declarations reconstructed
+    /// from metadata written before types were retained. The status path may
+    /// fill those entries after one batched inspection, fenced by generation.
+    pub value_types: BTreeMap<String, String>,
     /// Names this turn REMOVES from the decl plane (no replacement). A name is
     /// retracted when its binding migrates to the value plane (e.g. a
     /// self-referential `n <- pure (n+1)` that must materialize) — the decl
@@ -238,6 +246,38 @@ impl DeclLog {
             }
         }
         map.into_values().collect()
+    }
+
+    /// The retained type of a value export in its exact defining generation.
+    /// A generation is part of the lookup so a fallback result can never be
+    /// attached to a same-named declaration that shadowed it meanwhile.
+    #[must_use]
+    pub fn value_type_at(&self, generation: Generation, name: &str) -> Option<&str> {
+        let turn = self.turns.get((generation.0.checked_sub(1)?) as usize)?;
+        turn.value_types.get(name).map(String::as_str)
+    }
+
+    /// Retain fallback inspection results only while the supplied generation
+    /// remains the visible definition at `tip`.
+    pub fn retain_value_types_at(&mut self, tip: Generation, types: &[(String, u64, String)]) {
+        let current = self
+            .current_items_at(tip)
+            .into_iter()
+            .filter_map(|(item, generation)| match item {
+                ExportItem::Value { name } => Some((name, generation)),
+                ExportItem::Type { .. } | ExportItem::Class { .. } => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        for (name, generation, ty) in types {
+            if current.get(name) != Some(generation) || *generation == 0 {
+                continue;
+            }
+            if let Some(turn) = self.turns.get_mut((*generation - 1) as usize) {
+                turn.value_types
+                    .entry(name.clone())
+                    .or_insert_with(|| ty.clone());
+            }
+        }
     }
 
     /// Exact export items visible at `tip`, latest definition winning by head
@@ -729,6 +769,7 @@ mod tests {
             sources: vec![src.into()],
             workbench_imports: SourceImports::new(),
             items,
+            value_types: BTreeMap::new(),
             retracts: Vec::new(),
             parent: None,
         }
@@ -773,6 +814,7 @@ mod tests {
             sources: Vec::new(),
             workbench_imports: SourceImports::new(),
             items: Vec::new(),
+            value_types: BTreeMap::new(),
             retracts: names.iter().map(|s| (*s).into()).collect(),
             parent: None,
         }
@@ -786,6 +828,31 @@ mod tests {
     fn push_chained(log: &mut DeclLog, mut t: DeclTurn) -> Generation {
         t.parent = (log.generation().0 > 0).then_some(log.generation());
         log.push(t)
+    }
+
+    #[test]
+    fn retained_value_types_are_fenced_by_visible_generation() {
+        let mut log = DeclLog::new();
+        let first = push_chained(&mut log, turn("answer = 1", vec![val("answer")]));
+        log.retain_value_types_at(first, &[("answer".into(), first.0, "Int".into())]);
+        assert_eq!(log.value_type_at(first, "answer"), Some("Int"));
+
+        let second = push_chained(&mut log, turn("answer = True", vec![val("answer")]));
+        log.retain_value_types_at(
+            second,
+            &[
+                ("answer".into(), first.0, "stale".into()),
+                ("answer".into(), second.0, "Bool".into()),
+            ],
+        );
+        assert_eq!(log.value_type_at(first, "answer"), Some("Int"));
+        assert_eq!(log.value_type_at(second, "answer"), Some("Bool"));
+
+        // A fork still viewing the first tip retains its own exact generation,
+        // and cannot overwrite metadata already owned by that generation.
+        log.retain_value_types_at(first, &[("answer".into(), first.0, "Wrong".into())]);
+        assert_eq!(log.value_type_at(first, "answer"), Some("Int"));
+        assert_eq!(log.value_type_at(second, "answer"), Some("Bool"));
     }
 
     #[test]
@@ -1298,6 +1365,7 @@ mod tests {
             sources: vec!["a = 99".into()],
             workbench_imports: SourceImports::new(),
             items: vec![val("a")],
+            value_types: BTreeMap::new(),
             retracts: Vec::new(),
             parent: Some(Generation(1)),
         }); // gen 3, parent = 1
@@ -1336,6 +1404,7 @@ mod tests {
             sources: vec!["helper x = x + 1".into()],
             workbench_imports: SourceImports::new(),
             items: vec![val("helper")],
+            value_types: BTreeMap::new(),
             retracts: Vec::new(),
             parent: Some(Generation(1)),
         }); // gen 2 (left sibling)
@@ -1348,6 +1417,7 @@ mod tests {
             sources: vec!["helper x = x * 2".into()],
             workbench_imports: SourceImports::new(),
             items: vec![val("helper")],
+            value_types: BTreeMap::new(),
             retracts: Vec::new(),
             parent: Some(Generation(1)),
         }); // gen 3 (right sibling)

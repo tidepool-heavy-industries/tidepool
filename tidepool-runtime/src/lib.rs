@@ -25,6 +25,10 @@ pub use tidepool_codegen::suspension::ResumeInput;
 use tidepool_codegen::suspension::{ContinuationId, ParkedOutcome, RealmId, SuspensionRun};
 pub use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+pub use tidepool_extract_cmd::{
+    with_compiler_transaction, with_compiler_transaction_cancellable,
+    CompilerTransactionCancellation,
+};
 use tidepool_repr::serial::MetaWarnings;
 use tidepool_repr::{CoreExpr, DataConTable};
 

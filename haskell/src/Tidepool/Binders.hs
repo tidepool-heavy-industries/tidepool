@@ -44,6 +44,7 @@ module Tidepool.Binders
   , analyzeCellWithFlags
   , analyzeCell
   , renderCellCheckSource
+  , CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..)
   , CheckedBinderPin(..)
     -- * Turn-mode template selection (--turn)
   , TemplateSelector(..)
@@ -450,6 +451,22 @@ data CellAnalysisItem = CellAnalysisItem
   , cellAnalysisSourceItems :: [CellAnalysisSourceItem]
   } deriving (Eq, Show)
 
+data ExpressionLiftPlan = ExpressionEffectful | ExpressionPure
+  deriving (Eq, Show)
+
+data ExpressionPresentation = ExpressionRendered | ExpressionOpaque
+  deriving (Eq, Show)
+
+-- | Compiler-owned execution decision for one expression item. The key is
+-- the reserved local binder whose zonked type supplied this evidence.
+data CellExpressionPlan = CellExpressionPlan
+  { expressionPlanKey :: String
+  , expressionPlanLift :: ExpressionLiftPlan
+  , expressionPlanPresentation :: ExpressionPresentation
+  , expressionPlanType :: String
+  , expressionPlanHeads :: [NominalHead]
+  } deriving (Eq, Show)
+
 -- | One original source item retained beneath its execution item. Declaration
 -- items are compiled as one group, but receipts still need their individual
 -- ordinals and spans.
@@ -721,7 +738,7 @@ renderCellCheckSource template plan = do
                 )
         StmtBinders KExpr _ _ ->
           Right
-            ( "__tidepoolCellExpression (\n"
+            ( "(\\__tidepool_cell_expr_" ++ show index ++ " -> __tidepoolCellExpression __tidepool_cell_expr_" ++ show index ++ ") (\n"
             ++ linePragma item
             ++ cellAnalysisSource item
             ++ trailingNewline (cellAnalysisSource item)

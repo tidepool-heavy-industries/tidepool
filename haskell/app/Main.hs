@@ -44,10 +44,11 @@ import Tidepool.Artifacts
   ( cborFileName, pruneAllClosedArtifacts, writeClosedTargets
   , writeWholeModuleClosed, runMultiTargetClosed, renderAsksJson )
 import Tidepool.GhcPipeline
-  ( PipelineSelection(..), PreparedPipelineResult(..)
+  ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
   , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..), dumpCore
   , withResidentPipelineSelectedRequests, CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances
-  , registerResidentEvictionHook )
+  , cellExpressionPlans
+  , registerResidentEvictionHook, satisfiesCapturedConstraint, stripMonadHead )
 import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), projectPreparedTargetWithConstructors, resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
@@ -90,10 +91,10 @@ import Tidepool.TurnSource (extractModuleName, spliceTemplate)
 -- consumer compiled in the same session. Every call site outside
 -- 'processFile''s 'PreparedStg' compile passes 'Set.empty' (a true no-op):
 -- only a prepared-STG compile ever recovers/persists a retained-generation
--- 'GlobalDecl' reference, so 'LegacyCore' modes (inspection/turn/cell) have
+-- 'GlobalDecl' reference, so metadata checks and legacy Core compiles have
 -- nothing to withhold. The resident-daemon path ('withResidentPipelineSelectedRequests',
--- used only behind @--worker-loop-v1@) honors this parameter per request too,
--- via a single installed plugin that reads a per-request 'IORef' cell.
+-- used only behind @--worker-loop-v2@) honors this parameter per compile too,
+-- via a single installed plugin that reads a transaction-local 'IORef' cell.
 type Compiler =
   forall result. PipelineSelection result
   -> Set.Set SymbolIdentity
@@ -106,11 +107,11 @@ type Compiler =
 
 -- | Prepared-recovery caches ('recoverPreparedClosure'), threaded alongside
 -- 'Compiler' into every call site that can reach 'prepareArtifacts'. In the
--- resident daemon ('main''s @--worker-loop-v1@ branch) these are created
+-- resident daemon ('main''s @--worker-loop-v2@ branch) these are created
 -- ONCE, before 'withResidentPipelineSelectedRequests' boots its session, and an
 -- eviction hook registered via 'registerResidentEvictionHook' drops every
--- target module compiled by a request and any @Tidepool.Session.*@ module from both
--- caches at the same request boundary 'sanitizeMemo' cleans the compile
+-- target module compiled by a transaction and any @Tidepool.Session.*@ module from both
+-- caches at the same transaction boundary 'sanitizeMemo' cleans the compile
 -- memo -- library modules stay warm for the daemon's lifetime (it restarts on
 -- a toolchain stamp change). The one-shot (non-daemon) path instead builds a
 -- fresh 'RecoveryCaches' per invocation via 'freshRecoveryCaches', since
@@ -126,7 +127,7 @@ freshRecoveryCaches = RecoveryCaches
   <$> newFatIfaceCache <*> newOwnerInterfaceCache <*> newPreparedBodyCache
 
 -- | True for a 'Module' whose cached recovery state must not survive past
--- this request: the request's own target module, or any
+-- this transaction: one of the transaction's target modules, or any
 -- @Tidepool.Session.*@ module (both mirror 'Tidepool.GhcPipeline.sanitizeMemo''s
 -- own predicate for 'GutsMemo', over the same 'ModuleName').
 staleRecoveryModule :: ModuleName -> Module -> Bool
@@ -135,7 +136,7 @@ staleRecoveryModule targetModName' owner =
     || isJust (parseSessionModule (moduleNameString (moduleName owner)))
 
 -- | Install the daemon-lifetime 'RecoveryCaches'' eviction into
--- 'Tidepool.GhcPipeline''s resident request boundary. Call exactly once,
+-- 'Tidepool.GhcPipeline''s resident transaction boundary. Call exactly once,
 -- before entering 'withResidentPipelineSelectedRequests'.
 registerRecoveryCacheEviction :: RecoveryCaches -> IO ()
 registerRecoveryCacheEviction caches =
@@ -162,19 +163,19 @@ throwCellSplitError errorValue = case errorValue of
 main :: IO ()
 main = do
   rawWorkerRequest <- getArgs
-  if rawWorkerRequest == ["--worker-loop-v1"]
+  if rawWorkerRequest == ["--worker-loop-v2"]
     then do
       hSetBinaryMode stdin True
       hSetBinaryMode stdout True
       -- Daemon-lifetime recovery caches: created ONCE per daemon process,
-      -- before the resident session boots, and evicted at each request
+      -- before the resident session boots, and evicted at each transaction
       -- boundary by the hook registered here (see 'RecoveryCaches').
       caches <- freshRecoveryCaches
       registerRecoveryCacheEviction caches
       withResidentPipelineSelectedRequests [] $ \runRequest ->
-        WorkerServer.runWorkerLoop
-          (\cwd argv ->
-            runRequest $ \compiler ->
+        WorkerServer.runWorkerLoop $ \serveTransaction ->
+          runRequest $ \compiler ->
+            serveTransaction (\cwd argv ->
               setCurrentDirectory cwd >> runWorkerInvocation compiler caches argv)
     else do
       hSetEncoding stdout utf8
@@ -224,6 +225,8 @@ dispatch compiler caches timing args =
         | isJust (requestInspectTypeBatch args)
           && not (length (requestInspections args) > 1 && all isInspectionTypeQuery (requestInspections args))
                                                   -> reportDiags (Left (toException (userError "inspection type batch requires at least two type queries and no other query kinds")))
+        | requestActivationPreview args && (not (requestTurn args) || not (requestPreparedTurn args) || not (isJust (requestTurnVerdict args)))
+                                                  -> reportDiags (Left (toException (userError "activation requires a prepared turn with a generated bind verdict")))
         | requestCell args                        -> runCellMode compiler args file
         | requestClassify args                    -> runClassifyMode timing args
         | not (null (requestInspections args))    -> runInspectionMode compiler args file
@@ -251,34 +254,47 @@ runInspectionMode compiler args _path = do
             -- only a compiler rejection of readable authored source may fall
             -- back to the preserved singleton modules.
             _ <- BS.readFile batchPath
-            compiled <- try (compiler LegacyCore Set.empty GeneralCompile scope batchPath (requestIncludes args) (requestBuildProductsDir args))
+            compiled <- try (compiler CheckedEnvironment Set.empty GeneralCompile scope batchPath (requestIncludes args) (requestBuildProductsDir args))
             case compiled of
-              Left exception -> case fromException exception of
-                Just (_ :: SourceError) -> runSingletons scope queries
-                Nothing -> throwIO exception
+              Left exception
+                | requestInspectionStrict args -> throwIO exception
+                | otherwise -> case fromException exception of
+                    Just (_ :: SourceError) -> runSingletons scope queries
+                    Nothing -> throwIO exception
               Right successful -> inspect successful queries
         | otherwise -> fail "inspection type batch requires at least two type queries and no other query kinds"
     BS.writeFile out (encodeInspectionResults results)
   reportDiags res
   where
     inspect successful queries = runInspection
-      (prHscEnv successful)
-      (prTargetTcGblEnv successful)
-      (prTargetRdrEnv successful)
-      (prCapturedTypes successful)
+      (crHscEnv successful)
+      (crTargetTcGblEnv successful)
+      (crTargetRdrEnv successful)
+      (crCapturedTypes successful)
       queries
 
-    runSingletons scope queries = fmap concat $ forM (zip (requestFiles args) queries) $ \(path, query) -> do
-      let purpose = case query of
-            InspectTypeSearch _ -> LookupTypeCompile
-            _ -> GeneralCompile
-      compiled <- try (compiler LegacyCore Set.empty purpose scope path (requestIncludes args) (requestBuildProductsDir args))
-      case compiled of
-        Left exception -> case fromException exception of
-          Just (sourceError :: SourceError) ->
-            pure [InspectionRejected (renderInspectionDiagnostics sourceError)]
-          Nothing -> throwIO exception
-        Right successful -> inspect successful [query]
+    -- A source path identifies an exact generated source in this request.
+    -- The producer shares it only for queries with identical scope/imports;
+    -- wildcard-normalized searches use their own source and compile purpose.
+    runSingletons scope queries = snd <$> foldM inspectNext (Map.empty, []) (zip (requestFiles args) queries)
+      where
+        inspectNext (environments, answers) (path, query) = do
+          let purpose = case query of
+                InspectTypeSearch _ -> LookupTypeCompile
+                _ -> GeneralCompile
+              key = (purpose, path)
+          compiled <- case Map.lookup key environments of
+            Just previous -> pure previous
+            Nothing -> try (compiler CheckedEnvironment Set.empty purpose scope path (requestIncludes args) (requestBuildProductsDir args))
+          result <- case compiled of
+            Left exception
+              | requestInspectionStrict args -> throwIO exception
+              | otherwise -> case fromException exception of
+                  Just (sourceError :: SourceError) ->
+                    pure [InspectionRejected (renderInspectionDiagnostics sourceError)]
+                  Nothing -> throwIO exception
+            Right successful -> inspect successful [query]
+          pure (Map.insert key compiled environments, answers ++ result)
 
 isInspectionTypeQuery :: InspectionRequest -> Bool
 isInspectionTypeQuery query = case query of
@@ -315,8 +331,13 @@ spliceHarnessProfilePragma args = case requestFiles args of
         scratchPath <- profileCopy outDir file
         pure args { requestFiles = scratchPath : rest }
       else do
-        files <- forM (zip [0 :: Int ..] (file : rest)) $ \(index, sourcePath) ->
-          profileCopy (outDir </> "inspection-query-" ++ show index) sourcePath
+        (_, files) <- foldM
+          (\(copies, paths) (index, sourcePath) -> do
+            copy <- case Map.lookup sourcePath copies of
+              Just existing -> pure existing
+              Nothing -> profileCopy (outDir </> "inspection-query-" ++ show index) sourcePath
+            pure (Map.insert sourcePath copy copies, paths ++ [copy]))
+          (Map.empty, []) (zip [0 :: Int ..] (file : rest))
         batch <- case requestInspectTypeBatch args of
           Nothing -> pure Nothing
           Just sourcePath -> Just <$> profileCopy (outDir </> "inspection-type-batch") sourcePath
@@ -693,7 +714,21 @@ runTurnMode compiler caches args path = do
         spliceInto :: FilePath -> IO (String, String, FilePath)
         spliceInto tmplFile = do
           tmplSrc <- readFile tmplFile
-          writeSpliced (spliceTemplate tmplSrc turnSrc bindersStr)
+          let spliced = spliceTemplate tmplSrc turnSrc bindersStr
+          if requestActivationPreview args
+            then do
+              let replace body = T.unpack (T.replace (T.pack "{{ACTIVATION_PREVIEW}}") (T.pack body) (T.pack spliced))
+                  opaque = "(TidepoolScaffoldText.pack \"<opaque value>\\nUse the input type to select fields or apply sessionInput.\", False)"
+              (_, _, checkPath) <- writeSpliced (replace opaque)
+              checked <- compiler CheckedEnvironment Set.empty GeneralCompile
+                (Just (scopeFromWorkerRequest args)) checkPath (requestIncludes args) (requestBuildProductsDir args)
+              inputType <- maybe (fail "activation is missing its checked input type") (pure . stripMonadHead) (crResultType checked)
+              rendered <- satisfiesCapturedConstraint (crHscEnv checked) (crTargetTcGblEnv checked)
+                "__tidepoolActivationConstraint" inputType
+              writeSpliced (replace (if rendered
+                then "TidepoolInspection.workbenchActivationDisplay __activationBudget __activationInput"
+                else opaque))
+            else writeSpliced spliced
         writeSpliced spliced = do
           let modName = fromMaybe "Input" (extractModuleName spliced)
           createDirectoryIfMissing True outDir
@@ -704,6 +739,9 @@ runTurnMode compiler caches args path = do
           -- the exact module GHC last saw, never an unspliced template guess.
           writeFile (outDir </> "turn-attempt.hs") spliced
           return (spliced, modName, modulePath)
+    if requestActivationPreview args && (sbKind sb /= KBind || length (sbBinders sb) /= 1)
+      then fail "activation requires exactly one generated input binder"
+      else pure ()
     turnOut <- case sbKind sb of
       KDecl -> do
         tmplFile <- case lookup (templateSelectorWireName SDecl) templates of
@@ -746,6 +784,10 @@ runTurnMode compiler caches args path = do
                 Left err@(_ :: SomeException) -> case (fromException err :: Maybe SourceError, rest) of
                   (Just _, _ : _) -> compileVariants (index + 1) rest
                   _               -> throwIO err
+        if requestActivationPreview args
+            && (not (requestPreparedTurn args) || selector /= SBind || length (sbBinders sb) /= 1 || length matching /= 1)
+          then fail "activation requires one prepared bind template"
+          else pure ()
         (variant, spliced, compiledPath, result, preparedModules) <- compileVariants (0 :: Int) matching
         let binds       = prBinds result
             hscEnv      = prHscEnv result
@@ -830,8 +872,8 @@ runCellMode compiler args cellPath = do
       rendered <- either fail pure (renderCellCheckSource template plan)
       writeFile modulePath rendered
       -- Preserve GHC's source plan even when checking reports diagnostics.
-      BS.writeFile out (encodeCellOut plan [] rendered)
-      compiler LegacyCore Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)) initialPlan
+      BS.writeFile out (encodeCellOut plan [] [] rendered)
+      compiler CheckedEnvironment Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)) initialPlan
     checkedSource <- either fail pure (renderCellCheckSource template analyzed)
     (finalPlan, finalSource, compiled) <- if null (cellPlanDisplayTargets analyzed)
       then pure (analyzed, checkedSource, provisional)
@@ -840,17 +882,18 @@ runCellMode compiler args cellPath = do
         let contextual = installCellDisplayDeclarations contextDeclarations analyzed
         contextualSource <- either fail pure (renderCellCheckSource template contextual)
         writeFile modulePath contextualSource
-        contextChecked <- compiler LegacyCore Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
+        contextChecked <- compiler CheckedEnvironment Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
         declarations <- cellDisplayDeclarations DisplayInstanceFields contextChecked analyzed
         let finalized = installCellDisplayDeclarations declarations analyzed
         finalizedSource <- either fail pure (renderCellCheckSource template finalized)
         writeFile modulePath finalizedSource
-        finalizedResult <- compiler LegacyCore Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
+        finalizedResult <- compiler CheckedEnvironment Set.empty GeneralCompile scope modulePath (requestIncludes args) (requestBuildProductsDir args)
         pure (finalized, finalizedSource, finalizedResult)
     -- Statement preparation checks these rendered pins in their actual value
     -- modules before any declaration commits or effect runs.
+    expressionPlans <- cellExpressionPlans compiled
     BS.writeFile out
-      (encodeCellOut finalPlan (prCheckedBinderPins compiled) finalSource)
+      (encodeCellOut finalPlan (crCheckedBinderPins compiled) expressionPlans finalSource)
   reportDiags res
 
 -- | Parse one raw @--turn-verdict kind[:name,name…]@ argument into the same

@@ -32,6 +32,7 @@ tidepool-tool.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+tidepool-extract-cmd.workspace = true
 frunk.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

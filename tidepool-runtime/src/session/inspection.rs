@@ -357,6 +357,21 @@ pub struct InspectionRequest<'a> {
 pub fn run_inspections(
     request: InspectionRequest<'_>,
 ) -> Result<Vec<InspectionResult>, CompileError> {
+    run_inspections_with_policy(request, false)
+}
+
+/// Declaration staging variant: source rejection must remain a request-level
+/// structured diagnostic so declaration span remapping is preserved.
+pub(super) fn run_inspections_strict(
+    request: InspectionRequest<'_>,
+) -> Result<Vec<InspectionResult>, CompileError> {
+    run_inspections_with_policy(request, true)
+}
+
+fn run_inspections_with_policy(
+    request: InspectionRequest<'_>,
+    strict: bool,
+) -> Result<Vec<InspectionResult>, CompileError> {
     if request.queries.is_empty() {
         return Ok(Vec::new());
     }
@@ -370,6 +385,9 @@ pub fn run_inspections(
         .includes(request.include)
         .session_root(request.session_root)
         .inject_vals(request.inject_modules);
+    if strict {
+        command.inspection_strict();
+    }
     let imports = match request.effects {
         Some(_) => format!("{}\nqualified Data.Proxy\n", request.imports),
         None => request.imports.to_owned(),
@@ -390,10 +408,24 @@ pub fn run_inspections(
                     .iter()
                     .any(|expression| expression.contains("__tidepool_inspect_"))
         });
+    let mut shared_environment_source = None;
     for (index, query) in request.queries.iter().enumerate() {
         let query_dir = temp.path().join(format!("query-{index}"));
         std::fs::create_dir(&query_dir)?;
-        let source_path = query_dir.join("Expr.hs");
+        let shares_environment = matches!(
+            query,
+            InspectionQuery::Info(_)
+                | InspectionQuery::Browse { .. }
+                | InspectionQuery::StructuredInfo { .. }
+                | InspectionQuery::StructuredType { .. }
+        );
+        let source_path = if shares_environment {
+            shared_environment_source
+                .get_or_insert_with(|| query_dir.join("Expr.hs"))
+                .clone()
+        } else {
+            query_dir.join("Expr.hs")
+        };
         let expressions = match query {
             InspectionQuery::TypeOf(expression) => std::slice::from_ref(expression),
             InspectionQuery::Info(_)
@@ -1154,6 +1186,49 @@ mod tests {
     }
 
     #[test]
+    fn qualified_info_and_browse_share_one_checked_target() {
+        eval_harness::require_extract();
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Expr.hs");
+        std::fs::write(
+            &source,
+            "module Expr where\nimport qualified Data.Maybe as M\n",
+        )
+        .unwrap();
+        let output = temp.path().join("inspection.cbor");
+        let mut command = ExtractCmd::new().unwrap();
+        command
+            .output_dir(temp.path())
+            .inspect_out(&output)
+            .input(&source)
+            .inspect_info("M.Maybe")
+            .input(&source)
+            .inspect_browse("Data.Maybe", false);
+        let run = command.bind().unwrap().execute(&command).unwrap();
+        assert!(run.success(), "{}", run.stderr_lossy());
+        let stderr = run.stderr_lossy();
+        assert_eq!(
+            stderr
+                .matches("tidepool-checked module=Expr target=True")
+                .count(),
+            1,
+            "{stderr}"
+        );
+        assert!(
+            !stderr.contains("tidepool-target phase=desugar"),
+            "metadata entered executable compilation: {stderr}"
+        );
+        let results = decode_inspections(&std::fs::read(output).unwrap()).unwrap();
+        assert!(matches!(
+            results.as_slice(),
+            [
+                InspectionResult::Info { .. },
+                InspectionResult::Browse { .. }
+            ]
+        ));
+    }
+
+    #[test]
     fn one_inspection_compile_answers_type_info_and_browse_queries() {
         eval_harness::require_extract();
         let include = tempfile::tempdir().unwrap();
@@ -1515,6 +1590,64 @@ mod tests {
                 InspectionResult::Rejected { .. }
             )
         ));
+    }
+
+    #[test]
+    fn checked_target_keeps_its_boot_interface_for_source_import_cycles() {
+        eval_harness::require_extract();
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("Expr.hs-boot"),
+            "module Expr where\nimport Prelude\neven' :: Int -> Bool\n",
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("Odd.hs"),
+            concat!(
+                "module Odd where\n",
+                "import Prelude\n",
+                "import {-# SOURCE #-} qualified Expr\n",
+                "odd' :: Int -> Bool\n",
+                "odd' n = n /= 0 && Expr.even' (n - 1)\n",
+            ),
+        )
+        .unwrap();
+        let source = temp.path().join("Expr.hs");
+        std::fs::write(
+            &source,
+            assemble_inspection_module(
+                concat!(
+                    "module Expr where\n",
+                    "import Prelude\n",
+                    "import qualified Odd\n",
+                    "even' :: Int -> Bool\n",
+                    "even' n = n == 0 || Odd.odd' (n - 1)\n",
+                ),
+                "",
+                &["even'".into()],
+            ),
+        )
+        .unwrap();
+        let output = temp.path().join("inspection.cbor");
+        let mut command = ExtractCmd::new().unwrap();
+        command
+            .output_dir(temp.path())
+            .inspect_out(&output)
+            .includes(&[temp.path()])
+            .session_root(temp.path())
+            .input(&source)
+            .inspect_type("even'");
+        let run = command.bind().unwrap().execute(&command).unwrap();
+        assert!(run.success(), "{}", run.stderr_lossy());
+        let results = decode_inspections(&std::fs::read(output).unwrap()).unwrap();
+
+        assert!(
+            matches!(
+                results.as_slice(),
+                [InspectionResult::Type { display, .. }] if display == "Int -> Bool"
+            ),
+            "{results:?}"
+        );
     }
 
     #[test]

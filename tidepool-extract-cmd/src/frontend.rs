@@ -199,10 +199,46 @@ fn serve_bound_endpoint() -> Result<u8, FrontendError> {
     let identity = prepared.producer_identity()?;
     crate::endpoint::write_identity(io::stdout().lock(), &identity).map_err(FrontendError::Io)?;
     let mut stdin = io::stdin().lock();
-    let (cwd, argv) = daemon::read_request(&mut stdin)?;
+    let mut prefix = [0u8; 8];
+    stdin.read_exact(&mut prefix).map_err(FrontendError::Io)?;
+    if &prefix == daemon::TRANSACTION {
+        let mut worker = daemon::Worker::spawn(&prepared)?;
+        worker.begin_transaction()?;
+        io::stdout().write_all(&[1]).map_err(FrontendError::Io)?;
+        io::stdout().flush().map_err(FrontendError::Io)?;
+        loop {
+            let mut command = [0u8; 1];
+            if stdin.read_exact(&mut command).is_err() {
+                break;
+            }
+            match command[0] {
+                daemon::TRANSACTION_END => break,
+                daemon::TRANSACTION_REQUEST => {
+                    let (cwd, argv) = daemon::read_request(&mut stdin)?;
+                    let worker_argv = daemon::normalize_worker_argv(argv)?;
+                    let (code, out, err) = worker.request(&cwd, &worker_argv)?;
+                    daemon::write_response(io::stdout().lock(), code, &out, &err)?;
+                    io::stdout().flush().map_err(FrontendError::Io)?;
+                }
+                other => {
+                    return Err(FrontendError::Daemon(format!(
+                        "unknown compiler transaction command {other}"
+                    )))
+                }
+            }
+        }
+        let result = worker.end_transaction();
+        worker.shutdown();
+        return result.map(|()| 0);
+    }
+    let mut request = io::Cursor::new(prefix).chain(stdin);
+    let (cwd, argv) = daemon::read_request(&mut request)?;
     let worker_argv = daemon::normalize_worker_argv(argv)?;
     let mut worker = daemon::Worker::spawn(&prepared)?;
-    let result = worker.request(&cwd, &worker_argv);
+    let result = worker
+        .begin_transaction()
+        .and_then(|()| worker.request(&cwd, &worker_argv))
+        .and_then(|response| worker.end_transaction().map(|()| response));
     if let Ok((code, stdout, stderr)) = &result {
         daemon::write_response(io::stdout().lock(), *code, stdout, stderr)?;
     }
@@ -468,7 +504,7 @@ mod tests {
     fn typed_worker_payload_must_decode() {
         let error = worker_payload(&[
             WORKER_REQUEST_FLAG.into(),
-            "54505245513030370100000009".into(),
+            "54505245513030380100000009".into(),
         ])
         .unwrap_err();
         assert!(matches!(

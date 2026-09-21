@@ -1500,6 +1500,16 @@ impl PreparedEngine {
         program: ProgramId,
         realm: RealmId,
     ) -> Result<PreparedSettlement, PreparedRuntimeError> {
+        self.run_settled_with_inputs(program, realm, &[])
+    }
+
+    /// Invoke a compiled inspection entry against an already mounted value.
+    pub(crate) fn run_settled_with_inputs(
+        &mut self,
+        program: ProgramId,
+        realm: RealmId,
+        inputs: &[PreparedInput],
+    ) -> Result<PreparedSettlement, PreparedRuntimeError> {
         let facts = self
             .programs
             .get(&program)
@@ -1520,7 +1530,7 @@ impl PreparedEngine {
         }
         let batch = self
             .machine
-            .run_entry_retained(program, entry, &[], SETTLE_CALL, realm)
+            .run_entry_retained(program, entry, inputs, SETTLE_CALL, realm)
             .map_err(PreparedRuntimeError::Run)?;
         self.settle_batch(program, realm, batch)
     }

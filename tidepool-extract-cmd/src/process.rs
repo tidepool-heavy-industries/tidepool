@@ -17,7 +17,29 @@ const SIGKILL: std::os::raw::c_int = 9;
 #[cfg(target_os = "linux")]
 unsafe extern "C" {
     fn getppid() -> std::os::raw::c_int;
+    fn kill(pid: std::os::raw::c_int, signal: std::os::raw::c_int) -> std::os::raw::c_int;
     fn prctl(option: std::os::raw::c_int, ...) -> std::os::raw::c_int;
+}
+
+pub(crate) fn kill_process(pid: u32) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: the worker remains owned and unreaped by the caller while
+        // this PID is used, so it cannot have been recycled for another process.
+        if unsafe { kill(pid as std::os::raw::c_int, SIGKILL) } == -1 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "worker cancellation requires Linux",
+        ))
+    }
 }
 
 /// Arm the current frontend/daemon process to die if its launcher disappears.

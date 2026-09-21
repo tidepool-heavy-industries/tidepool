@@ -17,13 +17,13 @@ use tidepool_effect::dispatch::{request_constructor, DispatchEffect};
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
-    check_cell_preferring_effectful, hide_preamble_exports, insert_preamble_imports,
-    render_turn_compile_error, render_turn_compile_rejection,
-    resident_cell_check_template, resident_workbench_templates, run_inspections, run_turn,
-    run_turn_pinned, CellCheck, CellCheckRequest, CheckedBinderPin, DeclarationReceipt,
-    InspectionQuery, InspectionRequest, OutputSink, ParsedBlock, ResidentError, ResidentHole,
-    ResidentOutcome, ResidentSession, RootCustody, SourceImports, TurnClassification, TurnKind,
-    TurnRequest, TurnResult,
+    check_cell, hide_preamble_exports, insert_preamble_imports, render_turn_compile_error,
+    render_turn_compile_rejection, resident_cell_check_template, resident_workbench_templates,
+    run_inspections, run_turn, run_turn_pinned, CellCheck, CellCheckRequest, CheckedBinderPin,
+    CheckedExpressionPlan, DeclarationReceipt, ExpressionPresentation, InspectionQuery,
+    InspectionRequest, OutputSink, ParsedBlock, ResidentError, ResidentHole, ResidentOutcome,
+    ResidentSession, RootCustody, SourceImports, TurnClassification, TurnKind, TurnRequest,
+    TurnResult,
 };
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
 
@@ -474,6 +474,16 @@ struct ResidentMachineAccess<H, O> {
     source: ActorWorkbenchSource,
 }
 
+struct CancelCompilerTransactionOnDrop(Option<tidepool_runtime::CompilerTransactionCancellation>);
+
+impl Drop for CancelCompilerTransactionOnDrop {
+    fn drop(&mut self) {
+        if let Some(cancellation) = self.0.take() {
+            cancellation.cancel();
+        }
+    }
+}
+
 impl<H, O> ResidentMachineAccess<H, O> {
     fn new(machines: Arc<ActorMachineRegistry<H, O>>, source: ActorWorkbenchSource) -> Self {
         Self { machines, source }
@@ -542,6 +552,7 @@ enum WorkbenchDisplay {
     Observation {
         name: String,
         budget: usize,
+        presentation: ExpressionPresentation,
         source: ActorWorkbenchSource,
         type_modules: Vec<String>,
     },
@@ -2100,6 +2111,11 @@ where
                         "_ <- Tidepool.Agent.Contract.{installer} @({authored_effects}) {entry}"
                     ),
                 };
+                let verdict = TurnClassification {
+                    kind: TurnKind::Bind,
+                    binders: Vec::new(),
+                    items: Vec::new(),
+                };
                 let step = begin_fragment(
                     session,
                     &compile_context,
@@ -2111,6 +2127,7 @@ where
                     },
                     block,
                     None,
+                    Some(&verdict),
                 )?;
                 let ResidentWorkbenchStep::Running { outcome, .. } = step else {
                     let detail = match step {
@@ -2406,75 +2423,16 @@ where
             .await
     }
 
-    pub(crate) async fn mount_named_input(
+    /// Compile the input interface and preview together, commit the input,
+    /// then render it. A failed preview leaves the mounted binding available.
+    pub(crate) async fn mount_activation_input(
         &self,
         context: crate::ActorSessionContext,
-        name: &'static str,
-        input_type: impl Into<String>,
+        input_type: String,
         input: RootCustody,
-    ) -> Result<(), ResidentActorWorkbenchError> {
-        let input_type = input_type.into();
-        let type_modules = Arc::clone(&self.type_modules);
-        self.access
-            .with_machine(context, move |session, context, source| {
-                let block = ParsedBlock {
-                    ordinal: 1,
-                    total: 1,
-                    source: format!("{name} <- pure (undefined :: ({input_type}))"),
-                };
-                let compiled = match compile_block(
-                    session,
-                    context,
-                    source,
-                    &context.haskell_effects_alias,
-                    &type_modules,
-                    &block,
-                    None,
-                    Some(&generated_bind_verdict(name)),
-                )? {
-                    CompiledBlock::Ready(compiled) => compiled,
-                    CompiledBlock::Rejected(diagnostic) => {
-                        return Err(ResidentActorWorkbenchError::InputMount(diagnostic.output));
-                    }
-                };
-                let ReadyBlock {
-                    result, generation, ..
-                } = *compiled;
-                let TurnResult::Bind {
-                    bound,
-                    compiled: expression,
-                    ..
-                } = result
-                else {
-                    return Err(ResidentActorWorkbenchError::InputMount(
-                        "the internal goal-input source was not classified as a binding".into(),
-                    ));
-                };
-                let [binder] = bound.as_slice() else {
-                    return Err(ResidentActorWorkbenchError::InputMount(format!(
-                        "the internal goal-input binding produced {} binders",
-                        bound.len()
-                    )));
-                };
-                session
-                    .mount_compiled_binding_in(
-                        context.placement.lexical_scope,
-                        binder,
-                        generation,
-                        &expression.table,
-                        input,
-                    )
-                    .map_err(ResidentActorWorkbenchError::Resident)
-            })
-            .await
-    }
-
-    pub(crate) async fn activation_preview(
-        &self,
-        context: crate::ActorSessionContext,
         reply_type: String,
         reply_declaration: Option<String>,
-    ) -> (String, String) {
+    ) -> Result<(String, String), ResidentActorWorkbenchError> {
         let mut source = self.access.source.clone();
         if let (Some(response), Some(request)) = (&self.response, self.request) {
             source.preamble = response
@@ -2483,15 +2441,82 @@ where
         }
         source.preamble = actor_preamble(&source.preamble, &context).into();
         let type_modules = self.type_modules.clone();
-        let input = match self
+        let preview = self
             .access
             .with_machine(context, move |session, context, _| {
-                render_activation_observation(
-                    session, context, &source, &type_modules, "sessionInput",
-                )
+                use tidepool_runtime::session::turn::{
+                    assemble_activation_module, run_activation_turn,
+                };
+                use tidepool_runtime::session::{TemplateSelector, TurnTemplate};
+                let view = actor_compile_view(session, context, &source, &type_modules)?;
+                let generation = view.next_value_generation();
+                let prepared = source.prepare(&view);
+                let preamble = insert_preamble_imports(&prepared.preamble, &prepared.imports);
+                let templates = [TurnTemplate {
+                    kind: TemplateSelector::Bind,
+                    source: assemble_activation_module(
+                        &preamble,
+                        &context.haskell_effects_alias,
+                        &input_type,
+                        ACTIVATION_INPUT_LIMIT,
+                    ),
+                }];
+                let include: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
+                let retained = session.prepared_retained();
+                let result = run_activation_turn(TurnRequest {
+                    turn_text: "sessionInput <- pure undefined",
+                    templates: &templates,
+                    include: &include,
+                    session_root: view.session_root(),
+                    inject_modules: &prepared.injected,
+                    gen: generation.0,
+                    verdict: Some(generated_bind_verdict("sessionInput")),
+                    target: None,
+                    prepared: session.prepared_turn_request(&retained),
+                })
+                .map_err(|failure| {
+                    ResidentActorWorkbenchError::InputMount(failure.error.to_string())
+                })?;
+                let TurnResult::Bind {
+                    bound, compiled, ..
+                } = result
+                else {
+                    return Err(ResidentActorWorkbenchError::InputMount(
+                        "activation did not produce a bind".into(),
+                    ));
+                };
+                let [binder] = bound.as_slice() else {
+                    return Err(ResidentActorWorkbenchError::InputMount(
+                        "activation did not produce one input binder".into(),
+                    ));
+                };
+                session
+                    .mount_compiled_binding_in(
+                        context.placement.lexical_scope,
+                        binder,
+                        generation,
+                        &compiled.table,
+                        input,
+                    )
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                let preview = match session.run_mounted_inspection_with_sites(
+                    compiled.code(),
+                    tidepool_repr::SessionVarId::from_extract(binder.var_id),
+                ) {
+                    Ok(ResidentOutcome::Suspended { hole, .. }) => {
+                        let _ = session
+                            .abort(hole.cont_id(), "pure activation preview suspended".into());
+                        Err(ResidentActorWorkbenchError::Inspection(
+                            "pure activation preview suspended".into(),
+                        ))
+                    }
+                    Ok(outcome) => decode_activation_observation(outcome),
+                    Err(error) => Err(ResidentActorWorkbenchError::Resident(error)),
+                };
+                Ok(preview)
             })
-            .await
-        {
+            .await?;
+        let input = match preview {
             Ok((text, omitted)) => bounded_activation_text(
                 text, ACTIVATION_INPUT_LIMIT, omitted, "inspectFull sessionInput",
             ),
@@ -2500,10 +2525,10 @@ where
         let reply = reply_declaration.unwrap_or_else(|| {
             format!("{reply_type} (no declaration captured at the request site)")
         });
-        (
+        Ok((
             input,
             bounded_activation_text(reply, 4 * 1024, false, &format!("lookup {reply_type}")),
-        )
+        ))
     }
 
     pub(crate) async fn prepare_cell(
@@ -2521,118 +2546,139 @@ where
             tidepool_runtime::session::workbench_input_binding(self.json_input.as_ref())
         )
         .into();
-        self.access
+        let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
+        let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
+        let result = self
+            .access
             .with_machine(context, move |session, context, _| {
-                if session.machine_disposition()
-                    == Some(tidepool_codegen::jit_machine::MachineDisposition::Unavailable)
-                {
-                    return Err(ResidentActorWorkbenchError::MachineLost);
-                }
-                let candidate_module = session.next_declaration_module().ok_or_else(|| {
-                    ResidentActorWorkbenchError::CompileInfrastructure(
-                        "resident cell session has no declaration plane".into(),
-                    )
-                })?;
-                source.preamble = match (response.as_ref(), request) {
-                    (Some(response), Some(request)) => response.request_preamble(
-                        &source.preamble,
-                        request,
+                tidepool_runtime::with_compiler_transaction_cancellable(cancellation, || {
+                    if session.machine_disposition()
+                        == Some(tidepool_codegen::jit_machine::MachineDisposition::Unavailable)
+                    {
+                        return Err(ResidentActorWorkbenchError::MachineLost);
+                    }
+                    let candidate_module = session.next_declaration_module().ok_or_else(|| {
+                        ResidentActorWorkbenchError::CompileInfrastructure(
+                            "resident cell session has no declaration plane".into(),
+                        )
+                    })?;
+                    source.preamble = match (response.as_ref(), request) {
+                        (Some(response), Some(request)) => response.request_preamble(
+                            &source.preamble,
+                            request,
+                            &context.haskell_effects_alias,
+                        ),
+                        (None, None) => source.preamble.to_string(),
+                        _ => unreachable!("request workbench scope is constructed atomically"),
+                    }
+                    .into();
+                    source.preamble = actor_preamble(&source.preamble, context).into();
+                    let compile_view =
+                        actor_compile_view(session, context, &source, &type_modules)?;
+                    let prepared = source.prepare(&compile_view);
+                    let check_preamble =
+                        cell_module_preamble(&prepared.preamble, &candidate_module.module_name())?;
+                    let template = resident_cell_check_template(
+                        &check_preamble,
                         &context.haskell_effects_alias,
-                    ),
-                    (None, None) => source.preamble.to_string(),
-                    _ => unreachable!("request workbench scope is constructed atomically"),
-                }
-                .into();
-                source.preamble = actor_preamble(&source.preamble, context).into();
-                let compile_view = actor_compile_view(session, context, &source, &type_modules)?;
-                let prepared = source.prepare(&compile_view);
-                let check_preamble =
-                    cell_module_preamble(&prepared.preamble, &candidate_module.module_name())?;
-                let template = resident_cell_check_template(
-                    &check_preamble,
-                    &context.haskell_effects_alias,
-                    &prepared.imports,
-                );
-                let include = prepared
-                    .include
-                    .iter()
-                    .map(PathBuf::as_path)
-                    .collect::<Vec<_>>();
-                let cell_check_request = || CellCheckRequest {
-                    cell_text: &cell_source,
-                    template: &template,
-                    include: &include,
-                    session_root: compile_view.session_root(),
-                    inject_modules: &prepared.injected,
-                };
-                let checked = match check_cell_preferring_effectful(cell_check_request()) {
-                    Ok(checked) => checked,
-                    Err(failure) => {
-                        // The same-cell shape: this cell both RE-DECLARES a
-                        // name and USES it from a bind statement in the SAME
-                        // cell. The check module above is already named for
-                        // the CANDIDATE next generation (`candidate_module`,
-                        // holding the cell's own fresh declaration) while
-                        // `prepared.imports` still names the CURRENT
-                        // generation unqualified (built before this cell's
-                        // own redeclarations were known) — both visible at
-                        // once. Retry exactly once with that collision
-                        // hidden, the same shadowing every other generation
-                        // boundary already gets via `render_module`.
-                        let mut patched_imports = None;
-                        if classify_compile(&failure.error).class == FailureClass::UserHaskell {
-                            if let Some(previous_module) = compile_view.library() {
-                                let previous_module = previous_module.module_name();
-                                let message = tidepool_runtime::session::render_cell_compile_error(
-                                    &failure.error,
-                                    &cell_source,
-                                );
-                                let names =
-                                    tidepool_runtime::session::turn::same_cell_value_collisions(
-                                        &message,
+                        &prepared.imports,
+                    );
+                    let compile_view_evidence =
+                        cell_check_evidence(&compile_view, &template, &prepared);
+                    let include = prepared
+                        .include
+                        .iter()
+                        .map(PathBuf::as_path)
+                        .collect::<Vec<_>>();
+                    let cell_check_request = || CellCheckRequest {
+                        cell_text: &cell_source,
+                        template: &template,
+                        include: &include,
+                        session_root: compile_view.session_root(),
+                        inject_modules: &prepared.injected,
+                        compile_generation: compile_view.next_value_generation().0,
+                        compile_view_evidence: &compile_view_evidence,
+                    };
+                    let checked = match check_cell(cell_check_request()) {
+                        Ok(checked) => checked,
+                        Err(failure) => {
+                            // The same-cell shape: this cell both RE-DECLARES a
+                            // name and USES it from a bind statement in the SAME
+                            // cell. The check module above is already named for
+                            // the CANDIDATE next generation (`candidate_module`,
+                            // holding the cell's own fresh declaration) while
+                            // `prepared.imports` still names the CURRENT
+                            // generation unqualified (built before this cell's
+                            // own redeclarations were known) — both visible at
+                            // once. Retry exactly once with that collision
+                            // hidden, the same shadowing every other generation
+                            // boundary already gets via `render_module`.
+                            let mut patched_imports = None;
+                            if classify_compile(&failure.error).class == FailureClass::UserHaskell {
+                                if let Some(previous_module) = compile_view.library() {
+                                    let previous_module = previous_module.module_name();
+                                    let message =
+                                        tidepool_runtime::session::render_cell_compile_error(
+                                            &failure.error,
+                                            &cell_source,
+                                        );
+                                    let names =
+                                        tidepool_runtime::session::turn::same_cell_value_collisions(
+                                            &message,
+                                            &previous_module,
+                                            &candidate_module.module_name(),
+                                        );
+                                    patched_imports = hide_same_cell_collisions(
+                                        &prepared.imports,
                                         &previous_module,
-                                        &candidate_module.module_name(),
+                                        &names,
                                     );
-                                patched_imports = hide_same_cell_collisions(
-                                    &prepared.imports,
-                                    &previous_module,
-                                    &names,
-                                );
-                            }
-                        }
-                        match patched_imports {
-                            Some(patched_imports) => {
-                                let retried_template = resident_cell_check_template(
-                                    &check_preamble,
-                                    &context.haskell_effects_alias,
-                                    &patched_imports,
-                                );
-                                match check_cell_preferring_effectful(CellCheckRequest {
-                                    template: &retried_template,
-                                    ..cell_check_request()
-                                }) {
-                                    Ok(checked) => checked,
-                                    Err(failure) => {
-                                        return Err(cell_check_error(failure, &cell_source))
-                                    }
                                 }
                             }
-                            None => return Err(cell_check_error(failure, &cell_source)),
+                            match patched_imports {
+                                Some(patched_imports) => {
+                                    let retried_template = resident_cell_check_template(
+                                        &check_preamble,
+                                        &context.haskell_effects_alias,
+                                        &patched_imports,
+                                    );
+                                    let retried_evidence = cell_check_evidence(
+                                        &compile_view,
+                                        &retried_template,
+                                        &prepared,
+                                    );
+                                    match check_cell(CellCheckRequest {
+                                        template: &retried_template,
+                                        compile_view_evidence: &retried_evidence,
+                                        ..cell_check_request()
+                                    }) {
+                                        Ok(checked) => checked,
+                                        Err(failure) => {
+                                            return Err(cell_check_error(failure, &cell_source))
+                                        }
+                                    }
+                                }
+                                None => return Err(cell_check_error(failure, &cell_source)),
+                            }
                         }
-                    }
-                };
-                let prepared = prepare_cell_in_session(
-                    session,
-                    context,
-                    &source,
-                    &context.haskell_effects_alias,
-                    &type_modules,
-                    &checked,
-                    compile_view,
-                )?;
-                Ok((checked, prepared))
+                    };
+                    let prepared = prepare_cell_in_session(
+                        session,
+                        context,
+                        &source,
+                        &context.haskell_effects_alias,
+                        &type_modules,
+                        &checked,
+                        &cell_source,
+                        &checked.compile_view_evidence,
+                        compile_view,
+                    )?;
+                    Ok((checked, prepared))
+                })
             })
-            .await
+            .await;
+        cancel_on_drop.0 = None;
+        result
     }
 
     pub(crate) async fn status_discovery(
@@ -2967,6 +3013,7 @@ fn begin_fragment<H, O>(
     scope: RequestWorkbenchScope<'_>,
     block: ParsedBlock,
     pins: Option<&[CheckedBinderPin]>,
+    verdict: Option<&TurnClassification>,
 ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
@@ -2990,7 +3037,7 @@ where
         scope.type_modules,
         &block,
         pins,
-        None,
+        verdict,
     )? {
         CompiledBlock::Ready(compiled) => compiled,
         CompiledBlock::Rejected(diagnostic) => {
@@ -3075,7 +3122,10 @@ where
                     compiled.code(),
                     binder,
                     generation,
-                    variant == 0,
+                    observation
+                        .as_ref()
+                        .and_then(|(_, _, effectful)| *effectful)
+                        .unwrap_or(variant == 0),
                 ),
                 [binder] => session.run_bind_with_sites(
                     "actor_interactive_bind",
@@ -3090,10 +3140,11 @@ where
                     generation,
                 ),
             };
-            let display = if let Some(name) = observation {
+            let display = if let Some((name, presentation, _)) = observation {
                 WorkbenchDisplay::Observation {
                     name,
                     budget: display_budget,
+                    presentation,
                     source: source.clone(),
                     type_modules: scope.type_modules.to_vec(),
                 }
@@ -3222,12 +3273,14 @@ where
                 WorkbenchDisplay::Observation {
                     name,
                     budget,
+                    presentation,
                     source,
                     type_modules,
                 } => {
                     match render_cell_observation(
                         session, context, &source, &type_modules,
                         &name, budget.saturating_sub(fragment.output.iter().map(|text| text.chars().count()).sum::<usize>()), &fragment.presented,
+                        presentation,
                     ) {
                         Ok(text) => text,
                         Err(error) => format!("Display failed: {error}\nValue remains bound as {name}. Inspect a smaller field or projection; execution was not repeated."),
@@ -3336,28 +3389,23 @@ fn bounded_activation_text(
     text
 }
 
-fn render_activation_observation<H, O>(
-    session: &mut ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    source: &ActorWorkbenchSource,
-    type_modules: &[String],
-    expression: &str,
-) -> Result<(String, bool), ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    let renderer = format!("workbenchActivationDisplay {ACTIVATION_INPUT_LIMIT}");
-    let opaque = "(T.pack \"<opaque value>\\nUse the input type to select fields or apply sessionInput.\", False)";
-    let render = format!("TidepoolInspection.{renderer} ({expression})");
-    inspect_rendered_value(
-        session,
-        context,
-        source,
-        type_modules,
-        expression,
-        &[render, opaque.into()],
-    )
+fn decode_activation_observation(
+    outcome: ResidentOutcome,
+) -> Result<(String, bool), ResidentActorWorkbenchError> {
+    match outcome {
+        ResidentOutcome::Completed { result, .. } => {
+            if tidepool_codegen::heap_bridge::contains_oversize_sentinel(result.value()) {
+                return Err(ResidentActorWorkbenchError::Inspection(
+                    "input preview exceeded the observation budget".into(),
+                ));
+            }
+            <(String, bool)>::from_value(result.value(), result.table())
+                .map_err(|error| ResidentActorWorkbenchError::Inspection(error.to_string()))
+        }
+        _ => Err(ResidentActorWorkbenchError::Inspection(
+            "pure input preview unexpectedly suspended".into(),
+        )),
+    }
 }
 
 fn inspect_rendered_value<H, O, T: FromCore>(
@@ -3456,6 +3504,7 @@ fn render_cell_observation<H, O>(
     observation: &str,
     budget: usize,
     presented: &[String],
+    presentation: ExpressionPresentation,
 ) -> Result<String, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
@@ -3480,37 +3529,32 @@ where
     let rendered =
         format!("TidepoolInspection.displayPageWithout [{keys}] {budget} ({observation} ())");
     let opaque = format!("TidepoolInspection.pageWithContinuation {budget} (TidepoolInspection.TextLeaf (T.pack \"<opaque value>\")) Nothing");
-    let mut candidate = None;
-    for rendering in [rendered, opaque] {
-        let block = ParsedBlock {
-            ordinal: 1,
-            total: 1,
-            source: format!(
-                "{page_name} <- pure (({rendering}) :: TidepoolInspection.DisplayPage {})",
-                context.haskell_effects_alias
-            ),
-        };
-        match compile_block(
-            session,
-            context,
-            source,
-            &context.haskell_effects_alias,
-            type_modules,
-            &block,
-            None,
-            Some(&generated_bind_verdict(&page_name)),
-        )? {
-            CompiledBlock::Ready(ready) => {
-                candidate = Some(ready);
-                break;
-            }
-            CompiledBlock::Rejected(_) => continue,
+    let rendering = match presentation {
+        ExpressionPresentation::Rendered => rendered,
+        ExpressionPresentation::Opaque => opaque,
+    };
+    let block = ParsedBlock {
+        ordinal: 1,
+        total: 1,
+        source: format!(
+            "{page_name} <- pure (({rendering}) :: TidepoolInspection.DisplayPage {})",
+            context.haskell_effects_alias
+        ),
+    };
+    let ready = match compile_block(
+        session,
+        context,
+        source,
+        &context.haskell_effects_alias,
+        type_modules,
+        &block,
+        None,
+        Some(&generated_bind_verdict(&page_name)),
+    )? {
+        CompiledBlock::Ready(ready) => ready,
+        CompiledBlock::Rejected(diagnostic) => {
+            return Err(ResidentActorWorkbenchError::Inspection(diagnostic.output));
         }
-    }
-    let Some(ready) = candidate else {
-        return Err(ResidentActorWorkbenchError::Inspection(
-            "display page could not be compiled".into(),
-        ));
     };
     let TurnResult::Bind {
         bound, compiled, ..
@@ -6426,7 +6470,7 @@ struct ReadyBlock {
     generation: tidepool_repr::Generation,
     declaration_source: String,
     declaration_imports: SourceImports,
-    observation: Option<String>,
+    observation: Option<(String, ExpressionPresentation, Option<bool>)>,
 }
 
 pub(crate) struct PreparedCellItem {
@@ -6464,6 +6508,8 @@ fn prepare_cell_in_session<H, O>(
     effect_stack: &str,
     type_modules: &[String],
     checked: &CellCheck,
+    cell_text: &str,
+    compile_view_evidence: &str,
     base_view: crate::ActorCompileView,
 ) -> Result<PreparedCell, ResidentActorWorkbenchError>
 where
@@ -6506,6 +6552,7 @@ where
     } else {
         None
     };
+    let checked_generation = base_view.next_value_generation().0;
     let mut compile_view = match &staged {
         Some(staged) => base_view.with_staged_library(staged.module(), staged.items()),
         None => base_view,
@@ -6535,6 +6582,17 @@ where
                 .then(|| checked.pins_for_item(index))
                 .transpose()
                 .map_err(ResidentActorWorkbenchError::Compile)?;
+            let expression_plan = (item.verdict.kind == TurnKind::Expr)
+                .then(|| {
+                    checked.expression_plan_for_item(
+                        index,
+                        cell_text,
+                        checked_generation,
+                        compile_view_evidence,
+                    )
+                })
+                .transpose()
+                .map_err(ResidentActorWorkbenchError::Compile)?;
             let block = ParsedBlock {
                 ordinal: index + 1,
                 total: checked.items.len(),
@@ -6552,6 +6610,7 @@ where
                 &staged_names,
                 Some(&item.verdict),
                 Some(&checked.prologue),
+                expression_plan.as_ref(),
             )?;
             let ready = match compiled {
                 CompiledBlock::Ready(ready) => *ready,
@@ -6650,6 +6709,27 @@ where
         .with_type_modules(type_modules))
 }
 
+fn cell_check_evidence(
+    view: &crate::ActorCompileView,
+    template: &str,
+    prepared: &WorkbenchCompilation,
+) -> String {
+    fn field(hasher: &mut blake3::Hasher, value: &[u8]) {
+        hasher.update(&(value.len() as u64).to_le_bytes());
+        hasher.update(value);
+    }
+    let mut evidence = blake3::Hasher::new();
+    field(&mut evidence, view.evidence_key().as_bytes());
+    field(&mut evidence, template.as_bytes());
+    for path in prepared.include.iter() {
+        field(&mut evidence, path.as_os_str().as_encoded_bytes());
+    }
+    for module in &prepared.injected {
+        field(&mut evidence, module.as_bytes());
+    }
+    evidence.finalize().to_hex().to_string()
+}
+
 /// The verdict for a block this runtime wrote itself: `<binder> <- pure …`,
 /// one bound name, no declaration exports. Classification is its own compiler
 /// round trip, and for a generated block it can only answer what the
@@ -6693,6 +6773,7 @@ where
         &[],
         verdict,
         None,
+        None,
     )
 }
 
@@ -6709,15 +6790,19 @@ fn compile_block_in_view<H, O>(
     staged_names: &[String],
     checked_verdict: Option<&TurnClassification>,
     prologue: Option<&tidepool_runtime::session::SourcePrologue>,
+    expression_plan: Option<&CheckedExpressionPlan>,
 ) -> Result<CompiledBlock, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
+    let pin_heads = pins
+        .into_iter()
+        .flatten()
+        .flat_map(|pin| &pin.heads)
+        .chain(expression_plan.into_iter().flat_map(|plan| &plan.heads));
     let pin_imports = SourceImports::from_specs(
-        pins.into_iter()
-            .flatten()
-            .flat_map(|pin| &pin.heads)
+        pin_heads
             .filter(|head| head.module.starts_with("Tidepool.Session."))
             .map(|head| format!("qualified {}", head.module)),
     );
@@ -6756,28 +6841,39 @@ where
             name.push('_');
         }
         let preamble = insert_preamble_imports(&prepared.preamble, &prepared.imports);
-        templates = [
-            tidepool_runtime::session::ExpressionLift::Effectful,
-            tidepool_runtime::session::ExpressionLift::Pure,
-        ]
-        .into_iter()
-        .map(|lift| tidepool_runtime::session::TurnTemplate {
-            kind: tidepool_runtime::session::TemplateSelector::Bind,
-            source: tidepool_runtime::session::turn::assemble_observation_module(
-                &preamble,
-                "__result",
-                effect_stack,
-                "{{TURN}}",
-                lift,
-            ),
-        })
-        .collect();
+        let lifts = expression_plan
+            .map(|plan| vec![plan.lift])
+            .unwrap_or_else(|| {
+                vec![
+                    tidepool_runtime::session::ExpressionLift::Effectful,
+                    tidepool_runtime::session::ExpressionLift::Pure,
+                ]
+            });
+        templates = lifts
+            .into_iter()
+            .map(|lift| tidepool_runtime::session::TurnTemplate {
+                kind: tidepool_runtime::session::TemplateSelector::Bind,
+                source: tidepool_runtime::session::turn::assemble_observation_module(
+                    &preamble,
+                    "__result",
+                    effect_stack,
+                    "{{TURN}}",
+                    lift,
+                    expression_plan.map(|plan| plan.type_display.as_str()),
+                ),
+            })
+            .collect();
         verdict = Some(TurnClassification {
             kind: TurnKind::Bind,
             binders: vec![name.clone()],
             items: Vec::new(),
         });
-        Some(name)
+        Some((
+            name,
+            expression_plan.map_or(ExpressionPresentation::Rendered, |plan| plan.presentation),
+            expression_plan
+                .map(|plan| plan.lift == tidepool_runtime::session::ExpressionLift::Effectful),
+        ))
     } else {
         None
     };
@@ -6842,7 +6938,7 @@ where
 }
 
 fn run_status_discovery<H, O>(
-    session: &ResidentSession<H, O>,
+    session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
     type_modules: &[String],
@@ -6865,6 +6961,24 @@ where
             } else {
                 inspect_actor_batch(session, context, source, type_modules, &queries)?
             };
+            let retained = bindings
+                .iter()
+                .filter(|binding| binding.type_query().is_some())
+                .zip(inspected.iter())
+                .filter_map(|(binding, result)| {
+                    let Ok(tidepool_runtime::session::InspectionResult::Type { display, .. }) =
+                        result
+                    else {
+                        return None;
+                    };
+                    Some((
+                        binding.name.clone(),
+                        binding.defining_generation()?,
+                        display.clone(),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            session.retain_declaration_value_types_in(context.placement.lexical_scope, &retained);
             let mut inspected = inspected.into_iter();
             let lines = bindings
                 .into_iter()
@@ -6876,6 +6990,7 @@ where
                         None if needs_inspection => inspected
                             .next()
                             .and_then(Result::ok)
+                            .map(|result| result.render())
                             .unwrap_or_else(|| format!("{} :: <type unavailable>", binding.name)),
                         None => format!("{} :: <type unavailable>", binding.name),
                     };
@@ -6930,7 +7045,10 @@ fn inspect_actor_batch<H, O>(
     source: &ActorWorkbenchSource,
     type_modules: &[String],
     queries: &[InspectionQuery],
-) -> Result<Vec<Result<String, String>>, ResidentActorWorkbenchError>
+) -> Result<
+    Vec<Result<tidepool_runtime::session::InspectionResult, String>>,
+    ResidentActorWorkbenchError,
+>
 where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
@@ -6949,7 +7067,10 @@ fn inspect_compile_view(
     source: &ActorWorkbenchSource,
     queries: &[InspectionQuery],
     effects: Option<&str>,
-) -> Result<Vec<Result<String, String>>, ResidentActorWorkbenchError> {
+) -> Result<
+    Vec<Result<tidepool_runtime::session::InspectionResult, String>>,
+    ResidentActorWorkbenchError,
+> {
     let prepared = source.prepare(compile_view);
     let include_refs = prepared
         .include
@@ -6973,7 +7094,7 @@ fn inspect_compile_view(
                 | tidepool_runtime::session::InspectionResult::Rejected { .. } => {
                     Err(result.render())
                 }
-                _ => Ok(result.render()),
+                _ => Ok(result),
             })
             .collect()),
         Ok(results) => Err(ResidentActorWorkbenchError::CompileInfrastructure(format!(
@@ -7506,6 +7627,7 @@ mod request_tests {
                     source: text.into(),
                 },
                 None,
+                None,
             )
             .unwrap_or_else(|error| panic!("{engine:?}: {text:?}: {error}"))
         };
@@ -7559,6 +7681,151 @@ mod request_tests {
                 describe_step(&other)
             ),
         }
+
+        // Declaration publication retains its checked GHC type. The real
+        // status path must therefore answer repeatedly without asking the
+        // compiler to rediscover an unchanged generation.
+        match run("answer :: Int\nanswer = 42") {
+            ResidentWorkbenchStep::Committed { .. } => {}
+            other => panic!(
+                "{engine:?}: expected declaration commit, got {}",
+                describe_step(&other)
+            ),
+        }
+        if engine == tidepool_runtime::session::EngineKind::Prepared {
+            assert!(matches!(
+                run("previewAction <- pure (pure (1 :: Int) :: Eff '[Shoal.Notifications] Int)"),
+                ResidentWorkbenchStep::Committed { .. }
+            ));
+        }
+        drop(run);
+        let before_status = tidepool_extract_cmd::extract_spawn_count();
+        for _ in 0..2 {
+            let status = run_status_discovery(
+                &mut session,
+                &context,
+                &source,
+                &[],
+                crate::status_tool::StatusDiscovery::Bindings,
+            )
+            .expect("binding status infrastructure")
+            .expect("binding status result");
+            assert!(status.contains("answer :: Int [declaration]"), "{status}");
+        }
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            before_status,
+            "unchanged binding status must issue zero compiler requests"
+        );
+
+        if engine == tidepool_runtime::session::EngineKind::Prepared {
+            use tidepool_runtime::session::turn::{
+                assemble_activation_module, run_activation_turn,
+            };
+            use tidepool_runtime::session::{TemplateSelector, TurnTemplate};
+            for (input_name, input_type, fail_renderer) in [
+                ("x", "Int", false),
+                ("x", "Int", true),
+                ("previewAction", "Eff '[Shoal.Notifications] Int", false),
+            ] {
+                let (input, _, _, _) = session
+                    .current_binding_in(lexical_scope, input_name)
+                    .unwrap();
+                let view = actor_compile_view(&session, &context, &source, &[]).unwrap();
+                let prepared = source.prepare(&view);
+                let mut preamble = insert_preamble_imports(&prepared.preamble, &prepared.imports);
+                if fail_renderer {
+                    preamble.push_str("\ninstance TidepoolInspection.WorkbenchDisplay Int where { workbenchDisplay _ = error \"preview failed\" }\n");
+                }
+                let templates = [TurnTemplate {
+                    kind: TemplateSelector::Bind,
+                    source: assemble_activation_module(&preamble, effects_alias, input_type, 4096),
+                }];
+                let includes: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
+                let retained = session.prepared_retained();
+                let before = tidepool_extract_cmd::extract_spawn_count();
+                let result = run_activation_turn(TurnRequest {
+                    turn_text: "sessionInput <- pure undefined",
+                    templates: &templates,
+                    include: &includes,
+                    session_root: view.session_root(),
+                    inject_modules: &prepared.injected,
+                    gen: view.next_value_generation().0,
+                    verdict: Some(generated_bind_verdict("sessionInput")),
+                    target: None,
+                    prepared: session.prepared_turn_request(&retained),
+                })
+                .unwrap();
+                assert_eq!(
+                    tidepool_extract_cmd::extract_spawn_count() - before,
+                    1,
+                    "activation uses one request without classification"
+                );
+                let TurnResult::Bind { compiled, .. } = result else {
+                    panic!("activation bind")
+                };
+                assert!(compiled.prepared.is_some());
+                if input_name == "x" && !fail_renderer {
+                    let mut installer_source = source.clone();
+                    installer_source.workbench_imports.extend_text(
+                        "qualified Tidepool.Agent.Contract\nqualified Tidepool.Effects.Core",
+                    );
+                    installer_source.preamble = format!(
+                        "{}\ntype HostedToolEffects = Tidepool.Effects.Core.AgentTools ': {effects_alias}\n",
+                        installer_source.preamble
+                    ).into();
+                    let installer = compile_block(
+                        &mut session,
+                        &context,
+                        &installer_source,
+                        "HostedToolEffects",
+                        &[],
+                        &ParsedBlock {
+                            ordinal: 1,
+                            total: 1,
+                            source: format!("_ <- Tidepool.Agent.Contract.installSpec @({effects_alias}) Tidepool.Agent.Contract.defaultSpec"),
+                        },
+                        None,
+                        Some(&TurnClassification {
+                            kind: TurnKind::Bind,
+                            binders: Vec::new(),
+                            items: Vec::new(),
+                        }),
+                    ).expect("known-shape tool installer compile");
+                    match installer {
+                        CompiledBlock::Ready(ready) => match ready.result {
+                            TurnResult::Bind { compiled, .. } => {
+                                assert!(compiled.prepared.is_some())
+                            }
+                            _ => panic!("installer must produce a prepared bind"),
+                        },
+                        CompiledBlock::Rejected(rejection) => {
+                            panic!("installer rejected: {rejection:?}")
+                        }
+                    }
+                    assert_eq!(
+                        tidepool_extract_cmd::extract_spawn_count() - before,
+                        2,
+                        "input/preview and installer each compile once without classification",
+                    );
+                }
+                let preview = session.run_mounted_inspection_with_sites(compiled.code(), input);
+                if fail_renderer {
+                    assert!(preview.is_err(), "renderer must fail");
+                } else {
+                    assert_eq!(
+                        decode_activation_observation(preview.unwrap()).unwrap(),
+                        (if input_name == "x" { "20" } else { "<opaque value>\nUse the input type to select fields or apply sessionInput." }.into(), false)
+                    );
+                }
+                assert!(
+                    session
+                        .current_binding_in(lexical_scope, input_name)
+                        .is_some(),
+                    "preview preserves the retained input"
+                );
+            }
+        }
     }
 
     #[test]
@@ -7579,7 +7846,7 @@ mod request_tests {
     /// redeclaration and its use never share one whole-cell preflight check
     /// there. This test drives the real `prepare_cell` machinery instead —
     /// `actor_compile_view` + `cell_module_preamble` +
-    /// `resident_cell_check_template` + `check_cell_preferring_effectful` —
+    /// `resident_cell_check_template` + `check_cell` —
     /// exactly as `ResidentActorWorkbench::prepare_cell` assembles them,
     /// without the registry/actor-runner scaffolding that method also needs.
     #[test]
@@ -7608,7 +7875,7 @@ mod request_tests {
         .expect("declaration plane")
         .with_validation_include(include.clone());
         let mut session = ResidentSession::unbootstrapped_on(
-            tidepool_runtime::session::EngineKind::Core,
+            tidepool_runtime::session::EngineKind::Prepared,
             frunk::HNil,
             tidepool_mcp::CapturedOutput::new(),
             include.clone(),
@@ -7660,6 +7927,7 @@ mod request_tests {
                 source: "sh args = length (args :: [Int])".into(),
             },
             None,
+            None,
         )
         .unwrap_or_else(|error| panic!("cell 1 (define sh): {error}"));
         assert!(
@@ -7701,6 +7969,8 @@ mod request_tests {
                 include: include_refs,
                 session_root: compile_view.session_root(),
                 inject_modules: &prepared.injected,
+                compile_generation: compile_view.next_value_generation().0,
+                compile_view_evidence: "",
             }
         }
 
@@ -7709,7 +7979,7 @@ mod request_tests {
         // cell's own fresh declaration and the unqualified import of the
         // current generation built before this cell's redeclaration was
         // known.
-        let failure = check_cell_preferring_effectful(request(
+        let failure = check_cell(request(
             cell_2,
             &template,
             &include_refs,
@@ -7743,7 +8013,7 @@ mod request_tests {
             &context.haskell_effects_alias,
             &patched_imports,
         );
-        let checked = check_cell_preferring_effectful(request(
+        let checked = check_cell(request(
             cell_2,
             &retried_template,
             &include_refs,
@@ -7761,5 +8031,82 @@ mod request_tests {
             2,
             "a decl item and a bind item: {checked:?}"
         );
+
+        // Drive an expression through the production prepare join. The
+        // checked plan supplies one lift and one presentation, so preparation
+        // issues one executable compilation for this item.
+        let expression = "{-# LANGUAGE PolyKinds #-}\nimport Data.Proxy (Proxy(..))\npure Proxy";
+        let expression_view =
+            actor_compile_view(&session, &context, &source, &[]).expect("expression view");
+        let expression_prepared = source.prepare(&expression_view);
+        let expression_module = session
+            .next_declaration_module()
+            .expect("declaration plane");
+        let expression_preamble = cell_module_preamble(
+            &expression_prepared.preamble,
+            &expression_module.module_name(),
+        )
+        .expect("expression preamble");
+        let expression_template = resident_cell_check_template(
+            &expression_preamble,
+            &context.haskell_effects_alias,
+            &expression_prepared.imports,
+        );
+        let expression_evidence =
+            cell_check_evidence(&expression_view, &expression_template, &expression_prepared);
+        let expression_include = expression_prepared
+            .include
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let expression_checked = check_cell(CellCheckRequest {
+            cell_text: expression,
+            template: &expression_template,
+            include: &expression_include,
+            session_root: expression_view.session_root(),
+            inject_modules: &expression_prepared.injected,
+            compile_generation: expression_view.next_value_generation().0,
+            compile_view_evidence: &expression_evidence,
+        })
+        .expect("expression whole-cell check");
+        assert_eq!(expression_checked.expression_plans.len(), 1);
+        let expression_type = &expression_checked.expression_plans[0].type_display;
+        assert!(
+            expression_type.contains("forall cell0") && expression_type.contains("cell1 :: cell0"),
+            "{expression_type}"
+        );
+        assert!(!expression_type.contains("ZonkAny"), "{expression_type}");
+        assert!(!expression_type.contains("() ->"), "{expression_type}");
+        let prepared_cell = tidepool_runtime::with_compiler_transaction(|| {
+            prepare_cell_in_session(
+                &mut session,
+                &context,
+                &source,
+                &context.haskell_effects_alias,
+                &[],
+                &expression_checked,
+                expression,
+                &expression_evidence,
+                expression_view,
+            )
+        })
+        .expect("typed expression preparation");
+        let PreparedCell::Ready { items, .. } = prepared_cell else {
+            let PreparedCell::Rejected { diagnostic, .. } = prepared_cell else {
+                unreachable!()
+            };
+            panic!(
+                "typed expression preparation was rejected: {diagnostic:?}; plans={:?}",
+                expression_checked.expression_plans
+            )
+        };
+        let observations = items
+            .iter()
+            .filter_map(|item| match &item.ready {
+                PreparedCellStep::Executable(ready) => ready.observation.as_ref(),
+                PreparedCellStep::Declaration { .. } => None,
+            })
+            .count();
+        assert_eq!(observations, 1, "one selected expression wrapper");
     }
 }
