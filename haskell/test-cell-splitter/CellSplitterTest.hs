@@ -2,7 +2,7 @@
 
 module Main where
 
-import Control.Monad (unless)
+import Control.Monad (forM_, unless, when)
 import Control.Exception (SomeException, bracket, finally, throwIO, try)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef, modifyIORef', readIORef)
@@ -44,8 +44,38 @@ main = do
   getArgs >>= \case
     [] -> pure ()
     ["--metadata"] -> metadataCompilation
+    ["--validation-memo"] -> validationMemoCompilation
     ["--structural-display", effectsRoot] -> structuralDisplayCompilation effectsRoot
-    _ -> fail "expected --metadata or --structural-display EFFECTS_INCLUDE"
+    _ -> fail "expected --metadata, --validation-memo, or --structural-display EFFECTS_INCLUDE"
+
+validationMemoCompilation :: IO ()
+validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let base = root </> "WarmBase.hs"
+      reexport = root </> "WarmReexport.hs"
+      child = root </> "WarmChild.hs"
+      target = root </> "WarmTarget.hs"
+  writeFile base "module WarmBase (value) where\nvalue :: Int\nvalue = 42\n"
+  writeFile reexport "module WarmReexport (value) where\nimport WarmBase (value)\n"
+  writeFile child "module WarmChild (value) where\nimport WarmReexport (value)\n"
+  writeFile target "module WarmTarget where\nimport WarmChild (value)\nresult = value\n"
+  previousTiming <- lookupEnv "TIDEPOOL_TIMING"
+  setEnv "TIDEPOOL_TIMING" "1"
+  (withResidentPipelineSelected [root] $ \compile -> do
+      _ <- compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+      (_, warmLog) <- captureStderr root "validation-warm" $
+        compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+      forM_ ["WarmReexport", "WarmChild"] $ \name ->
+        when (("tidepool-memo-miss module=" ++ name) `isInfixOf` warmLog) $
+          fail ("unchanged validation-only module was recompiled: " ++ name))
+    `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-validation-memo"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
 
 -- Metadata compilation must not enter the target's executable pipeline.
 -- A changed dependency must still be checked on the following request.

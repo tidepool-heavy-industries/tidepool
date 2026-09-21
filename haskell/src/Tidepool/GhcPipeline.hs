@@ -688,6 +688,15 @@ data MemoValidity = MemoValidity
   , memoHomeDependencies :: Set.Set ModuleName
   }
 
+-- Facts needed even when a module contributes no executable body. Keeping
+-- these separately lets an unchanged re-export or validation-only module
+-- prove its dependents valid without retaining its compiler session graph.
+data ModuleFacts = ModuleFacts
+  { moduleFactTyCons :: [TyCon]
+  , moduleFactReferences :: Set.Set ModuleName
+  , moduleFactHasDependentFiles :: Bool
+  }
+
 data MemoPreparation
   = AnalyzedOnly
   | PreparedBody PreparedModule
@@ -706,7 +715,8 @@ data AnalyzedModule = AnalyzedModule
 
 data GutsMemoEntry = GutsMemoEntry
   { gmeValidity :: MemoValidity
-  , gmeAnalyzed :: AnalyzedModule
+  , gmeFacts :: ModuleFacts
+  , gmeAnalyzed :: Maybe AnalyzedModule
   , gmePreparation :: MemoPreparation
     -- ^ The retained identities this module DEFINES, from the set THIS entry
     -- was compiled under ('retainedDefinedBy'; see
@@ -724,6 +734,22 @@ data GutsMemoEntry = GutsMemoEntry
     -- definitions.
   }
 
+data ModuleObservation
+  = CachedObservation ModSummary GutsMemoEntry
+  | FreshObservation ModuleFront
+
+observationSummary :: ModuleObservation -> ModSummary
+observationSummary (CachedObservation summary _) = summary
+observationSummary (FreshObservation front) = mfSummary front
+
+observationFacts :: ModuleObservation -> IO ModuleFacts
+observationFacts (CachedObservation _ entry) = pure (gmeFacts entry)
+observationFacts (FreshObservation front) = frontFacts front
+
+observationFront :: ModuleObservation -> Maybe ModuleFront
+observationFront (CachedObservation _ entry) = analyzedFront <$> gmeAnalyzed entry
+observationFront (FreshObservation front) = Just front
+
 preparedBody :: MemoPreparation -> Maybe PreparedModule
 preparedBody AnalyzedOnly = Nothing
 preparedBody (PreparedBody prepared) = Just prepared
@@ -738,6 +764,15 @@ analyzedResult analyzed =
   )
   where
     front = analyzedFront analyzed
+
+frontFacts :: ModuleFront -> IO ModuleFacts
+frontFacts front = do
+  dependentFiles <- readIORef (tcg_dependent_files (mfTcGblEnv front))
+  pure ModuleFacts
+    { moduleFactTyCons = mg_tcs (mfDesugared front)
+    , moduleFactReferences = mfReferencedModules front
+    , moduleFactHasDependentFiles = not (null dependentFiles)
+    }
 
 type GutsMemo = Map.Map ModuleName GutsMemoEntry
 
@@ -1049,11 +1084,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                       case Map.lookup (ms_mod_name modSum) m of
                         Nothing -> memoMiss modSum "absent" >> pure Nothing
                         Just entry -> do
-                          let analyzed = gmeAnalyzed entry
-                              front = analyzedFront analyzed
-                              validity = gmeValidity entry
-                          dependentFiles <- liftIO (readIORef (tcg_dependent_files (mfTcGblEnv front)))
-                          let cachedSummary = mfSummary front
+                          let validity = gmeValidity entry
                               sameHash = memoSourceHash validity == ms_hs_hash modSum
                               sameRetained = memoRetained validity == retainedFor modSum
                               sameHomeDependencies =
@@ -1061,26 +1092,26 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                           -- Source hashes do not cover CPP includes or TH's
                           -- addDependentFile inputs. Recompile these modules until
                           -- the memo owns fingerprints for those dependencies.
-                          if null dependentFiles
-                              && not (xopt LangExt.Cpp (ms_hspp_opts cachedSummary))
+                          if not (moduleFactHasDependentFiles (gmeFacts entry))
+                              && not (xopt LangExt.Cpp (ms_hspp_opts modSum))
                               && sameHash
                               && sameRetained
                               && sameHomeDependencies
                             then pure (Just entry)
                             else do
                               memoMiss modSum $ unwords
-                                [ "dependent-files=" ++ show (length dependentFiles)
+                                [ "dependent-files=" ++ show (moduleFactHasDependentFiles (gmeFacts entry))
                                 , "same-hash=" ++ show sameHash
                                 , "same-retained=" ++ show sameRetained
                                 , "same-home-dependencies=" ++ show sameHomeDependencies ]
                               pure Nothing
-          (fronts, results, preparedModules, mReachable) <- case cpTier plan of
+          (observations, results, preparedModules, mReachable) <- case cpTier plan of
             OptimizeEveryModule -> do
               pairs <- forM summaries $ \modSum -> do
                 cpBeforeModule plan modSum
                 let mn = ms_mod_name modSum
                 cached <- lookupValidMemo modSum
-                case cached of
+                case (cached, cached >>= gmeAnalyzed) of
                   -- Memo hit: skip parse/typecheck/desugar/core2core entirely —
                   -- this is the win (§7.6: 3114ms -> 9ms per reused cycle). Still
                   -- re-run 'cpAfterModule' unconditionally: it is a no-op for any
@@ -1089,8 +1120,8 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                   -- again this cycle (the incremental-population gap this memo
                   -- closes) it cheaply re-registers the already-computed iface
                   -- into the HPT that 'load'' just wiped.
-                  Just entry -> do
-                    let analyzed = gmeAnalyzed entry
+                  (Just entry, Just analyzed) -> do
+                    let
                         front = analyzedFront analyzed
                         cachedPrepared = preparedBody (gmePreparation entry)
                     recordValidity modSum True
@@ -1109,11 +1140,13 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                           Nothing -> pure ()
                         pure freshPrepared
                     pure (front, analyzedResult analyzed, prepared)
-                  Nothing -> do
-                    recordValidity modSum False
+                  _ -> do
+                    recordValidity modSum (isJust cached)
+                    when (isJust cached) (memoMiss modSum "executable-body-not-prepared")
                     mf <- compileFront modSum
                     (simplified, r) <- compileBack mf
                     prepared <- prepareSelected mf simplified
+                    facts <- liftIO (frontFacts mf)
                     case mMemoRef of
                       Just ref -> liftIO (modifyIORef' ref
                         (Map.insert mn (GutsMemoEntry
@@ -1121,11 +1154,12 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                             (ms_hs_hash modSum)
                             (retainedFor modSum)
                             (directHomeDeps modSum))
-                          (AnalyzedModule mf simplified)
+                          facts
+                          (Just (AnalyzedModule mf simplified))
                           (maybe AnalyzedOnly PreparedBody prepared))))
                       Nothing  -> pure ()
                     pure (mf, r, prepared)
-              pure ([f | (f, _, _) <- pairs], [r | (_, r, _) <- pairs],
+              pure (map (FreshObservation . (\(f, _, _) -> f)) pairs, [r | (_, r, _) <- pairs],
                     [p | (_, _, Just p) <- pairs], Nothing)
             OptimizeCoreReachable -> do
               -- A resident-session memo hit reuses a module's cached front (needed for the
@@ -1141,18 +1175,18 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
               -- be safe — but it can't even arise: a NON-reachable module is
               -- never core2core'd, so the memo is never asked to serve one where
               -- reachability differs from what produced the entry.
-              pairs <- forM summaries $ \modSum -> do
+              observations' <- forM summaries $ \modSum -> do
                 cpBeforeModule plan modSum
                 cached <- lookupValidMemo modSum
                 case cached of
                   Just entry -> do
                     recordValidity modSum True
-                    pure (analyzedFront (gmeAnalyzed entry), Just entry)
+                    pure (CachedObservation modSum entry)
                   Nothing    -> do
                     recordValidity modSum False
                     mf <- compileFront modSum
-                    pure (mf, Nothing)
-              let fs = map fst pairs
+                    pure (FreshObservation mf)
+              facts <- liftIO (mapM observationFacts observations')
               -- Reachable-module rule (written down before implementation, per
               -- spec): a home module is REACHABLE from the target iff it IS the
               -- target, or its DESUGARED Core is transitively referenced — via a
@@ -1179,7 +1213,8 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
               -- going to be thrown away.
               forceValidationOnly <- liftIO (lookupEnv "TIDEPOOL_TEST_FORCE_VALIDATION_ONLY")
               let referencesByMod = Map.fromList
-                    [ (ms_mod_name (mfSummary f), mfReferencedModules f) | f <- fs ]
+                    [ (ms_mod_name (observationSummary observation), moduleFactReferences fact)
+                    | (observation, fact) <- zip observations' facts ]
                   reachableMods0 = reachableModuleClosure targetModName' referencesByMod
                   -- E6 mis-tiering fault injection (detection-power demonstration,
                   -- see 00-spec.md's VERIFY section): forcibly deny a NAMED module
@@ -1189,15 +1224,34 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                   reachableMods = case forceValidationOnly of
                     Just m  -> Set.delete (mkModuleName m) reachableMods0
                     Nothing -> reachableMods0
-              rs <- fmap concat $ forM pairs $ \(f, mCachedResult) ->
-                if ms_mod_name (mfSummary f) `Set.member` reachableMods
-                  then case mCachedResult of
+              let rememberExecutable modSum f simplified prepared moduleFacts =
+                    case mMemoRef of
+                      Just ref -> liftIO (modifyIORef' ref
+                        (Map.insert (ms_mod_name modSum)
+                          (GutsMemoEntry
+                            (MemoValidity
+                              (ms_hs_hash modSum)
+                              (retainedFor modSum)
+                              (directHomeDeps modSum))
+                            moduleFacts
+                            (Just (AnalyzedModule f simplified))
+                            (maybe AnalyzedOnly PreparedBody prepared))))
+                      Nothing -> pure ()
+                  compileReachable modSum f moduleFacts = do
+                    (simplified, r) <- compileBack f
+                    prepared <- prepareSelected f simplified
+                    rememberExecutable modSum f simplified prepared moduleFacts
+                    pure [(r, prepared)]
+              rs <- fmap concat $ forM (zip observations' facts) $ \(observation, moduleFacts) ->
+                let modSum = observationSummary observation
+                in if ms_mod_name modSum `Set.member` reachableMods
+                  then case observation of
                     -- Memo hit AND reachable: the cached RESULT (already
                     -- core2core'd by whatever cycle inserted it) is exactly what
                     -- a fresh 'compileBack' would recompute — reuse it, skipping
                     -- the optimizer pass entirely.
-                    Just entry -> do
-                      let analyzed = gmeAnalyzed entry
+                    CachedObservation _ entry | Just analyzed <- gmeAnalyzed entry -> do
+                      let f = analyzedFront analyzed
                           cachedPrepared = preparedBody (gmePreparation entry)
                       mapM_ rememberPreparedSiblings cachedPrepared
                       prepared <- case (preparation, cachedPrepared) of
@@ -1209,31 +1263,35 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                             Just ref -> liftIO (modifyIORef' ref
                               (Map.adjust (\e -> e
                                 { gmePreparation = maybe AnalyzedOnly PreparedBody freshPrepared })
-                                (ms_mod_name (mfSummary f))))
+                                (ms_mod_name modSum)))
                             Nothing -> pure ()
                           pure freshPrepared
                       pure [(analyzedResult analyzed, prepared)]
-                    Nothing -> do
-                      (simplified, r) <- compileBack f
-                      prepared <- prepareSelected f simplified
-                      case mMemoRef of
-                        Just ref -> liftIO (modifyIORef' ref
-                          (Map.insert (ms_mod_name (mfSummary f))
-                            (GutsMemoEntry
-                              (MemoValidity
-                                (ms_hs_hash (mfSummary f))
-                                (retainedFor (mfSummary f))
-                                (directHomeDeps (mfSummary f)))
-                              (AnalyzedModule f simplified)
-                              (maybe AnalyzedOnly PreparedBody prepared))))
-                        Nothing  -> pure ()
-                      pure [(r, prepared)]
-                  -- Not reachable: never core2core'd this cycle (matches every
-                  -- pre-existing caller byte for byte) and never inserted into
-                  -- the memo — a module a LATER cycle finds reachable must still
-                  -- get a real 'compileBack', never a validation-only stand-in.
-                  else pure []
-              pure (fs, map fst rs, [p | (_, Just p) <- rs], Just reachableMods)
+                    CachedObservation _ _ -> do
+                      memoMiss modSum "validation-only-promoted"
+                      fresh <- compileFront modSum
+                      freshFacts <- liftIO (frontFacts fresh)
+                      compileReachable modSum fresh freshFacts
+                    FreshObservation f -> compileReachable modSum f moduleFacts
+                  -- Not reachable: retain only dependency and type facts. A
+                  -- later cycle that finds the module reachable promotes it by
+                  -- compiling a real executable body; compact validation facts
+                  -- are never used as a stand-in for Core or prepared STG.
+                  else do
+                    case (observation, mMemoRef) of
+                      (FreshObservation _, Just ref) -> liftIO (modifyIORef' ref
+                        (Map.insert (ms_mod_name modSum)
+                          (GutsMemoEntry
+                            (MemoValidity
+                              (ms_hs_hash modSum)
+                              (retainedFor modSum)
+                              (directHomeDeps modSum))
+                            moduleFacts
+                            Nothing
+                            AnalyzedOnly)))
+                      _ -> pure ()
+                    pure []
+              pure (observations', map fst rs, [p | (_, Just p) <- rs], Just reachableMods)
           totalTcMs   <- liftIO (readIORef tcMsRef)
           totalLoweringMs <- liftIO (readIORef loweringMsRef)
           liftIO (emitPhase timing "typecheck" totalTcMs)
@@ -1259,7 +1317,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
             Just reachableMods | timing -> liftIO $ do
               totalDsMs  <- readIORef dsMsRef
               totalC2cMs <- readIORef c2cMsRef
-              let allModNames = [ ms_mod_name (mfSummary f) | f <- fronts ]
+              let allModNames = map (ms_mod_name . observationSummary) observations
                   moduleCount = length allModNames
                   reachableCount = Set.size reachableMods
                   validationOnly = [ moduleNameString m | m <- allModNames, not (m `Set.member` reachableMods) ]
@@ -1300,10 +1358,12 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
           -- Order is summary order, which on the session variant (topologically
           -- sorted over the target's own import closure, so the target is last) is
           -- the dependencies-then-target order it used to build by hand.
+          moduleFacts <- liftIO (mapM observationFacts observations)
           let allBinds  = concatMap mg_binds depGuts ++ mg_binds targetGuts
-              allTyCons = concatMap (mg_tcs . mfDesugared) fronts
+              allTyCons = concatMap moduleFactTyCons moduleFacts
           targetEnvironment <- case [ mfTcGblEnv front
-                               | front <- fronts
+                               | observation <- observations
+                               , Just front <- [observationFront observation]
                                , ms_mod_name (mfSummary front) == targetModName' ] of
             env : _ -> pure env
             [] -> liftIO $ ioError $ userError $
@@ -1324,7 +1384,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                 , prTargetTcGblEnv = targetEnvironment
                 }
           capturedSources <- liftIO (captureDependencySources modGraphRaw)
-          dependencies <- liftIO (dependencyEvidenceFor capturedSources modGraphRaw fronts)
+          dependencies <- liftIO (dependencyEvidenceFor capturedSources modGraphRaw moduleFacts)
           pure (pipelineResult, preparedModules, dependencies)
     case selection of
       PreparedStg -> do
@@ -1403,9 +1463,9 @@ captureDependencySources graph = do
 -- imports have no selected home path; their ordered absent home candidates
 -- remain evidence because creating one later would introduce shadowing.
 dependencyEvidenceFor
-  :: ([DependencySource], Bool) -> ModuleGraph -> [ModuleFront]
+  :: ([DependencySource], Bool) -> ModuleGraph -> [ModuleFacts]
   -> IO DependencyEvidence
-dependencyEvidenceFor (sources, sourcesComplete) graph fronts = do
+dependencyEvidenceFor (sources, sourcesComplete) graph moduleFacts = do
   let graphSummaries = [summary | ModuleNode _ summary <- mgModSummaries' graph]
   selectedPairs <- forM
     graphSummaries $ \summary ->
@@ -1446,12 +1506,10 @@ dependencyEvidenceFor (sources, sourcesComplete) graph fronts = do
       , dependencyResolutionSelected = chosen
       , dependencyResolutionCandidates = nub throughSelected
       }
-  dependentFiles <- fmap concat $ forM fronts $ \front ->
-    readIORef (tcg_dependent_files (mfTcGblEnv front))
   let hasUntrackedPreprocessing = any (\summary ->
         xopt LangExt.Cpp (ms_hspp_opts summary)
           || xopt LangExt.TemplateHaskell (ms_hspp_opts summary)) graphSummaries
-      complete = sourcesComplete && null dependentFiles
+      complete = sourcesComplete && not (any moduleFactHasDependentFiles moduleFacts)
         && not hasUntrackedPreprocessing
         && all (not . null . dependencyResolutionCandidates) absoluteCandidates
       packages = sort
