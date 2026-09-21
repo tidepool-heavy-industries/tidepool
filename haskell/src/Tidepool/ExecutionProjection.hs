@@ -94,6 +94,7 @@ import Tidepool.TypePolicy qualified as TypePolicy
 import Tidepool.PreparedFormatting
   (FormattingAuthority, FormattingSpec(..), FormattingIntrinsic(..), classifyFormatting)
 import Tidepool.PreparedTime (TimeAuthority, TimeSpec(..), classifyTime)
+import Tidepool.PreparedJson (JsonAuthority, JsonSpec(..), classifyJson)
 
 data ProjectionContext = ProjectionContext
   { projectionProfile :: Text
@@ -107,6 +108,7 @@ data ProjectionContext = ProjectionContext
   , projectionAuxiliaryRoots :: [SymbolIdentity]
   , projectionFormattingAuthority :: Maybe FormattingAuthority
   , projectionTimeAuthority :: Maybe TimeAuthority
+  , projectionJsonAuthority :: Maybe JsonAuthority
   -- | Missing authority rejects text's kernel, not unrelated projection.
   , projectionTextUnit :: Maybe TextUnitAuthority
   } deriving stock (Eq, Show)
@@ -144,6 +146,7 @@ data PState = PState
   , homeModules :: Set (Text, Text)
   , formattingAuthority :: Maybe FormattingAuthority
   , timeAuthority :: Maybe TimeAuthority
+  , jsonAuthority :: Maybe JsonAuthority
   , textUnit :: Maybe TextUnitAuthority
   }
 
@@ -183,7 +186,7 @@ resolveTextPackageUnit hscEnv =
 -- | Narrow test seam for GHC literals which cannot be written in source Haskell.
 projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionError Atom
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
-  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty Nothing Nothing Nothing)
+  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty Nothing Nothing Nothing Nothing)
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
@@ -216,6 +219,7 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
              Text.pack (moduleNameString (moduleName (pmModule prepared))))
           | prepared <- modules, pmCoverage prepared == CompleteSourceModule ])
         (projectionFormattingAuthority context) (projectionTimeAuthority context)
+        (projectionJsonAuthority context)
         (projectionTextUnit context)
       -- An executable import's own top-level definition is never walked:
       -- 'homeModules'/'topIdentityMap' above still see the real, unfiltered
@@ -531,9 +535,22 @@ registeredTime context binder = case timeSpec context binder of
   Right (Just _) -> True
   _ -> False
 
+jsonSpec :: ProjectionContext -> Id -> Either ProjectionError (Maybe JsonSpec)
+jsonSpec context binder = case projectionJsonAuthority context of
+  Nothing -> Right Nothing
+  Just authority -> case classifyJson authority binder of
+    Left failure -> Left (UnsupportedPreparedShape (Text.pack (show failure)))
+    Right spec -> Right spec
+
+registeredJson :: ProjectionContext -> Id -> Bool
+registeredJson context binder = case jsonSpec context binder of
+  Right (Just _) -> True
+  _ -> False
+
 registeredReplacement :: ProjectionContext -> Id -> Bool
 registeredReplacement context binder =
   registeredFormatting context binder || registeredTime context binder
+    || registeredJson context binder
     || isJust (deferredFunction binder)
 
 selectPreparedTarget :: ProjectionContext -> [PreparedModule]
@@ -990,12 +1007,15 @@ projectTopPair binder rhs = do
   symbol <- topIdentity binder
   formatting <- formattingSpecFor binder
   time <- timeSpecFor binder
+  json <- jsonSpecFor binder
   let project = case deferredFunction binder of
         Just deferred -> projectDeferredRhs binder deferred rhs
-        Nothing -> case time of
-          Just spec -> projectTimeRhs spec rhs
-          Nothing -> maybe (projectRhs binder rhs)
-            (\spec -> projectFormattingRhs spec rhs) formatting
+        Nothing -> case json of
+          Just spec -> projectJsonRhs spec rhs
+          Nothing -> case time of
+            Just spec -> projectTimeRhs spec rhs
+            Nothing -> maybe (projectRhs binder rhs)
+              (\spec -> projectFormattingRhs spec rhs) formatting
   TopBinding symbol <$> (HeapBinding <$> requireTopValue binder <*> project)
 
 formattingSpecFor :: Id -> P (Maybe FormattingSpec)
@@ -1015,6 +1035,56 @@ timeSpecFor binder = do
     Just owner -> case classifyTime owner binder of
       Left failure -> failShape (Text.pack (show failure))
       Right result -> pure result
+
+jsonSpecFor :: Id -> P (Maybe JsonSpec)
+jsonSpecFor binder = do
+  authority <- gets jsonAuthority
+  case authority of
+    Nothing -> pure Nothing
+    Just owner -> case classifyJson owner binder of
+      Left failure -> failShape (Text.pack (show failure))
+      Right result -> pure result
+
+projectJsonRhs :: JsonSpec -> CgStgRhs -> P HeapRhs
+projectJsonRhs (DecodeJson textDataCon layout left right)
+    (StgRhsClosure _ _ ReEntrant parameters _ resultType) = withScope $ do
+  actual <- concat <$> mapM (argumentRepsForType . varType) parameters
+  result <- repsForType resultType
+  unless (actual == [LiftedRefRep] && result == [LiftedRefRep])
+    (failRepresentation "registered JSON parser has unexpected prepared entry reps")
+  textConstructor <- internConstructor textDataCon
+  layout' <- traverse internConstructor layout
+  left' <- internConstructor left
+  right' <- internConstructor right
+  textFields <- concat <$> mapM (repsForType . scaledThing) (dataConRepArgTys textDataCon)
+  unless (textFields == [UnliftedRefRep, IntRep 64, IntRep 64])
+    (failRepresentation "JSON parser Text constructor must contain byte array, offset, length")
+  parameters' <- mapM bindValue parameters
+  signature <- internSignature (Signature [LiftedRefRep] (Returns [LiftedRefRep]))
+  body <- case parameters' of
+    [input] -> jsonDecodeBody textDataCon textConstructor layout' left' right' input
+    _ -> failShape "registered JSON parser has unexpected prepared arity"
+  pure (Function signature parameters' [] body)
+ where scaledThing (Scaled _ ty) = ty
+projectJsonRhs _ _ = failShape "registered JSON anchor is not a reentrant closure"
+
+jsonDecodeBody :: DataCon -> ConstructorId -> Schema.JsonLayout ConstructorId
+  -> ConstructorId -> ConstructorId -> ValueId -> P Expr
+jsonDecodeBody textDataCon textConstructor layout left right input = do
+  enter <- internSignature (Signature [] (Returns [LiftedRefRep]))
+  parseSignature <- internSignature (Signature
+    [UnliftedRefRep, IntRep 64, IntRep 64] (Returns [LiftedRefRep]))
+  parse <- internSyntheticOperation (Schema.JsonDecodeIdentity layout left right) parseSignature
+  inputCase <- freshValue
+  rawBytes <- freshValue
+  rawOffset <- freshValue
+  rawLength <- freshValue
+  let textFamily = AlgebraicCase (nameSymbol "type"
+        (GHC.tyConName (dataConTyCon textDataCon)))
+      parsed = Operation parse
+        [Ref (Local rawBytes), Ref (Local rawOffset), Ref (Local rawLength)]
+  pure (Case (Enter (Ref (Local input)) enter) inputCase (Returns [LiftedRefRep]) textFamily
+    [Alternative (ConstructorPattern textConstructor) [rawBytes, rawOffset, rawLength] parsed])
 
 -- A registered wrapper is a normal function top. The source body has already
 -- established non-bottoming demand facts in GHC; only its dependencies and

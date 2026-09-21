@@ -82,6 +82,7 @@ main = do
           , projectionAuxiliaryRoots = []
           , projectionFormattingAuthority = Nothing
           , projectionTimeAuthority = Nothing
+          , projectionJsonAuthority = Nothing
           , projectionTextUnit = Nothing
           }
         references = preparedTargetReferences context [caller]
@@ -210,6 +211,7 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
         , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
         , projectionTimeAuthority = Nothing
+        , projectionJsonAuthority = Nothing
         , projectionTextUnit = Nothing
         }
       references = preparedTargetReferences context [prepared]
@@ -312,6 +314,7 @@ assertRecoveredKindRep root = do
         , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
         , projectionTimeAuthority = Nothing
+        , projectionJsonAuthority = Nothing
         , projectionTextUnit = Nothing
         }
   cache <- newFatIfaceCache
@@ -359,6 +362,7 @@ assertPatErrorBody root = do
         , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
         , projectionTimeAuthority = Nothing
+        , projectionJsonAuthority = Nothing
         , projectionTextUnit = Nothing
         }
       patErrors = filter isPatError (preparedTargetReferences context home)
@@ -451,6 +455,7 @@ assertRaiseContracts root = do
         , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
         , projectionTimeAuthority = Nothing
+        , projectionJsonAuthority = Nothing
         , projectionTextUnit = Nothing
         }
   program <- case projectPreparedTarget context (pprModules prepared) of
@@ -541,6 +546,7 @@ assertBottomingApplications root = do
             , projectionAuxiliaryRoots = []
             , projectionFormattingAuthority = Nothing
             , projectionTimeAuthority = Nothing
+            , projectionJsonAuthority = Nothing
             , projectionTextUnit = Nothing
             }
           modules = if occurrence == "bottomingPartial"

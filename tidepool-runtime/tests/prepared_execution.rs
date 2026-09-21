@@ -34,6 +34,24 @@ fn run_prepared_once(
     imports: MachineImports,
     cancel: Arc<AtomicBool>,
 ) -> Result<RunResult, PreparedRuntimeError> {
+    run_prepared_once_with_nursery(
+        artifact,
+        requirements,
+        limits,
+        imports,
+        cancel,
+        RunOptions::default().nursery_bytes,
+    )
+}
+
+fn run_prepared_once_with_nursery(
+    artifact: &[u8],
+    requirements: &ProgramRequirements,
+    limits: DecodeLimits,
+    imports: MachineImports,
+    cancel: Arc<AtomicBool>,
+    nursery_bytes: usize,
+) -> Result<RunResult, PreparedRuntimeError> {
     // A caller may pre-cancel before this function even parses the artifact
     // (e.g. a request already cancelled before compilation started); a
     // trivial entry may never reach a tail-call safepoint that would
@@ -46,13 +64,9 @@ fn run_prepared_once(
     let entry = prepared.entry();
     let linked = link_program(prepared, &imports)?;
     let compiled = CompiledProgram::compile(&linked).map_err(PreparedRuntimeError::Compile)?;
-    let (mut machine, program) = PreparedMachine::new(
-        compiled,
-        PreparedMachineOptions {
-            nursery_bytes: RunOptions::default().nursery_bytes,
-        },
-    )
-    .map_err(PreparedRuntimeError::Run)?;
+    let (mut machine, program) =
+        PreparedMachine::new(compiled, PreparedMachineOptions { nursery_bytes })
+            .map_err(PreparedRuntimeError::Run)?;
     let options = PreparedCallOptions {
         observation_budget: RunOptions::default().observation_budget,
         collect_before_observation: true,
@@ -77,6 +91,48 @@ const FREER_RESUME_ARTIFACT: &[u8] =
 /// header and `FreerResume.md`). Never hand-derived.
 const FREER_RESUME_EXPECTATIONS: &str =
     include_str!("../../haskell/test-prepared-stg/FreerResumeExpectations.json");
+
+#[test]
+fn native_json_parse_preserves_duplicate_policy_and_typed_failure() {
+    use tidepool_extract_cmd::{resolve_bin, ExtractCmd, ResolvedExtractBin};
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let source = root.join("haskell/test-prepared-stg/JsonIntrinsic.hs");
+    let output = tempfile::tempdir().unwrap();
+    let mut command = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(
+        resolve_bin().expect("resolve extractor").path,
+    ));
+    command
+        .input(&source)
+        .targets(["result"])
+        .include(root.join("haskell/lib"))
+        .output_dir(output.path());
+    let extracted = command
+        .bind()
+        .and_then(|endpoint| endpoint.execute(&command))
+        .expect("extract native JSON fixture");
+    assert!(
+        extracted.output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&extracted.output.stderr)
+    );
+    let bytes = std::fs::read(output.path().join("result.prepared.cbor"))
+        .expect("extractor wrote JSON fixture");
+    let requirements = tidepool_toolchain::prepared_artifact::production_requirements()
+        .expect("artifact requirements");
+    let result = run_prepared_once_with_nursery(
+        &bytes,
+        &requirements,
+        DecodeLimits::default(),
+        MachineImports::default(),
+        Arc::new(AtomicBool::new(false)),
+        4096,
+    )
+    .expect("native JSON fixture runs");
+    assert_eq!(observed_int(&result.values[0]), 1);
+}
 
 #[test]
 fn caller_result_matches_ghc_for_boxed_unboxed_and_join_forwarding() {

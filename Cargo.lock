@@ -3682,6 +3682,8 @@ dependencies = [
  "env_logger",
  "libc",
  "recursion",
+ "serde",
+ "serde_json",
  "stacker",
  "thiserror",
  "tidepool-bignum",

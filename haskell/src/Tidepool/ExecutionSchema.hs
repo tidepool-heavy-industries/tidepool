@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveTraversable #-}
 
 -- | The prepared-STG execution schema. GHC values are projected into these
 -- finite semantic types before bytes cross into Rust; this is not an
@@ -11,7 +12,7 @@ module Tidepool.ExecutionSchema
   , UpdatePolicy(..), HeapBinding(..), HeapRhs(..), JoinBinding(..)
   , AlternativePattern(..), Alternative(..), CaseKind(..), Expr(..), FieldLayout(..)
   , CheckedLayout(..), ConstructorDecl(..), GlobalDecl(..), OperationDecl(..)
-  , OperationIdentity(..), WiredInErrorKind(..), ForeignConvention(..)
+  , OperationIdentity(..), JsonLayout(..), WiredInErrorKind(..), ForeignConvention(..)
   , TopBinding(..), WireProgram(..), schemaVersion, executionAbiVersion
   , TypeNodeId(..), CtorRow(..), TypeNode(..), SiteDelivery(..), SiteRow(..)
   ) where
@@ -22,7 +23,7 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 
 schemaVersion, executionAbiVersion :: Word64
-schemaVersion = 11
+schemaVersion = 12
 executionAbiVersion = 5
 
 newtype ValueId = ValueId Word32 deriving stock (Eq, Ord, Show, Generic)
@@ -88,9 +89,18 @@ data GlobalDecl = GlobalDecl
 -- Catalogued missing capabilities have their own identity; other unresolved
 -- foreign calls remain projection errors, never primop names.
 data ForeignConvention = CCall deriving stock (Eq, Ord, Show, Generic)
+data JsonLayout a = JsonLayout
+  { jsonObject :: a, jsonArray :: a, jsonString :: a, jsonNumber :: a
+  , jsonBool :: a, jsonNull :: a, jsonMapBin :: a, jsonMapTip :: a
+  , jsonTrue :: a, jsonFalse :: a, jsonCons :: a, jsonNil :: a
+  , jsonScientific :: a, jsonIntegerSmall :: a, jsonIntegerPositive :: a
+  , jsonIntegerNegative :: a, jsonText :: a, jsonInt :: a
+  } deriving stock (Eq, Ord, Show, Functor, Foldable, Traversable, Generic)
 data OperationIdentity
   = PrimOpIdentity Text
   | IntrinsicIdentity Text ForeignConvention
+  | JsonDecodeIdentity (JsonLayout ConstructorId) ConstructorId ConstructorId
+  | JsonEncodeIdentity (JsonLayout ConstructorId)
   | CapabilityIdentity Text
   | WiredInErrorIdentity WiredInErrorKind
   deriving stock (Eq, Ord, Show, Generic)

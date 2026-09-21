@@ -1979,9 +1979,136 @@ impl<'a> Validator<'a> {
         match identity {
             super::OperationIdentity::PrimOp(name) => self.check_text(name),
             super::OperationIdentity::Intrinsic { symbol, .. } => self.check_text(symbol),
+            super::OperationIdentity::JsonDecode {
+                layout,
+                left,
+                right,
+            } => {
+                let constructors = [
+                    layout.object,
+                    layout.array,
+                    layout.string,
+                    layout.number,
+                    layout.bool_,
+                    layout.null,
+                    layout.map_bin,
+                    layout.map_tip,
+                    layout.true_,
+                    layout.false_,
+                    layout.cons,
+                    layout.nil,
+                    layout.scientific,
+                    layout.integer_small,
+                    layout.integer_positive,
+                    layout.integer_negative,
+                    layout.text,
+                    layout.int,
+                    *left,
+                    *right,
+                ];
+                if constructors.iter().copied().collect::<BTreeSet<_>>().len() != constructors.len()
+                {
+                    return Err(ParseError::Malformed(
+                        "duplicate JSON constructor role".into(),
+                    ));
+                }
+                for constructor in constructors {
+                    if constructor.0 as usize >= self.wire.constructors.len() {
+                        return Err(ParseError::Malformed(
+                            "JSON constructor is out of range".into(),
+                        ));
+                    }
+                }
+                self.check_json_layout(layout)?;
+                self.check_json_role(*left, "GHC.Internal.Data.Either", "Left")?;
+                self.check_json_role(*right, "GHC.Internal.Data.Either", "Right")?;
+                Ok(())
+            }
+            super::OperationIdentity::JsonEncode { layout } => {
+                let constructors = [
+                    layout.object,
+                    layout.array,
+                    layout.string,
+                    layout.number,
+                    layout.bool_,
+                    layout.null,
+                    layout.map_bin,
+                    layout.map_tip,
+                    layout.true_,
+                    layout.false_,
+                    layout.cons,
+                    layout.nil,
+                    layout.scientific,
+                    layout.integer_small,
+                    layout.integer_positive,
+                    layout.integer_negative,
+                    layout.text,
+                    layout.int,
+                ];
+                if constructors.iter().copied().collect::<BTreeSet<_>>().len() != constructors.len()
+                {
+                    return Err(ParseError::Malformed(
+                        "duplicate JSON constructor role".into(),
+                    ));
+                }
+                for constructor in constructors {
+                    if constructor.0 as usize >= self.wire.constructors.len() {
+                        return Err(ParseError::Malformed(
+                            "JSON constructor is out of range".into(),
+                        ));
+                    }
+                }
+                self.check_json_layout(layout)?;
+                Ok(())
+            }
             super::OperationIdentity::Capability { name } => self.check_text(name),
             super::OperationIdentity::WiredInError { .. } => Ok(()),
         }
+    }
+
+    fn check_json_layout(&self, layout: &super::JsonLayout) -> Result<(), ParseError> {
+        for (id, module, occurrence) in [
+            (layout.object, "Tidepool.Aeson.Value", "Object"),
+            (layout.array, "Tidepool.Aeson.Value", "Array"),
+            (layout.string, "Tidepool.Aeson.Value", "String"),
+            (layout.number, "Tidepool.Aeson.Value", "Number"),
+            (layout.bool_, "Tidepool.Aeson.Value", "Bool"),
+            (layout.null, "Tidepool.Aeson.Value", "Null"),
+            (layout.map_bin, "Data.Map.Internal", "Bin"),
+            (layout.map_tip, "Data.Map.Internal", "Tip"),
+            (layout.true_, "GHC.Types", "True"),
+            (layout.false_, "GHC.Types", "False"),
+            (layout.cons, "GHC.Types", ":"),
+            (layout.nil, "GHC.Types", "[]"),
+            (layout.scientific, "Tidepool.Aeson.Scientific", "Scientific"),
+            (layout.integer_small, "GHC.Num.Integer", "IS"),
+            (layout.integer_positive, "GHC.Num.Integer", "IP"),
+            (layout.integer_negative, "GHC.Num.Integer", "IN"),
+            (layout.text, "Data.Text.Internal", "Text"),
+            (layout.int, "GHC.Types", "I#"),
+        ] {
+            self.check_json_role(id, module, occurrence)?;
+        }
+        Ok(())
+    }
+
+    fn check_json_role(
+        &self,
+        id: ConstructorId,
+        module: &str,
+        occurrence: &str,
+    ) -> Result<(), ParseError> {
+        let declaration = self
+            .wire
+            .constructors
+            .get(id.0 as usize)
+            .ok_or_else(|| ParseError::Malformed("JSON constructor is out of range".into()))?;
+        if declaration.identity.module != module || declaration.identity.occurrence != occurrence {
+            return Err(ParseError::Malformed(
+                "JSON constructor role has the wrong identity".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn check_text(&mut self, text: &str) -> Result<(), ParseError> {
@@ -2142,6 +2269,77 @@ mod tests {
         }
     }
 
+    fn json_layout(start: u32) -> super::super::JsonLayout {
+        let mut next = start;
+        let mut id = || {
+            let value = ConstructorId(next);
+            next += 1;
+            value
+        };
+        super::super::JsonLayout {
+            object: id(),
+            array: id(),
+            string: id(),
+            number: id(),
+            bool_: id(),
+            null: id(),
+            map_bin: id(),
+            map_tip: id(),
+            true_: id(),
+            false_: id(),
+            cons: id(),
+            nil: id(),
+            scientific: id(),
+            integer_small: id(),
+            integer_positive: id(),
+            integer_negative: id(),
+            text: id(),
+            int: id(),
+        }
+    }
+
+    #[test]
+    fn json_codec_layout_rejects_duplicate_and_out_of_range_roles() {
+        let program = valid_program();
+        let mut validator = Validator::new(&program, DecodeLimits::default());
+        let unique_but_absent = super::super::OperationIdentity::JsonEncode {
+            layout: json_layout(0),
+        };
+        assert!(matches!(
+            validator.check_operation_identity(&unique_but_absent),
+            Err(ParseError::Malformed(message)) if message.contains("out of range")
+        ));
+
+        let duplicate = super::super::OperationIdentity::JsonDecode {
+            layout: super::super::JsonLayout {
+                object: ConstructorId(0),
+                array: ConstructorId(0),
+                string: ConstructorId(0),
+                number: ConstructorId(0),
+                bool_: ConstructorId(0),
+                null: ConstructorId(0),
+                map_bin: ConstructorId(0),
+                map_tip: ConstructorId(0),
+                true_: ConstructorId(0),
+                false_: ConstructorId(0),
+                cons: ConstructorId(0),
+                nil: ConstructorId(0),
+                scientific: ConstructorId(0),
+                integer_small: ConstructorId(0),
+                integer_positive: ConstructorId(0),
+                integer_negative: ConstructorId(0),
+                text: ConstructorId(0),
+                int: ConstructorId(0),
+            },
+            left: ConstructorId(0),
+            right: ConstructorId(0),
+        };
+        assert!(matches!(
+            validator.check_operation_identity(&duplicate),
+            Err(ParseError::Malformed(message)) if message.contains("duplicate")
+        ));
+    }
+
     fn replace_root(program: &mut WireProgram, frame: ExprFrame<usize>) {
         program.expressions.nodes = vec![frame];
     }
@@ -2191,6 +2389,55 @@ mod tests {
                 root_mask: vec![],
             },
         }
+    }
+
+    #[test]
+    fn json_codec_layout_rejects_same_shape_wrong_identity() {
+        let roles = [
+            ("Tidepool.Aeson.Value", "Object"),
+            ("Tidepool.Aeson.Value", "Array"),
+            ("Tidepool.Aeson.Value", "String"),
+            ("Tidepool.Aeson.Value", "Number"),
+            ("Tidepool.Aeson.Value", "Bool"),
+            ("Tidepool.Aeson.Value", "Null"),
+            ("Data.Map.Internal", "Bin"),
+            ("Data.Map.Internal", "Tip"),
+            ("GHC.Types", "True"),
+            ("GHC.Types", "False"),
+            ("GHC.Types", ":"),
+            ("GHC.Types", "[]"),
+            ("Tidepool.Aeson.Scientific", "Scientific"),
+            ("GHC.Num.Integer", "IS"),
+            ("GHC.Num.Integer", "IP"),
+            ("GHC.Num.Integer", "IN"),
+            ("Data.Text.Internal", "Text"),
+            ("GHC.Types", "I#"),
+            ("GHC.Internal.Data.Either", "Left"),
+            ("GHC.Internal.Data.Either", "Right"),
+        ];
+        let mut program = valid_program();
+        program.constructors = roles
+            .iter()
+            .enumerate()
+            .map(|(index, (module, occurrence))| {
+                let mut declaration = empty_constructor(occurrence, 1, 1);
+                declaration.identity.module = (*module).into();
+                declaration.host_id = crate::DataConId(index as u64);
+                declaration
+            })
+            .collect();
+        // Keep the physical shape unchanged while changing the declared owner.
+        program.constructors[1].identity.module = "Impostor.Value".into();
+        let identity = super::super::OperationIdentity::JsonDecode {
+            layout: json_layout(0),
+            left: ConstructorId(18),
+            right: ConstructorId(19),
+        };
+        let mut validator = Validator::new(&program, DecodeLimits::default());
+        assert!(matches!(
+            validator.check_operation_identity(&identity),
+            Err(ParseError::Malformed(message)) if message.contains("wrong identity")
+        ));
     }
 
     #[test]

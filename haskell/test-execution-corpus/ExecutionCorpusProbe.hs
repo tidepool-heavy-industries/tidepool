@@ -411,6 +411,7 @@ projectionContext formattingAuthority timeAuthority textAuthority identity =
     , projectionAuxiliaryRoots = []
     , projectionFormattingAuthority = formattingAuthority
     , projectionTimeAuthority = timeAuthority
+    , projectionJsonAuthority = Nothing
     , projectionTextUnit = textAuthority
     }
 

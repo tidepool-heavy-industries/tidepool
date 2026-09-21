@@ -132,8 +132,19 @@ encodeOperation operation = array
       IntrinsicIdentity symbol CCall -> tagged 1 [encodeString symbol, tag 0]
       CapabilityIdentity name -> tagged 2 [encodeString name]
       WiredInErrorIdentity kind -> tagged 3 [encodeWord (fromIntegral (fromEnum kind))]
+      JsonDecodeIdentity layout left right -> tagged 4
+        [encodeJsonLayout layout, encodeConstructorId left, encodeConstructorId right]
+      JsonEncodeIdentity layout -> tagged 5 [encodeJsonLayout layout]
   , encodeSignatureId (operationSignature operation)
   ]
+
+encodeJsonLayout :: JsonLayout ConstructorId -> Encoding
+encodeJsonLayout layout = array (map encodeConstructorId
+  [ jsonObject layout, jsonArray layout, jsonString layout, jsonNumber layout
+  , jsonBool layout, jsonNull layout, jsonMapBin layout, jsonMapTip layout
+  , jsonTrue layout, jsonFalse layout, jsonCons layout, jsonNil layout
+  , jsonScientific layout, jsonIntegerSmall layout, jsonIntegerPositive layout
+  , jsonIntegerNegative layout, jsonText layout, jsonInt layout ])
 
 encodeTypeNode :: TypeNode -> Encoding
 encodeTypeNode node = case node of

@@ -97,6 +97,7 @@ mod forcing;
 #[cfg(test)]
 mod foreign_apply_tests;
 mod formatting;
+mod json;
 mod plan;
 mod primitives;
 #[cfg(test)]
@@ -597,6 +598,10 @@ impl CompiledProgram {
                 (
                     time::PARSE_ISO8601_HOST,
                     time::prepared_parse_iso8601 as *const u8,
+                ),
+                (
+                    json::PARSE_JSON_HOST,
+                    json::prepared_parse_json as *const u8,
                 ),
                 (
                     "prepared_no_success_returned",

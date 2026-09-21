@@ -581,7 +581,15 @@ impl Decoder {
                 };
                 super::OperationIdentity::WiredInError { kind }
             }
-            (0..=3, _) => {
+            (4, 4) => super::OperationIdentity::JsonDecode {
+                layout: self.json_layout(&identity[1])?,
+                left: ConstructorId(u32_value(&identity[2], "JSON Left constructor")?),
+                right: ConstructorId(u32_value(&identity[3], "JSON Right constructor")?),
+            },
+            (5, 2) => super::OperationIdentity::JsonEncode {
+                layout: self.json_layout(&identity[1])?,
+            },
+            (0..=5, _) => {
                 return Err(ParseError::Malformed("invalid operation identity".into()));
             }
             (tag, _) => return Err(ParseError::InvalidTag(tag)),
@@ -589,6 +597,31 @@ impl Decoder {
         Ok(OperationDecl {
             identity,
             signature: SignatureId(u32_value(&fields[1], "operation signature ID")?),
+        })
+    }
+
+    fn json_layout(&mut self, value: &Value) -> Result<super::JsonLayout, ParseError> {
+        let fields = array(value, 18, "JSON layout")?;
+        let id = |index, label| u32_value(&fields[index], label).map(ConstructorId);
+        Ok(super::JsonLayout {
+            object: id(0, "JSON Object constructor")?,
+            array: id(1, "JSON Array constructor")?,
+            string: id(2, "JSON String constructor")?,
+            number: id(3, "JSON Number constructor")?,
+            bool_: id(4, "JSON Bool constructor")?,
+            null: id(5, "JSON Null constructor")?,
+            map_bin: id(6, "JSON Map Bin constructor")?,
+            map_tip: id(7, "JSON Map Tip constructor")?,
+            true_: id(8, "JSON True constructor")?,
+            false_: id(9, "JSON False constructor")?,
+            cons: id(10, "JSON cons constructor")?,
+            nil: id(11, "JSON nil constructor")?,
+            scientific: id(12, "JSON Scientific constructor")?,
+            integer_small: id(13, "JSON IS constructor")?,
+            integer_positive: id(14, "JSON IP constructor")?,
+            integer_negative: id(15, "JSON IN constructor")?,
+            text: id(16, "JSON Text constructor")?,
+            int: id(17, "JSON Int constructor")?,
         })
     }
 
@@ -1109,5 +1142,20 @@ mod tests {
         assert!(decoder
             .atom(&Value::Array(vec![number(3), number(1)]))
             .is_err());
+    }
+
+    #[test]
+    fn json_layout_codec_requires_all_named_roles() {
+        let mut decoder = Decoder::new(DecodeLimits::default());
+        let complete = Value::Array((0_u8..18).map(number).collect());
+        let layout = decoder.json_layout(&complete).unwrap();
+        assert_eq!(layout.object, ConstructorId(0));
+        assert_eq!(layout.int, ConstructorId(17));
+
+        let short = Value::Array((0_u8..17).map(number).collect());
+        assert!(matches!(
+            decoder.json_layout(&short),
+            Err(ParseError::Malformed(_))
+        ));
     }
 }

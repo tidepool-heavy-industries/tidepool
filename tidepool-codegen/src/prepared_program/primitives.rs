@@ -734,6 +734,9 @@ pub(super) fn recognize_operation(
     if super::time::recognize(&declaration.identity, signature) {
         return Some(PrimitiveOperation::ParseIso8601);
     }
+    if let Some((layout, left, right)) = super::json::recognize(&declaration.identity, signature) {
+        return Some(PrimitiveOperation::ParseJson(layout, left, right));
+    }
     if let Some(operation) = super::wide_words::recognize(&declaration.identity, signature) {
         return Some(PrimitiveOperation::WideWord(operation));
     }
@@ -861,6 +864,11 @@ pub(super) enum PrimitiveOperation {
     TextSearch(super::text_search::TextSearchOperation),
     Formatting(super::formatting::FormattingOperation),
     ParseIso8601,
+    ParseJson(
+        tidepool_repr::execution_schema::JsonLayout,
+        tidepool_repr::execution_schema::ConstructorId,
+        tidepool_repr::execution_schema::ConstructorId,
+    ),
     DecodeDoubleInt64,
     EncodeDouble {
         signed: bool,
@@ -1147,6 +1155,17 @@ pub(super) fn emit_operation(
             super::time::emit_parse_iso8601(builder, pipeline, vmctx, gc, bytes_array, arguments)
                 .map(Some)
         }
+        PrimitiveOperation::ParseJson(layout, left, right) => super::json::emit_parse_json(
+            builder,
+            pipeline,
+            vmctx,
+            bytes_array,
+            layout,
+            left,
+            right,
+            arguments,
+        )
+        .map(Some),
         PrimitiveOperation::Raise => {
             super::no_success::emit_terminal(
                 builder,

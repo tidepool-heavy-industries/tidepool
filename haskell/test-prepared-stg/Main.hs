@@ -106,6 +106,7 @@ projectEntryWithAux result modul entry auxEntries retained =
           | aux <- auxEntries ]
       , Projection.projectionFormattingAuthority = Nothing
       , Projection.projectionTimeAuthority = Nothing
+      , projectionJsonAuthority = Nothing
       , Projection.projectionTextUnit = Nothing
       }
 

@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u64 = 11;
+pub const SCHEMA_VERSION: u64 = 12;
 pub const EXECUTION_ABI_VERSION: u64 = 5;
 
 macro_rules! dense_id {
@@ -679,6 +679,28 @@ pub struct OperationDecl {
     pub signature: SignatureId,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct JsonLayout {
+    pub object: ConstructorId,
+    pub array: ConstructorId,
+    pub string: ConstructorId,
+    pub number: ConstructorId,
+    pub bool_: ConstructorId,
+    pub null: ConstructorId,
+    pub map_bin: ConstructorId,
+    pub map_tip: ConstructorId,
+    pub true_: ConstructorId,
+    pub false_: ConstructorId,
+    pub cons: ConstructorId,
+    pub nil: ConstructorId,
+    pub scientific: ConstructorId,
+    pub integer_small: ConstructorId,
+    pub integer_positive: ConstructorId,
+    pub integer_negative: ConstructorId,
+    pub text: ConstructorId,
+    pub int: ConstructorId,
+}
+
 /// Primops and admitted foreign capabilities occupy distinct identity spaces.
 /// The declaration signature completes the operation's identity; the same
 /// primop may occur at more than one instantiated signature.
@@ -688,6 +710,14 @@ pub enum OperationIdentity {
     Intrinsic {
         symbol: String,
         convention: ForeignConvention,
+    },
+    JsonDecode {
+        layout: JsonLayout,
+        left: ConstructorId,
+        right: ConstructorId,
+    },
+    JsonEncode {
+        layout: JsonLayout,
     },
     /// An explicitly catalogued missing runtime capability, never an arbitrary
     /// unresolved import. Keeps GHC's Returns signature; execution fails without

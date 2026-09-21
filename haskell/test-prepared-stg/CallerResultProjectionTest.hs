@@ -62,6 +62,7 @@ verifyCallerResultProjection = do
       , projectionAuxiliaryRoots = []
       , projectionFormattingAuthority = Nothing
       , projectionTimeAuthority = Nothing
+      , projectionJsonAuthority = Nothing
       , projectionTextUnit = Nothing
       }
     assert condition message = unless condition (fail message)
