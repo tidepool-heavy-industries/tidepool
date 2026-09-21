@@ -279,8 +279,8 @@ impl KvHandler {
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use tidepool_bridge::ToHaskell;
     use tidepool_bridge::HaskellValue;
+    use tidepool_bridge::ToHaskell;
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
     use tidepool_repr::DataConTable;
 

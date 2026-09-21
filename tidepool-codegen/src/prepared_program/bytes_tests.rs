@@ -680,9 +680,9 @@ fn literal_addresses_observe_through_one_shot_and_other_installed_programs() {
         .unwrap();
     assert!(matches!(
         length.values.as_slice(),
-        [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(
-            2
-        ))]
+        [tidepool_bridge::HaskellValue::Lit(
+            tidepool_repr::Literal::LitInt(2)
+        )]
     ));
 }
 

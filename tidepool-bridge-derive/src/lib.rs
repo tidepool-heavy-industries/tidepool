@@ -63,7 +63,7 @@ pub fn derive_from_haskell(input: TokenStream) -> TokenStream {
 
 /// Derive `ToHaskell` to convert this Rust type into a Haskell value for the JIT.
 ///
-/// The macro builds a `Value::Con` with the appropriate constructor tag and fields.
+/// The macro builds a `HaskellValue::Con` with the appropriate constructor tag and fields.
 /// Use `#[haskell(name = "HaskellCtorName")]` on variants when names differ.
 #[proc_macro_derive(ToHaskell, attributes(haskell))]
 pub fn derive_to_haskell(input: TokenStream) -> TokenStream {

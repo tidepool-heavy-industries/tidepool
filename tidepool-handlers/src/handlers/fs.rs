@@ -953,7 +953,8 @@ mod tests {
             FsReadReq::FsGrep("x".to_string(), String::new()),
         ] {
             let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-            let decoded: Result<HaskellValue, FsError> = FromHaskell::from_value(&res, &table).unwrap();
+            let decoded: Result<HaskellValue, FsError> =
+                FromHaskell::from_value(&res, &table).unwrap();
             match decoded {
                 Err(FsError::FsSandbox(d)) => assert!(
                     d.contains("matches EVERYTHING"),

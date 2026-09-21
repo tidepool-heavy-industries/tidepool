@@ -1036,28 +1036,30 @@ fn cleanup_plan_value(
     let actors = plan
         .actors
         .iter()
-        .map(|actor| -> Result<HaskellValue, ResidentActorWorkbenchError> {
-            let state = actor_context_constructor(
-                table,
-                if actor.terminal {
-                    "CleanupActorTerminal"
-                } else {
-                    "CleanupActorRunning"
-                },
-                Vec::new(),
-            )?;
-            Ok(actor_context_constructor(
-                table,
-                "CleanupActorPlan",
-                vec![
-                    actor_int(actor.actor.id.0)?.to_value(table)?,
-                    actor_int(actor.actor.incarnation.0)?.to_value(table)?,
-                    actor.label.clone().to_value(table)?,
-                    state,
-                    actor_int(actor.revision)?.to_value(table)?,
-                ],
-            )?)
-        })
+        .map(
+            |actor| -> Result<HaskellValue, ResidentActorWorkbenchError> {
+                let state = actor_context_constructor(
+                    table,
+                    if actor.terminal {
+                        "CleanupActorTerminal"
+                    } else {
+                        "CleanupActorRunning"
+                    },
+                    Vec::new(),
+                )?;
+                Ok(actor_context_constructor(
+                    table,
+                    "CleanupActorPlan",
+                    vec![
+                        actor_int(actor.actor.id.0)?.to_value(table)?,
+                        actor_int(actor.actor.incarnation.0)?.to_value(table)?,
+                        actor.label.clone().to_value(table)?,
+                        state,
+                        actor_int(actor.revision)?.to_value(table)?,
+                    ],
+                )?)
+            },
+        )
         .collect::<Result<Vec<_>, _>>()?
         .to_value(table)?;
     let responses = plan
@@ -1479,7 +1481,10 @@ enum ResidentRequest {
 }
 
 impl ResidentRequest {
-    fn decode(request: &HaskellValue, table: &DataConTable) -> Result<Self, ResidentActorWorkbenchError> {
+    fn decode(
+        request: &HaskellValue,
+        table: &DataConTable,
+    ) -> Result<Self, ResidentActorWorkbenchError> {
         tracing::trace!(
             constructor = %request_constructor(request, table),
             "decoding resident request"
@@ -5691,7 +5696,10 @@ where
                             tidepool_bridge::get_resilient(table, "Just", 1).ok_or_else(|| {
                                 tidepool_bridge::BridgeError::UnknownDataConName("Just".into())
                             })?;
-                        HaskellValue::Con(just, vec![crate::actor_terminal_value(&terminal, table)?])
+                        HaskellValue::Con(
+                            just,
+                            vec![crate::actor_terminal_value(&terminal, table)?],
+                        )
                     }
                     None => {
                         let nothing = tidepool_bridge::get_resilient(table, "Nothing", 0)

@@ -439,7 +439,7 @@ impl Drop for StaticLookupMetrics {
         if self.enabled {
             use std::sync::atomic::Ordering::Relaxed;
             eprintln!(
-                "tidepool-static-lookup owner={} calls={} probes={} hits={} max_regions={}",
+                "tidepool-static-lookup-lifetime owner={} lifetime_lookup_calls={} lifetime_region_probes={} lifetime_static_hits={} lifetime_max_regions={}",
                 self.owner,
                 self.calls.load(Relaxed),
                 self.probes.load(Relaxed),

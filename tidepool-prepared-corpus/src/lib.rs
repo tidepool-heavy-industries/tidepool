@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{atomic::AtomicBool, Arc};
 use tidepool_bridge::shapes::unbox_char;
-use tidepool_bridge::{FromHaskell, Value};
+use tidepool_bridge::{FromHaskell, HaskellValue};
 use tidepool_codegen::prepared_program::{admit_prepared, CompiledProgram, RunOptions};
 use tidepool_repr::execution_schema::{
     link_program, parse_program, DecodeLimits, MachineImports, ProgramRequirements,
@@ -589,7 +589,7 @@ impl ProgramRecord {
 /// Missing expectations are separate from success; no timeout or admission
 /// rejection satisfies an error oracle.
 pub fn compare_values(
-    values: &[Value],
+    values: &[HaskellValue],
     expected: &Expectation,
     constructors: &DataConTable,
 ) -> Result<(), String> {
@@ -613,8 +613,8 @@ pub fn compare_values(
     }
 
     enum Task<'a> {
-        Compare(&'a Value, &'a Expectation),
-        List(&'a Value, &'a [Expectation]),
+        Compare(&'a HaskellValue, &'a Expectation),
+        List(&'a HaskellValue, &'a [Expectation]),
     }
 
     let mut work = vec![Task::Compare(&values[0], expected)];
@@ -742,7 +742,9 @@ pub fn compare_values(
                 let mut observed_elements = Vec::with_capacity(expected_elements.len());
                 loop {
                     match cursor {
-                        Value::Con(id, fields) if constructors.name_of(*id) == Some("[]") => {
+                        HaskellValue::Con(id, fields)
+                            if constructors.name_of(*id) == Some("[]") =>
+                        {
                             if !fields.is_empty() {
                                 return Err(format!(
                                     "malformed [] constructor with {} fields",
@@ -751,7 +753,7 @@ pub fn compare_values(
                             }
                             break;
                         }
-                        Value::Con(id, fields) if constructors.name_of(*id) == Some(":") => {
+                        HaskellValue::Con(id, fields) if constructors.name_of(*id) == Some(":") => {
                             if fields.len() != 2 {
                                 return Err(format!(
                                     "malformed : constructor with {} fields",
@@ -785,18 +787,20 @@ pub fn compare_values(
     Ok(())
 }
 
-fn canonical_char(value: &Value, constructors: &DataConTable) -> Option<char> {
+fn canonical_char(value: &HaskellValue, constructors: &DataConTable) -> Option<char> {
     unbox_char(value, constructors)
 }
 
 fn constructor<'a>(
-    value: &'a Value,
+    value: &'a HaskellValue,
     expected_name: &str,
     constructors: &DataConTable,
-) -> Result<&'a [Value], String> {
+) -> Result<&'a [HaskellValue], String> {
     match value {
-        Value::Con(id, fields) if constructors.name_of(*id) == Some(expected_name) => Ok(fields),
-        Value::Con(id, _) => Err(format!(
+        HaskellValue::Con(id, fields) if constructors.name_of(*id) == Some(expected_name) => {
+            Ok(fields)
+        }
+        HaskellValue::Con(id, _) => Err(format!(
             "expected constructor {expected_name}, received {}",
             constructors.name_of(*id).unwrap_or("unknown constructor")
         )),
@@ -848,10 +852,10 @@ mod tests {
         table
     }
 
-    fn list(values: Vec<Value>) -> Value {
-        let mut result = Value::Con(DataConId(1), vec![]);
+    fn list(values: Vec<HaskellValue>) -> HaskellValue {
+        let mut result = HaskellValue::Con(DataConId(1), vec![]);
         for value in values.into_iter().rev() {
-            result = Value::Con(DataConId(2), vec![value, result]);
+            result = HaskellValue::Con(DataConId(2), vec![value, result]);
         }
         result
     }
@@ -950,13 +954,13 @@ mod tests {
         let table = DataConTable::default();
         assert!(compare_values(&[], &Expectation::Int(7), &table).is_err());
         assert!(compare_values(
-            &[Value::Lit(tidepool_repr::Literal::LitInt(7))],
+            &[HaskellValue::Lit(tidepool_repr::Literal::LitInt(7))],
             &Expectation::Int(7),
             &table
         )
         .is_ok());
         assert!(compare_values(
-            &[Value::Lit(tidepool_repr::Literal::LitInt(8))],
+            &[HaskellValue::Lit(tidepool_repr::Literal::LitInt(8))],
             &Expectation::Int(7),
             &table
         )
@@ -966,15 +970,15 @@ mod tests {
     #[test]
     fn compares_nested_list_tuple_maybe_and_either_by_constructor_name() {
         let table = constructor_table();
-        let value = Value::Con(
+        let value = HaskellValue::Con(
             DataConId(4),
-            vec![Value::Con(
+            vec![HaskellValue::Con(
                 DataConId(7),
                 vec![
-                    list(vec![Value::Lit(tidepool_repr::Literal::LitInt(7))]),
-                    Value::Con(
+                    list(vec![HaskellValue::Lit(tidepool_repr::Literal::LitInt(7))]),
+                    HaskellValue::Con(
                         DataConId(6),
-                        vec![Value::Lit(tidepool_repr::Literal::LitInt(9))],
+                        vec![HaskellValue::Lit(tidepool_repr::Literal::LitInt(9))],
                     ),
                 ],
             )],
@@ -989,9 +993,9 @@ mod tests {
     #[test]
     fn rejects_malformed_shape_and_wrong_constructor_without_using_tag_identity() {
         let table = constructor_table();
-        let malformed = Value::Con(
+        let malformed = HaskellValue::Con(
             DataConId(2),
-            vec![Value::Lit(tidepool_repr::Literal::LitInt(1))],
+            vec![HaskellValue::Lit(tidepool_repr::Literal::LitInt(1))],
         );
         assert!(compare_values(
             &[malformed],
@@ -1000,7 +1004,7 @@ mod tests {
         )
         .is_err());
 
-        let wrong_constructor = Value::Con(DataConId(8), vec![]);
+        let wrong_constructor = HaskellValue::Con(DataConId(8), vec![]);
         assert!(compare_values(&[wrong_constructor], &Expectation::Maybe(None), &table).is_err());
     }
 
@@ -1008,67 +1012,79 @@ mod tests {
     fn canonical_word_char_and_float_tolerance_are_supported() {
         let table = constructor_table();
         assert!(compare_values(
-            &[Value::Lit(tidepool_repr::Literal::LitWord('A' as u64))],
+            &[HaskellValue::Lit(tidepool_repr::Literal::LitWord(
+                'A' as u64
+            ))],
             &Expectation::Char('A'),
             &table
         )
         .is_ok());
         assert!(compare_values(
-            &[Value::Lit(tidepool_repr::Literal::LitWord(0x1_00000061))],
+            &[HaskellValue::Lit(tidepool_repr::Literal::LitWord(
+                0x1_00000061
+            ))],
             &Expectation::Char('a'),
             &table
         )
         .is_err());
         assert!(compare_values(
-            &[Value::Lit(tidepool_repr::Literal::LitWord(0xd800))],
+            &[HaskellValue::Lit(tidepool_repr::Literal::LitWord(0xd800))],
             &Expectation::Char('a'),
             &table
         )
         .is_err());
         assert!(compare_values(
-            &[Value::Con(
+            &[HaskellValue::Con(
                 DataConId(10),
-                vec![Value::Lit(tidepool_repr::Literal::LitWord('A' as u64))],
+                vec![HaskellValue::Lit(tidepool_repr::Literal::LitWord(
+                    'A' as u64
+                ))],
             )],
             &Expectation::Char('A'),
             &table
         )
         .is_ok());
         assert!(compare_values(
-            &[Value::Con(
+            &[HaskellValue::Con(
                 DataConId(10),
-                vec![Value::Lit(tidepool_repr::Literal::LitInt('A' as i64))],
+                vec![HaskellValue::Lit(tidepool_repr::Literal::LitInt(
+                    'A' as i64
+                ))],
             )],
             &Expectation::Char('A'),
             &table
         )
         .is_err());
         assert!(compare_values(
-            &[Value::Con(DataConId(10), vec![])],
+            &[HaskellValue::Con(DataConId(10), vec![])],
             &Expectation::Char('A'),
             &table
         )
         .is_err());
         assert!(compare_values(
-            &[Value::Con(
+            &[HaskellValue::Con(
                 DataConId(10),
-                vec![Value::Lit(tidepool_repr::Literal::LitWord(0x1_00000041))],
+                vec![HaskellValue::Lit(tidepool_repr::Literal::LitWord(
+                    0x1_00000041
+                ))],
             )],
             &Expectation::Char('A'),
             &table
         )
         .is_err());
         assert!(compare_values(
-            &[Value::Con(
+            &[HaskellValue::Con(
                 DataConId(4),
-                vec![Value::Lit(tidepool_repr::Literal::LitWord('A' as u64))],
+                vec![HaskellValue::Lit(tidepool_repr::Literal::LitWord(
+                    'A' as u64
+                ))],
             )],
             &Expectation::Char('A'),
             &table
         )
         .is_err());
         assert!(compare_values(
-            &[Value::Lit(tidepool_repr::Literal::LitDouble(
+            &[HaskellValue::Lit(tidepool_repr::Literal::LitDouble(
                 1.0f64.to_bits()
             ))],
             &Expectation::Float64Approx {
@@ -1094,7 +1110,7 @@ mod tests {
         };
         assert_eq!(number.to_bits(), 0x4da4_f9fc_3c6d_a5d7);
         let table = DataConTable::default();
-        let value = |bits| Value::Lit(tidepool_repr::Literal::LitDouble(bits));
+        let value = |bits| HaskellValue::Lit(tidepool_repr::Literal::LitDouble(bits));
         assert!(compare_values(&[value(number.to_bits())], &expected, &table).is_ok());
         assert!(compare_values(&[value(number.to_bits() + 1)], &expected, &table).is_err());
 
@@ -1112,15 +1128,15 @@ mod tests {
         let expectation = Expectation::Error(ExpectedFailure::Blackhole);
         assert!(compare_values(&[], &expectation, &table).is_err());
         assert!(compare_values(
-            &[Value::Lit(tidepool_repr::Literal::LitInt(1))],
+            &[HaskellValue::Lit(tidepool_repr::Literal::LitInt(1))],
             &expectation,
             &table
         )
         .is_err());
         assert!(compare_values(
             &[
-                Value::Lit(tidepool_repr::Literal::LitInt(1)),
-                Value::Lit(tidepool_repr::Literal::LitInt(1)),
+                HaskellValue::Lit(tidepool_repr::Literal::LitInt(1)),
+                HaskellValue::Lit(tidepool_repr::Literal::LitInt(1)),
             ],
             &Expectation::Int(1),
             &table
@@ -1398,7 +1414,7 @@ mod tests {
         ));
         assert!(classify_execution_error(&budget, None).is_none());
         assert!(compare_values(
-            &[Value::Lit(tidepool_repr::Literal::LitInt(1))],
+            &[HaskellValue::Lit(tidepool_repr::Literal::LitInt(1))],
             &Expectation::CyclicObservation,
             &DataConTable::default()
         )

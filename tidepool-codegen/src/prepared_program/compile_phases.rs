@@ -154,7 +154,9 @@ impl NativeCounts {
 pub(super) struct NativeMetrics {
     enabled: bool,
     owners: std::collections::BTreeMap<tidepool_repr::execution_schema::ValueId, (String, String)>,
-    definitions: std::collections::BTreeMap<(&'static str, String, String), NativeCounts>,
+    categories: std::collections::BTreeMap<&'static str, NativeCounts>,
+    definitions:
+        std::collections::BTreeMap<(&'static str, &'static str, String, String), NativeCounts>,
 }
 
 impl NativeMetrics {
@@ -179,6 +181,7 @@ impl NativeMetrics {
         Self {
             enabled,
             owners,
+            categories: Default::default(),
             definitions: Default::default(),
         }
     }
@@ -191,38 +194,43 @@ impl NativeMetrics {
         pipeline: &crate::pipeline::CodegenPipeline,
     ) {
         if self.enabled {
-            let (unit, module) = self
+            let (owner_scope, unit, module) = self
                 .owners
                 .get(&id)
                 .cloned()
-                .unwrap_or_else(|| (String::new(), "<local>".into()));
+                .map(|(unit, module)| ("top_binding_inclusive", unit, module))
+                .unwrap_or_else(|| ("unattributed", String::new(), "<unattributed>".into()));
             self.definitions
-                .entry((category, unit, module))
+                .entry((category, owner_scope, unit, module))
                 .or_default()
                 .add_delta(before, NativeCounts::read(pipeline));
         }
     }
 
     pub(super) fn category(
-        &self,
+        &mut self,
         category: &'static str,
         before: NativeCounts,
         pipeline: &crate::pipeline::CodegenPipeline,
     ) {
         if self.enabled {
-            let mut delta = NativeCounts::default();
-            delta.add_delta(before, NativeCounts::read(pipeline));
-            tracing::info!(target: "tidepool_codegen::prepared_compile", category,
-                functions = delta.functions, blocks = delta.blocks, code_bytes = delta.bytes, native_compile_us = delta.native_us,
-                "native category");
+            self.categories
+                .entry(category)
+                .or_default()
+                .add_delta(before, NativeCounts::read(pipeline));
         }
     }
 
     pub(super) fn report(&self) {
-        for ((category, unit, module), counts) in &self.definitions {
-            tracing::info!(target: "tidepool_codegen::prepared_compile", category, unit, module,
+        for (category, counts) in &self.categories {
+            tracing::info!(target: "tidepool_codegen::prepared_compile", metric_scope = "category", category,
                 functions = counts.functions, blocks = counts.blocks, code_bytes = counts.bytes, native_compile_us = counts.native_us,
-                "native definitions");
+                "prepared native metrics");
+        }
+        for ((category, owner_scope, unit, module), counts) in &self.definitions {
+            tracing::info!(target: "tidepool_codegen::prepared_compile", metric_scope = "definition", category, owner_scope, unit, module,
+                functions = counts.functions, blocks = counts.blocks, code_bytes = counts.bytes, native_compile_us = counts.native_us,
+                "prepared native metrics");
         }
     }
 }

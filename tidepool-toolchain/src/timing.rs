@@ -184,11 +184,11 @@ pub const PHASE_WRITE: &str = "write";
 /// Prepared execution: recovering the closure of exact bodies the turn's
 /// prepared program reaches (`recoverPreparedClosure`), once per target.
 pub const PHASE_PREPARED_RECOVER: &str = "prepared_recover";
-/// Prepared execution: projecting the recovered closure to a prepared
-/// program, forced only to weak head normal form. Read it together with
-/// [`PHASE_PREPARED_ENCODE`]: laziness moves cost between the two.
+/// Prepared execution: selecting the recovered closure's complete reachable
+/// binding and identity inventory.
 pub const PHASE_PREPARED_PROJECT: &str = "prepared_project";
-/// Prepared execution: encoding the projected program to its wire bytes.
+/// Prepared execution: lowering the selected closure and forcing its wire
+/// encoding. This phase owns both because lowering is deliberately lazy.
 pub const PHASE_PREPARED_ENCODE: &str = "prepared_encode";
 /// Whole-process wall clock as the extract itself measures it.
 pub const PHASE_TOTAL: &str = "total";
@@ -347,7 +347,7 @@ impl ExtractTiming {
 pub const COMPILE_SUMMARY_PREFIX: &str = "tidepool-compile-summary ";
 
 /// One extract invocation's default-on compile summary — module count, whole
-/// compile wall time, the typecheck/core phase totals (always computed
+/// compile wall time, the typecheck/lowering/interface phase totals (always computed
 /// regardless of [`TIMING_ENV`] — see `GhcPipeline.hs`'s `tcMsRef`/
 /// `loweringMsRef`), and the top-3 modules by wall time. Parsed out of a fresh
 /// compile's stderr; absent on a memo hit (no extract process ran) or a hard
@@ -358,8 +358,11 @@ pub struct CompileSummary {
     pub wall_ms: u64,
     pub typecheck_ms: u64,
     pub lowering_ms: u64,
+    pub interface_ms: u64,
     /// `(module, ms)` pairs, up to 3, in descending wall-time order.
     pub top: Vec<(String, u64)>,
+    /// Interface-only `(module, ms)` pairs, up to 3, in descending order.
+    pub interface_top: Vec<(String, u64)>,
 }
 
 impl CompileSummary {
@@ -375,7 +378,9 @@ impl CompileSummary {
             let mut wall_ms = None;
             let mut typecheck_ms = None;
             let mut lowering_ms = None;
+            let mut interface_ms = None;
             let mut top = Vec::new();
+            let mut interface_top = Vec::new();
             for field in rest.split_whitespace() {
                 if let Some(v) = field.strip_prefix("modules=") {
                     modules = v.parse::<u32>().ok();
@@ -385,6 +390,8 @@ impl CompileSummary {
                     typecheck_ms = v.parse::<u64>().ok();
                 } else if let Some(v) = field.strip_prefix("lowering_ms=") {
                     lowering_ms = v.parse::<u64>().ok();
+                } else if let Some(v) = field.strip_prefix("interface_ms=") {
+                    interface_ms = v.parse::<u64>().ok();
                 } else if let Some(v) = field.strip_prefix("top=") {
                     top = v
                         .split(',')
@@ -394,17 +401,33 @@ impl CompileSummary {
                             Some((name.to_string(), ms.parse::<u64>().ok()?))
                         })
                         .collect();
+                } else if let Some(v) = field.strip_prefix("interface_top=") {
+                    interface_top = v
+                        .split(',')
+                        .filter(|s| !s.is_empty())
+                        .filter_map(|pair| {
+                            let (name, ms) = pair.rsplit_once(':')?;
+                            Some((name.to_string(), ms.parse::<u64>().ok()?))
+                        })
+                        .collect();
                 }
             }
-            if let (Some(modules), Some(wall_ms), Some(typecheck_ms), Some(lowering_ms)) =
-                (modules, wall_ms, typecheck_ms, lowering_ms)
+            if let (
+                Some(modules),
+                Some(wall_ms),
+                Some(typecheck_ms),
+                Some(lowering_ms),
+                Some(interface_ms),
+            ) = (modules, wall_ms, typecheck_ms, lowering_ms, interface_ms)
             {
                 return Some(CompileSummary {
                     modules,
                     wall_ms,
                     typecheck_ms,
                     lowering_ms,
+                    interface_ms,
                     top,
+                    interface_top,
                 });
             }
         }
@@ -471,13 +494,21 @@ pub fn log_compile_summary(summary: &CompileSummary) {
         .map(|(name, ms)| format!("{name}:{ms}"))
         .collect::<Vec<_>>()
         .join(",");
+    let interface_top = summary
+        .interface_top
+        .iter()
+        .map(|(name, ms)| format!("{name}:{ms}"))
+        .collect::<Vec<_>>()
+        .join(",");
     tracing::info!(
         target: "tidepool_runtime::compile",
         modules = summary.modules,
         wall_ms = summary.wall_ms,
         typecheck_ms = summary.typecheck_ms,
         lowering_ms = summary.lowering_ms,
+        interface_ms = summary.interface_ms,
         top = %top,
+        interface_top = %interface_top,
         "compile summary"
     );
 }
@@ -553,18 +584,26 @@ tidepool-timing phase=ghc_load ms=4533\n";
     fn parses_a_compile_summary_line_with_top_modules() {
         let stderr = "\
 some ghc warning\n\
-tidepool-compile-summary modules=39 wall_ms=361000 typecheck_ms=120000 lowering_ms=200000 top=Harness:90000,Tidepool.Prelude:40000,Tidepool.Agent.Spawn:15000\n";
+tidepool-compile-summary modules=39 wall_ms=361000 typecheck_ms=120000 lowering_ms=200000 interface_ms=41000 top=Harness:90000,Tidepool.Prelude:40000,Tidepool.Agent.Spawn:15000 interface_top=Tidepool.Prelude:30000,Harness:11000\n";
         let s = CompileSummary::parse(stderr).expect("summary line present");
         assert_eq!(s.modules, 39);
         assert_eq!(s.wall_ms, 361000);
         assert_eq!(s.typecheck_ms, 120000);
         assert_eq!(s.lowering_ms, 200000);
+        assert_eq!(s.interface_ms, 41000);
         assert_eq!(
             s.top,
             vec![
                 ("Harness".to_string(), 90000),
                 ("Tidepool.Prelude".to_string(), 40000),
                 ("Tidepool.Agent.Spawn".to_string(), 15000),
+            ]
+        );
+        assert_eq!(
+            s.interface_top,
+            vec![
+                ("Tidepool.Prelude".to_string(), 30000),
+                ("Harness".to_string(), 11000),
             ]
         );
     }
@@ -581,7 +620,7 @@ tidepool-compile-summary modules=39 wall_ms=361000 typecheck_ms=120000 lowering_
         );
         assert!(CompileSummary::parse("tidepool-timing phase=lowering ms=10\n").is_none());
         let phase_only = "tidepool-compile-summary modules=1 wall_ms=1 top=A:1\n";
-        // Missing typecheck_ms/lowering_ms -> malformed, correctly rejected.
+        // Missing phase totals -> malformed, correctly rejected.
         assert!(CompileSummary::parse(phase_only).is_none());
     }
 
@@ -604,7 +643,7 @@ some other noise\n";
     #[test]
     fn module_timings_absent_when_not_gated_on() {
         assert!(parse_module_timings(
-            "tidepool-compile-summary modules=1 wall_ms=1 typecheck_ms=1 lowering_ms=1 top=A:1\n"
+            "tidepool-compile-summary modules=1 wall_ms=1 typecheck_ms=1 lowering_ms=1 interface_ms=0 top=A:1 interface_top=\n"
         )
         .is_empty());
     }

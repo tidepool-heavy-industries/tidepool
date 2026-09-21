@@ -3,6 +3,7 @@
 {-# LANGUAGE UnboxedTuples #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE PackageImports #-}
 -- | Drop-in replacement for @Data.Text@ as a tidepool HOME module.
 --
 -- WHY: the @(Char -> Bool)@-taking Data.Text functions, when reached through a
@@ -37,18 +38,18 @@ module Tidepool.Data.Text
   ) where
 
 import Prelude hiding (takeWhile, dropWhile, span, break, filter, all, any, null, lines, words)
-import Data.Text hiding
+import "text" Data.Text hiding
   ( takeWhile, takeWhileEnd, dropWhile, dropWhileEnd, dropAround
   , span, break, filter, partition
   , find, findIndex, all, any
   , split, groupBy, pack, lines, words )
-import Data.Text (null, empty)
-import qualified Data.Text as DT (pack)
-import Data.Text.Internal (Text(..), text)
-import Data.Text.Unsafe (Iter(..), iter, reverseIter, unsafeTail)
-import qualified Data.Text.Array as A
-import Data.Text.Internal.Encoding.Utf8 (utf8LengthByLeader, chr2, chr3, chr4)
-import Data.Text.Internal.Unsafe.Char (unsafeChr8)
+import "text" Data.Text (null, empty)
+import "text" Data.Text qualified as DT (pack)
+import "text" Data.Text.Internal (Text(..), text)
+import "text" Data.Text.Unsafe (Iter(..), iter, reverseIter, unsafeTail)
+import "text" Data.Text.Array qualified as A
+import "text" Data.Text.Internal.Encoding.Utf8 (utf8LengthByLeader, chr2, chr3, chr4)
+import "text" Data.Text.Internal.Unsafe.Char (unsafeChr8)
 import Data.Char (isSpace)
 import Control.Monad.ST (ST, runST)
 

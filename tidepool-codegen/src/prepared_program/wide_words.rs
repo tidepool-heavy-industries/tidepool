@@ -214,7 +214,7 @@ mod tests {
     fn pair(values: Vec<tidepool_bridge::HaskellValue>) -> (u64, u64) {
         use tidepool_bridge::HaskellValue;
         use tidepool_repr::Literal;
-        let [Value::Lit(Literal::LitWord(high)), Value::Lit(Literal::LitWord(low))] =
+        let [HaskellValue::Lit(Literal::LitWord(high)), HaskellValue::Lit(Literal::LitWord(low))] =
             values.as_slice()
         else {
             panic!("expected two Word64 results: {values:?}");
@@ -225,7 +225,7 @@ mod tests {
     fn int_triple(values: Vec<tidepool_bridge::HaskellValue>) -> (i64, i64, i64) {
         use tidepool_bridge::HaskellValue;
         use tidepool_repr::Literal;
-        let [Value::Lit(Literal::LitInt(high_needed)), Value::Lit(Literal::LitInt(high)), Value::Lit(Literal::LitInt(low))] =
+        let [HaskellValue::Lit(Literal::LitInt(high_needed)), HaskellValue::Lit(Literal::LitInt(high)), HaskellValue::Lit(Literal::LitInt(low))] =
             values.as_slice()
         else {
             panic!("expected three Int64 results: {values:?}");
@@ -432,19 +432,19 @@ mod tests {
             run_operation("clz#", vec![w], vec![w], vec![word(0)])
                 .unwrap()
                 .as_slice(),
-            [Value::Lit(Literal::LitWord(64))]
+            [HaskellValue::Lit(Literal::LitWord(64))]
         ));
         assert!(matches!(
             run_operation("clz#", vec![w], vec![w], vec![word(1 << 63)])
                 .unwrap()
                 .as_slice(),
-            [Value::Lit(Literal::LitWord(0))]
+            [HaskellValue::Lit(Literal::LitWord(0))]
         ));
         assert!(matches!(
             run_operation("ord#", vec![w], vec![i], vec![word(0x10ffff)])
                 .unwrap()
                 .as_slice(),
-            [Value::Lit(Literal::LitInt(0x10ffff))]
+            [HaskellValue::Lit(Literal::LitInt(0x10ffff))]
         ));
         for (left, right, expected) in [
             (0x10ffff, 0x10ffff, 1),
@@ -461,7 +461,7 @@ mod tests {
             .unwrap();
             assert!(matches!(
                 values.as_slice(),
-                [Value::Lit(Literal::LitInt(actual))] if *actual == expected
+                [HaskellValue::Lit(Literal::LitInt(actual))] if *actual == expected
             ));
         }
         // `ltChar#` is the strict complement of `geChar#` over the same
@@ -481,7 +481,7 @@ mod tests {
             .unwrap();
             assert!(matches!(
                 values.as_slice(),
-                [Value::Lit(Literal::LitInt(actual))] if *actual == expected
+                [HaskellValue::Lit(Literal::LitInt(actual))] if *actual == expected
             ));
         }
     }

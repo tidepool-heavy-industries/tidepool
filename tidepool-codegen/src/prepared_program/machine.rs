@@ -5365,9 +5365,9 @@ mod tests {
             .expect("B's generated Case recognises A's Field cell through the shared descriptor");
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(
-                99
-            ))]
+            [tidepool_bridge::HaskellValue::Lit(
+                tidepool_repr::Literal::LitInt(99)
+            )]
         ));
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
         assert!(machine.release(*handle_a));
@@ -6401,9 +6401,9 @@ mod tests {
             );
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(
-                123
-            ))]
+            [tidepool_bridge::HaskellValue::Lit(
+                tidepool_repr::Literal::LitInt(123)
+            )]
         ));
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
         assert!(machine.release(*handle_a));
@@ -7737,7 +7737,9 @@ mod tests {
     /// shape.
     fn boxed_depth(value: &HaskellValue, unit_id: u64, box_id: u64) -> Option<usize> {
         match value {
-            HaskellValue::Con(id, fields) if *id == DataConId(unit_id) && fields.is_empty() => Some(0),
+            HaskellValue::Con(id, fields) if *id == DataConId(unit_id) && fields.is_empty() => {
+                Some(0)
+            }
             HaskellValue::Con(id, fields) if *id == DataConId(box_id) => match fields.as_slice() {
                 [inner] => boxed_depth(inner, unit_id, box_id).map(|depth| depth + 1),
                 _ => None,

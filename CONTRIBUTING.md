@@ -78,7 +78,7 @@ When adding or modifying functions in `haskell/lib/Tidepool/Prelude.hs`, keep th
 ## Testing Approach
 
 - **Rust Tests**: Use unit tests and integration tests in the `tests/` directory of each crate.
-- **Haskell Integration Tests**: Add test cases to `haskell/test/Suite.hs`. These tests are compiled to CBOR fixtures and verified by integration tests in `tidepool-testing/src/haskell_suite.rs`.
+- **Haskell Integration Tests**: Add test cases to `haskell/test/Suite.hs`. The prepared-STG corpus compiles and verifies them through `scripts/prepared-corpus.sh` and `tidepool-prepared-corpus`.
 - **Property-Based Testing**: Use `proptest` for complex logic like the bridge conversion and the JIT machine state transitions.
 
 ## Code Style

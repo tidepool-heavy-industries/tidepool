@@ -82,7 +82,7 @@ pub enum CompileError {
     /// cross-paired artifact and metadata (one compile's prepared program
     /// with another compile's table), or an extractor identity-minting bug.
     /// Rejected at assembly so no handler ever interprets an observed
-    /// `Value::Con(host_id, ...)` under the wrong table's nominal name. A
+    /// `HaskellValue::Con(host_id, ...)` under the wrong table's nominal name. A
     /// `host_id` with no table entry at all is not this error — see
     /// `artifacts::check_constructor_identity_agreement`'s doc for why that
     /// is deliberately out of scope.

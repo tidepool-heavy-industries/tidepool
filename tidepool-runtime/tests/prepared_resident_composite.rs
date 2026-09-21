@@ -20,10 +20,10 @@
 //! `SingleSlot<M, H>`'s own checkout/settle protocol is already tested
 //! generically in `tidepool-runtime/src/session/registry.rs` against a
 //! `FakeMachine`; this file's whole point is proving the REAL production
-//! machine type (`tidepool_codegen::prepared_program::PreparedMachine` — the
-//! inner engine `PreparedEngine`, the deleted `PreparedRuntime`'s own real
-//! wrapped type, is built on) survives that protocol under Send-correctness
-//! and simulated park/resume across a "moved to another thread and back"
+//! machine type (`tidepool_codegen::prepared_program::PreparedMachine`, the
+//! engine owned by `PreparedEngine`) survives that protocol under
+//! Send-correctness and simulated park/resume across a "moved to another
+//! thread and back"
 //! cycle.
 //!
 //! `H` here is a plain `(RealmId, PreparedHandle)` tuple: this test never
@@ -287,11 +287,9 @@ fn take_scalar(fields: &[PreparedResult], index: usize) -> u64 {
 }
 
 /// Build one consumer program's `MachineImports` from its own declared
-/// globals plus a by-identity handle map: `entry_signature`/`generation` are
-/// read directly off the consumer's own declaration (there is no separate
-/// session-level generation ledger at this layer any more — `retain_top`
-/// mints a handle with no generation of its own), and `evaluated` is read
-/// live off the machine the handles actually live on.
+/// globals plus a by-identity handle map. `entry_signature` and `generation`
+/// come from each consumer declaration, while `evaluated` is read live from
+/// the machine that owns the handle.
 fn import_bindings_for(
     consumer: &PreparedProgram,
     machine: &PreparedMachine<'static>,
@@ -726,15 +724,9 @@ fn session_registry_drives_prepared_runtime_through_bind_import_park_resume_canc
         frames_a, 0,
         "the prepared engine never parks a continuation as a frame in this test (no `park` call)"
     );
-    // NOTE: leasing/lease-count bookkeeping is not asserted here. The
-    // deleted `PreparedRuntime` wrapper's own `BindingTable`
-    // `acquire_leases`/`lease_count`/`release_leases` calls were never wired
-    // to the production `PreparedMachine`/`PreparedEngine` path -- they are
-    // dead bookkeeping on the prepared route (only the Core-route
-    // continuation-capture path in `tidepool-runtime/src/session/resident.rs`
-    // actually calls `acquire_leases`/`release_leases`). `bound_value`/
-    // `bound_fn` are session-level (`RealmId::ROOT`) handles from
-    // `retain_top`, entirely unaffected by closing `realm_a`.
+    // Imported handles are session-level (`RealmId::ROOT`) roots from
+    // `retain_top`; closing `realm_a` does not affect them. The prepared
+    // machine has no lease-count bookkeeping for this path.
 
     let (frames_b, handles_b) = machine.close_realm(realm_b);
     assert_eq!(

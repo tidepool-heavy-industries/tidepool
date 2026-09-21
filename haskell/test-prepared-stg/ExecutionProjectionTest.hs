@@ -18,6 +18,7 @@ import GHC.Builtin.Types
   ( doubleRepDataConTy, intRepDataConTy, liftedRepTy, tupleRepDataConTyCon
   , mkPromotedListTy, runtimeRepTy, unliftedRepTy, zeroBitRepTy )
 import GHC.Core.Type (mkTyConApp, splitFunTys, splitTyConApp_maybe)
+import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Core.DataCon (dataConName, dataConRepArity)
 import GHC.Core.TyCon (tyConName)
 import GHC.Types.Basic (TypeOrConstraint(TypeLike, ConstraintLike))
@@ -1074,9 +1075,9 @@ verifyPreparedTime = do
         , (binding, _) <- pmBindings modul, binder <- topBindersForTest binding
         , occNameString (nameOccName (varName binder)) == "parseISO8601"]
   case (authority, parsers) of
-    (Just (TimeAuthority owner), [binder]) -> unless
+    (Just (TimeAuthority owner textUnit), [binder]) -> unless
       (case classifyTime
-        (TimeAuthority (mkModule (stringToUnit "wrong-unit") (moduleName owner))) binder of
+        (TimeAuthority (mkModule (stringToUnit "wrong-unit") (moduleName owner)) textUnit) binder of
         Right Nothing -> True
         _ -> False)
       (ioError (userError "prepared time matched a same-named wrong-unit parser"))
@@ -1086,9 +1087,60 @@ verifyPreparedTime = do
   shadowAuthority <- resolveTimeAuthority (prHscEnv (pprPipelineResult shadowed))
   unless (shadowAuthority == Nothing)
     (ioError (userError "prepared time granted authority to shadowed source"))
+  verifyTimeDependencyShadow
   where
     isTimeIntrinsic (OperationDecl (IntrinsicIdentity name CCall) _)
       | name == "prepared_parse_iso8601" = True
+    isTimeIntrinsic _ = False
+
+verifyTimeDependencyShadow :: IO ()
+verifyTimeDependencyShadow = do
+  prepared <- runPipelineSelected PreparedStg
+    "test-prepared-stg/TimeDependencyShadow.hs"
+    ["test-prepared-stg/time-dependency-shadow", "test-prepared-stg", "lib"]
+  authority <- resolveTimeAuthority (prHscEnv (pprPipelineResult prepared))
+  let homeShadows = [pmModule modul | modul <- pprModules prepared
+        , moduleNameString (moduleName (pmModule modul)) == "Data.Text"]
+      parsers = [binder | modul <- pprModules prepared
+        , moduleNameString (moduleName (pmModule modul)) == "Tidepool.Data.Time"
+        , (binding, _) <- pmBindings modul, binder <- topBindersForTest binding
+        , occNameString (nameOccName (varName binder)) == "parseISO8601"]
+      context = ProjectionContext
+        { projectionProfile = "ghc-9.12-prepared-stg"
+        , projectionToolchain = "ghc-9.12.2"
+        , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []
+        , projectionRetainedGenerations = mempty
+        , projectionEntry = SymbolIdentity "main" "TimeDependencyShadow" "value" "trusted" Nothing
+        , projectionAuxiliaryRoots = []
+        , projectionFormattingAuthority = Nothing
+        , projectionTimeAuthority = authority
+        , projectionTextUnit = Nothing
+        }
+  case (authority, homeShadows, parsers) of
+    (Just trusted@(TimeAuthority _ textUnit), [shadowOwner], [parser]) -> do
+      unless (moduleUnit shadowOwner == stringToUnit "main")
+        (ioError (userError "prepared time home Data.Text shadow was not loaded"))
+      unless (case classifyTime trusted parser of
+        Right (Just _) -> case splitFunTys (idType parser) of
+          ([Scaled _ argument], _) -> case splitTyConApp_maybe argument of
+            Just (tycon, []) -> case nameModule_maybe (tyConName tycon) of
+              Just textOwner -> moduleUnit textOwner == textUnit
+                && moduleUnit textOwner /= moduleUnit shadowOwner
+              Nothing -> False
+            _ -> False
+          _ -> False
+        _ -> False)
+        (ioError (userError "prepared time parser did not retain package Text"))
+      program <- either
+        (\failure -> ioError (userError
+          ("prepared time dependency shadow projection failed: " <> show failure)))
+        pure (projectPreparedTarget context (pprModules prepared))
+      unless (any isTimeIntrinsic (programOperations program))
+        (ioError (userError "prepared time dependency shadow bypassed the intrinsic"))
+    _ -> ioError (userError "prepared time dependency shadow or parser missing")
+  where
+    isTimeIntrinsic (OperationDecl (IntrinsicIdentity name CCall) _) =
+      name == "prepared_parse_iso8601"
     isTimeIntrinsic _ = False
 
 verifyTagToEnumProjection :: IO ()

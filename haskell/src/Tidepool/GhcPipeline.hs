@@ -118,8 +118,8 @@ import Tidepool.Session
   , isSessionScopeActive, injectSessionScope, renderSessionModule
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule )
 import Tidepool.Timing
-  ( readTimingEnabled, timeSection, timePhase, timeDetailPhase, emitPhase, monotonicTime, elapsedMs
-  , emitCompileSummary, emitModuleTiming )
+  ( readTimingEnabled, timeSection, timePhase, emitPhase, monotonicTime, elapsedMs
+  , emitCompileSummary, emitModuleTiming, emitModuleInterfaceTiming )
 import Tidepool.PreparedStg (PreparedElaboration(..), PreparedModule(..), prepareModule)
 import Tidepool.PreparedSites
   ( elaboratePreparedSites, resolvePreparedSiblings, resolveSiteAuthority )
@@ -579,7 +579,7 @@ data CompilePlan = CompilePlan
     -- session path injects value ifaces here, after their declaration-module
     -- dependencies have entered the HPT and before the first importer needs
     -- them.
-  , cpAfterModule :: ModSummary -> TcGblEnv -> HscEnv -> ModGuts -> Ghc ()
+  , cpAfterModule :: ModSummary -> TcGblEnv -> HscEnv -> ModGuts -> Ghc (Maybe Integer)
     -- ^ Runs after a module's 'core2core', on the pre-'externalizeInternalTops'
     -- guts. The session path registers deferred modules into the HPT here.
   , cpTier :: TierPolicy
@@ -874,8 +874,17 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
           -- into one entry per module via 'Map.insertWith'. The compile summary uses
           -- the top three; detailed per-module output remains timing-gated.
           moduleMsRef <- liftIO (newIORef (Map.empty :: Map.Map String Integer))
+          interfaceMsRef <- liftIO (newIORef (0 :: Integer))
+          moduleInterfaceMsRef <- liftIO (newIORef (Map.empty :: Map.Map String Integer))
           targetModName' <- liftIO (targetModuleNameFor path)
           let targetModName = moduleNameString targetModName'
+              recordInterface modSum = \case
+                Nothing -> pure ()
+                Just ms -> do
+                  let name = moduleNameString (ms_mod_name modSum)
+                  modifyIORef' interfaceMsRef (+ ms)
+                  modifyIORef' moduleInterfaceMsRef (Map.insertWith (+) name ms)
+                  modifyIORef' moduleMsRef (Map.insertWith (+) name ms)
               -- The ONE per-module front half. Re-canonicalize the module's
               -- DynFlags first (see canonicalizeDFlags): the load phase may have
               -- downgraded them for TH/QQ bytecode provisioning. NOTE: 'hscDesugar'
@@ -932,7 +941,8 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                 liftIO (modifyIORef' c2cMsRef (+ coreMs))
                 liftIO (modifyIORef' moduleMsRef
                           (Map.insertWith (+) (moduleNameString (ms_mod_name (mfSummary mf))) coreMs))
-                timePhase timing "module_interface" $ cpAfterModule plan (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
+                mInterfaceMs <- cpAfterModule plan (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
+                liftIO $ recordInterface (mfSummary mf) mInterfaceMs
                 pure
                   ( simplified
                   , ( externalizeInternalTops simplified
@@ -1038,7 +1048,8 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                   Just entry -> do
                     recordValidity modSum True
                     mapM_ rememberPreparedSiblings (gmePrepared entry)
-                    timePhase timing "module_interface" $ cpAfterModule plan modSum (mfTcGblEnv (gmeFront entry)) (mfHscEnv (gmeFront entry)) (gmeSimplified entry)
+                    mInterfaceMs <- cpAfterModule plan modSum (mfTcGblEnv (gmeFront entry)) (mfHscEnv (gmeFront entry)) (gmeSimplified entry)
+                    liftIO $ recordInterface modSum mInterfaceMs
                     prepared <- case (preparation, gmePrepared entry) of
                       (CheckOnly, _) -> pure Nothing
                       (PrepareStg, Just cachedPrepared) -> pure (Just cachedPrepared)
@@ -1166,9 +1177,15 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
           summaryT1 <- monotonicTime
           liftIO $ do
             moduleTimes <- readIORef moduleMsRef
+            interfaceTotal <- readIORef interfaceMsRef
+            moduleInterfaces <- readIORef moduleInterfaceMsRef
             let topModules = take 3 (sortOn (negate . snd) (Map.toList moduleTimes))
-            emitCompileSummary (length summaries) (elapsedMs sessionT0 summaryT1) totalTcMs totalLoweringMs topModules
+                topInterfaces = take 3 (sortOn (negate . snd) (Map.toList moduleInterfaces))
+            emitPhase timing "module_interface" interfaceTotal
+            emitCompileSummary (length summaries) (elapsedMs sessionT0 summaryT1)
+              totalTcMs totalLoweringMs interfaceTotal topModules topInterfaces
             emitModuleTiming timing (sortOn (negate . snd) (Map.toList moduleTimes))
+              (sortOn (negate . snd) (Map.toList moduleInterfaces))
           -- Diagnostic-only (see 'dsMsRef'/'c2cMsRef' haddock above): NOT part of
           -- the tidepool-timing wire grammar, so 'ExtractTiming::parse' never sees
           -- it and there is nothing to keep in sync there. Emitted only under
@@ -1549,7 +1566,7 @@ normalVariant purpose path = do
         -- order.
       , cpResultBinders = [scaffoldOutputBase, scaffoldTargetName]
       , cpBeforeModule = \_ -> pure ()
-      , cpAfterModule = \_ _ _ _ -> pure ()
+      , cpAfterModule = \_ _ _ _ -> pure Nothing
       , cpTier = OptimizeCoreReachable
         -- Phase barrier (backstop): a target or dependency compile error
         -- already threw a spanned 'SourceError' from inside the compile loop
@@ -1746,14 +1763,22 @@ sessionVariant purpose scope path = do
             -- type mentions that Lib module then makes typecheckIface fail
             -- with "module ... is not loaded". Generated Libs and deferred
             -- importers therefore share the same single registration path.
-            when (ms_mod_name modSum `Set.member` deferredMods || isSessionLib modSum) $ do
-              (cgGuts, modDetails) <- timeDetailPhase timing "module_interface" "tidy" $
-                liftIO $ hscTidy hscEnv simplified
-              iface <- timeDetailPhase timing "module_interface" "make_iface" $ liftIO $
-                mkIfaceTc hscEnv Sf_None modDetails modSum (Just (cg_binds cgGuts)) tcGblEnv
-              let hmi = HomeModInfo iface modDetails emptyHomeModInfoLinkable
-              hscEnvNow <- getSession
-              setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name modSum) hmi) hscEnvNow)
+            if ms_mod_name modSum `Set.member` deferredMods || isSessionLib modSum
+              then do
+                (cgGuts, modDetails, tidyMs) <- do
+                  ((guts, details), elapsed) <- timeSection $ liftIO $ hscTidy hscEnv simplified
+                  liftIO $ emitModuleInterfaceTiming timing (moduleNameString (ms_mod_name modSum))
+                    "module_interface" "tidy" elapsed
+                  pure (guts, details, elapsed)
+                (iface, ifaceMs) <- timeSection $ liftIO $
+                  mkIfaceTc hscEnv Sf_None modDetails modSum (Just (cg_binds cgGuts)) tcGblEnv
+                liftIO $ emitModuleInterfaceTiming timing (moduleNameString (ms_mod_name modSum))
+                  "module_interface" "make_iface" ifaceMs
+                let hmi = HomeModInfo iface modDetails emptyHomeModInfoLinkable
+                hscEnvNow <- getSession
+                setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name modSum) hmi) hscEnvNow)
+                pure (Just (tidyMs + ifaceMs))
+              else pure Nothing
         , cpTier = OptimizeEveryModule
           -- The load barrier already fired in 'cpAfterLoad' (see there).
         , cpBeforeMerge = \_ _ ->

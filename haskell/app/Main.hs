@@ -79,7 +79,7 @@ import Tidepool.Metadata
   ( collectDataCons, dcToMeta, mergeMetaPreserving, targetBindingHasIO
   , wiredInDataCons )
 import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut)
-import Tidepool.Timing (readTimingEnabled, timePhase, timeDetailPhase)
+import Tidepool.Timing (readTimingEnabled, timePhase)
 import Tidepool.TurnSource (extractModuleName, spliceTemplate)
 
 renderAsksJson :: [Tidepool.EffectSchema.YieldSite] -> String
@@ -477,17 +477,17 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
   forM targets $ \target -> do
     let context = contextFor target
     -- Three flat phases, one row each per target (see Tidepool.Timing).
-    -- Projection is pure and only forced to weak head normal form here, so
-    -- part of its cost lands in 'prepared_encode'; read the two together.
+    -- Selection forces its complete identity/binding inventory. Lowering is
+    -- lazy, so encoding owns and forces lowering plus wire serialization.
     recovered <- timePhase timing "prepared_recover"
       (recover (projectionEntry context))
     reportRecoveryResiduals target (closureFailures recovered)
-    (program, constructors) <- timePhase timing "prepared_project" $ do
-      selected <- timeDetailPhase timing "prepared_project" "select" $
-        requireProjection (prepareProjection context (closureModules recovered))
-      timeDetailPhase timing "prepared_project" "lower" $
-        requireProjection (projectSelected selected)
-    bytes <- timePhase timing "prepared_encode" (evaluate (encodeWireProgram program))
+    selected <- timePhase timing "prepared_project" $
+      requireProjection (prepareProjection context (closureModules recovered))
+    (program, constructors, bytes) <- timePhase timing "prepared_encode" $ do
+      (program, constructors) <- requireProjection (projectSelected selected)
+      bytes <- evaluate (encodeWireProgram program)
+      pure (program, constructors, bytes)
     let admitted = Set.fromList (map siteId (programSites program))
         yieldSites =
           [ site

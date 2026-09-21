@@ -31,8 +31,8 @@ use tidepool_repr::{SessionModule, SessionVarId};
 
 /// A minimal, index-relevant view of one binding, taken from a `BindingEntry`
 /// at the moment it enters or leaves `live`. Deliberately decoupled from
-/// `BoundValue` (whose `Prepared` variant carries a `PreparedHandle` this
-/// crate has no public constructor for) so index maintenance -- and its unit
+/// `BoundValue` (which carries a `PreparedHandle` this crate has no public
+/// constructor for) so index maintenance -- and its unit
 /// tests -- never need a real prepared handle, only the identity, generation,
 /// and root address the index actually keys on.
 pub(super) struct BindRecord {

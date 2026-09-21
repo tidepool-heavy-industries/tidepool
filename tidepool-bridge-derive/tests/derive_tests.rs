@@ -239,7 +239,10 @@ fn test_arity_mismatch() {
 
     let true_id = table.get_by_name("True").unwrap();
 
-    let value = HaskellValue::Con(true_id, vec![HaskellValue::Lit(tidepool_repr::Literal::LitInt(1))]);
+    let value = HaskellValue::Con(
+        true_id,
+        vec![HaskellValue::Lit(tidepool_repr::Literal::LitInt(1))],
+    );
 
     let res = MyBool::from_value(&value, &table);
 
@@ -301,7 +304,10 @@ fn test_struct_wrong_con() {
     let table = test_table();
     // Use Pair's constructor id with GetBranch's expected type
     let pair_id = table.get_by_name("Pair").unwrap();
-    let value = HaskellValue::Con(pair_id, vec![HaskellValue::Lit(tidepool_repr::Literal::LitInt(1))]);
+    let value = HaskellValue::Con(
+        pair_id,
+        vec![HaskellValue::Lit(tidepool_repr::Literal::LitInt(1))],
+    );
     let res = GetBranchRequest::from_value(&value, &table);
     assert!(matches!(res, Err(BridgeError::UnknownDataCon(_))));
 }
@@ -313,7 +319,10 @@ fn nested_struct_failure_preserves_the_matched_field() {
     let unknown = DataConId(100);
     let value = HaskellValue::Con(
         pair,
-        vec![true.to_value(&table).unwrap(), HaskellValue::Con(unknown, vec![])],
+        vec![
+            true.to_value(&table).unwrap(),
+            HaskellValue::Con(unknown, vec![]),
+        ],
     );
     let error = GenericStruct::<bool, MyBool>::from_value(&value, &table).unwrap_err();
     assert!(matches!(error, BridgeError::FieldDecode {

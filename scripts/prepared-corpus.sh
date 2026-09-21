@@ -105,64 +105,71 @@ assert_contract_report() {
   }
 }
 
-# Suite.hs carries compiler-introduced tops without a source oracle, tops that
-# are not closed programs, and known engine limitations, so it cannot use
-# assert_contract_report's all-six-stages contract. Its invariant:
-# - the denominator is fixed and the structural stages are fully clean;
-# - every execution row is passed, failed, or carries a typed classification,
-#   and passes are a floor while failures and classifications are ceilings;
-# - comparison never mismatches, passes are a floor, a source top that ran
-#   without an oracle is a ceiling, and every row that ran reached comparison.
-# Classifications never count as passes. Floors and ceilings bound aggregate
-# drift; source-value comparisons remain the semantic acceptance evidence.
+# Suite.hs includes compiler-introduced workers, dictionaries, and floats. Their
+# number and whether GHC makes them independently callable are implementation
+# details, so this contract derives the source domain from the native oracle
+# rather than pinning a total-row count or aggregate pass floor. It still
+# requires every emitted row to pass projection through compilation, and then
+# checks each declared source top against its exact oracle or typed refusal.
 assert_suite_report() {
   local cohort="$1"
   local report="$2"
-  local expected_programs="$3"
-  local min_execution_passed="$4"
-  local max_execution_failed="$5"
-  local max_execution_classified="$6"
-  local min_comparison_passed="$7"
-  local max_missing_expectation="$8"
-  local max_no_oracle="$9"
+  local oracle="$3"
+  local manifest="$4"
+  local expected_source_targets="$5"
   jq -e \
-    --argjson expected "$expected_programs" \
-    --argjson min_execution "$min_execution_passed" \
-    --argjson max_failed "$max_execution_failed" \
-    --argjson max_classified "$max_execution_classified" \
-    --argjson min_comparison "$min_comparison_passed" \
-    --argjson max_missing "$max_missing_expectation" \
-    --argjson max_no_oracle "$max_no_oracle" '
-    def stage($name): [.stage_totals[] | select(.stage == $name)][0];
-    def classified: .not_closed + .no_finite_observation + .function_valued;
-    .stg_programs == $expected
-    and (.programs | length) == $expected
-    and (stage("projection").passed == $expected and stage("projection").failed == 0)
-    and (stage("validation").passed == $expected and stage("validation").failed == 0)
-    and (stage("admission").passed == $expected and stage("admission").failed == 0)
-    and (stage("compilation").passed == $expected and stage("compilation").failed == 0)
-    and (stage("execution") as $e
-      | $e.passed >= $min_execution
-      and $e.failed <= $max_failed
-      and ($e | classified) <= $max_classified
-      and ($e.passed + $e.failed + ($e | classified)) == $expected)
-    and (stage("comparison") as $c
-      | $c.failed == 0
-      and $c.passed >= $min_comparison
-      and $c.missing_expectation <= $max_missing
-      and $c.no_oracle <= $max_no_oracle
-      and ($c.passed + $c.missing_expectation + $c.no_oracle + $c.not_reached) == $expected)
+    --argjson expected_source_targets "$expected_source_targets" \
+    --slurpfile oracle "$oracle" \
+    --slurpfile manifest "$manifest" '
+    $oracle[0] as $oracle |
+    $manifest[0] as $manifest |
+    ($manifest.programs | map({key: .name, value: .expectation_key}) | from_entries) as $keys |
+    def expectation_key: $keys[.name];
+    def is_source:
+      expectation_key as $key | ($oracle.source_tops | index($key)) != null;
+    def status($index): .stages[$index].outcome.status;
+    def source_kind:
+      expectation_key as $key | $oracle.expectations[$key].kind;
+    def refusal_class:
+      expectation_key as $key | $oracle.refusals[$key].class;
+    (.source_targets | length) == $expected_source_targets
+    and .source_mapped == $expected_source_targets
+    and .source_unmapped == 0
+    and ([.source_targets[].source_name] | sort) == ($oracle.source_tops | sort)
+    and (.stg_programs == (.programs | length))
+    and ([.programs[].name] | sort) == ([$manifest.programs[].name] | sort)
+    # Every compiler-emitted program remains an acceptance obligation even
+    # though the compiler may harmlessly add, remove, or reshape such rows.
+    and all(.programs[];
+      (.stages | length) == 6
+      and all(.stages[0:4][]; .outcome.status == "passed")
+      and all(.stages[]; .outcome.status != "running")
+      and status(4) != "failed"
+      and status(5) != "failed")
+    # Values and error oracles must compare exactly. The two source-level
+    # refusal classes and no-finite oracle have their own typed outcomes.
+    and all(.programs[] | select(is_source);
+      if refusal_class == "not_closed" then
+        status(4) == "classified" and .stages[4].outcome.class == "not_closed"
+          and status(5) == "not_reached"
+      elif refusal_class == "unrepresentable" then
+        status(4) == "passed" and status(5) == "missing_expectation"
+      elif source_kind == "no_finite_observation" or source_kind == "cyclic_observation" then
+        status(4) == "classified" and .stages[4].outcome.class == "no_finite_observation"
+          and status(5) == "not_reached"
+      else
+        status(5) == "passed"
+      end)
+    # A missing expectation is permitted only for the reviewed source-level
+    # unrepresentable values; compiler rows must remain explicitly no-oracle.
+    and all(.programs[] | select(status(5) == "missing_expectation");
+      is_source and refusal_class == "unrepresentable")
     and all(.programs[];
       if .stages[4].outcome.status == "passed"
       then .stages[5].outcome.status != "not_reached" else true end)
   ' "$report" >/dev/null || {
-    echo "suite cohort $cohort regressed: expected stg_programs == $expected_programs" \
-      "with projection/validation/admission/compilation fully passing;" \
-      "execution passed >= $min_execution_passed, failed <= $max_execution_failed," \
-      "classified <= $max_execution_classified; comparison failed == 0," \
-      "passed >= $min_comparison_passed, missing_expectation <= $max_missing_expectation," \
-      "no_oracle <= $max_no_oracle;" \
-      "every executed row compared: $report" >&2
+    echo "suite cohort $cohort regressed: source domain or source oracle mismatch," \
+      "or an emitted row failed projection through execution: $report" >&2
     return 1
   }
 }
@@ -192,34 +199,7 @@ jq -e '.source_tops | type == "array"' "$suite_oracle" >/dev/null || {
 "$prepared_runner" run \
   "$suite_root/manifest.json" "$suite_oracle" \
   "$metadata" "$suite_report"
-suite_expected_programs=812
-# Floors are measured values; raise them when a run exceeds them.
-suite_min_execution_passed=705
-suite_max_execution_failed=0
-# 104 not closed, 3 no finite observation; the 3 function-valued tops execute
-# since observation bridges closures as the sentinel (412a46c53).
-suite_max_execution_classified=107
-suite_min_comparison_passed=234
-# Source tops whose type has no expectation kind (Aeson Value and FmtKInt).
-suite_max_missing_expectation=4
-# Compiler-introduced rows have no source-level oracle. Measured ceiling: a
-# rise means source tops lost oracles or projection introduced new bindings.
-# 467 = 464 + the 3 function-valued tops that now execute without an
-# expectation kind (they need one; see the missing-oracle list below).
-suite_max_no_oracle=467
-assert_suite_report suite "$suite_report" \
-  "$suite_expected_programs" "$suite_min_execution_passed" "$suite_max_execution_failed" \
-  "$suite_max_execution_classified" "$suite_min_comparison_passed" \
-  "$suite_max_missing_expectation" "$suite_max_no_oracle"
-# These source types have no observation expectation yet. A new missing oracle
-# is a regression even if another row gains an oracle in the same change.
-jq -e 'all(.programs[] | select(.stages[5].outcome.status == "missing_expectation");
-  .name as $name | ["main:Suite:value:FmtKInt", "main:Suite:value:qq_j_anti",
-    "main:Suite:value:qq_j_build", "main:Suite:value:qq_j_scalar"] | index($name) != null)' \
-  "$suite_report" >/dev/null || {
-  echo "unexpected source top without an oracle: $suite_report" >&2
-  exit 1
-}
+assert_suite_report suite "$suite_report" "$suite_oracle" "$suite_root/manifest.json" "$suite_count"
 jq -r '[.stage_totals[] | select(.stage == "execution")][0]
   | "  Suite execution: \(.passed) passed, \(.failed) failed;"
     + " classified: not_closed=\(.not_closed) no_finite_observation=\(.no_finite_observation)"

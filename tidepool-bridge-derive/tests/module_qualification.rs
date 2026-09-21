@@ -60,7 +60,9 @@ fn qualified_name_alpha_roundtrips_when_beta_shares_name() {
     let original = Alpha::Read;
     let value = original.to_value(&table).expect("to_value");
     match &value {
-        HaskellValue::Con(id, _) => assert_eq!(id.0, 1, "alpha encode should use TestMod.Alpha.Read id"),
+        HaskellValue::Con(id, _) => {
+            assert_eq!(id.0, 1, "alpha encode should use TestMod.Alpha.Read id")
+        }
         other => panic!("expected Con, got {other:?}"),
     }
     let decoded = Alpha::from_value(&value, &table).expect("from_value");
@@ -73,7 +75,9 @@ fn beta_roundtrips_when_alpha_shares_name() {
     let original = Beta::Read;
     let value = original.to_value(&table).expect("to_value");
     match &value {
-        HaskellValue::Con(id, _) => assert_eq!(id.0, 2, "beta encode should use TestMod.Beta.Read id"),
+        HaskellValue::Con(id, _) => {
+            assert_eq!(id.0, 2, "beta encode should use TestMod.Beta.Read id")
+        }
         other => panic!("expected Con, got {other:?}"),
     }
     let decoded = Beta::from_value(&value, &table).expect("from_value");

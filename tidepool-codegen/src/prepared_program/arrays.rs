@@ -2240,9 +2240,9 @@ mod tests {
                 .unwrap();
             assert!(matches!(
                 result.values.as_slice(),
-                [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(
-                    3
-                ))]
+                [tidepool_bridge::HaskellValue::Lit(
+                    tidepool_repr::Literal::LitInt(3)
+                )]
             ));
         }
     }
@@ -2259,9 +2259,9 @@ mod tests {
             .unwrap();
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(
-                1
-            ))]
+            [tidepool_bridge::HaskellValue::Lit(
+                tidepool_repr::Literal::LitInt(1)
+            )]
         ));
         let error = frozen_shrink_program(true)
             .run_entry(

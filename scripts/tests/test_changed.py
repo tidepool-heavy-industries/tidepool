@@ -67,6 +67,11 @@ class Selection(unittest.TestCase):
         self.assertIn("tidepool-runtime", selection)
         self.assertEqual(actions, {"haskell", "fixtures"})
 
+    def test_haskell_library_change_checks_fixtures(self):
+        self.package("tidepool-runtime")
+        _, _, actions, _ = self.select("haskell/lib/Tidepool/Data/Time.hs")
+        self.assertEqual(actions, {"haskell", "fixtures"})
+
     def test_documentation_only_is_explicit_empty_selection(self):
         self.assertEqual(self.select("a/README.md", "docs/GUIDE.md"), ({}, set(), set(), set()))
 

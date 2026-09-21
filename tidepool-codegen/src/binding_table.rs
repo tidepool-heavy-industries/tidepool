@@ -68,7 +68,6 @@ struct BindingTip {
     retained: HashSet<SessionVarId>,
 }
 
-/// A live value retained by the prepared-STG machine.
 /// A value retained by a prepared-STG `PreparedMachine`: tenured as-is (never
 /// deep-forced, so its preparation policy is Tier-1's), rooted by `root` for
 /// the machine's life. `handle` is the machine's own custody of that same root

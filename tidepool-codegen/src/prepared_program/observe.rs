@@ -673,9 +673,9 @@ impl ObservationHeap<'_> {
                             pool.logical_suffix(seed.word).map(<[u8]>::to_vec)
                         })
                         .ok_or_else(unauthenticated)?;
-                    return Ok(ObservationFrame::Leaf(HaskellValue::Lit(Literal::LitString(
-                        bytes,
-                    ))));
+                    return Ok(ObservationFrame::Leaf(HaskellValue::Lit(
+                        Literal::LitString(bytes),
+                    )));
                 }
                 RuntimeRep::Int(bits) => {
                     return Ok(ObservationFrame::Leaf(HaskellValue::Lit(Literal::LitInt(
@@ -688,14 +688,14 @@ impl ObservationHeap<'_> {
                     ))))
                 }
                 RuntimeRep::Float(32) => {
-                    return Ok(ObservationFrame::Leaf(HaskellValue::Lit(Literal::LitFloat(
-                        (seed.word as u32).into(),
-                    ))))
+                    return Ok(ObservationFrame::Leaf(HaskellValue::Lit(
+                        Literal::LitFloat((seed.word as u32).into()),
+                    )))
                 }
                 RuntimeRep::Float(64) => {
-                    return Ok(ObservationFrame::Leaf(HaskellValue::Lit(Literal::LitDouble(
-                        seed.word as u64,
-                    ))))
+                    return Ok(ObservationFrame::Leaf(HaskellValue::Lit(
+                        Literal::LitDouble(seed.word as u64),
+                    )))
                 }
                 RuntimeRep::Float(bits) => {
                     return Err(ObservationFailure::Representation(RuntimeRep::Float(bits)))
@@ -746,9 +746,9 @@ impl ObservationHeap<'_> {
                             let bytes = owner
                                 .copy_external_bytes(published)
                                 .map_err(external_observation_error)?;
-                            return Ok(ObservationFrame::Leaf(HaskellValue::Lit(Literal::LitByteArray(
-                                bytes,
-                            ))));
+                            return Ok(ObservationFrame::Leaf(HaskellValue::Lit(
+                                Literal::LitByteArray(bytes),
+                            )));
                         }
                         // `SmallArray#`/`Array#` observe as `DataConId(0)` over
                         // the elements; the wrapping constructor carries the
@@ -1424,7 +1424,10 @@ mod tests {
         // Where a bounded walk of a long list actually leaves its cut.
         let spine = |tail: HaskellValue| {
             (0..100_000).fold(tail, |rest, index| {
-                HaskellValue::Con(DataConId(9), vec![HaskellValue::Lit(Literal::LitInt(index)), rest])
+                HaskellValue::Con(
+                    DataConId(9),
+                    vec![HaskellValue::Lit(Literal::LitInt(index)), rest],
+                )
             })
         };
         assert!(contains_oversize_sentinel(&spine(oversize_cut())));

@@ -22,7 +22,7 @@ pub enum BridgeError {
     },
     /// Lookup by (name, arity) found MORE THAN ONE distinct constructor —
     /// insertion order would otherwise silently decide which one is used
-    /// (the class of bug that let a wrong-type `Value::Con` reach the
+    /// (the class of bug that let a wrong-type `HaskellValue::Con` reach the
     /// runtime with metadata/field arity disagreeing). Emitted by derived
     /// `FromHaskell`/`ToHaskell` impls instead of picking a candidate arbitrarily;
     /// disambiguate with a `#[haskell(module = "...")]` attribute.

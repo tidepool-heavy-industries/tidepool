@@ -18,7 +18,7 @@ envelope.
 (added for E2, the resume-loop test) are the engine's idiom for forcing a
 value from Rust, used the same way as `resumeInt`: a tiny compiled Haskell
 top, called through `run_entry_retained` with the retained value as a
-`Managed` argument. They exist because `PreparedRuntime::inspect_outer`
+`Managed` argument. They exist because `PreparedMachine::inspect_outer`
 (`tidepool-codegen/src/prepared_program/observe.rs`) is deliberately
 observation-only — it reads one already-WHNF constructor layer and never
 forces a field. `Union`'s payload field (`Data.OpenUnion.Internal`, a

@@ -6,8 +6,8 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use tidepool_bridge::ToHaskell;
 use tidepool_bridge::HaskellValue;
+use tidepool_bridge::ToHaskell;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{ResidentHole, ResidentOutcome};
 
@@ -101,7 +101,10 @@ pub(crate) enum GreenDelivery<'a> {
 pub(crate) enum ServicedSuspension {
     /// The popped item was itself terminal — the PRIMARY chain's `loop` has
     /// finished.
-    Completed { result: HaskellValue, table: DataConTable },
+    Completed {
+        result: HaskellValue,
+        table: DataConTable,
+    },
     /// The hole was resumed; its next outcome re-enters the ready queue
     /// under the same chain.
     Resumed(GreenReady),
@@ -127,7 +130,11 @@ pub(crate) fn green_int_field(request: &HaskellValue, idx: usize, table: &DataCo
 
 /// Pull an `[Int]` field out of a Green request Con (`AsyncJoinAnyWith`'s
 /// sole field).
-pub(crate) fn green_int_list_field(request: &HaskellValue, idx: usize, table: &DataConTable) -> Vec<i64> {
+pub(crate) fn green_int_list_field(
+    request: &HaskellValue,
+    idx: usize,
+    table: &DataConTable,
+) -> Vec<i64> {
     let HaskellValue::Con(_, fields) = request else {
         return Vec::new();
     };

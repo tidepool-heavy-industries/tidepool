@@ -12,7 +12,7 @@ pub use tidepool_runtime::CompileError;
 use tidepool_runtime::{
     compile_and_run, compile_and_run_with_nursery_size, compile_haskell, compile_targets,
     run_prepared_program, CompileResult, CompiledArtifacts, DispatchEffect, EvalResult,
-    RuntimeError, HaskellValue, DEFAULT_NURSERY_SIZE, EVAL_STACK_SIZE,
+    HaskellValue, RuntimeError, DEFAULT_NURSERY_SIZE, EVAL_STACK_SIZE,
 };
 
 /// Repo root, derived from this crate's manifest dir (`<root>/tidepool-testing`).

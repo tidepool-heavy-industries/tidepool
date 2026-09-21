@@ -19,21 +19,14 @@ use tidepool_repr::freer_names::{
 use tidepool_repr::DataConId;
 use tidepool_runtime::prepared_execution::{PreparedFailureKind, PreparedRuntimeError, RealmId};
 
-/// This file drives `tidepool_codegen::prepared_program::PreparedMachine`
-/// directly: the deleted `PreparedRuntime` session-bookkeeping wrapper
-/// (bindings/generations/leases) duplicated the real production owner,
-/// `PreparedEngine` (`tidepool-runtime/src/session/prepared.rs`), and none of
-/// the tests below exercise session-level bookkeeping -- they are all
-/// machine-level (parking, resuming, realms, cancellation, freer-resume
-/// loops, cross-program imports, GC), so they are ported onto the lower
-/// layer instead of onto `PreparedEngine`.
+/// This file exercises the prepared execution engine directly. The tests
+/// cover machine-level invariants—parking, resuming, realms, cancellation,
+/// freer-resume loops, cross-program imports, and collection—while
+/// session-level orchestration is covered by the resident-session tests.
 ///
-/// One-shot convenience equivalent to the deleted
-/// `tidepool_runtime::prepared_execution::run_prepared_once`: parse, link,
-/// compile, install on a fresh ephemeral machine, and run the artifact's
-/// designated entry with no arguments, using the same default nursery size
-/// and observation budget the deleted wrapper used
-/// ([`RunOptions::default`]).
+/// Parse, link, compile, install on a fresh machine, and run an artifact's
+/// designated entry with no arguments using the default nursery and
+/// observation settings ([`RunOptions::default`]).
 fn run_prepared_once(
     artifact: &[u8],
     requirements: &ProgramRequirements,
@@ -187,10 +180,12 @@ fn chrono_parse_error_text_survives_collection_before_observation() {
     .expect("run chrono parse error");
     assert_eq!(result.collections, 1);
     let expected = b"parseISO8601: \"not-a-time\": premature end of input";
-    fn contains_bytes(value: &Value, expected: &[u8]) -> bool {
+    fn contains_bytes(value: &HaskellValue, expected: &[u8]) -> bool {
         match value {
-            Value::Lit(tidepool_repr::Literal::LitByteArray(bytes)) => bytes == expected,
-            Value::Con(_, fields) => fields.iter().any(|field| contains_bytes(field, expected)),
+            HaskellValue::Lit(tidepool_repr::Literal::LitByteArray(bytes)) => bytes == expected,
+            HaskellValue::Con(_, fields) => {
+                fields.iter().any(|field| contains_bytes(field, expected))
+            }
             _ => false,
         }
     }
@@ -309,10 +304,8 @@ fn strict_program() -> PreparedProgram {
         .expect("strict_artifact() parses")
 }
 
-/// The default [`PreparedCallOptions`] `PreparedRuntime`'s deleted
-/// convenience wrappers used everywhere: the same observation budget
-/// [`RunOptions::default`] carries, with `collect_before_observation` set
-/// per call site.
+/// Call options using repository defaults, with collection timing chosen by
+/// each test.
 fn call_options(collect_before_observation: bool) -> PreparedCallOptions {
     PreparedCallOptions {
         observation_budget: RunOptions::default().observation_budget,
@@ -326,9 +319,8 @@ fn machine_options() -> PreparedMachineOptions {
     }
 }
 
-/// A fresh machine with `strict_program()` installed as its only, closed
-/// program -- the direct-`PreparedMachine` equivalent of
-/// `PreparedRuntime::from_artifact(&strict_artifact(), ...)`.
+/// A fresh machine with `strict_program()` installed as its only closed
+/// program.
 fn open_strict_machine() -> (PreparedMachine<'static>, ProgramId) {
     let linked =
         link_program(strict_program(), &MachineImports::default()).expect("strict links closed");
@@ -336,22 +328,16 @@ fn open_strict_machine() -> (PreparedMachine<'static>, ProgramId) {
     PreparedMachine::new(compiled, machine_options()).expect("strict artifact installs")
 }
 
-/// Link `prepared` with no imports, compile and install it as a fresh
-/// machine's only program -- the direct-`PreparedMachine` equivalent of
-/// `PreparedRuntime::from_prepared(prepared, MachineImports::default())` for
-/// a closed artifact.
+/// Link `prepared` with no imports, compile it, and install it as the fresh
+/// machine's only program.
 fn open_closed_machine_from(prepared: PreparedProgram) -> (PreparedMachine<'static>, ProgramId) {
     let linked = link_program(prepared, &MachineImports::default()).expect("artifact links closed");
     let compiled = CompiledProgram::compile(&linked).expect("artifact compiles");
     PreparedMachine::new(compiled, machine_options()).expect("artifact installs")
 }
 
-/// Parse, link with no imports, compile and install `artifact` as a fresh
-/// machine's only program, returning its own designated entry alongside --
-/// the direct-`PreparedMachine` equivalent of
-/// `PreparedRuntime::from_artifact(artifact, ..., MachineImports::default())`
-/// for a closed artifact whose tests drive the designated entry (what the
-/// deleted wrapper's `run_entry(None, ...)` meant).
+/// Parse, link with no imports, compile, and install `artifact` as a fresh
+/// machine's only program, returning its designated entry alongside it.
 fn open_closed_machine(artifact: &[u8]) -> (PreparedMachine<'static>, ProgramId, ValueId) {
     let prepared =
         parse_program(artifact, &requirements(), DecodeLimits::default()).expect("artifact parses");
@@ -505,12 +491,11 @@ fn retained_session_caches_closed_program_and_rejects_unclosed_artifact() {
     // own declared globals exactly (so `link_program` succeeds), but no real
     // `PreparedHandle` backs any of those identities: `install_program`
     // refuses with `ExecutionError::UnknownPreparedHandle`, the same
-    // `PreparedFailureKind::Rejected` classification the deleted
-    // `PreparedRuntime::run_entry(None, ...)` surfaced for an artifact whose
-    // declared imports were never actually bound. Installing it as a SECOND
-    // program on an already-open, already-working machine (rather than as
-    // the very first program) lets this test also observe that the refusal
-    // leaves that machine's own disposition untouched.
+    // `PreparedFailureKind::Rejected` classification. An artifact whose
+    // declared imports have no live handles must be rejected by installation.
+    // Installing it as a second program on an already-open,
+    // already-working machine also proves that the refusal leaves the
+    // existing machine reusable.
     let (mut unclosed_machine, _first) = open_strict_machine();
     let unclosed_linked = link_program(
         parse_program(ARTIFACT, &requirements(), DecodeLimits::default()).unwrap(),
@@ -651,11 +636,9 @@ fn freer_resume_artifact_admits_program_and_resume_int_as_two_entries(
          because Eff is not IO"
     );
 
-    // The deleted `PreparedRuntime::from_artifact` parsed and linked eagerly
-    // but deferred compilation (and therefore whole-program admission) to
-    // the first entry run; `PreparedMachine::new` below compiles and admits
-    // the whole artifact up front instead, so this test's own compile step
-    // already stands in for that deferred-admission moment.
+    // `PreparedMachine::new` compiles and admits the whole artifact up front,
+    // so installing the fixture already proves that both reachable entries
+    // were admitted before either one is run.
     let program_run = machine
         .run_entry_retained(
             program,
@@ -727,7 +710,7 @@ fn take_scalar(fields: &[PreparedResult], index: usize) -> u64 {
 }
 
 /// Drives the compiled `qApp` resume loop (Wave 6B decision D2) end to end,
-/// with no Rust-side freer walker: `PreparedRuntime::inspect_outer` reads
+/// with no Rust-side freer walker: `PreparedMachine::inspect_outer` reads
 /// every constructor layer this loop looks at (`E`/`Val`, and `Union`'s
 /// unpacked tag/payload shape), and `resumeInt`/`askArgument`/`valResult`
 /// are the only things that ever force a field, and they do it as ordinary
@@ -765,7 +748,7 @@ fn take_scalar(fields: &[PreparedResult], index: usize) -> u64 {
 ///
 /// The final `Int` is checked against `FreerResumeExpectations.json`
 /// (`FreerResumeOracle.hs` run under the pinned GHC, never hand-typed).
-/// Every `PreparedValue` this loop allocates is released as soon as it is no
+/// Every managed handle this loop allocates is released as soon as it is no
 /// longer needed, and the runtime's handle ledger must read back to zero at
 /// the end: no leaked handles, and nothing forces `k` itself anywhere in
 /// this loop (it is only ever inspected as an opaque `Managed` field and
@@ -908,7 +891,7 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments(
     assert_eq!(
         machine.handle_count(),
         0,
-        "every PreparedValue produced along the resume loop must be released"
+        "every managed handle produced along the resume loop must be released"
     );
 }
 
@@ -1236,7 +1219,7 @@ fn parked_continuations_resume_out_of_order_with_a_collection_between(
     assert_eq!(
         machine.handle_count(),
         0,
-        "every PreparedValue produced along both resume loops must be released"
+        "every managed handle produced along both resume loops must be released"
     );
     assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 }
@@ -1415,18 +1398,15 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable(
     assert_eq!(
         machine.handle_count(),
         0,
-        "every PreparedValue produced by this test must be released"
+        "every managed handle produced by this test must be released"
     );
     assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 }
 
 /// E3(c): cancellation set so a running entry's own compiled safepoint poll
 /// observes it -- not a shortcut check performed before generated code ever
-/// runs. `PreparedRuntime::run_entry_retained` (`tidepool-runtime/src/session/prepared.rs`)
-/// checks its realm's cancel flag in plain Rust before it ever calls into
-/// the machine, so driving cancellation through that wrapper would prove
-/// only the wrapper's own precondition check, not the generated-code
-/// contract. This test instead drives `tidepool_codegen::prepared_program::PreparedMachine`
+/// runs. The session layer may check cancellation before entering the machine;
+/// this test drives `tidepool_codegen::prepared_program::PreparedMachine`
 /// directly (the same lower layer `machine.rs`'s own
 /// `cancellation_is_recoverable_before_a_following_entry` test uses): its
 /// `run_entry_retained` installs the cancel flag onto the `MachineState`
@@ -1603,7 +1583,7 @@ fn cancellation_before_commit_leaves_a_parked_k_valid_for_retry() {
 
 /// [`take_managed`], but for the raw `PreparedMachine` API's own
 /// `PreparedResult`, used by the direct-`PreparedMachine` cancellation
-/// tests below instead of `PreparedRuntime`'s `PreparedValueResult`.
+/// tests below instead of a session-level materialized result type.
 fn take_managed_result(fields: &mut [PreparedResult], index: usize) -> PreparedHandle {
     match std::mem::replace(&mut fields[index], PreparedResult::Void) {
         PreparedResult::Managed(handle) => handle,
@@ -1623,8 +1603,8 @@ fn take_scalar_result(fields: &[PreparedResult], index: usize) -> u64 {
 /// `PreparedMachine`/`ProgramId` primitives (the same layer
 /// `cancellation_before_commit_leaves_a_parked_k_valid_for_retry` drives
 /// directly) and tagged with an explicit `realm`, so the two-realm
-/// cancellation test below can drive each realm's own suspension without
-/// going through `PreparedRuntime`'s realm-agnostic convenience wrapper.
+/// cancellation test below can drive each realm's own suspension through the
+/// machine API.
 /// Every intermediate root this loop mints under `realm` (`union`, `k`,
 /// `payload`) is released as soon as it is consumed, exactly as
 /// `drive_freer_program_to_val_in` does; unlike that helper, the settled
@@ -2028,16 +2008,12 @@ fn two_realms_share_one_machine_cancel_reset_close_independently_of_each_other()
 // already pins interleaved parked work WITHIN one installed program. Rung 3
 // as stated in the acceptance ladder is about two installed programs
 // sharing one heap. This section installs the freer-resume artifact a
-// second time on the SAME machine (`install_program`, no imports -- the two
+// second time on the same machine (`install_program`, no imports—the two
 // copies share no data) and drives both through `drive_freer_program_to_val`,
-// which already takes an explicit [`ProgramId`] (the deleted
-// `PreparedRuntime::run_entry_retained_in`'s whole reason to exist, folded
-// directly into the one direct-`PreparedMachine` helper above rather than
-// kept as a second, now-identical copy).
+// which takes an explicit [`ProgramId`].
 
-/// Parse, link with no imports, and install `artifact` as a SECOND (or
-/// later) program on `machine` -- the direct-`PreparedMachine` equivalent of
-/// the deleted `PreparedRuntime::install`.
+/// Parse, link with no imports, and install `artifact` as a second (or later)
+/// program on `machine`.
 fn install_closed(machine: &mut PreparedMachine<'static>, artifact: &[u8]) -> ProgramId {
     let prepared =
         parse_program(artifact, &requirements(), DecodeLimits::default()).expect("artifact parses");
@@ -2124,7 +2100,7 @@ fn c0_two_installed_programs_park_and_resume_out_of_order_with_a_collection_betw
     assert_eq!(
         machine.handle_count(),
         0,
-        "every PreparedValue produced along both resume loops must be released"
+        "every managed handle produced along both resume loops must be released"
     );
     assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 }
@@ -2311,12 +2287,8 @@ fn top_arity(prepared: &PreparedProgram, top: &TopBinding) -> usize {
     }
 }
 
-/// The [`ImportedValue`] `link_program` checks a declared import against,
-/// read from `handle`'s live state under `generation` -- the same facts
-/// `PreparedEngine::install` (`tidepool-runtime/src/session/prepared.rs`)
-/// assembles per import before linking, and the direct-`PreparedMachine`
-/// equivalent of what the deleted `PreparedRuntime::bind_top`'s generation
-/// bookkeeping produced.
+/// Build the [`ImportedValue`] facts that `link_program` checks for a
+/// declared import from `handle`'s live state and its generation.
 fn imported_value_for(
     machine: &PreparedMachine<'static>,
     owner: &PreparedProgram,
@@ -2340,11 +2312,7 @@ fn imported_value_for(
     }
 }
 
-/// Link and install `prepared` against exactly the imports named -- the
-/// direct-`PreparedMachine` equivalent of the deleted
-/// `PreparedRuntime::install_prepared`'s link-then-compile-then-install
-/// sequence, minus the `SessionVarId`/lease bookkeeping that wrapper alone
-/// carried.
+/// Link and install `prepared` against exactly the named imports.
 fn install_importing(
     machine: &mut PreparedMachine<'static>,
     prepared: PreparedProgram,
@@ -2524,10 +2492,8 @@ fn retained_import_end_to_end_links_consumer_against_bound_producer_tops() {
     )
     .expect("consumer links against both generation-11 bindings and installs");
     assert_ne!(program, first);
-    // `bindings().lease_count(...)` was dead bookkeeping specific to the
-    // deleted `PreparedRuntime` wrapper: `PreparedEngine::install` (the
-    // production owner) never calls `BindingTable::acquire_leases`, so no
-    // import is ever leased on the real prepared route either. Dropped.
+    // The prepared engine does not lease imported handles; the installed
+    // program keeps its import slots live until the machine is retired.
 
     let expected = expected_consumer_value();
     let observed = machine
@@ -2624,9 +2590,8 @@ fn retained_import_end_to_end_links_consumer_against_bound_producer_tops() {
     // A consumer projected against generation 11 does not link against
     // bindings whose `ImportedValue.generation` reads 12, and the refusal
     // installs nothing. `PreparedMachine` carries no generation-stamped
-    // binding table of its own (that tracking lived only in the deleted
-    // `PreparedRuntime` wrapper's `bind_top`/`set_val_gen`), so this step
-    // retains two fresh handles to the same tops and hand-builds their
+    // binding table of its own, so this step retains two fresh handles to the
+    // same tops and hand-builds their
     // `ImportedValue`s at a fabricated stale generation instead of
     // advancing a real session generation counter and rebinding.
     let stale_value = machine
@@ -2670,10 +2635,8 @@ fn retained_import_end_to_end_links_consumer_against_bound_producer_tops() {
     assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 
     // `bound_value`/`bound_fn` are left retained (the production
-    // `PreparedEngine` route never leases them either, so nothing refuses
-    // their release the way the deleted `PreparedRuntime` wrapper's
-    // `BindingLeased` did; leaving them alive here matches the same
-    // "installed program's import slot stays live" end state). The
+    // `PreparedEngine` route never leases them either; leaving them alive
+    // matches the installed program's live import slots. The
     // never-installed-against stale handles release cleanly.
     assert!(machine.release(stale_value));
     assert!(machine.release(stale_fn));
@@ -2764,10 +2727,8 @@ fn s6_direct_global_call_runs_against_the_oracle() {
     )
     .expect("a direct call to an imported function is admitted and links");
     assert_ne!(program, first);
-    // `bindings().lease_count(...)` was dead bookkeeping specific to the
-    // deleted `PreparedRuntime` wrapper -- see the matching comment in
-    // `retained_import_end_to_end_links_consumer_against_bound_producer_tops`.
-    // Dropped.
+    // Imported handles remain live while the installed program can reach its
+    // slots; the machine has no separate lease counter.
 
     let observed = machine
         .run_entry(
@@ -2797,10 +2758,6 @@ fn s6_direct_global_call_runs_against_the_oracle() {
 
     assert_eq!(machine.handle_count(), 2);
     assert_eq!(machine.disposition(), MachineDisposition::Reusable);
-    // The deleted `PreparedRuntime` wrapper's `release_binding(bound_fn)`
-    // refused with `BindingLeased` here because ITS OWN bookkeeping leased
-    // every import; `PreparedMachine` (and the production `PreparedEngine`
-    // route) never leases, so `bound_fn` is simply left retained -- the
-    // same "installed program's import slot stays live" state, reached
-    // without a lease-refusal assertion to port.
+    // Imported handles remain live while the installed program can reach its
+    // slots; the machine has no separate lease-refusal path.
 }

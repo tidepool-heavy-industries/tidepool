@@ -6,7 +6,7 @@ pub mod write;
 pub use read::{read_metadata, MetaWarnings};
 pub use write::write_metadata;
 
-/// Errors that can occur during CBOR deserialization of Tidepool IR.
+/// Errors that can occur during CBOR deserialization of constructor metadata.
 ///
 /// Wraps underlying `ciborium` errors and adds structural context.
 #[derive(Debug, thiserror::Error)]
@@ -14,7 +14,7 @@ pub enum ReadError {
     /// An error occurred in the underlying CBOR parser.
     #[error("CBOR decode error: {0}")]
     Cbor(#[from] ciborium::de::Error<std::io::Error>),
-    /// The structural layout of the CBOR data does not match Tidepool IR.
+    /// The structural layout of the CBOR data does not match constructor metadata.
     #[error("Invalid structure: {0}")]
     InvalidStructure(String),
     /// Input without the mandatory `TPLR` header — a stale or foreign payload.
@@ -68,7 +68,7 @@ pub const VERSION_MINOR: u16 = 0;
 /// Total header length in bytes.
 pub const HEADER_LEN: usize = 8;
 
-/// Errors that can occur during CBOR serialization of Tidepool IR.
+/// Errors that can occur during CBOR serialization of constructor metadata.
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
     /// An error occurred in the underlying CBOR serializer.

@@ -94,6 +94,10 @@ main = do
       repeated <- recover entry
       assert (any recoveredFst (closureModules repeated))
         "returning to the first target lost its defining-module recovery"
+      assert (closureFactCacheHits repeated > 0)
+        "returning to the first target did not reuse recovered-body facts"
+      assert (closureFactCacheHits other == 0)
+        "a target without the recovered dependency observed stale recovery facts"
       pure first
     liftIO $ assert (any recoveredFst (closureModules closure))
       "closure did not retain the newly prepared defining module for fst"

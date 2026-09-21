@@ -49,7 +49,7 @@ def select(metadata, changed, root):
         if path.startswith("haskell/"):
             if file.suffix in (".hs", ".cabal", ".cbor", ".json") or file.name.startswith("cabal.project"):
                 actions.add("haskell")
-                if path.startswith(("haskell/src/", "haskell/app/", "haskell/test/", "haskell/test-prepared-stg/", "haskell/test-execution-corpus/")):
+                if path.startswith(("haskell/src/", "haskell/app/", "haskell/lib/", "haskell/test/", "haskell/test-prepared-stg/", "haskell/test-execution-corpus/")):
                     actions.add("fixtures")
                 all_tests("tidepool-runtime")
             continue

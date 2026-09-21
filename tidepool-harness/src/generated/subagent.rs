@@ -26,7 +26,12 @@ pub enum SubagentReq {
         tidepool_bridge::HaskellValue,
         tidepool_bridge::HaskellValue,
     ),
-    SubagentResume(tidepool_bridge::HaskellValue, String, bool, tidepool_bridge::HaskellValue),
+    SubagentResume(
+        tidepool_bridge::HaskellValue,
+        String,
+        bool,
+        tidepool_bridge::HaskellValue,
+    ),
     SubagentSpawnAsync(tidepool_bridge::HaskellValue, tidepool_bridge::HaskellValue),
     SubagentAwait(tidepool_bridge::HaskellValue),
     SubagentCancel(tidepool_bridge::HaskellValue),

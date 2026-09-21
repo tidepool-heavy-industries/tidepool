@@ -6,8 +6,8 @@
 
 use std::sync::Arc;
 
-use tidepool_bridge::ToHaskell;
 use tidepool_bridge::HaskellValue;
+use tidepool_bridge::ToHaskell;
 use tidepool_repr::DataConTable;
 
 use super::rendered_result_snippet;

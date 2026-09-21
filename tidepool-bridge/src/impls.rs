@@ -177,7 +177,9 @@ impl FromHaskell for () {
             // nullary constructor, ...) silently corrupts downstream decode —
             // exactly the failure mode `to_value`'s own comment warns about
             // for the encode direction (#F6).
-            HaskellValue::Con(id, fields) if fields.is_empty() && table.name_of(*id) == Some("()") => {
+            HaskellValue::Con(id, fields)
+                if fields.is_empty() && table.name_of(*id) == Some("()") =>
+            {
                 Ok(())
             }
             _ => Err(type_mismatch("()", value)),
@@ -366,22 +368,25 @@ impl FromHaskell for String {
                     got: format!("Invalid UTF-8: {}", e),
                 })
             }
-            HaskellValue::Lit(Literal::LitString(bytes)) => {
-                String::from_utf8(bytes.clone()).map_err(|e| BridgeError::TypeMismatch {
+            HaskellValue::Lit(Literal::LitString(bytes)) => String::from_utf8(bytes.clone())
+                .map_err(|e| BridgeError::TypeMismatch {
                     expected: "UTF-8 String".to_string(),
                     got: format!("Invalid UTF-8: {}", e),
-                })
-            }
+                }),
             // Also accept cons-cell list of Char (from ++ desugaring)
             HaskellValue::Con(_, _) => {
                 let mut chars = Vec::new();
                 let mut cur = value;
                 loop {
                     match cur {
-                        HaskellValue::Con(tag, fields) if nil_id == Some(*tag) && fields.is_empty() => {
+                        HaskellValue::Con(tag, fields)
+                            if nil_id == Some(*tag) && fields.is_empty() =>
+                        {
                             break;
                         }
-                        HaskellValue::Con(tag, fields) if cons_id == Some(*tag) && fields.len() == 2 => {
+                        HaskellValue::Con(tag, fields)
+                            if cons_id == Some(*tag) && fields.len() == 2 =>
+                        {
                             match shapes::unbox_char(&fields[0], table) {
                                 Some(c) => chars.push(c),
                                 None => return Err(type_mismatch("Char or C#", &fields[0])),

@@ -1,4 +1,4 @@
-{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
+{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, PackageImports #-}
 -- | Minimal UTC time surface for Tidepool eval.
 --
 -- 'UTCTime' is an opaque newtype over epoch milliseconds (Int).  All
@@ -26,7 +26,7 @@ import Prelude
   , (>), (>=), (<), (<=), otherwise
   , ($), (.), (++)
   )
-import Data.Text (Text)
+import "text" Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 
 -- | Opaque UTC timestamp at millisecond resolution.

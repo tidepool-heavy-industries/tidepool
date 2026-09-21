@@ -604,7 +604,10 @@ pub(crate) enum PreparedRun {
     /// The turn requested a typed effect: its continuation is parked under
     /// `id` in the machine's ledger and `request` is the observed request,
     /// ready for the host to route.
-    Suspended { id: ContinuationId, request: HaskellValue },
+    Suspended {
+        id: ContinuationId,
+        request: HaskellValue,
+    },
 }
 
 /// The hole a suspension of a turn run in `mode` mints, carrying its
@@ -897,7 +900,10 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
             Ok(value) => Ok(PreparedRun::Done { handle, value }),
             Err(error) if is_observation_budget_exhausted(&error) => Ok(PreparedRun::Done {
                 handle,
-                value: HaskellValue::Con(tidepool_codegen::observation::OVERSIZE_SENTINEL, Vec::new()),
+                value: HaskellValue::Con(
+                    tidepool_codegen::observation::OVERSIZE_SENTINEL,
+                    Vec::new(),
+                ),
             }),
             Err(error) => {
                 engine.release(handle);
@@ -2894,8 +2900,7 @@ where
     /// for delivering an already-bound value into another parked frame by
     /// handle ([`Self::resume_handle`]/[`Self::resume_framed_custody`]) —
     /// [`Self::reenter_prepared`]'s `Handle`/`FramedHandle` branches' test
-    /// surface. Reuses `BoundValue::
-    /// Prepared`'s own linking handle rather than minting a fresh one, so
+    /// surface. Reuses `BoundValue`'s own linking handle rather than minting a fresh one, so
     /// custody moves without disturbing the binding's root -- and, because
     /// the binding table (not this token) is the handle's real owner, the
     /// returned custody is [`RootCustody::shared`]: a caller that only ever
@@ -2971,7 +2976,10 @@ where
 enum ParkedRun {
     CompletedValue(HaskellValue),
     CompletedProject,
-    Suspended { id: ContinuationId, request: HaskellValue },
+    Suspended {
+        id: ContinuationId,
+        request: HaskellValue,
+    },
 }
 
 /// The three ways a resident eval thread's lifecycle can resolve — spawn

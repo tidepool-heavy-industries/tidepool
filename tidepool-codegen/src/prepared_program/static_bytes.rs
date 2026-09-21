@@ -70,6 +70,13 @@ struct PinnedLiteral {
     logical_len: usize,
 }
 
+/// Physical storage newly retained by one install's literal-pool absorption.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct PinnedBytesAbsorption {
+    storage_entries: usize,
+    storage_bytes: usize,
+}
+
 impl PinnedBytes {
     pub(super) fn new(by_value: BTreeMap<Vec<u8>, Arc<[u8]>>) -> Self {
         Self {
@@ -153,38 +160,52 @@ impl PinnedBytes {
     /// not lose its copy. Every distinct storage is therefore kept alive and
     /// resolvable through `by_address` for the machine's life, even when it
     /// is a content duplicate.
-    pub(crate) fn absorb(&mut self, other: &PinnedBytes) {
+    pub(crate) fn absorb(&mut self, other: &PinnedBytes) -> PinnedBytesAbsorption {
+        let mut added = PinnedBytesAbsorption::default();
         if other.local.by_value.is_empty() {
-            return;
+            return added;
         }
         let base = Arc::make_mut(&mut self.base);
         for (value, storage) in &other.local.by_value {
             if !base.by_value.contains_key(value) {
                 base.insert_owned(value.clone(), Arc::clone(storage));
+                added.storage_entries += 1;
+                added.storage_bytes += storage.len();
             } else {
-                base.by_address
-                    .entry(storage.as_ptr() as usize)
-                    .or_insert_with(|| PinnedLiteral {
-                        storage: Arc::clone(storage),
-                        logical_len: value.len(),
-                    });
+                let address = storage.as_ptr() as usize;
+                if !base.by_address.contains_key(&address) {
+                    base.by_address.insert(
+                        address,
+                        PinnedLiteral {
+                            storage: Arc::clone(storage),
+                            logical_len: value.len(),
+                        },
+                    );
+                    added.storage_entries += 1;
+                    added.storage_bytes += storage.len();
+                }
             }
         }
+        added
     }
 
     /// Physical storage includes duplicate content at distinct embedded addresses.
-    pub(crate) fn report_residency(&self) {
+    pub(crate) fn report_residency(&self, absorption: PinnedBytesAbsorption) {
         if std::env::var("TIDEPOOL_MEMORY_DETAIL").as_deref() == Ok("1") {
-            let entries = self.base.by_address.len() + self.local.by_address.len();
-            let bytes: usize = self
+            let lifetime_storage_entries = self.base.by_address.len() + self.local.by_address.len();
+            let lifetime_storage_bytes: usize = self
                 .base
                 .by_address
                 .values()
                 .chain(self.local.by_address.values())
                 .map(|literal| literal.storage.len())
                 .sum();
-            tracing::info!(target: "tidepool_codegen::prepared_compile", entries, bytes,
-                "permanent literal pool");
+            tracing::info!(target: "tidepool_codegen::prepared_compile",
+                lifetime_storage_entries,
+                lifetime_storage_bytes,
+                absorption_added_storage_entries = absorption.storage_entries,
+                absorption_added_storage_bytes = absorption.storage_bytes,
+                "permanent literal pool residency");
         }
     }
 
@@ -494,8 +515,12 @@ mod tests {
             PinnedBytes::new(BTreeMap::from([(b"shared".to_vec(), Arc::clone(&second))]));
 
         let mut pool = PinnedBytes::empty();
-        pool.absorb(&program_a);
-        pool.absorb(&program_b);
+        let first_absorption = pool.absorb(&program_a);
+        assert_eq!(first_absorption.storage_entries, 1);
+        assert_eq!(first_absorption.storage_bytes, first.len());
+        let second_absorption = pool.absorb(&program_b);
+        assert_eq!(second_absorption.storage_entries, 1);
+        assert_eq!(second_absorption.storage_bytes, second.len());
 
         assert!(Arc::ptr_eq(pool.get(b"shared").unwrap(), &first));
         assert_eq!(

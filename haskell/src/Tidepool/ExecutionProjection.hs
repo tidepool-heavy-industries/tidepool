@@ -68,7 +68,8 @@ import GHC.Types.RepType
   (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
 import GHC.Types.Unique.Set (UniqSet, addListToUniqSet, addOneToUniqSet, elementOfUniqSet, emptyUniqSet, mkUniqSet, nonDetEltsUniqSet)
 import GHC.Types.Unique (Unique, getKey)
-import GHC.Types.Unique.FM (UniqFM, addToUFM, emptyUFM, listToUFM, lookupUFM)
+import GHC.Types.Unique.FM
+  (UniqFM, addToUFM, emptyUFM, listToUFM, lookupUFM, nonDetEltsUFM)
 import GHC.Types.Var (Id, varName, varType, varUnique)
 import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
 import GHC.Types.Var.Set (dVarSetElems, isEmptyVarSet)
@@ -288,9 +289,10 @@ prepareProjection _ [] = Left (UnsupportedPreparedShape "execution program has n
 prepareProjection context modules =
   let (identities, selected) = selectPreparedTarget context modules
       bindingCount = sum [length (pmBindings prepared) | prepared <- selected]
+      identityCount = length (nonDetEltsUFM identities)
       reachable = mkUniqSet [ varUnique binder | prepared <- selected
         , (binding, _) <- pmBindings prepared, binder <- topBinders binding ]
-  in bindingCount `seq` case [ srMessage rejection | prepared <- modules
+  in bindingCount `seq` identityCount `seq` case [ srMessage rejection | prepared <- modules
             , rejection <- pmSiteRejections prepared
             , elementOfUniqSet (varUnique (srBinder rejection)) reachable
             , not (skippedFromRecovery context (srBinder rejection)) ] of

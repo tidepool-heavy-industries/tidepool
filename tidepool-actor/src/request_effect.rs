@@ -74,7 +74,11 @@ pub(crate) enum WatchesReq {
     RegisterWatchWith(String, Vec<AwaitDependency>),
     RegisterWatchGroupsWith(String, Vec<Vec<AwaitDependency>>),
     RegisterRouteWith(String, tidepool_bridge::HaskellValue, Vec<AwaitDependency>),
-    RegisterRouteGroupsWith(String, tidepool_bridge::HaskellValue, Vec<Vec<AwaitDependency>>),
+    RegisterRouteGroupsWith(
+        String,
+        tidepool_bridge::HaskellValue,
+        Vec<Vec<AwaitDependency>>,
+    ),
     ObserveRouteWith(i64),
     ListRoutesWith,
     #[haskell(module = "Tidepool.Agent.Watch.Internal")]

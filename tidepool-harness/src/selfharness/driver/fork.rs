@@ -323,7 +323,9 @@ impl BranchAgentSessionGuard {
     /// by name. Retries the finalized-value take across a
     /// `TurnInFlight` race (the original one-shot fork path's own
     /// discipline). Consumes the window.
-    pub(crate) async fn finalize_fork_data(mut self) -> Result<(HaskellValue, String), HarnessError> {
+    pub(crate) async fn finalize_fork_data(
+        mut self,
+    ) -> Result<(HaskellValue, String), HarnessError> {
         let node = self.node;
         let (value, rendered) = self.agent.take_finalized_value_keep_open(node).await?;
         let _ = self
@@ -457,15 +459,17 @@ impl SelfHarnessDriver {
         // must never be observable in the resumed answer).
         let this = &*self;
         #[allow(clippy::type_complexity)]
-        let results: Vec<(usize, Result<Result<HaskellValue, InvocationExit>, DriverError>)> =
-            drive_concurrent(cap, prompts.len(), |idx| {
-                let prompt = prompts[idx];
-                async move {
-                    this.drive_fanout_child(sid, site, idx, prompt, element_ty, modules, table)
-                        .await
-                }
-            })
-            .await;
+        let results: Vec<(
+            usize,
+            Result<Result<HaskellValue, InvocationExit>, DriverError>,
+        )> = drive_concurrent(cap, prompts.len(), |idx| {
+            let prompt = prompts[idx];
+            async move {
+                this.drive_fanout_child(sid, site, idx, prompt, element_ty, modules, table)
+                    .await
+            }
+        })
+        .await;
 
         self.lifecycle = SelfHarnessState::RunningLoop;
 

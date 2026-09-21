@@ -89,10 +89,11 @@ encodeMetaEntry DCMeta{dcmId, dcmName, dcmTag, dcmArity, dcmBangs, dcmQualName, 
   <> foldMap encodeString dcmFieldTypes
 
 --------------------------------------------------------------------------------
--- Turn-mode rich result (--turn) — independent of the frozen tree format
--- above: no TPLR header, no version coupling. A 2-element list, a string tag
--- ("Decl"/"Bind"/"Expr") plus the variant's payload, mirroring 'encodeNode's
--- tagged-list convention. This is the ONLY serialization of a 'TurnOut': the
+-- Turn-mode rich result (--turn) — independent of the constructor-metadata
+-- wire above: no TPLR header, no version coupling. A 2-element list, a string
+-- tag ("Decl"/"Bind"/"Expr") plus the variant's payload, using the same
+-- tagged-list convention as the other execution wires. This is the ONLY
+-- serialization of a 'TurnOut': the
 -- parallel JSON rendering (@--json-output@ / @renderTurnOutJson@) was a second
 -- hand-maintained serializer with no reader and was deleted.
 --------------------------------------------------------------------------------
@@ -118,7 +119,7 @@ encodeTurnOut turnOut = toStrictByteString $ case turnOut of
         <> encodeAsks aks
         <> encodeString wrapped)
 
--- | Whole-cell analysis wire. Independent from the frozen Core format and
+-- | Whole-cell analysis wire. Independent from the constructor-metadata wire and
 -- deliberately positional like 'TurnOut':
 -- @[items, pins, checked_source, prologue]@. The checked source is retained as exact
 -- evidence for diagnostic remapping and staged-wrapper review.

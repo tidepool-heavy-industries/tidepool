@@ -111,9 +111,9 @@ fn double2int_non_finite_values_report_reusable_overflow() {
     let valid = run(&program, 12.5).unwrap();
     assert!(matches!(
         valid.values.as_slice(),
-        [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(
-            12
-        ))]
+        [tidepool_bridge::HaskellValue::Lit(
+            tidepool_repr::Literal::LitInt(12)
+        )]
     ));
     assert_overflow(run(&program, f64::NAN));
 }

@@ -1640,9 +1640,9 @@ mod tests {
             .unwrap();
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(
-                1
-            ))]
+            [tidepool_bridge::HaskellValue::Lit(
+                tidepool_repr::Literal::LitInt(1)
+            )]
         ));
 
         for (length, index) in [(16, -1), (16, 2)] {
@@ -2514,9 +2514,9 @@ mod tests {
                 .unwrap();
             assert!(matches!(
                 result.values.as_slice(),
-                [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(
-                    17
-                ))]
+                [tidepool_bridge::HaskellValue::Lit(
+                    tidepool_repr::Literal::LitInt(17)
+                )]
             ));
         }
     }

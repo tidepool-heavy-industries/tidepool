@@ -685,7 +685,10 @@ enum RosterRequest {
 /// `Text`/`[Text]`/`Bool` is bound as a materialized Haskell `Value` — see each
 /// `tidepool_protocol::effects::*` module's doc) is instead
 /// [`ClassifyError::Decode`], never silently retried against a later member.
-fn decode_roster(request: &HaskellValue, table: &DataConTable) -> Result<RosterRequest, ClassifyError> {
+fn decode_roster(
+    request: &HaskellValue,
+    table: &DataConTable,
+) -> Result<RosterRequest, ClassifyError> {
     macro_rules! try_member {
         ($variant:path, $req:ty) => {
             match <$req as tidepool_bridge::FromHaskell>::from_value(request, table) {
@@ -2565,7 +2568,10 @@ pub async fn drive_model_turn(
 
 /// Bridge a JSON answer (from a form submission or an in-context resume value)
 /// to a Haskell `Value` against `table`, for feeding to `ResidentSession::resume`.
-pub fn json_answer_to_value(answer: &Json, table: &DataConTable) -> Result<HaskellValue, EngineError> {
+pub fn json_answer_to_value(
+    answer: &Json,
+    table: &DataConTable,
+) -> Result<HaskellValue, EngineError> {
     use tidepool_bridge::ToHaskell;
     answer
         .to_value(table)
@@ -2582,7 +2588,10 @@ pub fn json_answer_to_value(answer: &Json, table: &DataConTable) -> Result<Haske
 /// table-local indices, so a table from a DIFFERENT compile of the same
 /// program resolves to the same ids, exactly how a single fork's answer
 /// already crosses from the child's compiled table into the parent's heap).
-pub fn build_list_value(items: Vec<HaskellValue>, table: &DataConTable) -> Result<HaskellValue, EngineError> {
+pub fn build_list_value(
+    items: Vec<HaskellValue>,
+    table: &DataConTable,
+) -> Result<HaskellValue, EngineError> {
     let nil_id = tidepool_bridge::get_resilient(table, "[]", 0).ok_or_else(|| {
         EngineError::Run("build_list_value: no [] constructor in table".to_string())
     })?;
@@ -3912,13 +3921,19 @@ mod tests {
                         HaskellValue::Lit(Literal::LitInt(42)),
                         HaskellValue::Con(
                             DataConId(11),
-                            vec![HaskellValue::Lit(Literal::LitString(b"also fine".to_vec())), nil],
+                            vec![
+                                HaskellValue::Lit(Literal::LitString(b"also fine".to_vec())),
+                                nil,
+                            ],
                         ),
                     ],
                 ),
             ],
         );
-        let request = HaskellValue::Con(DataConId(1), vec![HaskellValue::Lit(Literal::LitWord(0)), list]);
+        let request = HaskellValue::Con(
+            DataConId(1),
+            vec![HaskellValue::Lit(Literal::LitWord(0)), list],
+        );
         let asks = YieldSites::from_pairs(vec![]);
         let err = classify_hole(&request, &table, &asks).unwrap_err();
         assert!(

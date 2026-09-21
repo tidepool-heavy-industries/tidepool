@@ -37,7 +37,7 @@
 //! a `&DataConTable` and recognize constructors BY NAME (`name_of`), which
 //! tolerates duplicate same-name cons from cross-module closures.
 
-use crate::value::{SharedByteArray, HaskellValue};
+use crate::value::{HaskellValue, SharedByteArray};
 use std::sync::{Arc, Mutex, PoisonError};
 use tidepool_repr::{DataConId, DataConTable, Literal};
 
@@ -100,7 +100,10 @@ pub fn box_word(n: u64, w_hash: DataConId) -> HaskellValue {
 
 /// Box a `Double` as `D#(LitDouble bits)`.
 pub fn box_double(f: f64, d_hash: DataConId) -> HaskellValue {
-    HaskellValue::Con(d_hash, vec![HaskellValue::Lit(Literal::LitDouble(f.to_bits()))])
+    HaskellValue::Con(
+        d_hash,
+        vec![HaskellValue::Lit(Literal::LitDouble(f.to_bits()))],
+    )
 }
 
 /// Box a `Float` as `F#(LitFloat bits)`.
@@ -406,7 +409,8 @@ pub fn make_map_from_sorted(
         let right = go(&mut r[1..], bin, tip, i);
         map_bin_node(size, k, v, left, right, bin, i)
     }
-    let mut entries: Vec<Option<(HaskellValue, HaskellValue)>> = entries.into_iter().map(Some).collect();
+    let mut entries: Vec<Option<(HaskellValue, HaskellValue)>> =
+        entries.into_iter().map(Some).collect();
     go(&mut entries, bin_id, tip_id, i_hash)
 }
 
@@ -578,13 +582,17 @@ pub fn integer_from_decimal(
 pub fn bignat_backing_bytes(v: &HaskellValue, table: &DataConTable) -> Option<Vec<u8>> {
     fn raw(v: &HaskellValue) -> Option<Vec<u8>> {
         match v {
-            HaskellValue::ByteArray(bs) => Some(bs.lock().unwrap_or_else(PoisonError::into_inner).clone()),
+            HaskellValue::ByteArray(bs) => {
+                Some(bs.lock().unwrap_or_else(PoisonError::into_inner).clone())
+            }
             HaskellValue::Lit(Literal::LitByteArray(bytes)) => Some(bytes.clone()),
             _ => None,
         }
     }
     match v {
-        HaskellValue::Con(id, fields) if fields.len() == 1 && is_con_named(*id, "ByteArray", table) => {
+        HaskellValue::Con(id, fields)
+            if fields.len() == 1 && is_con_named(*id, "ByteArray", table) =>
+        {
             raw(&fields[0])
         }
         other => raw(other),
@@ -738,9 +746,18 @@ mod tests {
     fn unbox_int_unwraps_nested_boxes() {
         let t = test_table();
         let i = id(&t, "I#");
-        let v = HaskellValue::Con(i, vec![HaskellValue::Con(i, vec![HaskellValue::Lit(Literal::LitInt(7))])]);
+        let v = HaskellValue::Con(
+            i,
+            vec![HaskellValue::Con(
+                i,
+                vec![HaskellValue::Lit(Literal::LitInt(7))],
+            )],
+        );
         assert_eq!(unbox_int(&v, &t), Some(7));
-        assert_eq!(unbox_int(&HaskellValue::Lit(Literal::LitInt(3)), &t), Some(3));
+        assert_eq!(
+            unbox_int(&HaskellValue::Lit(Literal::LitInt(3)), &t),
+            Some(3)
+        );
         assert_eq!(unbox_int(&HaskellValue::Lit(Literal::LitWord(3)), &t), None);
     }
 
@@ -794,11 +811,17 @@ mod tests {
         let string = HaskellValue::Con(
             cons,
             vec![
-                HaskellValue::Con(c_hash, vec![HaskellValue::Lit(Literal::LitWord('A' as u64))]),
+                HaskellValue::Con(
+                    c_hash,
+                    vec![HaskellValue::Lit(Literal::LitWord('A' as u64))],
+                ),
                 HaskellValue::Con(
                     cons,
                     vec![
-                        HaskellValue::Con(c_hash, vec![HaskellValue::Lit(Literal::LitWord('λ' as u64))]),
+                        HaskellValue::Con(
+                            c_hash,
+                            vec![HaskellValue::Lit(Literal::LitWord('λ' as u64))],
+                        ),
                         nil,
                     ],
                 ),

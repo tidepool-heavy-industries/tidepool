@@ -583,7 +583,11 @@ impl ProgramFacts {
     /// `Text`: the bridge's `Text backing off len` (as `String::to_value`
     /// builds it) or a bare string literal; the slice must be in bounds and
     /// valid UTF-8. Built as `Text bytes 0 len` over a fresh byte array.
-    fn lower_text(&self, site: u64, value: &HaskellValue) -> Result<AnswerPlan, PreparedRuntimeError> {
+    fn lower_text(
+        &self,
+        site: u64,
+        value: &HaskellValue,
+    ) -> Result<AnswerPlan, PreparedRuntimeError> {
         let shape = |detail| PreparedRuntimeError::AnswerShape { site, detail };
         let text = self.constructor_named(TEXT_MODULE, "Text");
         let bytes = match value {
@@ -591,8 +595,10 @@ impl ProgramFacts {
             HaskellValue::Con(id, fields) if Some(*id) == text && fields.len() == 3 => {
                 let backing = byte_backing(&fields[0])
                     .ok_or(shape("a Text answer's backing must be a byte array"))?;
-                let (HaskellValue::Lit(Literal::LitInt(off)), HaskellValue::Lit(Literal::LitInt(len))) =
-                    (&fields[1], &fields[2])
+                let (
+                    HaskellValue::Lit(Literal::LitInt(off)),
+                    HaskellValue::Lit(Literal::LitInt(len)),
+                ) = (&fields[1], &fields[2])
                 else {
                     return Err(shape(
                         "a Text answer's offset and length must be Int literals",
@@ -627,7 +633,11 @@ impl ProgramFacts {
     /// 64-bit limbs whose magnitude does not fit `IS` (GHC's invariant, which
     /// generated comparisons and conversions rely on). A bare `Int` literal
     /// is an `IS`.
-    fn lower_integer(&self, site: u64, value: &HaskellValue) -> Result<AnswerPlan, PreparedRuntimeError> {
+    fn lower_integer(
+        &self,
+        site: u64,
+        value: &HaskellValue,
+    ) -> Result<AnswerPlan, PreparedRuntimeError> {
         let shape = |detail| PreparedRuntimeError::AnswerShape { site, detail };
         let named = |occurrence: &str| self.constructor_named(INTEGER_MODULE, occurrence);
         let small = |host_id: DataConId, value: i64| AnswerPlan::Constructor {
@@ -644,7 +654,9 @@ impl ProgramFacts {
                 [HaskellValue::Lit(Literal::LitInt(value))] => Ok(small(*id, *value)),
                 _ => Err(shape("IS takes one Int literal")),
             },
-            HaskellValue::Con(id, fields) if Some(*id) == named("IP") || Some(*id) == named("IN") => {
+            HaskellValue::Con(id, fields)
+                if Some(*id) == named("IP") || Some(*id) == named("IN") =>
+            {
                 let positive = Some(*id) == named("IP");
                 let limbs = bignat_limbs(fields).ok_or(shape(
                     "IP and IN take one canonical BigNat# payload of whole limbs",
@@ -677,7 +689,11 @@ impl ProgramFacts {
 
     /// `Natural`: `NS Word#`, or `NB` over canonical limbs above `u64::MAX`.
     /// A bare word literal, or a non-negative `Int` literal, is an `NS`.
-    fn lower_natural(&self, site: u64, value: &HaskellValue) -> Result<AnswerPlan, PreparedRuntimeError> {
+    fn lower_natural(
+        &self,
+        site: u64,
+        value: &HaskellValue,
+    ) -> Result<AnswerPlan, PreparedRuntimeError> {
         let shape = |detail| PreparedRuntimeError::AnswerShape { site, detail };
         let named = |occurrence: &str| self.constructor_named(NATURAL_MODULE, occurrence);
         let small = |host_id: DataConId, value: u64| AnswerPlan::Constructor {
@@ -734,7 +750,9 @@ fn byte_backing(value: &HaskellValue) -> Option<Vec<u8>> {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone(),
         ),
-        HaskellValue::Lit(Literal::LitByteArray(bytes) | Literal::LitString(bytes)) => Some(bytes.clone()),
+        HaskellValue::Lit(Literal::LitByteArray(bytes) | Literal::LitString(bytes)) => {
+            Some(bytes.clone())
+        }
         _ => None,
     }
 }
@@ -871,10 +889,12 @@ const UNSITED: u64 = 0;
 fn site_field(field: &HaskellValue, table: &DataConTable) -> Option<u64> {
     match field {
         HaskellValue::Lit(Literal::LitInt(n)) => u64::try_from(*n).ok(),
-        HaskellValue::Con(id, inner) if table.name_of(*id) == Some("I#") => match inner.as_slice() {
-            [HaskellValue::Lit(Literal::LitInt(n))] => u64::try_from(*n).ok(),
-            _ => None,
-        },
+        HaskellValue::Con(id, inner) if table.name_of(*id) == Some("I#") => {
+            match inner.as_slice() {
+                [HaskellValue::Lit(Literal::LitInt(n))] => u64::try_from(*n).ok(),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -1137,8 +1157,8 @@ pub struct PreparedResumed {
     pub runner: ProgramId,
 }
 
-// SAFETY: identical to `PreparedRuntime`'s justification above -- the machine
-// is the only non-auto-`Send` field, and `PersistentSession` moves the engine
+// SAFETY: the machine is the only non-auto-`Send` field, and `PersistentSession`
+// moves the engine
 // between exactly one owning thread at a time (stowed XOR running).
 unsafe impl Send for PreparedEngine {}
 
@@ -2262,10 +2282,12 @@ impl PreparedEngine {
             // interned descriptor (`Nothing` closing a stateful actor's
             // receive on drain). Anything with a field re-enters by handle.
             return match value {
-                HaskellValue::Con(host_id, fields) if fields.is_empty() => Ok(AnswerPlan::Constructor {
-                    host_id: *host_id,
-                    fields: Vec::new(),
-                }),
+                HaskellValue::Con(host_id, fields) if fields.is_empty() => {
+                    Ok(AnswerPlan::Constructor {
+                        host_id: *host_id,
+                        fields: Vec::new(),
+                    })
+                }
                 _ => Err(PreparedRuntimeError::UnsitedAnswer),
             };
         }
@@ -2958,22 +2980,19 @@ mod tests {
     }
 
     // ---- S4/G2: `link_program`'s identity/generation-linked import
-    // contract, ported from the deleted `PreparedRuntime`'s own
-    // `bind_top`/`install_prepared` bookkeeping.
+    // contract and `PreparedMachine::install_program` verification.
     //
-    // `PreparedEngine` (the production owner) only ever runs a turn's settled
+    // `PreparedEngine` only ever runs a turn's settled
     // scaffold (`run_settled`); it exposes no general-purpose entry call, so
     // it cannot force an arbitrary CAF the way these tests need to flip a
     // binding from unevaluated to evaluated. What is under test here is
     // `link_program`'s contract check itself (stale generation, missing
     // import, `required_evaluated` against live handle state) plus
     // `PreparedMachine::install_program`'s import verification --
-    // exactly the mechanism `PreparedEngine::install` wraps thinly one layer
-    // up (and which `tidepool-runtime/tests/prepared_turn.rs`'s
-    // `notebook_turns` exercises end to end on the happy path through the
-    // real session). Driving `PreparedMachine` directly here, instead of
-    // through either session wrapper, tests that mechanism without
-    // reintroducing a session-shaped duplicate of it.
+    // exactly the mechanism `PreparedEngine::install` owns one layer up (and
+    // which `tidepool-runtime/tests/prepared_turn.rs`'s `notebook_turns`
+    // exercises end to end on the happy path). Driving `PreparedMachine`
+    // directly here isolates the contract from turn orchestration.
     //
     fn producer_identity() -> SymbolIdentity {
         testing::identity("S4Session", "producer")

@@ -330,7 +330,9 @@ mod tests {
     /// of) and clones just the field it needs.
     fn unwrap_right(val: HaskellValue, table: &tidepool_repr::DataConTable) -> HaskellValue {
         match &val {
-            HaskellValue::Con(id, fields) if table.name_of(*id).unwrap() == "Right" => fields[0].clone(),
+            HaskellValue::Con(id, fields) if table.name_of(*id).unwrap() == "Right" => {
+                fields[0].clone()
+            }
             HaskellValue::Con(id, fields) if table.name_of(*id).unwrap() == "Left" => {
                 let err: GitError = FromHaskell::from_value(&fields[0], table).unwrap();
                 panic!("expected Right, got Left({:?})", err);

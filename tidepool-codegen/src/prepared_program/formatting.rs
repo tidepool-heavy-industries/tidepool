@@ -184,7 +184,11 @@ mod tests {
     use std::sync::{atomic::AtomicBool, Arc};
     use tidepool_repr::execution_schema::*;
 
-    fn run_intrinsic(symbol: &str, precedence: Option<i64>, value: f64) -> tidepool_bridge::HaskellValue {
+    fn run_intrinsic(
+        symbol: &str,
+        precedence: Option<i64>,
+        value: f64,
+    ) -> tidepool_bridge::HaskellValue {
         let mut wire = testing::wire_program();
         let predicate = symbol == "prepared_double_needs_precedence";
         let result_rep = if predicate {

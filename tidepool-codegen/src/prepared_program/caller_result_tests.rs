@@ -228,10 +228,14 @@ fn compile(wire: WireProgram) -> CompiledProgram {
 fn assert_answer(values: &[HaskellValue], rep: RuntimeRep) {
     match rep {
         RuntimeRep::LiftedRef => {
-            assert!(matches!(values, [HaskellValue::Con(DataConId(1980), fields)] if fields.is_empty()))
+            assert!(
+                matches!(values, [HaskellValue::Con(DataConId(1980), fields)] if fields.is_empty())
+            )
         }
         RuntimeRep::Int(64) => assert!(matches!(values, [HaskellValue::Lit(Literal::LitInt(42))])),
-        RuntimeRep::Word(64) => assert!(matches!(values, [HaskellValue::Lit(Literal::LitWord(42))])),
+        RuntimeRep::Word(64) => {
+            assert!(matches!(values, [HaskellValue::Lit(Literal::LitWord(42))]))
+        }
         _ => panic!("fixture answer representation"),
     }
 }

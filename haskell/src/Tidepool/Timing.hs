@@ -12,6 +12,7 @@ module Tidepool.Timing
   , emitCount
   , emitCompileSummary
   , emitModuleTiming
+  , emitModuleInterfaceTiming
   , monotonicTime
   , elapsedMs
   ) where
@@ -100,14 +101,17 @@ elapsedMs t0 t1 = round ((t1 - t0) * 1000)
 -- Distinct wire prefix (@tidepool-compile-summary@, not @tidepool-timing @)
 -- so 'ExtractTiming::parse' on the Rust side (which matches the
 -- @tidepool-timing \<space\>@ prefix only) never sees or misparses this line.
-emitCompileSummary :: Int -> Integer -> Integer -> Integer -> [(String, Integer)] -> IO ()
-emitCompileSummary moduleCount wallMs typecheckMs loweringMs topModules =
+emitCompileSummary :: Int -> Integer -> Integer -> Integer -> Integer
+  -> [(String, Integer)] -> [(String, Integer)] -> IO ()
+emitCompileSummary moduleCount wallMs typecheckMs loweringMs interfaceMs topModules topInterfaces =
   hPutStrLn stderr $
     "tidepool-compile-summary modules=" ++ show moduleCount
     ++ " wall_ms=" ++ show wallMs
     ++ " typecheck_ms=" ++ show typecheckMs
     ++ " lowering_ms=" ++ show loweringMs
+    ++ " interface_ms=" ++ show interfaceMs
     ++ " top=" ++ intercalate "," [ name ++ ":" ++ show ms | (name, ms) <- topModules ]
+    ++ " interface_top=" ++ intercalate "," [ name ++ ":" ++ show ms | (name, ms) <- topInterfaces ]
 
 -- | Write one @tidepool-timing-module module=\<name\> ms=\<ms\>@ line per
 -- module, only when @enabled@ — the full per-module breakdown backing
@@ -117,9 +121,19 @@ emitCompileSummary moduleCount wallMs typecheckMs loweringMs topModules =
 -- @tidepool-timing \<space\>@ (the phase wire grammar) and
 -- @tidepool-compile-summary@ — a collector keyed on either never picks this
 -- line up by accident.
-emitModuleTiming :: Bool -> [(String, Integer)] -> IO ()
-emitModuleTiming False _ = pure ()
-emitModuleTiming True modules =
+emitModuleTiming :: Bool -> [(String, Integer)] -> [(String, Integer)] -> IO ()
+emitModuleTiming False _ _ = pure ()
+emitModuleTiming True modules interfaces =
   mapM_ (\(name, ms) ->
-    hPutStrLn stderr ("tidepool-timing-module module=" ++ name ++ " ms=" ++ show ms))
-    modules
+    hPutStrLn stderr ("tidepool-timing-module module=" ++ name ++ " ms=" ++ show ms
+      ++ " interface_ms=" ++ show (lookupInterface name))) modules
+  where
+    lookupInterface name = maybe 0 id (lookup name interfaces)
+
+-- | Detail rows identify the module which paid the interface work. They are
+-- diagnostic-only and deliberately do not create a flat timing phase.
+emitModuleInterfaceTiming :: Bool -> String -> String -> String -> Integer -> IO ()
+emitModuleInterfaceTiming False _ _ _ _ = pure ()
+emitModuleInterfaceTiming True moduleName parent phase ms =
+  hPutStrLn stderr ("tidepool-timing-module-detail module=" ++ moduleName
+    ++ " parent=" ++ parent ++ " phase=" ++ phase ++ " ms=" ++ show ms)

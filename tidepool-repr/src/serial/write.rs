@@ -1,4 +1,4 @@
-//! Serialization of Tidepool IR to CBOR.
+//! Serialization of constructor metadata to CBOR.
 
 use super::WriteError;
 use ciborium::value::Value;

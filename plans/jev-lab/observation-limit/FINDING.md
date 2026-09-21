@@ -36,7 +36,7 @@ match plan {
     }
     SettlePlan::Bind(ValueTier::Tier1Closure) => Ok(PreparedRun::Done {
         handle,
-        value: Value::Con(CLOSURE_SENTINEL, Vec::new()),
+        value: HaskellValue::Con(CLOSURE_SENTINEL, Vec::new()),
     }),
 ```
 

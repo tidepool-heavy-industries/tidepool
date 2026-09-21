@@ -12,7 +12,9 @@ import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Maybe (isJust)
+import Data.Word (Word64)
 import GHC.Types.Unique.Set (elementOfUniqSet, nonDetEltsUniqSet, sizeUniqSet)
+import GHC.Types.Unique (getKey)
 import System.Environment (lookupEnv)
 import GHC.Core (CoreBind, Bind(..))
 import GHC.Driver.Env (HscEnv)
@@ -73,6 +75,10 @@ instance Show RecoveryFailure where
 data RecoveredClosure = RecoveredClosure
   { closureModules :: [PreparedModule]
   , closureFailures :: [RecoveryFailure]
+  -- | Per-target evidence that recovered-module facts came from the request's
+  -- immutable body-set memo.  This is intentionally target-local: no target's
+  -- reachability or accounting is ever retained.
+  , closureFactCacheHits :: Int
   }
 
 -- | Diagnostic split of 'prepared_recover' (flat sub-phases, summed over
@@ -121,18 +127,24 @@ newPreparedRecovery env cache ownerCache bodyCache baseContext home = do
   let factsOf prepared =
         (preparedModuleReferenceFacts baseContext prepared, preparedModuleReachFacts baseContext prepared)
       homeFacts = [(prepared, factsOf prepared) | prepared <- home]
+  -- Recovered prepared modules are cached by their owner plus exact binding
+  -- group membership.  Use that same immutable body-set identity here: a
+  -- replacement with a larger/different prepared body set gets fresh facts,
+  -- while a later target that receives the same cached PreparedModule reuses
+  -- them.  This memo deliberately lives outside the entry closure.
+  factsMemo <- newIORef Map.empty
   pure $ \entry -> do
     let context = baseContext { projectionEntry = entry }
         seedList = nonDetEltsUniqSet (preparedSeedUniques context home)
-    factsMemo <- newIORef Map.empty
+    factHits <- newIORef (0 :: Int)
     let factsFor prepared = do
           memo <- readIORef factsMemo
-          case Map.lookup (pmModule prepared) memo of
-            Just hit -> pure hit
+          case Map.lookup (preparedBodyKey prepared) memo of
+            Just hit -> pure (hit, True)
             Nothing -> do
               let fresh = factsOf prepared
-              modifyIORef' factsMemo (Map.insert (pmModule prepared) fresh)
-              pure fresh
+              modifyIORef' factsMemo (Map.insert (preparedBodyKey prepared) fresh)
+              pure (fresh, False)
         roundReferences reach entries =
           let reached = reachedUniques reach
               kept binding =
@@ -149,7 +161,10 @@ newPreparedRecovery env cache ownerCache bodyCache baseContext home = do
           -- one, so charging them separately is what says whether a round costs
           -- what it discovers or what it re-walks.
           (recovered, factsMs) <- timeSection $ do
-            entries <- mapM (\m -> (,) m <$> factsFor m) (Map.elems prepared)
+            entries <- mapM (\m -> do
+              (facts, hit) <- factsFor m
+              when hit (modifyIORef' factHits (+ 1))
+              pure (m, facts)) (Map.elems prepared)
             mapM_ (\(_, (references, reach)) -> do
               _ <- evaluate (sum (map length (Map.elems references)))
               evaluate (sum (map (length . snd) reach))) entries
@@ -159,8 +174,8 @@ newPreparedRecovery env cache ownerCache bodyCache baseContext home = do
             -- Only what this round admitted enters the walk: the closure and
             -- the dependency relation carry over from the previous round.
             let admittedFacts =
-                  [ reach | (entry, (_, reach)) <- entries
-                  , Set.member (pmModule entry) admitted ]
+                  [ reach | (preparedEntry, (_, reach)) <- entries
+                  , Set.member (pmModule preparedEntry) admitted ]
                 extended = admitReachFacts seedList admittedFacts previousReach
             _ <- evaluate (sizeUniqSet (reachedUniques extended))
             _ <- evaluate (sizeUniqSet (admittedTops extended))
@@ -192,7 +207,8 @@ newPreparedRecovery env cache ownerCache bodyCache baseContext home = do
               emitDetailPhase timing "prepared_recover" "prepared_recover_prepare" prepareTotal
               emitCount timing "prepared_recover_rounds" rounds
               emitCount timing "prepared_recover_module_preparations" preparedModules
-              pure (RecoveredClosure modules failures)
+              hits <- readIORef factHits
+              pure (RecoveredClosure modules failures hits)
             else do
               ((nextGroups, dirty, nextFailures), lookupMs) <- timeSection $ foldM
                 (lookupOne cache homeOwners) (groups, Set.empty, failures) pending
@@ -232,15 +248,23 @@ newPreparedRecovery env cache ownerCache bodyCache baseContext home = do
             (Map.findWithDefault [] owner groups)
           case result of
             Right modul -> do
-              -- The module's pmBindings just changed; the memoized per-module
-              -- reference facts for 'owner' (see 'factsFor' above) are stale.
-              modifyIORef' factsMemo (Map.delete owner)
               pure
                 ( Map.insert owner modul prepared
                 , filter (not . preparationFailureFor owner) failures
                 )
             Left failure -> pure (prepared, failures ++ [DefiningPreparationFailure failure])
     go Set.empty Map.empty Map.empty [] homeOwners emptyPreparedReachability
+
+-- | The recovered-body cache's exact group identity.  It is deliberately more
+-- specific than the owner: recovery can prepare the same owner repeatedly as
+-- its exact body set grows, and facts from one such set cannot describe the
+-- next one.
+preparedBodyKey :: PreparedModule -> (Module, [[Word64]])
+preparedBodyKey prepared =
+  (pmModule prepared,
+    [ map (getKey . varUnique) (topBinders binding)
+    | (binding, _) <- pmBindings prepared
+    ])
 
 preparationFailureFor :: Module -> RecoveryFailure -> Bool
 preparationFailureFor owner (DefiningPreparationFailure failure) =

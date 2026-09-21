@@ -1,6 +1,6 @@
 use frunk::hlist;
 use proptest::prelude::*;
-use tidepool_bridge::{BridgeError, FromHaskell, Value};
+use tidepool_bridge::{BridgeError, FromHaskell, HaskellValue};
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext, EffectHandler, Response};
 use tidepool_effect::error::EffectError;
 use tidepool_repr::datacon::DataCon;
@@ -31,12 +31,12 @@ fn table() -> DataConTable {
     table
 }
 
-fn request(id: DataConId, value: i64) -> Value {
-    Value::Con(id, vec![Value::Lit(Literal::LitInt(value))])
+fn request(id: DataConId, value: i64) -> HaskellValue {
+    HaskellValue::Con(id, vec![HaskellValue::Lit(Literal::LitInt(value))])
 }
 
-fn decode_request(value: &Value, expected_id: DataConId) -> Result<i64, BridgeError> {
-    let Value::Con(id, fields) = value else {
+fn decode_request(value: &HaskellValue, expected_id: DataConId) -> Result<i64, BridgeError> {
+    let HaskellValue::Con(id, fields) = value else {
         return Err(BridgeError::UnknownDataCon(DataConId(0)));
     };
     if *id != expected_id {
@@ -50,7 +50,7 @@ fn decode_request(value: &Value, expected_id: DataConId) -> Result<i64, BridgeEr
         });
     }
     match fields[0] {
-        Value::Lit(Literal::LitInt(n)) => Ok(n),
+        HaskellValue::Lit(Literal::LitInt(n)) => Ok(n),
         ref other => Err(BridgeError::TypeMismatch {
             expected: "LitInt".into(),
             got: format!("{other:?}"),
@@ -61,7 +61,7 @@ fn decode_request(value: &Value, expected_id: DataConId) -> Result<i64, BridgeEr
 struct FirstRequest(i64);
 impl tidepool_bridge::sealed::FromHaskellSealed for FirstRequest {}
 impl FromHaskell for FirstRequest {
-    fn from_value(value: &Value, _table: &DataConTable) -> Result<Self, BridgeError> {
+    fn from_value(value: &HaskellValue, _table: &DataConTable) -> Result<Self, BridgeError> {
         decode_request(value, FIRST).map(Self)
     }
 }
@@ -69,7 +69,7 @@ impl FromHaskell for FirstRequest {
 struct SecondRequest(i64);
 impl tidepool_bridge::sealed::FromHaskellSealed for SecondRequest {}
 impl FromHaskell for SecondRequest {
-    fn from_value(value: &Value, _table: &DataConTable) -> Result<Self, BridgeError> {
+    fn from_value(value: &HaskellValue, _table: &DataConTable) -> Result<Self, BridgeError> {
         decode_request(value, SECOND).map(Self)
     }
 }
@@ -83,7 +83,7 @@ impl EffectHandler for FirstHandler {
         request: FirstRequest,
         _cx: &EffectContext<'_>,
     ) -> Result<Response, EffectError> {
-        Ok(Value::Lit(Literal::LitInt(request.0 + 10)).into())
+        Ok(HaskellValue::Lit(Literal::LitInt(request.0 + 10)).into())
     }
 }
 
@@ -96,13 +96,13 @@ impl EffectHandler for SecondHandler {
         request: SecondRequest,
         _cx: &EffectContext<'_>,
     ) -> Result<Response, EffectError> {
-        Ok(Value::Lit(Literal::LitInt(request.0 + 20)).into())
+        Ok(HaskellValue::Lit(Literal::LitInt(request.0 + 20)).into())
     }
 }
 
 fn completed_int(response: Option<Response>) -> i64 {
     match response {
-        Some(Response::Complete(Value::Lit(Literal::LitInt(n)))) => n,
+        Some(Response::Complete(HaskellValue::Lit(Literal::LitInt(n)))) => n,
         other => panic!("expected a completed integer response, got {other:?}"),
     }
 }
@@ -153,7 +153,7 @@ fn unknown_constructor_is_left_unhandled() {
 fn malformed_owned_constructor_does_not_fall_through() {
     let table = table();
     let cx = EffectContext::with_user(&table, &());
-    let malformed = Value::Con(FIRST, vec![]);
+    let malformed = HaskellValue::Con(FIRST, vec![]);
     let mut handlers = hlist![FirstHandler, SecondHandler];
 
     assert!(matches!(

@@ -32,9 +32,15 @@ fn clone_tree(root: &HaskellValue) -> HaskellValue {
         root,
         HaskellValue::as_frame,
         |frame| match frame {
-            HaskellValueFrame::Leaf(HaskellValue::Lit(literal)) => HaskellValue::Lit(literal.clone()),
-            HaskellValueFrame::Leaf(HaskellValue::ByteArray(bytes)) => HaskellValue::ByteArray(Arc::clone(bytes)),
-            HaskellValueFrame::Leaf(HaskellValue::Con(..)) => unreachable!("constructors have child frames"),
+            HaskellValueFrame::Leaf(HaskellValue::Lit(literal)) => {
+                HaskellValue::Lit(literal.clone())
+            }
+            HaskellValueFrame::Leaf(HaskellValue::ByteArray(bytes)) => {
+                HaskellValue::ByteArray(Arc::clone(bytes))
+            }
+            HaskellValueFrame::Leaf(HaskellValue::Con(..)) => {
+                unreachable!("constructors have child frames")
+            }
             HaskellValueFrame::Con(id, fields) => HaskellValue::Con(id, fields),
         },
     )
@@ -51,7 +57,9 @@ impl<'a> recursion::MappableFrame for HaskellValueFrame<'a, recursion::Partially
     fn map_frame<A, B>(input: Self::Frame<A>, f: impl FnMut(A) -> B) -> Self::Frame<B> {
         match input {
             HaskellValueFrame::Leaf(value) => HaskellValueFrame::Leaf(value),
-            HaskellValueFrame::Con(id, fields) => HaskellValueFrame::Con(id, fields.into_iter().map(f).collect()),
+            HaskellValueFrame::Con(id, fields) => {
+                HaskellValueFrame::Con(id, fields.into_iter().map(f).collect())
+            }
         }
     }
 }
@@ -108,7 +116,9 @@ fn format_tree(
     while let Some(action) = work.pop() {
         match action {
             FormatAction::Text(text) => std::fmt::Write::write_str(output, text)?,
-            FormatAction::HaskellValue(HaskellValue::Lit(literal)) if matches!(mode, FormatMode::Debug) => {
+            FormatAction::HaskellValue(HaskellValue::Lit(literal))
+                if matches!(mode, FormatMode::Debug) =>
+            {
                 write!(output, "Lit({literal:?})")?;
             }
             FormatAction::HaskellValue(HaskellValue::Lit(literal)) => match literal {
@@ -143,7 +153,9 @@ fn format_tree(
                     }
                 }
             }
-            FormatAction::HaskellValue(HaskellValue::ByteArray(bytes)) if matches!(mode, FormatMode::Debug) => {
+            FormatAction::HaskellValue(HaskellValue::ByteArray(bytes))
+                if matches!(mode, FormatMode::Debug) =>
+            {
                 write!(output, "ByteArray({bytes:?})")?;
             }
             FormatAction::HaskellValue(HaskellValue::ByteArray(bytes)) => match bytes.lock() {

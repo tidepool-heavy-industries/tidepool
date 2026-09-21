@@ -431,5 +431,4 @@ mod tests {
         };
         assert_eq!(bridged_node_count(&j), json_to_value(&j, &ids).node_count());
     }
-
 }

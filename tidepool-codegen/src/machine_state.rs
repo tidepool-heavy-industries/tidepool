@@ -1899,8 +1899,8 @@ impl MachineState {
         // clones cheaply either way (its own fields are an `Arc` and an
         // empty `local` layer -- see its overlay doc); the potentially large
         // clone this guards is the inner `Tables` `absorb` mutates.
-        Arc::make_mut(&mut pool).absorb(other);
-        pool.report_residency();
+        let absorption = Arc::make_mut(&mut pool).absorb(other);
+        pool.report_residency(absorption);
     }
 
     /// Resolve a literal `Addr#` against the one permanent pool.

@@ -649,7 +649,10 @@ mod tests {
                         HaskellValue::Lit(Literal::LitInt(1)),
                         HaskellValue::Con(
                             cons_id,
-                            vec![HaskellValue::Lit(Literal::LitInt(2)), HaskellValue::Con(nil_id, vec![])],
+                            vec![
+                                HaskellValue::Lit(Literal::LitInt(2)),
+                                HaskellValue::Con(nil_id, vec![]),
+                            ],
                         ),
                     ],
                 ),
@@ -956,7 +959,10 @@ mod tests {
                 HaskellValue::Con(
                     cons_id,
                     vec![
-                        HaskellValue::Con(c_hash_id, vec![HaskellValue::Lit(Literal::LitChar('i'))]),
+                        HaskellValue::Con(
+                            c_hash_id,
+                            vec![HaskellValue::Lit(Literal::LitChar('i'))],
+                        ),
                         HaskellValue::Con(nil_id, vec![]),
                     ],
                 ),

@@ -2784,9 +2784,9 @@ mod tests {
             .unwrap();
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(
-                42
-            ))]
+            [tidepool_bridge::HaskellValue::Lit(
+                tidepool_repr::Literal::LitInt(42)
+            )]
         ));
     }
 }
