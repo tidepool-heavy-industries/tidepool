@@ -51,6 +51,30 @@ mod answer;
 mod run;
 pub use crate::resource_ledger::PreparedFrameEvidence;
 pub use answer::{AnswerBuildError, AnswerPlan, MAX_ANSWER_DEPTH};
+
+struct ActiveIntrinsicScope<'a> {
+    machine: &'a crate::machine_state::MachineState,
+}
+
+impl<'a> ActiveIntrinsicScope<'a> {
+    fn new(
+        machine: &'a crate::machine_state::MachineState,
+        program: &CompiledProgram,
+    ) -> Result<Self, ExecutionError> {
+        if !machine.install_active_intrinsic_program(program) {
+            return Err(ExecutionError::Invariant(
+                "a nested managed intrinsic operation is already active",
+            ));
+        }
+        Ok(Self { machine })
+    }
+}
+
+impl Drop for ActiveIntrinsicScope<'_> {
+    fn drop(&mut self) {
+        self.machine.clear_active_intrinsic_program();
+    }
+}
 pub use machine::{
     ImportBindings, ManagedBuilder, ManagedField, ManagedNode, ParkRequest, PreparedCallOptions,
     PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions, PreparedOuter,

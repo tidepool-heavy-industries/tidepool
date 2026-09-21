@@ -234,6 +234,8 @@ impl<'code> PreparedInvocation<'code> {
             .pipeline
             .get_function_ptr(compiled.adapter);
         let raw_status = {
+            let _intrinsic =
+                super::ActiveIntrinsicScope::new(&invocation.machine, invocation.program)?;
             let _scope = OldSpaceScope::new(&invocation.machine, &invocation.old_space)?;
             unsafe {
                 let adapter: extern "C" fn(*mut VMContext, *mut u64, *const u64) -> i32 =

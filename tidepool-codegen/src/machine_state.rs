@@ -305,6 +305,11 @@ pub struct MachineState {
     /// pointer is installed only during a shared execution/observation borrow
     /// and cleared before promotion or owner movement; it is never a Send handle.
     prepared_old_space: RefCell<Option<*const crate::old_space::OldSpace>>,
+    /// Program metadata available only while one synchronous prepared entry
+    /// is executing. Rust-backed structural intrinsics use this to resolve
+    /// authenticated constructors without a process registry. Nested installs
+    /// are refused by the invocation owner.
+    active_intrinsic_program: Cell<*const crate::prepared_program::CompiledProgram>,
     /// Payloads allocated outside the moving heap. The map key is the pointer
     /// published in a Lit's value word; `base` may differ for byte arrays,
     /// whose ABI pointer follows a hidden allocation-size word.
@@ -387,6 +392,7 @@ impl MachineState {
             remembered_slots: RefCell::new(HashSet::new()),
             old_space_arenas: RefCell::new(Vec::new()),
             prepared_old_space: RefCell::new(None),
+            active_intrinsic_program: Cell::new(std::ptr::null()),
             external_storage: RefCell::new(HashMap::new()),
             external_revision: Cell::new(Some(0)),
             external_allocated_bytes: Cell::new(0),
@@ -1543,6 +1549,31 @@ impl MachineState {
     /// Clear the borrowed prepared admission pointer before its owner drops.
     pub(crate) fn clear_prepared_old_space(&self) {
         *self.prepared_old_space.borrow_mut() = None;
+    }
+
+    pub(crate) fn install_active_intrinsic_program(
+        &self,
+        program: &crate::prepared_program::CompiledProgram,
+    ) -> bool {
+        if !self.active_intrinsic_program.get().is_null() {
+            return false;
+        }
+        self.active_intrinsic_program.set(program);
+        true
+    }
+
+    pub(crate) fn clear_active_intrinsic_program(&self) {
+        self.active_intrinsic_program.set(std::ptr::null());
+    }
+
+    /// # Safety
+    /// The returned borrow is bounded by the synchronous invocation scope
+    /// that installed the stable compiled-program owner.
+    #[allow(dead_code, reason = "used by the prepared JSON intrinsic sink")]
+    pub(crate) unsafe fn active_intrinsic_program(
+        &self,
+    ) -> Option<&crate::prepared_program::CompiledProgram> {
+        self.active_intrinsic_program.get().as_ref()
     }
 
     /// Borrow the exact-start admission owner for one collector/observer call.
