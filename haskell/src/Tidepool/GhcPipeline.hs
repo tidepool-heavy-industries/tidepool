@@ -682,6 +682,10 @@ runPipelineSessionSelected selection retained purpose mscope path includes build
 data MemoValidity = MemoValidity
   { memoSourceHash :: Fingerprint
   , memoRetained :: Set.Set SymbolIdentity
+    -- A source hash does not change when one of its imports switches between
+    -- a home module and a package module. Preserve the home-resolution shape
+    -- that produced the body so removing a shadow cannot reuse stale Core.
+  , memoHomeDependencies :: Set.Set ModuleName
   }
 
 data MemoPreparation
@@ -1010,10 +1014,12 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
           -- dependent is checked. A mismatch is an ordinary miss and overwrites the
           -- cached entry after recompilation.
           let cycleModNames = Set.fromList (map ms_mod_name summaries)
-              directHomeDeps modSum =
-                [ mn | (_, lmn) <- ms_textual_imps modSum
-                     , let mn = unLoc lmn
-                     , mn `Set.member` cycleModNames ]
+              directHomeDeps modSum = Set.fromList
+                [ mn
+                | (_, lmn) <- ms_textual_imps modSum ++ ms_srcimps modSum
+                , let mn = unLoc lmn
+                , mn `Set.member` cycleModNames
+                ]
           validThisCycleRef <- liftIO (newIORef (Map.empty :: Map.Map ModuleName Bool))
           -- The withholding pass can change only a module's own retained
           -- definitions; retained identities defined elsewhere reach it through
@@ -1021,7 +1027,8 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
           let retainedFor modSum = retainedDefinedBy (ms_mod modSum) retained
           let depsValidSoFar modSum = liftIO $ do
                 validMap <- readIORef validThisCycleRef
-                pure (all (\d -> Map.findWithDefault False d validMap) (directHomeDeps modSum))
+                pure (all (\d -> Map.findWithDefault False d validMap)
+                  (Set.toList (directHomeDeps modSum)))
               recordValidity modSum isValid =
                 liftIO (modifyIORef' validThisCycleRef (Map.insert (ms_mod_name modSum) isValid))
           -- Under TIDEPOOL_TIMING, name why a memoized module was recompiled.
@@ -1035,7 +1042,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                   if not depsOk || xopt LangExt.Cpp (ms_hspp_opts modSum)
                     then do
                       memoMiss modSum (if depsOk then "cpp" else "dependency-miss:" ++ unwords
-                        [ moduleNameString d | d <- directHomeDeps modSum ])
+                        [ moduleNameString d | d <- Set.toList (directHomeDeps modSum) ])
                       pure Nothing
                     else do
                       m <- liftIO (readIORef ref)
@@ -1049,6 +1056,8 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                           let cachedSummary = mfSummary front
                               sameHash = memoSourceHash validity == ms_hs_hash modSum
                               sameRetained = memoRetained validity == retainedFor modSum
+                              sameHomeDependencies =
+                                memoHomeDependencies validity == directHomeDeps modSum
                           -- Source hashes do not cover CPP includes or TH's
                           -- addDependentFile inputs. Recompile these modules until
                           -- the memo owns fingerprints for those dependencies.
@@ -1056,12 +1065,14 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                               && not (xopt LangExt.Cpp (ms_hspp_opts cachedSummary))
                               && sameHash
                               && sameRetained
+                              && sameHomeDependencies
                             then pure (Just entry)
                             else do
                               memoMiss modSum $ unwords
                                 [ "dependent-files=" ++ show (length dependentFiles)
                                 , "same-hash=" ++ show sameHash
-                                , "same-retained=" ++ show sameRetained ]
+                                , "same-retained=" ++ show sameRetained
+                                , "same-home-dependencies=" ++ show sameHomeDependencies ]
                               pure Nothing
           (fronts, results, preparedModules, mReachable) <- case cpTier plan of
             OptimizeEveryModule -> do
@@ -1106,7 +1117,10 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                     case mMemoRef of
                       Just ref -> liftIO (modifyIORef' ref
                         (Map.insert mn (GutsMemoEntry
-                          (MemoValidity (ms_hs_hash modSum) (retainedFor modSum))
+                          (MemoValidity
+                            (ms_hs_hash modSum)
+                            (retainedFor modSum)
+                            (directHomeDeps modSum))
                           (AnalyzedModule mf simplified)
                           (maybe AnalyzedOnly PreparedBody prepared))))
                       Nothing  -> pure ()
@@ -1206,7 +1220,10 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                         Just ref -> liftIO (modifyIORef' ref
                           (Map.insert (ms_mod_name (mfSummary f))
                             (GutsMemoEntry
-                              (MemoValidity (ms_hs_hash (mfSummary f)) (retainedFor (mfSummary f)))
+                              (MemoValidity
+                                (ms_hs_hash (mfSummary f))
+                                (retainedFor (mfSummary f))
+                                (directHomeDeps (mfSummary f)))
                               (AnalyzedModule f simplified)
                               (maybe AnalyzedOnly PreparedBody prepared))))
                         Nothing  -> pure ()
@@ -1307,7 +1324,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                 , prTargetTcGblEnv = targetEnvironment
                 }
           capturedSources <- liftIO (captureDependencySources modGraphRaw)
-          dependencies <- liftIO (dependencyEvidenceFor capturedSources modGraphRaw summaries fronts)
+          dependencies <- liftIO (dependencyEvidenceFor capturedSources modGraphRaw fronts)
           pure (pipelineResult, preparedModules, dependencies)
     case selection of
       PreparedStg -> do
@@ -1386,11 +1403,12 @@ captureDependencySources graph = do
 -- imports have no selected home path; their ordered absent home candidates
 -- remain evidence because creating one later would introduce shadowing.
 dependencyEvidenceFor
-  :: ([DependencySource], Bool) -> ModuleGraph -> [ModSummary] -> [ModuleFront]
+  :: ([DependencySource], Bool) -> ModuleGraph -> [ModuleFront]
   -> IO DependencyEvidence
-dependencyEvidenceFor (sources, sourcesComplete) graph summaries fronts = do
+dependencyEvidenceFor (sources, sourcesComplete) graph fronts = do
+  let graphSummaries = [summary | ModuleNode _ summary <- mgModSummaries' graph]
   selectedPairs <- forM
-    [summary | ModuleNode _ summary <- mgModSummaries' graph] $ \summary ->
+    graphSummaries $ \summary ->
       case ml_hs_file (ms_location summary) of
         Nothing -> pure Nothing
         Just source -> do
@@ -1399,14 +1417,14 @@ dependencyEvidenceFor (sources, sourcesComplete) graph summaries fronts = do
   let selected = Map.fromList [pair | Just pair <- selectedPairs]
       allImports = sort . Set.toList . Set.fromList $
         [ (unLoc imported, False)
-        | summary <- summaries
+        | summary <- graphSummaries
         , (_, imported) <- ms_textual_imps summary
         ] ++
         [ (unLoc imported, True)
-        | summary <- summaries
+        | summary <- graphSummaries
         , (_, imported) <- ms_srcimps summary
         ]
-      roots = nub (concatMap (importPaths . ms_hspp_opts) summaries)
+      roots = nub (concatMap (importPaths . ms_hspp_opts) graphSummaries)
       moduleRelative name =
         map (\c -> if c == '.' then pathSeparator else c) (moduleNameString name)
       rawCandidates name isBoot =
@@ -1432,7 +1450,7 @@ dependencyEvidenceFor (sources, sourcesComplete) graph summaries fronts = do
     readIORef (tcg_dependent_files (mfTcGblEnv front))
   let hasUntrackedPreprocessing = any (\summary ->
         xopt LangExt.Cpp (ms_hspp_opts summary)
-          || xopt LangExt.TemplateHaskell (ms_hspp_opts summary)) summaries
+          || xopt LangExt.TemplateHaskell (ms_hspp_opts summary)) graphSummaries
       complete = sourcesComplete && null dependentFiles
         && not hasUntrackedPreprocessing
         && all (not . null . dependencyResolutionCandidates) absoluteCandidates
