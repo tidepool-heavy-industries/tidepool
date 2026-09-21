@@ -1271,6 +1271,32 @@ mod tests {
     }
 
     #[test]
+    fn compiler_phase_timings_are_structured_in_the_daemon_trace() {
+        let trace = CapturedWriter::default();
+        let subscriber = tracing_subscriber(
+            CapturedWriter::default(),
+            CapturedWriter::default(),
+            trace.clone(),
+            tracing_subscriber::EnvFilter::new("debug"),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            log_compile_timing(
+                "run-7",
+                "abcdef0123456789",
+                b"tidepool-timing phase=cycle_modules_wall ms=14700\n",
+            );
+        });
+
+        let event: serde_json::Value = serde_json::from_str(trace.text().trim()).unwrap();
+        assert_eq!(event["fields"]["message"], "compiler phase timing");
+        assert_eq!(event["fields"]["run_id"], "run-7");
+        assert_eq!(event["fields"]["compile_request"], "abcdef0123456789");
+        assert_eq!(event["fields"]["phase"], "cycle_modules_wall");
+        assert_eq!(event["fields"]["elapsed_ms"], 14_700);
+    }
+
+    #[test]
     fn the_daemon_trace_file_sits_beside_the_compiler_log() {
         assert_eq!(
             trace_path(Path::new("/tmp/project/.shoal/logs/run-1-compiler.log")),

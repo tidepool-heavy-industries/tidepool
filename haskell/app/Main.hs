@@ -46,7 +46,7 @@ import Tidepool.Artifacts
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..)
   , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..), dumpCore
-  , withResidentPipelineSelected, CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances
+  , withResidentPipelineSelectedRequests, CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances
   , registerResidentEvictionHook )
 import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), projectPreparedTargetWithConstructors, resolveTextPackageUnit)
@@ -91,7 +91,7 @@ import Tidepool.TurnSource (extractModuleName, spliceTemplate)
 -- 'processFile''s 'PreparedStg' compile passes 'Set.empty' (a true no-op):
 -- only a prepared-STG compile ever recovers/persists a retained-generation
 -- 'GlobalDecl' reference, so 'LegacyCore' modes (inspection/turn/cell) have
--- nothing to withhold. The resident-daemon path ('withResidentPipelineSelected',
+-- nothing to withhold. The resident-daemon path ('withResidentPipelineSelectedRequests',
 -- used only behind @--worker-loop-v1@) honors this parameter per request too,
 -- via a single installed plugin that reads a per-request 'IORef' cell.
 type Compiler =
@@ -107,9 +107,9 @@ type Compiler =
 -- | Prepared-recovery caches ('recoverPreparedClosure'), threaded alongside
 -- 'Compiler' into every call site that can reach 'prepareArtifacts'. In the
 -- resident daemon ('main''s @--worker-loop-v1@ branch) these are created
--- ONCE, before 'withResidentPipelineSelected' boots its session, and an
--- eviction hook registered via 'registerResidentEvictionHook' drops each
--- request's own target module and any @Tidepool.Session.*@ module from both
+-- ONCE, before 'withResidentPipelineSelectedRequests' boots its session, and an
+-- eviction hook registered via 'registerResidentEvictionHook' drops every
+-- target module compiled by a request and any @Tidepool.Session.*@ module from both
 -- caches at the same request boundary 'sanitizeMemo' cleans the compile
 -- memo -- library modules stay warm for the daemon's lifetime (it restarts on
 -- a toolchain stamp change). The one-shot (non-daemon) path instead builds a
@@ -136,7 +136,7 @@ staleRecoveryModule targetModName' owner =
 
 -- | Install the daemon-lifetime 'RecoveryCaches'' eviction into
 -- 'Tidepool.GhcPipeline''s resident request boundary. Call exactly once,
--- before entering 'withResidentPipelineSelected'.
+-- before entering 'withResidentPipelineSelectedRequests'.
 registerRecoveryCacheEviction :: RecoveryCaches -> IO ()
 registerRecoveryCacheEviction caches =
   registerResidentEvictionHook $ \targetModName' -> do
@@ -171,9 +171,11 @@ main = do
       -- boundary by the hook registered here (see 'RecoveryCaches').
       caches <- freshRecoveryCaches
       registerRecoveryCacheEviction caches
-      withResidentPipelineSelected [] $ \compiler ->
+      withResidentPipelineSelectedRequests [] $ \runRequest ->
         WorkerServer.runWorkerLoop
-          (\cwd argv -> setCurrentDirectory cwd >> runWorkerInvocation compiler caches argv)
+          (\cwd argv ->
+            runRequest $ \compiler ->
+              setCurrentDirectory cwd >> runWorkerInvocation compiler caches argv)
     else do
       hSetEncoding stdout utf8
       -- One-shot path: 'main' runs this branch exactly once per process, so

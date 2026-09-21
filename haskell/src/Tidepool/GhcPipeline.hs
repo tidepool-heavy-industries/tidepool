@@ -14,6 +14,7 @@ module Tidepool.GhcPipeline
   , checkCellInstances
     -- * Resident session
   , withResidentPipeline, withResidentPipelineSelected
+  , withResidentPipelineSelectedRequests
   , registerResidentEvictionHook
   ) where
 
@@ -101,7 +102,7 @@ import System.FilePath (takeBaseName, takeFileName)
 import System.IO (hPutStrLn, stderr, readFile')
 import System.IO.Unsafe (unsafePerformIO)
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad (forM, when)
+import Control.Monad (forM, forM_, when)
 import Data.Data (Data, cast, gmapQ)
 import Data.Foldable (toList)
 import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellDisplayTarget(..), CellGenericDeclaration(..), omitCellGenericDeclarations, omitCellDisplayDeclarations)
@@ -1119,10 +1120,25 @@ withResidentPipeline baseIncludes useCompiler = do
 -- only the current request.
 withResidentPipelineSelected
   :: [FilePath]
-  -> ((forall result. PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope
-       -> FilePath -> [FilePath] -> Maybe FilePath -> IO result) -> IO a)
+  -> (ResidentCompiler -> IO a)
   -> IO a
-withResidentPipelineSelected baseIncludes useCompiler = do
+withResidentPipelineSelected baseIncludes useCompiler =
+  withResidentPipelineSelectedRequests baseIncludes $ \runRequest ->
+    useCompiler $ \selection retained purpose mscope path extraIncludes buildProductsDir ->
+      runRequest $ \compile ->
+        compile selection retained purpose mscope path extraIncludes buildProductsDir
+
+-- | Keep request-scoped compiler state across every compile needed to serve
+-- one framed worker request, then remove it before admitting the next request.
+-- A cell check can compile repeatedly while rejecting generated instances;
+-- treating each retry as a request boundary discards the memo entries the
+-- next retry was meant to reuse. The scoped runner owns cleanup so a caller
+-- cannot admit another request without first sanitizing this one's state.
+withResidentPipelineSelectedRequests
+  :: [FilePath]
+  -> (RequestRunner -> IO a)
+  -> IO a
+withResidentPipelineSelectedRequests baseIncludes useRequests = do
   timing <- readTimingEnabled
   (libdir, startupMs) <- timeSection getLibdir
   emitPhase timing "startup" startupMs
@@ -1135,23 +1151,53 @@ withResidentPipelineSelected baseIncludes useCompiler = do
     setSession (installRetainedUnfoldingsPlugin retainedRef hscForRetained)
     cache   <- liftIO newIfaceCache
     memoRef <- liftIO (newIORef Map.empty)
+    requestTargetsRef <- liftIO (newIORef Set.empty)
     let baseImportPaths = importPaths dflags'
     reifyGhc $ \session ->
-      useCompiler $ \selection retained purpose mscope path extraIncludes buildProductsDir -> do
-        targetModName' <- targetModuleNameFor path
-        compiled <- (writeIORef retainedRef retained >>
-          reflectGhc
-            (residentCompileOne (selectionKind selection) cache memoRef retainedRef dflags' baseImportPaths timing purpose mscope path extraIncludes buildProductsDir)
-            session)
-          `finally` (sanitizeMemo targetModName' memoRef >> runResidentEvictionHooks targetModName'
-                       >> writeIORef retainedRef Set.empty)
-        pure (selectCompileResult selection compiled)
+      let finishRequest = do
+            targets <- atomicModifyIORef' requestTargetsRef (\pending -> (Set.empty, pending))
+            forM_ (Set.toList targets) $ \targetModName' -> do
+              sanitizeMemo targetModName' memoRef
+              runResidentEvictionHooks targetModName'
+          compile :: ResidentCompiler
+          compile selection retained purpose mscope path extraIncludes buildProductsDir = do
+            targetModName' <- targetModuleNameFor path
+            modifyIORef' requestTargetsRef (Set.insert targetModName')
+            -- The target's parsed tree depends on the compile purpose (for
+            -- example, lookup compilation normalizes wildcards). Source and
+            -- dependency hashes cannot distinguish those variants, so never
+            -- reuse a target entry across internal compiles. Session
+            -- dependencies remain warm until the framed request ends.
+            evictTargetMemo targetModName' memoRef
+            compiled <- (writeIORef retainedRef retained >>
+              reflectGhc
+                (residentCompileOne (selectionKind selection) cache memoRef retainedRef dflags' baseImportPaths timing purpose mscope path extraIncludes buildProductsDir)
+                session)
+              `finally` writeIORef retainedRef Set.empty
+            pure (selectCompileResult selection compiled)
+          runRequest :: RequestRunner
+          runRequest action = action compile `finally` finishRequest
+      in useRequests runRequest
+
+type ResidentCompiler = forall result.
+  PipelineSelection result
+  -> Set.Set SymbolIdentity
+  -> CompilePurpose
+  -> Maybe SessionScope
+  -> FilePath
+  -> [FilePath]
+  -> Maybe FilePath
+  -> IO result
+
+type RequestRunner = forall requestResult.
+  (ResidentCompiler -> IO requestResult) -> IO requestResult
 
 -- | One resident-session compile cycle, against the ALREADY-OPEN session
 -- 'withResidentPipeline' booted. Patches @importPaths@ for THIS cycle only
 -- (see 'withResidentPipeline'), compiles with the shared 'ModIfaceCache' +
--- 'GutsMemo'. The IO boundary in 'withResidentPipelineSelected' sanitizes the
--- memo after both successful and exceptional cycles (see 'sanitizeMemo').
+-- 'GutsMemo'. The request boundary established by
+-- 'withResidentPipelineSelectedRequests' sanitizes the memo after both
+-- successful and exceptional requests (see 'sanitizeMemo').
 -- Captures a fresh start time so every request gets its own compile summary.
 --
 -- The resident and direct paths select the same pipeline variant. This is an
@@ -1181,12 +1227,12 @@ residentCompileOne preparation cache memoRef retainedRef baseDFlags baseImportPa
   runCompileCycle preparation (Just cache) (Just memoRef) retained timing sessionT0 variant path
 
 -- | Strip every request-scoped entry from the shared 'GutsMemo' after a
--- resident cycle: the cycle's own target module (@targetModName@) and any
+-- framed worker request: every target module compiled by that request and any
 -- @Tidepool.Session.*@ module ('parseSessionModule' recognizes both @Val@
 -- and @Lib@ kinds — the ONE existing session-module-name recognizer, reused
 -- rather than a second hand-rolled prefix check).
 --
--- | Remove request-scoped modules after each resident compile. Reusable
+-- | Remove request-scoped modules after each framed worker request. Reusable
 -- library entries stay warm, while @__result@ and session-value guts cannot
 -- leak into a later request that reuses the same module name.
 sanitizeMemo :: ModuleName -> IORef GutsMemo -> IO ()
@@ -1194,14 +1240,18 @@ sanitizeMemo targetModName' memoRef =
   modifyIORef' memoRef $ Map.filterWithKey $ \mn _ ->
     mn /= targetModName' && isNothing (parseSessionModule (moduleNameString mn))
 
+evictTargetMemo :: ModuleName -> IORef GutsMemo -> IO ()
+evictTargetMemo targetModName' memoRef =
+  modifyIORef' memoRef (Map.delete targetModName')
+
 -- | Registered eviction hooks for daemon-lifetime caches this module knows
 -- nothing about (e.g. 'Tidepool.FatIface.OwnerInterfaceCache' and
 -- 'Tidepool.FatIface.FatIfaceCache', hoisted to daemon lifetime by
--- app/Main.hs around 'withResidentPipelineSelected'). A hook decides for
+-- app/Main.hs around 'withResidentPipelineSelectedRequests'). A hook decides for
 -- itself, from the request's target 'ModuleName', which of its own cache
 -- entries to drop -- the same request-boundary invalidation 'sanitizeMemo'
 -- performs for 'GutsMemo', run at the same point in the resident cycle.
--- A global 'IORef' (rather than a new parameter on 'withResidentPipelineSelected')
+-- A global 'IORef' (rather than another parameter on the compiler closure)
 -- keeps every existing caller of that function -- including test suites this
 -- change must not touch -- source-compatible; an unregistered hook list is a
 -- no-op, matching today's behavior exactly.
@@ -1211,7 +1261,7 @@ residentEvictionHooks = unsafePerformIO (newIORef [])
 
 -- | Register a hook to run at every resident request boundary, alongside
 -- 'sanitizeMemo'. Intended to be called once, before entering
--- 'withResidentPipelineSelected', by the daemon entry point that owns the
+-- 'withResidentPipelineSelectedRequests', by the daemon entry point that owns the
 -- cache being registered (see app/Main.hs).
 registerResidentEvictionHook :: (ModuleName -> IO ()) -> IO ()
 registerResidentEvictionHook hook =

@@ -3,7 +3,7 @@
 module Main where
 
 import Control.Monad (unless)
-import Control.Exception (bracket, try)
+import Control.Exception (SomeException, bracket, finally, throwIO, try)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (isInfixOf, isPrefixOf, tails)
 import GHC
@@ -15,10 +15,13 @@ import GHC.Types.SourceError (SourceError)
 import Tidepool.Binders
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.GhcPipeline
-import System.Directory (getTemporaryDirectory, createDirectory, removeFile, removeDirectoryRecursive)
+import System.Directory
+  ( getTemporaryDirectory, createDirectory, createDirectoryIfMissing
+  , removeFile, removeDirectoryRecursive )
 import System.FilePath ((</>))
-import System.IO (openTempFile, hClose)
-import System.Environment (getArgs)
+import System.IO (openTempFile, hClose, hFlush, readFile', stderr)
+import GHC.IO.Handle (hDuplicate, hDuplicateTo)
+import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
 
 main :: IO ()
 main = do
@@ -44,15 +47,16 @@ main = do
 
 structuralDisplayCompilation :: FilePath -> IO ()
 structuralDisplayCompilation effectsRoot = bracket temporary removeDirectoryRecursive $ \root -> do
+  requestMemoLifecycle root
   source <- readFile "test-cell-splitter/DisplayFields.cell.hs"
   plan <- analyzeCell template source >>= either (fail . renderCellSplitError) pure
   let includes = ["lib", "test-cell-splitter", effectsRoot]
-  withResidentPipeline includes $ \compiler -> do
+  withResidentPipelineSelectedRequests includes $ \runRequest -> runRequest $ \compiler -> do
     let compile current = do
           rendered <- either fail pure (renderCellCheckSource template current)
           let path = root </> "CellCheck.hs"
           writeFile path rendered
-          compiler GeneralCompile Nothing path includes Nothing
+          compiler LegacyCore mempty GeneralCompile Nothing path includes Nothing
     (accepted, provisional) <- checkCellInstances compile plan
     assertEqual "resolved authored Display instances retained" False
       (any (`elem` map displayTargetName (cellPlanDisplayTargets accepted)) ["Custom", "Reexported"])
@@ -110,6 +114,80 @@ structuralDisplayCompilation effectsRoot = bracket temporary removeDirectoryRecu
       , "{{CELL_DECLS}}"
       , "__tidepool_cell_check = do { {{CELL_BODY}} } :: Maybe ()"
       ]
+
+requestMemoLifecycle :: FilePath -> IO ()
+requestMemoLifecycle root = do
+  let dependencyDir = root </> "Tidepool" </> "Session" </> "Lib"
+      dependencyPath = dependencyDir </> "G1.hs"
+      targetPath = root </> "MemoTarget.hs"
+      validDependency = unlines
+        [ "module Tidepool.Session.Lib.G1 (dependency) where"
+        , "dependency :: Int"
+        , "dependency = 41"
+        ]
+      invalidDependency = unlines
+        [ "module Tidepool.Session.Lib.G1 (dependency) where"
+        , "dependency :: Int"
+        , "dependency = missing"
+        ]
+  createDirectoryIfMissing True dependencyDir
+  writeFile dependencyPath validDependency
+  writeFile targetPath $ unlines
+    [ "module MemoTarget where"
+    , "import Tidepool.Session.Lib.G1 (dependency)"
+    , "result :: Int"
+    , "result = dependency + 1"
+    ]
+  previousTiming <- lookupEnv "TIDEPOOL_TIMING"
+  setEnv "TIDEPOOL_TIMING" "1"
+  (withResidentPipelineSelectedRequests [root] $ \runRequest -> do
+      let compile purpose compiler = compiler LegacyCore mempty purpose Nothing targetPath [root] Nothing
+          sessionMiss = "tidepool-memo-miss module=Tidepool.Session.Lib.G1"
+          absentSession = sessionMiss ++ " reason=absent"
+          targetMiss = "tidepool-memo-miss module=MemoTarget"
+      runRequest $ \compiler -> do
+        (_, coldLog) <- captureStderr root "memo-cold" (compile GeneralCompile compiler)
+        assertContains "cold request compiles the session dependency" absentSession coldLog
+        assertContains "cold request compiles its target" targetMiss coldLog
+        (_, warmLog) <- captureStderr root "memo-warm" (compile LookupTypeCompile compiler)
+        unless (not (sessionMiss `isInfixOf` warmLog)) $
+          fail "unchanged session dependency was not reused within one worker request"
+        assertContains "internal compile evicts its purpose-sensitive target" targetMiss warmLog
+        writeFile dependencyPath invalidDependency
+        (changed, changedLog) <- captureStderr root "memo-changed"
+          (try (compile GeneralCompile compiler) :: IO (Either SourceError PipelineResult))
+        case changed of
+          Left _ -> pure ()
+          Right _ -> fail "changed invalid session dependency reused a stale memo entry"
+        assertContains "source-sensitive memo invalidation" sessionMiss changedLog
+      writeFile dependencyPath validDependency
+      (_, nextRequestLog) <- captureStderr root "memo-next-request"
+        (runRequest $ \compiler -> compile GeneralCompile compiler)
+      assertContains "normal request exit evicts session dependencies" absentSession nextRequestLog
+      failedRequest <- try (captureStderr root "memo-exception" $ runRequest $ \compiler -> do
+        _ <- compile GeneralCompile compiler
+        throwIO (userError "request failure after compile"))
+        :: IO (Either SomeException (PipelineResult, String))
+      case failedRequest of
+        Left _ -> pure ()
+        Right _ -> fail "exception cleanup probe unexpectedly succeeded"
+      (_, afterExceptionLog) <- captureStderr root "memo-after-exception"
+        (runRequest $ \compiler -> compile GeneralCompile compiler)
+      assertContains "exceptional request exit evicts session dependencies" absentSession afterExceptionLog)
+    `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
+
+captureStderr :: FilePath -> String -> IO a -> IO (a, String)
+captureStderr root label action = do
+  (path, handle) <- openTempFile root label
+  saved <- hDuplicate stderr
+  result <- (hDuplicateTo handle stderr >> action) `finally` do
+    hFlush stderr
+    hDuplicateTo saved stderr
+    hClose saved
+    hClose handle
+  output <- readFile' path
+  removeFile path
+  pure (result, output)
 
 lexicalIslands :: DynFlags -> IO ()
 lexicalIslands flags = do
