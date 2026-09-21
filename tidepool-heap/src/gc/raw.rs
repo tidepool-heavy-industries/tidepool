@@ -28,6 +28,7 @@ pub struct DescriptorSpace {
     /// is independent, so a pointer is static iff SOME region in the set
     /// admits it.
     static_regions: Vec<Arc<crate::static_region::StaticRegion>>,
+    static_metrics: crate::static_region::StaticLookupMetrics,
     descriptors: HashMap<usize, Arc<ObjectDescriptor>>,
     object_starts: Vec<u64>,
     root_slots: Vec<usize>,
@@ -100,6 +101,7 @@ impl DescriptorSpace {
         }
         Ok(Self {
             static_regions: Vec::new(),
+            static_metrics: crate::static_region::StaticLookupMetrics::new("collector"),
             descriptors: owners,
             object_starts: Vec::new(),
             root_slots: Vec::new(),
@@ -290,11 +292,21 @@ impl DescriptorSpace {
     }
 
     fn static_reference(&self, encoded: usize) -> Result<Option<usize>, DescriptorTraceError> {
-        for region in &self.static_regions {
-            if let Some(reference) = region.admit(encoded)? {
-                return Ok(Some(reference));
+        for (index, region) in self.static_regions.iter().enumerate() {
+            match region.admit(encoded) {
+                Ok(None) => {}
+                result => {
+                    self.static_metrics.record(
+                        self.static_regions.len(),
+                        index + 1,
+                        result.is_ok(),
+                    );
+                    return result;
+                }
             }
         }
+        self.static_metrics
+            .record(self.static_regions.len(), self.static_regions.len(), false);
         Ok(None)
     }
 

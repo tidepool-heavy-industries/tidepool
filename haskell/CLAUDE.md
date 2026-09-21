@@ -80,6 +80,7 @@ Diagnostics are opt-in:
 
 | Variable | Purpose |
 |---|---|
+| `TIDEPOOL_TIMING=1` | phase timings, nested breakdowns, and counts, correlated by compiler request |
 | `TIDEPOOL_VARID_AUDIT=1` | report VarId collisions |
 | `TIDEPOOL_VARID_AUDIT=<hex>,...` | resolve selected VarIds to names |
 | `TIDEPOOL_DANGLING_DEBUG=1` | show unresolved references before allowed session refs are removed |

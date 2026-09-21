@@ -5,6 +5,7 @@
 module Tidepool.Timing
   ( readTimingEnabled
   , timePhase
+  , timeDetailPhase
   , timeSection
   , emitPhase
   , emitDetailPhase
@@ -35,6 +36,13 @@ timePhase enabled name act = do
   (r, ms) <- timeSection act
   liftIO (emitPhase enabled name ms)
   pure r
+
+-- | Measure a named child without putting it in the flat phase stream.
+timeDetailPhase :: MonadIO m => Bool -> String -> String -> m a -> m a
+timeDetailPhase enabled parent name act = do
+  (result, ms) <- timeSection act
+  liftIO (emitDetailPhase enabled parent name ms)
+  pure result
 
 -- | Time @act@ without emitting anything — for a phase whose wall clock is
 -- the SUM of several non-contiguous sub-steps (e.g. once per module in a

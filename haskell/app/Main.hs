@@ -47,7 +47,7 @@ import Tidepool.GhcPipeline
   , cellExpressionPlans
   , satisfiesCapturedConstraint, stripMonadHead )
 import Tidepool.ExecutionEncode (encodeWireProgram)
-import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), projectPreparedTargetWithConstructors, resolveTextPackageUnit)
+import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjection, projectSelected, resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..)
@@ -78,7 +78,7 @@ import Tidepool.Metadata
   ( collectDataCons, dcToMeta, mergeMetaPreserving, targetBindingHasIO
   , wiredInDataCons )
 import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut)
-import Tidepool.Timing (readTimingEnabled, timePhase)
+import Tidepool.Timing (readTimingEnabled, timePhase, timeDetailPhase)
 import Tidepool.TurnSource (extractModuleName, spliceTemplate)
 
 renderAsksJson :: [Tidepool.EffectSchema.YieldSite] -> String
@@ -479,12 +479,11 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
     recovered <- timePhase timing "prepared_recover"
       (recover (projectionEntry context))
     reportRecoveryResiduals target (closureFailures recovered)
-    (program, constructors) <- timePhase timing "prepared_project" $
-      case projectPreparedTargetWithConstructors context (closureModules recovered) of
-        -- A reachable polymorphic typed site is the author's source error.
-        Left (RejectedTypedSite message) -> throwIO (SourceRejection (T.unpack message))
-        Left failure -> ioError (userError ("prepared projection failed: " <> show failure))
-        Right projected -> evaluate projected
+    (program, constructors) <- timePhase timing "prepared_project" $ do
+      selected <- timeDetailPhase timing "prepared_project" "select" $
+        requireProjection (prepareProjection context (closureModules recovered))
+      timeDetailPhase timing "prepared_project" "lower" $
+        requireProjection (projectSelected selected)
     bytes <- timePhase timing "prepared_encode" (evaluate (encodeWireProgram program))
     let admitted = Set.fromList (map siteId (programSites program))
         yieldSites =
@@ -494,6 +493,12 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
           , Tidepool.EffectSchema.ysSite site `Set.member` admitted
           ]
     pure (PreparedArtifact target bytes constructors yieldSites)
+
+requireProjection :: Either ProjectionError a -> IO a
+requireProjection = \case
+  Left (RejectedTypedSite message) -> throwIO (SourceRejection (T.unpack message))
+  Left failure -> ioError (userError ("prepared projection failed: " <> show failure))
+  Right projected -> evaluate projected
 
 -- | Filter the standard prepared-turn auxiliary root names
 -- ('preparedResumeTargetName', 'preparedDecodeTargetName') down to those the

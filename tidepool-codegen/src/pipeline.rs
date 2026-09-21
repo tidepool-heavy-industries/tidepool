@@ -130,6 +130,7 @@ pub struct CodegenPipeline {
     /// diff-after way as [`Self::functions_defined`]; it is the size half of
     /// the same question — how much executable memory one turn cost.
     code_bytes: u64,
+    native_compile_time: std::time::Duration,
 }
 
 impl CodegenPipeline {
@@ -203,6 +204,7 @@ impl CodegenPipeline {
             functions_defined: 0,
             blocks_emitted: 0,
             code_bytes: 0,
+            native_compile_time: std::time::Duration::ZERO,
         })
     }
 
@@ -239,6 +241,11 @@ impl CodegenPipeline {
     /// field doc for how to read a delta.
     pub fn code_bytes(&self) -> u64 {
         self.code_bytes
+    }
+
+    /// Time inside native compilation and stack-map installation, excluding IR construction.
+    pub(crate) fn native_compile_time(&self) -> std::time::Duration {
+        self.native_compile_time
     }
 
     /// Largest native stack reserve among finalized functions.
@@ -287,9 +294,11 @@ impl CodegenPipeline {
         // Cranelift has its own substantial native frames. Emission guards
         // cannot protect compilation after returning to their caller's stack.
         self.invalidate();
+        let started = std::time::Instant::now();
         let result = stacker::maybe_grow(COMPILER_STACK_RESERVE, COMPILER_STACK_SEGMENT, || {
             self.define_function_inner(func_id, ctx)
         });
+        self.native_compile_time += started.elapsed();
         if result.is_ok() {
             self.compilation_state = CompilationState::Ready;
         }

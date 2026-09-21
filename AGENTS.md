@@ -181,6 +181,9 @@ Keep detailed design references out of always-loaded instructions.
   Use `just suite PACKAGE` for its full integration suites and `just verify`
   at major integration boundaries. Nextest filters select execution, not Cargo
   compilation: choose the package and target as well as the test name.
+- Use `tidepool-test-data` for repr-only fixtures, `tidepool-testing` for
+  evaluation and `TestEffectSurface`, and `tidepool-prepared-corpus` for corpus
+  execution. Keep heavy support out of low-level dev dependencies.
 - Share compilation of fixed Haskell fixtures across named test scenarios.
   Keep fresh machines for mutable state, and preserve process isolation for
   signal, crash, and global-state tests. Lightweight fixture data belongs below

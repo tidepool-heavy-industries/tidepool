@@ -28,7 +28,7 @@ mode="$1"
 manifest="$2"
 case "$mode" in check | verify | update) ;; *) usage ;; esac
 
-fixture="tidepool-testing/fixtures/prepared-corpus-expectations.json"
+fixture="tidepool-prepared-corpus/fixtures/prepared-corpus-expectations.json"
 oracle_source="haskell/test-prepared-stg/suite-oracle"
 classifications="$oracle_source/SuiteOracleClassifications.json"
 nonterminating="$oracle_source/SuiteOracleNonterminating.txt"

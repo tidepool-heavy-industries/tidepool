@@ -797,8 +797,10 @@ fn hex(bytes: &[u8]) -> String {
 /// prefixes mirror `tidepool_toolchain::timing` (this crate is a dependency
 /// leaf and cannot name it).
 fn log_compile_timing(run_id: &str, compile_request: &str, stderr: &[u8]) {
-    const PREFIXES: [&str; 5] = [
+    const PREFIXES: [&str; 7] = [
         "tidepool-timing ",
+        "tidepool-timing-detail ",
+        "tidepool-count ",
         "tidepool-compile-summary ",
         "tidepool-memo-miss ",
         "tidepool-checked ",
@@ -1602,6 +1604,8 @@ mod tests {
                 "run-7",
                 "abcdef0123456789",
                 b"tidepool-timing phase=cycle_modules_wall ms=14700\n\
+tidepool-timing-detail parent=prepared_recover phase=lookup ms=5\n\
+tidepool-count name=prepared_recover_rounds count=2\n\
 tidepool-checked module=Inspect target=False\n\
 tidepool-target phase=desugar module=Execute\n",
             );
@@ -1625,6 +1629,8 @@ tidepool-target phase=desugar module=Execute\n",
         assert_eq!(
             structural,
             [
+                "tidepool-timing-detail parent=prepared_recover phase=lookup ms=5",
+                "tidepool-count name=prepared_recover_rounds count=2",
                 "tidepool-checked module=Inspect target=False",
                 "tidepool-target phase=desugar module=Execute",
             ]

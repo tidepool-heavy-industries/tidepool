@@ -4,6 +4,9 @@ module Tidepool.ExecutionProjection
   , projectPrepared
   , projectPreparedTarget
   , projectPreparedTargetWithConstructors
+  , PreparedProjection
+  , prepareProjection
+  , projectSelected
   , preparedTopIdentities
   , preparedTargetReferences
   , ReferenceFact(..)
@@ -267,19 +270,32 @@ projectPreparedTarget context modules =
 -- Return them from the same transaction that produced the wire declarations.
 projectPreparedTargetWithConstructors :: ProjectionContext -> [PreparedModule]
   -> Either ProjectionError (WireProgram, [DataCon])
-projectPreparedTargetWithConstructors _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
 projectPreparedTargetWithConstructors context modules =
+  prepareProjection context modules >>= projectSelected
+
+-- | Selection retains the exact context and identity map that authorized it.
+-- Its binding lists are forced here so timing selection measures the complete
+-- reachability walk, rather than charging its thunks to projection later.
+data PreparedProjection = PreparedProjection ProjectionContext [PreparedModule] (VarEnv SymbolIdentity)
+
+prepareProjection :: ProjectionContext -> [PreparedModule]
+  -> Either ProjectionError PreparedProjection
+prepareProjection _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
+prepareProjection context modules =
   let (identities, selected) = selectPreparedTarget context modules
+      bindingCount = sum [length (pmBindings prepared) | prepared <- selected]
       reachable = mkUniqSet [ varUnique binder | prepared <- selected
         , (binding, _) <- pmBindings prepared, binder <- topBinders binding ]
-  in case [ srMessage rejection | prepared <- modules
+  in bindingCount `seq` case [ srMessage rejection | prepared <- modules
             , rejection <- pmSiteRejections prepared
             , elementOfUniqSet (varUnique (srBinder rejection)) reachable
-            -- A retained-generation import's body is linked, never executed
-            -- here, so its sites cannot reject this program.
             , not (skippedFromRecovery context (srBinder rejection)) ] of
        message : _ -> Left (RejectedTypedSite (Text.pack message))
-       [] -> projectPreparedWithTopSymbols context selected identities
+       [] -> Right (PreparedProjection context selected identities)
+
+projectSelected :: PreparedProjection -> Either ProjectionError (WireProgram, [DataCon])
+projectSelected (PreparedProjection context selected identities) =
+  projectPreparedWithTopSymbols context selected identities
 
 -- | The per-module, round-invariant part of 'preparedTargetReferences'.
 --

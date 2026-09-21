@@ -1900,6 +1900,7 @@ impl MachineState {
         // empty `local` layer -- see its overlay doc); the potentially large
         // clone this guards is the inner `Tables` `absorb` mutates.
         Arc::make_mut(&mut pool).absorb(other);
+        pool.report_residency();
     }
 
     /// Resolve a literal `Addr#` against the one permanent pool.

@@ -118,7 +118,7 @@ import Tidepool.Session
   , isSessionScopeActive, injectSessionScope, renderSessionModule
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule )
 import Tidepool.Timing
-  ( readTimingEnabled, timeSection, timePhase, emitPhase, monotonicTime, elapsedMs
+  ( readTimingEnabled, timeSection, timePhase, timeDetailPhase, emitPhase, monotonicTime, elapsedMs
   , emitCompileSummary, emitModuleTiming )
 import Tidepool.PreparedStg (PreparedElaboration(..), PreparedModule(..), prepareModule)
 import Tidepool.PreparedSites
@@ -1747,8 +1747,9 @@ sessionVariant purpose scope path = do
             -- with "module ... is not loaded". Generated Libs and deferred
             -- importers therefore share the same single registration path.
             when (ms_mod_name modSum `Set.member` deferredMods || isSessionLib modSum) $ do
-              (cgGuts, modDetails) <- liftIO $ hscTidy hscEnv simplified
-              iface <- liftIO $
+              (cgGuts, modDetails) <- timeDetailPhase timing "module_interface" "tidy" $
+                liftIO $ hscTidy hscEnv simplified
+              iface <- timeDetailPhase timing "module_interface" "make_iface" $ liftIO $
                 mkIfaceTc hscEnv Sf_None modDetails modSum (Just (cg_binds cgGuts)) tcGblEnv
               let hmi = HomeModInfo iface modDetails emptyHomeModInfoLinkable
               hscEnvNow <- getSession

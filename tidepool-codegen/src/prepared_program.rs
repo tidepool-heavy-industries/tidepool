@@ -408,6 +408,7 @@ impl CompiledProgram {
         }
         let mut clock = compile_phases::PhaseClock::start();
         let mut phases = compile_phases::CompilePhases::default();
+        let mut native_metrics = compile_phases::NativeMetrics::new(linked.prepared());
         admit_program(linked)?;
         phases.admit = clock.lap();
         use crate::entry_abi::{EnvironmentMode, NativeAbiProfile};
@@ -823,6 +824,7 @@ impl CompiledProgram {
         }
         let dispatchers = apply::declare_dispatchers(&plan, &profile, &mut pipeline)?;
         phases.declare = clock.lap();
+        let mut category_start = compile_phases::NativeCounts::read(&pipeline);
         let callables = apply::emit_dispatchers(
             &plan,
             &dispatchers,
@@ -837,13 +839,16 @@ impl CompiledProgram {
             prepared_unresolved_call,
             &mut pipeline,
         )?;
+        native_metrics.category("dispatchers", category_start, &pipeline);
         phases.emit_dispatchers = clock.lap();
+        category_start = compile_phases::NativeCounts::read(&pipeline);
         // Every function address has been declared, including recursive peers.
         for (&id, instances) in &functions {
             if plan.thunks.contains_key(&id) {
                 continue;
             }
             for (results, &output) in instances {
+                let definition_start = compile_phases::NativeCounts::read(&pipeline);
                 emit::emit_function(
                     &plan,
                     id,
@@ -857,10 +862,14 @@ impl CompiledProgram {
                     case_trap,
                     &mut pipeline,
                 )?;
+                native_metrics.definition("function", id, definition_start, &pipeline);
             }
         }
+        native_metrics.category("functions", category_start, &pipeline);
         phases.emit_functions = clock.lap();
+        category_start = compile_phases::NativeCounts::read(&pipeline);
         for (&id, &body) in &thunk_bodies {
+            let definition_start = compile_phases::NativeCounts::read(&pipeline);
             emit::emit_thunk_body(
                 &plan,
                 id,
@@ -873,8 +882,11 @@ impl CompiledProgram {
                 case_trap,
                 &mut pipeline,
             )?;
+            native_metrics.definition("thunk", id, definition_start, &pipeline);
         }
+        native_metrics.category("thunks", category_start, &pipeline);
         phases.emit_thunks = clock.lap();
+        category_start = compile_phases::NativeCounts::read(&pipeline);
         let thunk_entries = plan
             .thunks
             .iter()
@@ -909,7 +921,9 @@ impl CompiledProgram {
             prepared_recorded_failure,
             write_barrier,
         )?;
+        native_metrics.category("enter", category_start, &pipeline);
         phases.emit_enter = clock.lap();
+        category_start = compile_phases::NativeCounts::read(&pipeline);
         let force_adapter =
             adapter::emit_force_adapter(&mut pipeline, "prepared_force_adapter", prepared_enter)?;
         let mut entries = BTreeMap::new();
@@ -945,6 +959,7 @@ impl CompiledProgram {
                 },
             );
         }
+        native_metrics.category("adapters", category_start, &pipeline);
         phases.emit_adapters = clock.lap();
         pipeline.finalize()?;
         phases.finalize = clock.lap();
@@ -1067,6 +1082,7 @@ impl CompiledProgram {
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         phases.descriptors = clock.lap();
+        native_metrics.report();
         compile_phases::record(
             &phases,
             &compile_phases::CompileScale {

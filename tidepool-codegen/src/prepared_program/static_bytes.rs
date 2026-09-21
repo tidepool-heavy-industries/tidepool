@@ -172,6 +172,22 @@ impl PinnedBytes {
         }
     }
 
+    /// Physical storage includes duplicate content at distinct embedded addresses.
+    pub(crate) fn report_residency(&self) {
+        if std::env::var("TIDEPOOL_MEMORY_DETAIL").as_deref() == Ok("1") {
+            let entries = self.base.by_address.len() + self.local.by_address.len();
+            let bytes: usize = self
+                .base
+                .by_address
+                .values()
+                .chain(self.local.by_address.values())
+                .map(|literal| literal.storage.len())
+                .sum();
+            tracing::info!(target: "tidepool_codegen::prepared_compile", entries, bytes,
+                "permanent literal pool");
+        }
+    }
+
     /// Observe only logical literal bytes, excluding the implicit terminal NUL.
     pub(crate) fn logical_suffix(&self, address: usize) -> Option<&[u8]> {
         let (base, literal) = self.address_entry(address)?;

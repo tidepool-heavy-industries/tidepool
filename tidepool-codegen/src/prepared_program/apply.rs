@@ -239,6 +239,7 @@ pub(super) fn declare_dispatchers(
             }
         }
     }
+    let call_demands = demanded.len();
     // Every owner serves exact PAP suffixes and all proper partial prefixes,
     // even when no call in its own source demands that shape.
     for function in plan.functions.values() {
@@ -273,6 +274,7 @@ pub(super) fn declare_dispatchers(
             }
         }
     }
+    let owner_demands = demanded.len();
     // Close over foreign excess suffixes and the statically typed prefix
     // probes. Every new signature is a slice of an existing argument vector.
     let mut cursor = 0;
@@ -302,6 +304,10 @@ pub(super) fn declare_dispatchers(
                 }
             }
         }
+    }
+    if std::env::var("TIDEPOOL_CODEGEN_DETAIL").as_deref() == Ok("1") {
+        tracing::info!(target: "tidepool_codegen::prepared_compile", call_demands,
+            owner_demands, closed_demands = demanded.len(), "dispatcher demand expansion");
     }
     let mut entries = BTreeMap::new();
     for (index, semantic) in demanded.into_iter().enumerate() {
@@ -340,6 +346,7 @@ pub(super) fn emit_dispatchers(
 ) -> Result<Vec<resolve::CallableExport>, super::CompileError> {
     let started = std::time::Instant::now();
     let mut code_bytes = 0usize;
+    let blocks_before = pipeline.blocks_emitted();
     // Every offer is recorded where its header's chain entry is emitted, so
     // an owner never offers a shape its dispatcher cannot serve.
     let mut exports = Vec::new();
@@ -718,6 +725,12 @@ pub(super) fn emit_dispatchers(
                 signature: lift.clone(),
             });
         }
+    }
+    if std::env::var("TIDEPOOL_CODEGEN_DETAIL").as_deref() == Ok("1") {
+        tracing::info!(target: "tidepool_codegen::prepared_compile",
+            dispatchers = dispatchers.entries.len(), offers = exports.len(),
+            blocks = pipeline.blocks_emitted() - blocks_before, code_bytes,
+            "dispatcher output");
     }
     tracing::debug!(target: "tidepool::prepared_apply",
         dispatchers = dispatchers.entries.len(), code_bytes,

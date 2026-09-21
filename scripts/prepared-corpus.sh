@@ -166,7 +166,7 @@ assert_suite_report() {
   }
 }
 
-jq -r '.source_tops[]' "$repo_root/tidepool-testing/fixtures/prepared-corpus-expectations.json" \
+jq -r '.source_tops[]' "$repo_root/tidepool-prepared-corpus/fixtures/prepared-corpus-expectations.json" \
   | LC_ALL=C sort >"$suite_targets"
 suite_count="$(wc -l <"$suite_targets" | tr -d '[:space:]')"
 echo "==> projecting Suite.hs prepared corpus ($suite_count targets)"
@@ -181,7 +181,7 @@ elif ! cmp -s "$suite_root/meta.cbor" "$metadata"; then
   exit 1
 fi
 suite_report="$suite_root/results.json"
-suite_oracle="$repo_root/tidepool-testing/fixtures/prepared-corpus-expectations.json"
+suite_oracle="$repo_root/tidepool-prepared-corpus/fixtures/prepared-corpus-expectations.json"
 echo "==> checking the generated Suite oracle against this manifest"
 "$repo_root/scripts/prepared-corpus-oracle.sh" check "$suite_root/manifest.json"
 jq -e '.source_tops | type == "array"' "$suite_oracle" >/dev/null || {

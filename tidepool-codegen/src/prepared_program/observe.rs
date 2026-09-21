@@ -147,6 +147,7 @@ pub(super) struct ObservationHeap<'a> {
     /// Every installed program's immutable static image. A pointer is static
     /// iff SOME region in this set admits it -- see [`Self::object`].
     statics: Vec<&'a StaticRegion>,
+    static_metrics: tidepool_heap::static_region::StaticLookupMetrics,
     old_space: Option<&'a dyn tidepool_heap::descriptor_region::DescriptorOldSpace>,
     descriptors: DescriptorSource<'a>,
     starts: Vec<u64>,
@@ -224,6 +225,7 @@ impl<'a> ObservationHeap<'a> {
         external_owner: &'a crate::machine_state::MachineState,
     ) -> Result<Self, ObservationFailure> {
         Ok(Self {
+            static_metrics: tidepool_heap::static_region::StaticLookupMetrics::new("observer"),
             nursery,
             statics: statics.iter().map(Arc::as_ref).collect(),
             old_space,
@@ -283,6 +285,7 @@ impl<'a> ObservationHeap<'a> {
             offset += extent / 8;
         }
         Ok(Self {
+            static_metrics: tidepool_heap::static_region::StaticLookupMetrics::new("observer"),
             nursery,
             statics,
             old_space: None,
@@ -303,12 +306,24 @@ impl<'a> ObservationHeap<'a> {
         // the union, not any single program's own region, is what a
         // cross-program static field (T4) resolves through.
         let mut static_hit = None;
+        let mut probes = 0;
         for region in &self.statics {
-            if region.admit(encoded)?.is_some() {
-                static_hit = Some(*region);
-                break;
+            probes += 1;
+            match region.admit(encoded) {
+                Ok(Some(_)) => {
+                    static_hit = Some(*region);
+                    break;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.static_metrics
+                        .record(self.statics.len(), probes, false);
+                    return Err(error.into());
+                }
             }
         }
+        self.static_metrics
+            .record(self.statics.len(), probes, static_hit.is_some());
         let old_pointer = if static_hit.is_some() {
             None
         } else if let Some(owner) = self.old_space {

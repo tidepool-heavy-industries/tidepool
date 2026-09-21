@@ -122,3 +122,107 @@ pub(crate) fn record(phases: &CompilePhases, scale: &CompileScale) {
         "prepared compile"
     );
 }
+
+/// Opt-in native-size attribution. Top definitions keep their defining module;
+/// local closures are reported separately rather than guessed from their IDs.
+#[derive(Clone, Copy, Default)]
+pub(super) struct NativeCounts {
+    functions: u64,
+    blocks: u64,
+    bytes: u64,
+    native_us: u64,
+}
+
+impl NativeCounts {
+    pub(super) fn read(pipeline: &crate::pipeline::CodegenPipeline) -> Self {
+        Self {
+            functions: pipeline.functions_defined(),
+            blocks: pipeline.blocks_emitted(),
+            bytes: pipeline.code_bytes(),
+            native_us: pipeline.native_compile_time().as_micros() as u64,
+        }
+    }
+
+    fn add_delta(&mut self, before: Self, after: Self) {
+        self.functions += after.functions - before.functions;
+        self.blocks += after.blocks - before.blocks;
+        self.bytes += after.bytes - before.bytes;
+        self.native_us += after.native_us - before.native_us;
+    }
+}
+
+pub(super) struct NativeMetrics {
+    enabled: bool,
+    owners: std::collections::BTreeMap<tidepool_repr::execution_schema::ValueId, (String, String)>,
+    definitions: std::collections::BTreeMap<(&'static str, String, String), NativeCounts>,
+}
+
+impl NativeMetrics {
+    pub(super) fn new(program: &tidepool_repr::execution_schema::PreparedProgram) -> Self {
+        let enabled = std::env::var("TIDEPOOL_CODEGEN_DETAIL").as_deref() == Ok("1");
+        let mut owners = std::collections::BTreeMap::new();
+        if enabled {
+            for group in program.bindings() {
+                use tidepool_repr::execution_schema::Group;
+                let tops = match group {
+                    Group::NonRecursive(top) => std::slice::from_ref(top),
+                    Group::Recursive(tops) => tops,
+                };
+                for top in tops {
+                    owners.insert(
+                        top.binding.id,
+                        (top.identity.unit.clone(), top.identity.module.clone()),
+                    );
+                }
+            }
+        }
+        Self {
+            enabled,
+            owners,
+            definitions: Default::default(),
+        }
+    }
+
+    pub(super) fn definition(
+        &mut self,
+        category: &'static str,
+        id: tidepool_repr::execution_schema::ValueId,
+        before: NativeCounts,
+        pipeline: &crate::pipeline::CodegenPipeline,
+    ) {
+        if self.enabled {
+            let (unit, module) = self
+                .owners
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| (String::new(), "<local>".into()));
+            self.definitions
+                .entry((category, unit, module))
+                .or_default()
+                .add_delta(before, NativeCounts::read(pipeline));
+        }
+    }
+
+    pub(super) fn category(
+        &self,
+        category: &'static str,
+        before: NativeCounts,
+        pipeline: &crate::pipeline::CodegenPipeline,
+    ) {
+        if self.enabled {
+            let mut delta = NativeCounts::default();
+            delta.add_delta(before, NativeCounts::read(pipeline));
+            tracing::info!(target: "tidepool_codegen::prepared_compile", category,
+                functions = delta.functions, blocks = delta.blocks, code_bytes = delta.bytes, native_compile_us = delta.native_us,
+                "native category");
+        }
+    }
+
+    pub(super) fn report(&self) {
+        for ((category, unit, module), counts) in &self.definitions {
+            tracing::info!(target: "tidepool_codegen::prepared_compile", category, unit, module,
+                functions = counts.functions, blocks = counts.blocks, code_bytes = counts.bytes, native_compile_us = counts.native_us,
+                "native definitions");
+        }
+    }
+}
