@@ -3,13 +3,14 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use tidepool_mcp::{CompanionImports, EffectDecl};
+use tidepool_mcp::{CompanionImports, EffectDecl, RowArgs};
 
 /// Optional authored vocabulary layered on top of an effect row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestEffectSurfaceOptions {
     pub companion_imports: CompanionImports,
     pub user_library: bool,
+    pub row_args: RowArgs,
 }
 
 impl Default for TestEffectSurfaceOptions {
@@ -17,6 +18,7 @@ impl Default for TestEffectSurfaceOptions {
         Self {
             companion_imports: CompanionImports::Omit,
             user_library: false,
+            row_args: RowArgs::default(),
         }
     }
 }
@@ -41,7 +43,7 @@ impl TestEffectSurface {
         declarations: &[EffectDecl],
         options: TestEffectSurfaceOptions,
     ) -> io::Result<Self> {
-        let dirs = tidepool_mcp::ensure_effects_module(declarations)?;
+        let dirs = tidepool_mcp::ensure_effects_module_at(declarations, &options.row_args)?;
         let mut include_paths = vec![super::eval_harness::prelude_path()];
         if options.user_library {
             include_paths.push(super::eval_harness::user_lib_dir());
@@ -55,7 +57,7 @@ impl TestEffectSurface {
                 options.user_library,
                 options.companion_imports,
             ),
-            row: tidepool_mcp::build_effect_stack_type(declarations),
+            row: tidepool_mcp::build_effect_stack_type_at(declarations, &options.row_args),
         })
     }
 
@@ -105,10 +107,34 @@ mod tests {
             TestEffectSurfaceOptions {
                 companion_imports: CompanionImports::Include,
                 user_library: true,
+                ..Default::default()
             },
         )
         .expect("expanded surface");
         assert_eq!(expanded.include_paths().len(), 4);
         assert_ne!(surface.preamble(), expanded.preamble());
+    }
+
+    #[test]
+    fn parameterized_effect_uses_the_same_row_arguments_for_source_and_row() {
+        let row_args = RowArgs::at("Finalize", ["Decision"]).importing(["HarnessTypes"]);
+        let surface = TestEffectSurface::with_options(
+            &[tidepool_mcp::finalize_decl()],
+            TestEffectSurfaceOptions {
+                row_args,
+                ..Default::default()
+            },
+        )
+        .expect("parameterized surface");
+
+        assert_eq!(surface.row(), "'[Finalize Decision]");
+        let shim = surface
+            .include_paths()
+            .last()
+            .expect("effect surface includes its row-specific shim");
+        let source = std::fs::read_to_string(shim.join("Tidepool/Effects.hs"))
+            .expect("parameterized effect shim source");
+        assert!(source.contains("import HarnessTypes"));
+        assert!(source.contains("Finalize Decision"));
     }
 }

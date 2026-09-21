@@ -624,14 +624,12 @@ fn freer_resume_top(
 /// (`tidepool_codegen::prepared_program::admission::admit_prepared`), so a
 /// single successful compile admits every top in the artifact, `resumeInt`
 /// included.
-#[test]
-fn freer_resume_artifact_admits_program_and_resume_int_as_two_entries() {
-    let prepared = parse_program(
-        FREER_RESUME_ARTIFACT,
-        &requirements(),
-        DecodeLimits::default(),
-    )
-    .expect("freer-resume artifact parses");
+fn freer_resume_artifact_admits_program_and_resume_int_as_two_entries(
+    machine: &mut PreparedMachine<'static>,
+    program: ProgramId,
+    fixture: &FreerResumeFixture,
+) {
+    let prepared = &fixture.prepared;
 
     let program_top = freer_resume_top(&prepared, "program");
     let resume_int_top = freer_resume_top(&prepared, "resumeInt");
@@ -658,15 +656,6 @@ fn freer_resume_artifact_admits_program_and_resume_int_as_two_entries() {
     // the first entry run; `PreparedMachine::new` below compiles and admits
     // the whole artifact up front instead, so this test's own compile step
     // already stands in for that deferred-admission moment.
-    let (mut machine, program) = open_closed_machine_from(
-        parse_program(
-            FREER_RESUME_ARTIFACT,
-            &requirements(),
-            DecodeLimits::default(),
-        )
-        .expect("freer-resume artifact parses"),
-    );
-
     let program_run = machine
         .run_entry_retained(
             program,
@@ -680,7 +669,10 @@ fn freer_resume_artifact_admits_program_and_resume_int_as_two_entries() {
              the artifact, which includes `resumeInt` as a second top",
         );
     assert_eq!(program_run.values.len(), 1);
-    assert!(matches!(program_run.values[0], PreparedResult::Managed(_)));
+    let Some(PreparedResult::Managed(outer)) = program_run.values.into_iter().next() else {
+        panic!("`program` must return one managed `Eff` outer value");
+    };
+    assert!(machine.release(outer));
 
     // `admit_prepared` (`tidepool_codegen::prepared_program::admission`) is
     // documented whole-program: it walks every top in `program.bindings()`
@@ -778,29 +770,15 @@ fn take_scalar(fields: &[PreparedResult], index: usize) -> u64 {
 /// the end: no leaked handles, and nothing forces `k` itself anywhere in
 /// this loop (it is only ever inspected as an opaque `Managed` field and
 /// handed back to `resumeInt`).
-#[test]
-fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments() {
-    let prepared = parse_program(
-        FREER_RESUME_ARTIFACT,
-        &requirements(),
-        DecodeLimits::default(),
-    )
-    .expect("freer-resume artifact parses");
-    let program_top = freer_resume_top(&prepared, "program");
-    let resume_int_top = freer_resume_top(&prepared, "resumeInt");
-    let ask_argument_top = freer_resume_top(&prepared, "askArgument");
-    let val_result_top = freer_resume_top(&prepared, "valResult");
-
-    let e_id = freer_resume_constructor_identity(E_DEFINING_MODULE, "E");
-    let val_id = freer_resume_constructor_identity(VAL_DEFINING_MODULE, "Val");
-    let union_id = freer_resume_constructor_identity(UNION_DEFINING_MODULE, "Union");
-
-    let (mut machine, program) = open_closed_machine_from(prepared);
-
+fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments(
+    machine: &mut PreparedMachine<'static>,
+    program: ProgramId,
+    fixture: &FreerResumeFixture,
+) {
     let first = machine
         .run_entry_retained(
             program,
-            program_top.binding.id,
+            fixture.program_top.binding.id,
             &[],
             call_options(true),
             RealmId::ROOT,
@@ -821,7 +799,7 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments() {
             .inspect_outer(outer, RealmId::ROOT)
             .expect("the retained Eff value survives its collection and inspects");
 
-        if identity == val_id {
+        if identity == fixture.val_id {
             assert_eq!(fields.len(), 1, "Val has exactly one field");
             // The boxed `Int` field itself is an ordinary lazy field (`pure
             // (a + b)` is never forced by anything on the path back to
@@ -833,7 +811,7 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments() {
             let value_result = machine
                 .run_entry_retained(
                     program,
-                    val_result_top.binding.id,
+                    fixture.val_result_top.binding.id,
                     &[CodegenPreparedInput::Managed(outer)],
                     call_options(true),
                     RealmId::ROOT,
@@ -848,7 +826,10 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments() {
             break word as i64;
         }
 
-        assert_eq!(identity, e_id, "an Eff value at WHNF is either Val or E");
+        assert_eq!(
+            identity, fixture.e_id,
+            "an Eff value at WHNF is either Val or E"
+        );
         assert_eq!(fields.len(), 2, "E has exactly two fields: Union and Arrs");
         let union = take_managed(&mut fields, 0);
         let k = take_managed(&mut fields, 1);
@@ -860,7 +841,7 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments() {
         } = machine
             .inspect_outer(union, RealmId::ROOT)
             .expect("Union inspects");
-        assert_eq!(union_identity, union_id);
+        assert_eq!(union_identity, fixture.union_id);
         assert_eq!(
             union_fields.len(),
             2,
@@ -879,7 +860,7 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments() {
         let ask_result = machine
             .run_entry_retained(
                 program,
-                ask_argument_top.binding.id,
+                fixture.ask_argument_top.binding.id,
                 &[CodegenPreparedInput::Managed(payload)],
                 call_options(true),
                 RealmId::ROOT,
@@ -896,7 +877,7 @@ fn freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments() {
         let resumed = machine
             .run_entry_retained(
                 program,
-                resume_int_top.binding.id,
+                fixture.resume_int_top.binding.id,
                 &[
                     CodegenPreparedInput::Managed(k),
                     CodegenPreparedInput::Scalar(n),
@@ -942,6 +923,7 @@ struct FreerResumeFixture {
     e_id: DataConId,
     val_id: DataConId,
     union_id: DataConId,
+    prepared: PreparedProgram,
 }
 
 impl FreerResumeFixture {
@@ -957,11 +939,102 @@ impl FreerResumeFixture {
             resume_int_top: freer_resume_top(&prepared, "resumeInt"),
             ask_argument_top: freer_resume_top(&prepared, "askArgument"),
             val_result_top: freer_resume_top(&prepared, "valResult"),
-            e_id: freer_resume_constructor_identity(E_DEFINING_MODULE, "E"),
-            val_id: freer_resume_constructor_identity(VAL_DEFINING_MODULE, "Val"),
-            union_id: freer_resume_constructor_identity(UNION_DEFINING_MODULE, "Union"),
+            e_id: find_declared(prepared.constructors(), E_DEFINING_MODULE, "E")
+                .expect("freer-resume artifact includes E")
+                .host_id,
+            val_id: find_declared(prepared.constructors(), VAL_DEFINING_MODULE, "Val")
+                .expect("freer-resume artifact includes Val")
+                .host_id,
+            union_id: find_declared(prepared.constructors(), UNION_DEFINING_MODULE, "Union")
+                .expect("freer-resume artifact includes Union")
+                .host_id,
+            prepared,
         }
     }
+}
+
+macro_rules! freer_resume_subcase {
+    ($machine:expr, $name:literal, $body:expr) => {{
+        eprintln!("freer-resume subcase: {}", $name);
+        $body;
+        assert_eq!(
+            $machine.handle_count(),
+            0,
+            "freer-resume subcase `{}` releases every handle before the next subcase",
+            $name,
+        );
+        assert_eq!(
+            $machine.disposition(),
+            MachineDisposition::Reusable,
+            "freer-resume subcase `{}` leaves the shared machine reusable",
+            $name,
+        );
+    }};
+}
+
+/// The cases below use the same immutable freer-resume fixture and leave no
+/// live handles behind, so compiling it once is sufficient. Cancellation
+/// cases intentionally retain dedicated machines because their assertions
+/// depend on a modified realm cancellation state and nursery configuration.
+#[test]
+fn freer_resume_fixture_regressions() {
+    let fixture = FreerResumeFixture::load();
+    let (mut machine, program) = open_closed_machine_from(fixture.prepared.clone());
+
+    freer_resume_subcase!(
+        machine,
+        "admission exposes program and resumeInt",
+        freer_resume_artifact_admits_program_and_resume_int_as_two_entries(
+            &mut machine,
+            program,
+            &fixture,
+        )
+    );
+    freer_resume_subcase!(
+        machine,
+        "managed qApp resume loop",
+        freer_resume_loop_drives_qapp_to_completion_via_managed_resume_arguments(
+            &mut machine,
+            program,
+            &fixture,
+        )
+    );
+    freer_resume_subcase!(
+        machine,
+        "parked continuations resume out of order",
+        parked_continuations_resume_out_of_order_with_a_collection_between(
+            &mut machine,
+            program,
+            &fixture,
+        )
+    );
+    freer_resume_subcase!(
+        machine,
+        "unrelated entry preserves parked continuation",
+        unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable(
+            &mut machine,
+            program,
+            &fixture,
+        )
+    );
+    freer_resume_subcase!(
+        machine,
+        "two installed programs resume out of order",
+        c0_two_installed_programs_park_and_resume_out_of_order_with_a_collection_between(
+            &mut machine,
+            program,
+            &fixture,
+        )
+    );
+    freer_resume_subcase!(
+        machine,
+        "unrelated entry on a second installed program",
+        c0_unrelated_entry_of_a_second_installed_program_runs_while_the_first_stays_parked(
+            &mut machine,
+            program,
+            &fixture,
+        )
+    );
 }
 
 /// Drive one already-suspended `Eff '[Req] Int` value (`outer`, as returned
@@ -1109,18 +1182,11 @@ fn split_suspension(
 /// turns; a parked continuation is inert heap data") is exactly the claim
 /// this pins: interleaving is safe because nothing but retained heap data
 /// survives a park, so resume order cannot matter to correctness.
-#[test]
-fn parked_continuations_resume_out_of_order_with_a_collection_between() {
-    let fixture = FreerResumeFixture::load();
-    let (mut machine, program) = open_closed_machine_from(
-        parse_program(
-            FREER_RESUME_ARTIFACT,
-            &requirements(),
-            DecodeLimits::default(),
-        )
-        .expect("freer-resume artifact parses"),
-    );
-
+fn parked_continuations_resume_out_of_order_with_a_collection_between(
+    machine: &mut PreparedMachine<'static>,
+    program: ProgramId,
+    fixture: &FreerResumeFixture,
+) {
     let first = machine
         .run_entry_retained(
             program,
@@ -1157,13 +1223,13 @@ fn parked_continuations_resume_out_of_order_with_a_collection_between() {
     // first. Every step inside this call forces a collection before
     // observation, so `k1` (still only reachable through `outer1`, untouched
     // here) survives many moving collections while parked.
-    let second_value = drive_freer_program_to_val(&mut machine, program, &fixture, outer2);
+    let second_value = drive_freer_program_to_val(machine, program, fixture, outer2);
     assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 
     // Now resume the first suspension to completion -- the collection(s)
     // just forced while draining `outer2` are the collection between the
     // two resumes the task card asks for.
-    let first_value = drive_freer_program_to_val(&mut machine, program, &fixture, outer1);
+    let first_value = drive_freer_program_to_val(machine, program, fixture, outer1);
 
     assert_eq!(second_value, expected_program_value());
     assert_eq!(first_value, expected_program_value());
@@ -1189,18 +1255,11 @@ fn parked_continuations_resume_out_of_order_with_a_collection_between() {
 /// refusal, not a panic and not a silent success -- `inspect_outer` is
 /// documented observation-only and must never force or otherwise expose a
 /// parked continuation's body.
-#[test]
-fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() {
-    let fixture = FreerResumeFixture::load();
-    let (mut machine, program) = open_closed_machine_from(
-        parse_program(
-            FREER_RESUME_ARTIFACT,
-            &requirements(),
-            DecodeLimits::default(),
-        )
-        .expect("freer-resume artifact parses"),
-    );
-
+fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable(
+    machine: &mut PreparedMachine<'static>,
+    program: ProgramId,
+    fixture: &FreerResumeFixture,
+) {
     let first = machine
         .run_entry_retained(
             program,
@@ -1213,7 +1272,7 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
     let Some(PreparedResult::Managed(outer1)) = first.values.into_iter().next() else {
         panic!("`program` must return one managed `Eff` outer value");
     };
-    let (union1, k1) = split_suspension(&mut machine, &fixture, outer1);
+    let (union1, k1) = split_suspension(machine, fixture, outer1);
 
     // `k1` is now parked: an opaque retained `Arrs` closure, reachable only
     // through this handle, not touched again until the end of this test.
@@ -1295,7 +1354,7 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
     let Some(PreparedResult::Managed(outer2)) = second.values.into_iter().next() else {
         panic!("`program` must return one managed `Eff` outer value");
     };
-    let unrelated_value = drive_freer_program_to_val(&mut machine, program, &fixture, outer2);
+    let unrelated_value = drive_freer_program_to_val(machine, program, fixture, outer2);
     assert_eq!(unrelated_value, expected_program_value());
     assert_eq!(
         machine.disposition(),
@@ -1350,7 +1409,7 @@ fn unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable() 
         panic!("resumeInt must return one managed `Eff` outer value");
     };
     assert!(resumed_values.next().is_none());
-    let first_value = drive_freer_program_to_val(&mut machine, program, &fixture, next_outer);
+    let first_value = drive_freer_program_to_val(machine, program, fixture, next_outer);
 
     assert_eq!(first_value, expected_program_value());
     assert_eq!(
@@ -2022,18 +2081,11 @@ fn park_second_program(
 /// with B's own collections sitting between the two resumes -- A's `k`
 /// must survive every one of them untouched, exactly as within-program E3
 /// already proved for a single program's two parked continuations.
-#[test]
-fn c0_two_installed_programs_park_and_resume_out_of_order_with_a_collection_between() {
-    let fixture = FreerResumeFixture::load();
-    let (mut machine, program_a) = open_closed_machine_from(
-        parse_program(
-            FREER_RESUME_ARTIFACT,
-            &requirements(),
-            DecodeLimits::default(),
-        )
-        .expect("freer-resume artifact parses"),
-    );
-
+fn c0_two_installed_programs_park_and_resume_out_of_order_with_a_collection_between(
+    machine: &mut PreparedMachine<'static>,
+    program_a: ProgramId,
+    fixture: &FreerResumeFixture,
+) {
     let a_first = machine
         .run_entry_retained(
             program_a,
@@ -2047,7 +2099,7 @@ fn c0_two_installed_programs_park_and_resume_out_of_order_with_a_collection_betw
         panic!("`program` must return one managed `Eff` outer value");
     };
 
-    let (program_b, outer_b) = park_second_program(&mut machine, &fixture);
+    let (program_b, outer_b) = park_second_program(machine, fixture);
     assert_ne!(
         program_a, program_b,
         "the second install is a distinct program on the same machine"
@@ -2062,10 +2114,10 @@ fn c0_two_installed_programs_park_and_resume_out_of_order_with_a_collection_betw
     // collection before observation, so A's `k` -- reachable only through
     // `outer_a`, on a DIFFERENT installed program, untouched here -- must
     // survive every one of B's collections while parked.
-    let value_b = drive_freer_program_to_val(&mut machine, program_b, &fixture, outer_b);
+    let value_b = drive_freer_program_to_val(machine, program_b, fixture, outer_b);
     assert_eq!(machine.disposition(), MachineDisposition::Reusable);
 
-    let value_a = drive_freer_program_to_val(&mut machine, program_a, &fixture, outer_a);
+    let value_a = drive_freer_program_to_val(machine, program_a, fixture, outer_a);
 
     assert_eq!(value_b, expected_program_value());
     assert_eq!(value_a, expected_program_value());
@@ -2083,18 +2135,11 @@ fn c0_two_installed_programs_park_and_resume_out_of_order_with_a_collection_betw
 /// value) runs on the same machine. A's parked `k` must remain a live,
 /// untouched value that still resumes correctly afterward, and the
 /// machine's disposition must stay `Reusable` throughout.
-#[test]
-fn c0_unrelated_entry_of_a_second_installed_program_runs_while_the_first_stays_parked() {
-    let fixture = FreerResumeFixture::load();
-    let (mut machine, program_a) = open_closed_machine_from(
-        parse_program(
-            FREER_RESUME_ARTIFACT,
-            &requirements(),
-            DecodeLimits::default(),
-        )
-        .expect("freer-resume artifact parses"),
-    );
-
+fn c0_unrelated_entry_of_a_second_installed_program_runs_while_the_first_stays_parked(
+    machine: &mut PreparedMachine<'static>,
+    program_a: ProgramId,
+    fixture: &FreerResumeFixture,
+) {
     let a_first = machine
         .run_entry_retained(
             program_a,
@@ -2111,7 +2156,7 @@ fn c0_unrelated_entry_of_a_second_installed_program_runs_while_the_first_stays_p
 
     // B installs and runs its own unrelated `program` entry to its own
     // fresh suspension, sharing no data with A's parked continuation.
-    let (program_b, outer_b) = park_second_program(&mut machine, &fixture);
+    let (program_b, outer_b) = park_second_program(machine, fixture);
     assert_eq!(
         machine.handle_count(),
         2,
@@ -2176,12 +2221,12 @@ fn c0_unrelated_entry_of_a_second_installed_program_runs_while_the_first_stays_p
     assert!(machine.release(k_a));
 
     // A still resumes correctly to completion after B ran unrelated work.
-    let value_a = drive_freer_program_to_val(&mut machine, program_a, &fixture, outer_a);
+    let value_a = drive_freer_program_to_val(machine, program_a, fixture, outer_a);
     assert_eq!(value_a, expected_program_value());
 
     // B's own suspension is untouched by any of the above and still
     // resumes to the same expected value.
-    let value_b = drive_freer_program_to_val(&mut machine, program_b, &fixture, outer_b);
+    let value_b = drive_freer_program_to_val(machine, program_b, fixture, outer_b);
     assert_eq!(value_b, expected_program_value());
 
     assert_eq!(machine.handle_count(), 0);

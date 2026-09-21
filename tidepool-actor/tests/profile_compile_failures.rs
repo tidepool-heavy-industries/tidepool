@@ -23,6 +23,7 @@ fn named_profile_compile_failures() {
         TestEffectSurfaceOptions {
             companion_imports: tidepool_mcp::CompanionImports::Include,
             user_library: false,
+            ..Default::default()
         },
     )
     .expect("materialize effects");
