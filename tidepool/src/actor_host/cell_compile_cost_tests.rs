@@ -52,7 +52,7 @@ async fn cell_compile_cost_measurement() {
     let campaign = super::test_campaign::TestCampaign::start().await;
     let policy = campaign.root_installation.policy.clone();
 
-    // The first cell pays the session's own warm-up; measure after it.
+    // Report the first cell separately because it pays the cold compile.
     let started = Instant::now();
     let before = tidepool_extract_cmd::extract_spawn_count();
     super::tests::dispatch_haskell_script(policy.as_ref(), ONE_STATEMENT_CELL).await;
