@@ -7,6 +7,10 @@ import re
 import subprocess
 import sys
 
+# Also support importlib-based unit tests without changing their caller cwd.
+sys.path.insert(0, str(Path(__file__).parent))
+from fixture_dependencies import affected as affected_fixtures
+
 # These packages' unit tests do not launch the extractor. Keep this explicit:
 # default nextest filters constrain execution, not Cargo's build graph.
 EXTRACTOR_FREE = (
@@ -14,6 +18,37 @@ EXTRACTOR_FREE = (
     "tidepool-bridge", "tidepool-bridge-derive", "tidepool-bridge-effects",
     "tidepool-codegen",
 )
+
+
+def cabal_components(root, changed):
+    """Derive source ownership from Cabal's component declarations."""
+    manifest = root / "haskell/tidepool-extract.cabal"
+    try:
+        text = manifest.read_text()
+    except OSError:
+        return ["all"]
+    if any(path.endswith(".cabal") or Path(path).name.startswith("cabal.project") for path in changed):
+        return ["all"]
+    selected = set()
+    components = {}
+    for component in re.split(r"(?m)^(?=(?:library|executable|test-suite) )", text)[1:]:
+        name = component.splitlines()[0].split()[1]
+        components[name] = component
+        directories = re.search(r"(?m)^  hs-source-dirs:\s*([^\n]+)", component)
+        if directories is None:
+            return ["all"]
+        roots = [root / "haskell" / directory for directory in re.split(r"[,\s]+", directories[1].strip())]
+        if any((root / path).is_relative_to(directory) for path in changed for directory in roots):
+            selected.add(name)
+    while True:
+        consumers = {name for name, body in components.items()
+                     if any(re.search(r"(?<![\w-])" + re.escape(dependency) + r"(?![\w-])", body)
+                            for dependency in selected)}
+        expanded = selected | consumers
+        if expanded == selected:
+            break
+        selected = expanded
+    return sorted(selected) or ["all"]
 
 
 def select(metadata, changed, root):
@@ -85,6 +120,17 @@ def select(metadata, changed, root):
             all_tests(owner)
             production.add(owner)
 
+    # Compiler and schema boundaries require the full structural corpus. An
+    # ordinary library edit can use the worker's consumed-source evidence.
+    structural = any(path.startswith(("haskell/src/", "haskell/app/", "tidepool-repr/src/", "tidepool-protocol/src/")) and Path(path).suffix != ".md" for path in changed)
+    if structural:
+        actions.add("fixtures")
+    elif "fixtures" in actions and all(path.startswith("haskell/lib/") or Path(path).suffix == ".md" for path in changed):
+        cohorts = affected_fixtures(root / "target/prepared-corpus/dependencies.json", changed, root)
+        if cohorts is not None:
+            actions.remove("fixtures")
+            actions.update("fixture:" + cohort for cohort in cohorts)
+
     downstream = set(production)
     while True:
         consumers = {name for name, p in packages.items() if any(
@@ -97,7 +143,7 @@ def select(metadata, changed, root):
     return selections, downstream, actions, reasons
 
 
-def commands(selections, downstream, actions):
+def commands(selections, downstream, actions, components=None):
     result = []
     if selections:
         result.append(["cargo", "fmt", *[arg for name in sorted(selections) for arg in ("-p", name)], "--", "--check"])
@@ -106,7 +152,7 @@ def commands(selections, downstream, actions):
     if "registration" in actions:
         result.append(["scripts/test-suite-check.sh"])
     if "haskell" in actions:
-        result.append(["bash", "-c", "cd haskell && cabal build all"])
+        result.append(["bash", "-c", 'cd haskell && cabal build "$@"', "cabal-components", *(components or ["all"])])
     for name, targets in sorted(selections.items()):
         # One invocation per package, deduplicating unit and suite targets.
         prefix = (["cargo", "nextest", "run", "--profile", "battery", "--no-fail-fast"]
@@ -116,6 +162,10 @@ def commands(selections, downstream, actions):
         result.append([*prefix, "-p", name, *flags])
     if "fixtures" in actions:
         result.append(["scripts/fixtures.sh", "check"])
+    else:
+        cohorts = sorted(action.removeprefix("fixture:") for action in actions if action.startswith("fixture:"))
+        if cohorts:
+            result.append(["scripts/fixtures.sh", "check", *cohorts])
     return result
 
 
@@ -124,6 +174,7 @@ def main():
     parser.add_argument("base", nargs="?", default="HEAD")
     parser.add_argument("--list", action="store_true", help="print commands without executing")
     parser.add_argument("--quick-packages", action="store_true")
+    parser.add_argument("--in-compiler-run", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.quick_packages:
         print("\n".join(EXTRACTOR_FREE))
@@ -138,10 +189,25 @@ def main():
     if reasons:
         print("Shared build or unmapped executable inputs changed; run just verify at integration:\n  " + "\n  ".join(sorted(reasons)), file=sys.stderr)
         return 2
-    work = commands(selections, downstream, actions)
+    work = commands(selections, downstream, actions, cabal_components(root, changed))
     if not work:
         print("No executable checks selected (clean tree or documentation-only changes).")
         return 0
+    # One owner keeps the daemon alive across every selected target. Nested
+    # battery wrappers inherit its endpoint and do not retire it themselves.
+    needs_compiler = bool(downstream or actions.intersection({"haskell", "fixtures"}) or any(action.startswith("fixture:") for action in actions)) or any(
+        command[0] == "scripts/battery.sh" for command in work)
+    if not args.list and not args.in_compiler_run and needs_compiler:
+        return subprocess.run([
+            "bash", "-c",
+            'source scripts/lib-extract.sh\n'
+            'resolve_tidepool_extract\n'
+            'trap teardown_battery_daemon EXIT INT TERM\n'
+            'start_battery_daemon\n'
+            '"$@"',
+            "selected-checks", sys.executable, str(Path(__file__).resolve()),
+            *sys.argv[1:], "--in-compiler-run",
+        ]).returncode
     import shlex
     status = 0
     for command in work:

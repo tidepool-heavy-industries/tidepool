@@ -171,6 +171,19 @@ Keep detailed design references out of always-loaded instructions.
   `just test-target <crate> <target> 'test(<name>)'`, and the owning crate's
   documented focused command. Haskell/extractor-backed tests must use the repository's Nix/toolchain
   setup rather than assuming ambient `cargo` is sufficient.
+- `just changed BASE` shares one compiler daemon across its selected targets.
+  A successful full `just fixtures-check` writes a compiler-derived dependency
+  index under `target/prepared-corpus/`. Ordinary Haskell library edits use that
+  index to select fixture cohorts; absent, stale or incomplete evidence keeps
+  full coverage. Compiler/schema changes always select the structural corpus.
+- `just fixtures-check [COHORT...]` batches the selected cohorts through one
+  resident compiler process. Omit cohorts for integration and metadata checks;
+  for example, `just fixtures-check containers-contract` checks that cohort.
+  Each cohort retains its own outputs and each request its own cleanup. A
+  partial run never replaces the complete dependency index.
+- Reuse compiled immutable fixtures across repeated installations in one test.
+  Keep real binding injection/generation cases and fresh mutable machines;
+  nextest still isolates tests in separate processes.
 - `just quick` runs the explicit extractor-free engine unit-test packages and
   does not build or start the compiler worker. `just changed-plan BASE` previews
   affected targets; `just changed BASE` runs each selected target once and

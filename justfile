@@ -73,8 +73,9 @@ changed-plan base="HEAD":
     {{ nix }} scripts/test-changed.sh "$1" --list
 
 # Check that committed Haskell CBOR fixtures match current extractor output.
-fixtures-check:
-    {{ nix }} scripts/fixtures.sh check
+[positional-arguments]
+fixtures-check *cohorts:
+    {{ nix }} scripts/fixtures.sh check "$@"
 
 # Regenerate the committed Haskell CBOR fixture corpus.
 fixtures-update:

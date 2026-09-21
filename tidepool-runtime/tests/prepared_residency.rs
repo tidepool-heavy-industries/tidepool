@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use tidepool_repr::Generation;
 use tidepool_runtime::session::{
-    resident_workbench_templates, run_turn, BoundBinder, ModuleEnv, ResidentOutcome,
+    resident_workbench_templates, run_turn, BoundBinder, CompiledTurn, ModuleEnv, ResidentOutcome,
     ResidentSession, SessionLib, TurnRequest, TurnResult, TurnTemplate,
 };
 use tidepool_testing::effect_surface::TestEffectSurface;
@@ -34,8 +34,6 @@ use tidepool_testing::eval_harness;
 
 /// The minimal parts of `prepared_turn.rs`'s own `Notebook` this file needs:
 /// one resident session, its compile plumbing, and expression/bind turns.
-/// Copied rather than shared so this file never has to touch
-/// `prepared_turn.rs`.
 struct Notebook {
     session: ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>,
     preamble: String,
@@ -115,18 +113,23 @@ impl Notebook {
         })
     }
 
-    /// Run an expression turn to completion; the value itself is not needed.
-    fn expression(&mut self, text: &str) {
+    fn prepare_expression(&mut self, text: &str) -> CompiledTurn {
         let TurnResult::Expr { compiled, .. } = self.compile(text) else {
             panic!("{text:?} did not classify as an expression");
         };
+        compiled
+    }
+
+    /// Install the immutable artifact afresh on every turn. Compilation is
+    /// shared; mutable heap state and program retirement are still exercised.
+    fn expression(&mut self, compiled: &CompiledTurn) {
         let outcome = self
             .session
             .run_with_sites("residency_expression", compiled.code())
-            .unwrap_or_else(|error| panic!("{text:?} failed to run: {error}"));
+            .expect("prepared expression runs");
         assert!(
             matches!(outcome, ResidentOutcome::Completed { .. }),
-            "{text:?} did not complete: {outcome:?}"
+            "{outcome:?}"
         );
     }
 
@@ -181,7 +184,7 @@ fn assert_counts_flat(
     );
 }
 
-/// Twenty `1 + <i>` expression turns on the prepared route, each installing
+/// Twenty installations of one prepared constant expression on the prepared route, each installing
 /// exactly one program: `quiesce_and_collect` only actually collects every
 /// `N`th install (see the module doc), so `programs` is checked against the
 /// amortized bound every turn, and exact flatness across every counter --
@@ -209,8 +212,9 @@ fn prepared_session_residency_stays_bounded_across_many_turns() {
     let mut boundary_counts: Option<tidepool_codegen::prepared_program::ResidencyCounts> = None;
     let mut boundary_old_bytes: Option<usize> = None;
     let mut boundaries_seen = 0;
+    let expression = notebook.prepare_expression("1 + (2 :: Int)");
     for i in 0..TOTAL {
-        notebook.expression(&format!("1 + {i}"));
+        notebook.expression(&expression);
         let counts = notebook
             .session
             .residency()
@@ -257,8 +261,9 @@ fn prepared_session_residency_stays_bounded_across_many_turns() {
     let mut boundary_counts: Option<tidepool_codegen::prepared_program::ResidencyCounts> = None;
     let mut boundary_old_bytes: Option<usize> = None;
     let mut boundaries_seen = 0;
+    let expression = notebook.prepare_expression("x + (2 :: Int)");
     for i in 0..POST_BIND {
-        notebook.expression(&format!("x + {i}"));
+        notebook.expression(&expression);
         let counts = notebook
             .session
             .residency()
@@ -318,8 +323,9 @@ fn prepared_session_residency_stays_bounded_across_many_turns() {
 fn prepared_session_large_promotion_triggers_an_early_major_collection() {
     let mut notebook = Notebook::new();
 
-    for i in 0..N {
-        notebook.expression(&format!("1 + {i}"));
+    let expression = notebook.prepare_expression("1 + (2 :: Int)");
+    for _ in 0..N {
+        notebook.expression(&expression);
     }
     let old_bytes_before = notebook
         .session
@@ -330,7 +336,7 @@ fn prepared_session_large_promotion_triggers_an_early_major_collection() {
 
     let mut collected_within = None;
     for i in 0..2 {
-        notebook.expression(&format!("2 + {i}"));
+        notebook.expression(&expression);
         let old_bytes_now = notebook
             .session
             .old_bytes()

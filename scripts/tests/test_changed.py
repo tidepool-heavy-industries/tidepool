@@ -4,6 +4,8 @@ import importlib.util
 from pathlib import Path
 import sys
 import tempfile
+import json
+import hashlib
 import unittest
 
 sys.dont_write_bytecode = True
@@ -71,6 +73,81 @@ class Selection(unittest.TestCase):
         self.package("tidepool-runtime")
         _, _, actions, _ = self.select("haskell/lib/Tidepool/Data/Time.hs")
         self.assertEqual(actions, {"haskell", "fixtures"})
+
+    def test_cabal_components_come_from_manifest_source_roots(self):
+        manifest = self.root / "haskell/tidepool-extract.cabal"
+        manifest.parent.mkdir()
+        manifest.write_text("library compiler\n  hs-source-dirs: src\nexecutable worker\n  hs-source-dirs: app\ntest-suite parser\n  hs-source-dirs: test-parser\n")
+        self.assertEqual(changed.cabal_components(self.root, ["haskell/src/A.hs"]), ["compiler"])
+        self.assertEqual(changed.cabal_components(self.root, ["haskell/test-parser/A.hs"]), ["parser"])
+        self.assertEqual(changed.cabal_components(self.root, ["haskell/tidepool-extract.cabal"]), ["all"])
+
+    def fixture_index(self):
+        self.package("tidepool-runtime")
+        library = self.root / "haskell/lib/Library.hs"
+        library.parent.mkdir(parents=True)
+        library.write_text("module Library where")
+        unrelated = self.root / "haskell/lib/Unrelated.hs"
+        unrelated.write_text("module Unrelated where")
+        candidate = self.root / "higher/Library.hs"
+        evidence = dict(version=1, cache_safe=True, selection_complete=True,
+                        sources=[dict(path=str(library), sha256=hashlib.sha256(library.read_bytes()).hexdigest())],
+                        resolutions=[dict(module="Library", selected=str(library), candidates=[str(candidate), str(library)])], packages=[])
+        index = self.root / "target/prepared-corpus/dependencies.json"
+        index.parent.mkdir(parents=True)
+        document = dict(
+            version=1,
+            repository=str(self.root),
+            cohorts={"selected": evidence},
+            cohort_count=1,
+            complete=True,
+            expected_cohorts=["selected"],
+        )
+        index.write_text(json.dumps(document))
+        return index, document, library, candidate
+
+    def test_complete_evidence_selects_consumers_and_ignores_unrelated_library(self):
+        self.fixture_index()
+        _, _, actions, _ = self.select("haskell/lib/Library.hs")
+        self.assertIn("fixture:selected", actions)
+        self.assertNotIn("fixtures", actions)
+        _, _, actions, _ = self.select("haskell/lib/Unrelated.hs")
+        self.assertFalse(any(a.startswith("fixture") for a in actions))
+
+    def test_missing_incomplete_or_stale_evidence_falls_back(self):
+        index, document, library, _ = self.fixture_index()
+        document["cohorts"]["selected"]["selection_complete"] = False
+        index.write_text(json.dumps(document))
+        self.assertIn("fixtures", self.select("haskell/lib/Library.hs")[2])
+        document["cohorts"]["selected"]["selection_complete"] = True
+        index.write_text(json.dumps(document))
+        library.write_text("an edit outside the selected diff")
+        self.assertIn("fixtures", self.select("haskell/lib/Unrelated.hs")[2])
+        index.unlink()
+        self.assertIn("fixtures", self.select("haskell/lib/Library.hs")[2])
+
+    def test_shadow_insertions_select_previous_consumers(self):
+        index, _, _, candidate = self.fixture_index()
+        candidate.parent.mkdir()
+        candidate.write_text("module Library where")
+        self.assertEqual(changed.affected_fixtures(index, ["higher/Library.hs"], self.root), ["selected"])
+        self.assertIsNone(changed.affected_fixtures(index, [], self.root))
+
+    def test_incomplete_inventory_cannot_reduce_coverage(self):
+        index, document, _, _ = self.fixture_index()
+        document["cohort_count"] = 2
+        index.write_text(json.dumps(document))
+        self.assertIn("fixtures", self.select("haskell/lib/Library.hs")[2])
+
+        document["cohort_count"] = 1
+        document["complete"] = False
+        index.write_text(json.dumps(document))
+        self.assertIn("fixtures", self.select("haskell/lib/Library.hs")[2])
+
+        document["complete"] = True
+        document["expected_cohorts"].append("missing")
+        index.write_text(json.dumps(document))
+        self.assertIn("fixtures", self.select("haskell/lib/Library.hs")[2])
 
     def test_documentation_only_is_explicit_empty_selection(self):
         self.assertEqual(self.select("a/README.md", "docs/GUIDE.md"), ({}, set(), set(), set()))
