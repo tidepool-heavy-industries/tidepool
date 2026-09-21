@@ -3,26 +3,52 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+metadata_mode="${1:-check}"
+if [[ $# -gt 1 || ( "$metadata_mode" != check && "$metadata_mode" != update ) ]]; then
+  echo "usage: $0 [check|update]" >&2
+  exit 2
+fi
 
 output_root="$repo_root/target/prepared-corpus"
 mkdir -p "$output_root"
-run_root="$(mktemp -d "$output_root/run.XXXXXX")"
-priority_root="$(mktemp -d "$output_root/project-work-candidate.XXXXXX")"
-actor_root="$(mktemp -d "$output_root/agent-watch-await-settled.XXXXXX")"
-suite_root="$(mktemp -d "$output_root/suite.XXXXXX")"
-recovered_root="$(mktemp -d "$output_root/recovered-base-contract.XXXXXX")"
-formatting_root="$(mktemp -d "$output_root/formatting-execution-contract.XXXXXX")"
-formatting_shadow_root="$(mktemp -d "$output_root/formatting-dependency-shadow.XXXXXX")"
-fingerprint_root="$(mktemp -d "$output_root/fingerprint-execution-contract.XXXXXX")"
-containers_root="$(mktemp -d "$output_root/containers-contract.XXXXXX")"
-bignum_root="$(mktemp -d "$output_root/bignum-contract.XXXXXX")"
-usertypes_root="$(mktemp -d "$output_root/usertypes-contract.XXXXXX")"
-text_root="$(mktemp -d "$output_root/text-contract.XXXXXX")"
+work_root="$(mktemp -d "$output_root/run.XXXXXX")"
+run_root="$work_root/executables"
+priority_root="$work_root/project-work-candidate"
+actor_root="$work_root/agent-watch-await-settled"
+suite_root="$work_root/suite"
+recovered_root="$work_root/recovered-base-contract"
+formatting_root="$work_root/formatting-execution-contract"
+formatting_shadow_root="$work_root/formatting-dependency-shadow"
+fingerprint_root="$work_root/fingerprint-execution-contract"
+containers_root="$work_root/containers-contract"
+bignum_root="$work_root/bignum-contract"
+usertypes_root="$work_root/usertypes-contract"
+text_root="$work_root/text-contract"
+mkdir -p "$run_root" "$priority_root" "$actor_root" "$suite_root" "$recovered_root" "$formatting_root" "$formatting_shadow_root" "$fingerprint_root" "$containers_root" "$bignum_root" "$usertypes_root" "$text_root"
+suite_targets="$work_root/suite-targets"
+cleanup_corpus() {
+  local status=$?
+  if [[ "$status" -eq 0 ]]; then
+    # Retain bounded summary evidence; binaries and per-top scratch are
+    # regenerable. Failure runs keep the exact executables and full reports.
+    jq '{cohort: (input_filename | split("/")[-2]), stage_totals, stg_programs}' \
+      "$work_root"/*/results.json | jq -s --slurpfile provenance "$run_root/provenance.json" \
+      '{provenance: $provenance[0], cohorts: .}' >"$work_root/summary.json"
+    mv "$work_root/summary.json" "$output_root/latest-success.json"
+    rm -rf -- "$work_root"
+    echo "==> corpus passed; summary: $output_root/latest-success.json"
+  else
+    echo "==> corpus failed; retained evidence: $work_root" >&2
+  fi
+  return "$status"
+}
+trap cleanup_corpus EXIT
 echo "==> prepared corpus executable snapshot: $run_root"
 echo "    provenance: $run_root/provenance.json"
 
 echo "==> building prepared corpus runner"
-cargo build -p tidepool-testing --bin prepared-corpus
+cargo build -p tidepool-prepared-corpus --bin prepared-corpus
+cargo build -p tidepool-testing --bin test-effects-core
 built_runner="$(cargo metadata --no-deps --format-version 1 \
   | jq -r '.target_directory')/debug/prepared-corpus"
 prepared_runner="$run_root/prepared-corpus"
@@ -52,11 +78,10 @@ jq -n \
     runner: {source: $runner_source, path: $runner_path, sha256: $runner_sha256},
     projection_probe: {source: $probe_source, path: $probe_path, sha256: $probe_sha256}}' \
   >"$run_root/provenance.json"
-effects_core="$("$prepared_runner" effects-core)"
+effects_generator="$(dirname "$built_runner")/test-effects-core"
+effects_core="$("$prepared_runner" effects-core "$("$effects_generator")")"
 
 metadata="$repo_root/haskell/test/suite_cbor/meta.cbor"
-suite_targets="$(mktemp)"
-trap 'rm -f "$suite_targets"' EXIT
 
 assert_contract_report() {
   local cohort="$1"
@@ -141,45 +166,20 @@ assert_suite_report() {
   }
 }
 
-priority_source="$repo_root/haskell/test-prepared-stg/ProjectWorkCandidate.hs"
-priority_include="$priority_root/source"
-mkdir -p "$priority_include/Project"
-ln -s "$repo_root/tidepool/src/actor_host/fixtures/project/Work.hs" \
-  "$priority_include/Project/Work.hs"
-ln -s "$repo_root/tidepool/src/actor_host/fixtures/project/Types.hs" \
-  "$priority_include/Project/Types.hs"
-echo "==> projecting priority Project.Work.candidate structural probe"
-"$projection_probe" \
-  "$priority_source" ProjectWorkCandidate \
-  "$repo_root/haskell/test-prepared-stg/ProjectWorkCandidateTargets" "$priority_root" \
-  "$repo_root/haskell/lib" "$priority_include"
-priority_report="$priority_root/results.json"
-"$prepared_runner" run \
-  "$priority_root/manifest.json" \
-  "$repo_root/haskell/test-prepared-stg/ProjectWorkCandidateExpectations.json" "$metadata" \
-  "$priority_report"
-assert_contract_report priority-project-work 1 "$priority_report"
-
-echo "==> projecting actor awaitSettled dependency probe"
-actor_source="$repo_root/haskell/test-prepared-stg/AwaitSettledDependencies.hs"
-"$projection_probe" \
-  "$actor_source" AwaitSettledDependencies \
-  "$repo_root/haskell/test-prepared-stg/AwaitSettledDependenciesTargets" \
-  "$actor_root" "$repo_root/haskell/lib" "$effects_core"
-actor_report="$actor_root/results.json"
-"$prepared_runner" run \
-  "$actor_root/manifest.json" \
-  "$repo_root/haskell/test-prepared-stg/AwaitSettledDependenciesExpectations.json" "$metadata" \
-  "$actor_report"
-assert_contract_report actor-await-settled-dependencies 1 "$actor_report"
-
 jq -r '.source_tops[]' "$repo_root/tidepool-testing/fixtures/prepared-corpus-expectations.json" \
   | LC_ALL=C sort >"$suite_targets"
 suite_count="$(wc -l <"$suite_targets" | tr -d '[:space:]')"
 echo "==> projecting Suite.hs prepared corpus ($suite_count targets)"
 "$projection_probe" \
+  --metadata-targets 'con_left con_right con_just con_nothing showInt' \
   --all-tops "$repo_root/haskell/test/Suite.hs" Suite "$suite_targets" "$suite_root" \
   "$repo_root/haskell/lib"
+if [[ "$metadata_mode" == update ]]; then
+  cp "$suite_root/meta.cbor" "$metadata"
+elif ! cmp -s "$suite_root/meta.cbor" "$metadata"; then
+  echo "error: $metadata is stale; run just fixtures-update" >&2
+  exit 1
+fi
 suite_report="$suite_root/results.json"
 suite_oracle="$repo_root/tidepool-testing/fixtures/prepared-corpus-expectations.json"
 echo "==> checking the generated Suite oracle against this manifest"
@@ -223,6 +223,39 @@ jq -r '[.stage_totals[] | select(.stage == "execution")][0]
   | "  Suite execution: \(.passed) passed, \(.failed) failed;"
     + " classified: not_closed=\(.not_closed) no_finite_observation=\(.no_finite_observation)"
     + " function_valued=\(.function_valued)"' "$suite_report"
+
+priority_source="$repo_root/haskell/test-prepared-stg/ProjectWorkCandidate.hs"
+priority_include="$priority_root/source"
+mkdir -p "$priority_include/Project"
+ln -s "$repo_root/tidepool/src/actor_host/fixtures/project/Work.hs" \
+  "$priority_include/Project/Work.hs"
+ln -s "$repo_root/tidepool/src/actor_host/fixtures/project/Types.hs" \
+  "$priority_include/Project/Types.hs"
+echo "==> projecting priority Project.Work.candidate structural probe"
+"$projection_probe" \
+  "$priority_source" ProjectWorkCandidate \
+  "$repo_root/haskell/test-prepared-stg/ProjectWorkCandidateTargets" "$priority_root" \
+  "$repo_root/haskell/lib" "$priority_include"
+priority_report="$priority_root/results.json"
+"$prepared_runner" run \
+  "$priority_root/manifest.json" \
+  "$repo_root/haskell/test-prepared-stg/ProjectWorkCandidateExpectations.json" "$metadata" \
+  "$priority_report"
+assert_contract_report priority-project-work 1 "$priority_report"
+
+echo "==> projecting actor awaitSettled dependency probe"
+actor_source="$repo_root/haskell/test-prepared-stg/AwaitSettledDependencies.hs"
+"$projection_probe" \
+  "$actor_source" AwaitSettledDependencies \
+  "$repo_root/haskell/test-prepared-stg/AwaitSettledDependenciesTargets" \
+  "$actor_root" "$repo_root/haskell/lib" "$effects_core"
+actor_report="$actor_root/results.json"
+"$prepared_runner" run \
+  "$actor_root/manifest.json" \
+  "$repo_root/haskell/test-prepared-stg/AwaitSettledDependenciesExpectations.json" "$metadata" \
+  "$actor_report"
+assert_contract_report actor-await-settled-dependencies 1 "$actor_report"
+
 
 echo "==> projecting recovered base-call contract (1 target)"
 "$projection_probe" \

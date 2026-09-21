@@ -66,10 +66,12 @@ just fixtures-check
 just fixtures-update
 ```
 
-The check regenerates the compact Suite constructor metadata with the current
-frontend and worker, compares it with the committed fixture, verifies the
-source fingerprint, and runs the prepared corpus. The update replaces that
-metadata before running the same semantic checks. Prepared program artifacts
+The prepared corpus projection compiles Suite once and writes its compact
+constructor metadata from that same graph. The check compares this metadata
+with the committed fixture, verifies the source fingerprint, and executes the
+corpus. The update replaces the metadata before the same semantic checks.
+Successful corpus runs retain a summary and remove generated scratch; failures
+retain their executables, provenance, and full reports. Prepared program artifacts
 are generated into temporary run directories and are not committed.
 
 ## Extractor diagnostics

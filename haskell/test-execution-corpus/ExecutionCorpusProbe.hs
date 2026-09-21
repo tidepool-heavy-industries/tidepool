@@ -3,7 +3,7 @@
 
 module Main (main) where
 
-import Control.Monad (forM, unless)
+import Control.Monad (forM, unless, when)
 import Control.Exception
   ( AsyncException, SomeException, evaluate, fromException, throwIO, try )
 import Data.ByteString qualified as BS
@@ -36,7 +36,7 @@ import ExecutionCorpusInventory
 import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), TextUnitAuthority, resolveTextPackageUnit
-  , preparedTopIdentities, projectPreparedTarget )
+  , preparedTopIdentities, projectPreparedTarget, projectPreparedTargetWithConstructors )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..) )
 import Tidepool.FatIface (newFatIfaceCache, newOwnerInterfaceCache)
@@ -44,11 +44,14 @@ import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PipelineResult(..), PreparedPipelineResult(..)
   , runPipelineSelected )
 import Tidepool.PreparedRecovery
-  ( RecoveryFailure, RecoveredClosure(..), recoverPreparedClosure )
+  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecovery )
 import Tidepool.PreparedStg (newPreparedBodyCache)
 import Tidepool.PreparedFormatting
   ( FormattingAuthority, resolveFormattingAuthority )
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
+import Tidepool.Metadata
+  (collectDataCons, dcToMeta, mergeMetaPreserving, targetBindingHasIO, wiredInDataCons)
+import Tidepool.CborEncode (encodeMetadata)
 import Tidepool.Json (jsonString)
 
 data Record = Record String (Maybe String) [RecoveryFailure] Outcome
@@ -64,14 +67,17 @@ main = getArgs >>= \arguments -> case arguments of
   _ -> runProbe arguments
 
 runProbe :: [String] -> IO ()
-runProbe arguments = do
+runProbe rawArguments = do
+  let (metadataTargets, arguments) = case rawArguments of
+        "--metadata-targets" : names : rest -> (words names, rest)
+        rest -> ([], rest)
   (allTops, source, moduleNameArg, targetsFile, outputDir, includes) <- case arguments of
     "--all-tops" : source : moduleNameArg : targetsFile : outputDir : rest
       | not (null rest) -> pure (True, source, moduleNameArg, targetsFile, outputDir, rest)
     source : moduleNameArg : targetsFile : outputDir : rest
       | not (null rest) -> pure (False, source, moduleNameArg, targetsFile, outputDir, rest)
     _ -> ioError (userError
-      "usage: execution-corpus-projection [--all-tops] SOURCE MODULE TARGETS_FILE OUTPUT_DIR INCLUDE...")
+      "usage: execution-corpus-projection [--metadata-targets NAMES] [--all-tops] SOURCE MODULE TARGETS_FILE OUTPUT_DIR INCLUDE...")
   targets <- lines <$> readFile targetsFile
   createDirectoryIfMissing True outputDir
   compiled <- trySync (runPipelineSelected PreparedStg source includes)
@@ -116,11 +122,37 @@ runProbe arguments = do
         Right (Right identities) -> do
           let selected = filter (inModule moduleNameArg) identities
           sourceTargets <- mapSourceTargets moduleNameArg identities targets
+          first <- case selected of
+            identity : _ -> pure identity
+            [] -> fail "prepared corpus selected no target identities"
+          cache <- newFatIfaceCache
+          ownerCache <- newOwnerInterfaceCache
+          bodyCache <- newPreparedBodyCache
+          recover <- newPreparedRecovery (prHscEnv (pprPipelineResult prepared))
+            cache ownerCache bodyCache (projectionContext formattingAuthority textAuthority first)
+            (pprModules prepared)
+          when (not (null metadataTargets)) $ do
+            constructors <- fmap concat $ forM metadataTargets $ \name -> do
+              identity <- case filter (matchesExternal moduleNameArg name) selected of
+                [identity] -> pure identity
+                _ -> fail ("metadata target missing or ambiguous: " ++ name)
+              closure <- recover identity
+              case projectPreparedTargetWithConstructors
+                     (projectionContext formattingAuthority textAuthority identity) (closureModules closure) of
+                Left failure -> fail ("metadata projection: " ++ show failure)
+                Right (_, constructors) -> pure constructors
+            let result = pprPipelineResult prepared
+                metadata = mergeMetaPreserving
+                  [wiredInDataCons, collectDataCons (prTyCons result), map dcToMeta constructors]
+                hasIO = any (targetBindingHasIO (prBinds result)) metadataTargets
+            BS.writeFile (outputDir </> "meta.cbor")
+              (encodeMetadata metadata hasIO (Text.pack <$> prCapturedType result)
+                (map Text.pack (prWarnings result)))
           rowsWithInventory <- if allTops
             then forM (zip [0 :: Int ..] selected) $ \(index, identity) ->
-              projectOneIdentity prepared formattingAuthority textAuthority outputDir index identity
+              projectOneIdentity recover formattingAuthority textAuthority outputDir index identity
             else forM (zip [0 :: Int ..] (zip targets sourceTargets)) $ \(index, (occurrence, sourceTarget)) ->
-              projectOneTarget prepared formattingAuthority textAuthority moduleNameArg outputDir index occurrence
+              projectOneTarget recover formattingAuthority textAuthority moduleNameArg outputDir index occurrence
                 (sourceTargetIdentity sourceTarget)
           let (rows, targetInventories) = unzip rowsWithInventory
           pure (rows, sourceTargets, targetInventories)
@@ -187,7 +219,7 @@ matchesExternal moduleNameArg occurrence identity =
     && symbolOccurrence identity == Text.pack occurrence
 
 projectOneTarget
-  :: PreparedPipelineResult
+  :: (SymbolIdentity -> IO RecoveredClosure)
   -> Maybe FormattingAuthority
   -> Maybe TextUnitAuthority
   -> String
@@ -196,7 +228,7 @@ projectOneTarget
   -> String
   -> Maybe SymbolIdentity
   -> IO (Record, TargetInventory)
-projectOneTarget prepared formattingAuthority textAuthority moduleNameArg outputDir index occurrence mapped = do
+projectOneTarget recover formattingAuthority textAuthority moduleNameArg outputDir index occurrence mapped = do
   let name = missingName moduleNameArg occurrence
       reject reason = pure
         ( Record name Nothing [] (Rejected reason)
@@ -204,17 +236,17 @@ projectOneTarget prepared formattingAuthority textAuthority moduleNameArg output
         )
   case mapped of
     Nothing -> reject ("target " <> show occurrence <> " is missing from module " <> moduleNameArg)
-    Just selected -> projectOneIdentity prepared formattingAuthority textAuthority outputDir index selected
+    Just selected -> projectOneIdentity recover formattingAuthority textAuthority outputDir index selected
 
 projectOneIdentity
-  :: PreparedPipelineResult
+  :: (SymbolIdentity -> IO RecoveredClosure)
   -> Maybe FormattingAuthority
   -> Maybe TextUnitAuthority
   -> FilePath
   -> Int
   -> SymbolIdentity
   -> IO (Record, TargetInventory)
-projectOneIdentity prepared formattingAuthority textAuthority outputDir index selected = do
+projectOneIdentity recover formattingAuthority textAuthority outputDir index selected = do
   let context = projectionContext formattingAuthority textAuthority selected
       artifactName = numericArtifactName index
       name = identityName selected
@@ -222,11 +254,7 @@ projectOneIdentity prepared formattingAuthority textAuthority outputDir index se
       unavailable residuals reason = unavailableTargetInventory name residuals reason
       reject residuals inventory reason = pure
         (Record name Nothing residuals (Rejected reason), inventory)
-  cache <- newFatIfaceCache
-  ownerCache <- newOwnerInterfaceCache
-  bodyCache <- newPreparedBodyCache
-  recovered <- trySync (recoverPreparedClosure
-    (prHscEnv (pprPipelineResult prepared)) cache ownerCache bodyCache context (pprModules prepared))
+  recovered <- trySync (recover selected)
   case recovered of
     Left failure -> let reason = "target " <> show (symbolOccurrence selected) <> " recovery failed: " <> show failure
       in reject [] (unavailable [] reason) reason
