@@ -116,7 +116,9 @@ validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -
         compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
       forM_ ["WarmReexport", "WarmChild"] $ \name ->
         when (("tidepool-memo-miss module=" ++ name) `isInfixOf` warmLog) $
-          fail ("unchanged validation-only module was recompiled: " ++ name))
+          fail ("unchanged validation-only module was recompiled: " ++ name)
+      assertContains "warm compile prepares only its evicted target"
+        "front_compiles=1 core_compiles=1 prepared_compiles=1" warmLog)
     `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
   where
     temporary = do

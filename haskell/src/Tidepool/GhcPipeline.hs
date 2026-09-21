@@ -908,6 +908,9 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
           -- quantity.
           dsMsRef  <- liftIO (newIORef (0 :: Integer))
           c2cMsRef <- liftIO (newIORef (0 :: Integer))
+          frontCountRef <- liftIO (newIORef (0 :: Int))
+          backCountRef <- liftIO (newIORef (0 :: Int))
+          preparedCountRef <- liftIO (newIORef (0 :: Int))
           -- Per-module wall time: front (typecheck +
           -- desugar) and back (core2core) halves keyed by module name and SUMMED
           -- into one entry per module via 'Map.insertWith'. The compile summary uses
@@ -932,6 +935,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
               -- applying it unconditionally here costs nothing extra even for a
               -- module the tier goes on to skip.
               compileFront modSum0 = do
+                liftIO (modifyIORef' frontCountRef (+ 1))
                 let modSum = modSum0 { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts modSum0) }
                 (typechecked, tcMs) <- timeSection $ do
                   parsed <- parseModule modSum
@@ -975,6 +979,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
               -- resident session can repeat HPT registration on later requests;
               -- direct compilation discards it.
               compileBack mf = do
+                liftIO (modifyIORef' backCountRef (+ 1))
                 (simplified, coreMs) <- timeSection $
                   liftIO (core2core (mfHscEnv mf) (mfDesugared mf))
                 liftIO (modifyIORef' loweringMsRef (+ coreMs))
@@ -999,6 +1004,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
               prepareSelected mf simplified = case preparation of
                 CheckOnly -> pure Nothing
                 PrepareStg -> do
+                  liftIO (modifyIORef' preparedCountRef (+ 1))
                   (cgGuts, _details) <- timePhase timing "prepared_tidy" $ liftIO $ hscTidy (mfHscEnv mf) simplified
                   siblings <- liftIO $ atomicModifyIORef' preparedSiblingsRef $ \known ->
                     let known' = Map.union (resolvePreparedSiblings (cg_binds cgGuts)) known
@@ -1273,6 +1279,9 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
             Just reachableMods | timing -> liftIO $ do
               totalDsMs  <- readIORef dsMsRef
               totalC2cMs <- readIORef c2cMsRef
+              frontCount <- readIORef frontCountRef
+              backCount <- readIORef backCountRef
+              preparedCount <- readIORef preparedCountRef
               let allModNames = map (ms_mod_name . observationSummary) observations
                   moduleCount = length allModNames
                   reachableCount = Set.size reachableMods
@@ -1282,6 +1291,9 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                 ++ " reachable=" ++ show reachableCount
                 ++ " desugar_ms=" ++ show totalDsMs
                 ++ " core2core_ms=" ++ show totalC2cMs
+                ++ " front_compiles=" ++ show frontCount
+                ++ " core_compiles=" ++ show backCount
+                ++ " prepared_compiles=" ++ show preparedCount
                 ++ " validation_only=" ++ show validationOnly
                 ++ " reachable_names=" ++ show (map moduleNameString (Set.toList reachableMods))
             _ -> pure ()
