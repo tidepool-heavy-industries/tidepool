@@ -732,7 +732,7 @@ const INTEGER_MODULE: &str = "GHC.Num.Integer";
 const NATURAL_MODULE: &str = "GHC.Num.Natural";
 const AESON_VALUE_MODULE: &str = "Tidepool.Aeson.Value";
 const AESON_SCIENTIFIC_MODULE: &str = "Tidepool.Aeson.Scientific";
-const GHC_TYPES_MODULE: &str = "GHC.Types";
+const GHC_TYPES_MODULE: &str = "GHC.Internal.Types";
 const AESON_VALUE_OCCURRENCE: &str = "Value";
 
 /// Whether `family` names the vendored `Tidepool.Aeson.Value.Value` type
