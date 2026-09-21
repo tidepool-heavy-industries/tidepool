@@ -148,9 +148,9 @@ impl<'code> PreparedInvocation<'code> {
                 )
             }),
             program
-                .thunk_enter_headers
+                .thunk_entries
                 .iter()
-                .map(|&header| (header, program.pipeline.get_function_ptr(program.enter))),
+                .map(|&(header, function)| (header, program.pipeline.get_function_ptr(function))),
         );
         machine.absorb_interned_bytes(&program.bytes);
         machine.set_cancel_flag(Arc::clone(&cancel));

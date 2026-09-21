@@ -355,10 +355,8 @@ pub struct CompiledProgram {
     pub(crate) callables: Vec<resolve::CallableExport>,
     /// Pins every demand address embedded in the generated resolver calls.
     _dispatchers: apply::Dispatchers,
-    /// This program's own `prepared_enter` FuncId.
-    pub(crate) enter: FuncId,
-    /// Thunk headers that require this program's enter/update state machine.
-    pub(crate) thunk_enter_headers: Vec<usize>,
+    /// Exact per-thunk entry state machines, keyed by descriptor header.
+    pub(crate) thunk_entries: Vec<(usize, FuncId)>,
     /// Every descriptor header with a published call or enter record. Shared
     /// descriptors are excluded so retirement removes only this owner.
     pub(crate) dispatch_owned_headers: Vec<usize>,
@@ -901,7 +899,7 @@ impl CompiledProgram {
         native_metrics.category("thunks", category_start, &pipeline);
         phases.emit_thunks = clock.lap();
         category_start = compile_phases::NativeCounts::read(&pipeline);
-        let thunk_entries = plan
+        let thunk_metadata = plan
             .thunks
             .iter()
             .map(|(&id, thunk)| entry::ThunkEntry {
@@ -911,13 +909,27 @@ impl CompiledProgram {
                 results: thunk.signature.results.clone(),
             })
             .collect::<Vec<_>>();
+        let thunk_entries = thunk_metadata
+            .iter()
+            .enumerate()
+            .map(|(index, thunk)| {
+                pipeline
+                    .declare_function_with_signature(
+                        &format!("prepared_thunk_enter_{index}"),
+                        Linkage::Local,
+                        &entry::signature(),
+                    )
+                    .map(|function| (thunk.descriptor.initial_header_word(), function))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         // Evaluated objects are classified by the machine's descriptor space;
         // only thunk state machines require owner-specific generated code.
         let enter_evaluated = Vec::new();
         entry::emit_prepared_enter(
             &mut pipeline,
             prepared_enter,
-            &thunk_entries,
+            prepared_enter,
+            &[],
             &enter_evaluated,
             prepared_poll,
             prepared_stack_overflow,
@@ -927,6 +939,22 @@ impl CompiledProgram {
             prepared_recorded_failure,
             write_barrier,
         )?;
+        for (thunk, &(_, function)) in thunk_metadata.iter().zip(&thunk_entries) {
+            entry::emit_prepared_enter(
+                &mut pipeline,
+                function,
+                prepared_enter,
+                std::slice::from_ref(thunk),
+                &enter_evaluated,
+                prepared_poll,
+                prepared_stack_overflow,
+                prepared_bad_state,
+                prepared_blackhole,
+                prepared_resolve_enter,
+                prepared_recorded_failure,
+                write_barrier,
+            )?;
+        }
         native_metrics.category("enter", category_start, &pipeline);
         phases.emit_enter = clock.lap();
         category_start = compile_phases::NativeCounts::read(&pipeline);
@@ -1062,13 +1090,9 @@ impl CompiledProgram {
             .map(|descriptor| descriptor.initial_header_word())
             .chain(plan.externals.headers())
             .collect::<std::collections::HashSet<_>>();
-        let thunk_enter_headers = thunk_entries
+        let dispatch_owned_headers = thunk_entries
             .iter()
-            .map(|thunk_entry| thunk_entry.descriptor.initial_header_word())
-            .collect::<Vec<_>>();
-        let dispatch_owned_headers = thunk_enter_headers
-            .iter()
-            .copied()
+            .map(|&(header, _)| header)
             .chain(callables.iter().map(|callable| callable.header))
             .filter(|header| !shared.contains(header))
             .collect::<std::collections::BTreeSet<_>>()
@@ -1121,8 +1145,7 @@ impl CompiledProgram {
             force_adapter,
             callables,
             _dispatchers: dispatchers,
-            enter: prepared_enter,
-            thunk_enter_headers,
+            thunk_entries,
             dispatch_owned_headers,
         })
     }

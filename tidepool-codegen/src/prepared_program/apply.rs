@@ -325,7 +325,6 @@ pub(super) fn declare_dispatchers(
                 };
                 metadata.insert(prefix);
                 metadata.insert(suffix.clone());
-                workers.insert(suffix.clone());
                 if queued.insert(suffix.clone()) {
                     worker_queue.push(suffix);
                 }
@@ -827,15 +826,18 @@ pub(super) fn emit_dispatchers(
                         &returned,
                         &demand.results,
                     )? {
-                        let suffix = dispatchers
-                            .find(&remainder)
-                            .ok_or_else(|| super::CompileError::MissingDemand(remainder.clone()))?;
-                        let suffix_ref = pipeline.module.declare_func_in_func(suffix, builder.func);
-                        let args =
-                            call_arguments(vmctx, payload[0], &physical_arguments[consumed..]);
-                        let call = builder.ins().call(suffix_ref, &args);
-                        let result = builder.inst_results(call).to_vec();
-                        builder.ins().return_(&result);
+                        emit_suffix_stage(
+                            &mut builder,
+                            pipeline,
+                            dispatchers,
+                            profile,
+                            vmctx,
+                            payload[0],
+                            &physical_arguments[consumed..],
+                            &remainder,
+                            prepared_resolve_call,
+                            prepared_unresolved_call,
+                        )?;
                     }
                 }
             }
@@ -888,6 +890,171 @@ pub(super) fn emit_dispatchers(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "compiled application dispatchers");
     Ok(exports)
+}
+
+/// Continue an oversaturated application inside its original worker. Each
+/// stage owns fresh transport slots and roots the entered callee and managed
+/// results in SSA; no suffix-shaped native worker is declared.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a suffix stage carries the fixed dispatcher services and its logical argument window"
+)]
+fn emit_suffix_stage(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut CodegenPipeline,
+    dispatchers: &Dispatchers,
+    profile: &NativeAbiProfile,
+    vmctx: ir::Value,
+    callee: ir::Value,
+    arguments: &[Option<ir::Value>],
+    signature: &Signature,
+    prepared_resolve_call: FuncId,
+    prepared_unresolved_call: FuncId,
+) -> Result<(), super::CompileError> {
+    let object = builder.ins().band_imm(callee, !7_i64);
+    let header = builder
+        .ins()
+        .load(types::I64, MemFlags::trusted(), object, 0);
+    let resolve_ref = pipeline
+        .module
+        .declare_func_in_func(prepared_resolve_call, builder.func);
+    let mut probes = vec![(signature.clone(), ResolvedContinuation::Return)];
+    for consumed in (0..=signature.arguments.len()).rev() {
+        let terminal = Signature {
+            arguments: signature.arguments[..consumed].to_vec(),
+            results: super::ResultContract::NoSuccess,
+        };
+        if terminal != *signature {
+            probes.push((terminal, ResolvedContinuation::Terminal));
+        }
+    }
+    if signature.results != super::ResultContract::NoSuccess {
+        for consumed in (1..signature.arguments.len()).rev() {
+            probes.push((
+                Signature {
+                    arguments: signature.arguments[..consumed].to_vec(),
+                    results: super::ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+                },
+                ResolvedContinuation::Apply {
+                    consumed,
+                    remainder: Signature {
+                        arguments: signature.arguments[consumed..].to_vec(),
+                        results: signature.results.clone(),
+                    },
+                },
+            ));
+        }
+    }
+    for (demand, continuation) in probes {
+        let metadata = builder
+            .ins()
+            .iconst(types::I64, dispatchers.demand_address(&demand)?);
+        let lookup = builder.ins().call(resolve_ref, &[vmctx, header, metadata]);
+        let code = builder.inst_results(lookup)[0];
+        let found = builder
+            .ins()
+            .icmp_imm(ir::condcodes::IntCC::NotEqual, code, 0);
+        let hit = builder.create_block();
+        let miss = builder.create_block();
+        builder.ins().brif(found, hit, &[], miss, &[]);
+        builder.switch_to_block(hit);
+        builder.seal_block(hit);
+
+        let demand_abi = EntryAbi::lower_internal(profile, &demand, EnvironmentMode::Captured)?;
+        let argument_values = arguments
+            .iter()
+            .take(demand.arguments.len())
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        let argument_words = 1_u32
+            .checked_add(argument_values.len() as u32)
+            .ok_or(super::CompileError::RootBlock)?;
+        let argument_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
+            ir::StackSlotKind::ExplicitSlot,
+            argument_words * 8,
+            3,
+        ));
+        let argument_area = builder.ins().stack_addr(types::I64, argument_slot, 0);
+        builder
+            .ins()
+            .store(MemFlags::trusted(), callee, argument_area, 0);
+        for (index, value) in argument_values.into_iter().enumerate() {
+            builder.ins().store(
+                MemFlags::trusted(),
+                value,
+                argument_area,
+                ((index + 1) * 8) as i32,
+            );
+        }
+        let result_words = demand_abi.physical_results().len().max(1) as u32;
+        let result_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
+            ir::StackSlotKind::ExplicitSlot,
+            result_words * 8,
+            3,
+        ));
+        let result_area = builder.ins().stack_addr(types::I64, result_slot, 0);
+        let mut native = ir::Signature::new(pipeline.isa.default_call_conv());
+        native.params = vec![ir::AbiParam::new(types::I64); 3];
+        native.returns = vec![ir::AbiParam::new(types::I32)];
+        let sig_ref = builder.import_signature(native);
+        let call = builder
+            .ins()
+            .call_indirect(sig_ref, code, &[vmctx, result_area, argument_area]);
+        let status = builder.inst_results(call)[0];
+        super::emit::emit_status_guard(builder, status);
+        let mut returned = vec![status];
+        for (index, rep) in demand_abi.physical_results().iter().enumerate() {
+            let value = builder.ins().load(
+                super::adapter::scalar_type(*rep),
+                MemFlags::trusted(),
+                result_area,
+                (index * 8) as i32,
+            );
+            if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
+                builder.declare_value_needs_stack_map(value);
+            }
+            returned.push(value);
+        }
+        match continuation {
+            ResolvedContinuation::Return => {
+                builder.ins().return_(&returned);
+            }
+            ResolvedContinuation::Terminal => {
+                super::emit_call_results(builder, pipeline, vmctx, &returned, &demand.results)?;
+            }
+            ResolvedContinuation::Apply {
+                consumed,
+                remainder,
+            } => {
+                if let Some(payload) =
+                    super::emit_call_results(builder, pipeline, vmctx, &returned, &demand.results)?
+                {
+                    emit_suffix_stage(
+                        builder,
+                        pipeline,
+                        dispatchers,
+                        profile,
+                        vmctx,
+                        payload[0],
+                        &arguments[consumed..],
+                        &remainder,
+                        prepared_resolve_call,
+                        prepared_unresolved_call,
+                    )?;
+                }
+            }
+        };
+        builder.switch_to_block(miss);
+        builder.seal_block(miss);
+    }
+    let unresolved = pipeline
+        .module
+        .declare_func_in_func(prepared_unresolved_call, builder.func);
+    let recorded = builder.ins().call(unresolved, &[vmctx, object]);
+    let status = builder.inst_results(recorded)[0];
+    crate::alloc::emit_prepared_failure_return(builder, status);
+    Ok(())
 }
 
 /// The compiled instance of `id` a demand applies: its own result contract,
@@ -998,7 +1165,10 @@ fn call_arguments<'a>(
     native
 }
 
-fn logical_arguments(signature: &Signature, physical: &[ir::Value]) -> Vec<Option<ir::Value>> {
+pub(super) fn logical_arguments(
+    signature: &Signature,
+    physical: &[ir::Value],
+) -> Vec<Option<ir::Value>> {
     let mut next = 0;
     signature
         .arguments
@@ -1015,7 +1185,7 @@ fn logical_arguments(signature: &Signature, physical: &[ir::Value]) -> Vec<Optio
         .collect()
 }
 
-fn emit_partial(
+pub(super) fn emit_partial(
     builder: &mut FunctionBuilder<'_>,
     vmctx: ir::Value,
     callee: ir::Value,
