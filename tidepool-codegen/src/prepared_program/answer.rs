@@ -104,6 +104,8 @@ pub enum AnswerBuildError {
     /// engine's ledger (already released, or minted under another engine).
     #[error("an answer plan's borrowed handle is not live")]
     UnknownHandle,
+    #[error("a managed construction node belongs to another builder")]
+    ForeignNode,
 }
 
 /// Nesting bound for a plan: a bridge `Value` is an owned tree and the
