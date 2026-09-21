@@ -139,6 +139,19 @@ impl<'code> PreparedInvocation<'code> {
         let results = super::run::try_root_words(result_words.max(1))?;
 
         let machine = Rc::new(MachineState::new());
+        machine.register_prepared_entries(
+            program.callables.iter().map(|callable| {
+                (
+                    callable.header,
+                    callable.signature.clone(),
+                    program.pipeline.get_function_ptr(callable.function),
+                )
+            }),
+            program
+                .thunk_enter_headers
+                .iter()
+                .map(|&header| (header, program.pipeline.get_function_ptr(program.enter))),
+        );
         machine.absorb_interned_bytes(&program.bytes);
         machine.set_cancel_flag(Arc::clone(&cancel));
         machine.set_stack_map_registry(&program.pipeline.stack_maps);
@@ -402,6 +415,7 @@ impl Drop for PreparedInvocation<'_> {
         // Native execution has returned before this owner can be dropped.
         // Teardown consults ownership tables only, even after terminal failure.
         self.machine.clear_prepared_old_space();
+        self.machine.clear_prepared_entries();
         self.machine.clear_rust_roots();
         self.machine.free_session_heap();
         self.machine.clear_stack_map_registry();
