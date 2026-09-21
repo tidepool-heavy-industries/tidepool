@@ -824,18 +824,17 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
                 request: parked.request,
             });
         };
-        let answer = match response_value(response, table) {
-            Ok(answer) => answer,
-            Err(error) => {
-                let constructor = request_constructor(&parked.request, table);
-                let _ = engine.abort_parked(parked.id);
-                return Err(PreparedRuntimeError::Handler {
-                    constructor,
+        let uses_aeson = engine.answer_contains_aeson(parked.id)?;
+        let resumed = match if uses_aeson {
+            response_value(response, table)
+                .map_err(|error| PreparedRuntimeError::Handler {
+                    constructor: request_constructor(&parked.request, table),
                     detail: error.to_string(),
-                });
-            }
-        };
-        let resumed = match engine.resume_with_answer(parked.id, &answer, table) {
+                })
+                .and_then(|answer| engine.resume_with_answer(parked.id, &answer, table))
+        } else {
+            engine.resume_with_structural_answer(parked.id, &response, table)
+        } {
             Ok(resumed) => resumed,
             Err(error) => {
                 // A refusal before the take leaves the frame parked; a

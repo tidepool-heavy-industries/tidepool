@@ -18,6 +18,14 @@ impl std::fmt::Debug for Response {
 }
 
 impl Response {
+    pub fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn tidepool_bridge::HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        self.source.visit(table, visitor)
+    }
+
     /// Materialize this response at the dispatch/resume boundary. The owned
     /// source remains structural until a consumer actually needs a snapshot.
     pub fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {

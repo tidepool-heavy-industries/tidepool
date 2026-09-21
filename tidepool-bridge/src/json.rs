@@ -24,7 +24,7 @@ impl ToHaskell for serde_json::Value {
                 "aeson Value constructors (Object/Array/String/…) not in scope".into(),
             )
         })?;
-        crate::json_builder::json_to_value(self, &ids).visit(table, visitor)
+        crate::json_builder::visit_json(self, &ids, visitor)
     }
 }
 

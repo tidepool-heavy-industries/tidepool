@@ -21,8 +21,8 @@
 //! in [`crate::shapes`] — this module owns only the JSON-document policy
 //! (key sorting and resolving [`JsonConIds`]) on top of them.
 
-use crate::value::HaskellValue;
-use tidepool_repr::{DataConId, DataConTable};
+use crate::{BridgeError, HaskellValue, HaskellVisitor, ToHaskell};
+use tidepool_repr::{DataConId, DataConTable, Literal};
 
 /// `DataConId`s of every constructor needed to build a `HaskellValue`.
 /// (see [`crate::env::EvalIds`]), with no borrow of the originating `DataConTable`.
@@ -105,6 +105,97 @@ impl JsonConIds {
     }
 }
 
+fn visit_text(
+    text: &str,
+    ids: &JsonConIds,
+    visitor: &mut dyn HaskellVisitor,
+) -> Result<(), BridgeError> {
+    visitor.begin_constructor(ids.text, 3)?;
+    visitor.byte_array(text.as_bytes().to_vec())?;
+    visitor.literal(Literal::LitInt(0))?;
+    visitor.literal(Literal::LitInt(text.len() as i64))?;
+    visitor.end_constructor()
+}
+
+fn visit_map(
+    entries: &[(&String, &serde_json::Value)],
+    ids: &JsonConIds,
+    visitor: &mut dyn HaskellVisitor,
+) -> Result<(), BridgeError> {
+    if entries.is_empty() {
+        visitor.begin_constructor(ids.tip, 0)?;
+        return visitor.end_constructor();
+    }
+    let mid = entries.len() / 2;
+    let (key, value) = entries[mid];
+    visitor.begin_constructor(ids.bin, 5)?;
+    visitor.begin_constructor(ids.i_hash, 1)?;
+    visitor.literal(Literal::LitInt(entries.len() as i64))?;
+    visitor.end_constructor()?;
+    visit_text(key, ids, visitor)?;
+    visit_json(value, ids, visitor)?;
+    visit_map(&entries[..mid], ids, visitor)?;
+    visit_map(&entries[mid + 1..], ids, visitor)?;
+    visitor.end_constructor()
+}
+
+/// Emit a parsed JSON value without constructing a parallel `HaskellValue`
+/// tree. Constructor ids and layouts come from the authenticated table.
+pub fn visit_json(
+    value: &serde_json::Value,
+    ids: &JsonConIds,
+    visitor: &mut dyn HaskellVisitor,
+) -> Result<(), BridgeError> {
+    match value {
+        serde_json::Value::Null => {
+            visitor.begin_constructor(ids.null, 0)?;
+            visitor.end_constructor()
+        }
+        serde_json::Value::Bool(value) => {
+            visitor.begin_constructor(ids.bool_con, 1)?;
+            visitor.begin_constructor(if *value { ids.true_con } else { ids.false_con }, 0)?;
+            visitor.end_constructor()?;
+            visitor.end_constructor()
+        }
+        serde_json::Value::Number(number) => {
+            let (coefficient, exponent) =
+                crate::decimal::Decimal::parse_token(number.as_str())?.into_parts();
+            visitor.begin_constructor(ids.number, 1)?;
+            visitor.begin_constructor(ids.scientific, 2)?;
+            crate::shapes::integer_from_decimal(&coefficient, ids.is, ids.ip, ids.in_)
+                .visit(&DataConTable::new(), visitor)?;
+            visitor.literal(Literal::LitInt(exponent))?;
+            visitor.end_constructor()?;
+            visitor.end_constructor()
+        }
+        serde_json::Value::String(text) => {
+            visitor.begin_constructor(ids.string, 1)?;
+            visit_text(text, ids, visitor)?;
+            visitor.end_constructor()
+        }
+        serde_json::Value::Array(items) => {
+            visitor.begin_constructor(ids.array, 1)?;
+            for item in items {
+                visitor.begin_constructor(ids.cons, 2)?;
+                visit_json(item, ids, visitor)?;
+            }
+            visitor.begin_constructor(ids.nil, 0)?;
+            visitor.end_constructor()?;
+            for _ in items {
+                visitor.end_constructor()?;
+            }
+            visitor.end_constructor()
+        }
+        serde_json::Value::Object(map) => {
+            let mut entries = map.iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(right.0));
+            visitor.begin_constructor(ids.object, 1)?;
+            visit_map(&entries, ids, visitor)?;
+            visitor.end_constructor()
+        }
+    }
+}
+
 /// Build the worker `Text ByteArray# Int# Int#` for a UTF-8 string (offset 0).
 fn text_value(s: &str, ids: &JsonConIds) -> HaskellValue {
     crate::shapes::make_text(s, ids.text)
@@ -117,30 +208,36 @@ fn list_value(items: Vec<HaskellValue>, ids: &JsonConIds) -> HaskellValue {
 
 /// Build a `Data.Map.Strict.Map Key HaskellValue` from key-sorted entries by
 /// divide-and-conquer (`Bin size k v left right` / `Tip`, size boxed as `I#`).
-fn map_value(entries: &[(&String, &serde_json::Value)], ids: &JsonConIds) -> HaskellValue {
+fn map_value(
+    entries: &[(&String, &serde_json::Value)],
+    ids: &JsonConIds,
+) -> Result<HaskellValue, crate::decimal::DecimalError> {
     if entries.is_empty() {
-        return crate::shapes::map_tip(ids.tip);
+        return Ok(crate::shapes::map_tip(ids.tip));
     }
     let mid = entries.len() / 2;
     let (k, v) = entries[mid];
-    let left = map_value(&entries[..mid], ids);
-    let right = map_value(&entries[mid + 1..], ids);
-    crate::shapes::map_bin_node(
+    let left = map_value(&entries[..mid], ids)?;
+    let right = map_value(&entries[mid + 1..], ids)?;
+    Ok(crate::shapes::map_bin_node(
         entries.len() as i64,
         text_value(k, ids),
-        json_to_value(v, ids),
+        json_to_value(v, ids)?,
         left,
         right,
         ids.bin,
         ids.i_hash,
-    )
+    ))
 }
 
 /// Convert a parsed `serde_json::Value` to the eval `HaskellValue` for the vendored
 /// aeson `Value` type. Recursion depth is bounded by serde_json's own nesting
 /// limit (128 by default), so this never approaches host-stack exhaustion.
-pub fn json_to_value(j: &serde_json::Value, ids: &JsonConIds) -> HaskellValue {
-    match j {
+pub fn json_to_value(
+    j: &serde_json::Value,
+    ids: &JsonConIds,
+) -> Result<HaskellValue, crate::decimal::DecimalError> {
+    Ok(match j {
         serde_json::Value::Null => HaskellValue::Con(ids.null, vec![]),
         serde_json::Value::Bool(b) => {
             let inner = HaskellValue::Con(if *b { ids.true_con } else { ids.false_con }, vec![]);
@@ -155,18 +252,21 @@ pub fn json_to_value(j: &serde_json::Value, ids: &JsonConIds) -> HaskellValue {
                 ip: ids.ip,
                 in_: ids.in_,
             },
-        ),
+        )?,
         serde_json::Value::String(s) => HaskellValue::Con(ids.string, vec![text_value(s, ids)]),
         serde_json::Value::Array(arr) => {
-            let items = arr.iter().map(|v| json_to_value(v, ids)).collect();
+            let items = arr
+                .iter()
+                .map(|v| json_to_value(v, ids))
+                .collect::<Result<Vec<_>, _>>()?;
             HaskellValue::Con(ids.array, vec![list_value(items, ids)])
         }
         serde_json::Value::Object(map) => {
             let mut entries: Vec<(&String, &serde_json::Value)> = map.iter().collect();
             entries.sort_by(|a, b| a.0.cmp(b.0));
-            HaskellValue::Con(ids.object, vec![map_value(&entries, ids)])
+            HaskellValue::Con(ids.object, vec![map_value(&entries, ids)?])
         }
-    }
+    })
 }
 
 /// The exact node count of the `HaskellValue` [`json_to_value`] would build for `j` —
@@ -184,7 +284,7 @@ pub fn json_to_value(j: &serde_json::Value, ids: &JsonConIds) -> HaskellValue {
 /// the same work the machine does on the abort path (`resp_val.node_count()`),
 /// so the numbers agree by construction; cheap relative to the network fetch.
 #[must_use]
-pub fn bridged_node_count(j: &serde_json::Value) -> usize {
+pub fn bridged_node_count(j: &serde_json::Value) -> Result<usize, crate::decimal::DecimalError> {
     // node_count is shape-only, so every id can be the same placeholder.
     let z = DataConId(0);
     let ids = JsonConIds {
@@ -207,7 +307,7 @@ pub fn bridged_node_count(j: &serde_json::Value) -> usize {
         cons: z,
         nil: z,
     };
-    json_to_value(j, &ids).node_count()
+    Ok(json_to_value(j, &ids)?.node_count())
 }
 
 #[cfg(test)]
@@ -279,7 +379,7 @@ mod tests {
         });
         let ids = JsonConIds::from_table(&table).expect("table has all JSON constructors");
         let json = serde_json::json!({"key": "value"});
-        let val = json_to_value(&json, &ids);
+        let val = json_to_value(&json, &ids).unwrap();
         match &val {
             HaskellValue::Con(id, _) => assert_eq!(*id, ids.object),
             other => panic!("expected Con(Object), got {other:?}"),
@@ -363,7 +463,7 @@ mod tests {
 
         let ids = JsonConIds::from_table(&t).expect("table has all JSON constructors");
         let json = serde_json::json!({"a": 1, "b": 2});
-        let val = json_to_value(&json, &ids);
+        let val = json_to_value(&json, &ids).unwrap();
         match &val {
             HaskellValue::Con(id, fields) => {
                 assert_eq!(*id, ids.object);
@@ -396,7 +496,7 @@ mod tests {
             "a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6, "g": 7, "h": 8,
         });
         let serde = serde_nodes(&obj);
-        let bridged = bridged_node_count(&obj);
+        let bridged = bridged_node_count(&obj).unwrap();
         assert!(
             bridged >= 4 * serde,
             "object should bridge much larger: serde={serde}, bridged={bridged}"
@@ -429,6 +529,9 @@ mod tests {
             cons: z,
             nil: z,
         };
-        assert_eq!(bridged_node_count(&j), json_to_value(&j, &ids).node_count());
+        assert_eq!(
+            bridged_node_count(&j).unwrap(),
+            json_to_value(&j, &ids).unwrap().node_count()
+        );
     }
 }

@@ -22,10 +22,9 @@ use tidepool_heap::external_storage::ExternalStorageValidationError;
 use tidepool_repr::execution_schema::RuntimeRep;
 use tidepool_repr::DataConId;
 
-use super::machine::PreparedHandle;
-use crate::descriptor_bridge::{
-    marshal_descriptor_object, DescriptorMarshalError, DescriptorValue,
-};
+use super::machine::{ManagedBuilder, ManagedField, ManagedNode, PreparedHandle};
+use super::ExecutionError;
+use crate::descriptor_bridge::DescriptorMarshalError;
 
 /// A validated answer, ready to build. Field order is the constructor's
 /// logical field order.
@@ -115,7 +114,6 @@ pub const MAX_ANSWER_DEPTH: usize = 4096;
 /// One object of a flattened plan, in build (postorder) order.
 struct PlannedObject {
     host_id: DataConId,
-    descriptor: Arc<ObjectDescriptor>,
     fields: Vec<PlannedField>,
 }
 
@@ -144,9 +142,6 @@ pub(super) struct FlattenedAnswer {
     /// Borrowed handles referenced by [`AnswerPlan::Handle`] leaves, in the
     /// order [`Self::write`] expects their resolved tagged words.
     handles: Vec<PreparedHandle>,
-    /// The external `Bytes` wrapper descriptor every byte array is written
-    /// with, from the program the answer is built for.
-    bytes_descriptor: Arc<ObjectDescriptor>,
     /// Index into `objects` of the plan's root, recorded once
     /// [`Self::resolve`] has refused a non-`Constructor` root: `write`
     /// returns this object's word rather than assuming the last object
@@ -159,16 +154,12 @@ pub(super) struct FlattenedAnswer {
 /// back. The builder lays objects out the same way.
 const WORD: usize = std::mem::size_of::<u64>();
 
-fn align_up(offset: usize) -> usize {
-    offset.div_ceil(WORD) * WORD
-}
-
 impl FlattenedAnswer {
     /// Resolve and size `plan`. Nothing here touches the heap.
     pub(super) fn resolve<'a>(
         plan: &AnswerPlan,
         resolve: &impl Fn(DataConId) -> Option<&'a Arc<ObjectDescriptor>>,
-        bytes_descriptor: &Arc<ObjectDescriptor>,
+        _bytes_descriptor: &Arc<ObjectDescriptor>,
     ) -> Result<Self, AnswerBuildError> {
         if !matches!(plan, AnswerPlan::Constructor { .. }) {
             return Err(AnswerBuildError::UnboxedRoot);
@@ -177,7 +168,6 @@ impl FlattenedAnswer {
             objects: Vec::new(),
             byte_arrays: Vec::new(),
             handles: Vec::new(),
-            bytes_descriptor: Arc::clone(bytes_descriptor),
             root: 0,
         };
         flattened.visit(plan, resolve, 0)?;
@@ -191,11 +181,6 @@ impl FlattenedAnswer {
             .checked_sub(1)
             .ok_or(AnswerBuildError::UnboxedRoot)?;
         Ok(flattened)
-    }
-
-    /// Borrowed handles are resolved after each possible collection.
-    pub(super) fn handles(&self) -> impl Iterator<Item = PreparedHandle> + '_ {
-        self.handles.iter().copied()
     }
 
     fn visit<'a>(
@@ -241,7 +226,6 @@ impl FlattenedAnswer {
                 }
                 self.objects.push(PlannedObject {
                     host_id: *host_id,
-                    descriptor: Arc::clone(descriptor),
                     fields: planned,
                 });
                 Ok(PlannedField::Object(self.objects.len() - 1))
@@ -249,89 +233,32 @@ impl FlattenedAnswer {
         }
     }
 
-    pub(super) fn root_count(&self) -> usize {
-        self.byte_arrays.len() + self.objects.len()
-    }
-
-    pub(super) fn byte_count(&self) -> usize {
-        self.byte_arrays.len()
-    }
-
-    pub(super) fn byte_data(&self, index: usize) -> &[u8] {
-        &self.byte_arrays[index].data
-    }
-
-    pub(super) fn byte_extent(&self) -> usize {
-        align_up(self.bytes_descriptor.allocation_extent() as usize)
-    }
-
-    /// Initialize one byte wrapper. The caller guarantees that no collection
-    /// occurs before the returned tagged word reaches a registered root slot.
-    pub(super) unsafe fn write_byte(
+    pub(super) fn build(
         &self,
-        pointer: *mut u8,
-        payload: *mut u8,
-    ) -> Result<usize, AnswerBuildError> {
-        marshal_descriptor_object(
-            pointer,
-            self.bytes_descriptor.allocation_extent() as usize,
-            &self.bytes_descriptor,
-            &[DescriptorValue::Address(payload.cast_const())],
-        )
-        .map_err(AnswerBuildError::Wrapper)?;
-        Ok(pointer as usize | usize::from(self.bytes_descriptor.tag()))
-    }
-
-    pub(super) fn object_count(&self) -> usize {
-        self.objects.len()
-    }
-
-    pub(super) fn object_extent(&self, index: usize) -> usize {
-        align_up(self.objects[index].descriptor.allocation_extent() as usize)
-    }
-
-    /// Initialize one constructor from collector-updated child roots and
-    /// borrowed handle words resolved after the most recent collection.
-    pub(super) unsafe fn write_object(
-        &self,
-        index: usize,
-        pointer: *mut u8,
-        roots: &[u64],
-        handle_words: &[usize],
-    ) -> Result<usize, AnswerBuildError> {
-        let object = &self.objects[index];
-        let mut values = Vec::with_capacity(object.fields.len());
-        for field in &object.fields {
-            values.push(match field {
-                PlannedField::Scalar(bits) => DescriptorValue::Bits(*bits),
-                PlannedField::Object(index) => {
-                    DescriptorValue::Managed(roots[self.byte_arrays.len() + *index] as *mut u8)
-                }
-                PlannedField::Bytes(index) => DescriptorValue::Managed(roots[*index] as *mut u8),
-                PlannedField::Handle(index) => {
-                    DescriptorValue::Managed(handle_words[*index] as *mut u8)
-                }
-            });
+        builder: &mut ManagedBuilder<'_, '_>,
+    ) -> Result<ManagedNode, ExecutionError> {
+        let bytes = self
+            .byte_arrays
+            .iter()
+            .map(|bytes| builder.bytes(&bytes.data))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut objects = Vec::with_capacity(self.objects.len());
+        for object in &self.objects {
+            let fields = object
+                .fields
+                .iter()
+                .map(|field| match field {
+                    PlannedField::Object(index) => ManagedField::Node(objects[*index]),
+                    PlannedField::Scalar(bits) => ManagedField::Scalar(*bits),
+                    PlannedField::Bytes(index) => ManagedField::Node(bytes[*index]),
+                    PlannedField::Handle(index) => ManagedField::Handle(self.handles[*index]),
+                })
+                .collect::<Vec<_>>();
+            objects.push(builder.constructor(object.host_id, &fields)?);
         }
-        marshal_descriptor_object(
-            pointer,
-            object.descriptor.allocation_extent() as usize,
-            &object.descriptor,
-            &values,
-        )
-        .map_err(|error| AnswerBuildError::Field {
-            host_id: object.host_id,
-            index: match &error {
-                DescriptorMarshalError::Representation { index, .. }
-                | DescriptorMarshalError::ManagedReference { index } => *index,
-                _ => 0,
-            },
-            error,
-        })?;
-        Ok(pointer as usize | usize::from(object.descriptor.tag()))
-    }
-
-    pub(super) fn root_slot(&self) -> usize {
-        self.byte_arrays.len() + self.root
+        objects
+            .get(self.root)
+            .copied()
+            .ok_or(AnswerBuildError::UnboxedRoot.into())
     }
 }

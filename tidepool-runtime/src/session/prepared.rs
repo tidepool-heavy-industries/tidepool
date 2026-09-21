@@ -8,16 +8,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tidepool_bridge::HaskellValue;
+use tidepool_bridge::{BridgeError, HaskellValue, HaskellVisitor};
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
 
 use super::binding_table::BindingIndex;
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
-    AnswerPlan, CompileError, CompiledProgram, ExecutionError, ImportBindings, ParkRequest,
-    PreparedCallOptions, PreparedFrameEvidence, PreparedHandle, PreparedInput, PreparedMachine,
-    PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter, PreparedResult,
-    PreparedResultBatch, ProgramId, RunOptions, MAX_ANSWER_DEPTH,
+    AnswerPlan, CompileError, CompiledProgram, ExecutionError, ImportBindings, ManagedBuilder,
+    ManagedField, ManagedNode, ParkRequest, PreparedCallOptions, PreparedFrameEvidence,
+    PreparedHandle, PreparedInput, PreparedMachine, PreparedMachineOptions,
+    PreparedOuter as CodegenPreparedOuter, PreparedResult, PreparedResultBatch, ProgramId,
+    RunOptions, MAX_ANSWER_DEPTH,
 };
 // Re-exported: callers of this module's realm-scoped cancellation API
 // (`open_realm`/`cancel_handle`/`close_realm`) need both types without a
@@ -443,6 +444,23 @@ impl ProgramFacts {
         self.types.get(id.0 as usize)
     }
 
+    fn contains_aeson_value(&self, root: TypeNodeId) -> bool {
+        let mut pending = vec![root];
+        let mut seen = BTreeSet::new();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            if let Some(TypeNode::Data { family, rows, .. }) = self.type_node(node) {
+                if is_aeson_value(family) {
+                    return true;
+                }
+                pending.extend(rows.iter().flat_map(|row| row.fields.iter().copied()));
+            }
+        }
+        false
+    }
+
     fn constructor_identity(
         &self,
         id: tidepool_repr::execution_schema::ConstructorId,
@@ -803,6 +821,209 @@ fn scalar_bits(rep: RuntimeRep, literal: &Literal) -> Option<[u8; 16]> {
         _ => return None,
     };
     Some(word.to_ne_bytes())
+}
+
+#[derive(Clone, Copy)]
+enum StructuralExpected {
+    Node(TypeNodeId),
+    Bytes,
+    Scalar(RuntimeRep),
+}
+
+struct StructuralFrame {
+    host_id: DataConId,
+    expected: Vec<StructuralExpected>,
+    fields: Vec<ManagedField>,
+}
+
+struct StructuralAnswerVisitor<'facts, 'builder, 'machine, 'code> {
+    site: u64,
+    root: TypeNodeId,
+    facts: &'facts ProgramFacts,
+    builder: &'builder mut ManagedBuilder<'machine, 'code>,
+    frames: Vec<StructuralFrame>,
+    result: Option<ManagedNode>,
+    failure: Option<PreparedRuntimeError>,
+}
+
+impl StructuralAnswerVisitor<'_, '_, '_, '_> {
+    fn bridge_abort(&mut self, error: PreparedRuntimeError) -> BridgeError {
+        self.failure = Some(error);
+        BridgeError::TypeMismatch {
+            expected: "the parked site's answer type".into(),
+            got: "structural response mismatch".into(),
+        }
+    }
+
+    fn shape(&mut self, detail: &'static str) -> BridgeError {
+        self.bridge_abort(PreparedRuntimeError::AnswerShape {
+            site: self.site,
+            detail,
+        })
+    }
+
+    fn expected(&mut self) -> Result<StructuralExpected, BridgeError> {
+        if let Some(frame) = self.frames.last() {
+            frame
+                .expected
+                .get(frame.fields.len())
+                .copied()
+                .ok_or_else(|| self.shape("the response emits too many constructor fields"))
+        } else if self.result.is_none() {
+            Ok(StructuralExpected::Node(self.root))
+        } else {
+            Err(self.shape("the response emits more than one root"))
+        }
+    }
+
+    fn attach(&mut self, field: ManagedField) -> Result<(), BridgeError> {
+        if let Some(frame) = self.frames.last_mut() {
+            frame.fields.push(field);
+            Ok(())
+        } else if let ManagedField::Node(root) = field {
+            self.result = Some(root);
+            Ok(())
+        } else {
+            Err(self.shape("a host answer root must be a constructor"))
+        }
+    }
+
+    fn constructor_shape(
+        &mut self,
+        expected: StructuralExpected,
+        host_id: DataConId,
+    ) -> Result<Vec<StructuralExpected>, BridgeError> {
+        let StructuralExpected::Node(node) = expected else {
+            return Err(self.shape("a constructor was emitted for a scalar or byte field"));
+        };
+        let Some(node) = self.facts.type_node(node) else {
+            return Err(self.shape("the site's type evidence names an undeclared node"));
+        };
+        match node {
+            TypeNode::Data { rows, .. } => {
+                let row = rows
+                    .iter()
+                    .find(|row| {
+                        self.facts
+                            .constructors
+                            .get(row.constructor.0 as usize)
+                            .is_some_and(|(_, declared)| *declared == host_id)
+                    })
+                    .ok_or_else(|| {
+                        self.bridge_abort(PreparedRuntimeError::AnswerConstructor {
+                            site: self.site,
+                            host_id,
+                        })
+                    })?;
+                Ok(row
+                    .fields
+                    .iter()
+                    .copied()
+                    .map(StructuralExpected::Node)
+                    .collect())
+            }
+            TypeNode::Text => {
+                let text = self.facts.constructor_named(TEXT_MODULE, "Text");
+                if text != Some(host_id) {
+                    return Err(self.shape("a Text answer requires the Text constructor"));
+                }
+                Ok(vec![
+                    StructuralExpected::Bytes,
+                    StructuralExpected::Scalar(RuntimeRep::Int(64)),
+                    StructuralExpected::Scalar(RuntimeRep::Int(64)),
+                ])
+            }
+            TypeNode::Integer => {
+                let is = self.facts.constructor_named(INTEGER_MODULE, "IS");
+                let ip = self.facts.constructor_named(INTEGER_MODULE, "IP");
+                let in_ = self.facts.constructor_named(INTEGER_MODULE, "IN");
+                if is == Some(host_id) {
+                    Ok(vec![StructuralExpected::Scalar(RuntimeRep::Int(64))])
+                } else if ip == Some(host_id) || in_ == Some(host_id) {
+                    Ok(vec![StructuralExpected::Bytes])
+                } else {
+                    Err(self.shape("an Integer answer requires IS, IP or IN"))
+                }
+            }
+            TypeNode::Natural => {
+                let ns = self.facts.constructor_named(NATURAL_MODULE, "NS");
+                let nb = self.facts.constructor_named(NATURAL_MODULE, "NB");
+                if ns == Some(host_id) {
+                    Ok(vec![StructuralExpected::Scalar(RuntimeRep::Word(64))])
+                } else if nb == Some(host_id) {
+                    Ok(vec![StructuralExpected::Bytes])
+                } else {
+                    Err(self.shape("a Natural answer requires NS or NB"))
+                }
+            }
+            TypeNode::Scalar(_) => Err(self.shape("a scalar field requires a literal")),
+            TypeNode::Unconstructible { reason, .. } => Err(self.bridge_abort(
+                PreparedRuntimeError::AnswerUnconstructible {
+                    site: self.site,
+                    reason: reason.clone(),
+                },
+            )),
+        }
+    }
+}
+
+impl HaskellVisitor for StructuralAnswerVisitor<'_, '_, '_, '_> {
+    fn begin_constructor(&mut self, id: DataConId, fields: usize) -> Result<(), BridgeError> {
+        let expected = self.expected()?;
+        let shape = self.constructor_shape(expected, id)?;
+        if shape.len() != fields {
+            return Err(self.shape("the constructor's field count does not match its declaration"));
+        }
+        self.frames.push(StructuralFrame {
+            host_id: id,
+            expected: shape,
+            fields: Vec::with_capacity(fields),
+        });
+        Ok(())
+    }
+
+    fn end_constructor(&mut self) -> Result<(), BridgeError> {
+        let frame = self
+            .frames
+            .pop()
+            .ok_or_else(|| self.shape("a constructor ended without a matching begin"))?;
+        if frame.fields.len() != frame.expected.len() {
+            return Err(self.shape("a constructor ended before all fields were emitted"));
+        }
+        let node = self
+            .builder
+            .constructor(frame.host_id, &frame.fields)
+            .map_err(|error| self.bridge_abort(PreparedRuntimeError::Run(error)))?;
+        self.attach(ManagedField::Node(node))
+    }
+
+    fn literal(&mut self, literal: Literal) -> Result<(), BridgeError> {
+        let rep = match self.expected()? {
+            StructuralExpected::Node(node) => match self.facts.type_node(node) {
+                Some(TypeNode::Scalar(rep)) => *rep,
+                _ => return Err(self.shape("a literal was emitted for a constructor field")),
+            },
+            StructuralExpected::Scalar(rep) => rep,
+            StructuralExpected::Bytes => {
+                return Err(self.shape("a literal was emitted for a byte-array field"))
+            }
+        };
+        let bits = scalar_bits(rep, &literal).ok_or_else(|| {
+            self.shape("the literal does not fit the field's scalar representation")
+        })?;
+        self.attach(ManagedField::Scalar(bits))
+    }
+
+    fn byte_array(&mut self, bytes: Vec<u8>) -> Result<(), BridgeError> {
+        if !matches!(self.expected()?, StructuralExpected::Bytes) {
+            return Err(self.shape("a byte array was emitted for a non-byte field"));
+        }
+        let node = self
+            .builder
+            .bytes(&bytes)
+            .map_err(|error| self.bridge_abort(PreparedRuntimeError::Run(error)))?;
+        self.attach(ManagedField::Node(node))
+    }
 }
 
 /// Whether two site rows from two programs carry the same evidence: the same
@@ -2172,6 +2393,7 @@ impl PreparedEngine {
         let (realm, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
             ExecutionError::UnknownContinuation(id),
         ))?;
+        let evidence = *evidence;
         let site = evidence.site;
         if site == UNSITED {
             return Err(PreparedRuntimeError::UnsitedAnswer);
@@ -2311,6 +2533,107 @@ impl PreparedEngine {
             });
         }
         owner.lower_answer(row.site, row.wire, value, 0, table)
+    }
+
+    /// Whether this parked site's answer graph contains the opaque vendored
+    /// JSON family. Until the native JSON intrinsic owns that family, those
+    /// responses use the legacy decode entry; every other response can stream
+    /// directly through [`Self::resume_with_structural_answer`].
+    pub fn answer_contains_aeson(&self, id: ContinuationId) -> Result<bool, PreparedRuntimeError> {
+        let (_, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
+            ExecutionError::UnknownContinuation(id),
+        ))?;
+        if evidence.site == UNSITED {
+            return Ok(false);
+        }
+        let owner = self
+            .programs
+            .get(&evidence.owner)
+            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                evidence.owner,
+            )))?;
+        let row = owner
+            .sites
+            .iter()
+            .find(|row| row.site == evidence.site)
+            .ok_or(PreparedRuntimeError::UnknownSite {
+                site: evidence.site,
+            })?;
+        Ok(owner.contains_aeson_value(row.wire))
+    }
+
+    /// Validate and construct an owned response directly from structural
+    /// visitor events. Completed children enter the shared incremental
+    /// builder immediately, so no `HaskellValue` or `AnswerPlan` tree exists.
+    pub fn resume_with_structural_answer(
+        &mut self,
+        id: ContinuationId,
+        response: &tidepool_effect::Response,
+        table: &DataConTable,
+    ) -> Result<PreparedResumed, PreparedRuntimeError> {
+        let (realm, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
+            ExecutionError::UnknownContinuation(id),
+        ))?;
+        let evidence = *evidence;
+        if evidence.site == UNSITED {
+            return Err(PreparedRuntimeError::UnsitedAnswer);
+        }
+        if self.machine.realm_cancel_handle(realm).is_cancelled() {
+            return Err(PreparedRuntimeError::Cancelled);
+        }
+        let site = evidence.site;
+        let (programs, machine) = (&self.programs, &mut self.machine);
+        let owner = programs
+            .get(&evidence.owner)
+            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
+                evidence.owner,
+            )))?;
+        let row = owner
+            .sites
+            .iter()
+            .find(|row| row.site == site)
+            .ok_or(PreparedRuntimeError::UnknownSite { site })?;
+        if row.delivery != SiteDelivery::HostAnswer {
+            return Err(PreparedRuntimeError::AnswerDelivery {
+                site,
+                delivery: row.delivery,
+            });
+        }
+        let mut builder = machine
+            .managed_builder()
+            .map_err(PreparedRuntimeError::Run)?;
+        let mut visitor = StructuralAnswerVisitor {
+            site,
+            root: row.wire,
+            facts: owner,
+            builder: &mut builder,
+            frames: Vec::new(),
+            result: None,
+            failure: None,
+        };
+        let visited = response.visit(table, &mut visitor);
+        if let Some(error) = visitor.failure.take() {
+            return Err(error);
+        }
+        visited.map_err(|error| PreparedRuntimeError::AnswerRejected {
+            site,
+            detail: error.to_string(),
+        })?;
+        if !visitor.frames.is_empty() {
+            return Err(PreparedRuntimeError::AnswerShape {
+                site,
+                detail: "the response left a constructor unfinished",
+            });
+        }
+        let root = visitor.result.ok_or(PreparedRuntimeError::AnswerShape {
+            site,
+            detail: "the response emitted no managed answer root",
+        })?;
+        drop(visitor);
+        let answer = builder
+            .finish(realm, root)
+            .map_err(PreparedRuntimeError::Run)?;
+        self.resume_parked(id, answer)
     }
 
     /// Resolve every [`AnswerPlan::Json`] leaf of `plan` (a `HaskellValue`-carrying

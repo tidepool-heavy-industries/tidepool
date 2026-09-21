@@ -56,6 +56,9 @@ use super::{
     CompiledProgram, DescriptorMetadata, ExecutionError, ImportShapeFact, RunResult, Unsupported,
 };
 use crate::context::VMContext;
+use crate::descriptor_bridge::{
+    marshal_descriptor_object, DescriptorMarshalError, DescriptorValue,
+};
 use crate::host_fns::{prepared_gc_trigger, RuntimeError};
 use crate::machine::CancelHandle;
 use crate::machine_state::{MachineDisposition, MachineFailure, MachineState};
@@ -253,6 +256,254 @@ pub struct PreparedCallOptions {
 pub struct PreparedHandle {
     raw: ValueHandle,
     rep: RuntimeRep,
+}
+
+/// One completed object owned by an active [`ManagedBuilder`]. The index is
+/// meaningful only to that builder and never escapes as a heap address.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ManagedNode(usize);
+
+/// One logical constructor field for incremental managed construction.
+#[derive(Clone, Copy, Debug)]
+pub enum ManagedField {
+    Node(ManagedNode),
+    Scalar([u8; 16]),
+    Handle(PreparedHandle),
+}
+
+/// Incremental descriptor-authenticated construction under fixed temporary
+/// roots. Each completed object is rooted before another collection can run.
+pub struct ManagedBuilder<'machine, 'code> {
+    machine: &'machine mut PreparedMachine<'code>,
+    roots: Vec<RootWords>,
+    roots_mark: usize,
+}
+
+impl Drop for ManagedBuilder<'_, '_> {
+    fn drop(&mut self) {
+        self.machine.machine.truncate_rust_roots(self.roots_mark);
+    }
+}
+
+impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
+    fn new(machine: &'machine mut PreparedMachine<'code>) -> Result<Self, ExecutionError> {
+        machine.ensure_handle_access()?;
+        machine
+            .handles
+            .try_reserve_handles(1)
+            .map_err(|_| runtime_error(&machine.machine, RuntimeError::HeapOverflow))?;
+        if unsafe { machine.machine.prepared_old_space() }.is_some() {
+            return Err(runtime_error(&machine.machine, RuntimeError::BadPointer));
+        }
+        let roots_mark = machine.machine.rust_roots_len();
+        Ok(Self {
+            machine,
+            roots: Vec::new(),
+            roots_mark,
+        })
+    }
+
+    fn ensure_capacity(&mut self, extent: usize) -> Result<(), ExecutionError> {
+        let free = (self.machine.vmctx.alloc_limit as usize)
+            .saturating_sub(self.machine.vmctx.alloc_ptr as usize);
+        if free < extent {
+            collect_on(
+                &self.machine.machine,
+                &mut self.machine.vmctx,
+                &self.machine.old_space,
+                extent,
+            )?;
+            let free = (self.machine.vmctx.alloc_limit as usize)
+                .saturating_sub(self.machine.vmctx.alloc_ptr as usize);
+            if free < extent {
+                return Err(super::answer::AnswerBuildError::TooLarge(extent).into());
+            }
+        }
+        Ok(())
+    }
+
+    fn push_root(&mut self, word: usize) -> Result<ManagedNode, ExecutionError> {
+        let root = RootWords::new(1)?;
+        root.write(0, word as u64)?;
+        let source = root
+            .slot_address(0)
+            .ok_or_else(|| runtime_error(&self.machine.machine, RuntimeError::BadPointer))?;
+        self.machine.machine.register_rust_root(source);
+        self.roots.push(root);
+        Ok(ManagedNode(self.roots.len() - 1))
+    }
+
+    fn node_word(&self, node: ManagedNode) -> Result<usize, ExecutionError> {
+        self.roots
+            .get(node.0)
+            .ok_or_else(|| runtime_error(&self.machine.machine, RuntimeError::BadPointer))?
+            .read(0)
+            .map(|word| word as usize)
+            .map_err(|cause| runtime_error(&self.machine.machine, cause))
+    }
+
+    pub fn bytes(&mut self, bytes: &[u8]) -> Result<ManagedNode, ExecutionError> {
+        let descriptor = Arc::clone(
+            &self
+                .machine
+                .interner
+                .shared_externals()
+                .ok_or(ExecutionError::Invariant(
+                    "managed builder: no shared byte-array descriptor",
+                ))?
+                .bytes_array,
+        );
+        let extent = (descriptor.allocation_extent() as usize).next_multiple_of(8);
+        self.ensure_capacity(extent)?;
+        let payload = self
+            .machine
+            .machine
+            .allocate_external_storage(ExternalStorageKind::Bytes, bytes.len())
+            .and_then(|payload| {
+                self.machine
+                    .machine
+                    .store_external_bytes(payload, 0, bytes)
+                    .map(|()| payload)
+            })
+            .map_err(super::answer::AnswerBuildError::Storage)?;
+        let pointer = self.machine.vmctx.alloc_ptr;
+        // SAFETY: capacity above reserves `extent` bytes at the cursor and no
+        // collection can run before the wrapper is initialized and rooted.
+        let written = unsafe {
+            marshal_descriptor_object(
+                pointer,
+                descriptor.allocation_extent() as usize,
+                &descriptor,
+                &[DescriptorValue::Address(payload.cast_const())],
+            )
+        };
+        if let Err(error) = written {
+            if !self.machine.machine.release_external_storage(payload) {
+                return Err(runtime_error(
+                    &self.machine.machine,
+                    RuntimeError::BadPointer,
+                ));
+            }
+            return Err(super::answer::AnswerBuildError::Wrapper(error).into());
+        }
+        self.machine.vmctx.alloc_ptr = unsafe { pointer.add(extent) };
+        self.push_root(pointer as usize | usize::from(descriptor.tag()))
+    }
+
+    pub fn constructor(
+        &mut self,
+        host_id: DataConId,
+        fields: &[ManagedField],
+    ) -> Result<ManagedNode, ExecutionError> {
+        let descriptor = Arc::clone(
+            self.machine
+                .interner
+                .by_host(host_id)
+                .map(|(_, descriptor)| descriptor)
+                .ok_or(super::answer::AnswerBuildError::UnknownConstructor(host_id))?,
+        );
+        let expected = descriptor.payload().logical_to_stored().len();
+        if fields.len() != expected {
+            return Err(super::answer::AnswerBuildError::FieldCount {
+                host_id,
+                expected,
+                actual: fields.len(),
+            }
+            .into());
+        }
+        if descriptor.allocation_alignment() as usize > 8 {
+            return Err(super::answer::AnswerBuildError::Alignment {
+                host_id,
+                required: descriptor.allocation_alignment(),
+            }
+            .into());
+        }
+        let extent = (descriptor.allocation_extent() as usize).next_multiple_of(8);
+        self.ensure_capacity(extent)?;
+        let values = fields
+            .iter()
+            .map(|field| match field {
+                ManagedField::Node(node) => self
+                    .node_word(*node)
+                    .map(|word| DescriptorValue::Managed(word as *mut u8)),
+                ManagedField::Scalar(bits) => Ok(DescriptorValue::Bits(*bits)),
+                ManagedField::Handle(handle) => self
+                    .machine
+                    .handles
+                    .handle(handle.raw)
+                    .map(|entry| unsafe { entry.slot.current() } as usize)
+                    .filter(|word| *word != 0)
+                    .map(|word| DescriptorValue::Managed(word as *mut u8))
+                    .ok_or_else(|| super::answer::AnswerBuildError::UnknownHandle.into()),
+            })
+            .collect::<Result<Vec<_>, ExecutionError>>()?;
+        let pointer = self.machine.vmctx.alloc_ptr;
+        // SAFETY: capacity above reserves `extent` bytes at the cursor and
+        // all managed inputs were refreshed after the last possible GC.
+        unsafe {
+            marshal_descriptor_object(
+                pointer,
+                descriptor.allocation_extent() as usize,
+                &descriptor,
+                &values,
+            )
+        }
+        .map_err(|error| super::answer::AnswerBuildError::Field {
+            host_id,
+            index: match &error {
+                DescriptorMarshalError::Representation { index, .. }
+                | DescriptorMarshalError::ManagedReference { index } => *index,
+                _ => 0,
+            },
+            error,
+        })?;
+        self.machine.vmctx.alloc_ptr = unsafe { pointer.add(extent) };
+        self.push_root(pointer as usize | usize::from(descriptor.tag()))
+    }
+
+    pub fn finish(
+        self,
+        realm: RealmId,
+        root: ManagedNode,
+    ) -> Result<PreparedHandle, ExecutionError> {
+        let source = self
+            .roots
+            .get(root.0)
+            .and_then(|root| root.slot_address(0))
+            .ok_or_else(|| runtime_error(&self.machine.machine, RuntimeError::BadPointer))?;
+        unsafe {
+            self.machine
+                .machine
+                .install_prepared_old_space(&self.machine.old_space)
+        };
+        let retained = unsafe {
+            self.machine.old_space.retain_prepared(
+                &self.machine.machine,
+                &mut self.machine.vmctx,
+                &[source],
+                &self.machine.descriptors,
+            )
+        };
+        self.machine.machine.clear_prepared_old_space();
+        let mut retained = retained.map_err(|cause| runtime_error(&self.machine.machine, cause))?;
+        let Some(root) = retained.pop().filter(|_| retained.is_empty()) else {
+            for root in retained {
+                self.machine.machine.deregister_persistent_root(root.addr());
+            }
+            return Err(runtime_error(
+                &self.machine.machine,
+                RuntimeError::BadPointer,
+            ));
+        };
+        let raw = self
+            .machine
+            .handles
+            .insert_handle(root, realm, RuntimeRep::LiftedRef);
+        Ok(PreparedHandle {
+            raw,
+            rep: RuntimeRep::LiftedRef,
+        })
+    }
 }
 
 impl PreparedHandle {
@@ -1998,7 +2249,6 @@ impl<'code> PreparedMachine<'code> {
         realm: RealmId,
         plan: &super::answer::AnswerPlan,
     ) -> Result<PreparedHandle, ExecutionError> {
-        self.ensure_handle_access()?;
         let bytes_descriptor = Arc::clone(
             &self
                 .interner
@@ -2014,114 +2264,15 @@ impl<'code> PreparedMachine<'code> {
             &|id| self.interner.by_host(id).map(|(_, descriptor)| descriptor),
             &bytes_descriptor,
         )?;
-        let free = |vmctx: &VMContext| {
-            (vmctx.alloc_limit as usize).saturating_sub(vmctx.alloc_ptr as usize)
-        };
-        let roots = RootWords::new(flattened.root_count())?;
-        let mark = self.machine.rust_roots_len();
-        for index in 0..roots.len() {
-            let slot = roots
-                .slot_address(index)
-                .ok_or_else(|| runtime_error(&self.machine, RuntimeError::BadPointer))?;
-            self.machine.register_rust_root(slot);
-        }
-        let _temporary_roots = TemporaryRoots {
-            machine: &self.machine,
-            mark,
-        };
-        self.handles
-            .try_reserve_handles(1)
-            .map_err(|_| runtime_error(&self.machine, RuntimeError::HeapOverflow))?;
-        if unsafe { self.machine.prepared_old_space() }.is_some() {
-            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
-        }
-        for index in 0..flattened.byte_count() {
-            let extent = flattened.byte_extent();
-            if free(&self.vmctx) < extent {
-                collect_on(&self.machine, &mut self.vmctx, &self.old_space, extent)?;
-                if free(&self.vmctx) < extent {
-                    return Err(super::answer::AnswerBuildError::TooLarge(extent).into());
-                }
-            }
-            let bytes = flattened.byte_data(index);
-            let allocated = self
-                .machine
-                .allocate_external_storage(ExternalStorageKind::Bytes, bytes.len())
-                .and_then(|payload| {
-                    self.machine
-                        .store_external_bytes(payload, 0, bytes)
-                        .map(|()| payload)
-                });
-            let payload = allocated.map_err(super::answer::AnswerBuildError::Storage)?;
-            let pointer = self.vmctx.alloc_ptr;
-            let word = match unsafe { flattened.write_byte(pointer, payload) } {
-                Ok(word) => word,
-                Err(error) => {
-                    if !self.machine.release_external_storage(payload) {
-                        return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
-                    }
-                    return Err(error.into());
-                }
-            };
-            self.vmctx.alloc_ptr = unsafe { pointer.add(extent) };
-            roots.write(index, word as u64)?;
-        }
+        let mut builder = self.managed_builder()?;
+        let root = flattened.build(&mut builder)?;
+        builder.finish(realm, root)
+    }
 
-        for index in 0..flattened.object_count() {
-            let extent = flattened.object_extent(index);
-            if free(&self.vmctx) < extent {
-                collect_on(&self.machine, &mut self.vmctx, &self.old_space, extent)?;
-                if free(&self.vmctx) < extent {
-                    return Err(super::answer::AnswerBuildError::TooLarge(extent).into());
-                }
-            }
-            // A collection can move borrowed handles and completed children,
-            // so read both only after capacity has been established.
-            let handle_words = flattened
-                .handles()
-                .map(|handle| {
-                    self.handles
-                        .handle(handle.raw)
-                        .map(|entry| unsafe { entry.slot.current() } as usize)
-                        .filter(|word| *word != 0)
-                        .ok_or(super::answer::AnswerBuildError::UnknownHandle)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let child_words = roots.snapshot();
-            let pointer = self.vmctx.alloc_ptr;
-            let word =
-                unsafe { flattened.write_object(index, pointer, &child_words, &handle_words) }?;
-            self.vmctx.alloc_ptr = unsafe { pointer.add(extent) };
-            roots.write(flattened.byte_count() + index, word as u64)?;
-        }
-
-        let source = roots
-            .slot_address(flattened.root_slot())
-            .ok_or_else(|| runtime_error(&self.machine, RuntimeError::BadPointer))?;
-        unsafe { self.machine.install_prepared_old_space(&self.old_space) };
-        let retained = unsafe {
-            self.old_space.retain_prepared(
-                &self.machine,
-                &mut self.vmctx,
-                &[source],
-                &self.descriptors,
-            )
-        };
-        self.machine.clear_prepared_old_space();
-        let mut roots = retained.map_err(|cause| runtime_error(&self.machine, cause))?;
-        let Some(root) = roots.pop().filter(|_| roots.is_empty()) else {
-            for root in roots {
-                self.machine.deregister_persistent_root(root.addr());
-            }
-            return Err(runtime_error(&self.machine, RuntimeError::BadPointer));
-        };
-        let raw = self
-            .handles
-            .insert_handle(root, realm, RuntimeRep::LiftedRef);
-        Ok(PreparedHandle {
-            raw,
-            rep: RuntimeRep::LiftedRef,
-        })
+    /// Start one incremental managed construction operation. Dropping the
+    /// builder publishes no handle and releases all temporary root ownership.
+    pub fn managed_builder(&mut self) -> Result<ManagedBuilder<'_, 'code>, ExecutionError> {
+        ManagedBuilder::new(self)
     }
 
     /// The persistent root slot behind a retained handle, for an owner that
