@@ -620,6 +620,13 @@ impl ExtractCmd {
         self
     }
 
+    /// Provide one module containing all indexed `inspect_type` probes.
+    /// Individual input modules remain the per-query fallback on source errors.
+    pub fn inspect_type_batch(&mut self, path: impl AsRef<Path>) -> &mut Self {
+        self.request.inspect_type_batch(path.as_ref());
+        self
+    }
+
     /// The full argv (positional inputs first, then flags in the order they
     /// were set), without the program. Exposed for tests and diagnostics.
     pub fn argv(&self) -> Vec<OsString> {

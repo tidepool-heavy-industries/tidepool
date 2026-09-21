@@ -29,6 +29,7 @@ typedInspectionDecodes = case workerRequestFromArgv
     , InspectBrowseExpanded "Tidepool.Actors.Shoal"
     , InspectSearch "Response result -> Await (Settlement result)"
     , InspectOut "inspection.cbor"
+    , InspectTypeBatch "type-batch/Expr.hs"
     ]) of
   Right (Just request) ->
     requestInspections request ==
@@ -38,6 +39,7 @@ typedInspectionDecodes = case workerRequestFromArgv
       , InspectTypeSearch "Response result -> Await (Settlement result)"
       ]
       && requestInspectOut request == Just "inspection.cbor"
+      && requestInspectTypeBatch request == Just "type-batch/Expr.hs"
   _ -> False
 
 structuredInspectionDecodes :: Bool

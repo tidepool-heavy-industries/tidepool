@@ -77,6 +77,9 @@ enum Field {
     InspectStructuredInfo(StructuredInspection),
     InspectStructuredType(StructuredInspection),
     InspectOut(OsString),
+    /// One source containing every indexed `InspectType` probe. Singleton
+    /// input sources remain in `Input` fields for typed-error fallback.
+    InspectTypeBatch(PathBuf),
     RetainedGeneration(SymbolIdentity, u64),
     /// A `--turn` request that also writes its target's prepared-STG program
     /// (`<target>.prepared.cbor`), compiled against the retained generations.
@@ -241,6 +244,7 @@ impl ExtractRequest {
                     Field::RetainedGeneration(identity, decoder.u64()?)
                 }
                 39 => Field::PreparedTurn,
+                40 => Field::InspectTypeBatch(PathBuf::from(decoder.os_string()?)),
                 other => return Err(ProtocolError::UnknownFieldTag(other)),
             };
             fields.push(field);
@@ -440,6 +444,10 @@ impl ExtractRequest {
             .push(Field::InspectOut(value.as_ref().to_owned()));
     }
 
+    pub(crate) fn inspect_type_batch(&mut self, value: &Path) {
+        self.fields.push(Field::InspectTypeBatch(value.to_owned()));
+    }
+
     pub(crate) fn cli_argv(&self) -> Vec<OsString> {
         let mut inputs = Vec::new();
         let mut flags = Vec::new();
@@ -496,6 +504,9 @@ impl ExtractRequest {
                     structured_flag(&mut flags, "--inspect-structured-type", query)
                 }
                 Field::InspectOut(value) => flag(&mut flags, "--inspect-out", value),
+                Field::InspectTypeBatch(value) => {
+                    flag(&mut flags, "--inspect-type-batch", value.as_os_str())
+                }
                 Field::RetainedGeneration(identity, generation) => flag(
                     &mut flags,
                     "--retained-generation",
@@ -767,6 +778,10 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
             out.extend_from_slice(&generation.to_le_bytes());
         }
         Field::PreparedTurn => out.push(39),
+        Field::InspectTypeBatch(value) => {
+            out.push(40);
+            push_frame(out, value.as_os_str());
+        }
     }
 }
 
@@ -997,6 +1012,23 @@ mod tests {
             .cli_argv()
             .iter()
             .any(|arg| arg == "--prepared-turn"));
+    }
+
+    #[test]
+    fn inspection_type_batch_round_trips_through_the_typed_protocol() {
+        let mut request = ExtractRequest::default();
+        request.input("query-0/Expr.hs");
+        request.input("query-1/Expr.hs");
+        request.inspect_type("id");
+        request.inspect_type("1");
+        request.inspect_type_batch(Path::new("type-batch/Expr.hs"));
+
+        let decoded = ExtractRequest::decode(&request.encode()).unwrap();
+        assert_eq!(decoded.cli_argv(), request.cli_argv());
+        assert!(decoded
+            .cli_argv()
+            .windows(2)
+            .any(|args| args == ["--inspect-type-batch", "type-batch/Expr.hs"]));
     }
 
     #[test]

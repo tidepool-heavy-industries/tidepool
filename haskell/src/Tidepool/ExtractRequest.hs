@@ -55,6 +55,7 @@ data RequestField
   | InspectStructuredInfo StructuredInspection
   | InspectStructuredType StructuredInspection
   | InspectOut FilePath
+  | InspectTypeBatch FilePath
   | RetainedGeneration SymbolIdentity Word64
   | PreparedTurn
   deriving (Eq, Show)
@@ -87,6 +88,7 @@ data WorkerRequest = WorkerRequest
   , requestBuildProductsDir :: Maybe FilePath
   , requestInspections :: [InspectionRequest]
   , requestInspectOut :: Maybe FilePath
+  , requestInspectTypeBatch :: Maybe FilePath
   -- | Executable imports: symbols the caller has already retained at a prior
   -- generation. The projection excludes each one from recovery and declares
   -- it as a global carrying that generation, even when its defining module
@@ -125,6 +127,7 @@ emptyWorkerRequest = WorkerRequest
   , requestBuildProductsDir = Nothing
   , requestInspections = []
   , requestInspectOut = Nothing
+  , requestInspectTypeBatch = Nothing
   , requestRetainedGenerations = Map.empty
   , requestPreparedTurn = False
   }
@@ -207,6 +210,7 @@ requestFromFields = foldl apply emptyWorkerRequest
       InspectStructuredType query -> request
         { requestInspections = requestInspections request ++ [InspectStructuredTypeOf query] }
       InspectOut path -> request { requestInspectOut = Just path }
+      InspectTypeBatch path -> request { requestInspectTypeBatch = Just path }
       RetainedGeneration identity generation -> request
         { requestRetainedGenerations =
             Map.insert identity generation (requestRetainedGenerations request) }
@@ -280,6 +284,7 @@ encodeField field = case field of
   RetainedGeneration identity generation ->
     BS.singleton 38 <> encodeSymbolIdentity identity <> putU64 generation
   PreparedTurn -> BS.singleton 39
+  InspectTypeBatch value -> taggedText 40 value
 
 encodeSymbolIdentity :: SymbolIdentity -> BS.ByteString
 encodeSymbolIdentity identity =
@@ -380,6 +385,7 @@ pField bytes = do
       (generation, rest'') <- pWord64 rest'
       Right (RetainedGeneration identity generation, rest'')
     39 -> Right (PreparedTurn, rest)
+    40 -> mapParser InspectTypeBatch pText rest
     _  -> Left ("worker request: unknown field tag " ++ show tag)
   where
     retired tag = Left ("worker request: retired field tag " ++ show tag)

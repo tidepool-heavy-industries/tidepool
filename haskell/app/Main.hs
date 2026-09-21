@@ -221,6 +221,9 @@ dispatch compiler caches timing args =
     [] -> reportDiags (Left (toException (userError "worker request contains no input")))
     (file : _)
         -- Classification consumes every input; all other modes use the first.
+        | isJust (requestInspectTypeBatch args)
+          && not (length (requestInspections args) > 1 && all isInspectionTypeQuery (requestInspections args))
+                                                  -> reportDiags (Left (toException (userError "inspection type batch requires at least two type queries and no other query kinds")))
         | requestCell args                        -> runCellMode compiler args file
         | requestClassify args                    -> runClassifyMode timing args
         | not (null (requestInspections args))    -> runInspectionMode compiler args file
@@ -240,7 +243,32 @@ runInspectionMode compiler args _path = do
     if length queries /= length (requestFiles args)
       then fail "inspection request must carry exactly one source per query"
       else pure ()
-    results <- fmap concat $ forM (zip (requestFiles args) queries) $ \(path, query) -> do
+    results <- case requestInspectTypeBatch args of
+      Nothing -> runSingletons scope queries
+      Just batchPath
+        | length queries > 1 && all isInspectionTypeQuery queries -> do
+            -- Validate producer infrastructure outside the SourceError catch:
+            -- only a compiler rejection of readable authored source may fall
+            -- back to the preserved singleton modules.
+            _ <- BS.readFile batchPath
+            compiled <- try (compiler LegacyCore Set.empty GeneralCompile scope batchPath (requestIncludes args) (requestBuildProductsDir args))
+            case compiled of
+              Left exception -> case fromException exception of
+                Just (_ :: SourceError) -> runSingletons scope queries
+                Nothing -> throwIO exception
+              Right successful -> inspect successful queries
+        | otherwise -> fail "inspection type batch requires at least two type queries and no other query kinds"
+    BS.writeFile out (encodeInspectionResults results)
+  reportDiags res
+  where
+    inspect successful queries = runInspection
+      (prHscEnv successful)
+      (prTargetTcGblEnv successful)
+      (prTargetRdrEnv successful)
+      (prCapturedTypes successful)
+      queries
+
+    runSingletons scope queries = fmap concat $ forM (zip (requestFiles args) queries) $ \(path, query) -> do
       let purpose = case query of
             InspectTypeSearch _ -> LookupTypeCompile
             _ -> GeneralCompile
@@ -250,14 +278,12 @@ runInspectionMode compiler args _path = do
           Just (sourceError :: SourceError) ->
             pure [InspectionRejected (renderInspectionDiagnostics sourceError)]
           Nothing -> throwIO exception
-        Right successful -> runInspection
-          (prHscEnv successful)
-          (prTargetTcGblEnv successful)
-          (prTargetRdrEnv successful)
-          (prCapturedTypes successful)
-          [query]
-    BS.writeFile out (encodeInspectionResults results)
-  reportDiags res
+        Right successful -> inspect successful [query]
+
+isInspectionTypeQuery :: InspectionRequest -> Bool
+isInspectionTypeQuery query = case query of
+  InspectTypeOf _ -> True
+  _ -> False
 
 renderInspectionDiagnostics :: SourceError -> String
 renderInspectionDiagnostics = intercalate "\n" . map render . diagsFromSourceError
@@ -268,20 +294,36 @@ renderInspectionDiagnostics = intercalate "\n" . map render . diagsFromSourceErr
       Nothing -> ""
 
 
--- | Prepend the harness language profile to a scratch copy of the first input.
--- Putting the profile in source keeps it visible to GHC downsweep and to
--- source-based cache keys. The caller's file is never modified; diagnostics
--- are shifted by the inserted line.
+-- | Prepend the harness language profile to scratch input copies. Inspection
+-- requests profile every singleton fallback and their optional batch source;
+-- other modes compile only the first input. Putting the profile in source
+-- keeps it visible to GHC downsweep and source-based cache keys. Caller files
+-- are never modified; diagnostics are shifted by the inserted line.
 spliceHarnessProfilePragma :: WorkerRequest -> IO WorkerRequest
 spliceHarnessProfilePragma args = case requestFiles args of
   [] -> pure args
   (file : rest) -> do
-    src <- readFile file
     let outDir = fromMaybe (takeDirectory file </> takeBaseName file ++ "_cbor") (requestOutDir args)
-        scratchPath = outDir </> takeFileName file
-    createDirectoryIfMissing True outDir
-    writeFile scratchPath (harnessProfilePragmaLine ++ "\n" ++ src)
-    pure args { requestFiles = scratchPath : rest }
+        profileCopy directory sourcePath = do
+          source <- readFile sourcePath
+          let scratchPath = directory </> takeFileName sourcePath
+          createDirectoryIfMissing True directory
+          writeFile scratchPath (harnessProfilePragmaLine ++ "\n" ++ source)
+          pure scratchPath
+    if null (requestInspections args)
+      then do
+        scratchPath <- profileCopy outDir file
+        pure args { requestFiles = scratchPath : rest }
+      else do
+        files <- forM (zip [0 :: Int ..] (file : rest)) $ \(index, sourcePath) ->
+          profileCopy (outDir </> "inspection-query-" ++ show index) sourcePath
+        batch <- case requestInspectTypeBatch args of
+          Nothing -> pure Nothing
+          Just sourcePath -> Just <$> profileCopy (outDir </> "inspection-type-batch") sourcePath
+        pure args
+          { requestFiles = files
+          , requestInspectTypeBatch = batch
+          }
 
 -- | Harness language extensions. A cross-language consistency test pins this
 -- to the runtime-owned canonical eval dialect.

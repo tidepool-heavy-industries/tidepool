@@ -351,7 +351,9 @@ pub struct InspectionRequest<'a> {
 /// Inspect an ordered batch without evaluating it or mutating the resident
 /// session. Every query sees the same preamble, imports, session modules, and
 /// injected value interfaces as the next ordinary turn. The worker serves the
-/// batch through one request while isolating GHC rejection per query.
+/// batch through one request while isolating GHC rejection per query. A
+/// homogeneous batch of type probes is compiled together first; its original
+/// singleton sources remain available if that combined source is rejected.
 pub fn run_inspections(
     request: InspectionRequest<'_>,
 ) -> Result<Vec<InspectionResult>, CompileError> {
@@ -372,6 +374,22 @@ pub fn run_inspections(
         Some(_) => format!("{}\nqualified Data.Proxy\n", request.imports),
         None => request.imports.to_owned(),
     };
+    let type_batch = request
+        .queries
+        .iter()
+        .map(|query| match query {
+            InspectionQuery::TypeOf(expression) => Some(expression.clone()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .filter(|expressions| {
+            expressions.len() > 1
+                && !request.preamble.contains("__tidepool_inspect_")
+                && !request.imports.contains("__tidepool_inspect_")
+                && !expressions
+                    .iter()
+                    .any(|expression| expression.contains("__tidepool_inspect_"))
+        });
     for (index, query) in request.queries.iter().enumerate() {
         let query_dir = temp.path().join(format!("query-{index}"));
         std::fs::create_dir(&query_dir)?;
@@ -417,6 +435,19 @@ pub fn run_inspections(
                 command.inspect_structured_type(structured_request(query, provenance));
             }
         }
+    }
+    if let Some(expressions) = type_batch {
+        let batch_dir = temp.path().join("type-batch");
+        std::fs::create_dir(&batch_dir)?;
+        let batch_path = batch_dir.join("Expr.hs");
+        let mut source = assemble_inspection_module(request.preamble, &imports, &expressions);
+        if let Some(effects) = request.effects {
+            source.push_str("\n__tidepool_lookup_row :: Data.Proxy.Proxy (");
+            source.push_str(effects);
+            source.push_str(")\n__tidepool_lookup_row = Data.Proxy.Proxy\n");
+        }
+        std::fs::write(&batch_path, source)?;
+        command.inspect_type_batch(&batch_path);
     }
 
     let endpoint = command.bind().map_err(map_spawn)?;
@@ -1395,5 +1426,127 @@ mod tests {
             InspectionResult::StructuredInfo(Err(QueryError::Unsupported(detail)))
                 if detail.contains("abstract newtype constructor")
         ));
+    }
+
+    #[test]
+    fn type_probe_batch_preserves_independent_types_and_rejected_siblings() {
+        eval_harness::require_extract();
+        let session = tempfile::tempdir().unwrap();
+        let preamble = concat!(
+            "{-# LANGUAGE NoImplicitPrelude, ExtendedDefaultRules #-}\n",
+            "module Expr where\n",
+            "import Prelude\n",
+        );
+        let valid_queries = [
+            InspectionQuery::TypeOf("id".into()),
+            InspectionQuery::TypeOf("1".into()),
+            InspectionQuery::TypeOf("const".into()),
+        ];
+        let inspect = |queries: &[InspectionQuery]| {
+            run_inspections(InspectionRequest {
+                preamble,
+                imports: "",
+                include: &[],
+                session_root: session.path(),
+                inject_modules: &[],
+                queries,
+                effects: None,
+            })
+            .unwrap()
+        };
+
+        let valid = inspect(&valid_queries);
+        let singleton_results = valid_queries
+            .iter()
+            .map(|query| inspect(std::slice::from_ref(query)).remove(0))
+            .collect::<Vec<_>>();
+        assert_eq!(valid, singleton_results);
+        assert!(matches!(
+            &valid[0],
+            InspectionResult::Type { expression, display, .. }
+                if expression == "id" && display.contains("->")
+        ));
+        assert!(matches!(
+            &valid[1],
+            InspectionResult::Type { expression, display, .. }
+                if expression == "1" && !display.is_empty()
+        ));
+        assert!(matches!(
+            &valid[2],
+            InspectionResult::Type { expression, display, .. }
+                if expression == "const" && display.contains("->")
+        ));
+
+        let invalid_queries = [
+            InspectionQuery::TypeOf("id".into()),
+            InspectionQuery::TypeOf("missing + 1".into()),
+            InspectionQuery::TypeOf("const".into()),
+        ];
+        let isolated = inspect(&invalid_queries);
+        assert!(
+            matches!(&isolated[0], InspectionResult::Type { expression, .. } if expression == "id")
+        );
+        assert!(matches!(&isolated[1], InspectionResult::Rejected { .. }));
+        assert!(
+            matches!(&isolated[2], InspectionResult::Type { expression, .. } if expression == "const")
+        );
+
+        // Generated probe bindings share a module only in the batch form. If
+        // authored source names that private prefix, keep singleton scoping so
+        // one query cannot resolve another query's generated binder.
+        let generated_name_queries = [
+            InspectionQuery::TypeOf("id".into()),
+            InspectionQuery::TypeOf("__tidepool_inspect_0 1".into()),
+        ];
+        let generated_name_results = inspect(&generated_name_queries);
+        let generated_name_singletons = generated_name_queries
+            .iter()
+            .map(|query| inspect(std::slice::from_ref(query)).remove(0))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            (&generated_name_results[0], &generated_name_singletons[0]),
+            (InspectionResult::Type { display: batched, .. }, InspectionResult::Type { display: singleton, .. })
+                if batched == singleton
+        ));
+        assert!(matches!(
+            (&generated_name_results[1], &generated_name_singletons[1]),
+            (
+                InspectionResult::Rejected { .. },
+                InspectionResult::Rejected { .. }
+            )
+        ));
+    }
+
+    #[test]
+    fn ninety_five_type_probes_share_one_valid_batch() {
+        eval_harness::require_extract();
+        let session = tempfile::tempdir().unwrap();
+        let queries = (0..95)
+            .map(|_| InspectionQuery::TypeOf("id".into()))
+            .collect::<Vec<_>>();
+        let results = run_inspections(InspectionRequest {
+            preamble: concat!(
+                "{-# LANGUAGE NoImplicitPrelude #-}\n",
+                "module Expr where\n",
+                "import Prelude\n",
+            ),
+            imports: "",
+            include: &[],
+            session_root: session.path(),
+            inject_modules: &[],
+            queries: &queries,
+            effects: None,
+        })
+        .unwrap();
+
+        assert_eq!(results.len(), 95);
+        assert!(results.iter().all(|result| matches!(
+            result,
+            InspectionResult::Type {
+                expression,
+                display,
+                ..
+            } if expression == "id" && display.contains("->")
+        )));
     }
 }
