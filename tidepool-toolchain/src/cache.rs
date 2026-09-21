@@ -4,15 +4,6 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Returns the cache directory for Tidepool's compiled-artifact memos.
-/// Delegates to the canonical resolver ([`crate::paths::compile_cache_dir`]),
-/// which is [`crate::paths::cache_dir`] unless `$TIDEPOOL_COMPILE_CACHE_DIR`
-/// redirects the memo somewhere shared; wrapped
-/// in `Some` since every call site uses `?`/`Option` combinators.
-fn cache_dir() -> Option<PathBuf> {
-    Some(crate::paths::compile_cache_dir())
-}
-
 /// A content-addressed cache key: the blake3 hex digest of a compilation
 /// request. A newtype so a raw string can't be mistaken for a computed key at
 /// the [`cache_load`]/[`cache_store`] boundary (the digest also names the
@@ -56,27 +47,9 @@ pub(crate) fn eval_cache_key(
     salt: Option<&str>,
     endpoint_identity: &[u8],
 ) -> Option<CacheKey> {
-    if has_untracked_cpp_inputs(source, include) {
+    if source_has_untracked_cpp_inputs(source) {
         return None;
     }
-    Some(cache_key_raw(
-        source,
-        target,
-        include,
-        salt,
-        endpoint_identity,
-    ))
-}
-
-/// Digest builder beneath [`eval_cache_key`]. Kept private so production code
-/// cannot mint a key without first applying the cacheability policy.
-fn cache_key_raw(
-    source: &str,
-    target: &str,
-    include: &[PathBuf],
-    salt: Option<&str>,
-    endpoint_identity: &[u8],
-) -> CacheKey {
     let mut hasher = blake3::Hasher::new();
     // Length-prefixed framing: NUL separators alone let a NUL embedded in one
     // field shift bytes across the boundary (key("a\0b","c") == key("a","b\0c")),
@@ -97,12 +70,16 @@ fn cache_key_raw(
     frame(&mut hasher, &(include.len() as u64).to_le_bytes());
     for root in include {
         frame(&mut hasher, root.as_os_str().as_encoded_bytes());
-        fingerprint_dir(root, &mut hasher);
+        let manifest = dependency_source_manifest(root);
+        if !manifest.cacheable {
+            return None;
+        }
+        manifest.fingerprint(root, &mut hasher);
     }
 
     frame(&mut hasher, endpoint_identity);
 
-    CacheKey(hasher.finalize().to_hex().to_string())
+    Some(CacheKey(hasher.finalize().to_hex().to_string()))
 }
 
 /// Hash a length-prefixed field: unambiguous framing regardless of content.
@@ -111,15 +88,19 @@ fn frame(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
-/// Recursively walks a directory to fingerprint its Haskell dependency
-/// sources. The source manifest is shared with invocation keying so the two
-/// cache generations cannot drift onto different extension allowlists.
-fn fingerprint_dir(dir: &Path, hasher: &mut blake3::Hasher) {
-    let files = dependency_source_manifest(dir);
-    frame(hasher, &(files.len() as u64).to_le_bytes());
-    for (rel, digest) in files {
-        frame(hasher, dir.join(rel).as_os_str().as_encoded_bytes());
-        frame(hasher, &digest);
+/// One read of each dependency supplies both cacheability and content identity.
+struct DependencyManifest {
+    files: Vec<(PathBuf, Vec<u8>)>,
+    cacheable: bool,
+}
+
+impl DependencyManifest {
+    fn fingerprint(&self, prefix: &Path, hasher: &mut blake3::Hasher) {
+        frame(hasher, &(self.files.len() as u64).to_le_bytes());
+        for (rel, digest) in &self.files {
+            frame(hasher, prefix.join(rel).as_os_str().as_encoded_bytes());
+            frame(hasher, digest);
+        }
     }
 }
 
@@ -133,12 +114,15 @@ fn fingerprint_dir(dir: &Path, hasher: &mut blake3::Hasher) {
 /// otherwise recurse forever. Canonicalizing and checking membership before
 /// descending breaks the cycle (and, as a side effect, a diamond of two
 /// symlinks to the same real directory is only hashed once).
-fn dependency_source_manifest(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
-    let mut files = Vec::new();
+fn dependency_source_manifest(root: &Path) -> DependencyManifest {
+    let mut manifest = DependencyManifest {
+        files: Vec::new(),
+        cacheable: true,
+    };
     let mut visited = std::collections::HashSet::new();
-    collect_dependency_sources(root, root, &mut files, &mut visited);
-    files.sort_by(|(a, _), (b, _)| a.cmp(b));
-    files
+    collect_dependency_sources(root, root, &mut manifest, &mut visited);
+    manifest.files.sort_by(|(a, _), (b, _)| a.cmp(b));
+    manifest
 }
 
 /// The same per-file content manifest a compiled artifact is keyed by, as
@@ -154,6 +138,7 @@ fn dependency_source_manifest(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 #[must_use]
 pub fn source_root_manifest(root: &Path) -> Vec<(PathBuf, String)> {
     dependency_source_manifest(root)
+        .files
         .into_iter()
         .map(|(rel, digest)| {
             let hex = match digest.split_first() {
@@ -195,7 +180,7 @@ fn hex_digest(bytes: &[u8]) -> String {
 fn collect_dependency_sources(
     root: &Path,
     dir: &Path,
-    out: &mut Vec<(PathBuf, Vec<u8>)>,
+    out: &mut DependencyManifest,
     visited: &mut std::collections::HashSet<PathBuf>,
 ) {
     if let Ok(canon) = fs::canonicalize(dir) {
@@ -222,13 +207,18 @@ fn collect_dependency_sources(
         // `fs::read` follows source symlinks, matching what GHC compiles.
         let digest = match fs::read(&path) {
             Ok(bytes) => {
+                out.cacheable &= std::str::from_utf8(&bytes)
+                    .is_ok_and(|source| !source_has_untracked_cpp_inputs(source));
                 let mut digest = vec![1];
                 digest.extend_from_slice(blake3::hash(&bytes).as_bytes());
                 digest
             }
-            Err(_) => vec![0],
+            Err(_) => {
+                out.cacheable = false;
+                vec![0]
+            }
         };
-        out.push((rel, digest));
+        out.files.push((rel, digest));
     }
 }
 
@@ -256,23 +246,6 @@ fn source_has_untracked_cpp_inputs(source: &str) -> bool {
     })
 }
 
-/// Whether the target or any Haskell dependency source can reach arbitrary
-/// CPP side inputs. Dependency files are read from the same shared manifest
-/// used for both key generations; a non-UTF-8 source is conservatively cold.
-fn has_untracked_cpp_inputs(source: &str, include: &[PathBuf]) -> bool {
-    source_has_untracked_cpp_inputs(source)
-        || include.iter().any(|root| {
-            dependency_source_manifest(root)
-                .into_iter()
-                .any(|(rel, _)| match fs::read(root.join(rel)) {
-                    Ok(bytes) => std::str::from_utf8(&bytes)
-                        .map(source_has_untracked_cpp_inputs)
-                        .unwrap_or(true),
-                    Err(_) => true,
-                })
-        })
-}
-
 /// Sentinel payload: blake3(meta_bytes) || blake3(asks_bytes) ||
 /// blake3(prepared_bytes), 96 raw bytes.
 /// Anything else (missing, empty, wrong length — an old-format entry from
@@ -288,7 +261,7 @@ type CachedArtifactParts = (Vec<u8>, Vec<u8>, Vec<u8>);
 /// still decodes as valid CBOR would otherwise be served as a different
 /// program, so a checksum mismatch falls through to a MISS/recompile instead.
 pub(crate) fn cache_load(key: &CacheKey) -> Option<CachedArtifactParts> {
-    let dir = cache_dir()?;
+    let dir = crate::paths::compile_cache_dir();
     let sentinel_path = dir.join(format!("{}.ok", key));
     let sentinel = fs::read(&sentinel_path).ok()?;
     if sentinel.len() != SENTINEL_LEN {
@@ -324,7 +297,7 @@ pub(crate) fn cache_store(
     asks_bytes: &[u8],
     prepared_bytes: &[u8],
 ) {
-    let Some(dir) = cache_dir() else { return };
+    let dir = crate::paths::compile_cache_dir();
     if fs::create_dir_all(&dir).is_err() {
         return;
     }
@@ -498,9 +471,6 @@ pub struct Invocation<'a> {
 /// see that field's doc) — every other `--inject-val`/`--session-root` still
 /// falls through to the default-deny arm below.
 pub fn invocation_key(inv: &Invocation<'_>) -> Option<InvocationKey> {
-    if has_untracked_cpp_inputs(inv.source, inv.include) {
-        return None;
-    }
     // Walk first, so an uncacheable invocation costs no hashing.
     let mut fields: Vec<&OsStr> = Vec::new();
     let mut stable_session_root: Option<&OsStr> = None;
@@ -537,6 +507,9 @@ pub fn invocation_key(inv: &Invocation<'_>) -> Option<InvocationKey> {
         return None;
     }
 
+    if source_has_untracked_cpp_inputs(inv.source) {
+        return None;
+    }
     let mut hasher = blake3::Hasher::new();
     frame(&mut hasher, INVOCATION_NAMESPACE);
     frame(&mut hasher, inv.source.as_bytes());
@@ -551,7 +524,11 @@ pub fn invocation_key(inv: &Invocation<'_>) -> Option<InvocationKey> {
     // different compilations and must not share a key.
     frame(&mut hasher, &(inv.include.len() as u64).to_le_bytes());
     for root in inv.include {
-        fingerprint_dir_relative(root, &mut hasher);
+        let manifest = dependency_source_manifest(root);
+        if !manifest.cacheable {
+            return None;
+        }
+        manifest.fingerprint(Path::new(""), &mut hasher);
     }
 
     if let (Some(sv), Some(root)) = (inv.stable_val, stable_session_root) {
@@ -581,28 +558,10 @@ fn fingerprint_stable_val_iface(hi_path: &Path, hasher: &mut blake3::Hasher) {
 /// Fingerprints an include root by CONTENT, keyed by each file's path
 /// RELATIVE to that root.
 ///
-/// The relative keying is the deliberate divergence from [`fingerprint_dir`],
-/// which frames absolute paths. It is what makes one memo shareable across
-/// processes that materialized identical trees at different locations (the
-/// generated effects module and test fixtures both live under a per-process
-/// tempdir), and it is sound because the absolute location of an include dir
-/// does not reach the output bytes: Cast/Tick/Type erasure happens in the
-/// Haskell serializer, so Core carries no source spans. Module identity comes
-/// from the path relative to the search root — which IS keyed.
-///
-/// Files are collected then sorted globally, so the digest does not depend on
-/// directory traversal order. The canonicalized-`visited` set is the same
-/// cycle guard [`fingerprint_dir_inner`] carries: `path.is_dir()` follows
-/// symlinks, so a directory symlink pointing back at an ancestor would
-/// otherwise recurse forever.
+/// Relative paths let identical relocated source trees share a key. Absolute
+/// source locations do not enter the prepared execution program.
 fn fingerprint_dir_relative(root: &Path, hasher: &mut blake3::Hasher) {
-    let files = dependency_source_manifest(root);
-
-    frame(hasher, &(files.len() as u64).to_le_bytes());
-    for (rel, digest) in &files {
-        frame(hasher, rel.as_os_str().as_encoded_bytes());
-        frame(hasher, digest);
-    }
+    dependency_source_manifest(root).fingerprint(Path::new(""), hasher);
 }
 
 /// Load a cached invocation's FULL artifact set, in the order `names` requests
@@ -616,7 +575,7 @@ fn fingerprint_dir_relative(root: &Path, hasher: &mut blake3::Hasher) {
 /// the asks pass writes no `asks.json`, and the caller's "no file" branch
 /// yields an empty sidecar rather than parsing `[]`.
 pub fn artifacts_load(key: &InvocationKey, names: &[&str]) -> Option<Vec<Option<Vec<u8>>>> {
-    let dir = cache_dir()?;
+    let dir = crate::paths::compile_cache_dir();
     let manifest = fs::read(dir.join(format!("{key}.ok"))).ok()?;
     let manifest =
         tidepool_extract_report::artifact_manifest::ArtifactManifest::decode(&manifest).ok()?;
@@ -649,7 +608,7 @@ pub fn artifacts_load(key: &InvocationKey, names: &[&str]) -> Option<Vec<Option<
 /// a half-written set. Best-effort throughout — a cache that cannot be written
 /// degrades to recompiling, never to failing the compile.
 pub fn artifacts_store(key: &InvocationKey, artifacts: &[(&str, Option<&[u8]>)]) {
-    let Some(dir) = cache_dir() else { return };
+    let dir = crate::paths::compile_cache_dir();
     if fs::create_dir_all(&dir).is_err() {
         return;
     }
@@ -881,6 +840,7 @@ mod tests {
         fs::write(temp.path().join("ignored.h"), "header").unwrap();
 
         let names: Vec<_> = dependency_source_manifest(temp.path())
+            .files
             .into_iter()
             .map(|(path, _)| path)
             .collect();
@@ -1185,7 +1145,6 @@ mod tests {
         let include_owned = [include.clone()];
         let argv = turn_argv(&input, &tmp.path().join("out"), "result", &[&include]);
 
-        assert!(has_untracked_cpp_inputs(source, &include_owned));
         assert!(eval_cache_key(source, "result", &include_owned, None, TEST_ENDPOINT).is_none());
         assert!(invocation_key(&Invocation {
             source,

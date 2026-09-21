@@ -41,10 +41,11 @@ frames the identity reported by the already-bound compiler endpoint, so the
 producer named by the key is necessarily the producer that executes. See
 `fingerprint_dir_relative` for why include-dir fingerprints are
 path-independent (module identity comes from the path relative to the search
-root, since Cast/Tick/Type erasure strips source spans before Core reaches
+root, since source spans are erased before the prepared program reaches
 Rust — see root CLAUDE.md's Key Decisions Reference).
 
-Both layers consume one dependency-source manifest covering `.hs`,
+Each layer reads dependency bytes once, collecting the digest and CPP
+cacheability decision together. Both consume one manifest covering `.hs`,
 `.hs-boot`, `.lhs`, and `.lhs-boot`. The eval layer additionally frames each
 include root's absolute path; the invocation layer frames only root-relative
 module paths so identical relocated trees share a key. CPP directives make
