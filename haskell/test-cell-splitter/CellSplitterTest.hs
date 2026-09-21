@@ -6,7 +6,7 @@ import Control.Monad (forM_, unless, when)
 import Control.Exception (SomeException, bracket, finally, throwIO, try)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef, modifyIORef', readIORef)
-import Data.List (isInfixOf, isPrefixOf, tails)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf, tails)
 import GHC
 import GHC.Driver.Session (parseDynamicFilePragma)
 import GHC.Parser.Header (getOptions)
@@ -16,6 +16,7 @@ import GHC.Types.SourceError (SourceError)
 import Tidepool.Binders
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.GhcPipeline
+import Tidepool.DependencyEvidence
 import System.Directory
   ( getTemporaryDirectory, createDirectory, createDirectoryIfMissing
   , removeFile, removeDirectoryRecursive )
@@ -44,9 +45,58 @@ main = do
   getArgs >>= \case
     [] -> pure ()
     ["--metadata"] -> metadataCompilation
+    ["--dependency-evidence"] -> dependencyEvidenceCompilation
     ["--validation-memo"] -> validationMemoCompilation
     ["--structural-display", effectsRoot] -> structuralDisplayCompilation effectsRoot
-    _ -> fail "expected --metadata, --validation-memo, or --structural-display EFFECTS_INCLUDE"
+    _ -> fail "expected --metadata, --dependency-evidence, --validation-memo, or --structural-display EFFECTS_INCLUDE"
+
+dependencyEvidenceCompilation :: IO ()
+dependencyEvidenceCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let home = root </> "WitnessA.hs"
+      boot = root </> "WitnessA.hs-boot"
+      sibling = root </> "WitnessB.hs"
+      target = root </> "WitnessTarget.hs"
+  writeFile boot "module WitnessA where\nvalue :: Int\n"
+  writeFile home "module WitnessA where\nimport WitnessB (helper)\nvalue :: Int\nvalue = helper\n"
+  writeFile sibling $ unlines
+    [ "module WitnessB where"
+    , "import {-# SOURCE #-} WitnessA (value)"
+    , "helper :: Int"
+    , "helper = value"
+    ]
+  writeFile target $ unlines
+    [ "module WitnessTarget where"
+    , "import qualified Data.Text as Text"
+    , "import WitnessA (value)"
+    , "result = (Text.length (Text.pack \"x\"), value)"
+    ]
+  prepared <- runPipelineSelected PreparedStg target [root]
+  let evidence = pprDependencies prepared
+      resolutions = dependencyResolutions evidence
+      selectedPaths = [path | resolution <- resolutions
+                            , Just path <- [dependencyResolutionSelected resolution]]
+      packageWitnesses = [resolution | resolution <- resolutions
+        , dependencyResolutionModule resolution == "Data.Text"]
+  unless (any (isSuffixOf "WitnessA.hs-boot") selectedPaths) $
+    fail "SOURCE import did not retain its selected boot-interface witness"
+  unless (any (isSuffixOf "WitnessA.hs") selectedPaths) $
+    fail "ordinary home import did not retain its selected source witness"
+  unless (case packageWitnesses of
+      [resolution] -> dependencyResolutionSelected resolution == Nothing
+        && any (isSuffixOf ("Data" </> "Text.hs"))
+          (dependencyResolutionCandidates resolution)
+      _ -> False) $
+    fail "package import did not retain absent higher-priority home candidates"
+  unless ("Data.Text" `elem` dependencyPackages evidence) $
+    fail "package import was not recorded in dependency evidence"
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-dependency-evidence"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
 
 validationMemoCompilation :: IO ()
 validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
