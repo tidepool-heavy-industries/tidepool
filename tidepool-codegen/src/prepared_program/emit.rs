@@ -65,6 +65,7 @@ pub(super) fn emit_function(
     id: ValueId,
     output: FuncId,
     results: &ResultContract,
+    functions: &BTreeMap<ValueId, BTreeMap<ResultContract, FuncId>>,
     dispatchers: &super::apply::Dispatchers,
     prepared_gc: FuncId,
     prepared_poll: FuncId,
@@ -78,6 +79,7 @@ pub(super) fn emit_function(
         id,
         output,
         Some(results),
+        functions,
         dispatchers,
         prepared_gc,
         prepared_poll,
@@ -96,6 +98,7 @@ pub(super) fn emit_thunk_body(
     plan: &ProgramPlan<'_>,
     id: ValueId,
     output: FuncId,
+    functions: &BTreeMap<ValueId, BTreeMap<ResultContract, FuncId>>,
     dispatchers: &super::apply::Dispatchers,
     prepared_gc: FuncId,
     prepared_poll: FuncId,
@@ -109,6 +112,7 @@ pub(super) fn emit_thunk_body(
         id,
         output,
         None,
+        functions,
         dispatchers,
         prepared_gc,
         prepared_poll,
@@ -128,6 +132,7 @@ fn emit_function_at(
     id: ValueId,
     output: FuncId,
     results: Option<&ResultContract>,
+    functions: &BTreeMap<ValueId, BTreeMap<ResultContract, FuncId>>,
     dispatchers: &super::apply::Dispatchers,
     prepared_gc: FuncId,
     prepared_poll: FuncId,
@@ -528,6 +533,7 @@ fn emit_function_at(
                             vmctx,
                             pipeline,
                             &destination.results,
+                            functions,
                             dispatchers,
                             &values,
                             callee,
@@ -1448,6 +1454,7 @@ fn emit_exact_call(
     vmctx: Value,
     pipeline: &mut CodegenPipeline,
     caller_results: &ResultContract,
+    functions: &BTreeMap<ValueId, BTreeMap<ResultContract, FuncId>>,
     dispatchers: &super::apply::Dispatchers,
     values: &BTreeMap<ValueId, Value>,
     callee: &Atom,
@@ -1485,12 +1492,6 @@ fn emit_exact_call(
     if signature.results.is_caller_result() {
         signature.results = caller_results.clone();
     }
-    let callee_ref = dispatchers
-        .find(&signature)
-        .ok_or_else(|| CompileError::MissingDemand(signature.clone()))?;
-    let callee_ref = pipeline
-        .module
-        .declare_func_in_func(callee_ref, builder.func);
     if arguments.len() != signature.arguments.len() {
         return Err(unsupported(owner, node));
     }
@@ -1504,6 +1505,44 @@ fn emit_exact_call(
         owner,
         node,
     )?);
+    // A locally known saturated function already has an authoritative body
+    // and ABI. Calling it directly avoids generating and executing a
+    // signature-wide descriptor comparison chain. Thunks still go through
+    // ordinary enter/update, and partial or excess applications retain the
+    // application classifier's adapter route.
+    if let Atom::Ref(ValueRef::Local(callee_id)) = callee {
+        if let Some(function) = plan.functions.get(callee_id) {
+            if super::apply::classify(function.signature, 0, &signature)
+                == Some(super::apply::Application::Exact)
+            {
+                let results = if function.signature.results.is_caller_result() {
+                    &signature.results
+                } else {
+                    &function.signature.results
+                };
+                if let Some(&target) = functions
+                    .get(callee_id)
+                    .and_then(|instances| instances.get(results))
+                {
+                    let target = pipeline.module.declare_func_in_func(target, builder.func);
+                    return super::emit_direct_call(
+                        builder,
+                        pipeline,
+                        vmctx,
+                        target,
+                        &call_arguments,
+                        &signature.results,
+                    );
+                }
+            }
+        }
+    }
+    let callee_ref = dispatchers
+        .find(&signature)
+        .ok_or_else(|| CompileError::MissingDemand(signature.clone()))?;
+    let callee_ref = pipeline
+        .module
+        .declare_func_in_func(callee_ref, builder.func);
     super::emit_direct_call(
         builder,
         pipeline,

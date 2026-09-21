@@ -66,6 +66,17 @@ use crate::stack_map::{StackMapChain, StackMapIndex, StackMapRegistry};
 
 pub use tidepool_heap::external_storage::{ExternalStorageKind, ExternalStorageValidationError};
 
+/// All executable dispatch facts owned by one prepared descriptor.
+///
+/// A record is assembled before publication and thereafter only read. The
+/// outer table is mutable solely at quiescent install and retirement points;
+/// generated calls and enters therefore observe one coherent owner record
+/// instead of consulting independently updated call and enter maps.
+struct PreparedDispatchRecord {
+    enter: Option<*const u8>,
+    calls: std::collections::BTreeMap<tidepool_repr::execution_schema::Signature, *const u8>,
+}
+
 /// Whether another entry may safely reuse this machine after a failed run.
 ///
 /// `Unavailable` is monotonic for the lifetime of a machine: once execution
@@ -305,25 +316,10 @@ pub struct MachineState {
     external_allocated_objects: Cell<usize>,
     external_freed_bytes: Cell<usize>,
     external_freed_objects: Cell<usize>,
-    /// Cross-program call targets, keyed by the callee's descriptor header
-    /// word and full demand signature: registered at install, read by the
-    /// `prepared_resolve_call` host fn a foreign dispatcher call falls back
-    /// to. Holds raw code pointers into an installed pipeline's finalized
-    /// module -- valid exactly as long as that pipeline (owned by the
-    /// installed program, which the stack-map chain's lifetime rule also
-    /// governs) is alive, and must be cleared before the machine's programs
-    /// drop (`clear_prepared_entries`, called from `Drop for PreparedMachine`).
-    prepared_callables: RefCell<
-        HashMap<
-            usize,
-            std::collections::BTreeMap<tidepool_repr::execution_schema::Signature, *const u8>,
-        >,
-    >,
-    /// Cross-program force targets: a thunk/function/PAP descriptor header ->
-    /// the OWNING program's `prepared_enter` code pointer, so a foreign
-    /// `Enter` can force an imported thunk through the program that knows how
-    /// to run it. Same lifetime contract as `prepared_callables`.
-    prepared_enters: RefCell<HashMap<usize, *const u8>>,
+    /// Cross-program call and enter targets, keyed by descriptor header.
+    /// Each immutable record is published as one unit after installation's
+    /// fallible work and removed before its finalized code is released.
+    prepared_dispatch: RefCell<HashMap<usize, PreparedDispatchRecord>>,
     /// Constructor descriptor header -> constructor identity, for every
     /// constructor an installed program declares. A prepared case miss reads
     /// its scrutinee's header here: a known constructor is an intact object
@@ -397,8 +393,7 @@ impl MachineState {
             external_allocated_objects: Cell::new(0),
             external_freed_bytes: Cell::new(0),
             external_freed_objects: Cell::new(0),
-            prepared_callables: RefCell::new(HashMap::new()),
-            prepared_enters: RefCell::new(HashMap::new()),
+            prepared_dispatch: RefCell::new(HashMap::new()),
             prepared_constructors: RefCell::new(HashMap::new()),
             interned_bytes: RefCell::new(Arc::new(
                 crate::prepared_program::static_bytes::PinnedBytes::empty(),
@@ -884,6 +879,42 @@ impl MachineState {
         Ok(i64::from(tag.get() - 1))
     }
 
+    /// Resolve the physical kind of a live prepared object through the active
+    /// descriptor space. This lets generic enter recognize evaluated values
+    /// without embedding every installed function, PAP, and constructor
+    /// header in generated code.
+    ///
+    /// # Safety
+    /// `encoded` has the same managed-reference provenance requirement as
+    /// [`Self::prepared_constructor_tag`].
+    pub(crate) unsafe fn prepared_object_kind(
+        &self,
+        encoded: usize,
+    ) -> Result<tidepool_heap::execution_descriptor::ObjectKind, RuntimeError> {
+        use tidepool_heap::managed_reference::untag;
+        let reference = untag(encoded) as *const usize;
+        if reference.is_null() {
+            return Err(RuntimeError::BadPointer);
+        }
+        let active = self
+            .gc_state
+            .try_borrow()
+            .map_err(|_| RuntimeError::BadPointer)?;
+        let prepared = active
+            .as_ref()
+            .and_then(|state| state.prepared.as_ref())
+            .ok_or(RuntimeError::BadPointer)?;
+        let header = unsafe { reference.read() };
+        if header & 7 != 0 {
+            return Err(RuntimeError::BadThunkState((header & 7) as u8));
+        }
+        prepared
+            .space
+            .live_descriptor(header)
+            .map(|descriptor| descriptor.kind())
+            .ok_or(RuntimeError::BadPointer)
+    }
+
     /// Install a prepared nursery whose descriptor space admits one immutable
     /// invocation-owned static region as an external managed space.
     pub(crate) fn install_prepared_buffer_with_static_region(
@@ -1258,7 +1289,7 @@ impl MachineState {
     // --- cross-program call/enter resolution ------------------------------
     // Substrate for the prepared engine's cross-program call and force
     // fallback (see `prepared_program::resolve`); `apply::emit_dispatchers`'
-    // fallback and `entry::emit_prepared_enter` read these tables at a miss.
+    // fallback and `entry::emit_prepared_enter` read the same owner record.
 
     /// Register one installed program's exported call targets and owned
     /// enter headers. Headers are unique per descriptor across the machine;
@@ -1270,11 +1301,27 @@ impl MachineState {
         >,
         enters: impl IntoIterator<Item = (usize, *const u8)>,
     ) {
-        let mut targets = self.prepared_callables.borrow_mut();
+        let mut staged = HashMap::<usize, PreparedDispatchRecord>::new();
         for (header, signature, code) in callables {
-            targets.entry(header).or_default().insert(signature, code);
+            staged
+                .entry(header)
+                .or_insert_with(|| PreparedDispatchRecord {
+                    enter: None,
+                    calls: std::collections::BTreeMap::new(),
+                })
+                .calls
+                .insert(signature, code);
         }
-        self.prepared_enters.borrow_mut().extend(enters);
+        for (header, enter) in enters {
+            staged
+                .entry(header)
+                .or_insert_with(|| PreparedDispatchRecord {
+                    enter: None,
+                    calls: std::collections::BTreeMap::new(),
+                })
+                .enter = Some(enter);
+        }
+        self.prepared_dispatch.borrow_mut().extend(staged);
     }
 
     /// Record constructor headers an installed program declares; see
@@ -1313,8 +1360,7 @@ impl MachineState {
     /// Machine-teardown path (`Drop for PreparedMachine`): drop every raw
     /// code pointer before the pipelines they point into are freed.
     pub(crate) fn clear_prepared_entries(&self) {
-        self.prepared_callables.borrow_mut().clear();
-        self.prepared_enters.borrow_mut().clear();
+        self.prepared_dispatch.borrow_mut().clear();
         self.prepared_constructors.borrow_mut().clear();
     }
 
@@ -1323,23 +1369,25 @@ impl MachineState {
     /// one program (its descriptors are minted per compile), so a retired
     /// owner's rows have no other pointer to switch to; a header a live object
     /// still carried would have kept the program live.
-    pub(crate) fn retire_prepared_entries(&self, callables: &[usize], enters: &[usize]) {
-        let mut targets = self.prepared_callables.borrow_mut();
-        for header in callables {
-            targets.remove(header);
-        }
-        let mut owners = self.prepared_enters.borrow_mut();
-        for header in enters {
-            owners.remove(header);
+    pub(crate) fn retire_prepared_entries(&self, headers: &[usize]) {
+        let mut records = self.prepared_dispatch.borrow_mut();
+        for header in headers {
+            records.remove(header);
         }
     }
 
     /// `(callable rows, enter rows)` currently registered.
     pub(crate) fn prepared_entry_rows(&self) -> (usize, usize) {
-        (
-            self.prepared_callables.borrow().len(),
-            self.prepared_enters.borrow().len(),
-        )
+        let records = self.prepared_dispatch.borrow();
+        let callable_rows = records
+            .values()
+            .filter(|record| !record.calls.is_empty())
+            .count();
+        let enter_rows = records
+            .values()
+            .filter(|record| record.enter.is_some())
+            .count();
+        (callable_rows, enter_rows)
     }
 
     /// Program retirement's precondition: the live descriptor space is
@@ -1384,15 +1432,16 @@ impl MachineState {
         header: usize,
         signature: &tidepool_repr::execution_schema::Signature,
     ) -> Option<*const u8> {
-        self.prepared_callables
+        self.prepared_dispatch
             .borrow()
             .get(&header)?
+            .calls
             .get(signature)
             .copied()
     }
 
     pub(crate) fn resolve_prepared_enter(&self, header: usize) -> Option<*const u8> {
-        self.prepared_enters.borrow().get(&header).copied()
+        self.prepared_dispatch.borrow().get(&header)?.enter
     }
 
     /// Whether some installed program owns an enter routine for `header` (a
@@ -1402,7 +1451,7 @@ impl MachineState {
     /// on any other header means the callee word does not name a callable
     /// object at all, which is an integrity failure.
     pub(crate) fn owns_prepared_entry(&self, header: usize) -> bool {
-        self.prepared_enters.borrow().contains_key(&header)
+        self.prepared_dispatch.borrow().contains_key(&header)
     }
 
     /// Join a successful generated-frame walk with every ambient root registry.

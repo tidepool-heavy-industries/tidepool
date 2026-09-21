@@ -274,13 +274,10 @@ unsafe extern "C" fn prepared_unresolved_call(
 /// the caller returns the reference unchanged. Never a code address.
 pub(crate) const ENTER_EVALUATED: u64 = 1;
 
-/// Resolve how to enter an untagged object `entry.rs`'s per-program chain
-/// does not know. A foreign thunk/function/PAP resolves to its owning
-/// program's `prepared_enter`. A constructor is a value whatever program
-/// declared it: interned constructors are machine-shared and have no owner
-/// row, so they answer [`ENTER_EVALUATED`] from the live descriptor space.
-/// Returns 0 on a miss -- no installed program owns the object, an
-/// integrity failure rather than an unresolved callee.
+/// Resolve how to enter an untagged object `entry.rs`'s thunk chain does not
+/// know. Foreign thunks resolve to their owner's `prepared_enter`; functions,
+/// PAPs, and constructors are already values and are recognized through the
+/// descriptor space without a generated header enumeration.
 unsafe extern "C" fn prepared_resolve_enter(
     vmctx: *mut crate::context::VMContext,
     object: u64,
@@ -290,7 +287,12 @@ unsafe extern "C" fn prepared_resolve_enter(
     if let Some(code) = machine.resolve_prepared_enter(header) {
         return code as u64;
     }
-    if unsafe { machine.prepared_constructor_tag(object as usize) }.is_ok() {
+    if matches!(
+        unsafe { machine.prepared_object_kind(object as usize) },
+        Ok(tidepool_heap::execution_descriptor::ObjectKind::Function
+            | tidepool_heap::execution_descriptor::ObjectKind::Pap
+            | tidepool_heap::execution_descriptor::ObjectKind::Constructor)
+    ) {
         return ENTER_EVALUATED;
     }
     machine.set_first_cause(crate::host_fns::RuntimeError::BadThunkState(0));
@@ -353,17 +355,13 @@ pub struct CompiledProgram {
     pub(crate) callables: Vec<resolve::CallableExport>,
     /// Pins every demand address embedded in the generated resolver calls.
     _dispatchers: apply::Dispatchers,
-    /// This program's own `prepared_enter` FuncId. `PreparedMachine::install`
-    /// registers it as the owner for every header in `enter_owned_headers`.
+    /// This program's own `prepared_enter` FuncId.
     pub(crate) enter: FuncId,
-    /// Every thunk/function/PAP descriptor header this program owns and its
-    /// `prepared_enter` (the `enter` field above) knows how to force.
-    /// `PreparedMachine::install` registers these against `enter` so
-    /// `prepared_resolve_enter` can dispatch foreign headers to their
-    /// owning program, and retirement removes exactly these rows. Shared
-    /// descriptors (interned constructors, external wrappers) are never
-    /// listed: another program may rely on them after this one retires.
-    pub(crate) enter_owned_headers: Vec<usize>,
+    /// Thunk headers that require this program's enter/update state machine.
+    pub(crate) thunk_enter_headers: Vec<usize>,
+    /// Every descriptor header with a published call or enter record. Shared
+    /// descriptors are excluded so retirement removes only this owner.
+    pub(crate) dispatch_owned_headers: Vec<usize>,
 }
 
 impl CompiledProgram {
@@ -830,7 +828,7 @@ impl CompiledProgram {
         let dispatchers = apply::declare_dispatchers(&plan, &profile, &mut pipeline)?;
         phases.declare = clock.lap();
         let mut category_start = compile_phases::NativeCounts::read(&pipeline);
-        let callables = apply::emit_dispatchers(
+        let mut callables = apply::emit_dispatchers(
             &plan,
             &dispatchers,
             &functions,
@@ -844,6 +842,15 @@ impl CompiledProgram {
             prepared_unresolved_call,
             &mut pipeline,
         )?;
+        for (index, callable) in callables.iter_mut().enumerate() {
+            callable.function = adapter::emit_dynamic_adapter(
+                &mut pipeline,
+                &format!("prepared_dynamic_adapter_{index}"),
+                callable.function,
+                &callable.signature,
+                &profile,
+            )?;
+        }
         native_metrics.category("dispatchers", category_start, &pipeline);
         phases.emit_dispatchers = clock.lap();
         category_start = compile_phases::NativeCounts::read(&pipeline);
@@ -859,6 +866,7 @@ impl CompiledProgram {
                     id,
                     output,
                     results,
+                    &functions,
                     &dispatchers,
                     prepared_gc,
                     prepared_poll,
@@ -879,6 +887,7 @@ impl CompiledProgram {
                 &plan,
                 id,
                 body,
+                &functions,
                 &dispatchers,
                 prepared_gc,
                 prepared_poll,
@@ -902,17 +911,9 @@ impl CompiledProgram {
                 results: thunk.signature.results.clone(),
             })
             .collect::<Vec<_>>();
-        let mut enter_evaluated = plan.constructors.clone();
-        enter_evaluated.extend(
-            plan.functions
-                .values()
-                .map(|function| Arc::clone(&function.descriptor)),
-        );
-        enter_evaluated.extend(
-            plan.pap_layouts
-                .values()
-                .map(|pap| Arc::clone(&pap.descriptor)),
-        );
+        // Evaluated objects are classified by the machine's descriptor space;
+        // only thunk state machines require owner-specific generated code.
+        let enter_evaluated = Vec::new();
         entry::emit_prepared_enter(
             &mut pipeline,
             prepared_enter,
@@ -1061,15 +1062,17 @@ impl CompiledProgram {
             .map(|descriptor| descriptor.initial_header_word())
             .chain(plan.externals.headers())
             .collect::<std::collections::HashSet<_>>();
-        let enter_owned_headers = thunk_entries
+        let thunk_enter_headers = thunk_entries
             .iter()
             .map(|thunk_entry| thunk_entry.descriptor.initial_header_word())
-            .chain(
-                enter_evaluated
-                    .iter()
-                    .map(|descriptor| descriptor.initial_header_word()),
-            )
+            .collect::<Vec<_>>();
+        let dispatch_owned_headers = thunk_enter_headers
+            .iter()
+            .copied()
+            .chain(callables.iter().map(|callable| callable.header))
             .filter(|header| !shared.contains(header))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
             .collect::<Vec<_>>();
         let byte_tops = plan
             .top_bindings
@@ -1119,7 +1122,8 @@ impl CompiledProgram {
             callables,
             _dispatchers: dispatchers,
             enter: prepared_enter,
-            enter_owned_headers,
+            thunk_enter_headers,
+            dispatch_owned_headers,
         })
     }
 

@@ -29,18 +29,18 @@ use tidepool_repr::execution_schema::{
 /// Source calls, owner offers and generated suffixes share one signature map.
 pub(super) struct Dispatchers {
     // Boxed keys pin the metadata addresses embedded in generated code.
-    entries: BTreeMap<Box<Signature>, FuncId>,
+    entries: BTreeMap<Box<Signature>, Option<FuncId>>,
 }
 
 impl Dispatchers {
     pub(super) fn find(&self, signature: &Signature) -> Option<FuncId> {
-        self.entries.get(signature).copied()
+        self.entries.get(signature).copied().flatten()
     }
 
     fn iter(&self) -> impl Iterator<Item = (&Signature, FuncId)> {
-        self.entries
-            .iter()
-            .map(|(signature, function)| (signature.as_ref(), *function))
+        self.entries.iter().filter_map(|(signature, function)| {
+            function.map(|function| (signature.as_ref(), function))
+        })
     }
 
     fn demand_address(&self, signature: &Signature) -> Result<i64, super::CompileError> {
@@ -48,6 +48,13 @@ impl Dispatchers {
             .get_key_value(signature)
             .map(|(key, _)| key.as_ref() as *const Signature as i64)
             .ok_or_else(|| super::CompileError::MissingDemand(signature.clone()))
+    }
+
+    fn function_count(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|function| function.is_some())
+            .count()
     }
 }
 
@@ -202,13 +209,17 @@ pub(super) fn declare_dispatchers(
 ) -> Result<Dispatchers, super::CompileError> {
     let result_instances = super::plan::result_instances(plan.program);
     let enter_lifts = enter_serves_zero_argument_lift(profile)?;
-    let mut demanded = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
+    let mut workers = std::collections::BTreeSet::new();
+    let mut queued = std::collections::BTreeSet::new();
+    let mut worker_queue = Vec::new();
+    let mut metadata = std::collections::BTreeSet::new();
     for declaration in plan.program.operations() {
         let signature = &plan.program.signatures()[declaration.signature.0 as usize];
         if let Some(callback) = super::lifetime::callback_signature(declaration, signature) {
-            if seen.insert(callback.clone()) {
-                demanded.push(callback);
+            if workers.insert(callback.clone()) {
+                metadata.insert(callback.clone());
+                queued.insert(callback.clone());
+                worker_queue.push(callback);
             }
         }
     }
@@ -234,12 +245,14 @@ pub(super) fn declare_dispatchers(
                 arguments: semantic.arguments.clone(),
                 results,
             };
-            if seen.insert(concrete.clone()) {
-                demanded.push(concrete);
+            if workers.insert(concrete.clone()) {
+                metadata.insert(concrete.clone());
+                queued.insert(concrete.clone());
+                worker_queue.push(concrete);
             }
         }
     }
-    let call_demands = demanded.len();
+    let call_demands = workers.len();
     // Every owner serves exact PAP suffixes and all proper partial prefixes,
     // even when no call in its own source demands that shape.
     for function in plan.functions.values() {
@@ -256,8 +269,10 @@ pub(super) fn declare_dispatchers(
                     arguments: remaining.to_vec(),
                     results,
                 };
-                if seen.insert(exact.clone()) {
-                    demanded.push(exact);
+                metadata.insert(exact.clone());
+                workers.insert(exact.clone());
+                if queued.insert(exact.clone()) {
+                    worker_queue.push(exact);
                 }
             }
             // `supplied == 0` is the zero-argument lift `prepared_enter`
@@ -268,26 +283,27 @@ pub(super) fn declare_dispatchers(
                     arguments: remaining[..supplied].to_vec(),
                     results: super::ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
                 };
-                if seen.insert(partial.clone()) {
-                    demanded.push(partial);
+                metadata.insert(partial.clone());
+                workers.insert(partial.clone());
+                if queued.insert(partial.clone()) {
+                    worker_queue.push(partial);
                 }
             }
         }
     }
-    let owner_demands = demanded.len();
-    // Close over foreign excess suffixes and the statically typed prefix
-    // probes. Every new signature is a slice of an existing argument vector.
+    let owner_demands = workers.len();
+    // Close workers over foreign excess suffixes. Prefix probes need stable
+    // metadata but no native body: the resolved code belongs to the callee's
+    // owner, so probe-only signatures no longer expand generated code.
     let mut cursor = 0;
-    while let Some(demand) = demanded.get(cursor).cloned() {
+    while let Some(demand) = worker_queue.get(cursor).cloned() {
         cursor += 1;
         for consumed in 0..=demand.arguments.len() {
             let terminal = Signature {
                 arguments: demand.arguments[..consumed].to_vec(),
                 results: super::ResultContract::NoSuccess,
             };
-            if seen.insert(terminal.clone()) {
-                demanded.push(terminal);
-            }
+            metadata.insert(terminal);
             if consumed > 0 && consumed < demand.arguments.len() {
                 let prefix = Signature {
                     arguments: demand.arguments[..consumed].to_vec(),
@@ -297,27 +313,33 @@ pub(super) fn declare_dispatchers(
                     arguments: demand.arguments[consumed..].to_vec(),
                     results: demand.results.clone(),
                 };
-                for shape in [prefix, suffix] {
-                    if seen.insert(shape.clone()) {
-                        demanded.push(shape);
-                    }
+                metadata.insert(prefix);
+                metadata.insert(suffix.clone());
+                workers.insert(suffix.clone());
+                if queued.insert(suffix.clone()) {
+                    worker_queue.push(suffix);
                 }
             }
         }
     }
     if std::env::var("TIDEPOOL_CODEGEN_DETAIL").as_deref() == Ok("1") {
         tracing::info!(target: "tidepool_codegen::prepared_compile", call_demands,
-            owner_demands, closed_demands = demanded.len(), "dispatcher demand expansion");
+            owner_demands, worker_demands = workers.len(), pinned_demands = metadata.len(),
+            "dispatcher demand expansion");
     }
     let mut entries = BTreeMap::new();
-    for (index, semantic) in demanded.into_iter().enumerate() {
-        let abi = EntryAbi::lower_internal(profile, &semantic, EnvironmentMode::Captured)?;
-        let native = abi.cranelift_signature(profile, CallConv::Tail)?;
-        let function = pipeline.declare_function_with_signature(
-            &format!("prepared_apply_{index}"),
-            Linkage::Local,
-            &native,
-        )?;
+    for (index, semantic) in metadata.into_iter().enumerate() {
+        let function = if workers.contains(&semantic) {
+            let abi = EntryAbi::lower_internal(profile, &semantic, EnvironmentMode::Captured)?;
+            let native = abi.cranelift_signature(profile, CallConv::Tail)?;
+            Some(pipeline.declare_function_with_signature(
+                &format!("prepared_apply_{index}"),
+                Linkage::Local,
+                &native,
+            )?)
+        } else {
+            None
+        };
         entries.insert(Box::new(semantic), function);
     }
     Ok(Dispatchers { entries })
@@ -381,9 +403,17 @@ pub(super) fn emit_dispatchers(
             let Some(callee_function) = callee_instance(functions, id, function, signature) else {
                 continue;
             };
+            // A saturated function body already is the owner's exact Tail-ABI
+            // adapter. Publish it directly so foreign dynamic calls do not
+            // re-enter this signature worker and repeat its descriptor chain.
+            let exported = if application == Application::Exact {
+                callee_function
+            } else {
+                output
+            };
             exports.push(resolve::CallableExport {
                 header: function.descriptor.initial_header_word(),
-                function: output,
+                function: exported,
                 signature: signature.clone(),
             });
             let hit = builder.create_block();
@@ -644,16 +674,63 @@ pub(super) fn emit_dispatchers(
             builder.ins().brif(found, hit, &[], miss, &[]);
             builder.switch_to_block(hit);
             builder.seal_block(hit);
-            let native = EntryAbi::lower_internal(profile, &demand, EnvironmentMode::Captured)?
-                .cranelift_signature(profile, CallConv::Tail)?;
+            let demand_abi = EntryAbi::lower_internal(profile, &demand, EnvironmentMode::Captured)?;
+            let argument_values = physical_arguments
+                .iter()
+                .take(demand.arguments.len())
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>();
+            let argument_words = 1_u32
+                .checked_add(argument_values.len() as u32)
+                .ok_or(super::CompileError::RootBlock)?;
+            let argument_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
+                ir::StackSlotKind::ExplicitSlot,
+                argument_words * 8,
+                3,
+            ));
+            let argument_area = builder.ins().stack_addr(types::I64, argument_slot, 0);
+            builder
+                .ins()
+                .store(MemFlags::trusted(), callee, argument_area, 0);
+            for (index, value) in argument_values.into_iter().enumerate() {
+                builder.ins().store(
+                    MemFlags::trusted(),
+                    value,
+                    argument_area,
+                    ((index + 1) * 8) as i32,
+                );
+            }
+            let result_words = demand_abi.physical_results().len().max(1) as u32;
+            let result_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
+                ir::StackSlotKind::ExplicitSlot,
+                result_words * 8,
+                3,
+            ));
+            let result_area = builder.ins().stack_addr(types::I64, result_slot, 0);
+            let mut native = ir::Signature::new(pipeline.isa.default_call_conv());
+            native.params = vec![ir::AbiParam::new(types::I64); 3];
+            native.returns = vec![ir::AbiParam::new(types::I32)];
             let sig_ref = builder.import_signature(native);
-            let args = call_arguments(
-                vmctx,
-                callee,
-                physical_arguments.iter().take(demand.arguments.len()),
-            );
-            let call = builder.ins().call_indirect(sig_ref, code, &args);
-            let returned = builder.inst_results(call).to_vec();
+            let call =
+                builder
+                    .ins()
+                    .call_indirect(sig_ref, code, &[vmctx, result_area, argument_area]);
+            let status = builder.inst_results(call)[0];
+            super::emit::emit_status_guard(&mut builder, status);
+            let mut returned = vec![status];
+            for (index, rep) in demand_abi.physical_results().iter().enumerate() {
+                let value = builder.ins().load(
+                    super::adapter::scalar_type(*rep),
+                    MemFlags::trusted(),
+                    result_area,
+                    (index * 8) as i32,
+                );
+                if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
+                    builder.declare_value_needs_stack_map(value);
+                }
+                returned.push(value);
+            }
             match application {
                 ResolvedContinuation::Return => {
                     builder.ins().return_(&returned);
@@ -728,12 +805,13 @@ pub(super) fn emit_dispatchers(
     }
     if std::env::var("TIDEPOOL_CODEGEN_DETAIL").as_deref() == Ok("1") {
         tracing::info!(target: "tidepool_codegen::prepared_compile",
-            dispatchers = dispatchers.entries.len(), offers = exports.len(),
+            dispatchers = dispatchers.function_count(), pinned_demands = dispatchers.entries.len(),
+            offers = exports.len(),
             blocks = pipeline.blocks_emitted() - blocks_before, code_bytes,
             "dispatcher output");
     }
     tracing::debug!(target: "tidepool::prepared_apply",
-        dispatchers = dispatchers.entries.len(), code_bytes,
+        dispatchers = dispatchers.function_count(), pinned_demands = dispatchers.entries.len(), code_bytes,
         offers = exports.len(),
         elapsed_ms = started.elapsed().as_millis() as u64,
         "compiled application dispatchers");
