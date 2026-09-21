@@ -1,10 +1,10 @@
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 module Tidepool.Command
   ( Commands,
@@ -96,8 +96,13 @@ import Tidepool.Effects.Core
     Commands (..),
   )
 import Tidepool.Inspection
-  ( Display (..), DisplayTree (..), DisplayPage, PageDisplay (..)
-  , WorkbenchDisplay (..), pageWithContinuation, renderText
+  ( Display (..),
+    DisplayPage,
+    DisplayTree (..),
+    PageDisplay (..),
+    WorkbenchDisplay (..),
+    pageWithContinuation,
+    renderText,
   )
 import Tidepool.QQ.Bash (bash)
 
@@ -205,7 +210,7 @@ await :: (Member Commands effects) => Job -> Eff effects RunResult
 await retained@(Job key) = do
   observation <- checked <$> send (CommandForegroundWith key)
   let result = Finished retained (observedCommandResult observation) (observedCommandOutput observation)
-  send (CommandPresentWith key (CommandVisible (resultHeading (commandResult result) <> " · session_id: " <> key) 65536))
+  send (CommandPresentWith key (CommandVisible ("session_id: " <> key <> "\n" <> resultHeading (commandResult result)) 65536))
   pure result
 
 -- | Wait briefly and display newly available output, retaining the same job.
@@ -216,11 +221,14 @@ observe Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job 
   current <- checked <$> send (CommandAwaitWith key milliseconds)
   let heading = case current of
         CommandFinished result -> resultHeading result
-        CommandQueued -> "Queued"
-        CommandStarting -> "Starting"
-        CommandRunning -> "Running"
-        CommandStopping -> "Stopping"
-  send (CommandPresentWith key (CommandVisible (heading <> " · session_id: " <> key) bytes))
+        CommandQueued -> "terminal: no · queued (process not started)"
+        CommandStarting -> "terminal: no · starting"
+        CommandRunning -> "terminal: no · running"
+        CommandStopping -> "terminal: no · stopping; cancellation not yet confirmed"
+  let next = case current of
+        CommandFinished _ -> ""
+        _ -> "\nnext: observe the same job with write_stdin; read_output for retained output"
+  send (CommandPresentWith key (CommandVisible ("session_id: " <> key <> "\n" <> heading <> next) bytes))
   pure current
 
 -- | Suppress routine command output within this computation, without changing
@@ -473,10 +481,11 @@ instance Display OutputPage where
     renderText budget (outputHeading (T.pack (show stream)) details)
 
 instance Display CommandOutput where
-  displayTree captured = Concat
-    [ TextLeaf (outputHeading "stdout" (commandStdout captured))
-    , TextLeaf (outputHeading "stderr" (commandStderr captured))
-    ]
+  displayTree captured =
+    Concat
+      [ TextLeaf (outputHeading "stdout" (commandStdout captured)),
+        TextLeaf (outputHeading "stderr" (commandStderr captured))
+      ]
   displayWith = displayOutput
 
 instance Display CommandPage where
@@ -505,11 +514,11 @@ displayOutput budget captured =
 
 resultHeading :: CommandResult -> Text
 resultHeading result =
-  "Finished · "
+  "terminal: yes · "
     <> T.pack (show (commandOutcome result))
     <> case commandCleanup result of
-      CommandClean -> " · cleanup: clean"
-      other -> " · cleanup: " <> T.pack (show other)
+      CommandClean -> " · cleanup: clean\nnext: inspect outcome and output; read_output for omitted diagnostics"
+      other -> " · cleanup: " <> T.pack (show other) <> "\nnext: inspect cleanup and retained job before releasing resources"
 
 outputHeading :: Text -> CommandPage -> Text
 outputHeading stream page = outputMetadata stream page <> "\n" <> outputText page <> "\n"
@@ -541,40 +550,49 @@ instance Display OutputIssue where
       "Command still running: " <> T.pack (show retained) <> ". Continue observing the same job with Cmd.await."
     other -> T.pack (show other)
 
-
 -- Reading a continuation uses the retained job and cursor. It never calls run,
 -- start, or await, and drains this page's text before requesting another page.
-instance Member Commands effects => PageDisplay effects OutputPage where
+instance (Member Commands effects) => PageDisplay effects OutputPage where
   displayPage budget page = outputDisplayPage budget page Nothing
 
-outputDisplayPage :: Member Commands effects => Int -> OutputPage -> Maybe (Eff effects (DisplayPage effects)) -> DisplayPage effects
+outputDisplayPage :: (Member Commands effects) => Int -> OutputPage -> Maybe (Eff effects (DisplayPage effects)) -> DisplayPage effects
 outputDisplayPage budget page following =
   let details = pageDetails page
       unread = outputEnd details < outputAvailableEnd details || not (outputFinished details)
-      continuation = if unread
-        then Just (do later <- next page; pure (outputDisplayPage 8192 later following))
-        else following
-  in pageWithContinuation budget (displayTree page) continuation
+      continuation =
+        if unread
+          then Just (do later <- next page; pure (outputDisplayPage 8192 later following))
+          else following
+   in pageWithContinuation budget (displayTree page) continuation
 
-instance Member Commands effects => PageDisplay effects RunResult where
+instance (Member Commands effects) => PageDisplay effects RunResult where
   displayPage budget result@Finished {completedJob = retained, capturedOutput = captured} =
     pageWithContinuation budget (displayTree result) (remainingOutput retained captured)
   displayPageWithout keys budget result@Finished {completedJob = retained@(Job key), commandResult = outcome}
     | key `elem` keys =
         let stderr = Just (do page <- readOutput Stderr retained; pure (outputDisplayPage 8192 page Nothing))
             allOutput = Just (do page <- output retained; pure (outputDisplayPage 8192 page stderr))
-        in pageWithContinuation budget (TextLeaf (resultHeading outcome <> " · output retained")) allOutput
+         in pageWithContinuation budget (TextLeaf (resultHeading outcome <> " · output retained")) allOutput
     | otherwise = displayPage budget result
 
-remainingOutput :: Member Commands effects => Job -> CommandOutput -> Maybe (Eff effects (DisplayPage effects))
-remainingOutput retained captured = missing Stdout (commandStdout captured)
-  (missing Stderr (commandStderr captured) Nothing)
+remainingOutput :: (Member Commands effects) => Job -> CommandOutput -> Maybe (Eff effects (DisplayPage effects))
+remainingOutput retained captured =
+  missing
+    Stdout
+    (commandStdout captured)
+    (missing Stderr (commandStderr captured) Nothing)
   where
     missing stream details following
-      | outputStart details > 0 = Just (do
-          page <- readOutput stream retained
-          pure (outputDisplayPage 8192 page following))
-      | outputEnd details < outputAvailableEnd details || not (outputFinished details) = Just (do
-          page <- readPage retained stream (OutputOffset (outputEnd details))
-          pure (outputDisplayPage 8192 page following))
+      | outputStart details > 0 =
+          Just
+            ( do
+                page <- readOutput stream retained
+                pure (outputDisplayPage 8192 page following)
+            )
+      | outputEnd details < outputAvailableEnd details || not (outputFinished details) =
+          Just
+            ( do
+                page <- readPage retained stream (OutputOffset (outputEnd details))
+                pure (outputDisplayPage 8192 page following)
+            )
       | otherwise = following

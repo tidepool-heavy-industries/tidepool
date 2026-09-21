@@ -28,7 +28,7 @@ Files under `shoal/` define the hosted base and focused instruction layers:
 
 Activation messages are rendered by Rust and carry request previews, reply
 declarations when available. Authority and assigned workspace appear once in
-per-incarnation launch instructions; detailed state remains in `:status`. Stable
+per-incarnation launch instructions; detailed state remains in `status`. Stable
 prompts teach composition and conditional discovery; they do not duplicate
 those runtime facts. Hosted requests settle through `respond`; roots outside
 a request have no reply binding. Files in `shoal/docs/` supply on-demand `:doc`
@@ -56,6 +56,6 @@ the new base explicitly and can change its provider prefix. Fingerprints record
 what Shoal selected; they do not certify provider application or cache reuse.
 
 The base adapts the bundled Astra prompt's autonomy, collaboration, and engineering
-guidance to Shoal's scaffold/fork/fold mode. API reference details and executable
-examples stay in the on-demand documents. Base-prompt wording is a design choice
+guidance to Shoal's scaffold/fork/fold mode. Core signatures and compact compositions stay in the shared API guide; detailed
+reference and longer executable examples live in on-demand documents and skills. Base-prompt wording is a design choice
 to exercise through real project work, not a validated efficacy result.

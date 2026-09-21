@@ -19,6 +19,9 @@ coordination, review, actor definitions and commands. Their Markdown examples ar
 executed by the coordination recipes and resident command acceptance checks.
 Keep installed skills unchanged during a wave.
 
+The package uses the shipped shared base and root instructions; project prompt
+resources add assignment-specific guidance without replacing that prefix.
+
 This authored .shoal package supplies a programmable working style for the current
 project, with a separate relationship-view example for shoal-repl. Begin with the human and
 [initial Astra planner](.shoal/prompts/planner.md), then the
@@ -35,7 +38,7 @@ recursive fork/join inside local integration loops. Shared scaffolds make child
 results fit together, context forks share their reasoning, and checked integration
 produces source and understanding for the next ready frontier.
 
-The Haskell modules are tools for resident GHCi use. Bind a Task, apply an operation,
+The Haskell modules are tools for resident notebook use. Bind a Task, apply an operation,
 keep its real handles, inspect a useful projection and compose the next action.
 No import starts work and no Markdown parser schedules a plan. The constituent
 unfold/request/watch/route operations remain available; a helper need not own an

@@ -1,12 +1,12 @@
-# Shoal Haskell API
+# Shoal API
 
-Use ordinary Haskell in notebook cells. One cell may contain
-declarations, bindings, and expressions; declarations are mutually recursive
-and visible throughout the cell. The default scope is `Tidepool.Actors.Shoal`; workspace
-modules such as `Project.Work` provide project policy. The cell dialect already
-enables the usual extensions — `OverloadedLabels`, `OverloadedRecordDot`,
-`DataKinds`, `TypeApplications` and the rest — so a cell needs no `LANGUAGE`
-pragma; a standalone `.hs` module in the workspace still declares its own.
+The default notebook scope is `Tidepool.Actors.Shoal`, plus configured workspace
+modules. `Cmd`, `J`, `R`, `T`, `Map`, and `Set` name commands, Jev, record actors,
+text, maps, and sets. `bash`, `withMemory`, `MiB`, `GiB`, `:=`, and `:&` are in scope.
+Cells enable the usual extensions, including `TypeApplications`, `DataKinds`,
+`OverloadedLabels`, and `OverloadedRecordDot`; standalone modules declare theirs.
+
+## Delegate and inspect
 
 ```haskell
 let task = "Remove the stale path and report the focused check." :: Text
@@ -17,115 +17,51 @@ let task = "Remove the stale path and report the focused check." :: Text
 ready
 ```
 
-`spawnWatched label path plan` is `unfold path plan` followed by
-`watch label (awaitSettled response)`; use `unfold` directly to admit several
-children at once. The final expression displays the watch handle. End the model
-turn while waiting.
-Truncated displays offer `cellDisplay.more`, which reads retained output without
-repeating the original effect.
-
-An `unfold` is applicative. It constructs every child before submitting any
-assignment, and children start after the cell commits. Combine independent
-children with `<$>` and `<*>`; use a later cell for dependent work. Define a
-shared plan once and use an ordinary local Haskell selector to derive short
-child assignments. Commit an authored scaffold when useful; admitted live source
-mechanically checkpoints eligible changes on its current branch and
-seeds children from that commit. It skips hooks and checks. Intermediate red
-or incomplete commits are legitimate; the parent's contract governs delivery.
-
-`child` returns a `Response result`. `responseActor` addresses its target.
-`responseAdmission` is `Just` only on the request created with that launch; later
-requests to the retained actor carry `Nothing`.
-
-Every assignment has a validated `Label`, typed `input`, optional `guidance`
-and `deadline`, and settlement reporting policy. Literal labels validate when
-forced. Use `labelFromText` for external text. Requests notify their requesting
-actor when they settle unless a watch or route registers for that response first.
-Use `report = Silent` for a record actor settlement source.
-
-`request @Report (responseActor worker) (assignment "revision" revisedTask)`
-assigns more work to the retained actor. `withModel "executor"` selects a
-frozen workspace alias; pair it with an explicit `withEffort Medium` when that
-is the execution policy. Use
-`withModel (Literal "provider-model")` for an explicit provider name. Omitted
-model and the native effort selector's effective default are used. Verify the
-selected launch before assuming effort inheritance. `withInstructions`,
-`withContext`, `withLifetime`, and `withForkBudget` configure launch behavior;
-they do not apply to requests sent to an existing actor.
-
-Use `awaitResponse response` when any unavailable dependency should fail the
-watch. Use `awaitSettled response` when failure belongs in the value. After a
-wake, inspect the retained handle:
+`spawnWatched` composes `unfold` and `watch (awaitSettled response)`. Use `<$>` and
+`<*>` for independent children in one `unfold`; use a later cell for dependent
+work. After wake:
 
 ```haskell
 state <- pollWatch ready
 inspectFull (fmap settledValue state)
 ```
 
-`lookup` searches names and types (`::type`) and ranks callable results by their
-availability in your effect row. Type search is Hoogle-like and needs a complete
-type: wildcard unknown parts with `_` and qualify types as they are imported,
-e.g. `:: Cmd.Command -> _` finds functions from `Cmd.Command` to anything.
-`polymorphic` fits your row with a constraint the call site decides, so it is
-usable as written; `unknown` needs more type information. Full signatures retain
-their constraints.
-`doc` lists topics and the workspace skills beside them; `doc <topic>` returns
-one guide. Load the skill where one exists and use the topic as the fallback:
-each topic's last line names its skill. Resource grants are checked when an
-operation executes. Load `shoal-jev` for the judgment-model effect available in
-every cell.
-`status` defaults to `summary` and
-also provides `detailed`, `recovery`, `lineage`, `trace`, and `bindings` views.
+`awaitSettled` preserves unavailable outcomes as values; `awaitResponse` fails
+the watch on an unavailable dependency. `pollResponse` distinguishes pending,
+cancellation pending, ready, and unavailable. Progress uses `childWithProgress`
+and `pollProgress`; snapshots are not replies. Record actors (`R.*`) collect
+and route events without model inference.
 
-`pollResponse` distinguishes pending, cancellation pending, ready, and
-unavailable responses. A wake is a reason to inspect retained handles; it does
-not prove success. A typed reply is evidence of execution, not integration.
-Use `responseWorktree` and repository observations to verify the
-submitted commit before review or integration.
+Seed root children with `projectHead`, bound children with `boundHead`, or use
+`atRef` for an explicit commit. Live-source admission checkpoints eligible edits
+on the source branch without hooks or checks; inspect omission/fallback receipts.
+Commit useful units without mistaking checkpoints for accepted delivery.
 
-For progress, use `childWithProgress` or `requestWithProgress`, then
-`pollProgress`. Progress publications are snapshots with independent cursors;
-they are not terminal replies. Record actors (`R.*`) can collect progress and
-settlements without model inference.
+`withModel "executor"` selects a workspace alias; `withModel (Literal "provider-model")`
+selects an explicit model. `withEffort Medium` sets effort. Omitted settings follow
+the native launch selector's defaults; `previewBranch` shows resolved policy.
+`withContext (selected render)` selects fresh context. Launch options do not
+modify retained actors. Use `labelFromText` for dynamic labels.
 
-`reflect n` returns your own last `n` completed conversation turns, oldest
-first, with their messages, tool calls, and tool results. Bind it once and reuse
-the value as the context argument for the questions that follow instead of
-restating your history by hand. `doc reflect` has the worked example.
+The activation supplies typed `sessionInput` and its reply declaration; use
+`inspectFull sessionInput` only for omitted detail. Roots outside an assignment
+have no reply binding. `request @Report (responseActor worker) (assignment "revision" input)`
+assigns follow-up work. `pollRequestUpdate` inspects an accepted update handle.
+Requests notify their owner unless a watch/route takes over; record actor
+settlement sources require `report = Silent`.
 
-`me` is the current actor's exact address. A closure captures the `me` in scope
-where it is defined; newly authored code in a child sees the child's address.
-Use `sendMessage me text` only when steering the current actor is intended.
-`parentAgent` answers the actor that spawned this one, `Nothing` for a root —
-use it to `sendMessage` upward, for example from an after-tool slot.
+## Review and integrate
 
-Cancellation is acknowledged by the target through its activation binding.
-Stopping actors and releasing groups remain explicit supervision decisions.
-Inspect failure values before retrying. Typecheck rejection runs no effects;
-runtime failure or interruption keeps the completed prefix.
+A reply identifies a candidate, not an integrated result. Recover its exact
+commit through `responseWorktree`; inspect it from your repository view with
+`git show`/`git diff`, not the child's live working directory. Commission review
+at that revision; give the reviewer the contract and implementer reference for
+repairs. Reviewers running checks need coding authority. Integrate the accepted
+revision with `tryMerge` for a managed target or ordinary Git in your checkout;
+verify that resulting revision before delivery. Load `shoal-review` for the
+compiled project review/repair recipe and `shoal-unfold` for submission evidence.
 
-Delegation at a glance:
-
-- start work: `spawnWatched` or `unfold` with `child`; follow-up work for a
-  retained actor: `request`.
-- steer: `sendMessage` delivers a note; `updateRequest` clarifies the active
-  request; `cancelRequest` withdraws a request (a queued one never starts) and
-  keeps the actor; `stopAgent` retires the actor and waits for its resources
-  to release (`StoppedNow`), or says what stays retained.
-- inspect: `listAgents`, `lookupAgent`, `findAgentsByLabel`, `observeForkGroup`,
-  `pollResponse`.
-- wait: `watch` with `awaitSettled` (combine with `<*>` for all-of) or
-  `awaitAnySettled` (wake when any settles).
-- launch options: `withContext (selected render)` starts a fresh conversation
-  with only the rendered input; `withModel`, `withEffort`; `previewBranch`
-  shows the resolved launch before admission.
-- finish: `tryMerge` integrates a submission; `planCleanup` and
-  `executeCleanup` retire a group.
-
-For repository delegation use these operations rather than generic agent tools:
-they give typed results, worktree custody, and wakes.
-
-Common signatures (reference, not a cell to execute):
+## Core signatures
 
 ```haskell signatures
 assignment :: Label -> input -> Assignment input
@@ -146,79 +82,45 @@ pollWatch :: Member Watches effects => Watch result -> Eff effects (WatchState r
 pollResponse :: Member Replies effects => Response result -> Eff effects (ResponseState result)
 ```
 
-`Map.`, `Set.`, and `T.` provide maps, sets, and text. `Cmd.` provides command
-composition; `R.` provides record actors; `J.` provides Jev. `bash`, `withMemory`,
-`MiB`, `GiB`, and the packet operators `:=`, `:&`, and `Nil` are in scope.
-`traverse`, `for`, `forM`, `forM_`,
-and `for_` are already in scope. Use a type application such as `request @Report`
-when the result type is otherwise unconstrained; later statements in the same
-cell can often determine it.
+## Compose commands and judgment
 
-Reusable effectful helpers should declare their `Member` constraints, as in
-the example below. The workbench may be unable to retain an inferred polymorphic
-effect row: an ambiguous `effects0` or `parent0` is a reason to name that row in
-a signature, not to duplicate the helper's body at every call site. For a fork
-helper, start from the `unfold`/`child` signatures above and the effects it uses.
-
-## Find a capability when you need it
-
-| Intended operation | Starting surface | Load for the next step |
-| --- | --- | --- |
-| Feed command evidence into a program | `Cmd.run`, `Cmd.quiet`, `Cmd.stdout` | `shoal-command`: stderr, complete output, paging, completion events |
-| Judge evidence and select an action | `J.ask1`, `J.choice`, `J.settle` | `shoal-jev`: packets, per-row batteries, speculative questions |
-| React without another model turn | Record actors through `R.*` | `shoal-define-actors`: state, installed event sources, handlers |
-| Delegate and collect typed replies | `spawnWatched`, `unfold`, `watch` | `shoal-unfold`; `shoal-cleanup` when retiring the work |
-| Reuse a project-authored function | `doc topics`, module/name lookup | The installed module's exports and worked example |
-| Inspect a partial failure or old handle | The cell receipt, `status` recovery view | `doc recovery`, `shoal-workbench` |
-
-Load more detail when the intended operation needs it. For example, moving from
-a short foreground command to an unattended long check is the point to read
-the command-completion pattern. A new effect such as conversation reflection
-needs an installed signature; a plan or worker report does not make it callable.
-
-## Commands, judgments, and prepared follow-ups
-
-Use `Cmd.run` when command results should feed code. `Cmd.stdout result` returns
-complete successful stdout or an explicit issue; it does not silently truncate
-or turn a nonzero exit into success. Use `Cmd.quiet` to retain data without routine
-command display. For failed commands, inspect the outcome and stderr through the
-output API; load `shoal-command` for paging and completeness contracts.
-
-This helper reads recent commit subjects, asks which might explain a task, and
-fetches the selected commit's stat without another model turn. Selection is a
-reading aid, not a conclusion about the code. The task is an argument so intent
-travels with the evidence. Every command argument comes from code or Git output.
+This task-local helper batches two semantic questions over successful complete
+command output. Exit failure is handled in code; Jev unavailability stays explicit.
 
 ```haskell
 import Tidepool.Effects.Core (Jev, Commands)
-inspectRecentChanges :: (Member Jev effects, Member Commands effects) => Text -> Eff effects Text
-inspectRecentChanges task = do
-      listed <- Cmd.quiet (Cmd.run (Cmd.argv ["git", "log", "-8", "--format=%H%x09%s"]))
-      case Cmd.stdout listed of
-        Left issue -> pure ("Cannot read history: " <> T.pack (show issue))
-        Right history -> do
-          let rows = map (T.breakOn "\t") (T.lines history)
-              offers = J.alt #unresolved "No listed subject explains the task, or subjects lack the deciding detail" ()
-                J..| J.many #commit fst (T.drop 1 . snd) rows
-          answer <- J.ask1 (J.rawState (object ["task" .= (task :: Text), "recent_history" .= history]))
-            (J.choice "Which listed commit subject identifies a change worth inspecting for `task`?" offers)
-          case answer of
-            Left err -> pure ("Jev unavailable: " <> T.pack (show err))
-            Right a -> case J.settle J.lenient a
-                 (#unresolved (\() -> pure "The listed subjects do not resolve what to read; inspect broader history or source.")
-                   J..| #commit (\_ (oid, _) -> do
-                     result <- Cmd.quiet (Cmd.run (Cmd.argv ["git", "show", "--stat", "--oneline", oid]))
-                     pure (either (\issue -> "Cannot read selected commit: " <> T.pack (show issue)) id (Cmd.stdout result)))) of
-              Left _ -> pure ("Needs inspection: " <> J.explain J.lenient a)
-              Right (J.Settled act) -> act
+judgeChanges :: (Member Jev effects, Member Commands effects) => Text -> Eff effects Text
+judgeChanges task = do
+  result <- Cmd.quiet (Cmd.run (Cmd.argv ["git", "diff", "--stat"]))
+  case Cmd.stdout result of
+    Left issue -> pure ("Cannot read changes: " <> T.pack (show issue))
+    Right changes -> do
+      answer <- J.ask (J.rawState (object ["task" .= task, "changes" .= changes]))
+        (#relevant := J.noul "Do these changed paths plausibly relate to the task?"
+          :& #enough := J.noul "Does this diff stat suffice to establish task completion?")
+      pure (either (\err -> "Jev unavailable: " <> T.pack (show err))
+        (\a -> T.pack (show (a.relevant.yes, a.enough.yes))) answer)
 ```
 
-Call `inspectRecentChanges "Which recent change could explain the command output regression?"`
-with your actual question. The helper is defined by the cell, not a shipped API.
-Keep the returned evidence if another judgment needs it. For several independent
-questions over one state, use `J.ask` with a packet and read fields from `J.answers`.
-`J.settle` checks the winner's distribution and dispatches through the handler its
-label names; its doubt and the transport failure are separate cases. A confident
-unresolved answer remains unresolved. `J` is present where the workspace pins the
-Jev library. Use `shoal-jev` for per-row batteries, speculative questions, and
-other patterns.
+`Cmd.stdout` returns complete successful stdout or an explicit issue. For failed
+commands, inspect outcome and stderr; `Cmd.quiet` suppresses routine display.
+`reflect n` returns your last `n` completed conversation turns, oldest first;
+reuse that evidence across questions. `me` is lexically captured; `parentAgent`
+is the spawning actor or `Nothing` for a root.
+
+## Discover missing information
+
+Start from this guide and the assignment; no startup inventory ritual.
+`lookup` accepts names, modules, and Hoogle-like types such as `:: Cmd.Command -> _`.
+`polymorphic` is usable with call-site constraints; `unknown` needs more type
+information. Use `doc topics` for guides and workspace modules; inspect their
+exports/source where needed. `status` offers `summary`, `detailed`, `recovery`,
+`lineage`, `trace`, and `bindings` for runtime uncertainty.
+
+Load the relevant skill at an unfamiliar boundary: `shoal-command` for retained
+output/stdin/completion; `shoal-workbench` for parser/type/display recovery;
+`shoal-jev` for typed judgment composition; `shoal-unfold` for delegation/source;
+`shoal-coordinate`, `shoal-fork`, `shoal-orchestrate`, and `shoal-review` for project
+coordination; `shoal-define-actors` for custom event handlers; `shoal-cleanup` for
+retirement; `shoal-agent-spec` for tools and after-tool reload. Use the corresponding
+`doc` topic as fallback. Distinguish shipped APIs from project/example-only helpers.

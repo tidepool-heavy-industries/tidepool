@@ -10,7 +10,7 @@ pub(super) enum PromptId {
 }
 
 impl PromptId {
-    pub(super) const CATALOG_VERSION: u32 = 23;
+    pub(super) const CATALOG_VERSION: u32 = 24;
 
     #[cfg(test)]
     pub(super) const ALL: [Self; 7] = [
@@ -180,6 +180,15 @@ impl FrozenBasePrompt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_prompt_stays_within_word_budget() {
+        let words = PromptId::ShoalBase.body().split_whitespace().count();
+        assert!(
+            words <= 2000,
+            "shared base/API has {words} words; budget is 2000"
+        );
+    }
 
     #[test]
     fn frozen_base_reuses_exact_bytes_and_rejects_changed_artifacts() {

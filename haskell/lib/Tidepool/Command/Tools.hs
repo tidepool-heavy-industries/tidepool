@@ -77,8 +77,7 @@ data ReadOutput = ReadOutput
 -- Schemas and handlers travel together through the ordinary tools-record DSL.
 -- These definitions can be selected or reused by project-authored tool records.
 data ShellTools mode = ShellTools
-  { bash :: mode :- RawCall Text,
-    execCommand :: mode :- Call Execute Text,
+  { bash :: mode :- Call Execute Text,
     writeStdin :: mode :- Call WriteInput Text,
     readOutput :: mode :- Call ReadOutput Text,
     cancelCommand :: mode :- Call CancelCommand Text
@@ -89,24 +88,20 @@ tools :: (Member Cmd.Commands effects) => ShellTools (AsServerT (Eff effects))
 tools =
   ShellTools
     { bash =
-        rawTool
-          "Run literal Bash in this actor's workspace; output displays directly. Default: 256 MiB, 30s observation. Use exec_command for resource/cwd/environment/PTY options. A live command returns session_id for write_stdin; read_output recovers retained output without rerunning. Haskell retains the same Cmd.Job for composition."
-          (\script -> Cmd.run (Cmd.bashCommand script) >> pure ""),
-      execCommand =
         tool
-          "Execute literal Bash once. Optional workdir/environment, memory_mib (default 256), tty or piped stdin. yield_time_ms: 0..30000 (default 30000); max_output_bytes: 1024..32768 (default 32768). Running/queued commands retain session_id; observation expiry does not cancel execution. Bash does not load shell profiles. intent: one line saying what you are looking for; your after-tool slot can read it."
+          "Execute Bash once; no shell profiles. Optional workdir/environment, memory_mib (default 256), tty or piped stdin. Observe 0..30000ms (default 30000); output 1024..32768 bytes (default 32768). Returns session_id and a retained Cmd.Job. Observation expiry leaves execution alive: use write_stdin to observe, read_output to recover output. intent supplies the purpose to an after-tool slot."
           execute,
       writeStdin =
         tool
-          "Send chars to an existing session_id, then observe new output. Omit chars or use empty text to poll without writing. close_stdin sends final bytes then EOF for pipes only; PTYs reject it. Backend write acknowledgment does not prove the child consumed the bytes. yield_time_ms: 0..30000 (default 250). Output allowance: 1024..32768 bytes. PTYs accept terminal control characters. Never rerun to recover output."
+          "Observe an existing session_id; optional chars sends input first. Empty/omitted chars only observes. close_stdin sends final bytes then EOF (pipes only). Write acknowledgment does not prove consumption; never replay uncertain input. PTYs accept control characters. Observe 0..30000ms (default 250); output 1024..32768 bytes."
           writeInput,
       readOutput =
         tool
-          "Read retained output without executing, waiting or consuming it. Default stream Stdout, offset 0, max_output_bytes 8192 (1024..32768 including metadata). Contiguous pages, never head/tail previews. Reply reports byte positions, next offset, current end versus EOF and retention gaps. Use Stderr for diagnostics."
+          "Read retained output; no execution, waiting, or consumption. Defaults: Stdout, byte offset 0, 8192 bytes (1024..32768 including metadata). Contiguous pages report next_offset, EOF/current end, and retention gaps. Use Stderr for diagnostics."
           readRetained,
       cancelCommand =
         tool
-          "Request cancellation of an existing session_id, then observe it. Works for queued jobs, pipes and PTYs; stdin need not be open. Default observation 250ms, maximum 30000ms. Cancellation requested is not terminal/cleanup confirmation. Repeated cancellation preserves the actual outcome; retained output remains readable."
+          "Request cancellation, then observe the same session_id (0..30000ms, default 250). Works for queued jobs, pipes, and PTYs. Acknowledgment is not terminal/cleanup confirmation. Repeated cancellation preserves the outcome; output remains retained."
           cancelRetained
     }
 
@@ -176,7 +171,13 @@ writeInput WriteInput {session_id = key, chars = input, close_stdin = close, yie
         Left issue -> pure $ "session_id: " <> key <> "\nInput submission unconfirmed: " <> T.pack (show issue) <> "\nInspect the same job before recovery. Do not replay input after an uncertain acknowledgment."
         Right () -> do
           _ <- Cmd.observe options (Job key)
-          pure $ if eof then "Stdin is closed." else ""
+          pure $
+            if eof
+              then "Stdin is closed."
+              else
+                if T.null text
+                  then ""
+                  else "Input acknowledged by backend; child consumption is unknown."
 
 cancelRetained :: (Member Cmd.Commands effects) => CancelCommand -> Eff effects Text
 cancelRetained CancelCommand {session_id = key, yield_time_ms = wait, max_output_bytes = limit} =
@@ -217,7 +218,7 @@ readRetained ReadOutput {session_id = key, stream = selected, offset = position,
           -- still names the job's retained Haskell binding, same as every
           -- other direct command tool. The small budget only covers this
           -- heading; the page itself is never refetched here.
-          _ <- send (CommandPresentWith key (CommandVisible ("Read · session_id: " <> key) 512))
+          _ <- send (CommandPresentWith key (CommandVisible ("Read retained output · session_id: " <> key <> "\nnext: read_output at next_offset; EOF describes this stream, not command success") 512))
           let (text, _) = displayWith budget details
           pure $ T.pack (show selectedStream) <> " · " <> text <> "\nnext_offset: " <> T.pack (show (Cmd.outputEnd details))
 

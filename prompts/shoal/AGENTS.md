@@ -6,6 +6,11 @@ This file guides contributors; it is not part of the shipped model prompt.
   catalog identity. `base.md` plus `api-guide.md` form one frozen shared superset
   across roles. Workspace core overrides are selected once at swarm startup;
   never vary the selected prefix by role or live bindings.
+- Optimize instructions for model decisions: use established technical vocabulary
+  with its actual semantics; explain Shoal-specific departures. Give each contract
+  one canonical home, and move rare recovery detail behind targeted discovery.
+  Base plus API guide must stay within 2,000 words; inspect the assembled role
+  and tool layers too rather than relocating verbosity into always-loaded text.
 - Keep core callable signatures and representative examples in `api-guide.md`.
   Avoid ritual startup inventories; recommend targeted discovery only for missing
   information. Check against live/public types rather than inventing API shapes.

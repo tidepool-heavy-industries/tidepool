@@ -62,9 +62,9 @@ async fn response(
                 json!({"cmd":"python3 -c 'a=bytearray(512*1024*1024)'", "memory_mib":64,"yield_time_ms":30000})
             }
         };
-        json!({"type":"function_call", "call_id":"initial-oom", "name":"exec_command", "arguments":args.to_string()})
+        json!({"type":"function_call", "call_id":"initial-oom", "name":match provider.shell { tidepool_agent::InteractiveShellTools::Native => "exec_command", tidepool_agent::InteractiveShellTools::Hosted => "bash" }, "arguments":args.to_string()})
     } else if index == 40 {
-        json!({"type":"function_call", "call_id":"structured-40", "name":"exec_command",
+        json!({"type":"function_call", "call_id":"structured-40", "name":"bash",
             "arguments":json!({"cmd":"python3 -c 'import sys; sys.stdout.buffer.write(bytes([255])*9000)'", "memory_mib":64,"yield_time_ms":30000}).to_string()})
     } else if index == 41 || index == 42 {
         let requests = provider.requests.lock().unwrap();
@@ -104,7 +104,7 @@ async fn response(
             json!({"cmd":"printf cancel-ready; exec sleep 30", "yield_time_ms":0})
         };
         json!({"type":"function_call", "call_id":format!("structured-{index}"),
-            "name":"exec_command", "arguments":arguments.to_string()})
+            "name":"bash", "arguments":arguments.to_string()})
     } else if (31..=33).contains(&index) || (35..=38).contains(&index) {
         let origin = if index == 38 {
             27
@@ -153,32 +153,30 @@ async fn response(
         } else {
             "printf 'once\\n' >> raw-start-count; printf 'RAW-BEGIN\\n'; head -c 96000 /dev/zero | tr '\\0' x; printf '\\nRAW-END\\n'; printf 'nonzero diagnostic\\n' >&2; exit 7"
         };
-        json!({"type":"custom_tool_call", "call_id":format!("haskell-{index}"),
-            "name":"bash", "input":script})
+        json!({"type":"function_call", "call_id":format!("haskell-{index}"),
+            "name":"bash", "arguments":json!({"cmd":script}).to_string()})
     } else if index == 22 {
         let requests = provider.requests.lock().unwrap();
         let receipt = requests[index]["input"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|item| {
-                item["call_id"] == "haskell-21" && item["type"] == "custom_tool_call_output"
-            })
+            .find(|item| item["call_id"] == "haskell-21" && item["type"] == "function_call_output")
             .and_then(|item| item["output"].as_str())
-            .expect("raw tool output in provider history");
+            .expect("structured Bash output in provider history");
         let binding = receipt
             .lines()
             .find_map(|line| {
-                line.strip_prefix("Optional Haskell binding: ")?
+                line.strip_prefix("retained as ")?
                     .strip_suffix(" :: Cmd.Job")
             })
-            .expect("large raw command installs an actual job binding");
+            .expect("large command installs an actual job binding");
         json!({"type":"custom_tool_call", "call_id":"haskell-22",
             "name":"haskell",
             "input":format!("rawPage <- Cmd.output {binding}\n(T.length (Cmd.pageText rawPage), T.take 9 (Cmd.pageText rawPage))")})
     } else if index == 23 {
         json!({"type":"function_call", "call_id":"structured-23",
-            "name":"exec_command", "arguments":json!({"cmd":"printf once >> structured-count; touch structured-started; read -r line; printf 'structured:%s\\n' \"$line\"; printf 'structured-error\\n' >&2; exit 7", "tty":true,"memory_mib":64,"yield_time_ms":0}).to_string()})
+            "name":"bash", "arguments":json!({"cmd":"printf once >> structured-count; touch structured-started; read -r line; printf 'structured:%s\\n' \"$line\"; printf 'structured-error\\n' >&2; exit 7", "tty":true,"memory_mib":64,"yield_time_ms":0}).to_string()})
     } else if (24..=26).contains(&index) {
         let requests = provider.requests.lock().unwrap();
         let receipt = requests[index]["input"]
@@ -212,7 +210,7 @@ async fn response(
             "name":name,"arguments":arguments.to_string()})
     } else if index == 27 {
         json!({"type":"function_call", "call_id":"structured-27",
-            "name":"exec_command", "arguments":json!({"cmd":"trap 'exit 42' INT; touch structured-interrupt-ready; while :; do sleep 1; done", "tty":true,"memory_mib":64,"yield_time_ms":0}).to_string()})
+            "name":"bash", "arguments":json!({"cmd":"trap 'exit 42' INT; touch structured-interrupt-ready; while :; do sleep 1; done", "tty":true,"memory_mib":64,"yield_time_ms":0}).to_string()})
     } else if index == 28 {
         let requests = provider.requests.lock().unwrap();
         let receipt = requests[index]["input"]
@@ -912,7 +910,11 @@ trust_level = "trusted"
                     .expect("default tools share Codex's functions group")["tools"]
                     .as_array()
                     .expect("default tool list");
-                for name in ["exec_command", "write_stdin", "haskell", "apply_patch"] {
+                let shell_name = match shell {
+                    tidepool_agent::InteractiveShellTools::Native => "exec_command",
+                    tidepool_agent::InteractiveShellTools::Hosted => "bash",
+                };
+                for name in [shell_name, "write_stdin", "haskell", "apply_patch"] {
                     assert_eq!(
                         flat.iter().filter(|tool| tool["name"] == name).count(),
                         1,
@@ -920,17 +922,15 @@ trust_level = "trusted"
                     );
                 }
                 if shell == tidepool_agent::InteractiveShellTools::Hosted {
-                    for name in ["bash", "read_output", "cancel_command"] {
+                    assert!(!flat.iter().any(|tool| tool["name"] == "exec_command"));
+                    for name in ["read_output", "cancel_command"] {
                         assert_eq!(
                             flat.iter().filter(|tool| tool["name"] == name).count(),
                             1,
                             "{tools}"
                         );
                     }
-                    let exec = flat
-                        .iter()
-                        .find(|tool| tool["name"] == "exec_command")
-                        .unwrap();
+                    let exec = flat.iter().find(|tool| tool["name"] == "bash").unwrap();
                     assert!(
                         exec.to_string().contains("memory_mib"),
                         "hosted schema required: {exec}"
@@ -1021,8 +1021,8 @@ trust_level = "trusted"
                 );
                 assert!(output(21).contains("raw-stderr"), "{}", output(21));
                 assert!(
-                    !output(21).contains(" :: Cmd.Job"),
-                    "short calls need no binding"
+                    output(21).contains(" :: Cmd.Job"),
+                    "short calls retain a composable job binding"
                 );
                 let large = output(22);
                 assert!(large.len() <= 32 * 1024, "{}", large.len());

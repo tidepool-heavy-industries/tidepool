@@ -456,7 +456,7 @@ instance
 -- >   , triage_search :: mode :- Call Triage Text
 -- >   } deriving (Generic)
 --
--- declares @bash, exec_command, write_stdin, read_output, cancel_command,
+-- declares @bash, write_stdin, read_output, cancel_command,
 -- triage_search@, in that order. This is how an agent keeps the shell tools
 -- while adding its own: a record that does not nest them does not have them.
 --

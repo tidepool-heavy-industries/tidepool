@@ -94,14 +94,24 @@ for them: define the result type so the artifact is a value, and let the Git
 identity carry anything too large to be one. A typed reply is evidence of
 execution, not of integration; verify the submitted commit before merging.
 
-**Say so in the assignment.** A child that is not told to commit may not. Three
-children were once given the same assignment — write one passing test — and one
-of them committed; the other two ran their tests green, replied that they were
-done, and left the work uncommitted in a worktree nobody looked at again. Their
-branches were still at the base commit, which only surfaced as `AlreadyContained`
-at merge time, four exercises later. End every assignment with the sentence that
-makes the reply true: commit your change to your own branch before replying, and
-name the commit in your reply.
+Require committed candidates in implementation assignments: commit to the child's
+own branch before replying and include the exact commit in the result. A passing
+check over uncommitted files does not establish a submitted candidate.
+
+## Source admission and follow-up
+
+`projectHead` selects live root source; `boundHead` requires an allocated child
+worktree. Admission checkpoints eligible edits on the source branch, including
+root main, without hooks or checks. Runtime `.shoal/`, configured exclusions, and
+recognized caches are excluded. Git failure preserves working files and refuses
+the fork. A busy-source fallback uses existing HEAD and reports omitted edits.
+Use `atRef` for an explicit committed baseline; inspect the admission receipt.
+
+Use `request` for new work on a retained worker, `updateRequest` for clarification
+of its active assignment, and `sendMessage` for information. Inspect the accepted
+update with `pollRequestUpdate`; admission, presentation, and checked incorporation
+remain separate evidence. `doc request` covers refusal and uncertain delivery.
+Use `shoal-cleanup` for `stopAgent`, `planCleanup`, and `executeCleanup`.
 
 Assignment values and explicit worktree seeds keep ordinary Haskell value
 semantics and are not reevaluated at startup. A later failure in the cell stops

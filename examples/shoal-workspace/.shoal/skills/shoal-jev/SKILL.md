@@ -3,12 +3,10 @@ name: shoal-jev
 description: Ask Jev, the cheap judgment model, inside a Haskell cell — packets, per-item batteries, calibrated alternatives, and gating an action on a policy. Load when a cell needs a semantic decision (triage, routing, relevance, a review gate) instead of another model round.
 ---
 
-Jev is a fast "System 1" call beside your own reasoning: about 200 ms, a small
-fraction of a cent, no per-run cap worth rationing. Call it per item, per file,
-per candidate, inside a loop. Ten Jev calls that save one model round are a win;
-one Jev-dense cell that replaces five read-then-judge model rounds is a much
-bigger one. A judgment is evidence, not authority, and it never generates the
-action: a choice selects a payload you already built, and that payload runs.
+Jev returns typed semantic judgments inside an effectful program. Batch independent
+questions over shared evidence; sequence calls when new evidence changes the
+question. Code owns authoritative facts and prepared actions. A judgment supplies
+evidence, not authority. Measure latency and usage for the actual workload.
 
 Everything named in this skill is **shipped**: `J.ask`, `J.ask1`, `J.askWith`,
 `J.choice`, `J.noul`, `J.score`, `J.each`, `J.optional`, `J.alt`, `J..|`,
@@ -29,17 +27,16 @@ to your own policy; never retry blindly.
 
 ## Be dense
 
-One packet per semantic boundary. Gather the evidence with a shell listing and
-one read per candidate, bind short previews, then ask everything the evidence
-can answer at once. Ask again only when a read, a command or a reply has
-changed the world. This is two cells for work that otherwise costs five model
-rounds, and only the shortlist — never the file text — reaches your context.
+One packet per semantic boundary. Gather evidence, then batch the questions it
+can answer. Use previews only when they contain the deciding evidence; otherwise
+read the complete source. The example below stops on failed reads. Ask again when
+new evidence or a changed question warrants it.
 
 ```haskell
 listed <- Cmd.stdout <$> Cmd.run [bash|ls|]
-let names = either (const []) T.lines listed
+let names = either (error . T.pack . show) T.lines listed
 previews <- forM names $ \n ->
-  (n,) . either (const "") id . Cmd.stdout <$> Cmd.run (Cmd.withArguments [n] [bash|head -n 20 -- "$1"|])
+  (n,) . either (error . T.pack . show) id . Cmd.stdout <$> Cmd.run (Cmd.withArguments [n] [bash|head -n 20 -- "$1"|])
 ```
 
 A packet is a chain of labelled cells joined with `:&`. Nothing terminates it,
@@ -352,3 +349,7 @@ let classify :: Text -> Handler [(Text, Text)] MyEffects (); classify output = d
         Left err -> modify' (++ [("jev_unavailable", T.pack (show err))])
         Right a -> modify' (++ [(either (const "doubt") (\(J.Settled act) -> act) (J.takenUnder J.lenient a), a.key <> " " <> T.pack (show a.confidence))])
 ```
+
+For a compiled command → choice → effectful continuation example, read
+[recent changes](references/recent-changes.md). It handles output failure, doubt,
+and the unresolved alternative separately.

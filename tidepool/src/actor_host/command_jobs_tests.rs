@@ -227,15 +227,15 @@ pub(super) async fn backend_request(
 }
 
 #[tokio::test]
-async fn raw_bash_uses_compiled_handler_and_shared_command_owner() {
+async fn structured_bash_uses_compiled_handler_and_shared_command_owner() {
     let mut campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.clone();
     assert!(policy.tools().iter().any(|tool| matches!(tool,
-        tidepool_tool::HostedTool::Custom(declaration) if declaration.name == "bash")));
+        tidepool_tool::HostedTool::Function(declaration) if declaration.name == "bash")));
     let script = "cat <<'EOF'\nλ; $(literal) [bash|text|]\nEOF\n";
     let invocation = ToolInvocation {
         name: "bash".into(),
-        arguments: ToolArguments::Raw(script.into()),
+        arguments: ToolArguments::Structured(serde_json::json!({"cmd":script})),
         context: Some(ToolInvocationContext {
             context_call_id: Some("raw-once".into()),
             thread_id: "raw-thread".into(),
@@ -258,7 +258,7 @@ async fn raw_bash_uses_compiled_handler_and_shared_command_owner() {
     // result text, even when output is small and nothing was truncated.
     let binding = receipt["items"][0]["installedBindings"][0]
         .as_str()
-        .expect("a small raw command still installs a retained job binding");
+        .expect("a small structured command still installs a retained job binding");
     assert!(
         output.contains(&format!("retained as {binding} :: Cmd.Job")),
         "{receipt}"
@@ -279,7 +279,7 @@ async fn raw_bash_uses_compiled_handler_and_shared_command_owner() {
     );
     assert_eq!(backend.specs.lock()[0].memory, 256 * 1024 * 1024);
     let mut changed = invocation;
-    changed.arguments = ToolArguments::Raw("changed".into());
+    changed.arguments = ToolArguments::Structured(serde_json::json!({"cmd":"changed"}));
     assert!(policy.dispatch_boxed(changed).await.is_err());
     committed(&campaign, "40 + 2 :: Int").await;
     campaign.forest.shutdown().await;
@@ -298,7 +298,7 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
         })
     };
     let invalid = call(
-        "exec_command",
+        "bash",
         serde_json::json!({"cmd":"never", "yield_time_ms":-1}),
     )
     .await
@@ -312,7 +312,7 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
         "{invalid}"
     );
     let running = tokio::spawn(call(
-        "exec_command",
+        "bash",
         serde_json::json!({
             "cmd":"printf literal", "workdir":"src", "environment":{"EXAMPLE":"value"},
             "memory_mib":64, "stdin":true, "yield_time_ms":0, "max_output_bytes":2048,
@@ -335,7 +335,7 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
     let session = session.to_owned();
     let binding = receipt["items"][0]["installedBindings"][0]
         .as_str()
-        .expect("exec_command names a retained binding even with small output")
+        .expect("bash names a retained binding even with small output")
         .to_owned();
     let first = call(
         "write_stdin",
@@ -364,7 +364,7 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
     assert!(read_output.contains("result"), "{read}");
     // read_output is the one direct command tool that never starts, waits, or
     // sends anything — it still names the same retained binding the earlier
-    // exec_command call installed, not a fresh one.
+    // bash call installed, not a fresh one.
     assert_eq!(
         read["items"][0]["installedBindings"][0].as_str().unwrap(),
         binding,
@@ -430,7 +430,7 @@ async fn structured_shell_tools_retain_sessions_and_navigate_without_reexecution
 }
 
 #[tokio::test]
-async fn raw_bash_oversized_output_retains_a_real_job() {
+async fn structured_bash_oversized_output_retains_a_real_job() {
     let mut campaign = TestCampaign::start().await;
     let backend = TestCommands::new();
     *backend.stdout.lock() = format!("BEGIN\n{}\nEND\n", "λ".repeat(32_000));
@@ -439,7 +439,7 @@ async fn raw_bash_oversized_output_retains_a_real_job() {
     let running = tokio::spawn(policy.dispatch_boxed(ToolInvocation {
         context: None,
         name: "bash".into(),
-        arguments: ToolArguments::Raw("large".into()),
+        arguments: ToolArguments::Structured(serde_json::json!({"cmd":"large"})),
     }));
     backend_request(&mut campaign)
         .await
@@ -518,20 +518,22 @@ async fn raw_bash_oversized_output_retains_a_real_job() {
 }
 
 #[tokio::test]
-async fn raw_bash_timeout_preserves_the_command_for_haskell_continuation() {
+async fn structured_bash_timeout_preserves_the_command_for_haskell_continuation() {
     let mut campaign = TestCampaign::start().await;
     let backend = TestCommands::new();
     let policy = campaign.root_installation.policy.clone();
     let running = tokio::spawn(policy.dispatch_boxed(ToolInvocation {
         context: None,
         name: "bash".into(),
-        arguments: ToolArguments::Raw("long-lived".into()),
+        arguments: ToolArguments::Structured(
+            serde_json::json!({"cmd":"long-lived", "yield_time_ms":0}),
+        ),
     }));
     backend_request(&mut campaign)
         .await
         .supply(Ok(backend.clone()));
     let response = running.await.unwrap().unwrap();
-    assert_eq!(response["status"], "backgrounded", "{response}");
+    assert_eq!(response["status"], "committed", "{response}");
     let output = response["items"][0]["output"].as_str().unwrap();
     let session = output
         .split("session_id: ")
@@ -601,7 +603,7 @@ async fn write_stdin_and_cancel_command_each_name_the_same_retained_binding() {
         })
     };
     let running = tokio::spawn(call(
-        "exec_command",
+        "bash",
         serde_json::json!({"cmd":"printf literal", "stdin":true, "yield_time_ms":0}),
     ));
     backend_request(&mut campaign)
@@ -647,9 +649,7 @@ async fn write_stdin_and_cancel_command_each_name_the_same_retained_binding() {
     .await
     .unwrap();
     assert_eq!(cancel["status"], "committed", "{cancel}");
-    let cancel_binding = cancel["items"][0]["installedBindings"][0]
-        .as_str()
-        .unwrap();
+    let cancel_binding = cancel["items"][0]["installedBindings"][0].as_str().unwrap();
     assert_eq!(cancel_binding, started_binding, "{cancel}");
     assert!(
         cancel["items"][0]["output"]
@@ -898,7 +898,7 @@ async fn command_jobs_cancel_before_backend_cannot_start_later() {
         .policy
         .dispatch_boxed(ToolInvocation {
             context: None,
-            name: "exec_command".into(),
+            name: "bash".into(),
             arguments: ToolArguments::Structured(
                 serde_json::json!({"cmd":"never-execute","yield_time_ms":0}),
             ),
@@ -1378,7 +1378,7 @@ async fn flat_input_lifecycle_preserves_partial_acknowledgments() {
     };
     let backend = TestCommands::new();
     let started = tokio::spawn(call(
-        "exec_command",
+        "bash",
         serde_json::json!({"cmd":"input fixture","stdin":true,"yield_time_ms":0}),
     ));
     backend_request(&mut campaign)
@@ -1532,7 +1532,7 @@ async fn flat_output_pending_is_distinct_from_empty_and_failure() {
     let backend = TestCommands::new();
     backend.output_pending.store(true, Release);
     let started = tokio::spawn(call(
-        "exec_command",
+        "bash",
         serde_json::json!({"cmd":"pending fixture","yield_time_ms":0}),
     ));
     backend_request(&mut campaign)
@@ -1634,7 +1634,7 @@ async fn flat_pty_eof_rejection_proves_no_input_submitted() {
     };
     let backend = TestCommands::new();
     let pending = tokio::spawn(call(
-        "exec_command",
+        "bash",
         serde_json::json!({"cmd":"tty fixture","tty":true,"yield_time_ms":0}),
     ));
     backend_request(&mut campaign)

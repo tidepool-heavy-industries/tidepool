@@ -770,6 +770,62 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     // call a live provider: this check proves the published surface compiles.
     committed(root.as_ref(), guide_examples.next().unwrap()).await;
     assert!(guide_examples.next().is_none(), "untested guide example");
+    // Exercise changed evidence examples without live commands or model calls.
+    // The host requests a backend for each command, including later calls in a cell.
+    let command_examples = [
+        "judgeChanges \"inspect changed documentation\"",
+        examples(include_str!(
+            "../../../examples/shoal-workspace/.shoal/skills/shoal-workbench/SKILL.md"
+        ))
+        .nth(2)
+        .unwrap(),
+        examples(include_str!(
+            "../../../examples/shoal-workspace/.shoal/skills/shoal-workbench/SKILL.md"
+        ))
+        .nth(4)
+        .unwrap(),
+        example(include_str!(
+            "../../../examples/shoal-workspace/.shoal/skills/shoal-jev/SKILL.md"
+        )),
+    ];
+    for (index, source) in command_examples.into_iter().enumerate() {
+        let mut running = tokio::spawn({
+            let root = root.clone();
+            async move { dispatch_haskell_script(root.as_ref(), source).await }
+        });
+        let result = loop {
+            tokio::select! {
+                result = &mut running => break result.unwrap(),
+                request = super::command_jobs_tests::backend_request(&mut campaign) => {
+                    request.supply(Ok(super::command_jobs_tests::TestCommands::completed("README.md")));
+                }
+            }
+        };
+        assert_eq!(result["status"], "committed", "{source}: {result}");
+        if index == 0 {
+            assert!(result.to_string().contains("Jev unavailable:"), "{result}");
+        }
+    }
+
+    committed(
+        root.as_ref(),
+        example(include_str!("../../../examples/shoal-workspace/.shoal/skills/shoal-jev/references/recent-changes.md")),
+    )
+    .await;
+    let layout =
+        dispatch_haskell_script(root.as_ref(), include_str!("notebook_let_layout.hs")).await;
+    assert_eq!(layout["status"], "rejected", "{layout}");
+    assert!(layout.to_string().contains("parse error"), "{layout}");
+    let repaired = committed(
+        root.as_ref(),
+        include_str!("notebook_let_layout_repaired.hs"),
+    )
+    .await;
+    assert_eq!(
+        repaired["items"].as_array().unwrap().last().unwrap()["output"],
+        "42",
+        "{repaired}"
+    );
     assert_eq!(
         success["items"][1]["output"],
         "WatchReady (Right (Remove the stale path and report the focused check.))"

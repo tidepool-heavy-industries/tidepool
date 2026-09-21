@@ -53,11 +53,11 @@ tools = MyTools
   }
 ```
 
-That declares `bash`, `exec_command`, `write_stdin`, `read_output`,
+That declares `bash`, `write_stdin`, `read_output`,
 `cancel_command`, `probe`, in that order; the `shell` field name is not a tool
 name of its own. Naming your own record REPLACES the shell record rather than
 adding to it, so a record that does not nest `Shell.ShellTools` leaves you with
-no `bash` and no `exec_command` at your next incarnation — nest it unless you
+no `bash` at your next incarnation — nest it unless you
 mean to give them up.
 
 And the spec that installs it:
@@ -96,7 +96,7 @@ data ToolResult = ToolResult { toolResultName :: Text, toolResultHandle :: Resul
 ```
 
 `toolCallArguments` is the call's arguments as the model sent them: a JSON object
-for a `Call` tool, a JSON string for a `RawCall` tool such as `bash`.
+for a `Call` tool, a JSON string for a project-defined `RawCall` tool.
 `toolResultOutput` is the text the model would be shown. `ResultHandle` is
 `Text`, and is the name the whole result is bound under if you answer `Pruned`.
 All of this is `Tidepool.Agent.Contract`, which cells do not import, so `lookup`
@@ -282,7 +282,7 @@ so the parent can address that child directly; a monitor never corrects the
 child itself. When a call trips several heuristics at once, every `Advise`
 folds into one annotation and every `Escalate` reaches the parent in one
 message. The arguments Jev sees are whatever the call carried, so a tool that
-exposes its own free-text field — `exec_command`'s optional `intent` — feeds a
+exposes its own free-text field — `bash`'s optional `intent` — feeds a
 heuristic's judgment along with everything else in the call.
 
 Needs `Member Jev effects, Member ActorContext effects, Member Notifications

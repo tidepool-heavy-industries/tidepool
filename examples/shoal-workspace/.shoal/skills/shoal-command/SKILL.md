@@ -3,12 +3,12 @@ name: shoal-command
 description: Use when composing commands as Haskell values, recovering retained output, controlling PTY/stdin, or routing command completion. Ordinary shell calls use the direct tool schemas without loading this skill.
 ---
 
-Use the direct shell tools for ordinary shell work. `bash` accepts literal
-scripts, including multiline Bash and heredocs. `exec_command` adds `workdir`,
-`environment`, `memory_mib`, `tty` or piped `stdin`. No Haskell wrapper is needed.
-These are compiled Haskell handlers over the same command owner as `Cmd`.
+Use hosted `bash` for direct repository commands. Its structured `cmd` field
+contains literal Bash, including multiline scripts and heredocs; optional fields
+select workdir, environment, memory, PTY, and stdin. Haskell `Cmd` composes the same
+command owner when results feed a program.
 
-For example, call `exec_command` with:
+Call `bash` with:
 
 ```json
 {"cmd":"git status --short"}
@@ -49,7 +49,7 @@ positions; an unavailable-output error is different and keeps the same job.
 Execution defaults: 256 MiB and a 30-second observation. Expiry leaves the
 command alive.
 `max_output_bytes` is a byte budget, not a token count. Direct execution responses
-use at most 32 KiB; oversized foreground displays use an 8 KiB preview. Shortened
+use at most 32 KiB; oversized displays use an 8 KiB preview. Shortened
 output is recoverable only to the extent the job still retains it; follow the
 reported output position or gap. Do not rerun merely to obtain hidden output.
 

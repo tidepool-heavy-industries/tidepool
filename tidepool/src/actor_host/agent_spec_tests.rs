@@ -210,11 +210,7 @@ async fn start_with_sleeping_slot(answer: &str, slot: &str) -> TestCampaign {
             write_workspace(&config.workspace, DESCRIPTION, &answer);
             let authored = config.workspace.join(".shoal");
             std::fs::write(authored.join("config.toml"), SPEC_CONFIG).unwrap();
-            std::fs::write(
-                authored.join("AgentSpec.hs"),
-                spec_module_with_sleep(&slot),
-            )
-            .unwrap();
+            std::fs::write(authored.join("AgentSpec.hs"), spec_module_with_sleep(&slot)).unwrap();
             config.workspace_inputs = Some(
                 crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
                     .unwrap(),
@@ -946,7 +942,7 @@ async fn start_nested() -> TestCampaign {
 /// adding to it, so the only way to keep `bash` is to carry the shell record
 /// inside your own. One nested field declares the whole shell surface at the
 /// position it occupies, ahead of the record's own tool, and both halves
-/// answer: the nested `bash` reaches the same compiled raw handler and the
+/// answer: the nested `bash` reaches the same compiled structured handler and the
 /// same shared command owner it does when the shell record is installed
 /// alone.
 #[tokio::test]
@@ -967,16 +963,17 @@ async fn a_nested_shell_record_declares_its_tools_in_place_and_both_halves_answe
             .unwrap_or_else(|| panic!("{name} is not declared: {declared:?}"))
     };
     let bash = index("bash");
-    let exec_command = index("exec_command");
+    let cancel = index("cancel_command");
     let probe_at = index("probe");
-    assert!(bash < exec_command, "{declared:?}");
-    assert!(exec_command < probe_at, "{declared:?}");
+    assert!(bash < cancel, "{declared:?}");
+    assert!(cancel < probe_at, "{declared:?}");
+    assert!(!declared.contains(&"exec_command"), "{declared:?}");
     assert!(!declared.contains(&"shell"), "{declared:?}");
 
     // (2) The record's own tool answers.
     assert!(probe(policy.as_ref()).await.contains("one"));
 
-    // (3) The nested raw tool answers, through the shell record's own handler
+    // (3) The nested structured tool answers, through the shell record's own handler
     // and the campaign's shared command owner. The command backend is the
     // test one every other hosted command test uses, so what is checked here
     // is that a nested `bash` reaches it and returns its output — not what a
@@ -986,7 +983,7 @@ async fn a_nested_shell_record_declares_its_tools_in_place_and_both_halves_answe
         let policy = policy.clone();
         tokio::spawn(policy.dispatch_boxed(ToolInvocation {
             name: "bash".into(),
-            arguments: ToolArguments::Raw(script.into()),
+            arguments: ToolArguments::Structured(serde_json::json!({"cmd":script})),
             context: Some(ToolInvocationContext {
                 context_call_id: Some("nested-bash".into()),
                 thread_id: "nested-thread".into(),

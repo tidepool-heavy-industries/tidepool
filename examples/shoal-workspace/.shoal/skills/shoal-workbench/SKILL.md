@@ -5,7 +5,8 @@ description: Write Haskell notebook cells that typecheck the first time — Text
 
 Send one cell of ordinary Haskell: declarations, bindings and expressions. GHC
 splits declarations from statements and checks the whole cell before any effect
-runs, so a rejected cell installs no bindings and runs nothing. Declarations are
+runs: typecheck rejection installs no bindings and executes nothing. Runtime
+failure retains the completed prefix; inspect the receipt before retry. Declarations are
 mutually recursive and visible to every statement, but a declaration cannot
 depend on a binding a statement in the same cell introduces. Every expression
 displays its value; declarations and bindings persist into later cells.
@@ -47,7 +48,7 @@ classified as pure or effectful, and the cell is rejected before it runs.
 Annotate it:
 
 ```haskell
-let unreachable path = error ("no lane owns " <> T.unpack path) :: Text
+let unreachable path = error ("no owner for " <> path) :: Text
 ("annotated, and never forced" :: Text)
 ```
 
@@ -71,20 +72,26 @@ the cell runs. Bind the short preview, not the file:
 
 ```haskell
 previews <- forM ["README.md", "Justfile"] $ \path ->
-  (path,) . T.take 2000 . either (const "") id . Cmd.stdout
-    <$> Cmd.run (Cmd.withArguments [path] [bash|sed -n '1,40p' -- "$1"|])
+  (path,) . fmap (T.take 2000) . Cmd.stdout
+    <$> Cmd.quiet (Cmd.run (Cmd.withArguments [path] [bash|sed -n '1,40p' -- "$1"|]))
 map fst previews
 ```
 
-The projection is the point: display the keys, keep the text in the binding for
-the next statement. A truncated display offers `cellDisplay.more`, which reads
+The preview retains read failures as `Left`; fetch complete text before judgments
+that require it. Display the keys and keep the previews for the next statement. A truncated display offers `cellDisplay.more`, which reads
 the next retained page without repeating the effect, and `Cmd.quiet action`
 suppresses routine command presentation when only the data matters.
 
 ## Multi-line chains
 
+Notebook workaround: put separate statement-level value bindings in separate
+`let` statements. The current notebook rejects a second value binding in one
+multiline layout group, although ordinary Haskell permits it. A helper's signature
+and equation can share one explicit `let f :: T; f = ...` statement. This is a
+notebook limitation, not a language rule; whole-cell rejection still runs nothing.
+
 A continuation line of a multi-line `let` must be indented past the bound name.
-A line starting at the name's column begins a new binding and fails to parse.
+An operator continuation at the name's column is invalid layout.
 This bites hardest on `:&` packet chains and on record updates:
 
 ```haskell

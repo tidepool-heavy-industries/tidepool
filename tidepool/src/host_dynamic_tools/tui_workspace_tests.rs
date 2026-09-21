@@ -28,8 +28,8 @@ fn workspace_fixture_config_matches_shoal_schema() {
 }
 
 fn shell(role: &str, command: &str) -> Value {
-    let args = json!({"cmd":format!("set -eux; {command}; printf CHECKED-{role}"),"login":false,"yield_time_ms":10000,"max_output_tokens":3000});
-    json!({"type":"function_call","name":"exec_command","arguments":args.to_string()})
+    let args = json!({"cmd":format!("set -eux; {command}; printf CHECKED-{role}"),"yield_time_ms":10000,"max_output_bytes":12000});
+    json!({"type":"function_call","name":"bash","arguments":args.to_string()})
 }
 fn haskell(code: &str) -> Value {
     json!({"type":"custom_tool_call","name":"haskell","input":code})
@@ -43,8 +43,7 @@ fn completed_command_output<'a>(item: &'a Value, marker: &str) -> Option<&'a str
         .flatten()?;
     output
         .lines()
-        .next()
-        .is_some_and(|line| line.contains("CommandExited 0"))
+        .any(|line| line.starts_with("terminal: yes · CommandExited 0 ·"))
         .then_some(output)
         .filter(|output| output.contains(marker))
 }
@@ -52,20 +51,24 @@ fn running_command_output(item: &Value) -> bool {
     (item["type"] == "function_call_output")
         .then(|| item["output"].as_str())
         .flatten()
-        .and_then(|output| output.lines().next())
-        .is_some_and(|line| line.starts_with("Running · session_id: "))
+        .is_some_and(|output| {
+            output
+                .lines()
+                .any(|line| line.starts_with("terminal: no · running"))
+                && output.lines().any(|line| line.starts_with("session_id: "))
+        })
 }
 
 #[test]
 fn workspace_fixture_recognizes_completed_command_output() {
     let output = |text| json!({"type":"function_call_output","output":text});
     assert!(completed_command_output(
-        &output("Finished · CommandExited 0 · cleanup: clean\nstdout:\nCHECKED-root\n"),
+        &output("terminal: yes · CommandExited 0 · cleanup: clean\nstdout:\nCHECKED-root\n"),
         "CHECKED-root"
     )
     .is_some());
     assert!(completed_command_output(
-        &output("Finished · CommandExited 7 · cleanup: clean\nstdout:\nCHECKED-root\n"),
+        &output("terminal: yes · CommandExited 7 · cleanup: clean\nstdout:\nCHECKED-root\n"),
         "CHECKED-root"
     )
     .is_none());
@@ -75,13 +78,13 @@ fn workspace_fixture_recognizes_completed_command_output() {
     )
     .is_none());
     assert!(running_command_output(&output(
-        "Running · session_id: b885ec4a-2f7c-4a36-b89b-3ed93be60572\nstderr:\n+ exec sleep infinity\n"
+        "session_id: b885ec4a-2f7c-4a36-b89b-3ed93be60572\nterminal: no · running\nstderr:\n+ exec sleep infinity\n"
     )));
     assert!(!running_command_output(&output(
-        "Running · stderr available, but no retained session identity\n"
+        "terminal: no · running; stderr available, but no retained session identity\n"
     )));
     assert!(completed_command_output(
-        &output("Finished · CommandExited 0 · cleanup: clean\n"),
+        &output("terminal: yes · CommandExited 0 · cleanup: clean\n"),
         "CHECKED-root"
     )
     .is_none());

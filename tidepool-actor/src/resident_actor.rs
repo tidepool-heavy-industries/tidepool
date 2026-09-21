@@ -5142,9 +5142,9 @@ where
                                                 text,
                                                 (8 * 1024).min(limit).saturating_sub(512),
                                             );
-                                            text.push_str(&format!("\nRead retained output with read_output: session_id={job}, stream=Stdout (or Stderr), offset=0. Do not rerun.\nOptional Haskell binding: {binding} :: Cmd.Job"));
+                                            *text = format!("retained as {binding} :: Cmd.Job\nnext: read_output session_id={job}, stream=Stdout (or Stderr), offset=0. Do not rerun.\n{text}");
                                         } else {
-                                            text.push_str(&format!("\nretained as {binding} :: Cmd.Job"));
+                                            *text = format!("retained as {binding} :: Cmd.Job\n{text}");
                                         }
                                         next_fragment.retain_job_binding(binding);
                                     }
