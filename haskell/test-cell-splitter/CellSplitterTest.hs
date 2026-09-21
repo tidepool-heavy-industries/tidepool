@@ -105,13 +105,24 @@ dependencyEvidenceCompilation = bracket temporary removeDirectoryRecursive $ \ro
   let home = root </> "WitnessA.hs"
       boot = root </> "WitnessA.hs-boot"
       sibling = root </> "WitnessB.hs"
+      types = root </> "WitnessTypes.hs"
       target = root </> "WitnessTarget.hs"
-  writeFile boot "module WitnessA where\nvalue :: Int\n"
-  writeFile home "module WitnessA where\nimport WitnessB (helper)\nvalue :: Int\nvalue = helper\n"
+  writeFile types "module WitnessTypes where\ndata T = T\n"
+  writeFile boot $ unlines
+    [ "module WitnessA where"
+    , "import WitnessTypes (T)"
+    , "value :: T"
+    ]
+  writeFile home $ unlines
+    [ "module WitnessA where"
+    , "import WitnessB (helper)"
+    , "import WitnessTypes (T)"
+    , "value :: T"
+    , "value = helper"
+    ]
   writeFile sibling $ unlines
     [ "module WitnessB where"
     , "import {-# SOURCE #-} WitnessA (value)"
-    , "helper :: Int"
     , "helper = value"
     ]
   writeFile target $ unlines
@@ -149,7 +160,14 @@ dependencyEvidenceCompilation = bracket temporary removeDirectoryRecursive $ \ro
       assertContains "boot-only mutation invalidates its SOURCE importer"
         "tidepool-memo-miss module=WitnessB" changedLog
       assertContains "boot fingerprint participates in home dependency validity"
-        "same-home-dependencies=False" changedLog)
+        "same-home-dependencies=False" changedLog
+      appendFile types "\n-- transitive boot dependency mutation\n"
+      (_, transitiveLog) <- captureStderr root "boot-dependency-changed" $
+        compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+      assertContains "dependency imported by boot interface invalidates SOURCE importer"
+        "tidepool-memo-miss module=WitnessB" transitiveLog
+      assertContains "transitive boot dependency fingerprint participates in validity"
+        "same-home-dependencies=False" transitiveLog)
     `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
   where
     temporary = do

@@ -1041,28 +1041,43 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
               rememberPreparedSiblings prepared = liftIO $
                 modifyIORef' preparedSiblingsRef (\known -> Map.union known (pmSitedSiblings prepared))
           -- Module names do not identify generated content across independent
-          -- requests. A memo hit therefore requires both the current source hash
-          -- and valid direct home-module imports. Summaries are visited in
-          -- dependency order, so import validity has already been recorded when a
-          -- dependent is checked. A mismatch is an ordinary miss and overwrites the
-          -- cached entry after recompilation.
-          let summaryFingerprints = Map.fromList
-                [ ( HomeDependency (ms_mod_name summary)
-                      (if ms_hsc_src summary == HsBootFile
-                        then BootHomeSource else OrdinaryHomeSource)
-                  , HomeDependencyWitness
-                      (normalise <$> ml_hs_file (ms_location summary))
-                      (ms_hs_hash summary) )
+          -- requests. A memo hit therefore requires the current source hash and
+          -- the selected path/fingerprint closure of every home import. The
+          -- closure matters for SOURCE imports because boot summaries are not in
+          -- the executable memo walk: an import inside a .hs-boot must still
+          -- invalidate its ordinary importer. Ordinary dependencies additionally
+          -- propagate compile validity in summary order below.
+          let summaryDependency summary = HomeDependency (ms_mod_name summary)
+                    (if ms_hsc_src summary == HsBootFile
+                      then BootHomeSource else OrdinaryHomeSource)
+              summaryByDependency = Map.fromList
+                [ (summaryDependency summary, summary)
                 | ModuleNode _ summary <- mgModSummaries' modGraphRaw
                 ]
+              summaryFingerprints = Map.map
+                (\summary -> HomeDependencyWitness
+                  (normalise <$> ml_hs_file (ms_location summary))
+                  (ms_hs_hash summary))
+                summaryByDependency
               importedDependencies kind imports =
                 [ dependency
                 | (_, locatedName) <- imports
                 , let dependency = HomeDependency (unLoc locatedName) kind
                 , dependency `Map.member` summaryFingerprints
                 ]
+              summaryDependencies summary =
+                   importedDependencies OrdinaryHomeSource (ms_textual_imps summary)
+                ++ importedDependencies BootHomeSource (ms_srcimps summary)
+              dependencyClosure roots = go Set.empty roots
+                where
+                  go visited [] = visited
+                  go visited (dependency : pending)
+                    | dependency `Set.member` visited = go visited pending
+                    | otherwise = go (Set.insert dependency visited)
+                        (maybe [] summaryDependencies
+                          (Map.lookup dependency summaryByDependency) ++ pending)
               homeDependencyWitnesses modSum = Map.restrictKeys summaryFingerprints
-                (Set.fromList
+                (dependencyClosure
                   ( importedDependencies OrdinaryHomeSource (ms_textual_imps modSum)
                  ++ importedDependencies BootHomeSource (ms_srcimps modSum)))
               directHomeDeps modSum = Set.fromList
