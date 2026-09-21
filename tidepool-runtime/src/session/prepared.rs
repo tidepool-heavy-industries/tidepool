@@ -444,23 +444,6 @@ impl ProgramFacts {
         self.types.get(id.0 as usize)
     }
 
-    fn contains_aeson_value(&self, root: TypeNodeId) -> bool {
-        let mut pending = vec![root];
-        let mut seen = BTreeSet::new();
-        while let Some(node) = pending.pop() {
-            if !seen.insert(node) {
-                continue;
-            }
-            if let Some(TypeNode::Data { family, rows, .. }) = self.type_node(node) {
-                if is_aeson_value(family) {
-                    return true;
-                }
-                pending.extend(rows.iter().flat_map(|row| row.fields.iter().copied()));
-            }
-        }
-        false
-    }
-
     fn constructor_identity(
         &self,
         id: tidepool_repr::execution_schema::ConstructorId,
@@ -748,6 +731,8 @@ const TEXT_MODULE: &str = "Data.Text.Internal";
 const INTEGER_MODULE: &str = "GHC.Num.Integer";
 const NATURAL_MODULE: &str = "GHC.Num.Natural";
 const AESON_VALUE_MODULE: &str = "Tidepool.Aeson.Value";
+const AESON_SCIENTIFIC_MODULE: &str = "Tidepool.Aeson.Scientific";
+const GHC_TYPES_MODULE: &str = "GHC.Types";
 const AESON_VALUE_OCCURRENCE: &str = "Value";
 
 /// Whether `family` names the vendored `Tidepool.Aeson.Value.Value` type
@@ -828,12 +813,21 @@ enum StructuralExpected {
     Node(TypeNodeId),
     Bytes,
     Scalar(RuntimeRep),
+    JsonValue,
+    JsonMap,
+    JsonList,
+    JsonText,
+    JsonScientific,
+    JsonInteger,
+    JsonBool,
+    JsonBoxedInt,
 }
 
 struct StructuralFrame {
     host_id: DataConId,
     expected: Vec<StructuralExpected>,
     fields: Vec<ManagedField>,
+    counts_depth: bool,
 }
 
 struct StructuralAnswerVisitor<'facts, 'builder, 'machine, 'code> {
@@ -844,9 +838,43 @@ struct StructuralAnswerVisitor<'facts, 'builder, 'machine, 'code> {
     frames: Vec<StructuralFrame>,
     result: Option<ManagedNode>,
     failure: Option<PreparedRuntimeError>,
+    depth: usize,
 }
 
 impl StructuralAnswerVisitor<'_, '_, '_, '_> {
+    fn identity(&self, host_id: DataConId) -> Option<&SymbolIdentity> {
+        self.facts
+            .constructors
+            .iter()
+            .find_map(|(identity, declared)| (*declared == host_id).then_some(identity))
+    }
+
+    fn is_constructor(&self, host_id: DataConId, module: &str, occurrence: &str) -> bool {
+        self.identity(host_id)
+            .is_some_and(|identity| identity.module == module && identity.occurrence == occurrence)
+    }
+
+    fn json_value_shape(
+        &mut self,
+        host_id: DataConId,
+    ) -> Result<Vec<StructuralExpected>, BridgeError> {
+        let Some(identity) = self.identity(host_id) else {
+            return Err(self.shape("a JSON value names an undeclared constructor"));
+        };
+        if identity.module != AESON_VALUE_MODULE {
+            return Err(self.shape("a JSON value requires a vendored Value constructor"));
+        }
+        match identity.occurrence.as_str() {
+            "Object" => Ok(vec![StructuralExpected::JsonMap]),
+            "Array" => Ok(vec![StructuralExpected::JsonList]),
+            "String" => Ok(vec![StructuralExpected::JsonText]),
+            "Number" => Ok(vec![StructuralExpected::JsonScientific]),
+            "Bool" => Ok(vec![StructuralExpected::JsonBool]),
+            "Null" => Ok(Vec::new()),
+            _ => Err(self.shape("the vendored Value constructor is not an authenticated anchor")),
+        }
+    }
+
     fn bridge_abort(&mut self, error: PreparedRuntimeError) -> BridgeError {
         self.failure = Some(error);
         BridgeError::TypeMismatch {
@@ -894,13 +922,109 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
         host_id: DataConId,
     ) -> Result<Vec<StructuralExpected>, BridgeError> {
         let StructuralExpected::Node(node) = expected else {
-            return Err(self.shape("a constructor was emitted for a scalar or byte field"));
+            return match expected {
+                StructuralExpected::JsonMap => {
+                    if self.is_constructor(host_id, "Data.Map.Internal", "Tip") {
+                        Ok(Vec::new())
+                    } else if self.is_constructor(host_id, "Data.Map.Internal", "Bin") {
+                        Ok(vec![
+                            StructuralExpected::JsonBoxedInt,
+                            StructuralExpected::JsonText,
+                            StructuralExpected::JsonValue,
+                            StructuralExpected::JsonMap,
+                            StructuralExpected::JsonMap,
+                        ])
+                    } else {
+                        Err(self.shape("a JSON object requires Data.Map Bin or Tip"))
+                    }
+                }
+                StructuralExpected::JsonList => {
+                    if self.is_constructor(host_id, GHC_TYPES_MODULE, "[]") {
+                        Ok(Vec::new())
+                    } else if self.is_constructor(host_id, GHC_TYPES_MODULE, ":") {
+                        Ok(vec![
+                            StructuralExpected::JsonValue,
+                            StructuralExpected::JsonList,
+                        ])
+                    } else {
+                        Err(self.shape("a JSON array requires list constructors"))
+                    }
+                }
+                StructuralExpected::JsonText => {
+                    if self.is_constructor(host_id, TEXT_MODULE, "Text") {
+                        Ok(vec![
+                            StructuralExpected::Bytes,
+                            StructuralExpected::Scalar(RuntimeRep::Int(64)),
+                            StructuralExpected::Scalar(RuntimeRep::Int(64)),
+                        ])
+                    } else {
+                        Err(self.shape("a JSON string requires the Text constructor"))
+                    }
+                }
+                StructuralExpected::JsonScientific => {
+                    if self.is_constructor(host_id, AESON_SCIENTIFIC_MODULE, "Scientific") {
+                        Ok(vec![
+                            StructuralExpected::JsonInteger,
+                            StructuralExpected::Scalar(RuntimeRep::Int(64)),
+                        ])
+                    } else {
+                        Err(self.shape("a JSON number requires the Scientific constructor"))
+                    }
+                }
+                StructuralExpected::JsonInteger => {
+                    if self.is_constructor(host_id, INTEGER_MODULE, "IS") {
+                        Ok(vec![StructuralExpected::Scalar(RuntimeRep::Int(64))])
+                    } else if self.is_constructor(host_id, INTEGER_MODULE, "IP")
+                        || self.is_constructor(host_id, INTEGER_MODULE, "IN")
+                    {
+                        Ok(vec![StructuralExpected::Bytes])
+                    } else {
+                        Err(self.shape("a JSON coefficient requires IS, IP or IN"))
+                    }
+                }
+                StructuralExpected::JsonBool => {
+                    if self.is_constructor(host_id, GHC_TYPES_MODULE, "True")
+                        || self.is_constructor(host_id, GHC_TYPES_MODULE, "False")
+                    {
+                        Ok(Vec::new())
+                    } else {
+                        Err(self.shape("a JSON boolean requires True or False"))
+                    }
+                }
+                StructuralExpected::JsonBoxedInt => {
+                    if self.is_constructor(host_id, GHC_TYPES_MODULE, "I#") {
+                        Ok(vec![StructuralExpected::Scalar(RuntimeRep::Int(64))])
+                    } else {
+                        Err(self.shape("a JSON map size requires I#"))
+                    }
+                }
+                StructuralExpected::JsonValue => self.json_value_shape(host_id),
+                StructuralExpected::Bytes | StructuralExpected::Scalar(_) => {
+                    Err(self.shape("a constructor was emitted for a scalar or byte field"))
+                }
+                StructuralExpected::Node(_) => unreachable!(),
+            };
         };
         let Some(node) = self.facts.type_node(node) else {
             return Err(self.shape("the site's type evidence names an undeclared node"));
         };
         match node {
-            TypeNode::Data { rows, .. } => {
+            TypeNode::Data { family, rows, .. } => {
+                if is_aeson_value(family) {
+                    let admitted = rows.iter().any(|row| {
+                        self.facts
+                            .constructors
+                            .get(row.constructor.0 as usize)
+                            .is_some_and(|(_, declared)| *declared == host_id)
+                    });
+                    if !admitted {
+                        return Err(self.bridge_abort(PreparedRuntimeError::AnswerConstructor {
+                            site: self.site,
+                            host_id,
+                        }));
+                    }
+                    return self.json_value_shape(host_id);
+                }
                 let row = rows
                     .iter()
                     .find(|row| {
@@ -970,6 +1094,24 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
 impl HaskellVisitor for StructuralAnswerVisitor<'_, '_, '_, '_> {
     fn begin_constructor(&mut self, id: DataConId, fields: usize) -> Result<(), BridgeError> {
         let expected = self.expected()?;
+        // Representation spines do not add semantic nesting: a flat 100k
+        // element list or a large Map may have that many cons/tree nodes.
+        // Their elements and JSON Value wrappers still pass through this
+        // bound, as do ordinary nested constructors.
+        let counts_depth = !matches!(
+            expected,
+            StructuralExpected::JsonList
+                | StructuralExpected::JsonMap
+                | StructuralExpected::JsonText
+                | StructuralExpected::JsonScientific
+                | StructuralExpected::JsonInteger
+                | StructuralExpected::JsonBool
+                | StructuralExpected::JsonBoxedInt
+        ) && !self.is_constructor(id, GHC_TYPES_MODULE, "[]")
+            && !self.is_constructor(id, GHC_TYPES_MODULE, ":");
+        if counts_depth && self.depth >= MAX_ANSWER_DEPTH {
+            return Err(self.shape("the response exceeds the maximum constructor nesting depth"));
+        }
         let shape = self.constructor_shape(expected, id)?;
         if shape.len() != fields {
             return Err(self.shape("the constructor's field count does not match its declaration"));
@@ -978,7 +1120,9 @@ impl HaskellVisitor for StructuralAnswerVisitor<'_, '_, '_, '_> {
             host_id: id,
             expected: shape,
             fields: Vec::with_capacity(fields),
+            counts_depth,
         });
+        self.depth += usize::from(counts_depth);
         Ok(())
     }
 
@@ -987,6 +1131,7 @@ impl HaskellVisitor for StructuralAnswerVisitor<'_, '_, '_, '_> {
             .frames
             .pop()
             .ok_or_else(|| self.shape("a constructor ended without a matching begin"))?;
+        self.depth -= usize::from(frame.counts_depth);
         if frame.fields.len() != frame.expected.len() {
             return Err(self.shape("a constructor ended before all fields were emitted"));
         }
@@ -1006,6 +1151,16 @@ impl HaskellVisitor for StructuralAnswerVisitor<'_, '_, '_, '_> {
             StructuralExpected::Scalar(rep) => rep,
             StructuralExpected::Bytes => {
                 return Err(self.shape("a literal was emitted for a byte-array field"))
+            }
+            StructuralExpected::JsonValue
+            | StructuralExpected::JsonMap
+            | StructuralExpected::JsonList
+            | StructuralExpected::JsonText
+            | StructuralExpected::JsonScientific
+            | StructuralExpected::JsonInteger
+            | StructuralExpected::JsonBool
+            | StructuralExpected::JsonBoxedInt => {
+                return Err(self.shape("a literal was emitted for a JSON constructor field"))
             }
         };
         let bits = scalar_bits(rep, &literal).ok_or_else(|| {
@@ -2535,40 +2690,13 @@ impl PreparedEngine {
         owner.lower_answer(row.site, row.wire, value, 0, table)
     }
 
-    /// Whether this parked site's answer graph contains the opaque vendored
-    /// JSON family. Until the native JSON intrinsic owns that family, those
-    /// responses use the legacy decode entry; every other response can stream
-    /// directly through [`Self::resume_with_structural_answer`].
-    pub fn answer_contains_aeson(&self, id: ContinuationId) -> Result<bool, PreparedRuntimeError> {
-        let (_, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
-            ExecutionError::UnknownContinuation(id),
-        ))?;
-        if evidence.site == UNSITED {
-            return Ok(false);
-        }
-        let owner = self
-            .programs
-            .get(&evidence.owner)
-            .ok_or(PreparedRuntimeError::Run(ExecutionError::UnknownProgram(
-                evidence.owner,
-            )))?;
-        let row = owner
-            .sites
-            .iter()
-            .find(|row| row.site == evidence.site)
-            .ok_or(PreparedRuntimeError::UnknownSite {
-                site: evidence.site,
-            })?;
-        Ok(owner.contains_aeson_value(row.wire))
-    }
-
     /// Validate and construct an owned response directly from structural
     /// visitor events. Completed children enter the shared incremental
     /// builder immediately, so no `HaskellValue` or `AnswerPlan` tree exists.
     pub fn resume_with_structural_answer(
         &mut self,
         id: ContinuationId,
-        response: &tidepool_effect::Response,
+        response: &dyn tidepool_bridge::ToHaskell,
         table: &DataConTable,
     ) -> Result<PreparedResumed, PreparedRuntimeError> {
         let (realm, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
@@ -2610,6 +2738,7 @@ impl PreparedEngine {
             frames: Vec::new(),
             result: None,
             failure: None,
+            depth: 0,
         };
         let visited = response.visit(table, &mut visitor);
         if let Some(error) = visitor.failure.take() {

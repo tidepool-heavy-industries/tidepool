@@ -176,6 +176,10 @@ pub struct PreparedMachine<'code> {
     programs: BTreeMap<ProgramId, InstalledProgram<'code>>,
     /// The next id [`Self::install`] mints; never decremented.
     next_program: u32,
+    /// The next incremental managed-construction owner. Nodes carry this
+    /// identity so a completed node from an ended builder cannot alias the
+    /// same root index in a later builder.
+    next_builder: u64,
     /// Programs a caller holds live regardless of reachability
     /// ([`Self::pin`]): the install-to-bind gap, and explicit retention.
     pins: BTreeSet<ProgramId>,
@@ -261,7 +265,10 @@ pub struct PreparedHandle {
 /// One completed object owned by an active [`ManagedBuilder`]. The index is
 /// meaningful only to that builder and never escapes as a heap address.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ManagedNode(usize);
+pub struct ManagedNode {
+    owner: u64,
+    index: usize,
+}
 
 /// One logical constructor field for incremental managed construction.
 #[derive(Clone, Copy, Debug)]
@@ -275,6 +282,7 @@ pub enum ManagedField {
 /// roots. Each completed object is rooted before another collection can run.
 pub struct ManagedBuilder<'machine, 'code> {
     machine: &'machine mut PreparedMachine<'code>,
+    owner: u64,
     roots: Vec<RootWords>,
     roots_mark: usize,
 }
@@ -295,9 +303,15 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
         if unsafe { machine.machine.prepared_old_space() }.is_some() {
             return Err(runtime_error(&machine.machine, RuntimeError::BadPointer));
         }
+        let owner = machine.next_builder;
+        machine.next_builder = machine
+            .next_builder
+            .checked_add(1)
+            .ok_or_else(|| runtime_error(&machine.machine, RuntimeError::HeapOverflow))?;
         let roots_mark = machine.machine.rust_roots_len();
         Ok(Self {
             machine,
+            owner,
             roots: Vec::new(),
             roots_mark,
         })
@@ -330,12 +344,18 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
             .ok_or_else(|| runtime_error(&self.machine.machine, RuntimeError::BadPointer))?;
         self.machine.machine.register_rust_root(source);
         self.roots.push(root);
-        Ok(ManagedNode(self.roots.len() - 1))
+        Ok(ManagedNode {
+            owner: self.owner,
+            index: self.roots.len() - 1,
+        })
     }
 
     fn node_word(&self, node: ManagedNode) -> Result<usize, ExecutionError> {
+        if node.owner != self.owner {
+            return Err(super::answer::AnswerBuildError::ForeignNode.into());
+        }
         self.roots
-            .get(node.0)
+            .get(node.index)
             .ok_or_else(|| runtime_error(&self.machine.machine, RuntimeError::BadPointer))?
             .read(0)
             .map(|word| word as usize)
@@ -466,9 +486,12 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
         realm: RealmId,
         root: ManagedNode,
     ) -> Result<PreparedHandle, ExecutionError> {
+        if root.owner != self.owner {
+            return Err(super::answer::AnswerBuildError::ForeignNode.into());
+        }
         let source = self
             .roots
-            .get(root.0)
+            .get(root.index)
             .and_then(|root| root.slot_address(0))
             .ok_or_else(|| runtime_error(&self.machine.machine, RuntimeError::BadPointer))?;
         unsafe {
@@ -681,6 +704,7 @@ impl<'code> PreparedMachine<'code> {
         Ok(Self {
             programs: BTreeMap::new(),
             next_program: 0,
+            next_builder: 0,
             pins: BTreeSet::new(),
             nursery_bytes: options.nursery_bytes,
             handles: ResourceLedger::default(),
@@ -1162,9 +1186,9 @@ impl<'code> PreparedMachine<'code> {
                 )
             }),
             compiled
-                .thunk_enter_headers
+                .thunk_entries
                 .iter()
-                .map(|&header| (header, compiled.pipeline.get_function_ptr(compiled.enter))),
+                .map(|&(header, function)| (header, compiled.pipeline.get_function_ptr(function))),
         );
 
         self.interner.commit_absorb(&compiled.interned_constructors);
@@ -7072,6 +7096,44 @@ mod tests {
         ));
         assert!(machine.release(handle));
         assert_eq!(machine.handle_count(), handles_before);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
+    /// A managed node is meaningful only to the builder that minted it. A
+    /// later builder can reuse the same root-vector index, so accepting an
+    /// earlier node would silently publish or embed the wrong object.
+    #[test]
+    fn a_managed_node_cannot_cross_builder_ownership() {
+        use crate::prepared_program::{AnswerBuildError, AnswerPlan};
+
+        let (mut machine, _) = machine();
+        let stale = {
+            let mut builder = machine.managed_builder().expect("first builder");
+            builder
+                .constructor(DataConId(900), &[])
+                .expect("first builder constructs Unit")
+        };
+
+        let mut builder = machine.managed_builder().expect("second builder");
+        let fresh = builder
+            .constructor(DataConId(900), &[])
+            .expect("second builder constructs Unit at the same local index");
+        assert_ne!(stale.owner, fresh.owner);
+        assert!(matches!(
+            builder.finish(RealmId::ROOT, stale),
+            Err(ExecutionError::Answer(AnswerBuildError::ForeignNode))
+        ));
+
+        let handle = machine
+            .build_answer(
+                RealmId::ROOT,
+                &AnswerPlan::Constructor {
+                    host_id: DataConId(900),
+                    fields: Vec::new(),
+                },
+            )
+            .expect("the rejected cross-builder node leaves the machine reusable");
+        assert!(machine.release(handle));
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 

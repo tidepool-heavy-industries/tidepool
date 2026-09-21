@@ -33,6 +33,18 @@ impl Response {
     }
 }
 
+impl tidepool_bridge::sealed::ToHaskellSealed for Response {}
+
+impl ToHaskell for Response {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn tidepool_bridge::HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        self.source.visit(table, visitor)
+    }
+}
+
 impl From<HaskellValue> for Response {
     fn from(v: HaskellValue) -> Self {
         Response {

@@ -19,7 +19,7 @@ use tidepool_repr::execution_schema::SymbolIdentity;
 use super::prepared::{ParkPolicy, PreparedRuntimeError, PreparedSettlement};
 use super::turn::TurnCode;
 use tidepool_codegen::suspension::{ContinuationId, RealmId, ResumeInput, ValueHandle};
-use tidepool_effect::dispatch::{request_constructor, DispatchEffect, EffectContext, Response};
+use tidepool_effect::dispatch::{request_constructor, DispatchEffect, EffectContext};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::{
@@ -763,13 +763,6 @@ fn settle_rooted_application<H: DispatchEffect<O>, O>(
 /// spine exists on the handler side; the answer plan walks the rebuilt spine
 /// iteratively per row, and the spine's own `Drop` is the bridge `HaskellValue`'s
 /// (frame-based, not recursive).
-fn response_value(
-    response: Response,
-    table: &DataConTable,
-) -> Result<HaskellValue, tidepool_bridge::BridgeError> {
-    response.to_value(table)
-}
-
 /// The one completion routine for a settled layer, whichever entry produced
 /// it (the initial scaffold or a resume): a completed value is prepared per
 /// binder tier; a suspension is parked with the run's policy, then offered to
@@ -824,17 +817,7 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
                 request: parked.request,
             });
         };
-        let uses_aeson = engine.answer_contains_aeson(parked.id)?;
-        let resumed = match if uses_aeson {
-            response_value(response, table)
-                .map_err(|error| PreparedRuntimeError::Handler {
-                    constructor: request_constructor(&parked.request, table),
-                    detail: error.to_string(),
-                })
-                .and_then(|answer| engine.resume_with_answer(parked.id, &answer, table))
-        } else {
-            engine.resume_with_structural_answer(parked.id, &response, table)
-        } {
+        let resumed = match engine.resume_with_structural_answer(parked.id, &response, table) {
             Ok(resumed) => resumed,
             Err(error) => {
                 // A refusal before the take leaves the frame parked; a
@@ -2855,7 +2838,9 @@ where
         };
         let resumed = self.on_eval_thread(move |engine, table, handlers, captured| {
             let outcome = match input {
-                ResumeInput::Answer(value) => engine.resume_with_answer(frame_id, &value, table),
+                ResumeInput::Answer(value) => {
+                    engine.resume_with_structural_answer(frame_id, &value, table)
+                }
                 ResumeInput::Handle(handle) => engine.resume_with_handle(frame_id, handle),
                 ResumeInput::FramedHandle {
                     handle,
