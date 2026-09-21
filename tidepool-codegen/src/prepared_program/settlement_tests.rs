@@ -44,9 +44,13 @@ impl<'a> Invocation<'a> {
             })
             .unwrap();
         let machine = Box::new(MachineState::new());
-        machine.register_prepared_entries(std::iter::empty(), program.thunk_entries.iter().map(
-            |&(header, function)| (header, program.pipeline.get_function_ptr(function)),
-        ));
+        machine.register_prepared_entries(
+            std::iter::empty(),
+            program
+                .thunk_entries
+                .iter()
+                .map(|&(header, function)| (header, program.pipeline.get_function_ptr(function))),
+        );
         machine.set_stack_map_registry(&program.pipeline.stack_maps);
         machine
             .install_prepared_buffer(vec![0_u64; 8], program.descriptors.clone())

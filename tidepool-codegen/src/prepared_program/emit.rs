@@ -535,6 +535,7 @@ fn emit_function_at(
                             &destination.results,
                             functions,
                             dispatchers,
+                            prepared_gc,
                             &values,
                             callee,
                             *call_signature,
@@ -1456,6 +1457,7 @@ fn emit_exact_call(
     caller_results: &ResultContract,
     functions: &BTreeMap<ValueId, BTreeMap<ResultContract, FuncId>>,
     dispatchers: &super::apply::Dispatchers,
+    prepared_gc: FuncId,
     values: &BTreeMap<ValueId, Value>,
     callee: &Atom,
     signature: SignatureId,
@@ -1534,6 +1536,28 @@ fn emit_exact_call(
                         &signature.results,
                     );
                 }
+            }
+            if let Some(super::apply::Application::Partial { total_pending }) =
+                super::apply::classify(function.signature, 0, &signature)
+            {
+                if total_pending == 0 {
+                    return Ok(Some(vec![environment]));
+                }
+                let layout = plan
+                    .pap_layouts
+                    .get(&(*callee_id, total_pending))
+                    .ok_or(CompileError::MissingRepresentation(*callee_id))?;
+                let logical = super::apply::logical_arguments(&signature, &call_arguments[2..]);
+                let pap = super::apply::emit_partial(
+                    builder,
+                    vmctx,
+                    environment,
+                    &logical,
+                    layout,
+                    prepared_gc,
+                    pipeline,
+                )?;
+                return Ok(Some(vec![pap]));
             }
         }
     }

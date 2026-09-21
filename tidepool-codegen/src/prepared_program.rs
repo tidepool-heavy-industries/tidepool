@@ -265,12 +265,27 @@ unsafe extern "C" fn prepared_resolve_call(
     vmctx: *mut crate::context::VMContext,
     header: u64,
     demand: *const Signature,
+    logical_cursor: u64,
+    plan_out: *mut u64,
 ) -> u64 {
     let machine = unsafe { crate::machine_state::machine_state(vmctx) };
     let masked = (header as usize) & !7;
-    machine
-        .resolve_prepared_call(masked, unsafe { &*demand })
-        .map_or(0, |code| code as u64)
+    let Some(resolution) =
+        machine.resolve_prepared_application(masked, unsafe { &*demand }, logical_cursor as usize)
+    else {
+        return 0;
+    };
+    let kind = match resolution.continuation {
+        crate::machine_state::PreparedCallContinuation::Return => apply::RESOLUTION_RETURN,
+        crate::machine_state::PreparedCallContinuation::Terminal => apply::RESOLUTION_TERMINAL,
+        crate::machine_state::PreparedCallContinuation::Apply => apply::RESOLUTION_APPLY,
+    };
+    unsafe {
+        plan_out.write(resolution.logical_consumed as u64);
+        plan_out.add(1).write(resolution.physical_consumed as u64);
+        plan_out.add(2).write(kind);
+    }
+    resolution.code as u64
 }
 
 /// Report an exhausted application search exactly once. `object` is the
@@ -703,6 +718,12 @@ impl CompiledProgram {
             .map_err(|error| PipelineError::Declaration(error.to_string()))?;
         let mut prepared_resolve_call_signature =
             ir::Signature::new(pipeline.isa.default_call_conv());
+        prepared_resolve_call_signature
+            .params
+            .push(AbiParam::new(types::I64));
+        prepared_resolve_call_signature
+            .params
+            .push(AbiParam::new(types::I64));
         prepared_resolve_call_signature
             .params
             .push(AbiParam::new(types::I64));

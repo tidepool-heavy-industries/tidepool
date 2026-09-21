@@ -32,7 +32,6 @@ use tidepool_repr::execution_schema::{
 pub(super) struct Dispatchers {
     // Boxed keys pin the metadata addresses embedded in generated code.
     entries: BTreeMap<Box<Signature>, Option<FuncId>>,
-    owner_offers: std::collections::BTreeSet<Signature>,
 }
 
 impl Dispatchers {
@@ -58,18 +57,6 @@ impl Dispatchers {
             .values()
             .filter(|function| function.is_some())
             .count()
-    }
-
-    fn owner_signatures(&self) -> std::collections::BTreeSet<Signature> {
-        self.owner_offers
-            .iter()
-            .cloned()
-            .chain(
-                self.entries.iter().filter_map(|(signature, function)| {
-                    function.map(|_| signature.as_ref().clone())
-                }),
-            )
-            .collect()
     }
 }
 
@@ -120,14 +107,9 @@ pub(super) enum Application {
     },
 }
 
-enum ResolvedContinuation {
-    Return,
-    Terminal,
-    Apply {
-        consumed: usize,
-        remainder: Signature,
-    },
-}
+pub(super) const RESOLUTION_RETURN: u64 = 0;
+pub(super) const RESOLUTION_TERMINAL: u64 = 1;
+pub(super) const RESOLUTION_APPLY: u64 = 2;
 
 pub(super) fn classify(
     entry: &Signature,
@@ -213,6 +195,52 @@ pub(super) fn layouts<'a>(
     Ok(layouts)
 }
 
+fn owner_offers_for(
+    entry: &Signature,
+    result_instances: &std::collections::BTreeSet<super::ResultContract>,
+    enter_lifts: bool,
+) -> std::collections::BTreeSet<Signature> {
+    let mut offers = std::collections::BTreeSet::new();
+    for pending in 0..entry.arguments.len().max(1) {
+        offers.extend(owner_offers_at(
+            entry,
+            pending,
+            result_instances,
+            enter_lifts,
+        ));
+    }
+    offers
+}
+
+fn owner_offers_at(
+    entry: &Signature,
+    pending: usize,
+    result_instances: &std::collections::BTreeSet<super::ResultContract>,
+    enter_lifts: bool,
+) -> Vec<Signature> {
+    let remaining = &entry.arguments[pending..];
+    let results = if entry.results.is_caller_result() {
+        result_instances.iter().cloned().collect::<Vec<_>>()
+    } else {
+        vec![entry.results.clone()]
+    };
+    let mut offers = results
+        .into_iter()
+        .map(|results| Signature {
+            arguments: remaining.to_vec(),
+            results,
+        })
+        .collect::<Vec<_>>();
+    let first = usize::from(enter_lifts);
+    for supplied in first..remaining.len().min(2) {
+        offers.push(Signature {
+            arguments: remaining[..supplied].to_vec(),
+            results: super::ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        });
+    }
+    offers
+}
+
 /// Declare one native Tail-ABI dispatcher for each demanded call signature.
 /// The callee occupies the same ABI position as a captured environment; this
 /// keeps dynamic calls compatible with ordinary generated entries without a
@@ -226,16 +254,12 @@ pub(super) fn declare_dispatchers(
     let enter_lifts = enter_serves_zero_argument_lift(profile)?;
     let mut workers = std::collections::BTreeSet::new();
     let mut owner_offers = std::collections::BTreeSet::new();
-    let mut queued = std::collections::BTreeSet::new();
-    let mut worker_queue = Vec::new();
     let mut metadata = std::collections::BTreeSet::new();
     for declaration in plan.program.operations() {
         let signature = &plan.program.signatures()[declaration.signature.0 as usize];
         if let Some(callback) = super::lifetime::callback_signature(declaration, signature) {
             if workers.insert(callback.clone()) {
                 metadata.insert(callback.clone());
-                queued.insert(callback.clone());
-                worker_queue.push(callback);
             }
         }
     }
@@ -263,74 +287,18 @@ pub(super) fn declare_dispatchers(
             };
             if workers.insert(concrete.clone()) {
                 metadata.insert(concrete.clone());
-                queued.insert(concrete.clone());
-                worker_queue.push(concrete);
             }
         }
     }
     let call_demands = workers.len();
-    // Every owner serves exact PAP suffixes and all proper partial prefixes,
-    // even when no call in its own source demands that shape.
+    // Every owner serves its exact PAP suffix and one logical application
+    // step. The worker loop composes those steps for longer partial demands.
     for function in plan.functions.values() {
-        let entry = function.signature;
-        for pending in 0..entry.arguments.len().max(1) {
-            let remaining = &entry.arguments[pending..];
-            let results = if entry.results.is_caller_result() {
-                result_instances.iter().cloned().collect::<Vec<_>>()
-            } else {
-                vec![entry.results.clone()]
-            };
-            for results in results {
-                let exact = Signature {
-                    arguments: remaining.to_vec(),
-                    results,
-                };
-                metadata.insert(exact.clone());
-                owner_offers.insert(exact);
-            }
-            // `supplied == 0` is the zero-argument lift `prepared_enter`
-            // serves (see `zero_argument_lift`).
-            let first = usize::from(enter_lifts);
-            for supplied in first..remaining.len() {
-                let partial = Signature {
-                    arguments: remaining[..supplied].to_vec(),
-                    results: super::ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
-                };
-                metadata.insert(partial.clone());
-                owner_offers.insert(partial);
-            }
+        for offer in owner_offers_for(function.signature, &result_instances, enter_lifts) {
+            owner_offers.insert(offer);
         }
     }
     let owner_demands = owner_offers.len();
-    // Close workers over foreign excess suffixes. Prefix probes need stable
-    // metadata but no native body: the resolved code belongs to the callee's
-    // owner, so probe-only signatures no longer expand generated code.
-    let mut cursor = 0;
-    while let Some(demand) = worker_queue.get(cursor).cloned() {
-        cursor += 1;
-        for consumed in 0..=demand.arguments.len() {
-            let terminal = Signature {
-                arguments: demand.arguments[..consumed].to_vec(),
-                results: super::ResultContract::NoSuccess,
-            };
-            metadata.insert(terminal);
-            if consumed > 0 && consumed < demand.arguments.len() {
-                let prefix = Signature {
-                    arguments: demand.arguments[..consumed].to_vec(),
-                    results: super::ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
-                };
-                let suffix = Signature {
-                    arguments: demand.arguments[consumed..].to_vec(),
-                    results: demand.results.clone(),
-                };
-                metadata.insert(prefix);
-                metadata.insert(suffix.clone());
-                if queued.insert(suffix.clone()) {
-                    worker_queue.push(suffix);
-                }
-            }
-        }
-    }
     if std::env::var("TIDEPOOL_CODEGEN_DETAIL").as_deref() == Ok("1") {
         tracing::info!(target: "tidepool_codegen::prepared_compile", call_demands,
             owner_demands, worker_demands = workers.len(), pinned_demands = metadata.len(),
@@ -351,10 +319,7 @@ pub(super) fn declare_dispatchers(
         };
         entries.insert(Box::new(semantic), function);
     }
-    Ok(Dispatchers {
-        entries,
-        owner_offers,
-    })
+    Ok(Dispatchers { entries })
 }
 
 #[expect(
@@ -423,7 +388,7 @@ fn emit_function_owner_adapter(
                     .pap_layouts
                     .get(&(id, *total_pending))
                     .ok_or(super::CompileError::MissingRepresentation(id))?;
-                emit_partial(
+                let tagged = emit_partial(
                     &mut builder,
                     vmctx,
                     callee,
@@ -432,6 +397,11 @@ fn emit_function_owner_adapter(
                     prepared_gc,
                     pipeline,
                 )?;
+                let status = builder.ins().iconst(
+                    types::I32,
+                    crate::prepared_control::CallStatus::Success as i64,
+                );
+                builder.ins().return_(&[status, tagged]);
             }
         }
         Application::Excess {
@@ -546,7 +516,7 @@ fn emit_pap_owner_adapter(
                 .pap_layouts
                 .get(&(id, *total_pending))
                 .ok_or(super::CompileError::MissingRepresentation(id))?;
-            emit_partial(
+            let tagged = emit_partial(
                 &mut builder,
                 vmctx,
                 pap_function,
@@ -555,6 +525,11 @@ fn emit_pap_owner_adapter(
                 prepared_gc,
                 pipeline,
             )?;
+            let status = builder.ins().iconst(
+                types::I32,
+                crate::prepared_control::CallStatus::Success as i64,
+            );
+            builder.ins().return_(&[status, tagged]);
         }
         Application::Excess {
             consumed,
@@ -577,6 +552,192 @@ fn emit_pap_owner_adapter(
     builder.finalize();
     pipeline.define_function(output, &mut context)?;
     Ok(output)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the generic application loop owns its resolver, enter and failure boundaries"
+)]
+fn emit_resolution_loop(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut CodegenPipeline,
+    dispatchers: &Dispatchers,
+    profile: &NativeAbiProfile,
+    vmctx: ir::Value,
+    initial_callee: ir::Value,
+    arguments: &[Option<ir::Value>],
+    signature: &Signature,
+    prepared_enter: FuncId,
+    prepared_bad_state: FuncId,
+    prepared_resolve_call: FuncId,
+    prepared_unresolved_call: FuncId,
+) -> Result<(), super::CompileError> {
+    let physical_arguments = arguments.iter().flatten().copied().collect::<Vec<_>>();
+    let argument_words = 1_u32
+        .checked_add(physical_arguments.len() as u32)
+        .ok_or(super::CompileError::RootBlock)?;
+    let argument_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
+        ir::StackSlotKind::ExplicitSlot,
+        argument_words * 8,
+        3,
+    ));
+    let argument_base = builder.ins().stack_addr(types::I64, argument_slot, 0);
+    let result_abi = EntryAbi::lower_internal(profile, signature, EnvironmentMode::Captured)?;
+    let result_words = result_abi.physical_results().len().max(1) as u32;
+    let result_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
+        ir::StackSlotKind::ExplicitSlot,
+        result_words * 8,
+        3,
+    ));
+    let result_area = builder.ins().stack_addr(types::I64, result_slot, 0);
+    let plan_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
+        ir::StackSlotKind::ExplicitSlot,
+        3 * 8,
+        3,
+    ));
+    let plan_area = builder.ins().stack_addr(types::I64, plan_slot, 0);
+    let demand = builder
+        .ins()
+        .iconst(types::I64, dispatchers.demand_address(signature)?);
+    let loop_block = builder.create_block();
+    builder.append_block_param(loop_block, types::I64);
+    builder.append_block_param(loop_block, types::I64);
+    builder.append_block_param(loop_block, types::I64);
+    let zero = builder.ins().iconst(types::I64, 0);
+    builder.ins().jump(
+        loop_block,
+        &[initial_callee.into(), zero.into(), zero.into()],
+    );
+    builder.switch_to_block(loop_block);
+    let callee = builder.block_params(loop_block)[0];
+    let logical_cursor = builder.block_params(loop_block)[1];
+    let physical_cursor = builder.block_params(loop_block)[2];
+    builder.declare_value_needs_stack_map(callee);
+    for (index, value) in physical_arguments.iter().copied().enumerate() {
+        builder.ins().store(
+            MemFlags::trusted(),
+            value,
+            argument_base,
+            ((index + 1) * 8) as i32,
+        );
+    }
+    let byte_cursor = builder.ins().ishl_imm(physical_cursor, 3);
+    let argument_area = builder.ins().iadd(argument_base, byte_cursor);
+    builder
+        .ins()
+        .store(MemFlags::trusted(), callee, argument_area, 0);
+    let object = builder.ins().band_imm(callee, !7_i64);
+    let header = builder
+        .ins()
+        .load(types::I64, MemFlags::trusted(), object, 0);
+    let resolve = pipeline
+        .module
+        .declare_func_in_func(prepared_resolve_call, builder.func);
+    let lookup = builder
+        .ins()
+        .call(resolve, &[vmctx, header, demand, logical_cursor, plan_area]);
+    let code = builder.inst_results(lookup)[0];
+    let found = builder
+        .ins()
+        .icmp_imm(ir::condcodes::IntCC::NotEqual, code, 0);
+    let call_block = builder.create_block();
+    let unresolved_block = builder.create_block();
+    builder
+        .ins()
+        .brif(found, call_block, &[], unresolved_block, &[]);
+
+    builder.switch_to_block(unresolved_block);
+    builder.seal_block(unresolved_block);
+    let unresolved = pipeline
+        .module
+        .declare_func_in_func(prepared_unresolved_call, builder.func);
+    let recorded = builder.ins().call(unresolved, &[vmctx, object]);
+    let status = builder.inst_results(recorded)[0];
+    crate::alloc::emit_prepared_failure_return(builder, status);
+
+    builder.switch_to_block(call_block);
+    builder.seal_block(call_block);
+    let mut native = ir::Signature::new(pipeline.isa.default_call_conv());
+    native.params = vec![ir::AbiParam::new(types::I64); 3];
+    native.returns = vec![ir::AbiParam::new(types::I32)];
+    let sig_ref = builder.import_signature(native);
+    let call = builder
+        .ins()
+        .call_indirect(sig_ref, code, &[vmctx, result_area, argument_area]);
+    let status = builder.inst_results(call)[0];
+    super::emit::emit_status_guard(builder, status);
+    let kind = builder
+        .ins()
+        .load(types::I64, MemFlags::trusted(), plan_area, 16);
+    let apply = builder.create_block();
+    let finish = builder.create_block();
+    let is_apply =
+        builder
+            .ins()
+            .icmp_imm(ir::condcodes::IntCC::Equal, kind, RESOLUTION_APPLY as i64);
+    builder.ins().brif(is_apply, apply, &[], finish, &[]);
+
+    builder.switch_to_block(finish);
+    builder.seal_block(finish);
+    let is_terminal = builder.ins().icmp_imm(
+        ir::condcodes::IntCC::Equal,
+        kind,
+        RESOLUTION_TERMINAL as i64,
+    );
+    let invalid = builder.create_block();
+    let returned = builder.create_block();
+    builder.ins().brif(is_terminal, invalid, &[], returned, &[]);
+    builder.switch_to_block(invalid);
+    builder.seal_block(invalid);
+    emit_bad_state(builder, vmctx, prepared_bad_state, pipeline);
+    builder.switch_to_block(returned);
+    builder.seal_block(returned);
+    let mut values = vec![status];
+    for (index, rep) in result_abi.physical_results().iter().enumerate() {
+        let value = builder.ins().load(
+            super::adapter::scalar_type(*rep),
+            MemFlags::trusted(),
+            result_area,
+            (index * 8) as i32,
+        );
+        if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
+            builder.declare_value_needs_stack_map(value);
+        }
+        values.push(value);
+    }
+    builder.ins().return_(&values);
+
+    builder.switch_to_block(apply);
+    builder.seal_block(apply);
+    let intermediate = builder
+        .ins()
+        .load(types::I64, MemFlags::trusted(), result_area, 0);
+    builder.declare_value_needs_stack_map(intermediate);
+    let enter = pipeline
+        .module
+        .declare_func_in_func(prepared_enter, builder.func);
+    let entered = builder.ins().call(enter, &[vmctx, intermediate]);
+    let entered_values = builder.inst_results(entered).to_vec();
+    super::emit::emit_status_guard(builder, entered_values[0]);
+    builder.declare_value_needs_stack_map(entered_values[1]);
+    let logical_consumed = builder
+        .ins()
+        .load(types::I64, MemFlags::trusted(), plan_area, 0);
+    let physical_consumed = builder
+        .ins()
+        .load(types::I64, MemFlags::trusted(), plan_area, 8);
+    let next_logical = builder.ins().iadd(logical_cursor, logical_consumed);
+    let next_physical = builder.ins().iadd(physical_cursor, physical_consumed);
+    builder.ins().jump(
+        loop_block,
+        &[
+            entered_values[1].into(),
+            next_logical.into(),
+            next_physical.into(),
+        ],
+    );
+    builder.seal_block(loop_block);
+    Ok(())
 }
 
 /// Emit the exact-application portion of a dispatcher. PAP allocation and
@@ -605,11 +766,15 @@ pub(super) fn emit_dispatchers(
     let blocks_before = pipeline.blocks_emitted();
     let mut exports = Vec::new();
     let mut owner_index = 0usize;
-    for signature in dispatchers.owner_signatures() {
-        for (&id, function) in &plan.functions {
-            let Some(application) = classify(function.signature, 0, &signature) else {
-                continue;
-            };
+    let result_instances = super::plan::result_instances(plan.program);
+    let enter_lifts = enter_serves_zero_argument_lift(profile)?;
+    for (&id, function) in &plan.functions {
+        let offers = owner_offers_at(function.signature, 0, &result_instances, enter_lifts)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        for signature in offers {
+            let application = classify(function.signature, 0, &signature)
+                .expect("owner offers are produced by the canonical classifier contract");
             let Some(callee_function) = callee_instance(functions, id, function, &signature) else {
                 continue;
             };
@@ -635,16 +800,20 @@ pub(super) fn emit_dispatchers(
             exports.push(resolve::CallableExport {
                 header: function.descriptor.initial_header_word(),
                 function: target,
-                signature: signature.clone(),
+                signature,
             });
         }
-        for (&(id, pending), layout) in &plan.pap_layouts {
-            let Some(function) = plan.functions.get(&id) else {
-                continue;
-            };
-            let Some(application) = classify(function.signature, pending, &signature) else {
-                continue;
-            };
+    }
+    for (&(id, pending), layout) in &plan.pap_layouts {
+        let Some(function) = plan.functions.get(&id) else {
+            continue;
+        };
+        let offers = owner_offers_at(function.signature, pending, &result_instances, enter_lifts)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        for signature in offers {
+            let application = classify(function.signature, pending, &signature)
+                .expect("PAP offers are produced by the canonical classifier contract");
             let Some(callee_function) = callee_instance(functions, id, function, &signature) else {
                 continue;
             };
@@ -667,7 +836,7 @@ pub(super) fn emit_dispatchers(
             exports.push(resolve::CallableExport {
                 header: layout.descriptor.initial_header_word(),
                 function: target,
-                signature: signature.clone(),
+                signature,
             });
         }
     }
@@ -693,163 +862,20 @@ pub(super) fn emit_dispatchers(
             prepared_stack_overflow,
             prepared_enter,
         );
-        // Full-demand lookup may find an owner's exact or partial adapter.
-        // Prefix probes are non-mutating; only exhaustion records failure.
-        let object = builder.ins().band_imm(callee, !7_i64);
-        let header = builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), object, 0);
-        let resolve_ref = pipeline
-            .module
-            .declare_func_in_func(prepared_resolve_call, builder.func);
-        let mut probes = vec![(signature.clone(), ResolvedContinuation::Return)];
-        for consumed in (0..=signature.arguments.len()).rev() {
-            let terminal = Signature {
-                arguments: signature.arguments[..consumed].to_vec(),
-                results: super::ResultContract::NoSuccess,
-            };
-            if terminal != *signature {
-                probes.push((terminal, ResolvedContinuation::Terminal));
-            }
-        }
-        // A NoSuccess demand cannot acquire evidence of terminal behavior by
-        // first running a merely lifted-returning function (classify agrees).
-        if signature.results != super::ResultContract::NoSuccess {
-            for consumed in (1..signature.arguments.len()).rev() {
-                probes.push((
-                    Signature {
-                        arguments: signature.arguments[..consumed].to_vec(),
-                        results: super::ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
-                    },
-                    ResolvedContinuation::Apply {
-                        consumed,
-                        remainder: Signature {
-                            arguments: signature.arguments[consumed..].to_vec(),
-                            results: signature.results.clone(),
-                        },
-                    },
-                ));
-            }
-        }
-        for (demand, application) in probes {
-            let metadata = builder
-                .ins()
-                .iconst(types::I64, dispatchers.demand_address(&demand)?);
-            let lookup = builder.ins().call(resolve_ref, &[vmctx, header, metadata]);
-            let code = builder.inst_results(lookup)[0];
-            let found = builder
-                .ins()
-                .icmp_imm(ir::condcodes::IntCC::NotEqual, code, 0);
-            let hit = builder.create_block();
-            let miss = builder.create_block();
-            builder.ins().brif(found, hit, &[], miss, &[]);
-            builder.switch_to_block(hit);
-            builder.seal_block(hit);
-            let demand_abi = EntryAbi::lower_internal(profile, &demand, EnvironmentMode::Captured)?;
-            let argument_values = physical_arguments
-                .iter()
-                .take(demand.arguments.len())
-                .flatten()
-                .copied()
-                .collect::<Vec<_>>();
-            let argument_words = 1_u32
-                .checked_add(argument_values.len() as u32)
-                .ok_or(super::CompileError::RootBlock)?;
-            let argument_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
-                ir::StackSlotKind::ExplicitSlot,
-                argument_words * 8,
-                3,
-            ));
-            let argument_area = builder.ins().stack_addr(types::I64, argument_slot, 0);
-            builder
-                .ins()
-                .store(MemFlags::trusted(), callee, argument_area, 0);
-            for (index, value) in argument_values.into_iter().enumerate() {
-                builder.ins().store(
-                    MemFlags::trusted(),
-                    value,
-                    argument_area,
-                    ((index + 1) * 8) as i32,
-                );
-            }
-            let result_words = demand_abi.physical_results().len().max(1) as u32;
-            let result_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
-                ir::StackSlotKind::ExplicitSlot,
-                result_words * 8,
-                3,
-            ));
-            let result_area = builder.ins().stack_addr(types::I64, result_slot, 0);
-            let mut native = ir::Signature::new(pipeline.isa.default_call_conv());
-            native.params = vec![ir::AbiParam::new(types::I64); 3];
-            native.returns = vec![ir::AbiParam::new(types::I32)];
-            let sig_ref = builder.import_signature(native);
-            let call =
-                builder
-                    .ins()
-                    .call_indirect(sig_ref, code, &[vmctx, result_area, argument_area]);
-            let status = builder.inst_results(call)[0];
-            super::emit::emit_status_guard(&mut builder, status);
-            let mut returned = vec![status];
-            for (index, rep) in demand_abi.physical_results().iter().enumerate() {
-                let value = builder.ins().load(
-                    super::adapter::scalar_type(*rep),
-                    MemFlags::trusted(),
-                    result_area,
-                    (index * 8) as i32,
-                );
-                if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
-                    builder.declare_value_needs_stack_map(value);
-                }
-                returned.push(value);
-            }
-            match application {
-                ResolvedContinuation::Return => {
-                    builder.ins().return_(&returned);
-                }
-                ResolvedContinuation::Terminal => {
-                    super::emit_call_results(
-                        &mut builder,
-                        pipeline,
-                        vmctx,
-                        &returned,
-                        &demand.results,
-                    )?;
-                }
-                ResolvedContinuation::Apply {
-                    consumed,
-                    remainder,
-                } => {
-                    if let Some(payload) = super::emit_call_results(
-                        &mut builder,
-                        pipeline,
-                        vmctx,
-                        &returned,
-                        &demand.results,
-                    )? {
-                        emit_suffix_stage(
-                            &mut builder,
-                            pipeline,
-                            dispatchers,
-                            profile,
-                            vmctx,
-                            payload[0],
-                            &physical_arguments[consumed..],
-                            &remainder,
-                            prepared_resolve_call,
-                            prepared_unresolved_call,
-                        )?;
-                    }
-                }
-            }
-            builder.switch_to_block(miss);
-            builder.seal_block(miss);
-        }
-        let recorded_ref = pipeline
-            .module
-            .declare_func_in_func(prepared_unresolved_call, builder.func);
-        let recorded = builder.ins().call(recorded_ref, &[vmctx, object]);
-        let status = builder.inst_results(recorded)[0];
-        crate::alloc::emit_prepared_failure_return(&mut builder, status);
+        emit_resolution_loop(
+            &mut builder,
+            pipeline,
+            dispatchers,
+            profile,
+            vmctx,
+            callee,
+            &physical_arguments,
+            signature,
+            prepared_enter,
+            prepared_bad_state,
+            prepared_resolve_call,
+            prepared_unresolved_call,
+        )?;
         builder.seal_all_blocks();
         builder.finalize();
         pipeline.define_function(output, &mut context)?;
@@ -890,171 +916,6 @@ pub(super) fn emit_dispatchers(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "compiled application dispatchers");
     Ok(exports)
-}
-
-/// Continue an oversaturated application inside its original worker. Each
-/// stage owns fresh transport slots and roots the entered callee and managed
-/// results in SSA; no suffix-shaped native worker is declared.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a suffix stage carries the fixed dispatcher services and its logical argument window"
-)]
-fn emit_suffix_stage(
-    builder: &mut FunctionBuilder<'_>,
-    pipeline: &mut CodegenPipeline,
-    dispatchers: &Dispatchers,
-    profile: &NativeAbiProfile,
-    vmctx: ir::Value,
-    callee: ir::Value,
-    arguments: &[Option<ir::Value>],
-    signature: &Signature,
-    prepared_resolve_call: FuncId,
-    prepared_unresolved_call: FuncId,
-) -> Result<(), super::CompileError> {
-    let object = builder.ins().band_imm(callee, !7_i64);
-    let header = builder
-        .ins()
-        .load(types::I64, MemFlags::trusted(), object, 0);
-    let resolve_ref = pipeline
-        .module
-        .declare_func_in_func(prepared_resolve_call, builder.func);
-    let mut probes = vec![(signature.clone(), ResolvedContinuation::Return)];
-    for consumed in (0..=signature.arguments.len()).rev() {
-        let terminal = Signature {
-            arguments: signature.arguments[..consumed].to_vec(),
-            results: super::ResultContract::NoSuccess,
-        };
-        if terminal != *signature {
-            probes.push((terminal, ResolvedContinuation::Terminal));
-        }
-    }
-    if signature.results != super::ResultContract::NoSuccess {
-        for consumed in (1..signature.arguments.len()).rev() {
-            probes.push((
-                Signature {
-                    arguments: signature.arguments[..consumed].to_vec(),
-                    results: super::ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
-                },
-                ResolvedContinuation::Apply {
-                    consumed,
-                    remainder: Signature {
-                        arguments: signature.arguments[consumed..].to_vec(),
-                        results: signature.results.clone(),
-                    },
-                },
-            ));
-        }
-    }
-    for (demand, continuation) in probes {
-        let metadata = builder
-            .ins()
-            .iconst(types::I64, dispatchers.demand_address(&demand)?);
-        let lookup = builder.ins().call(resolve_ref, &[vmctx, header, metadata]);
-        let code = builder.inst_results(lookup)[0];
-        let found = builder
-            .ins()
-            .icmp_imm(ir::condcodes::IntCC::NotEqual, code, 0);
-        let hit = builder.create_block();
-        let miss = builder.create_block();
-        builder.ins().brif(found, hit, &[], miss, &[]);
-        builder.switch_to_block(hit);
-        builder.seal_block(hit);
-
-        let demand_abi = EntryAbi::lower_internal(profile, &demand, EnvironmentMode::Captured)?;
-        let argument_values = arguments
-            .iter()
-            .take(demand.arguments.len())
-            .flatten()
-            .copied()
-            .collect::<Vec<_>>();
-        let argument_words = 1_u32
-            .checked_add(argument_values.len() as u32)
-            .ok_or(super::CompileError::RootBlock)?;
-        let argument_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
-            ir::StackSlotKind::ExplicitSlot,
-            argument_words * 8,
-            3,
-        ));
-        let argument_area = builder.ins().stack_addr(types::I64, argument_slot, 0);
-        builder
-            .ins()
-            .store(MemFlags::trusted(), callee, argument_area, 0);
-        for (index, value) in argument_values.into_iter().enumerate() {
-            builder.ins().store(
-                MemFlags::trusted(),
-                value,
-                argument_area,
-                ((index + 1) * 8) as i32,
-            );
-        }
-        let result_words = demand_abi.physical_results().len().max(1) as u32;
-        let result_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
-            ir::StackSlotKind::ExplicitSlot,
-            result_words * 8,
-            3,
-        ));
-        let result_area = builder.ins().stack_addr(types::I64, result_slot, 0);
-        let mut native = ir::Signature::new(pipeline.isa.default_call_conv());
-        native.params = vec![ir::AbiParam::new(types::I64); 3];
-        native.returns = vec![ir::AbiParam::new(types::I32)];
-        let sig_ref = builder.import_signature(native);
-        let call = builder
-            .ins()
-            .call_indirect(sig_ref, code, &[vmctx, result_area, argument_area]);
-        let status = builder.inst_results(call)[0];
-        super::emit::emit_status_guard(builder, status);
-        let mut returned = vec![status];
-        for (index, rep) in demand_abi.physical_results().iter().enumerate() {
-            let value = builder.ins().load(
-                super::adapter::scalar_type(*rep),
-                MemFlags::trusted(),
-                result_area,
-                (index * 8) as i32,
-            );
-            if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
-                builder.declare_value_needs_stack_map(value);
-            }
-            returned.push(value);
-        }
-        match continuation {
-            ResolvedContinuation::Return => {
-                builder.ins().return_(&returned);
-            }
-            ResolvedContinuation::Terminal => {
-                super::emit_call_results(builder, pipeline, vmctx, &returned, &demand.results)?;
-            }
-            ResolvedContinuation::Apply {
-                consumed,
-                remainder,
-            } => {
-                if let Some(payload) =
-                    super::emit_call_results(builder, pipeline, vmctx, &returned, &demand.results)?
-                {
-                    emit_suffix_stage(
-                        builder,
-                        pipeline,
-                        dispatchers,
-                        profile,
-                        vmctx,
-                        payload[0],
-                        &arguments[consumed..],
-                        &remainder,
-                        prepared_resolve_call,
-                        prepared_unresolved_call,
-                    )?;
-                }
-            }
-        };
-        builder.switch_to_block(miss);
-        builder.seal_block(miss);
-    }
-    let unresolved = pipeline
-        .module
-        .declare_func_in_func(prepared_unresolved_call, builder.func);
-    let recorded = builder.ins().call(unresolved, &[vmctx, object]);
-    let status = builder.inst_results(recorded)[0];
-    crate::alloc::emit_prepared_failure_return(builder, status);
-    Ok(())
 }
 
 /// The compiled instance of `id` a demand applies: its own result contract,
@@ -1193,7 +1054,7 @@ pub(super) fn emit_partial(
     layout: &PapLayout,
     prepared_gc: FuncId,
     pipeline: &mut CodegenPipeline,
-) -> Result<(), super::CompileError> {
+) -> Result<ir::Value, super::CompileError> {
     let gc = pipeline
         .module
         .declare_func_in_func(prepared_gc, builder.func);
@@ -1214,12 +1075,7 @@ pub(super) fn emit_partial(
         .iconst(types::I64, layout.descriptor.tag() as i64);
     let tagged = builder.ins().bor(object, tag);
     builder.declare_value_needs_stack_map(tagged);
-    let status = builder.ins().iconst(
-        types::I32,
-        crate::prepared_control::CallStatus::Success as i64,
-    );
-    builder.ins().return_(&[status, tagged]);
-    Ok(())
+    Ok(tagged)
 }
 
 #[expect(
@@ -1485,6 +1341,64 @@ mod tests {
         assert_eq!(
             classify(&entry, 0, &demand),
             Some(Application::NoSuccess { consumed: 0 })
+        );
+    }
+
+    fn long_arity_structure(arity: usize) -> (usize, usize) {
+        let entry = Signature {
+            arguments: vec![RuntimeRep::Int(64); arity],
+            results: tidepool_repr::execution_schema::ResultContract::Returns(vec![
+                RuntimeRep::Int(64),
+            ]),
+        };
+        let instances = std::collections::BTreeSet::new();
+        let offers = owner_offers_for(&entry, &instances, true);
+        let mut planning_steps = 0;
+        for pending in 0..arity.max(1) {
+            planning_steps += owner_offers_at(&entry, pending, &instances, true).len();
+        }
+        (offers.len(), planning_steps)
+    }
+
+    #[test]
+    fn long_arity_owner_metadata_and_adapters_grow_linearly() {
+        let small = long_arity_structure(16);
+        let large = long_arity_structure(32);
+        assert!(large.0 <= small.0 * 2 + 1, "offers: {small:?} -> {large:?}");
+        assert!(
+            large.1 <= small.1 * 2 + 1,
+            "adapters: {small:?} -> {large:?}"
+        );
+        assert_eq!(small, (17, 31));
+        assert_eq!(large, (33, 63));
+    }
+
+    #[test]
+    fn dynamic_resolution_preserves_float_multiple_result_and_void_slots() {
+        let machine = crate::machine_state::MachineState::new();
+        let signature = Signature {
+            arguments: vec![
+                RuntimeRep::Void,
+                RuntimeRep::Float(32),
+                RuntimeRep::Float(64),
+            ],
+            results: tidepool_repr::execution_schema::ResultContract::Returns(vec![
+                RuntimeRep::Float(32),
+                RuntimeRep::Float(64),
+                RuntimeRep::Int(64),
+            ]),
+        };
+        let code = std::ptr::dangling::<u8>();
+        machine.register_prepared_entries([(0x1000, signature.clone(), code)], std::iter::empty());
+        let resolved = machine
+            .resolve_prepared_application(0x1000, &signature, 0)
+            .expect("the exact dynamic slot signature resolves");
+        assert_eq!(resolved.code, code);
+        assert_eq!(resolved.logical_consumed, 3);
+        assert_eq!(resolved.physical_consumed, 2);
+        assert_eq!(
+            resolved.continuation,
+            crate::machine_state::PreparedCallContinuation::Return
         );
     }
 }

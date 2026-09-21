@@ -77,6 +77,20 @@ struct PreparedDispatchRecord {
     calls: std::collections::BTreeMap<tidepool_repr::execution_schema::Signature, *const u8>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PreparedCallContinuation {
+    Return,
+    Terminal,
+    Apply,
+}
+
+pub(crate) struct PreparedCallResolution {
+    pub code: *const u8,
+    pub logical_consumed: usize,
+    pub physical_consumed: usize,
+    pub continuation: PreparedCallContinuation,
+}
+
 /// Whether another entry may safely reuse this machine after a failed run.
 ///
 /// `Unavailable` is monotonic for the lifetime of a machine: once execution
@@ -1433,17 +1447,79 @@ impl MachineState {
         prepared.space.retire_owner(headers, Some(region));
     }
 
-    pub(crate) fn resolve_prepared_call(
+    pub(crate) fn resolve_prepared_application(
         &self,
         header: usize,
-        signature: &tidepool_repr::execution_schema::Signature,
-    ) -> Option<*const u8> {
-        self.prepared_dispatch
-            .borrow()
-            .get(&header)?
-            .calls
-            .get(signature)
-            .copied()
+        demand: &tidepool_repr::execution_schema::Signature,
+        logical_cursor: usize,
+    ) -> Option<PreparedCallResolution> {
+        use tidepool_repr::execution_schema::{ResultContract, RuntimeRep};
+
+        let remaining = demand.arguments.get(logical_cursor..)?;
+        let records = self.prepared_dispatch.borrow();
+        let calls = &records.get(&header)?.calls;
+        let physical = |logical: &[RuntimeRep]| {
+            logical
+                .iter()
+                .filter(|rep| **rep != RuntimeRep::Void)
+                .count()
+        };
+        let resolution = |code, consumed, continuation| PreparedCallResolution {
+            code,
+            logical_consumed: consumed,
+            physical_consumed: physical(&remaining[..consumed]),
+            continuation,
+        };
+
+        if let Some((signature, &code)) = calls.iter().find(|(signature, _)| {
+            signature.arguments.as_slice() == remaining && signature.results == demand.results
+        }) {
+            return Some(resolution(
+                code,
+                signature.arguments.len(),
+                PreparedCallContinuation::Return,
+            ));
+        }
+
+        let mut terminal = None;
+        let mut apply = None;
+        for (signature, &code) in calls {
+            let consumed = signature.arguments.len();
+            if consumed > remaining.len()
+                || signature.arguments.as_slice() != &remaining[..consumed]
+            {
+                continue;
+            }
+            match &signature.results {
+                ResultContract::NoSuccess => {
+                    if terminal
+                        .as_ref()
+                        .is_none_or(|(_, previous)| consumed > *previous)
+                    {
+                        terminal = Some((code, consumed));
+                    }
+                }
+                ResultContract::Returns(reps)
+                    if demand.results != ResultContract::NoSuccess
+                        && reps.as_slice() == [RuntimeRep::LiftedRef]
+                        && consumed > 0
+                        && consumed < remaining.len()
+                        && apply
+                            .as_ref()
+                            .is_none_or(|(_, previous)| consumed > *previous) =>
+                {
+                    apply = Some((code, consumed));
+                }
+                ResultContract::Returns(_) | ResultContract::CallerResult => {}
+            }
+        }
+        terminal
+            .map(|(code, consumed)| resolution(code, consumed, PreparedCallContinuation::Terminal))
+            .or_else(|| {
+                apply.map(|(code, consumed)| {
+                    resolution(code, consumed, PreparedCallContinuation::Apply)
+                })
+            })
     }
 
     pub(crate) fn resolve_prepared_enter(&self, header: usize) -> Option<*const u8> {
