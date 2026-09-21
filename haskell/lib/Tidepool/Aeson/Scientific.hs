@@ -70,6 +70,7 @@ base10Exponent (Scientific _ e) = e
 -- @quotRem@ truncates toward zero, so the coefficient sign is preserved.
 stripZeros :: Integer -> Int -> (Integer, Int)
 stripZeros 0 _ = (0, 0)
+stripZeros c e | e == maxBound = (c, e)
 stripZeros c e = case c `quotRem` 10 of
   (q, 0) -> stripZeros q (e + 1)
   _      -> (c, e)

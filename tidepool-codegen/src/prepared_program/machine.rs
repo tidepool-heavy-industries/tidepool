@@ -2793,7 +2793,12 @@ impl<'code> InstalledProgram<'code> {
         let collections_before = machine.gc_generation();
         let pointer = self.program.get().pipeline.get_function_ptr(adapter);
         let raw = {
-            let _intrinsic = super::ActiveIntrinsicScope::new(machine, self.program.get())?;
+            let _intrinsic = super::ActiveIntrinsicScope::new(
+                machine,
+                self.program.get(),
+                statics,
+                descriptor_registry,
+            )?;
             let _scope = OldSpaceScope::new(machine, old_space)?;
             unsafe {
                 let adapter: extern "C" fn(*mut VMContext, *mut u64, *const u64) -> i32 =
@@ -2964,7 +2969,12 @@ impl<'code> InstalledProgram<'code> {
         let collections_before = machine.gc_generation();
         let pointer = self.program.get().pipeline.get_function_ptr(adapter);
         let raw_status = {
-            let _intrinsic = super::ActiveIntrinsicScope::new(machine, self.program.get())?;
+            let _intrinsic = super::ActiveIntrinsicScope::new(
+                machine,
+                self.program.get(),
+                statics,
+                descriptor_registry,
+            )?;
             let _scope = OldSpaceScope::new(machine, old_space)?;
             unsafe {
                 let adapter: extern "C" fn(*mut VMContext, *mut u64, *const u64) -> i32 =
@@ -7144,11 +7154,20 @@ mod tests {
         let (machine, program) = machine();
         let compiled = machine.programs[&program].program.get();
         {
-            let _active =
-                crate::prepared_program::ActiveIntrinsicScope::new(&machine.machine, compiled)
-                    .expect("first intrinsic operation owns the invocation scope");
+            let _active = crate::prepared_program::ActiveIntrinsicScope::new(
+                &machine.machine,
+                compiled,
+                &machine.statics,
+                &machine.descriptor_registry,
+            )
+            .expect("first intrinsic operation owns the invocation scope");
             assert!(matches!(
-                crate::prepared_program::ActiveIntrinsicScope::new(&machine.machine, compiled),
+                crate::prepared_program::ActiveIntrinsicScope::new(
+                    &machine.machine,
+                    compiled,
+                    &machine.statics,
+                    &machine.descriptor_registry,
+                ),
                 Err(ExecutionError::Invariant(
                     "a nested managed intrinsic operation is already active"
                 ))
@@ -7156,8 +7175,13 @@ mod tests {
             assert!(unsafe { machine.machine.active_intrinsic_program() }.is_some());
         }
         assert!(unsafe { machine.machine.active_intrinsic_program() }.is_none());
-        crate::prepared_program::ActiveIntrinsicScope::new(&machine.machine, compiled)
-            .expect("scope cleanup permits later intrinsic construction");
+        crate::prepared_program::ActiveIntrinsicScope::new(
+            &machine.machine,
+            compiled,
+            &machine.statics,
+            &machine.descriptor_registry,
+        )
+        .expect("scope cleanup permits later intrinsic construction");
     }
 
     /// A host answer for a constructor with a scalar field builds through the

@@ -324,6 +324,11 @@ pub struct MachineState {
     /// authenticated constructors without a process registry. Nested installs
     /// are refused by the invocation owner.
     active_intrinsic_program: Cell<*const crate::prepared_program::CompiledProgram>,
+    active_intrinsic_statics:
+        Cell<*const std::sync::Arc<tidepool_heap::static_region::StaticRegion>>,
+    active_intrinsic_statics_len: Cell<usize>,
+    active_intrinsic_registry:
+        Cell<*const std::collections::BTreeMap<usize, crate::prepared_program::DescriptorMetadata>>,
     /// Payloads allocated outside the moving heap. The map key is the pointer
     /// published in a Lit's value word; `base` may differ for byte arrays,
     /// whose ABI pointer follows a hidden allocation-size word.
@@ -407,6 +412,9 @@ impl MachineState {
             old_space_arenas: RefCell::new(Vec::new()),
             prepared_old_space: RefCell::new(None),
             active_intrinsic_program: Cell::new(std::ptr::null()),
+            active_intrinsic_statics: Cell::new(std::ptr::null()),
+            active_intrinsic_statics_len: Cell::new(0),
+            active_intrinsic_registry: Cell::new(std::ptr::null()),
             external_storage: RefCell::new(HashMap::new()),
             external_revision: Cell::new(Some(0)),
             external_allocated_bytes: Cell::new(0),
@@ -1630,16 +1638,24 @@ impl MachineState {
     pub(crate) fn install_active_intrinsic_program(
         &self,
         program: &crate::prepared_program::CompiledProgram,
+        statics: &[std::sync::Arc<tidepool_heap::static_region::StaticRegion>],
+        registry: &std::collections::BTreeMap<usize, crate::prepared_program::DescriptorMetadata>,
     ) -> bool {
         if !self.active_intrinsic_program.get().is_null() {
             return false;
         }
         self.active_intrinsic_program.set(program);
+        self.active_intrinsic_statics.set(statics.as_ptr());
+        self.active_intrinsic_statics_len.set(statics.len());
+        self.active_intrinsic_registry.set(registry);
         true
     }
 
     pub(crate) fn clear_active_intrinsic_program(&self) {
         self.active_intrinsic_program.set(std::ptr::null());
+        self.active_intrinsic_statics.set(std::ptr::null());
+        self.active_intrinsic_statics_len.set(0);
+        self.active_intrinsic_registry.set(std::ptr::null());
     }
 
     /// # Safety
@@ -1650,6 +1666,25 @@ impl MachineState {
         &self,
     ) -> Option<&crate::prepared_program::CompiledProgram> {
         self.active_intrinsic_program.get().as_ref()
+    }
+
+    /// # Safety
+    /// The returned borrows are bounded by the synchronous intrinsic scope.
+    pub(crate) unsafe fn active_intrinsic_observation(
+        &self,
+    ) -> Option<(
+        &[std::sync::Arc<tidepool_heap::static_region::StaticRegion>],
+        &std::collections::BTreeMap<usize, crate::prepared_program::DescriptorMetadata>,
+    )> {
+        let statics = self.active_intrinsic_statics.get();
+        let registry = self.active_intrinsic_registry.get();
+        if statics.is_null() || registry.is_null() {
+            return None;
+        }
+        Some((
+            unsafe { std::slice::from_raw_parts(statics, self.active_intrinsic_statics_len.get()) },
+            unsafe { &*registry },
+        ))
     }
 
     /// Borrow the exact-start admission owner for one collector/observer call.
@@ -1896,6 +1931,40 @@ impl MachineState {
             unsafe {
                 std::ptr::copy_nonoverlapping(data, copied.as_mut_ptr(), count);
                 copied.set_len(count);
+            }
+        }
+        Ok(copied)
+    }
+
+    /// Copy a checked external byte span while sampling cancellation between
+    /// bounded chunks. No heap action occurs while the ledger borrow is live.
+    pub(crate) fn read_external_payload_offset_polling(
+        &self,
+        published: *mut u8,
+        byte_offset: usize,
+        count: usize,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        let storage = self.external_storage.borrow();
+        let data = Self::checked_external_byte_range(&storage, published, byte_offset, count)
+            .map_err(|_| RuntimeError::BadPointer)?;
+        let mut copied: Vec<u8> = Vec::new();
+        copied
+            .try_reserve_exact(count)
+            .map_err(|_| RuntimeError::HeapOverflow)?;
+        for offset in (0..count).step_by(4096) {
+            if self.poll_prepared(crate::prepared_control::PreparedSafepoint::Backedge)
+                != crate::prepared_control::CallStatus::Success
+            {
+                return Err(RuntimeError::Cancelled);
+            }
+            let chunk = (count - offset).min(4096);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    data.add(offset),
+                    copied.as_mut_ptr().add(offset),
+                    chunk,
+                );
+                copied.set_len(offset + chunk);
             }
         }
         Ok(copied)

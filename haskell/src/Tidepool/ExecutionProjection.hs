@@ -781,29 +781,25 @@ lowerPreparedEvidence context modules = do
 -- | Force-intern type evidence for every admitted auxiliary root's own
 -- answer type, the same way a declared site's answer type is interned
 -- ('lowerOne'/'siteWireType' in "Tidepool.PreparedSites"). An auxiliary root
--- (for example the turn's admitted decode entry, 'preparedDecodeTargetName')
 -- is not itself a site: nothing about ordinary site traversal reaches its
 -- answer type, so a program whose turns never independently construct or
 -- observe that type (no 'httpGet', no rendered 'Left'/'Right') would
 -- otherwise leave its constructors out of the program's evidence even though
 -- the auxiliary root itself needs to read them back.
 --
--- The answer type is read off the binder's own (pre-erasure) GHC 'Type' via
--- 'splitFunTys', never off its STG 'StgRhsClosure' result type: an
--- eta-unexpanded auxiliary root (@__decodeValue = Aeson.eitherDecodeValue@,
--- a zero-arity CAF) has an STG result type that is the whole function arrow
--- rather than its codomain, and 'TypePolicy.classifyType' refuses a function
--- type outright.
--- | An auxiliary root's answer type is skipped for evidence interning when
+-- The answer type is read off the binder's own pre-erasure GHC 'Type' via
+-- 'splitFunTys', never off its STG closure result type: an eta-unexpanded
+-- zero-arity root can retain the whole function arrow there.
+--
+-- An auxiliary root's answer type is skipped for evidence interning when
 -- it still carries a free type variable after 'splitFunTys' (a genuinely
 -- polymorphic root like 'Tidepool.Session.preparedApplyEntryTargetName'/
 -- 'Tidepool.Session.preparedApplyValueTargetName', whose settled result is
 -- whatever the applied closure returns, not one concrete turn's type).
 -- 'TypePolicy.internType'/'classifyType' has no node for an unresolved type
 -- variable, so interning one would fail the whole projection rather than
--- leaving the root's own evidence merely absent. Every OTHER auxiliary root
--- ('preparedResumeTargetName', 'preparedDecodeTargetName') is compiled
--- concretely per turn and is unaffected by this filter.
+-- leaving the root's own evidence merely absent. Concrete auxiliary roots
+-- are unaffected by this filter.
 lowerAuxiliaryRootEvidence :: ProjectionContext -> [PreparedModule] -> Int -> P [TypeNode]
 lowerAuxiliaryRootEvidence context modules base = do
   let roots = Set.fromList (projectionAuxiliaryRoots context)
@@ -1064,6 +1060,25 @@ projectJsonRhs (DecodeJson textDataCon layout left right)
   body <- case parameters' of
     [input] -> jsonDecodeBody textDataCon textConstructor layout' left' right' input
     _ -> failShape "registered JSON parser has unexpected prepared arity"
+  pure (Function signature parameters' [] body)
+ where scaledThing (Scaled _ ty) = ty
+projectJsonRhs (EncodeJson textDataCon layout)
+    (StgRhsClosure _ _ ReEntrant parameters _ resultType) = withScope $ do
+  actual <- concat <$> mapM (argumentRepsForType . varType) parameters
+  result <- repsForType resultType
+  unless (actual == [LiftedRefRep] && result == [LiftedRefRep])
+    (failRepresentation "registered JSON encoder has unexpected prepared entry reps")
+  layout' <- traverse internConstructor layout
+  textFields <- concat <$> mapM (repsForType . scaledThing) (dataConRepArgTys textDataCon)
+  unless (textFields == [UnliftedRefRep, IntRep 64, IntRep 64])
+    (failRepresentation "JSON encoder Text constructor must contain byte array, offset, length")
+  parameters' <- mapM bindValue parameters
+  signature <- internSignature (Signature [LiftedRefRep] (Returns [LiftedRefRep]))
+  encodeSignature <- internSignature (Signature [LiftedRefRep] (Returns [LiftedRefRep]))
+  encode <- internSyntheticOperation (Schema.JsonEncodeIdentity layout') encodeSignature
+  body <- case parameters' of
+    [input] -> pure (Operation encode [Ref (Local input)])
+    _ -> failShape "registered JSON encoder has unexpected prepared arity"
   pure (Function signature parameters' [] body)
  where scaledThing (Scaled _ ty) = ty
 projectJsonRhs _ _ = failShape "registered JSON anchor is not a reentrant closure"

@@ -1,6 +1,10 @@
 //! Authenticated JSON intrinsics and their invocation-scoped managed sink.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    io::{Read, Write},
+    sync::Arc,
+};
 
 use cranelift_codegen::ir::{self, types, AbiParam, InstBuilder, MemFlags, Value};
 use cranelift_frontend::FunctionBuilder;
@@ -12,6 +16,7 @@ use tidepool_heap::{
 use tidepool_repr::execution_schema::{
     JsonLayout, OperationIdentity, ResultContract, RuntimeRep, Signature,
 };
+use tidepool_repr::DataConId;
 
 use crate::{
     context::VMContext,
@@ -25,6 +30,7 @@ use super::{roots::RootWords, CompiledProgram};
 
 const NUMBER_TOKEN: &str = "$serde_json::private::Number";
 pub(super) const PARSE_JSON_HOST: &str = "prepared_parse_json";
+pub(super) const ENCODE_JSON_HOST: &str = "prepared_encode_json";
 
 pub(super) fn recognize(
     identity: &OperationIdentity,
@@ -50,6 +56,18 @@ pub(super) fn recognize(
         ]
         && signature.results == ResultContract::Returns(vec![RuntimeRep::LiftedRef]))
     .then_some((*layout, *left, *right))
+}
+
+pub(super) fn recognize_encode(
+    identity: &OperationIdentity,
+    signature: &Signature,
+) -> Option<JsonLayout> {
+    let OperationIdentity::JsonEncode { layout } = identity else {
+        return None;
+    };
+    (signature.arguments == [RuntimeRep::LiftedRef]
+        && signature.results == ResultContract::Returns(vec![RuntimeRep::LiftedRef]))
+    .then_some(*layout)
 }
 
 pub(super) fn emit_parse_json(
@@ -135,6 +153,69 @@ fn layout_ids(
     ]
 }
 
+pub(super) fn emit_encode_json(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    vmctx: Value,
+    layout: JsonLayout,
+    arguments: &[Value],
+) -> Result<Vec<Value>, super::CompileError> {
+    let mut signature = ir::Signature::new(pipeline.isa.default_call_conv());
+    signature.params = vec![AbiParam::new(types::I64); 4];
+    signature.returns = vec![AbiParam::new(types::I32)];
+    let host = pipeline
+        .module
+        .declare_function(ENCODE_JSON_HOST, Linkage::Import, &signature)
+        .map_err(|error| crate::pipeline::PipelineError::Declaration(error.to_string()))?;
+    let host = pipeline.module.declare_func_in_func(host, builder.func);
+    let layout_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
+        ir::StackSlotKind::ExplicitSlot,
+        18 * 4,
+        2,
+    ));
+    for (index, constructor) in encode_layout_ids(layout).into_iter().enumerate() {
+        let value = builder.ins().iconst(types::I32, i64::from(constructor.0));
+        builder
+            .ins()
+            .stack_store(value, layout_slot, (index * 4) as i32);
+    }
+    let layout = builder.ins().stack_addr(types::I64, layout_slot, 0);
+    let output = super::arrays::output_slot(builder);
+    builder.declare_value_needs_stack_map(arguments[0]);
+    let call = builder
+        .ins()
+        .call(host, &[vmctx, arguments[0], layout, output]);
+    super::arrays::finish_checked_call(builder, builder.inst_results(call)[0]);
+    let result = builder
+        .ins()
+        .load(types::I64, MemFlags::trusted(), output, 0);
+    builder.declare_value_needs_stack_map(result);
+    Ok(vec![result])
+}
+
+fn encode_layout_ids(layout: JsonLayout) -> [tidepool_repr::execution_schema::ConstructorId; 18] {
+    [
+        layout.object,
+        layout.array,
+        layout.string,
+        layout.number,
+        layout.bool_,
+        layout.null,
+        layout.map_bin,
+        layout.map_tip,
+        layout.true_,
+        layout.false_,
+        layout.cons,
+        layout.nil,
+        layout.scientific,
+        layout.integer_small,
+        layout.integer_positive,
+        layout.integer_negative,
+        layout.text,
+        layout.int,
+    ]
+}
+
 fn int_bits(value: i64) -> [u8; 16] {
     (value as i128).to_ne_bytes()
 }
@@ -167,8 +248,6 @@ struct JsonDescriptors {
     in_: Arc<ObjectDescriptor>,
     text: Arc<ObjectDescriptor>,
     i_hash: Arc<ObjectDescriptor>,
-    left: Arc<ObjectDescriptor>,
-    right: Arc<ObjectDescriptor>,
 }
 
 impl JsonDescriptors {
@@ -197,21 +276,8 @@ impl JsonDescriptors {
             in_: d(15)?,
             text: d(16)?,
             i_hash: d(17)?,
-            left: d(18)?,
-            right: d(19)?,
         };
-        let reps = |descriptor: &ObjectDescriptor| {
-            descriptor
-                .payload()
-                .logical_to_stored()
-                .iter()
-                .map(|stored| {
-                    stored
-                        .and_then(|index| descriptor.payload().fields().get(index as usize))
-                        .map_or(RuntimeRep::Void, |field| field.rep())
-                })
-                .collect::<Vec<_>>()
-        };
+        let reps = descriptor_reps;
         let lifted = RuntimeRep::LiftedRef;
         let scalar = RuntimeRep::Int(64);
         let unlifted = RuntimeRep::UnliftedRef;
@@ -221,8 +287,6 @@ impl JsonDescriptors {
             &resolved.string,
             &resolved.number,
             &resolved.bool_,
-            &resolved.left,
-            &resolved.right,
         ] {
             if reps(descriptor) != [lifted] {
                 return Err(RuntimeError::BadPointer);
@@ -262,10 +326,26 @@ impl JsonDescriptors {
     }
 }
 
+fn descriptor_reps(descriptor: &ObjectDescriptor) -> Vec<RuntimeRep> {
+    descriptor
+        .payload()
+        .logical_to_stored()
+        .iter()
+        .map(|stored| {
+            stored
+                .and_then(|index| descriptor.payload().fields().get(index as usize))
+                .map_or(RuntimeRep::Void, |field| field.rep())
+        })
+        .collect()
+}
+
 struct JsonSink<'a, 'b> {
     builder: &'a mut IntrinsicBuilder<'b>,
     d: JsonDescriptors,
     failure: Option<RuntimeError>,
+    left: Arc<ObjectDescriptor>,
+    right: Arc<ObjectDescriptor>,
+    input: std::ops::Range<usize>,
 }
 
 impl JsonSink<'_, '_> {
@@ -304,12 +384,33 @@ impl JsonSink<'_, '_> {
             return self.con(&descriptor, &[IntrinsicField::Bits(int_bits(value))]);
         }
         let negative = coefficient.starts_with('-');
-        let digits = coefficient.trim_start_matches('-').bytes();
+        let digits = coefficient.trim_start_matches('-').as_bytes();
         let mut limbs = vec![0_u64];
-        for digit in digits {
-            let mut carry = u64::from(digit - b'0');
-            for limb in &mut limbs {
-                let value = u128::from(*limb) * 10 + u128::from(carry);
+        for chunk in digits.chunks(19) {
+            if self
+                .builder
+                .machine
+                .poll_prepared(crate::prepared_control::PreparedSafepoint::Backedge)
+                != CallStatus::Success
+            {
+                return Err(RuntimeError::Cancelled);
+            }
+            let factor = 10_u64.pow(chunk.len() as u32);
+            let mut carry = std::str::from_utf8(chunk)
+                .ok()
+                .and_then(|digits| digits.parse::<u64>().ok())
+                .ok_or(RuntimeError::BadPointer)?;
+            for (index, limb) in limbs.iter_mut().enumerate() {
+                if index % 1024 == 0
+                    && self
+                        .builder
+                        .machine
+                        .poll_prepared(crate::prepared_control::PreparedSafepoint::Backedge)
+                        != CallStatus::Success
+                {
+                    return Err(RuntimeError::Cancelled);
+                }
+                let value = u128::from(*limb) * u128::from(factor) + u128::from(carry);
                 *limb = value as u64;
                 carry = (value >> 64) as u64;
             }
@@ -458,32 +559,53 @@ pub(super) unsafe extern "C" fn prepared_parse_json(
             index: length,
             len: total,
         })?;
-        let input = machine
-            .read_external_payload_offset(published, offset, length)
-            .map_err(super::byte_arrays::byte_range_error)?;
+        let input = machine.read_external_payload_offset_polling(published, offset, length)?;
         let input = std::str::from_utf8(&input).map_err(|_| RuntimeError::BadPointer)?;
+        let input_start = input.as_ptr() as usize;
+        let input_end = input_start
+            .checked_add(input.len())
+            .ok_or(RuntimeError::BadPointer)?;
+        let input_range = input_start..input_end;
         let mut builder = unsafe { IntrinsicBuilder::active(machine, &mut *vmctx) }?;
         let descriptors = JsonDescriptors::resolve(&builder, layout)?;
+        let ids = unsafe { std::slice::from_raw_parts(layout, 20) };
+        let left = builder.descriptor(ids[18])?;
+        let right = builder.descriptor(ids[19])?;
+        if descriptor_reps(&left) != [RuntimeRep::LiftedRef]
+            || descriptor_reps(&right) != [RuntimeRep::LiftedRef]
+        {
+            return Err(RuntimeError::BadPointer);
+        }
         let mut sink = JsonSink {
             builder: &mut builder,
             d: descriptors,
             failure: None,
+            left,
+            right,
+            input: input_range,
         };
-        let mut deserializer = serde_json::Deserializer::from_str(input);
+        let mut deserializer = serde_json::Deserializer::from_reader(PollingReader {
+            input: input.as_bytes(),
+            offset: 0,
+            machine,
+        });
         let parsed = JsonSeed(&mut sink)
             .deserialize(&mut deserializer)
             .and_then(|node| deserializer.end().map(|()| node));
+        if machine.prepared_call_status() != CallStatus::Success {
+            return Err(RuntimeError::Cancelled);
+        }
         if let Some(error) = sink.failure.take() {
             return Err(error);
         }
         let result = match parsed {
             Ok(value) => {
-                let right = Arc::clone(&sink.d.right);
+                let right = Arc::clone(&sink.right);
                 sink.con(&right, &[IntrinsicField::Node(value)])?
             }
             Err(error) => {
                 let message = sink.text(&error.to_string())?;
-                let left = Arc::clone(&sink.d.left);
+                let left = Arc::clone(&sink.left);
                 sink.con(&left, &[IntrinsicField::Node(message)])?
             }
         };
@@ -493,7 +615,514 @@ pub(super) unsafe extern "C" fn prepared_parse_json(
     })();
     match result {
         Ok(()) => CallStatus::Success as i32,
+        Err(_error) if machine.prepared_call_status() != CallStatus::Success => {
+            machine.prepared_call_status() as i32
+        }
         Err(error) => super::arrays::array_error(machine, error),
+    }
+}
+
+struct PollingReader<'a> {
+    input: &'a [u8],
+    offset: usize,
+    machine: &'a MachineState,
+}
+
+struct PollingWriter<'a> {
+    output: &'a mut Vec<u8>,
+    machine: &'a MachineState,
+}
+
+impl Write for PollingWriter<'_> {
+    fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
+        if self
+            .machine
+            .poll_prepared(crate::prepared_control::PreparedSafepoint::Backedge)
+            != CallStatus::Success
+        {
+            return Err(std::io::Error::other("prepared JSON encoding cancelled"));
+        }
+        let count = input.len().min(4096);
+        self.output.extend_from_slice(&input[..count]);
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Read for PollingReader<'_> {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        if self
+            .machine
+            .poll_prepared(crate::prepared_control::PreparedSafepoint::Backedge)
+            != CallStatus::Success
+        {
+            return Err(std::io::Error::other("prepared JSON parsing cancelled"));
+        }
+        let count = output
+            .len()
+            .min(4096)
+            .min(self.input.len().saturating_sub(self.offset));
+        output[..count].copy_from_slice(&self.input[self.offset..self.offset + count]);
+        self.offset += count;
+        Ok(count)
+    }
+}
+
+pub(super) unsafe extern "C" fn prepared_encode_json(
+    vmctx: *mut VMContext,
+    reference: *mut u8,
+    layout: *const u32,
+    output: *mut u64,
+) -> i32 {
+    let machine = unsafe { crate::machine_state::machine_state(vmctx) };
+    if machine.prepared_call_status() != CallStatus::Success {
+        return machine.prepared_call_status() as i32;
+    }
+    let result = (|| -> Result<(), EncodeFailure> {
+        if output.is_null() || layout.is_null() {
+            return Err(RuntimeError::BadPointer.into());
+        }
+        let mut builder = unsafe { IntrinsicBuilder::active(machine, &mut *vmctx) }?;
+        let descriptors = JsonDescriptors::resolve(&builder, layout)?;
+        let ids = EncoderIds::resolve(&builder, layout)?;
+        let input = builder.push_root(reference as usize)?;
+        let mut bytes = Vec::new();
+        JsonEncoder {
+            builder: &mut builder,
+            ids,
+            active: HashSet::new(),
+            steps: 0,
+        }
+        .write_value(input, RuntimeRep::LiftedRef, 0, &mut bytes)?;
+        let payload = builder.bytes(&bytes)?;
+        let text = builder.constructor(
+            &descriptors.text,
+            &[
+                IntrinsicField::Node(payload),
+                IntrinsicField::Bits(int_bits(0)),
+                IntrinsicField::Bits(int_bits(bytes.len() as i64)),
+            ],
+        )?;
+        unsafe { output.write(builder.word(text)? as u64) };
+        Ok(())
+    })();
+    match result {
+        Ok(()) => CallStatus::Success as i32,
+        Err(EncodeFailure::Status(status)) => status as i32,
+        Err(EncodeFailure::Runtime(error)) => super::arrays::array_error(machine, error),
+    }
+}
+
+#[derive(Debug)]
+enum EncodeFailure {
+    Runtime(RuntimeError),
+    Status(CallStatus),
+}
+
+impl From<RuntimeError> for EncodeFailure {
+    fn from(value: RuntimeError) -> Self {
+        Self::Runtime(value)
+    }
+}
+
+impl From<CallStatus> for EncodeFailure {
+    fn from(value: CallStatus) -> Self {
+        Self::Status(value)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EncoderIds {
+    object: DataConId,
+    array: DataConId,
+    string: DataConId,
+    number: DataConId,
+    bool_: DataConId,
+    null: DataConId,
+    bin: DataConId,
+    tip: DataConId,
+    true_: DataConId,
+    false_: DataConId,
+    cons: DataConId,
+    nil: DataConId,
+    scientific: DataConId,
+    is: DataConId,
+    ip: DataConId,
+    in_: DataConId,
+    text: DataConId,
+    i_hash: DataConId,
+}
+
+impl EncoderIds {
+    fn resolve(builder: &IntrinsicBuilder<'_>, layout: *const u32) -> Result<Self, RuntimeError> {
+        let indexes = unsafe { std::slice::from_raw_parts(layout, 18) };
+        let id = |n: usize| {
+            builder
+                .program
+                .interned_constructors
+                .get(indexes[n] as usize)
+                .map(|(decl, _)| decl.host_id)
+                .ok_or(RuntimeError::BadPointer)
+        };
+        Ok(Self {
+            object: id(0)?,
+            array: id(1)?,
+            string: id(2)?,
+            number: id(3)?,
+            bool_: id(4)?,
+            null: id(5)?,
+            bin: id(6)?,
+            tip: id(7)?,
+            true_: id(8)?,
+            false_: id(9)?,
+            cons: id(10)?,
+            nil: id(11)?,
+            scientific: id(12)?,
+            is: id(13)?,
+            ip: id(14)?,
+            in_: id(15)?,
+            text: id(16)?,
+            i_hash: id(17)?,
+        })
+    }
+}
+
+struct JsonEncoder<'a, 'b> {
+    builder: &'a mut IntrinsicBuilder<'b>,
+    ids: EncoderIds,
+    active: HashSet<usize>,
+    steps: usize,
+}
+
+enum MapAction {
+    Enter((IntrinsicNode, RuntimeRep)),
+    Emit((IntrinsicNode, RuntimeRep), (IntrinsicNode, RuntimeRep)),
+    Leave(usize),
+}
+
+impl JsonEncoder<'_, '_> {
+    fn step(&mut self) -> Result<(), EncodeFailure> {
+        self.steps = self.steps.saturating_add(1);
+        if self.steps % 1024 == 0 {
+            self.poll_now()?;
+        }
+        Ok(())
+    }
+
+    fn poll_now(&self) -> Result<(), EncodeFailure> {
+        let status = self
+            .builder
+            .machine
+            .poll_prepared(crate::prepared_control::PreparedSafepoint::Backedge);
+        if status == CallStatus::Success {
+            Ok(())
+        } else {
+            Err(status.into())
+        }
+    }
+
+    fn frame(
+        &mut self,
+        node: IntrinsicNode,
+        rep: RuntimeRep,
+    ) -> Result<super::observe::ObservationFrame<(IntrinsicNode, RuntimeRep)>, EncodeFailure> {
+        self.step()?;
+        self.builder.expand(node, rep).map_err(Into::into)
+    }
+
+    fn constructor(
+        &mut self,
+        node: IntrinsicNode,
+        rep: RuntimeRep,
+    ) -> Result<(DataConId, Vec<(IntrinsicNode, RuntimeRep)>), EncodeFailure> {
+        match self.frame(node, rep)? {
+            super::observe::ObservationFrame::Constructor(id, fields) => Ok((id, fields)),
+            _ => Err(RuntimeError::BadPointer.into()),
+        }
+    }
+
+    fn write_value(
+        &mut self,
+        node: IntrinsicNode,
+        rep: RuntimeRep,
+        depth: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<(), EncodeFailure> {
+        if depth > 128 {
+            return Err(RuntimeError::StackOverflow.into());
+        }
+        let (id, fields) = self.constructor(node, rep)?;
+        let identity = self.builder.word(node)? & !7;
+        if !self.active.insert(identity) {
+            return Err(RuntimeError::BlackHole.into());
+        }
+        let result = (|| {
+            if id == self.ids.null && fields.is_empty() {
+                out.extend_from_slice(b"null");
+            } else if id == self.ids.string && fields.len() == 1 {
+                self.write_text(fields[0], out)?;
+            } else if id == self.ids.bool_ && fields.len() == 1 {
+                self.write_bool(fields[0], out)?;
+            } else if id == self.ids.number && fields.len() == 1 {
+                self.write_number(fields[0], out)?;
+            } else if id == self.ids.array && fields.len() == 1 {
+                self.write_list(fields[0], depth + 1, out)?;
+            } else if id == self.ids.object && fields.len() == 1 {
+                self.write_map(fields[0], depth + 1, out)?;
+            } else {
+                return Err(RuntimeError::BadPointer.into());
+            }
+            Ok(())
+        })();
+        self.active.remove(&identity);
+        result
+    }
+
+    fn write_bool(
+        &mut self,
+        field: (IntrinsicNode, RuntimeRep),
+        out: &mut Vec<u8>,
+    ) -> Result<(), EncodeFailure> {
+        let (id, fields) = self.constructor(field.0, field.1)?;
+        if !fields.is_empty() {
+            return Err(RuntimeError::BadPointer.into());
+        }
+        if id == self.ids.true_ {
+            out.extend_from_slice(b"true");
+        } else if id == self.ids.false_ {
+            out.extend_from_slice(b"false");
+        } else {
+            return Err(RuntimeError::BadPointer.into());
+        }
+        Ok(())
+    }
+
+    fn write_list(
+        &mut self,
+        mut field: (IntrinsicNode, RuntimeRep),
+        depth: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<(), EncodeFailure> {
+        out.push(b'[');
+        let mut first = true;
+        let mut seen = HashSet::new();
+        loop {
+            let (id, fields) = self.constructor(field.0, field.1)?;
+            if id == self.ids.nil && fields.is_empty() {
+                break;
+            }
+            if id != self.ids.cons || fields.len() != 2 {
+                return Err(RuntimeError::BadPointer.into());
+            }
+            let key = self.builder.word(field.0)? & !7;
+            if !seen.insert(key) {
+                return Err(RuntimeError::BlackHole.into());
+            }
+            if !first {
+                out.push(b',');
+            }
+            first = false;
+            self.write_value(fields[0].0, fields[0].1, depth, out)?;
+            field = fields[1];
+        }
+        out.push(b']');
+        Ok(())
+    }
+
+    fn write_map(
+        &mut self,
+        root: (IntrinsicNode, RuntimeRep),
+        depth: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<(), EncodeFailure> {
+        out.push(b'{');
+        let mut first = true;
+        let mut active = HashSet::new();
+        let mut actions = vec![MapAction::Enter(root)];
+        while let Some(action) = actions.pop() {
+            match action {
+                MapAction::Enter(node) => {
+                    let (id, fields) = self.constructor(node.0, node.1)?;
+                    if id == self.ids.tip && fields.is_empty() {
+                        continue;
+                    }
+                    if id != self.ids.bin || fields.len() != 5 {
+                        return Err(RuntimeError::BadPointer.into());
+                    }
+                    let identity = self.builder.word(node.0)? & !7;
+                    if !active.insert(identity) {
+                        return Err(RuntimeError::BlackHole.into());
+                    }
+                    actions.push(MapAction::Leave(identity));
+                    actions.push(MapAction::Enter(fields[4]));
+                    actions.push(MapAction::Emit(fields[1], fields[2]));
+                    actions.push(MapAction::Enter(fields[3]));
+                }
+                MapAction::Emit(key, value) => {
+                    if !first {
+                        out.push(b',');
+                    }
+                    first = false;
+                    self.write_text(key, out)?;
+                    out.push(b':');
+                    self.write_value(value.0, value.1, depth, out)?;
+                }
+                MapAction::Leave(identity) => {
+                    active.remove(&identity);
+                }
+            }
+        }
+        out.push(b'}');
+        Ok(())
+    }
+
+    fn write_text(
+        &mut self,
+        field: (IntrinsicNode, RuntimeRep),
+        out: &mut Vec<u8>,
+    ) -> Result<(), EncodeFailure> {
+        let (id, fields) = self.constructor(field.0, field.1)?;
+        if id != self.ids.text || fields.len() != 3 {
+            return Err(RuntimeError::BadPointer.into());
+        }
+        let bytes = self.bytes(fields[0])?;
+        let offset = self.int(fields[1])?;
+        let length = self.int(fields[2])?;
+        let offset = usize::try_from(offset).map_err(|_| RuntimeError::BadPointer)?;
+        let length = usize::try_from(length).map_err(|_| RuntimeError::BadPointer)?;
+        let end = offset.checked_add(length).ok_or(RuntimeError::BadPointer)?;
+        let text = std::str::from_utf8(bytes.get(offset..end).ok_or(RuntimeError::BadPointer)?)
+            .map_err(|_| RuntimeError::BadPointer)?;
+        serde_json::to_writer(
+            PollingWriter {
+                output: out,
+                machine: self.builder.machine,
+            },
+            text,
+        )
+        .map_err(|_| RuntimeError::BadPointer)?;
+        Ok(())
+    }
+
+    fn write_number(
+        &mut self,
+        field: (IntrinsicNode, RuntimeRep),
+        out: &mut Vec<u8>,
+    ) -> Result<(), EncodeFailure> {
+        let (id, fields) = self.constructor(field.0, field.1)?;
+        if id != self.ids.scientific || fields.len() != 2 {
+            return Err(RuntimeError::BadPointer.into());
+        }
+        let coefficient = self.integer(fields[0])?;
+        let exponent = self.int(fields[1])?;
+        let decimal = tidepool_bridge::decimal::Decimal::from_parts(&coefficient, exponent)
+            .map_err(|_| RuntimeError::BadPointer)?;
+        out.extend_from_slice(decimal.render().as_bytes());
+        Ok(())
+    }
+
+    fn integer(&mut self, field: (IntrinsicNode, RuntimeRep)) -> Result<String, EncodeFailure> {
+        let (id, fields) = self.constructor(field.0, field.1)?;
+        if id == self.ids.is && fields.len() == 1 {
+            return Ok(self.int(fields[0])?.to_string());
+        }
+        if (id == self.ids.ip || id == self.ids.in_) && fields.len() == 1 {
+            let magnitude = self.bytes(fields[0])?;
+            let mut value = self.bignat_decimal(&magnitude)?;
+            if id == self.ids.in_ {
+                value.insert(0, '-');
+            }
+            return Ok(value);
+        }
+        Err(RuntimeError::BadPointer.into())
+    }
+
+    fn int(&mut self, field: (IntrinsicNode, RuntimeRep)) -> Result<i64, EncodeFailure> {
+        match self.frame(field.0, field.1)? {
+            super::observe::ObservationFrame::Leaf(tidepool_bridge::HaskellValue::Lit(
+                tidepool_repr::Literal::LitInt(v),
+            )) => Ok(v),
+            super::observe::ObservationFrame::Constructor(id, fields)
+                if id == self.ids.i_hash && fields.len() == 1 =>
+            {
+                self.int(fields[0])
+            }
+            _ => Err(RuntimeError::BadPointer.into()),
+        }
+    }
+
+    fn bytes(&mut self, field: (IntrinsicNode, RuntimeRep)) -> Result<Vec<u8>, EncodeFailure> {
+        match self.frame(field.0, field.1)? {
+            super::observe::ObservationFrame::Leaf(tidepool_bridge::HaskellValue::ByteArray(
+                ref bytes,
+            )) => {
+                let bytes = bytes.lock().map_err(|_| RuntimeError::BadPointer)?;
+                let mut copy = Vec::new();
+                copy.try_reserve_exact(bytes.len())
+                    .map_err(|_| RuntimeError::HeapOverflow)?;
+                for chunk in bytes.chunks(4096) {
+                    self.poll_now()?;
+                    copy.extend_from_slice(chunk);
+                }
+                Ok(copy)
+            }
+            super::observe::ObservationFrame::Leaf(tidepool_bridge::HaskellValue::Lit(
+                tidepool_repr::Literal::LitByteArray(ref bytes),
+            )) => {
+                let mut copy = Vec::new();
+                copy.try_reserve_exact(bytes.len())
+                    .map_err(|_| RuntimeError::HeapOverflow)?;
+                for chunk in bytes.chunks(4096) {
+                    self.poll_now()?;
+                    copy.extend_from_slice(chunk);
+                }
+                Ok(copy)
+            }
+            _ => Err(RuntimeError::BadPointer.into()),
+        }
+    }
+
+    fn bignat_decimal(&mut self, bytes: &[u8]) -> Result<String, EncodeFailure> {
+        let mut limbs = bytes
+            .chunks(8)
+            .map(|chunk| {
+                let mut word = [0_u8; 8];
+                word[..chunk.len()].copy_from_slice(chunk);
+                u64::from_le_bytes(word)
+            })
+            .collect::<Vec<_>>();
+        while limbs.last() == Some(&0) {
+            limbs.pop();
+        }
+        if limbs.is_empty() {
+            return Ok("0".into());
+        }
+        let divisor = 10_000_000_000_000_000_000_u128;
+        let mut groups = Vec::new();
+        while !limbs.is_empty() {
+            let mut remainder = 0_u128;
+            for (index, limb) in limbs.iter_mut().enumerate().rev() {
+                if index % 1024 == 0 {
+                    self.poll_now()?;
+                }
+                let value = (remainder << 64) | u128::from(*limb);
+                *limb = (value / divisor) as u64;
+                remainder = value % divisor;
+            }
+            groups.push(remainder as u64);
+            while limbs.last() == Some(&0) {
+                limbs.pop();
+            }
+        }
+        let mut result = groups.pop().unwrap_or(0).to_string();
+        for group in groups.into_iter().rev() {
+            use std::fmt::Write as _;
+            write!(&mut result, "{group:019}").map_err(|_| RuntimeError::HeapOverflow)?;
+        }
+        Ok(result)
     }
 }
 
@@ -599,7 +1228,7 @@ impl<'de> Visitor<'de> for JsonSeed<'_, '_, '_> {
     where
         A: MapAccess<'de>,
     {
-        let Some(first) = access.next_key::<String>()? else {
+        let Some(first) = access.next_key_seed(JsonKeySeed(self.0.input.clone()))? else {
             let map = self.0.map(BTreeMap::new()).map_err(A::Error::custom)?;
             let d = Arc::clone(&self.0.d.object);
             return self
@@ -607,13 +1236,21 @@ impl<'de> Visitor<'de> for JsonSeed<'_, '_, '_> {
                 .con(&d, &[IntrinsicField::Node(map)])
                 .map_err(A::Error::custom);
         };
-        if first == NUMBER_TOKEN {
+        if matches!(first, JsonKey::NumberToken) {
             let token = access.next_value::<String>()?;
             return self.0.number(&token).map_err(A::Error::custom);
         }
+        let JsonKey::Object(first) = first else {
+            unreachable!()
+        };
         let mut entries = BTreeMap::new();
         entries.insert(first, access.next_value_seed(JsonSeed(self.0))?);
-        while let Some(key) = access.next_key::<String>()? {
+        while let Some(key) = access.next_key_seed(JsonKeySeed(self.0.input.clone()))? {
+            let JsonKey::Object(key) = key else {
+                return Err(A::Error::custom(
+                    "number token is only valid as a numeric wrapper",
+                ));
+            };
             entries.insert(key, access.next_value_seed(JsonSeed(self.0))?);
         }
         let map = self.0.map(entries).map_err(A::Error::custom)?;
@@ -624,12 +1261,69 @@ impl<'de> Visitor<'de> for JsonSeed<'_, '_, '_> {
     }
 }
 
+enum JsonKey {
+    NumberToken,
+    Object(String),
+}
+
+struct JsonKeySeed(std::ops::Range<usize>);
+
+impl<'de> DeserializeSeed<'de> for JsonKeySeed {
+    type Value = JsonKey;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_string(JsonKeyVisitor(self.0))
+    }
+}
+
+struct JsonKeyVisitor(std::ops::Range<usize>);
+
+impl Visitor<'_> for JsonKeyVisitor {
+    type Value = JsonKey;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON object key")
+    }
+
+    fn visit_borrowed_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        let pointer = value.as_ptr() as usize;
+        if value == NUMBER_TOKEN && !self.0.contains(&pointer) {
+            Ok(JsonKey::NumberToken)
+        } else {
+            Ok(JsonKey::Object(value.to_owned()))
+        }
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(JsonKey::Object(value.to_owned()))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(JsonKey::Object(value))
+    }
+}
+
 struct IntrinsicBuilder<'a> {
     machine: &'a MachineState,
     vmctx: &'a mut VMContext,
     program: &'a CompiledProgram,
     roots: Vec<RootWords>,
     roots_mark: usize,
+    starts: Vec<u64>,
+    scanned_words: usize,
+    indexed_generation: u64,
 }
 
 impl Drop for IntrinsicBuilder<'_> {
@@ -654,6 +1348,9 @@ impl<'a> IntrinsicBuilder<'a> {
             program,
             roots: Vec::new(),
             roots_mark: machine.rust_roots_len(),
+            starts: Vec::new(),
+            scanned_words: 0,
+            indexed_generation: u64::MAX,
         })
     }
 
@@ -684,14 +1381,147 @@ impl<'a> IntrinsicBuilder<'a> {
             .ok_or(RuntimeError::HeapOverflow)
     }
 
-    fn push_root(&mut self, word: usize) -> Result<IntrinsicNode, RuntimeError> {
-        let root = RootWords::new(1).map_err(|_| RuntimeError::HeapOverflow)?;
+    fn push_word(&mut self, word: usize, rep: RuntimeRep) -> Result<IntrinsicNode, RuntimeError> {
+        let root = self.prepare_root()?;
+        self.finish_root(root, word, rep)
+    }
+
+    fn prepare_root(&mut self) -> Result<RootWords, RuntimeError> {
+        self.roots
+            .try_reserve(1)
+            .map_err(|_| RuntimeError::HeapOverflow)?;
+        RootWords::new(1).map_err(|_| RuntimeError::HeapOverflow)
+    }
+
+    fn finish_root(
+        &mut self,
+        root: RootWords,
+        word: usize,
+        rep: RuntimeRep,
+    ) -> Result<IntrinsicNode, RuntimeError> {
         root.write(0, word as u64)
             .map_err(|_| RuntimeError::BadPointer)?;
         let slot = root.slot_address(0).ok_or(RuntimeError::BadPointer)?;
-        self.machine.register_rust_root(slot);
+        if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
+            self.machine.register_rust_root(slot);
+        }
         self.roots.push(root);
         Ok(IntrinsicNode(self.roots.len() - 1))
+    }
+
+    fn push_root(&mut self, word: usize) -> Result<IntrinsicNode, RuntimeError> {
+        self.push_word(word, RuntimeRep::LiftedRef)
+    }
+
+    fn force(&mut self, node: IntrinsicNode) -> Result<(), CallStatus> {
+        if self.machine.prepared_call_status() != CallStatus::Success {
+            return Err(self.machine.prepared_call_status());
+        }
+        let reserve = self
+            .program
+            .pipeline
+            .native_frame_maximum()
+            .checked_mul(2)
+            .ok_or(CallStatus::IntegrityFailure)?;
+        let bounds = super::safepoint::NativeStackBounds::current().map_err(|cause| {
+            self.machine.set_first_cause(cause);
+            self.machine.prepared_call_status()
+        })?;
+        bounds
+            .ensure_current_frame_reserve(reserve)
+            .map_err(|cause| {
+                self.machine.set_first_cause(cause);
+                self.machine.prepared_call_status()
+            })?;
+        let input = self.word(node).map_err(|cause| {
+            self.machine.set_first_cause(cause);
+            self.machine.prepared_call_status()
+        })?;
+        let output = self.roots[node.0]
+            .slot_address(0)
+            .ok_or(CallStatus::IntegrityFailure)?
+            .cast::<u64>();
+        let pointer = self
+            .program
+            .pipeline
+            .get_function_ptr(self.program.prepared_force_adapter());
+        let adapter: unsafe extern "C" fn(*mut VMContext, *mut u64, usize) -> i32 =
+            unsafe { std::mem::transmute(pointer) };
+        let raw = unsafe { adapter(self.vmctx, output, input) };
+        let status =
+            CallStatus::from_raw(i64::from(raw)).map_err(|_| CallStatus::IntegrityFailure)?;
+        if status != CallStatus::Success
+            || self.machine.prepared_call_status() != CallStatus::Success
+        {
+            return Err(status);
+        }
+        Ok(())
+    }
+
+    fn expand(
+        &mut self,
+        node: IntrinsicNode,
+        rep: RuntimeRep,
+    ) -> Result<super::observe::ObservationFrame<(IntrinsicNode, RuntimeRep)>, CallStatus> {
+        if rep == RuntimeRep::LiftedRef {
+            self.force(node)?;
+        }
+        let word = self.word(node).map_err(|cause| {
+            self.machine.set_first_cause(cause);
+            self.machine.prepared_call_status()
+        })?;
+        let old_space =
+            unsafe { self.machine.prepared_old_space() }.ok_or(CallStatus::IntegrityFailure)?;
+        let (statics, registry) = unsafe { self.machine.active_intrinsic_observation() }
+            .ok_or(CallStatus::IntegrityFailure)?;
+        let mut budget = super::observe::ObservationBudget {
+            remaining: usize::MAX,
+            limit: usize::MAX,
+        };
+        let frame = {
+            let heap = super::forcing::current_heap(
+                self.machine,
+                self.vmctx,
+                statics,
+                registry,
+                old_space,
+                &mut self.starts,
+                &mut self.scanned_words,
+                &mut self.indexed_generation,
+            )
+            .map_err(|_| CallStatus::IntegrityFailure)?;
+            heap.expand(
+                super::observe::ObservationSeed { word, rep },
+                &mut budget,
+                crate::observation::BudgetPolicy::Complete,
+            )
+            .map_err(|_| CallStatus::IntegrityFailure)?
+        };
+        match frame {
+            super::observe::ObservationFrame::Leaf(value) => {
+                Ok(super::observe::ObservationFrame::Leaf(value))
+            }
+            super::observe::ObservationFrame::Constructor(identity, mut fields) => {
+                // Observation expansion returns children in worklist order.
+                // Direct consumers need the constructor's logical field order.
+                fields.reverse();
+                let mut rooted = Vec::new();
+                rooted.try_reserve_exact(fields.len()).map_err(|_| {
+                    self.machine.set_first_cause(RuntimeError::HeapOverflow);
+                    self.machine.prepared_call_status()
+                })?;
+                for field in fields {
+                    let node = self.push_word(field.word, field.rep).map_err(|cause| {
+                        self.machine.set_first_cause(cause);
+                        self.machine.prepared_call_status()
+                    })?;
+                    rooted.push((node, field.rep));
+                }
+                Ok(super::observe::ObservationFrame::Constructor(
+                    identity, rooted,
+                ))
+            }
+        }
     }
 
     fn word(&self, node: IntrinsicNode) -> Result<usize, RuntimeError> {
@@ -707,6 +1537,7 @@ impl<'a> IntrinsicBuilder<'a> {
         descriptor: &ObjectDescriptor,
         fields: &[IntrinsicField],
     ) -> Result<IntrinsicNode, RuntimeError> {
+        let root = self.prepare_root()?;
         let extent = (descriptor.allocation_extent() as usize).next_multiple_of(8);
         self.ensure_capacity(extent)?;
         // Resolve rooted children only after the last possible collection.
@@ -723,10 +1554,15 @@ impl<'a> IntrinsicBuilder<'a> {
         unsafe { marshal_descriptor_object(pointer, extent, descriptor, &values) }
             .map_err(|_| RuntimeError::BadPointer)?;
         self.vmctx.alloc_ptr = unsafe { pointer.add(extent) };
-        self.push_root(pointer as usize | usize::from(descriptor.tag()))
+        self.finish_root(
+            root,
+            pointer as usize | usize::from(descriptor.tag()),
+            RuntimeRep::LiftedRef,
+        )
     }
 
     fn bytes(&mut self, bytes: &[u8]) -> Result<IntrinsicNode, RuntimeError> {
+        let root = self.prepare_root()?;
         let descriptor = Arc::clone(&self.program.externals.bytes_array);
         let extent = (descriptor.allocation_extent() as usize).next_multiple_of(8);
         self.ensure_capacity(extent)?;
@@ -757,6 +1593,35 @@ impl<'a> IntrinsicBuilder<'a> {
             return Err(RuntimeError::BadPointer);
         }
         self.vmctx.alloc_ptr = unsafe { pointer.add(extent) };
-        self.push_root(pointer as usize | usize::from(descriptor.tag()))
+        self.finish_root(
+            root,
+            pointer as usize | usize::from(descriptor.tag()),
+            RuntimeRep::LiftedRef,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn polling_reader_observes_cancellation_without_heap_pressure() {
+        let machine = MachineState::new();
+        machine.fail_prepared_at(
+            crate::prepared_control::PreparedSafepoint::Backedge,
+            2,
+            RuntimeError::Cancelled,
+        );
+        let input = vec![b' '; 32 * 1024];
+        let mut reader = PollingReader {
+            input: &input,
+            offset: 0,
+            machine: &machine,
+        };
+        let mut output = Vec::new();
+        assert!(reader.read_to_end(&mut output).is_err());
+        assert_eq!(machine.prepared_call_status(), CallStatus::Cancelled);
+        assert!(output.len() < input.len());
     }
 }

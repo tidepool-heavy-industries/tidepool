@@ -10,9 +10,27 @@ result =
   case ( eitherDecodeValue "{\"x\":1,\"x\":2}"
        , eitherDecodeValue "["
        , eitherDecodeValue deeplyNested
-       , eitherDecodeValue largeJson ) of
-    (Right (Object values), Left _, Left _, Right (Array (_ : _))) ->
-      if Map.lookup "x" values == Just (Number (scientific 2 0)) then 1 else 0
+       , eitherDecodeValue largeJson
+       , eitherDecodeValue "{\"$serde_json::private::Number\":\"kept\"}"
+       , eitherDecodeValue "{\"$serde_json::private::Number\":\"kept\",\"other\":3}"
+       , eitherDecodeValue "{\"$serde_json::private::Num\\u0062er\":\"escaped\"}"
+       , eitherDecodeValue "1234567890123456789012345678901234567890"
+       , eitherDecodeValue "\"\\uD83D\\uDE03\""
+       , eitherDecodeValue "\"\\uD83D\""
+       , eitherDecodeValue "01"
+       , eitherDecodeValue "true false" ) of
+    ( Right (Object values), Left _, Left _, Right (Array (_ : _))
+      , Right (Object reserved), Right (Object reservedMany), Right (Object escaped), Right (Number _)
+      , Right (String smile), Left _, Left _, Left _ ) ->
+      if Map.lookup "x" values == Just (Number (scientific 2 0))
+          && Map.lookup "$serde_json::private::Number" reserved == Just (String "kept")
+          && Map.lookup "other" reservedMany == Just (Number (scientific 3 0))
+          && Map.lookup "$serde_json::private::Number" escaped == Just (String "escaped")
+          && smile == Data.Text.pack "😃"
+          && encodeValue encoded == "{\"a\":[\"snowman ☃\",true],\"z\":1.25}"
+          && encodeValue (Number (scientific 10 maxBound)) == "10e9223372036854775807"
+          && encodeValue (Number (scientific 0 minBound)) == "0"
+        then 1 else 0
     _ -> 0
 
 largeJson :: Data.Text.Text
@@ -20,3 +38,11 @@ largeJson = "[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,2
 
 deeplyNested :: Data.Text.Text
 deeplyNested = Data.Text.replicate 129 "[" <> "0" <> Data.Text.replicate 129 "]"
+
+encoded :: Value
+encoded = Object (Map.fromList
+  [ ("z", Number (scientific 125 (-2)))
+  , ("a", Array [String (Data.Text.pack "snowman ☃"), Bool lazyTrue])
+  ])
+ where
+  lazyTrue = id True

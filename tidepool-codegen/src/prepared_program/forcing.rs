@@ -415,7 +415,7 @@ fn character(value: &HaskellValue) -> Option<char> {
     clippy::too_many_arguments,
     reason = "heap reconstruction independently borrows machine, VM and heap regions plus mutable generation-index custody"
 )]
-fn current_heap<'a>(
+pub(super) fn current_heap<'a>(
     machine: &'a MachineState,
     vmctx: &VMContext,
     statics: &'a [Arc<StaticRegion>],

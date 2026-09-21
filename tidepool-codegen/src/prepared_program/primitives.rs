@@ -737,6 +737,9 @@ pub(super) fn recognize_operation(
     if let Some((layout, left, right)) = super::json::recognize(&declaration.identity, signature) {
         return Some(PrimitiveOperation::ParseJson(layout, left, right));
     }
+    if let Some(layout) = super::json::recognize_encode(&declaration.identity, signature) {
+        return Some(PrimitiveOperation::EncodeJson(layout));
+    }
     if let Some(operation) = super::wide_words::recognize(&declaration.identity, signature) {
         return Some(PrimitiveOperation::WideWord(operation));
     }
@@ -869,6 +872,7 @@ pub(super) enum PrimitiveOperation {
         tidepool_repr::execution_schema::ConstructorId,
         tidepool_repr::execution_schema::ConstructorId,
     ),
+    EncodeJson(tidepool_repr::execution_schema::JsonLayout),
     DecodeDoubleInt64,
     EncodeDouble {
         signed: bool,
@@ -1166,6 +1170,9 @@ pub(super) fn emit_operation(
             arguments,
         )
         .map(Some),
+        PrimitiveOperation::EncodeJson(layout) => {
+            super::json::emit_encode_json(builder, pipeline, vmctx, layout, arguments).map(Some)
+        }
         PrimitiveOperation::Raise => {
             super::no_success::emit_terminal(
                 builder,

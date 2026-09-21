@@ -18,7 +18,7 @@ use cranelift_module::{FuncId, Module};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
-use tidepool_heap::static_region::{StaticImage, StaticImageError};
+use tidepool_heap::static_region::{StaticImage, StaticImageError, StaticRegion};
 use tidepool_repr::execution_schema::{
     Architecture, Endianness, GlobalId, LinkedProgram, ResultContract, RuntimeRep, Signature,
     TargetDescriptor, ValueId,
@@ -59,9 +59,11 @@ struct ActiveIntrinsicScope<'a> {
 impl<'a> ActiveIntrinsicScope<'a> {
     fn new(
         machine: &'a crate::machine_state::MachineState,
-        program: &CompiledProgram,
+        program: &'a CompiledProgram,
+        statics: &'a [Arc<StaticRegion>],
+        registry: &'a BTreeMap<usize, DescriptorMetadata>,
     ) -> Result<Self, ExecutionError> {
-        if !machine.install_active_intrinsic_program(program) {
+        if !machine.install_active_intrinsic_program(program, statics, registry) {
             return Err(ExecutionError::Invariant(
                 "a nested managed intrinsic operation is already active",
             ));
@@ -602,6 +604,10 @@ impl CompiledProgram {
                 (
                     json::PARSE_JSON_HOST,
                     json::prepared_parse_json as *const u8,
+                ),
+                (
+                    json::ENCODE_JSON_HOST,
+                    json::prepared_encode_json as *const u8,
                 ),
                 (
                     "prepared_no_success_returned",
