@@ -102,6 +102,19 @@ bytes and 609,845 native bytes overall. Other request shapes produced
 pool was only 3,577 bytes. Category and per-definition metrics overlap by
 design and must retain an explicit scope field so aggregators do not sum them.
 
+The linear dispatcher rewrite removes demand-closure expansion, global
+owner-by-demand comparison, and generated prefix-probe chains. It does not
+make retained PAP representation byte-linear in logical arity. A function of
+arity `A` still owns every necessary prefix layout and remaining signature,
+and each prefix adapter reloads its captured fields, for Θ(`A²`) aggregate
+metadata and emitted adapter work. Caller-result fanout across `K` concrete
+result contracts can make that Θ(`K·A²`). Runtime lookup is restricted to one
+owner record, but scans its compatible result entries at each of `D` excess
+stages, for O(`D·K`). The structural regression therefore asserts linear owner
+visits and plan-row counts only. Measure real authored arities and result
+fanout before a later wave considers compact PAP-prefix metadata or indexed
+result variants.
+
 ## Memory and disk
 
 Measure static-region probes per lookup and region counts before adding an

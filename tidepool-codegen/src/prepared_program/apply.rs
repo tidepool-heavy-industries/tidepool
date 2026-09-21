@@ -1333,13 +1333,13 @@ mod tests {
     }
 
     #[test]
-    fn long_arity_owner_metadata_and_adapters_grow_linearly() {
+    fn long_arity_owner_visits_and_plan_rows_grow_linearly() {
         let small = long_arity_structure(16);
         let large = long_arity_structure(32);
-        assert!(large.0 <= small.0 * 2 + 1, "offers: {small:?} -> {large:?}");
+        assert!(large.0 <= small.0 * 2 + 1, "visits: {small:?} -> {large:?}");
         assert!(
             large.1 <= small.1 * 2 + 1,
-            "adapters: {small:?} -> {large:?}"
+            "plan rows: {small:?} -> {large:?}"
         );
         assert_eq!(small, (16, 31));
         assert_eq!(large, (32, 63));
