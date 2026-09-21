@@ -40,7 +40,7 @@
 //! private (or even public but un-re-exported test-local) can be `use`d
 //! across them.
 
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_codegen::host_fns::RuntimeError;
 use tidepool_codegen::machine::MachineDisposition;
 use tidepool_codegen::prepared_program::{
@@ -189,17 +189,17 @@ fn expected_consumer_value() -> Vec<i64> {
 
 /// Flatten an observed `[Int]`: a cons cell is `Con(_, [head, tail])`, nil
 /// is `Con(_, [])`, and each head is a bare literal or an `I#` box around one.
-fn observed_int_list(value: &Value) -> Vec<i64> {
+fn observed_int_list(value: &HaskellValue) -> Vec<i64> {
     let mut out = Vec::new();
     let mut cursor = value;
     loop {
         match cursor {
-            Value::Con(_, fields) if fields.is_empty() => return out,
-            Value::Con(_, fields) if fields.len() == 2 => {
+            HaskellValue::Con(_, fields) if fields.is_empty() => return out,
+            HaskellValue::Con(_, fields) if fields.len() == 2 => {
                 let head = match &fields[0] {
-                    Value::Lit(tidepool_repr::Literal::LitInt(n)) => *n,
-                    Value::Con(_, boxed) => match boxed.as_slice() {
-                        [Value::Lit(tidepool_repr::Literal::LitInt(n))] => *n,
+                    HaskellValue::Lit(tidepool_repr::Literal::LitInt(n)) => *n,
+                    HaskellValue::Con(_, boxed) => match boxed.as_slice() {
+                        [HaskellValue::Lit(tidepool_repr::Literal::LitInt(n))] => *n,
                         other => panic!("unexpected boxed list head {other:?}"),
                     },
                     other => panic!("unexpected list head {other:?}"),

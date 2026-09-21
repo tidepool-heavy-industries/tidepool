@@ -13,7 +13,7 @@
 
 use std::marker::PhantomData;
 
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_bridge::{FromHaskell, ToHaskell};
 use tidepool_bridge_derive::{FromHaskell, ToHaskell};
 use tidepool_repr::{DataCon, DataConId, DataConTable};
@@ -82,7 +82,7 @@ fn phantom_only_variant_encodes_zero_haskell_fields() {
     let v = WithPhantom::Tagged(PhantomData);
     let encoded = v.to_value(&table).expect("Tagged encode");
     match encoded {
-        Value::Con(id, ref fields) => {
+        HaskellValue::Con(id, ref fields) => {
             assert_eq!(id, DataConId(1000));
             assert!(
                 fields.is_empty(),
@@ -102,7 +102,7 @@ fn mixed_variant_encodes_only_real_fields() {
     let v = WithPhantom::Mixed(PhantomData, 42);
     let encoded = v.to_value(&table).expect("Mixed encode");
     match &encoded {
-        Value::Con(id, fields) => {
+        HaskellValue::Con(id, fields) => {
             assert_eq!(*id, DataConId(1001));
             assert_eq!(
                 fields.len(),
@@ -122,7 +122,7 @@ fn real_only_variant_unaffected_by_phantom_path() {
     let v = WithPhantom::Plain(7);
     let encoded = v.to_value(&table).expect("Plain encode");
     match &encoded {
-        Value::Con(id, fields) => {
+        HaskellValue::Con(id, fields) => {
             assert_eq!(*id, DataConId(1002));
             assert_eq!(fields.len(), 1);
         }
@@ -184,7 +184,7 @@ fn struct_with_mixed_fields_round_trips() {
     };
     let encoded = v.to_value(&table).expect("MixStruct encode");
     match &encoded {
-        Value::Con(id, fields) => {
+        HaskellValue::Con(id, fields) => {
             assert_eq!(*id, DataConId(2000));
             assert_eq!(
                 fields.len(),
@@ -206,7 +206,7 @@ fn phantom_only_struct_encodes_zero_fields() {
     };
     let encoded = v.to_value(&table).expect("PhantomStruct encode");
     match &encoded {
-        Value::Con(id, fields) => {
+        HaskellValue::Con(id, fields) => {
             assert_eq!(*id, DataConId(2001));
             assert!(fields.is_empty(), "phantom-only struct encodes 0 fields");
         }

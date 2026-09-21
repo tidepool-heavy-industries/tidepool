@@ -1,13 +1,13 @@
 //! `State` crossing at a loop boundary — the SERIALIZED channel across two
 //! monads sharing one resident heap, distinct from the in-heap finalize
-//! channel (bridged `Value`, or a `ValueHandle` for a closure —
+//! channel (bridged `HaskellValue`, or a `ValueHandle` for a closure —
 //! `Harness::take_finalized_value_keep_open`/`take_live_payload_handle_keep_open`)
 //! `service_typed_request_suspension` uses within a loop. `State` is any
 //! author-defined `(ToJSON s, FromJSON s) => s`, so crossing it is NOT a
 //! fixed-schema JSON bridge — it reuses the same two mechanisms already
 //! proven for other typed/opaque values crossing the Rust/Haskell boundary:
 //!
-//! - **outbound** (`state_out`): render an evaluated `Value` to
+//! - **outbound** (`state_out`): render an evaluated `HaskellValue` to
 //!   `serde_json::Value` via [`tidepool_runtime::value_to_json`].
 //! - **inbound** (`state_in`): splice the prior loop's JSON as a Haskell
 //!   literal bound to `__selfHarnessState :: State`, decoded through the
@@ -40,7 +40,7 @@
 //! collision-unlikely name instead.
 
 use serde_json::Value as Json;
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{assemble_bind_module, TemplateSelector, TurnTemplate};
 
@@ -74,7 +74,7 @@ pub(crate) const RESUME_DECODE_SENTINEL: &str = "TIDEPOOL_RESUME_DECODE_FAILED: 
 /// boundary, after `loop state` completes with a new `State`; the result is
 /// what the driver persists (survives a restart) and what the NEXT
 /// `render(state)` call receives after being re-spliced by [`state_in`].
-pub fn state_out(value: &Value, table: &DataConTable) -> Json {
+pub fn state_out(value: &HaskellValue, table: &DataConTable) -> Json {
     tidepool_runtime::value_to_json(value, table, 0)
 }
 

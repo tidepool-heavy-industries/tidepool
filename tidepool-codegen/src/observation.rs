@@ -1,6 +1,6 @@
 //! Materialized observation policy and markers for retained prepared values.
 
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_repr::DataConId;
 
 /// Marker for an opaque closure retained behind a prepared value handle.
@@ -25,15 +25,15 @@ impl BudgetPolicy {
 }
 
 #[must_use]
-pub fn oversize_cut() -> Value {
-    Value::Con(OVERSIZE_SENTINEL, Vec::new())
+pub fn oversize_cut() -> HaskellValue {
+    HaskellValue::Con(OVERSIZE_SENTINEL, Vec::new())
 }
 
 #[must_use]
-pub fn contains_oversize_sentinel(value: &Value) -> bool {
+pub fn contains_oversize_sentinel(value: &HaskellValue) -> bool {
     let mut pending = vec![value];
     while let Some(node) = pending.pop() {
-        if let Value::Con(id, fields) = node {
+        if let HaskellValue::Con(id, fields) = node {
             if *id == OVERSIZE_SENTINEL {
                 return true;
             }
@@ -44,9 +44,9 @@ pub fn contains_oversize_sentinel(value: &Value) -> bool {
 }
 
 #[must_use]
-pub fn contains_closure_sentinel(value: &Value) -> bool {
+pub fn contains_closure_sentinel(value: &HaskellValue) -> bool {
     match value {
-        Value::Con(id, fields) => {
+        HaskellValue::Con(id, fields) => {
             *id == CLOSURE_SENTINEL || fields.iter().any(contains_closure_sentinel)
         }
         _ => false,
@@ -54,6 +54,6 @@ pub fn contains_closure_sentinel(value: &Value) -> bool {
 }
 
 #[must_use]
-pub fn field_contains_closure_sentinel(value: &Value, index: usize) -> bool {
-    matches!(value, Value::Con(_, fields) if fields.get(index).is_some_and(contains_closure_sentinel))
+pub fn field_contains_closure_sentinel(value: &HaskellValue, index: usize) -> bool {
+    matches!(value, HaskellValue::Con(_, fields) if fields.get(index).is_some_and(contains_closure_sentinel))
 }

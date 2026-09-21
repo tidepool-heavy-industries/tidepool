@@ -12,7 +12,7 @@ pub use tidepool_runtime::CompileError;
 use tidepool_runtime::{
     compile_and_run, compile_and_run_with_nursery_size, compile_haskell, compile_targets,
     run_prepared_program, CompileResult, CompiledArtifacts, DispatchEffect, EvalResult,
-    RuntimeError, Value, DEFAULT_NURSERY_SIZE, EVAL_STACK_SIZE,
+    RuntimeError, HaskellValue, DEFAULT_NURSERY_SIZE, EVAL_STACK_SIZE,
 };
 
 /// Repo root, derived from this crate's manifest dir (`<root>/tidepool-testing`).
@@ -124,7 +124,7 @@ pub fn require_extract() {
 
 /// Run `f` on a fresh thread with the JIT eval stack size ([`EVAL_STACK_SIZE`]).
 ///
-/// Deep `Value` spines recurse on `Drop`; the default ~2 MiB test-thread stack
+/// Deep `HaskellValue` spines recurse on `Drop`; the default ~2 MiB test-thread stack
 /// overflows (silent thread death → hang). Every hand-rolled `run` helper did
 /// this dance; call this instead.
 pub fn with_eval_stack<T, F>(f: F) -> T
@@ -167,8 +167,8 @@ impl Outcome {
             .unwrap_or_else(|e| panic!("expected successful eval, got error: {e}"))
     }
 
-    /// Borrow the computed [`Value`] (panics on error).
-    pub fn value(&self) -> &Value {
+    /// Borrow the computed [`HaskellValue`] (panics on error).
+    pub fn value(&self) -> &HaskellValue {
         self.result().value()
     }
 
@@ -198,10 +198,10 @@ impl Outcome {
 /// bundle, run via [`EvalHarness::run_target`]/[`run_target_owned`]. A
 /// pre-compiled target has no [`CompileResult`] of its own to hand
 /// `EvalResult::new` (crate-private in `tidepool-runtime`), so this wraps the
-/// raw `Value` + [`DataConTable`] pair the JIT run itself produces and
+/// raw `HaskellValue` + [`DataConTable`] pair the JIT run itself produces and
 /// renders JSON through the same public [`tidepool_runtime::value_to_json`]
 /// path `EvalResult::to_json` uses internally.
-pub struct TargetOutcome(Result<(Value, DataConTable), RuntimeError>);
+pub struct TargetOutcome(Result<(HaskellValue, DataConTable), RuntimeError>);
 
 impl TargetOutcome {
     /// Did evaluation succeed?
@@ -214,14 +214,14 @@ impl TargetOutcome {
         self.0.as_ref().err()
     }
 
-    fn result(&self) -> &(Value, DataConTable) {
+    fn result(&self) -> &(HaskellValue, DataConTable) {
         self.0
             .as_ref()
             .unwrap_or_else(|e| panic!("expected successful eval, got error: {e}"))
     }
 
-    /// Borrow the computed [`Value`] (panics on error).
-    pub fn value(&self) -> &Value {
+    /// Borrow the computed [`HaskellValue`] (panics on error).
+    pub fn value(&self) -> &HaskellValue {
         &self.result().0
     }
 
@@ -231,14 +231,14 @@ impl TargetOutcome {
         tidepool_runtime::value_to_json(value, table, 0)
     }
 
-    /// Consume and return the owned `(Value, DataConTable)` pair, panicking
+    /// Consume and return the owned `(HaskellValue, DataConTable)` pair, panicking
     /// with `ctx` + error.
-    pub fn expect(self, ctx: &str) -> (Value, DataConTable) {
+    pub fn expect(self, ctx: &str) -> (HaskellValue, DataConTable) {
         self.0.unwrap_or_else(|e| panic!("{ctx}: {e}"))
     }
 
     /// The raw `Result` (escape hatch for tests asserting on specific errors).
-    pub fn into_result(self) -> Result<(Value, DataConTable), RuntimeError> {
+    pub fn into_result(self) -> Result<(HaskellValue, DataConTable), RuntimeError> {
         self.0
     }
 }
@@ -494,7 +494,7 @@ impl EvalHarness {
         let has_io = artifacts.warnings.has_io;
         let nursery = self.nursery.unwrap_or(DEFAULT_NURSERY_SIZE);
         let (result, handlers) = with_eval_stack(move || {
-            let result: Result<(Value, DataConTable), RuntimeError> = (|| {
+            let result: Result<(HaskellValue, DataConTable), RuntimeError> = (|| {
                 if has_io {
                     return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
                 }
@@ -539,7 +539,7 @@ pub mod mock {
     use std::collections::HashMap;
     use std::sync::LazyLock;
 
-    use tidepool_bridge::Value;
+    use tidepool_bridge::HaskellValue;
     use tidepool_bridge_derive::FromHaskell;
     use tidepool_bridge_effects::{FileMeta, Proc};
     use tidepool_effect::{EffectContext, EffectError, EffectHandler, Response};
@@ -582,8 +582,8 @@ data ExecError = ExecSpawn Text | ExecBadDir Text deriving (Show, Eq)
 data Console a where
   Print :: Text -> Console ()
 data KV a where
-  KvGet :: Text -> KV (Maybe Value)
-  KvSet :: Text -> Value -> KV ()
+  KvGet :: Text -> KV (Maybe HaskellValue)
+  KvSet :: Text -> HaskellValue -> KV ()
   KvDelete :: Text -> KV ()
   KvKeys :: KV [Text]
 data FsRead a where
@@ -595,32 +595,32 @@ data FsRead a where
 data FsWrite a where
   FsWrite :: Text -> Text -> FsWrite ()
 data Http a where
-  HttpGet :: Text -> Http (Either HttpError Value)
-  HttpPost :: Text -> Value -> Http (Either HttpError Value)
-  HttpRequest :: Text -> Text -> [(Text,Text)] -> Text -> Http Value
+  HttpGet :: Text -> Http (Either HttpError HaskellValue)
+  HttpPost :: Text -> HaskellValue -> Http (Either HttpError HaskellValue)
+  HttpRequest :: Text -> Text -> [(Text,Text)] -> Text -> Http HaskellValue
 data Exec a where
   Run :: Text -> Exec (Either ExecError Proc)
   RunIn :: Text -> Text -> Exec (Either ExecError Proc)
-  RunJson :: Text -> Exec Value
+  RunJson :: Text -> Exec HaskellValue
 data Git a where
-  GitLog :: Int -> Git (Either GitError [Value])
-  GitStatus :: Git (Either GitError [Value])
-  GitDiffStat :: Text -> Git (Either GitError [Value])
+  GitLog :: Int -> Git (Either GitError [HaskellValue])
+  GitStatus :: Git (Either GitError [HaskellValue])
+  GitDiffStat :: Text -> Git (Either GitError [HaskellValue])
   GitShow :: Text -> Git (Either GitError Commit)
 data Llm a where
   LlmChat :: Text -> Llm Text
-  LlmStructured :: Text -> Value -> Llm (Either LlmError Value)
+  LlmStructured :: Text -> HaskellValue -> Llm (Either LlmError HaskellValue)
 data Time a where
   TimeNow :: Time Int
 data Entropy a where
   EntropySeed :: Entropy Int
 data Ask a where
-  Ask :: Text -> Ask Value
+  Ask :: Text -> Ask HaskellValue
 data RunLLMTurn a where
-  RunLLMTurnStub :: Text -> RunLLMTurn Value
+  RunLLMTurnStub :: Text -> RunLLMTurn HaskellValue
 data Fork a where
-  ForkWith :: Int -> Text -> Fork Value
-  ForkAllWith :: Int -> [Text] -> Fork Value
+  ForkWith :: Int -> Text -> Fork HaskellValue
+  ForkAllWith :: Int -> [Text] -> Fork HaskellValue
 
 type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLMTurn, Fork]
 "#;
@@ -658,7 +658,7 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
         #[haskell(name = "KvGet")]
         KvGet(String),
         #[haskell(name = "KvSet")]
-        KvSet(String, Value),
+        KvSet(String, HaskellValue),
         #[haskell(name = "KvDelete")]
         KvDelete(String),
         #[haskell(name = "KvKeys")]
@@ -756,7 +756,7 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
         #[haskell(name = "HttpGet")]
         HttpGet(String),
         #[haskell(name = "HttpPost")]
-        HttpPost(String, Value),
+        HttpPost(String, HaskellValue),
         #[haskell(name = "HttpRequest")]
         HttpRequest(String, String, Vec<(String, String)>, String),
     }
@@ -818,8 +818,8 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
         fn handle(&mut self, req: GitReq, cx: &EffectContext) -> Result<Response, EffectError> {
             match req {
                 GitReq::GitLog(_) | GitReq::GitStatus | GitReq::GitDiffStat(_) => {
-                    let empty: Vec<Value> = vec![];
-                    cx.respond(Ok::<Vec<Value>, String>(empty))
+                    let empty: Vec<HaskellValue> = vec![];
+                    cx.respond(Ok::<Vec<HaskellValue>, String>(empty))
                 }
                 GitReq::GitShow(_) => cx.respond(Ok::<tidepool_bridge_effects::GitCommit, String>(
                     tidepool_bridge_effects::GitCommit {
@@ -841,7 +841,7 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
         #[haskell(name = "LlmChat")]
         LlmChat(String),
         #[haskell(name = "LlmStructured")]
-        LlmStructured(String, Value),
+        LlmStructured(String, HaskellValue),
     }
     pub struct MockLlm;
     impl EffectHandler for MockLlm {

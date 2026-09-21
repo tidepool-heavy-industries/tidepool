@@ -207,9 +207,9 @@ fn w5_a5_promoted_result_survives_later_minor_collection() {
     assert_scope_clear(&invocation);
     assert!(matches!(
         result.values.as_slice(),
-        [tidepool_bridge::Value::Con(id, fields)]
+        [tidepool_bridge::HaskellValue::Con(id, fields)]
             if *id == tidepool_repr::DataConId(951)
-                && matches!(fields.as_slice(), [tidepool_bridge::Value::Con(child, rest)]
+                && matches!(fields.as_slice(), [tidepool_bridge::HaskellValue::Con(child, rest)]
                     if *child == tidepool_repr::DataConId(950) && rest.is_empty())
     ));
 }
@@ -225,9 +225,9 @@ fn w5_a5_old_thunk_update_remembers_young_result() {
     assert_scope_clear(&invocation);
     assert!(matches!(
         first.values.as_slice(),
-        [tidepool_bridge::Value::Con(id, fields)]
+        [tidepool_bridge::HaskellValue::Con(id, fields)]
             if *id == tidepool_repr::DataConId(951)
-                && matches!(fields.as_slice(), [tidepool_bridge::Value::Con(child, rest)]
+                && matches!(fields.as_slice(), [tidepool_bridge::HaskellValue::Con(child, rest)]
                     if *child == tidepool_repr::DataConId(950) && rest.is_empty())
     ));
     assert!(
@@ -239,9 +239,9 @@ fn w5_a5_old_thunk_update_remembers_young_result() {
     assert_scope_clear(&invocation);
     assert!(matches!(
         second.values.as_slice(),
-        [tidepool_bridge::Value::Con(id, fields)]
+        [tidepool_bridge::HaskellValue::Con(id, fields)]
             if *id == tidepool_repr::DataConId(951)
-                && matches!(fields.as_slice(), [tidepool_bridge::Value::Con(child, rest)]
+                && matches!(fields.as_slice(), [tidepool_bridge::HaskellValue::Con(child, rest)]
                     if *child == tidepool_repr::DataConId(950) && rest.is_empty())
     ));
 }
@@ -318,7 +318,7 @@ fn w5_a5_promoted_array_remembers_young_store_through_minor_gc() {
     assert_scope_clear(&invocation);
     assert!(matches!(
         result.values.as_slice(),
-        [tidepool_bridge::Value::Con(id, fields)]
+        [tidepool_bridge::HaskellValue::Con(id, fields)]
             if *id == tidepool_repr::DataConId(950) && fields.is_empty()
     ));
 }
@@ -381,7 +381,7 @@ fn w5_a5_static_and_already_old_results_are_noops() {
     assert_scope_clear(&static_invocation);
     assert!(matches!(
         static_result.values.as_slice(),
-        [tidepool_bridge::Value::Con(id, fields)]
+        [tidepool_bridge::HaskellValue::Con(id, fields)]
             if *id == tidepool_repr::DataConId(950) && fields.is_empty()
     ));
 

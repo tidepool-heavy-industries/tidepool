@@ -69,7 +69,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_heap::external_storage::ExternalStorageKind;
@@ -178,7 +178,7 @@ pub struct PreparedMachine<'code> {
     /// ([`Self::pin`]): the install-to-bind gap, and explicit retention.
     pins: BTreeSet<ProgramId>,
     nursery_bytes: usize,
-    /// Value handles, parked continuations AND realm-scoped cancellation
+    /// HaskellValue handles, parked continuations AND realm-scoped cancellation
     /// flags for this machine, shared exactly as `PreparedMachine` shares
     /// its own [`ResourceLedger`]. A parked frame ([`Self::park`]) owns its
     /// continuation's root slot as a stowed root until [`Self::take_parked`]
@@ -2189,7 +2189,7 @@ impl<'code> PreparedMachine<'code> {
         self.machine.persistent_roots_count()
     }
 
-    /// Materialize a retained value as a bridge `Value`, forcing its lazy
+    /// Materialize a retained value as a bridge `HaskellValue`, forcing its lazy
     /// fields through program `id`'s force adapter under the value's own
     /// realm cancel flag. The handle stays retained: forcing may evaluate and
     /// move the graph it roots, and the handle's root slot follows the move.
@@ -2200,7 +2200,7 @@ impl<'code> PreparedMachine<'code> {
         id: ProgramId,
         handle: PreparedHandle,
         budget: usize,
-    ) -> Result<Value, ExecutionError> {
+    ) -> Result<HaskellValue, ExecutionError> {
         self.observe_handle_with(
             id,
             handle,
@@ -2224,7 +2224,7 @@ impl<'code> PreparedMachine<'code> {
         id: ProgramId,
         handle: PreparedHandle,
         budget: usize,
-    ) -> Result<Value, ExecutionError> {
+    ) -> Result<HaskellValue, ExecutionError> {
         self.observe_handle_with(
             id,
             handle,
@@ -2239,7 +2239,7 @@ impl<'code> PreparedMachine<'code> {
         handle: PreparedHandle,
         budget: usize,
         policy: crate::observation::BudgetPolicy,
-    ) -> Result<Value, ExecutionError> {
+    ) -> Result<HaskellValue, ExecutionError> {
         self.ensure_handle_access()?;
         let (word, realm) = self
             .handles
@@ -3374,7 +3374,7 @@ mod tests {
             .expect("a language failure must not poison the prepared machine");
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(value))]
+            [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(value))]
                 if *value == 7
         ));
     }
@@ -3424,12 +3424,12 @@ mod tests {
         assert_eq!(second.collections, 1);
         assert!(matches!(
             first.values.as_slice(),
-            [tidepool_bridge::Value::Con(id, fields)]
+            [tidepool_bridge::HaskellValue::Con(id, fields)]
                 if *id == tidepool_repr::DataConId(900) && fields.is_empty()
         ));
         assert!(matches!(
             second.values.as_slice(),
-            [tidepool_bridge::Value::Con(id, fields)]
+            [tidepool_bridge::HaskellValue::Con(id, fields)]
                 if *id == tidepool_repr::DataConId(900) && fields.is_empty()
         ));
         assert_eq!(machine.persistent_roots_count(program), persistent_roots);
@@ -3747,12 +3747,12 @@ mod tests {
             .expect("program B entry before collection");
         assert!(matches!(
             before_a.values.as_slice(),
-            [tidepool_bridge::Value::Con(id, fields)]
+            [tidepool_bridge::HaskellValue::Con(id, fields)]
                 if *id == tidepool_repr::DataConId(950) && fields.is_empty()
         ));
         assert!(matches!(
             before_b.values.as_slice(),
-            [tidepool_bridge::Value::Con(id, fields)]
+            [tidepool_bridge::HaskellValue::Con(id, fields)]
                 if *id == tidepool_repr::DataConId(951) && fields.is_empty()
         ));
 
@@ -3785,12 +3785,12 @@ mod tests {
         assert!(after_b.collections >= 1);
         assert!(matches!(
             after_a.values.as_slice(),
-            [tidepool_bridge::Value::Con(id, fields)]
+            [tidepool_bridge::HaskellValue::Con(id, fields)]
                 if *id == tidepool_repr::DataConId(950) && fields.is_empty()
         ));
         assert!(matches!(
             after_b.values.as_slice(),
-            [tidepool_bridge::Value::Con(id, fields)]
+            [tidepool_bridge::HaskellValue::Con(id, fields)]
                 if *id == tidepool_repr::DataConId(951) && fields.is_empty()
         ));
 
@@ -4103,7 +4103,7 @@ mod tests {
             );
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::Value::Con(id, fields)]
+            [tidepool_bridge::HaskellValue::Con(id, fields)]
                 if *id == tidepool_repr::DataConId(990) && fields.is_empty()
         ));
     }
@@ -5365,7 +5365,7 @@ mod tests {
             .expect("B's generated Case recognises A's Field cell through the shared descriptor");
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(
+            [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(
                 99
             ))]
         ));
@@ -5910,7 +5910,7 @@ mod tests {
     /// parking a suspension) does NOT refuse a bare function object the way
     /// `inspect_outer`/`inspect_constructor` do -- it bridges it as the
     /// reserved closure sentinel, matching Core's own tolerant bridge
-    /// (`tidepool-codegen/CLAUDE.md` "Value handles and scope closure"). This
+    /// (`tidepool-codegen/CLAUDE.md` "HaskellValue handles and scope closure"). This
     /// is the settled-payload shape the self-harness's outer effect requests
     /// hit: `withHandler`/green-thread/`after` payloads carry a closure, and
     /// parking must observe successfully rather than erroring
@@ -5954,7 +5954,7 @@ mod tests {
             .expect("a bare function observes to the closure sentinel, not an error");
         assert!(matches!(
             observed,
-            Value::Con(id, ref fields)
+            HaskellValue::Con(id, ref fields)
                 if id == crate::observation::CLOSURE_SENTINEL && fields.is_empty()
         ));
         assert!(machine.release(*handle_f));
@@ -6014,11 +6014,11 @@ mod tests {
             .expect("A still runs correctly after the rejected install");
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::Value::Con(id, fields)]
+            [tidepool_bridge::HaskellValue::Con(id, fields)]
                 if *id == tidepool_repr::DataConId(960)
                     && matches!(
                         fields.as_slice(),
-                        [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(99))]
+                        [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(99))]
                     )
         ));
         assert!(machine.release(*handle_a));
@@ -6401,7 +6401,7 @@ mod tests {
             );
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(
+            [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(
                 123
             ))]
         ));
@@ -6636,7 +6636,7 @@ mod tests {
             .expect("A's own entry still runs correctly alongside B");
         assert!(matches!(
             a_result.values.as_slice(),
-            [tidepool_bridge::Value::Con(id, fields)]
+            [tidepool_bridge::HaskellValue::Con(id, fields)]
                 if *id == tidepool_repr::DataConId(995) && fields.is_empty()
         ));
 
@@ -6833,7 +6833,7 @@ mod tests {
         assert_eq!(machine.handle_realm(taken), Some(realm));
         assert!(matches!(
             machine.observe_handle(program, taken, 100),
-            Ok(Value::Con(id, ref fields)) if id == DataConId(900) && fields.is_empty()
+            Ok(HaskellValue::Con(id, ref fields)) if id == DataConId(900) && fields.is_empty()
         ));
         assert!(matches!(
             machine.take_parked(id),
@@ -6913,7 +6913,7 @@ mod tests {
         assert_eq!(machine.handle_count(), handles_before + 1);
         assert!(matches!(
             machine.observe_handle(program, handle, 100),
-            Ok(Value::Con(id, ref fields)) if id == DataConId(900) && fields.is_empty()
+            Ok(HaskellValue::Con(id, ref fields)) if id == DataConId(900) && fields.is_empty()
         ));
         // The built value survives a collection like any retained value.
         machine
@@ -6930,7 +6930,7 @@ mod tests {
             .expect("an unrelated call collects");
         assert!(matches!(
             machine.observe_handle(program, handle, 100),
-            Ok(Value::Con(id, ref fields)) if id == DataConId(900) && fields.is_empty()
+            Ok(HaskellValue::Con(id, ref fields)) if id == DataConId(900) && fields.is_empty()
         ));
         assert!(machine.release(handle));
         assert_eq!(machine.handle_count(), handles_before);
@@ -6977,11 +6977,11 @@ mod tests {
         assert_eq!(machine.handle_count(), handles_before + 1);
         assert!(matches!(
             machine.observe_handle(program, handle, 100),
-            Ok(Value::Con(id, ref fields))
+            Ok(HaskellValue::Con(id, ref fields))
                 if id == DataConId(910)
                     && matches!(
                         fields.as_slice(),
-                        [Value::Lit(tidepool_repr::Literal::LitInt(42))]
+                        [HaskellValue::Lit(tidepool_repr::Literal::LitInt(42))]
                     )
         ));
 
@@ -7173,14 +7173,14 @@ mod tests {
         let observed = |machine: &mut PreparedMachine<'_>| {
             matches!(
                 machine.observe_handle(program, handle, 1_000),
-                Ok(Value::Con(id, ref fields))
+                Ok(HaskellValue::Con(id, ref fields))
                     if id == DataConId(921)
                         && matches!(
                             fields.as_slice(),
                             [
-                                Value::Lit(tidepool_repr::Literal::LitByteArray(bytes)),
-                                Value::Lit(tidepool_repr::Literal::LitInt(0)),
-                                Value::Lit(tidepool_repr::Literal::LitInt(len)),
+                                HaskellValue::Lit(tidepool_repr::Literal::LitByteArray(bytes)),
+                                HaskellValue::Lit(tidepool_repr::Literal::LitInt(0)),
+                                HaskellValue::Lit(tidepool_repr::Literal::LitInt(len)),
                             ] if *bytes == text && *len == text.len() as i64
                         )
             )
@@ -7407,7 +7407,7 @@ mod tests {
         }
         assert!(matches!(
             machine.observe_handle(latest, previous, 100),
-            Ok(Value::Con(id, ref fields)) if id == DataConId(900) && fields.is_empty()
+            Ok(HaskellValue::Con(id, ref fields)) if id == DataConId(900) && fields.is_empty()
         ));
         assert!(machine.release(previous));
         assert!(machine.release(answer_handle.expect("the loop ran")));
@@ -7438,7 +7438,7 @@ mod tests {
             collect_before_observation: false,
         };
         // A closure observes to the reserved closure sentinel, not a data
-        // `Value`, so this `run_entry` (a non-retained observe: no handle is
+        // `HaskellValue`, so this `run_entry` (a non-retained observe: no handle is
         // minted for its result) leaves NOTHING rooting `f` once the call
         // returns -- the same orphaned-nursery-object setup the refusal used
         // to produce, now reached via a successful sentinel observation
@@ -7447,7 +7447,7 @@ mod tests {
             machine.run_entry(program_a, ValueId(0), &[], quiet, RealmId::ROOT),
             Ok(ref result) if matches!(
                 result.values.as_slice(),
-                [Value::Con(id, fields)]
+                [HaskellValue::Con(id, fields)]
                     if *id == crate::observation::CLOSURE_SENTINEL && fields.is_empty()
             )
         ));
@@ -7735,10 +7735,10 @@ mod tests {
 
     /// The nesting depth of an observed `boxed` value, `None` for any other
     /// shape.
-    fn boxed_depth(value: &Value, unit_id: u64, box_id: u64) -> Option<usize> {
+    fn boxed_depth(value: &HaskellValue, unit_id: u64, box_id: u64) -> Option<usize> {
         match value {
-            Value::Con(id, fields) if *id == DataConId(unit_id) && fields.is_empty() => Some(0),
-            Value::Con(id, fields) if *id == DataConId(box_id) => match fields.as_slice() {
+            HaskellValue::Con(id, fields) if *id == DataConId(unit_id) && fields.is_empty() => Some(0),
+            HaskellValue::Con(id, fields) if *id == DataConId(box_id) => match fields.as_slice() {
                 [inner] => boxed_depth(inner, unit_id, box_id).map(|depth| depth + 1),
                 _ => None,
             },

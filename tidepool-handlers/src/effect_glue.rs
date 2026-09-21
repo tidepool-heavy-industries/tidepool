@@ -140,11 +140,11 @@ macro_rules! dispatch_body {
 }
 pub(crate) use dispatch_body;
 
-/// An incoming aeson-`Value` GADT argument (e.g. `HttpPost`'s body,
+/// An incoming aeson-`HaskellValue` GADT argument (e.g. `HttpPost`'s body,
 /// `LlmStructured`'s schema), pre-converted to `serde_json::Value`.
 ///
 /// An `errors`-tagged verb's method receives no `cx` (see [`dispatch_body!`]),
-/// so it has no `DataConTable` to interpret a materialized Haskell `Value` — the table
+/// so it has no `DataConTable` to interpret a materialized Haskell `HaskellValue` — the table
 /// lookup has to happen at Req-decode time instead, while `cx` (and so the
 /// table) is still in scope. `FromHaskell` for a LOCAL wrapper type is exactly
 /// that decode-time hook: `tidepool_bridge_derive`'s enum derive calls
@@ -157,7 +157,7 @@ impl tidepool_bridge::sealed::FromHaskellSealed for JsonArg {}
 
 impl tidepool_bridge::FromHaskell for JsonArg {
     fn from_value(
-        value: &tidepool_bridge::Value,
+        value: &tidepool_bridge::HaskellValue,
         table: &tidepool_repr::DataConTable,
     ) -> Result<Self, tidepool_bridge::BridgeError> {
         Ok(JsonArg(tidepool_runtime::value_to_json(value, table, 0)))

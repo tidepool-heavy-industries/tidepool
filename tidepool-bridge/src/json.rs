@@ -5,17 +5,17 @@
 
 use crate::error::BridgeError;
 use crate::traits::{sealed::ToHaskellSealed, ToHaskell};
-use crate::Value;
+use crate::HaskellValue;
 use tidepool_repr::DataConTable;
 
 impl ToHaskellSealed for serde_json::Value {}
 
-/// Convert a `serde_json::Value` to a Tidepool `Value` matching the
+/// Convert a `serde_json::Value` to a Tidepool `HaskellValue` matching the
 /// vendored `Tidepool.Aeson.Value` Haskell type.
 ///
 /// Uses the bridge-owned JSON materialization builder.
 impl ToHaskell for serde_json::Value {
-    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
         let ids = crate::json_builder::JsonConIds::from_table(table).ok_or_else(|| {
             BridgeError::UnknownDataConName(
                 "aeson Value constructors (Object/Array/String/…) not in scope".into(),
@@ -34,7 +34,7 @@ mod tests {
     fn json_test_table() -> DataConTable {
         let mut t = DataConTable::new();
         let cons = [
-            // Value constructors
+            // HaskellValue constructors
             ("Object", 0, 1),
             ("Array", 1, 1),
             ("String", 2, 1),
@@ -83,7 +83,7 @@ mod tests {
         let table = json_test_table();
         let val = serde_json::Value::Null.to_value(&table).unwrap();
         match &val {
-            Value::Con(id, fields) => {
+            HaskellValue::Con(id, fields) => {
                 assert_eq!(table.name_of(*id), Some("Null"));
                 assert!(fields.is_empty());
             }
@@ -92,9 +92,9 @@ mod tests {
     }
 
     /// The shim's one genuine failure mode: a table with none of the aeson
-    /// `Value` constructors in scope (no `JsonDecode`/JSON-effect use in the
+    /// `HaskellValue` constructors in scope (no `JsonDecode`/JSON-effect use in the
     /// program) must report `UnknownDataConName`, not panic or silently
-    /// build a garbage `Value`.
+    /// build a garbage `HaskellValue`.
     #[test]
     fn to_value_reports_unknown_dataconname_when_json_constructors_absent() {
         let table = DataConTable::new();

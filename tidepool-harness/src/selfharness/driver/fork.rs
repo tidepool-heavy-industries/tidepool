@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use futures_util::stream::{self, StreamExt};
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_repr::DataConTable;
 
 use super::corrective::fork_child_failure_corrective;
@@ -84,9 +84,9 @@ pub(crate) enum AgentSessionExitPolicy {
 /// state) — a thin `DriverError` wrapper over [`engine::wrap_fork_answer`].
 pub(crate) fn wrap_fork_value(
     source: engine::ForkSource,
-    value: Value,
+    value: HaskellValue,
     table: &DataConTable,
-) -> Result<Value, DriverError> {
+) -> Result<HaskellValue, DriverError> {
     engine::wrap_fork_answer(source, value, table).map_err(|e| DriverError::Session(e.to_string()))
 }
 
@@ -323,7 +323,7 @@ impl BranchAgentSessionGuard {
     /// by name. Retries the finalized-value take across a
     /// `TurnInFlight` race (the original one-shot fork path's own
     /// discipline). Consumes the window.
-    pub(crate) async fn finalize_fork_data(mut self) -> Result<(Value, String), HarnessError> {
+    pub(crate) async fn finalize_fork_data(mut self) -> Result<(HaskellValue, String), HarnessError> {
         let node = self.node;
         let (value, rendered) = self.agent.take_finalized_value_keep_open(node).await?;
         let _ = self
@@ -420,7 +420,7 @@ impl SelfHarnessDriver {
         single_prompt: &str,
         prompts: &[String],
         table: &DataConTable,
-    ) -> Result<Value, DriverError> {
+    ) -> Result<HaskellValue, DriverError> {
         self.lifecycle = SelfHarnessState::SuspendedOnHole;
 
         let is_fanout = fan.is_some();
@@ -457,7 +457,7 @@ impl SelfHarnessDriver {
         // must never be observable in the resumed answer).
         let this = &*self;
         #[allow(clippy::type_complexity)]
-        let results: Vec<(usize, Result<Result<Value, InvocationExit>, DriverError>)> =
+        let results: Vec<(usize, Result<Result<HaskellValue, InvocationExit>, DriverError>)> =
             drive_concurrent(cap, prompts.len(), |idx| {
                 let prompt = prompts[idx];
                 async move {
@@ -546,7 +546,7 @@ impl SelfHarnessDriver {
         element_ty: Option<&str>,
         modules: &[String],
         table: &DataConTable,
-    ) -> Result<Result<Value, InvocationExit>, DriverError> {
+    ) -> Result<Result<HaskellValue, InvocationExit>, DriverError> {
         let node = self.agent.create_root_framed(
             &format!("fanout answerer {idx}"),
             "",
@@ -593,7 +593,7 @@ impl SelfHarnessDriver {
         element_ty: Option<&str>,
         modules: &[String],
         table: &DataConTable,
-    ) -> Result<Result<Value, InvocationExit>, DriverError> {
+    ) -> Result<Result<HaskellValue, InvocationExit>, DriverError> {
         self.agent
             .set_answer_contract(node, self.answer_contract(element_ty, modules));
         let child_prompt = engine::finalize_typed_request_prompt(
@@ -1277,7 +1277,7 @@ impl SelfHarnessDriver {
         fork_depth: u32,
         fork_subtree: &std::sync::atomic::AtomicU32,
         ty_label: &str,
-    ) -> Result<Result<Value, String>, DriverError> {
+    ) -> Result<Result<HaskellValue, String>, DriverError> {
         let briefs = engine::fork_briefs(fan, prompts, prompt)
             .map_err(|e| DriverError::Session(e.to_string()))?;
         let element_ty = match fan {
@@ -1295,7 +1295,7 @@ impl SelfHarnessDriver {
         let briefs_ref = &briefs;
         let titles_ref = &titles;
         #[allow(clippy::type_complexity)]
-        let results: Vec<(usize, Result<Result<Value, String>, DriverError>)> =
+        let results: Vec<(usize, Result<Result<HaskellValue, String>, DriverError>)> =
             drive_concurrent(cap, briefs.len(), |idx| {
                 let brief = briefs_ref[idx];
                 let title = titles_ref[idx].as_str();
@@ -1545,7 +1545,7 @@ impl SelfHarnessDriver {
         fork_depth: u32,
         fork_subtree: &std::sync::atomic::AtomicU32,
         ty_label: &str,
-    ) -> Result<Result<Value, String>, DriverError> {
+    ) -> Result<Result<HaskellValue, String>, DriverError> {
         let sid = self.outer_sid()?;
         let modules = self.agent.asks_modules(parent, site);
         let card = engine::finalize_typed_request_prompt(

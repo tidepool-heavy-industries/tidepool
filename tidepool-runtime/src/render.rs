@@ -1,7 +1,7 @@
 //! Rendering logic for evaluated results.
 
 use serde_json::json;
-use tidepool_bridge::{shapes, Value};
+use tidepool_bridge::{shapes, HaskellValue};
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::types::{DataConId, Literal};
 
@@ -9,10 +9,10 @@ const MAX_DEPTH: usize = 1000;
 const MAX_LIST_LEN: usize = 10000;
 
 /// Opaque result of evaluating a Haskell expression.
-/// Bundles the computed `Value` with the `DataConTable` needed to render constructor names.
+/// Bundles the computed `HaskellValue` with the `DataConTable` needed to render constructor names.
 #[derive(Debug)]
 pub struct EvalResult {
-    value: Value,
+    value: HaskellValue,
     table: DataConTable,
     /// GHC warnings from the compile that produced this result (empty on a
     /// clean compile, or when the turn didn't recompile — e.g. a resumed
@@ -21,7 +21,7 @@ pub struct EvalResult {
 }
 
 impl EvalResult {
-    pub(crate) fn new(value: Value, table: DataConTable, warnings: Vec<String>) -> Self {
+    pub(crate) fn new(value: HaskellValue, table: DataConTable, warnings: Vec<String>) -> Self {
         Self {
             value,
             table,
@@ -72,13 +72,13 @@ impl EvalResult {
         out
     }
 
-    /// Consume and return the inner Value (escape hatch for callers that need raw access).
-    pub fn into_value(self) -> Value {
+    /// Consume and return the inner HaskellValue (escape hatch for callers that need raw access).
+    pub fn into_value(self) -> HaskellValue {
         self.value
     }
 
-    /// Borrow the inner Value.
-    pub fn value(&self) -> &Value {
+    /// Borrow the inner HaskellValue.
+    pub fn value(&self) -> &HaskellValue {
         &self.value
     }
 
@@ -104,8 +104,8 @@ fn con_name(id: DataConId, table: &DataConTable) -> &str {
     table.name_of(id).unwrap_or("<unknown>")
 }
 
-/// Convert a tidepool Value to serde_json::Value using the DataConTable for constructor names.
-pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_json::Value {
+/// Convert a tidepool HaskellValue to serde_json::Value using the DataConTable for constructor names.
+pub fn value_to_json(val: &HaskellValue, table: &DataConTable, depth: usize) -> serde_json::Value {
     if depth > MAX_DEPTH {
         return json!("<depth limit>");
     }
@@ -113,10 +113,10 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
 
     match val {
         // Literals
-        Value::Lit(lit) => literal_to_json(lit),
+        HaskellValue::Lit(lit) => literal_to_json(lit),
 
         // Constructors — pattern match on known names
-        Value::Con(id, fields) => {
+        HaskellValue::Con(id, fields) => {
             let name = con_name(*id, table);
             match (name, fields.as_slice()) {
                 // Booleans
@@ -169,7 +169,7 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
                 // List: try to collect as array or string
                 ("[]", []) => {
                     // KNOWN LIMITATION: an empty Haskell `String` ([Char]) is
-                    // indistinguishable from any other empty list at the Value
+                    // indistinguishable from any other empty list at the HaskellValue
                     // level, so it renders as `[]` while `Text ""`/`LitString
                     // ""` render as `""`. The char-vs-list heuristic in
                     // `collect_list` needs a non-empty spine to fire.
@@ -223,7 +223,7 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
                     compose_scientific_json(&cs, e)
                 }
 
-                // Aeson Value constructors
+                // Aeson HaskellValue constructors
                 ("Null", []) => json!(null),
                 ("Bool", [x]) => value_to_json(x, table, d),
                 ("Number", [x]) => value_to_json(x, table, d),
@@ -242,7 +242,7 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
                     // Find the Array# field: it's the Con(_, elems) with elements,
                     // typically the last field (after Int# offset and length).
                     let array_elems = fields.iter().rev().find_map(|f| match f {
-                        Value::Con(_, elems) if !elems.is_empty() => Some(elems),
+                        HaskellValue::Con(_, elems) if !elems.is_empty() => Some(elems),
                         _ => None,
                     });
                     if let Some(elems) = array_elems {
@@ -287,7 +287,7 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
             }
         }
 
-        Value::ByteArray(bs) => {
+        HaskellValue::ByteArray(bs) => {
             let borrowed = bs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             match std::str::from_utf8(&borrowed) {
                 Ok(s) => json!(s),
@@ -299,7 +299,7 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
 
 /// Walk a Data.Map.Strict Bin/Tip tree and collect key-value pairs into a JSON object.
 /// Keys are Text values (Key newtype is erased by GHC).
-fn map_to_json_object(val: &Value, table: &DataConTable, depth: usize) -> serde_json::Value {
+fn map_to_json_object(val: &HaskellValue, table: &DataConTable, depth: usize) -> serde_json::Value {
     let mut entries = serde_json::Map::new();
     shapes::walk_map_entries(val, table, depth, MAX_DEPTH, &mut |k, v, node_depth| {
         let key_str = match value_to_json(k, table, node_depth) {
@@ -362,15 +362,15 @@ fn compose_decimal(coeff: &str, exp: i64) -> String {
     format!("{sign}{body}")
 }
 
-fn bignat_field_to_decimal(val: &Value, table: &DataConTable, depth: usize) -> String {
+fn bignat_field_to_decimal(val: &HaskellValue, table: &DataConTable, depth: usize) -> String {
     // Distinguish recognized-but-unreadable backing (ByteArray/LitByteArray/a
     // lifted Con("ByteArray", [..]) layer) from an unrecognized shape: only
     // the former reports "<big-integer>"; the latter falls back to recursing
     // as a plain value (e.g. a wrapped LitInt for IS-shaped sub-expressions).
     let is_recognized_shape = matches!(
         val,
-        Value::ByteArray(_) | Value::Lit(Literal::LitByteArray(_))
-    ) || matches!(val, Value::Con(id, fields) if con_name(*id, table) == "ByteArray" && fields.len() == 1);
+        HaskellValue::ByteArray(_) | HaskellValue::Lit(Literal::LitByteArray(_))
+    ) || matches!(val, HaskellValue::Con(id, fields) if con_name(*id, table) == "ByteArray" && fields.len() == 1);
     if !is_recognized_shape {
         let j = value_to_json(val, table, depth);
         return match j {
@@ -421,8 +421,8 @@ fn literal_to_json(lit: &Literal) -> serde_json::Value {
 
 /// Collect a cons-chain into a JSON array, or a JSON string if all elements are chars.
 fn collect_list(
-    head: &Value,
-    tail: &Value,
+    head: &HaskellValue,
+    tail: &HaskellValue,
     table: &DataConTable,
     depth: usize,
 ) -> serde_json::Value {
@@ -432,7 +432,7 @@ fn collect_list(
 
     loop {
         match current {
-            Value::Con(id, fields) => {
+            HaskellValue::Con(id, fields) => {
                 let name = con_name(*id, table);
                 match (name, fields.as_slice()) {
                     ("[]", []) => break,
@@ -550,7 +550,7 @@ mod tests {
     #[test]
     fn to_string_pretty_no_warnings_is_unchanged() {
         let table = test_table();
-        let result = EvalResult::new(Value::Lit(Literal::LitInt(42)), table, Vec::new());
+        let result = EvalResult::new(HaskellValue::Lit(Literal::LitInt(42)), table, Vec::new());
         assert_eq!(result.to_string_pretty(), "42");
         assert!(!result.to_string_pretty().contains("Warnings"));
     }
@@ -564,7 +564,7 @@ mod tests {
             "Expr.hs:3:1: warning: [-Woverlapping-patterns]\n    Pattern match is redundant"
                 .to_string(),
         ];
-        let result = EvalResult::new(Value::Lit(Literal::LitInt(42)), table, warnings);
+        let result = EvalResult::new(HaskellValue::Lit(Literal::LitInt(42)), table, warnings);
         let rendered = result.to_string_pretty();
         assert!(rendered.starts_with("42\n\n## Warnings\n"));
         assert!(rendered.contains("Woverlapping-patterns"));
@@ -576,7 +576,7 @@ mod tests {
     fn to_string_pretty_multiple_warnings() {
         let table = test_table();
         let warnings = vec!["warning: one".to_string(), "warning: two".to_string()];
-        let result = EvalResult::new(Value::Lit(Literal::LitInt(1)), table, warnings);
+        let result = EvalResult::new(HaskellValue::Lit(Literal::LitInt(1)), table, warnings);
         let rendered = result.to_string_pretty();
         assert!(rendered.contains("warning: one"));
         assert!(rendered.contains("warning: two"));
@@ -587,14 +587,14 @@ mod tests {
     fn warnings_accessor_returns_raw_list() {
         let table = test_table();
         let result = EvalResult::new(
-            Value::Lit(Literal::LitInt(1)),
+            HaskellValue::Lit(Literal::LitInt(1)),
             table,
             vec!["w1".to_string()],
         );
         assert_eq!(result.warnings(), &["w1".to_string()]);
     }
 
-    /// Per-shape `value_to_json` cases: one literal `Value` construction per
+    /// Per-shape `value_to_json` cases: one literal `HaskellValue` construction per
     /// row, each asserted against its exact expected JSON.
     #[test]
     fn test_render_value_shapes() {
@@ -605,51 +605,51 @@ mod tests {
         let pair_id = table.get_by_name("(,)").unwrap();
         let triple_id = table.get_by_name("(,,)").unwrap();
 
-        let cases: Vec<(&str, Value, serde_json::Value)> = vec![
-            ("lit_int", Value::Lit(Literal::LitInt(42)), json!(42)),
+        let cases: Vec<(&str, HaskellValue, serde_json::Value)> = vec![
+            ("lit_int", HaskellValue::Lit(Literal::LitInt(42)), json!(42)),
             (
                 "lit_string",
-                Value::Lit(Literal::LitString(b"hello".to_vec())),
+                HaskellValue::Lit(Literal::LitString(b"hello".to_vec())),
                 json!("hello"),
             ),
             (
                 "bool_true",
-                Value::Con(table.get_by_name("True").unwrap(), vec![]),
+                HaskellValue::Con(table.get_by_name("True").unwrap(), vec![]),
                 json!(true),
             ),
             (
                 "bool_false",
-                Value::Con(table.get_by_name("False").unwrap(), vec![]),
+                HaskellValue::Con(table.get_by_name("False").unwrap(), vec![]),
                 json!(false),
             ),
             (
                 "option_nothing",
-                Value::Con(table.get_by_name("Nothing").unwrap(), vec![]),
+                HaskellValue::Con(table.get_by_name("Nothing").unwrap(), vec![]),
                 json!(null),
             ),
             (
                 "option_just",
-                Value::Con(
+                HaskellValue::Con(
                     table.get_by_name("Just").unwrap(),
-                    vec![Value::Lit(Literal::LitInt(42))],
+                    vec![HaskellValue::Lit(Literal::LitInt(42))],
                 ),
                 json!(42),
             ),
             (
                 "unit",
-                Value::Con(table.get_by_name("()").unwrap(), vec![]),
+                HaskellValue::Con(table.get_by_name("()").unwrap(), vec![]),
                 json!(null),
             ),
             (
                 // [1, 2]
                 "list_int",
-                Value::Con(
+                HaskellValue::Con(
                     cons_id,
                     vec![
-                        Value::Lit(Literal::LitInt(1)),
-                        Value::Con(
+                        HaskellValue::Lit(Literal::LitInt(1)),
+                        HaskellValue::Con(
                             cons_id,
-                            vec![Value::Lit(Literal::LitInt(2)), Value::Con(nil_id, vec![])],
+                            vec![HaskellValue::Lit(Literal::LitInt(2)), HaskellValue::Con(nil_id, vec![])],
                         ),
                     ],
                 ),
@@ -657,24 +657,24 @@ mod tests {
             ),
             (
                 "text_bytearray",
-                Value::Con(
+                HaskellValue::Con(
                     text_id,
                     vec![
-                        Value::ByteArray(Arc::new(Mutex::new(b"hello".to_vec()))),
-                        Value::Lit(Literal::LitInt(0)),
-                        Value::Lit(Literal::LitInt(5)),
+                        HaskellValue::ByteArray(Arc::new(Mutex::new(b"hello".to_vec()))),
+                        HaskellValue::Lit(Literal::LitInt(0)),
+                        HaskellValue::Lit(Literal::LitInt(5)),
                     ],
                 ),
                 json!("hello"),
             ),
             (
                 "text_litstring",
-                Value::Con(
+                HaskellValue::Con(
                     text_id,
                     vec![
-                        Value::Lit(Literal::LitString(b"hello litstring".to_vec())),
-                        Value::Lit(Literal::LitInt(0)),
-                        Value::Lit(Literal::LitInt(15)),
+                        HaskellValue::Lit(Literal::LitString(b"hello litstring".to_vec())),
+                        HaskellValue::Lit(Literal::LitInt(0)),
+                        HaskellValue::Lit(Literal::LitInt(15)),
                     ],
                 ),
                 json!("hello litstring"),
@@ -682,15 +682,15 @@ mod tests {
             (
                 // ["a", "b"]
                 "list_string",
-                Value::Con(
+                HaskellValue::Con(
                     cons_id,
                     vec![
-                        Value::Lit(Literal::LitString(b"a".to_vec())),
-                        Value::Con(
+                        HaskellValue::Lit(Literal::LitString(b"a".to_vec())),
+                        HaskellValue::Con(
                             cons_id,
                             vec![
-                                Value::Lit(Literal::LitString(b"b".to_vec())),
-                                Value::Con(nil_id, vec![]),
+                                HaskellValue::Lit(Literal::LitString(b"b".to_vec())),
+                                HaskellValue::Con(nil_id, vec![]),
                             ],
                         ),
                     ],
@@ -699,23 +699,23 @@ mod tests {
             ),
             (
                 "tuple_pair",
-                Value::Con(
+                HaskellValue::Con(
                     pair_id,
                     vec![
-                        Value::Lit(Literal::LitInt(1)),
-                        Value::Lit(Literal::LitInt(2)),
+                        HaskellValue::Lit(Literal::LitInt(1)),
+                        HaskellValue::Lit(Literal::LitInt(2)),
                     ],
                 ),
                 json!([1, 2]),
             ),
             (
                 "tuple_triple",
-                Value::Con(
+                HaskellValue::Con(
                     triple_id,
                     vec![
-                        Value::Lit(Literal::LitInt(1)),
-                        Value::Lit(Literal::LitInt(2)),
-                        Value::Lit(Literal::LitInt(3)),
+                        HaskellValue::Lit(Literal::LitInt(1)),
+                        HaskellValue::Lit(Literal::LitInt(2)),
+                        HaskellValue::Lit(Literal::LitInt(3)),
                     ],
                 ),
                 json!([1, 2, 3]),
@@ -732,7 +732,7 @@ mod tests {
         let table = test_table();
         // 2^53 + 1 — first integer that loses precision in f64
         let n: i64 = 9007199254740993;
-        let val = Value::Lit(Literal::LitInt(n));
+        let val = HaskellValue::Lit(Literal::LitInt(n));
         let j = value_to_json(&val, &table, 0);
         assert_eq!(j, serde_json::json!(9007199254740993i64));
         // Confirm the raw number string is exact (not rounded)
@@ -780,8 +780,8 @@ mod tests {
         let mut bytes = Vec::with_capacity(16);
         bytes.extend_from_slice(&lo.to_le_bytes());
         bytes.extend_from_slice(&hi.to_le_bytes());
-        let ba = Value::ByteArray(std::sync::Arc::new(std::sync::Mutex::new(bytes)));
-        let val = Value::Con(ip_id, vec![ba]);
+        let ba = HaskellValue::ByteArray(std::sync::Arc::new(std::sync::Mutex::new(bytes)));
+        let val = HaskellValue::Con(ip_id, vec![ba]);
         assert_eq!(
             value_to_json(&val, &table, 0),
             serde_json::json!("15511210043330985984000000")
@@ -798,8 +798,8 @@ mod tests {
             v.extend_from_slice(&[0u8; 0]); // no padding needed for 1 limb
             v
         };
-        let ba = Value::ByteArray(std::sync::Arc::new(std::sync::Mutex::new(bytes)));
-        let val = Value::Con(in_id, vec![ba]);
+        let ba = HaskellValue::ByteArray(std::sync::Arc::new(std::sync::Mutex::new(bytes)));
+        let val = HaskellValue::Con(in_id, vec![ba]);
         assert_eq!(value_to_json(&val, &table, 0), serde_json::json!("-42"));
     }
 
@@ -822,20 +822,20 @@ mod tests {
 
         let text_id = table.get_by_name("Text").unwrap();
         let mk_text = |s: &[u8]| {
-            Value::Con(
+            HaskellValue::Con(
                 text_id,
                 vec![
-                    Value::ByteArray(Arc::new(Mutex::new(s.to_vec()))),
-                    Value::Lit(Literal::LitInt(0)),
-                    Value::Lit(Literal::LitInt(s.len() as i64)),
+                    HaskellValue::ByteArray(Arc::new(Mutex::new(s.to_vec()))),
+                    HaskellValue::Lit(Literal::LitInt(0)),
+                    HaskellValue::Lit(Literal::LitInt(s.len() as i64)),
                 ],
             )
         };
-        let hit = Value::Con(
+        let hit = HaskellValue::Con(
             hit_id,
             vec![
                 mk_text(b"src/main.rs"),
-                Value::Lit(Literal::LitInt(42)),
+                HaskellValue::Lit(Literal::LitInt(42)),
                 mk_text(b"fn main"),
             ],
         );
@@ -873,10 +873,10 @@ mod tests {
         table.set_field_labels(inner_id, vec!["line".into()]);
         table.set_field_labels(outer_id, vec!["name".into(), "loc".into()]);
 
-        let inner = Value::Con(inner_id, vec![Value::Lit(Literal::LitInt(7))]);
-        let outer = Value::Con(
+        let inner = HaskellValue::Con(inner_id, vec![HaskellValue::Lit(Literal::LitInt(7))]);
+        let outer = HaskellValue::Con(
             outer_id,
-            vec![Value::Lit(Literal::LitString(b"x".to_vec())), inner],
+            vec![HaskellValue::Lit(Literal::LitString(b"x".to_vec())), inner],
         );
         assert_eq!(
             value_to_json(&outer, &table, 0),
@@ -898,11 +898,11 @@ mod tests {
             qualified_name: None,
             type_name: String::new(),
         });
-        let val = Value::Con(
+        let val = HaskellValue::Con(
             con_id,
             vec![
-                Value::Lit(Literal::LitString(b"a.txt".to_vec())),
-                Value::Lit(Literal::LitInt(1)),
+                HaskellValue::Lit(Literal::LitString(b"a.txt".to_vec())),
+                HaskellValue::Lit(Literal::LitInt(1)),
             ],
         );
         assert_eq!(
@@ -928,11 +928,11 @@ mod tests {
         });
         // Only one label, but two runtime fields.
         table.set_field_labels(con_id, vec!["only".into()]);
-        let val = Value::Con(
+        let val = HaskellValue::Con(
             con_id,
             vec![
-                Value::Lit(Literal::LitInt(1)),
-                Value::Lit(Literal::LitInt(2)),
+                HaskellValue::Lit(Literal::LitInt(1)),
+                HaskellValue::Lit(Literal::LitInt(2)),
             ],
         );
         assert_eq!(
@@ -949,15 +949,15 @@ mod tests {
         let c_hash_id = table.get_by_name("C#").unwrap();
 
         // ['h', 'i']
-        let list = Value::Con(
+        let list = HaskellValue::Con(
             cons_id,
             vec![
-                Value::Con(c_hash_id, vec![Value::Lit(Literal::LitChar('h'))]),
-                Value::Con(
+                HaskellValue::Con(c_hash_id, vec![HaskellValue::Lit(Literal::LitChar('h'))]),
+                HaskellValue::Con(
                     cons_id,
                     vec![
-                        Value::Con(c_hash_id, vec![Value::Lit(Literal::LitChar('i'))]),
-                        Value::Con(nil_id, vec![]),
+                        HaskellValue::Con(c_hash_id, vec![HaskellValue::Lit(Literal::LitChar('i'))]),
+                        HaskellValue::Con(nil_id, vec![]),
                     ],
                 ),
             ],

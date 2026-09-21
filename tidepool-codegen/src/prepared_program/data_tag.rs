@@ -190,7 +190,7 @@ mod tests {
             }
             assert!(matches!(
                 result.values.as_slice(),
-                [tidepool_bridge::Value::Lit(Literal::LitInt(6))]
+                [tidepool_bridge::HaskellValue::Lit(Literal::LitInt(6))]
             ));
         }
     }

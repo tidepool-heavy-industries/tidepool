@@ -1,4 +1,4 @@
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_bridge::{BridgeError, FromHaskell, ToHaskell};
 use tidepool_repr::{DataCon, DataConId, DataConTable, Literal, SrcBang};
 
@@ -22,7 +22,7 @@ fn get_table() -> DataConTable {
 #[test]
 fn test_type_mismatch_int_to_string() {
     let table = get_table();
-    let val = Value::Lit(Literal::LitInt(42));
+    let val = HaskellValue::Lit(Literal::LitInt(42));
     let res = String::from_value(&val, &table);
     assert!(matches!(res, Err(BridgeError::TypeMismatch { .. })));
 }
@@ -30,7 +30,7 @@ fn test_type_mismatch_int_to_string() {
 #[test]
 fn test_type_mismatch_int_to_bool() {
     let table = get_table();
-    let val = Value::Lit(Literal::LitInt(1));
+    let val = HaskellValue::Lit(Literal::LitInt(1));
     let res = bool::from_value(&val, &table);
     assert!(matches!(res, Err(BridgeError::TypeMismatch { .. })));
 }
@@ -40,12 +40,12 @@ fn test_arity_mismatch_tuple() {
     let table = get_table();
     let triple_id = table.get_by_name("(,,)").unwrap();
     // Try to deserialize a 3-field Con as a 2-field tuple
-    let val = Value::Con(
+    let val = HaskellValue::Con(
         triple_id,
         vec![
-            Value::Lit(Literal::LitInt(1)),
-            Value::Lit(Literal::LitInt(2)),
-            Value::Lit(Literal::LitInt(3)),
+            HaskellValue::Lit(Literal::LitInt(1)),
+            HaskellValue::Lit(Literal::LitInt(2)),
+            HaskellValue::Lit(Literal::LitInt(3)),
         ],
     );
     let res = <(i64, i64)>::from_value(&val, &table);
@@ -131,12 +131,12 @@ fn test_text_decode_wrong_shape() {
     let table = get_table();
     let text_id = table.get_by_name("Text").unwrap();
     let false_id = table.get_by_name("False").unwrap();
-    let val = Value::Con(
+    let val = HaskellValue::Con(
         text_id,
         vec![
-            Value::Con(false_id, vec![]), // the wrong shape
-            Value::Lit(Literal::LitInt(0)),
-            Value::Lit(Literal::LitInt(0)),
+            HaskellValue::Con(false_id, vec![]), // the wrong shape
+            HaskellValue::Lit(Literal::LitInt(0)),
+            HaskellValue::Lit(Literal::LitInt(0)),
         ],
     );
     let res = String::from_value(&val, &table);

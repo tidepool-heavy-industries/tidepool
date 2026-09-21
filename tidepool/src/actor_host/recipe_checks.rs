@@ -7,7 +7,7 @@ use crate::generated::recipe_check::RecipeCheckReq;
 use crate::shoal::workspace::FrozenWorkspace;
 use std::collections::VecDeque;
 use tidepool_bridge::FromHaskell;
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext, Response};
 use tidepool_effect::error::EffectError;
 use tidepool_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
@@ -425,7 +425,7 @@ impl Driver {
 impl DispatchEffect for Driver {
     fn dispatch(
         &mut self,
-        request: &Value,
+        request: &HaskellValue,
         cx: &EffectContext<'_>,
     ) -> std::result::Result<Option<Response>, EffectError> {
         let request = RecipeCheckReq::from_value(request, cx.table())?;

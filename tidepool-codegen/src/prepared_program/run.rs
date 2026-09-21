@@ -6,7 +6,7 @@ use crate::machine_state::MachineFailure;
 use crate::machine_state::{MachineDisposition, MachineState};
 use crate::prepared_control::CallStatus;
 use std::sync::{atomic::AtomicBool, Arc};
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_repr::execution_schema::ValueId;
 use tidepool_repr::execution_schema::{Atom, HeapRhs, RuntimeRep, SymbolIdentity, ValueRef};
@@ -31,7 +31,7 @@ impl Default for RunOptions {
 
 #[derive(Debug)]
 pub struct RunResult {
-    pub values: Vec<Value>,
+    pub values: Vec<HaskellValue>,
     pub collections: u64,
 }
 

@@ -149,7 +149,7 @@ fn pap_undersaturation_allocates() {
         .expect("the adapter must receive the allocated PAP");
     assert!(matches!(
         result.values.as_slice(),
-        [tidepool_bridge::Value::Con(id, fields)]
+        [tidepool_bridge::HaskellValue::Con(id, fields)]
             if *id == crate::observation::CLOSURE_SENTINEL && fields.is_empty()
     ));
 }
@@ -184,7 +184,7 @@ fn pap_allocation_cancellation_publishes_no_result() {
     );
     assert!(matches!(
         retry.as_ref().map(|result| result.values.as_slice()),
-        Ok([tidepool_bridge::Value::Con(id, fields)])
+        Ok([tidepool_bridge::HaskellValue::Con(id, fields)])
             if *id == crate::observation::CLOSURE_SENTINEL && fields.is_empty()
     ));
 }
@@ -201,7 +201,7 @@ fn pap_exact_application_calls() {
         .expect("the exact PAP call completes through the generated adapter");
     assert!(matches!(
         result.values.as_slice(),
-        [tidepool_bridge::Value::Con(id, fields)]
+        [tidepool_bridge::HaskellValue::Con(id, fields)]
             if *id == tidepool_repr::DataConId(981) && fields.is_empty()
     ));
 }
@@ -357,7 +357,7 @@ fn pap_partial_to_partial_flattens_mixed_prefix_across_collection() {
     assert!(result.collections > 0);
     assert!(matches!(
         result.values.as_slice(),
-        [tidepool_bridge::Value::Con(id, fields)]
+        [tidepool_bridge::HaskellValue::Con(id, fields)]
             if *id == tidepool_repr::DataConId(985) && fields.is_empty()
     ));
 }
@@ -486,7 +486,7 @@ fn pap_oversaturation_applies_remainder() {
         .expect("oversaturation must route the generated suffix dispatcher");
     assert!(matches!(
         result.values.as_slice(),
-        [tidepool_bridge::Value::Con(id, fields)]
+        [tidepool_bridge::HaskellValue::Con(id, fields)]
             if *id == tidepool_repr::DataConId(982) && fields.is_empty()
     ));
 }
@@ -625,7 +625,7 @@ fn pap_oversaturation_enters_a_thunk_result_before_suffix_dispatch() {
         .expect("oversaturation suffix enters the returned thunk");
     assert!(matches!(
         result.values.as_slice(),
-        [tidepool_bridge::Value::Con(id, fields)]
+        [tidepool_bridge::HaskellValue::Con(id, fields)]
             if *id == tidepool_repr::DataConId(986) && fields.is_empty()
     ));
 }

@@ -7,7 +7,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use tidepool_bridge::ToHaskell;
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{ResidentHole, ResidentOutcome};
 
@@ -101,7 +101,7 @@ pub(crate) enum GreenDelivery<'a> {
 pub(crate) enum ServicedSuspension {
     /// The popped item was itself terminal — the PRIMARY chain's `loop` has
     /// finished.
-    Completed { result: Value, table: DataConTable },
+    Completed { result: HaskellValue, table: DataConTable },
     /// The hole was resumed; its next outcome re-enters the ready queue
     /// under the same chain.
     Resumed(GreenReady),
@@ -114,8 +114,8 @@ pub(crate) enum ServicedSuspension {
 /// Pull a plain `Int` field out of a Green request Con — every
 /// thread-id-shaped field (`AsyncJoinAnyWith`'s elements, `AsyncStatusWith`/
 /// `AsyncCancelWith`'s leading arg) shares this decode.
-pub(crate) fn green_int_field(request: &Value, idx: usize, table: &DataConTable) -> i64 {
-    let Value::Con(_, fields) = request else {
+pub(crate) fn green_int_field(request: &HaskellValue, idx: usize, table: &DataConTable) -> i64 {
+    let HaskellValue::Con(_, fields) = request else {
         return 0;
     };
     fields
@@ -127,8 +127,8 @@ pub(crate) fn green_int_field(request: &Value, idx: usize, table: &DataConTable)
 
 /// Pull an `[Int]` field out of a Green request Con (`AsyncJoinAnyWith`'s
 /// sole field).
-pub(crate) fn green_int_list_field(request: &Value, idx: usize, table: &DataConTable) -> Vec<i64> {
-    let Value::Con(_, fields) = request else {
+pub(crate) fn green_int_list_field(request: &HaskellValue, idx: usize, table: &DataConTable) -> Vec<i64> {
+    let HaskellValue::Con(_, fields) = request else {
         return Vec::new();
     };
     fields
@@ -271,7 +271,7 @@ impl SelfHarnessDriver {
     pub(crate) async fn deliver_green_resume(
         &self,
         site: &GreenResumeSite<'_>,
-        answer: Value,
+        answer: HaskellValue,
         ready: &mut VecDeque<GreenReady>,
         what: &str,
     ) -> Result<(), DriverError> {
@@ -333,7 +333,7 @@ impl SelfHarnessDriver {
         host: Option<NodeId>,
         chain: GreenChain,
         hole: &str,
-        request: &Value,
+        request: &HaskellValue,
         table: &DataConTable,
         threads: &mut HashMap<i64, GreenThread>,
         waiters: &mut HashMap<i64, Vec<(GreenChain, String)>>,
@@ -389,7 +389,7 @@ impl SelfHarnessDriver {
                 // (which bridges to `Tidepool.Aeson.Value`, the wrong TYPE
                 // for a plain `Int` `send` delivers natively — that generic
                 // wire path is for an `askUser` submission's `FromJSON`
-                // decode) and NOT a bare `Value::Lit` (unboxed; only
+                // decode) and NOT a bare `HaskellValue::Lit` (unboxed; only
                 // tolerated by the JIT's OWN synthesized `App` in
                 // `run_rooted_entry`, not by arbitrary compiled
                 // Haskell that pattern-matches `case x of I# n#`).
@@ -698,7 +698,7 @@ impl SelfHarnessDriver {
             // batch. Everything else keeps the single-item path below —
             // cheap, immediate resumes with nothing to gain from batching.
             let mut fork_batch: Vec<(GreenReady, ClassifiedSuspension)> = Vec::new();
-            let mut subagent_batch: Vec<(GreenChain, String, Value)> = Vec::new();
+            let mut subagent_batch: Vec<(GreenChain, String, HaskellValue)> = Vec::new();
             let mut rest: VecDeque<GreenReady> = VecDeque::with_capacity(green.ready.len());
             for item in green.ready.drain(..) {
                 let classified = match &item.outcome {
@@ -910,7 +910,7 @@ impl SelfHarnessDriver {
         let admitted_ref = &admitted;
         let cap = self.concurrency_cap;
         #[allow(clippy::type_complexity)]
-        let results: Vec<(usize, Result<Result<Value, String>, DriverError>)> =
+        let results: Vec<(usize, Result<Result<HaskellValue, String>, DriverError>)> =
             drive_concurrent(cap, admitted.len(), |idx| {
                 let a = &admitted_ref[idx];
                 async move {
@@ -1002,7 +1002,7 @@ impl SelfHarnessDriver {
     pub(crate) async fn drive_subagent_ready_batch(
         &self,
         node: NodeId,
-        batch: Vec<(GreenChain, String, Value)>,
+        batch: Vec<(GreenChain, String, HaskellValue)>,
         table: &DataConTable,
         green: &mut ModelRoundGreenThreadScheduler,
     ) -> Result<(), DriverError> {
@@ -1010,7 +1010,7 @@ impl SelfHarnessDriver {
         let batch_ref = &batch;
         let cap = self.concurrency_cap;
         #[allow(clippy::type_complexity)]
-        let results: Vec<(usize, Result<Value, DriverError>)> =
+        let results: Vec<(usize, Result<HaskellValue, DriverError>)> =
             drive_concurrent(cap, batch.len(), |idx| {
                 let (_, _, request) = &batch_ref[idx];
                 async move {

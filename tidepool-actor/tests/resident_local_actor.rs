@@ -3,7 +3,7 @@
 use tidepool_actor::{
     ActorDescriptor, ActorPlacement, ActorWorkbenchSource, LocalResidentDeployment, ResidentForest,
 };
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
@@ -37,7 +37,7 @@ struct NoHandlers;
 impl DispatchEffect<TestSink> for NoHandlers {
     fn dispatch(
         &mut self,
-        _request: &Value,
+        _request: &HaskellValue,
         _context: &EffectContext<'_, TestSink>,
     ) -> Result<Option<Response>, EffectError> {
         Ok(None)

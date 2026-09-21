@@ -22,7 +22,7 @@ use tidepool_bridge_derive::FromHaskell;
 pub enum AgentLaunchReq {
     AgentLaunchWith(
         String,
-        tidepool_bridge::Value,
+        tidepool_bridge::HaskellValue,
         crate::ActorLaunchRoleWire,
         crate::ActorEffectProfileWire,
         Vec<String>,

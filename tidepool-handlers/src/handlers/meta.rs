@@ -145,7 +145,7 @@ impl MetaHandler {
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use tidepool_bridge::Value;
+    use tidepool_bridge::HaskellValue;
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
 
     #[test]
@@ -155,7 +155,7 @@ mod tests {
         let cx = EffectContext::with_user(&table, &captured);
         let mut handlers = frunk::hlist![MetaHandler::new(vec![], vec![])];
         let con_id = table.get_by_name("MetaVersion").unwrap();
-        let request = Value::Con(con_id, vec![]);
+        let request = HaskellValue::Con(con_id, vec![]);
         let result = response_value(
             handlers
                 .dispatch(&request, &cx)
@@ -164,7 +164,7 @@ mod tests {
             &table,
         );
         match &result {
-            Value::Con(id, _) => {
+            HaskellValue::Con(id, _) => {
                 let name = table.name_of(*id).unwrap();
                 assert_eq!(name, "Text", "MetaVersion should return a Text");
             }
@@ -179,7 +179,7 @@ mod tests {
         let cx = EffectContext::with_user(&table, &captured);
         let mut handlers = frunk::hlist![MetaHandler::new(vec![], vec![])];
         let con_id = table.get_by_name("MetaPrimOps").unwrap();
-        let request = Value::Con(con_id, vec![]);
+        let request = HaskellValue::Con(con_id, vec![]);
         let result = response_value(
             handlers
                 .dispatch(&request, &cx)

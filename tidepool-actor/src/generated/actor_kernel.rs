@@ -20,14 +20,14 @@ use tidepool_bridge_derive::FromHaskell;
               that exists only here and is never reused"
 )]
 pub enum ActorKernelReq {
-    ActorInstallShutdownWith(i64, tidepool_bridge::Value),
+    ActorInstallShutdownWith(i64, tidepool_bridge::HaskellValue),
     ActorReadyWith,
-    ActorReplyWith(i64, tidepool_bridge::Value),
-    ActorContinueWith(i64, tidepool_bridge::Value),
-    ActorInstallProgressSourceWith(i64, tidepool_bridge::Value),
-    ActorInstallSettlementSourceWith(i64, tidepool_bridge::Value),
-    ActorInstallCommandSourceWith(String, tidepool_bridge::Value),
-    ActorInstallLifecycleSourceWith((i64, i64), tidepool_bridge::Value),
+    ActorReplyWith(i64, tidepool_bridge::HaskellValue),
+    ActorContinueWith(i64, tidepool_bridge::HaskellValue),
+    ActorInstallProgressSourceWith(i64, tidepool_bridge::HaskellValue),
+    ActorInstallSettlementSourceWith(i64, tidepool_bridge::HaskellValue),
+    ActorInstallCommandSourceWith(String, tidepool_bridge::HaskellValue),
+    ActorInstallLifecycleSourceWith((i64, i64), tidepool_bridge::HaskellValue),
     ActorLifecycleInputWith,
     ActorCommandInputWith,
 }

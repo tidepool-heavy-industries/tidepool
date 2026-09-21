@@ -514,7 +514,7 @@ mod tests {
         assert!(matches!(
             result,
             Ok(super::super::RunResult { values, .. })
-                if matches!(values.as_slice(), [tidepool_bridge::Value::Lit(
+                if matches!(values.as_slice(), [tidepool_bridge::HaskellValue::Lit(
                     tidepool_repr::Literal::LitWord(1)
                 )])
         ));

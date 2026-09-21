@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use tidepool_bridge::ToHaskell;
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_repr::DataConTable;
 
 use super::rendered_result_snippet;
@@ -22,8 +22,8 @@ impl SelfHarnessDriver {
     /// raised (distinct from [`Self::service_askuser_hole`], which handles a
     /// nested ANSWERER's form). Present `shape` via the operator gate
     /// ([`OperatorGate::present_form`]),
-    /// convert the flat submission into the `Value` `askUserRaw :: Value -> M
-    /// Value` returns ([`engine::json_answer_to_value`] against the outer
+    /// convert the flat submission into the `HaskellValue` `askUserRaw :: HaskellValue -> M
+    /// HaskellValue` returns ([`engine::json_answer_to_value`] against the outer
     /// compile's `table`), and resume the OUTER session — repeating while the
     /// resume lands on ANOTHER `AskUser` suspension, since `askUser` re-prompts
     /// by RECURSION on a decode failure (no `Either`; the retry is entirely
@@ -112,10 +112,10 @@ impl SelfHarnessDriver {
     /// completely silent (no `Event`, no gate call, no `tracing` line).
     pub(crate) async fn service_outer_subagent(
         &self,
-        request: &Value,
+        request: &HaskellValue,
         table: &DataConTable,
         source: FormSource,
-    ) -> Result<Value, DriverError> {
+    ) -> Result<HaskellValue, DriverError> {
         let gate = self.resolve_gate(&source);
         gate.delegation_progress(&DelegationPhase::Started {
             brief: rendered_result_snippet(&request.to_string()),
@@ -185,10 +185,10 @@ impl SelfHarnessDriver {
     pub(crate) fn service_outer_effect(
         &self,
         kind: engine::OuterEffectKind,
-        request: &Value,
+        request: &HaskellValue,
         table: &DataConTable,
         terminal_async: &[i64],
-    ) -> Result<Value, DriverError> {
+    ) -> Result<HaskellValue, DriverError> {
         if kind == engine::OuterEffectKind::Console {
             if let Ok(tidepool_handlers::ConsoleReq::Print(text)) =
                 <tidepool_handlers::ConsoleReq as tidepool_bridge::FromHaskell>::from_value(
@@ -275,9 +275,9 @@ impl SelfHarnessDriver {
     /// the scheduler.
     pub(crate) fn poll_repo_event_await(
         &mut self,
-        request: &Value,
+        request: &HaskellValue,
         table: &DataConTable,
-    ) -> Result<Option<Value>, DriverError> {
+    ) -> Result<Option<HaskellValue>, DriverError> {
         use tidepool_bridge::FromHaskell;
         let mut handlers = self.handlers.lock();
         let handler = handlers.event.as_mut().ok_or_else(|| {
@@ -328,13 +328,13 @@ impl SelfHarnessDriver {
     }
 
     /// The shared decode-dispatch-convert shape every outer-row effect
-    /// suspension goes through: decode the ORIGINAL suspended request `Value`
+    /// suspension goes through: decode the ORIGINAL suspended request `HaskellValue`
     /// via the handler's generated `<Eff>Req: FromHaskell` (against the loop
     /// compile's own table — never JSON-probed), dispatch it into `handler`
     /// under `tokio::task::block_in_place` (the same discipline every
     /// `OperatorGate` call and [`Self::service_outer_subagent`] use), and
     /// convert the [`tidepool_effect::Response`] back into a resumable
-    /// `Value` — a `Complete` value as-is, a `List` folded into a cons chain
+    /// `HaskellValue` — a `Complete` value as-is, a `List` folded into a cons chain
     /// from its carried `cons_id`/`nil_id` (mirrors the in-machine dispatch
     /// path's own fold, `tidepool_effect::machine`; a suspending outer row
     /// never reaches that path itself, so this is the suspend-side
@@ -342,9 +342,9 @@ impl SelfHarnessDriver {
     /// (`respond_list`) resumes correctly without another servicing site.
     pub(crate) fn dispatch_outer_effect<H>(
         handler: &mut H,
-        request: &Value,
+        request: &HaskellValue,
         table: &DataConTable,
-    ) -> Result<Value, tidepool_effect::EffectError>
+    ) -> Result<HaskellValue, tidepool_effect::EffectError>
     where
         H: tidepool_effect::EffectHandler<tidepool_mcp::CapturedOutput>,
     {
@@ -363,9 +363,9 @@ impl SelfHarnessDriver {
                 cons_id,
                 nil_id,
             } => {
-                let mut acc = Value::Con(nil_id, vec![]);
+                let mut acc = HaskellValue::Con(nil_id, vec![]);
                 for item in items.into_iter().rev() {
-                    acc = Value::Con(cons_id, vec![item, acc]);
+                    acc = HaskellValue::Con(cons_id, vec![item, acc]);
                 }
                 acc
             }

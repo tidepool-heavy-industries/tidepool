@@ -1,9 +1,7 @@
-//! serde_json → the runtime `Value` (the vendored `Tidepool.Aeson.Value` ADT).
+//! serde_json → the runtime `HaskellValue` (the vendored `Tidepool.Aeson.Value` ADT).
 //!
 //! This is the ONE source of truth for how a parsed JSON document is built as a
-//! Tidepool `Value`, shared by:
-//!   - the pure `JsonDecode` primop, via the `runtime_json_decode` host fn in
-//!     `tidepool-codegen`, and
+//! Tidepool `HaskellValue`, shared by:
 //!   - `tidepool-bridge`'s `impl ToHaskell for serde_json::Value` (effect results
 //!     that hand JSON back to Haskell), which delegates here.
 //!
@@ -19,27 +17,18 @@
 //! (`IS`/`IP`/`IN`) and the exponent an `Int`. No Double rounding, so a >i64 or
 //! high-precision literal survives round-trip intact (BUG-8).
 //!
-//! The Value-level shape primitives (Text/list/Map/number construction) live
+//! The HaskellValue-level shape primitives (Text/list/Map/number construction) live
 //! in [`crate::shapes`] — this module owns only the JSON-document policy
-//! (key sorting, Either wrapping, resolving [`JsonConIds`]) on top of them.
+//! (key sorting and resolving [`JsonConIds`]) on top of them.
 
-use crate::value::Value;
+use crate::value::HaskellValue;
 use tidepool_repr::{DataConId, DataConTable};
 
-/// `DataConId`s of every constructor needed to build a `Value` (and optionally an
-/// `Either Text Value`). `Copy` so it can be carried by value on [`crate::env::Env`]
+/// `DataConId`s of every constructor needed to build a `HaskellValue`.
 /// (see [`crate::env::EvalIds`]), with no borrow of the originating `DataConTable`.
 ///
-/// `left`/`right` are `Option<DataConId>` because `json_to_value` does not
-/// need them — only `decode_json_str` (the `JsonDecode` primop) does. This lets
-/// `tidepool-bridge`'s `ToHaskell for serde_json::Value` use `from_table` even when
-/// the program's `DataConTable` has no `Either` in scope.
 #[derive(Debug, Clone, Copy)]
 pub struct JsonConIds {
-    /// `Left` constructor (arity 1) — `None` when `Either` is not in scope.
-    pub left: Option<DataConId>,
-    /// `Right` constructor (arity 1) — `None` when `Either` is not in scope.
-    pub right: Option<DataConId>,
     /// `Object` constructor (arity 1, wraps the backing `Data.Map`).
     pub object: DataConId,
     /// `Array` constructor (arity 1, wraps the backing cons list).
@@ -80,11 +69,7 @@ pub struct JsonConIds {
 
 impl JsonConIds {
     /// Resolve constructor ids from a table. Returns `None` if any Haskell value,
-    /// `Data.Map` / `Text` constructor is absent. `left`/`right` are optional:
-    /// they are set to `Some` only when `Either` is in scope. Callers that need
-    /// `decode_json_str` (the `JsonDecode` primop) must check that both are
-    /// `Some`; callers that only need `json_to_value` (e.g. `tidepool-bridge`)
-    /// can ignore them.
+    /// `Data.Map` / `Text` constructor is absent.
     ///
     /// Tip resolution uses `get_companion` first so that when both
     /// `Data.Map.Tip` and `Data.Set.Tip` are present (cross-module closure) the
@@ -98,8 +83,6 @@ impl JsonConIds {
             .or_else(|| table.get_companion(bin, "Tip", 0))
             .or_else(|| table.get_by_name_arity("Tip", 0))?;
         Some(JsonConIds {
-            left: table.get_by_name_arity("Left", 1),
-            right: table.get_by_name_arity("Right", 1),
             object: table.get_by_name_arity("Object", 1)?,
             array: table.get_by_name_arity("Array", 1)?,
             string: table.get_by_name_arity("String", 1)?,
@@ -123,18 +106,18 @@ impl JsonConIds {
 }
 
 /// Build the worker `Text ByteArray# Int# Int#` for a UTF-8 string (offset 0).
-fn text_value(s: &str, ids: &JsonConIds) -> Value {
+fn text_value(s: &str, ids: &JsonConIds) -> HaskellValue {
     crate::shapes::make_text(s, ids.text)
 }
 
-/// Build a `[Value]` cons list (`:`/`[]`) from already-converted elements.
-fn list_value(items: Vec<Value>, ids: &JsonConIds) -> Value {
+/// Build a `[HaskellValue]` cons list (`:`/`[]`) from already-converted elements.
+fn list_value(items: Vec<HaskellValue>, ids: &JsonConIds) -> HaskellValue {
     crate::shapes::make_list(items, ids.cons, ids.nil)
 }
 
-/// Build a `Data.Map.Strict.Map Key Value` from key-sorted entries by
+/// Build a `Data.Map.Strict.Map Key HaskellValue` from key-sorted entries by
 /// divide-and-conquer (`Bin size k v left right` / `Tip`, size boxed as `I#`).
-fn map_value(entries: &[(&String, &serde_json::Value)], ids: &JsonConIds) -> Value {
+fn map_value(entries: &[(&String, &serde_json::Value)], ids: &JsonConIds) -> HaskellValue {
     if entries.is_empty() {
         return crate::shapes::map_tip(ids.tip);
     }
@@ -153,15 +136,15 @@ fn map_value(entries: &[(&String, &serde_json::Value)], ids: &JsonConIds) -> Val
     )
 }
 
-/// Convert a parsed `serde_json::Value` to the eval `Value` for the vendored
+/// Convert a parsed `serde_json::Value` to the eval `HaskellValue` for the vendored
 /// aeson `Value` type. Recursion depth is bounded by serde_json's own nesting
 /// limit (128 by default), so this never approaches host-stack exhaustion.
-pub fn json_to_value(j: &serde_json::Value, ids: &JsonConIds) -> Value {
+pub fn json_to_value(j: &serde_json::Value, ids: &JsonConIds) -> HaskellValue {
     match j {
-        serde_json::Value::Null => Value::Con(ids.null, vec![]),
+        serde_json::Value::Null => HaskellValue::Con(ids.null, vec![]),
         serde_json::Value::Bool(b) => {
-            let inner = Value::Con(if *b { ids.true_con } else { ids.false_con }, vec![]);
-            Value::Con(ids.bool_con, vec![inner])
+            let inner = HaskellValue::Con(if *b { ids.true_con } else { ids.false_con }, vec![]);
+            HaskellValue::Con(ids.bool_con, vec![inner])
         }
         serde_json::Value::Number(n) => crate::shapes::scientific_from_number(
             n,
@@ -173,22 +156,22 @@ pub fn json_to_value(j: &serde_json::Value, ids: &JsonConIds) -> Value {
                 in_: ids.in_,
             },
         ),
-        serde_json::Value::String(s) => Value::Con(ids.string, vec![text_value(s, ids)]),
+        serde_json::Value::String(s) => HaskellValue::Con(ids.string, vec![text_value(s, ids)]),
         serde_json::Value::Array(arr) => {
             let items = arr.iter().map(|v| json_to_value(v, ids)).collect();
-            Value::Con(ids.array, vec![list_value(items, ids)])
+            HaskellValue::Con(ids.array, vec![list_value(items, ids)])
         }
         serde_json::Value::Object(map) => {
             let mut entries: Vec<(&String, &serde_json::Value)> = map.iter().collect();
             entries.sort_by(|a, b| a.0.cmp(b.0));
-            Value::Con(ids.object, vec![map_value(&entries, ids)])
+            HaskellValue::Con(ids.object, vec![map_value(&entries, ids)])
         }
     }
 }
 
-/// The exact node count of the `Value` [`json_to_value`] would build for `j` —
+/// The exact node count of the `HaskellValue` [`json_to_value`] would build for `j` —
 /// equal to `json_to_value(j, ids).node_count()` for ANY `ids`, since
-/// [`Value::node_count`] walks tree SHAPE and ignores constructor ids. Lets a
+/// [`HaskellValue::node_count`] walks tree SHAPE and ignores constructor ids. Lets a
 /// caller reject a response that would overflow the effect-response
 /// materialization cap with a TYPED error, before it reaches the generic
 /// mid-effect abort in `tidepool-codegen`.
@@ -197,7 +180,7 @@ pub fn json_to_value(j: &serde_json::Value, ids: &JsonConIds) -> Value {
 /// to a `Data.Map` spine adds a `Bin` node, a boxed `I#` size, and a boxed
 /// `Text` key PER ENTRY (an object bridges several-fold larger than its serde
 /// node count), which is why an approximate serde-side guard let object-heavy
-/// responses slip past and abort. This builds the real `Value` and counts it —
+/// responses slip past and abort. This builds the real `HaskellValue` and counts it —
 /// the same work the machine does on the abort path (`resp_val.node_count()`),
 /// so the numbers agree by construction; cheap relative to the network fetch.
 #[must_use]
@@ -205,8 +188,6 @@ pub fn bridged_node_count(j: &serde_json::Value) -> usize {
     // node_count is shape-only, so every id can be the same placeholder.
     let z = DataConId(0);
     let ids = JsonConIds {
-        left: None,
-        right: None,
         object: z,
         array: z,
         string: z,
@@ -229,57 +210,6 @@ pub fn bridged_node_count(j: &serde_json::Value) -> usize {
     json_to_value(j, &ids).node_count()
 }
 
-/// First JSON number token (in document order) whose exponent
-/// [`crate::shapes::decimal_token_exponent_overflows`] flags, if any.
-/// Recursion depth is bounded by serde_json's own nesting limit (128 by
-/// default, same rationale as `json_to_value`), so this never approaches
-/// host-stack exhaustion.
-fn find_exponent_overflow(j: &serde_json::Value) -> Option<String> {
-    match j {
-        serde_json::Value::Number(n) => {
-            let tok = n.as_str();
-            crate::shapes::decimal_token_exponent_overflows(tok).then(|| tok.to_string())
-        }
-        serde_json::Value::Array(arr) => arr.iter().find_map(find_exponent_overflow),
-        serde_json::Value::Object(map) => map.values().find_map(find_exponent_overflow),
-        _ => None,
-    }
-}
-
-/// Parse a JSON document and wrap the result: `Right v` on success, `Left <err>`
-/// (the serde_json error message as a `Text`) on any parse error. This is the
-/// semantics of the internal `eitherDecodeValue :: Text -> Either Text Value`
-/// primop that the public `eitherDecode` is derived from.
-///
-/// Returns `None` (rather than panicking) when `ids.left` or `ids.right` are
-/// absent, so callers can surface a clean error. In practice this only happens
-/// when the `DataConTable` lacks `Either` in scope — programs that reach the
-/// JSON-decode primop always have it in scope.
-pub fn decode_json_str(input: &str, ids: &JsonConIds) -> Option<Value> {
-    let left = ids.left?;
-    let right = ids.right?;
-    match serde_json::from_str::<serde_json::Value>(input) {
-        Ok(j) => {
-            // F7: an exponent too large for parse_decimal_token's `i64` would
-            // otherwise be silently zeroed (`1e99999999999999999999` -> 1×10⁰)
-            // deep inside `json_to_value`/`scientific_from_number` — a wrong
-            // answer, not a crash, so it must be caught here where a typed
-            // decode error (`Left`) is still an option.
-            if let Some(tok) = find_exponent_overflow(&j) {
-                return Some(Value::Con(
-                    left,
-                    vec![text_value(
-                        &format!("unparseable exponent in JSON number: {tok}"),
-                        ids,
-                    )],
-                ));
-            }
-            Some(Value::Con(right, vec![json_to_value(&j, ids)]))
-        }
-        Err(e) => Some(Value::Con(left, vec![text_value(&e.to_string(), ids)])),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,7 +219,7 @@ mod tests {
     fn json_test_table() -> DataConTable {
         let mut t = DataConTable::new();
         let cons = [
-            // Value constructors
+            // HaskellValue constructors
             ("Object", 0, 1),
             ("Array", 1, 1),
             ("String", 2, 1),
@@ -351,7 +281,7 @@ mod tests {
         let json = serde_json::json!({"key": "value"});
         let val = json_to_value(&json, &ids);
         match &val {
-            Value::Con(id, _) => assert_eq!(*id, ids.object),
+            HaskellValue::Con(id, _) => assert_eq!(*id, ids.object),
             other => panic!("expected Con(Object), got {other:?}"),
         }
     }
@@ -435,11 +365,11 @@ mod tests {
         let json = serde_json::json!({"a": 1, "b": 2});
         let val = json_to_value(&json, &ids);
         match &val {
-            Value::Con(id, fields) => {
+            HaskellValue::Con(id, fields) => {
                 assert_eq!(*id, ids.object);
                 // Inner map should use Data.Map.Bin (id=100), not Data.Set.Bin
                 match &fields[0] {
-                    Value::Con(bin_id, _) => assert_eq!(*bin_id, DataConId(100)),
+                    HaskellValue::Con(bin_id, _) => assert_eq!(*bin_id, DataConId(100)),
                     other => panic!("expected Con(Bin), got {other:?}"),
                 }
             }
@@ -480,8 +410,6 @@ mod tests {
         let j = serde_json::json!({"xs": [1, 2, 3], "s": "hi", "nested": {"k": true}});
         let z = DataConId(7); // arbitrary non-zero ids
         let ids = JsonConIds {
-            left: None,
-            right: None,
             object: z,
             array: z,
             string: z,
@@ -504,80 +432,4 @@ mod tests {
         assert_eq!(bridged_node_count(&j), json_to_value(&j, &ids).node_count());
     }
 
-    /// F7: `decode_json_str` on a huge-exponent JSON number must produce
-    /// `Left <err>`, not silently build `Right (Number (Scientific 1 0))`
-    /// (the `1e0` the old `unwrap_or(0)` in `parse_decimal_token` produced).
-    #[test]
-    fn decode_json_str_rejects_huge_exponent_as_left() {
-        let left_id = DataConId(1);
-        let right_id = DataConId(2);
-        let z = DataConId(9); // arbitrary non-zero placeholder for the rest
-        let ids = JsonConIds {
-            left: Some(left_id),
-            right: Some(right_id),
-            object: z,
-            array: z,
-            string: z,
-            number: z,
-            scientific: z,
-            is: z,
-            ip: z,
-            in_: z,
-            bool_con: z,
-            null: z,
-            true_con: z,
-            false_con: z,
-            bin: z,
-            tip: z,
-            i_hash: z,
-            text: z,
-            cons: z,
-            nil: z,
-        };
-        let result = decode_json_str("1e99999999999999999999", &ids).expect("ids are complete");
-        match result {
-            Value::Con(id, _) => assert_eq!(
-                id, left_id,
-                "expected Left (decode error) for an unparseable exponent, got Con#{}",
-                id.0
-            ),
-            other => panic!("expected Value::Con, got {other:?}"),
-        }
-    }
-
-    /// Sanity counterpart: an ordinary large-but-representable exponent still
-    /// decodes to `Right`.
-    #[test]
-    fn decode_json_str_accepts_ordinary_exponent_as_right() {
-        let left_id = DataConId(1);
-        let right_id = DataConId(2);
-        let z = DataConId(9);
-        let ids = JsonConIds {
-            left: Some(left_id),
-            right: Some(right_id),
-            object: z,
-            array: z,
-            string: z,
-            number: z,
-            scientific: z,
-            is: z,
-            ip: z,
-            in_: z,
-            bool_con: z,
-            null: z,
-            true_con: z,
-            false_con: z,
-            bin: z,
-            tip: z,
-            i_hash: z,
-            text: z,
-            cons: z,
-            nil: z,
-        };
-        let result = decode_json_str("1e10", &ids).expect("ids are complete");
-        match result {
-            Value::Con(id, _) => assert_eq!(id, right_id),
-            other => panic!("expected Value::Con, got {other:?}"),
-        }
-    }
 }

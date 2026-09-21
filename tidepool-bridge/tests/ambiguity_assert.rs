@@ -7,7 +7,7 @@
 //! (deterministic, but not correctness-preserving: insertion order — not
 //! type identity — decided which constructor won) and, absent an exact
 //! arity match, to the first same-name entry at ANY arity — which could
-//! build a `Value::Con` whose metadata arity disagreed with its actual
+//! build a `HaskellValue::Con` whose metadata arity disagreed with its actual
 //! field count. Both fallbacks are gone: `get_resilient` now returns `None`
 //! whenever resolution isn't unique, and every callsite's existing
 //! `.ok_or_else(...)` turns that into a `BridgeError` instead of a
@@ -80,15 +80,15 @@ fn unambiguous_i_hash_resolves_cleanly() {
     let result = 42i64
         .to_value(&t)
         .expect("unambiguous I# must encode cleanly");
-    if let tidepool_bridge::Value::Con(id, _) = result {
+    if let tidepool_bridge::HaskellValue::Con(id, _) = result {
         assert_eq!(id, DataConId(100));
     } else {
-        panic!("expected Value::Con");
+        panic!("expected HaskellValue::Con");
     }
 }
 
 /// A same-named constructor at a DIFFERENT arity must not be used as a
-/// fallback: `get_resilient` must report absence, not build a `Value::Con`
+/// fallback: `get_resilient` must report absence, not build a `HaskellValue::Con`
 /// whose metadata arity disagrees with the field it's about to carry.
 #[test]
 fn wrong_arity_same_name_is_not_a_fallback_candidate() {

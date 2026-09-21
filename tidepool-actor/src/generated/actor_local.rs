@@ -21,6 +21,6 @@ use tidepool_bridge_derive::FromHaskell;
 )]
 pub enum ActorLocalReq {
     ActorLocalContextWith,
-    ActorReceiveWith(i64, tidepool_bridge::Value),
-    ActorCheckpointWith(i64, tidepool_bridge::Value),
+    ActorReceiveWith(i64, tidepool_bridge::HaskellValue),
+    ActorCheckpointWith(i64, tidepool_bridge::HaskellValue),
 }

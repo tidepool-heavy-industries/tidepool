@@ -534,7 +534,7 @@ mod tests {
             .expect("fingerprint execution");
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::Value::Lit(
+            [tidepool_bridge::HaskellValue::Lit(
                 tidepool_repr::Literal::LitWord(0x90)
             )]
         ));

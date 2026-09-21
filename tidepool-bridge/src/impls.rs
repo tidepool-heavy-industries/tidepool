@@ -3,7 +3,7 @@ use crate::traits::{
     sealed::{FromHaskellSealed, ToHaskellSealed},
     FromHaskell, ToHaskell,
 };
-use crate::{shapes, Value};
+use crate::{shapes, HaskellValue};
 use tidepool_repr::{DataConId, DataConTable, Literal};
 
 /// Lookup for hand-written bridge impls (shared by `ToHaskell`/`FromHaskell` impls
@@ -44,18 +44,18 @@ pub fn get_resilient(table: &DataConTable, name: &str, arity: u32) -> Option<Dat
 /// (`tidepool_bridge_derive::codegen`) alike — so the "what did we actually
 /// get" wording can't drift between the two.
 #[must_use]
-pub fn type_mismatch(expected: &str, got: &Value) -> BridgeError {
+pub fn type_mismatch(expected: &str, got: &HaskellValue) -> BridgeError {
     BridgeError::TypeMismatch {
         expected: expected.to_string(),
         got: value_shape(got),
     }
 }
 
-fn value_shape(value: &Value) -> String {
+fn value_shape(value: &HaskellValue) -> String {
     match value {
-        Value::Lit(l) => format!("Lit({:?})", l),
-        Value::Con(id, _) => format!("Con({:?})", id),
-        Value::ByteArray(bs) => match bs.lock() {
+        HaskellValue::Lit(l) => format!("Lit({:?})", l),
+        HaskellValue::Con(id, _) => format!("Con({:?})", id),
+        HaskellValue::ByteArray(bs) => match bs.lock() {
             Ok(b) => format!("ByteArray(len={})", b.len()),
             Err(_) => "ByteArray(poisoned)".to_string(),
         },
@@ -70,12 +70,12 @@ fn value_shape(value: &Value) -> String {
 pub fn field_decode_error(
     constructor: &str,
     field: usize,
-    value: &Value,
+    value: &HaskellValue,
     table: &DataConTable,
     source: BridgeError,
 ) -> BridgeError {
     let observed = match value {
-        Value::Con(id, _) => table
+        HaskellValue::Con(id, _) => table
             .get(*id)
             .map(|data_con| {
                 data_con
@@ -98,10 +98,10 @@ impl<T> FromHaskellSealed for std::marker::PhantomData<T> {}
 impl<T> ToHaskellSealed for std::marker::PhantomData<T> {}
 
 impl<T> FromHaskell for std::marker::PhantomData<T> {
-    fn from_value(value: &Value, _table: &DataConTable) -> Result<Self, BridgeError> {
+    fn from_value(value: &HaskellValue, _table: &DataConTable) -> Result<Self, BridgeError> {
         match value {
-            Value::Con(_, fields) if fields.is_empty() => Ok(std::marker::PhantomData),
-            Value::Con(id, fields) => Err(BridgeError::ArityMismatch {
+            HaskellValue::Con(_, fields) if fields.is_empty() => Ok(std::marker::PhantomData),
+            HaskellValue::Con(id, fields) => Err(BridgeError::ArityMismatch {
                 con: *id,
                 expected: 0,
                 got: fields.len(),
@@ -112,31 +112,31 @@ impl<T> FromHaskell for std::marker::PhantomData<T> {
 }
 
 impl<T> ToHaskell for std::marker::PhantomData<T> {
-    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
         // PhantomData has no Haskell representation; derived fields still need
         // an arity-0 placeholder. Require "()" because another nullary
         // constructor would corrupt downstream decoding.
         let id = table
             .get_by_name_arity("()", 0)
             .ok_or_else(|| BridgeError::UnknownDataConName("()".into()))?;
-        Ok(Value::Con(id, vec![]))
+        Ok(HaskellValue::Con(id, vec![]))
     }
 }
 
 // Box
 
-// Value identity — pass through without conversion.
-impl FromHaskellSealed for Value {}
-impl ToHaskellSealed for Value {}
+// HaskellValue identity — pass through without conversion.
+impl FromHaskellSealed for HaskellValue {}
+impl ToHaskellSealed for HaskellValue {}
 
-impl ToHaskell for Value {
-    fn to_value(&self, _table: &DataConTable) -> Result<Value, BridgeError> {
+impl ToHaskell for HaskellValue {
+    fn to_value(&self, _table: &DataConTable) -> Result<HaskellValue, BridgeError> {
         Ok(self.clone())
     }
 }
 
-impl FromHaskell for Value {
-    fn from_value(value: &Value, _table: &DataConTable) -> Result<Self, BridgeError> {
+impl FromHaskell for HaskellValue {
+    fn from_value(value: &HaskellValue, _table: &DataConTable) -> Result<Self, BridgeError> {
         Ok(value.clone())
     }
 }
@@ -145,13 +145,13 @@ impl<T> FromHaskellSealed for Box<T> {}
 impl<T> ToHaskellSealed for Box<T> {}
 
 impl<T: FromHaskell> FromHaskell for Box<T> {
-    fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+    fn from_value(value: &HaskellValue, table: &DataConTable) -> Result<Self, BridgeError> {
         T::from_value(value, table).map(Box::new)
     }
 }
 
 impl<T: ToHaskell> ToHaskell for Box<T> {
-    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
         (**self).to_value(table)
     }
 }
@@ -162,22 +162,22 @@ impl FromHaskellSealed for () {}
 impl ToHaskellSealed for () {}
 
 impl ToHaskell for () {
-    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
         let id = get_resilient(table, "()", 0)
             .ok_or_else(|| BridgeError::UnknownDataConName("()".into()))?;
-        Ok(Value::Con(id, vec![]))
+        Ok(HaskellValue::Con(id, vec![]))
     }
 }
 
 impl FromHaskell for () {
-    fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+    fn from_value(value: &HaskellValue, table: &DataConTable) -> Result<Self, BridgeError> {
         match value {
             // Mirror `to_value`: only the `()` constructor decodes to unit.
             // Accepting ANY nullary con (`Nothing`, `False`, `[]`, a user
             // nullary constructor, ...) silently corrupts downstream decode —
             // exactly the failure mode `to_value`'s own comment warns about
             // for the encode direction (#F6).
-            Value::Con(id, fields) if fields.is_empty() && table.name_of(*id) == Some("()") => {
+            HaskellValue::Con(id, fields) if fields.is_empty() && table.name_of(*id) == Some("()") => {
                 Ok(())
             }
             _ => Err(type_mismatch("()", value)),
@@ -193,13 +193,13 @@ impl FromHaskellSealed for i64 {}
 impl ToHaskellSealed for i64 {}
 
 impl FromHaskell for i64 {
-    fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+    fn from_value(value: &HaskellValue, table: &DataConTable) -> Result<Self, BridgeError> {
         shapes::unbox_int(value, table).ok_or_else(|| type_mismatch("LitInt or I#", value))
     }
 }
 
 impl ToHaskell for i64 {
-    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
         let id = get_resilient(table, "I#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("I#".into()))?;
         Ok(shapes::box_int(*self, id))
@@ -212,13 +212,13 @@ impl FromHaskellSealed for u64 {}
 impl ToHaskellSealed for u64 {}
 
 impl FromHaskell for u64 {
-    fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+    fn from_value(value: &HaskellValue, table: &DataConTable) -> Result<Self, BridgeError> {
         shapes::unbox_word(value, table).ok_or_else(|| type_mismatch("LitWord or W#", value))
     }
 }
 
 impl ToHaskell for u64 {
-    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
         let id = get_resilient(table, "W#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("W#".into()))?;
         Ok(shapes::box_word(*self, id))
@@ -231,13 +231,13 @@ impl FromHaskellSealed for f64 {}
 impl ToHaskellSealed for f64 {}
 
 impl FromHaskell for f64 {
-    fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+    fn from_value(value: &HaskellValue, table: &DataConTable) -> Result<Self, BridgeError> {
         shapes::unbox_double(value, table).ok_or_else(|| type_mismatch("LitDouble or D#", value))
     }
 }
 
 impl ToHaskell for f64 {
-    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
         let id = get_resilient(table, "D#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("D#".into()))?;
         Ok(shapes::box_double(*self, id))
@@ -250,7 +250,7 @@ impl FromHaskellSealed for i32 {}
 impl ToHaskellSealed for i32 {}
 
 impl FromHaskell for i32 {
-    fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+    fn from_value(value: &HaskellValue, table: &DataConTable) -> Result<Self, BridgeError> {
         let n = i64::from_value(value, table)?;
         if n < i32::MIN as i64 || n > i32::MAX as i64 {
             return Err(BridgeError::TypeMismatch {
@@ -263,7 +263,7 @@ impl FromHaskell for i32 {
 }
 
 impl ToHaskell for i32 {
-    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
         (*self as i64).to_value(table)
     }
 }
@@ -273,9 +273,9 @@ impl FromHaskellSealed for bool {}
 impl ToHaskellSealed for bool {}
 
 impl FromHaskell for bool {
-    fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+    fn from_value(value: &HaskellValue, table: &DataConTable) -> Result<Self, BridgeError> {
         match value {
-            Value::Con(id, fields) => {
+            HaskellValue::Con(id, fields) => {
                 let true_id = get_resilient(table, "True", 0)
                     .ok_or(BridgeError::UnknownDataConName("True".into()))?;
                 let false_id = get_resilient(table, "False", 0)
@@ -299,7 +299,7 @@ impl FromHaskell for bool {
 }
 
 impl ToHaskell for bool {
-    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
         let true_id = get_resilient(table, "True", 0)
             .ok_or_else(|| BridgeError::UnknownDataConName("True".into()))?;
         let false_id = get_resilient(table, "False", 0)
@@ -313,13 +313,13 @@ impl FromHaskellSealed for char {}
 impl ToHaskellSealed for char {}
 
 impl FromHaskell for char {
-    fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+    fn from_value(value: &HaskellValue, table: &DataConTable) -> Result<Self, BridgeError> {
         shapes::unbox_char(value, table).ok_or_else(|| type_mismatch("LitChar or C#", value))
     }
 }
 
 impl ToHaskell for char {
-    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
         let id = get_resilient(table, "C#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("C#".into()))?;
         Ok(shapes::box_char(*self, id))
@@ -330,20 +330,20 @@ impl FromHaskellSealed for String {}
 impl ToHaskellSealed for String {}
 
 impl FromHaskell for String {
-    fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+    fn from_value(value: &HaskellValue, table: &DataConTable) -> Result<Self, BridgeError> {
         let text_id = get_resilient(table, "Text", 3);
         let nil_id = get_resilient(table, "[]", 0);
         let cons_id = get_resilient(table, ":", 2);
 
         match value {
             // Text constructor: Text ByteArray# off len
-            Value::Con(id, fields) if fields.len() == 3 && text_id == Some(*id) => {
+            HaskellValue::Con(id, fields) if fields.len() == 3 && text_id == Some(*id) => {
                 let bytes = shapes::text_bytes_checked(fields, table).map_err(|e| match e {
                     shapes::TextShapeError::WrongShape => {
                         type_mismatch("Text ByteArray# Int# Int#", value)
                     }
                     shapes::TextShapeError::BadBacking => match &fields[0] {
-                        Value::Con(other_id, _) => {
+                        HaskellValue::Con(other_id, _) => {
                             let name = table.name_of(*other_id).unwrap_or("<unknown>");
                             BridgeError::TypeMismatch {
                                 expected: "ByteArray or ByteArray# in Text".to_string(),
@@ -366,22 +366,22 @@ impl FromHaskell for String {
                     got: format!("Invalid UTF-8: {}", e),
                 })
             }
-            Value::Lit(Literal::LitString(bytes)) => {
+            HaskellValue::Lit(Literal::LitString(bytes)) => {
                 String::from_utf8(bytes.clone()).map_err(|e| BridgeError::TypeMismatch {
                     expected: "UTF-8 String".to_string(),
                     got: format!("Invalid UTF-8: {}", e),
                 })
             }
             // Also accept cons-cell list of Char (from ++ desugaring)
-            Value::Con(_, _) => {
+            HaskellValue::Con(_, _) => {
                 let mut chars = Vec::new();
                 let mut cur = value;
                 loop {
                     match cur {
-                        Value::Con(tag, fields) if nil_id == Some(*tag) && fields.is_empty() => {
+                        HaskellValue::Con(tag, fields) if nil_id == Some(*tag) && fields.is_empty() => {
                             break;
                         }
-                        Value::Con(tag, fields) if cons_id == Some(*tag) && fields.len() == 2 => {
+                        HaskellValue::Con(tag, fields) if cons_id == Some(*tag) && fields.len() == 2 => {
                             match shapes::unbox_char(&fields[0], table) {
                                 Some(c) => chars.push(c),
                                 None => return Err(type_mismatch("Char or C#", &fields[0])),
@@ -399,7 +399,7 @@ impl FromHaskell for String {
 }
 
 impl ToHaskell for String {
-    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
         let text_id = get_resilient(table, "Text", 3)
             .ok_or_else(|| BridgeError::UnknownDataConName("Text".into()))?;
         Ok(shapes::make_text(self, text_id))
@@ -412,12 +412,12 @@ impl<T> FromHaskellSealed for Option<T> {}
 impl<T> ToHaskellSealed for Option<T> {}
 
 impl<T: FromHaskell> FromHaskell for Option<T> {
-    fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+    fn from_value(value: &HaskellValue, table: &DataConTable) -> Result<Self, BridgeError> {
         let nothing_id = get_resilient(table, "Nothing", 0);
         let just_id = get_resilient(table, "Just", 1);
 
         match value {
-            Value::Con(id, fields) => {
+            HaskellValue::Con(id, fields) => {
                 if nothing_id == Some(*id) {
                     if fields.is_empty() {
                         Ok(None)
@@ -450,17 +450,17 @@ impl<T: FromHaskell> FromHaskell for Option<T> {
 }
 
 impl<T: ToHaskell> ToHaskell for Option<T> {
-    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
         match self {
             None => {
                 let id = get_resilient(table, "Nothing", 0)
                     .ok_or_else(|| BridgeError::UnknownDataConName("Nothing".into()))?;
-                Ok(Value::Con(id, vec![]))
+                Ok(HaskellValue::Con(id, vec![]))
             }
             Some(x) => {
                 let id = get_resilient(table, "Just", 1)
                     .ok_or_else(|| BridgeError::UnknownDataConName("Just".into()))?;
-                Ok(Value::Con(id, vec![x.to_value(table)?]))
+                Ok(HaskellValue::Con(id, vec![x.to_value(table)?]))
             }
         }
     }
@@ -470,7 +470,7 @@ impl<T> FromHaskellSealed for Vec<T> {}
 impl<T> ToHaskellSealed for Vec<T> {}
 
 impl<T: FromHaskell> FromHaskell for Vec<T> {
-    fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+    fn from_value(value: &HaskellValue, table: &DataConTable) -> Result<Self, BridgeError> {
         let nil_id =
             get_resilient(table, "[]", 0).ok_or(BridgeError::UnknownDataConName("[]".into()))?;
         let cons_id =
@@ -481,7 +481,7 @@ impl<T: FromHaskell> FromHaskell for Vec<T> {
 
         loop {
             match curr {
-                Value::Con(id, fields) => {
+                HaskellValue::Con(id, fields) => {
                     if *id == nil_id {
                         if fields.is_empty() {
                             break;
@@ -516,15 +516,15 @@ impl<T: FromHaskell> FromHaskell for Vec<T> {
 }
 
 impl<T: ToHaskell> ToHaskell for Vec<T> {
-    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
         let nil_id = get_resilient(table, "[]", 0)
             .ok_or_else(|| BridgeError::UnknownDataConName("[]".into()))?;
         let cons_id = get_resilient(table, ":", 2)
             .ok_or_else(|| BridgeError::UnknownDataConName(":".into()))?;
 
-        let mut res = Value::Con(nil_id, vec![]);
+        let mut res = HaskellValue::Con(nil_id, vec![]);
         for x in self.iter().rev() {
-            res = Value::Con(cons_id, vec![x.to_value(table)?, res]);
+            res = HaskellValue::Con(cons_id, vec![x.to_value(table)?, res]);
         }
         Ok(res)
     }
@@ -534,12 +534,12 @@ impl<T, E> FromHaskellSealed for Result<T, E> {}
 impl<T, E> ToHaskellSealed for Result<T, E> {}
 
 impl<T: FromHaskell, E: FromHaskell> FromHaskell for Result<T, E> {
-    fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+    fn from_value(value: &HaskellValue, table: &DataConTable) -> Result<Self, BridgeError> {
         let right_id = get_resilient(table, "Right", 1).or_else(|| get_resilient(table, "Ok", 1));
         let left_id = get_resilient(table, "Left", 1).or_else(|| get_resilient(table, "Err", 1));
 
         match value {
-            Value::Con(id, fields) => {
+            HaskellValue::Con(id, fields) => {
                 if right_id == Some(*id) {
                     if fields.len() == 1 {
                         Ok(Ok(T::from_value(&fields[0], table)?))
@@ -570,19 +570,19 @@ impl<T: FromHaskell, E: FromHaskell> FromHaskell for Result<T, E> {
 }
 
 impl<T: ToHaskell, E: ToHaskell> ToHaskell for Result<T, E> {
-    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
         match self {
             Ok(x) => {
                 let id = get_resilient(table, "Right", 1)
                     .or_else(|| get_resilient(table, "Ok", 1))
                     .ok_or_else(|| BridgeError::UnknownDataConName("Right/Ok".into()))?;
-                Ok(Value::Con(id, vec![x.to_value(table)?]))
+                Ok(HaskellValue::Con(id, vec![x.to_value(table)?]))
             }
             Err(e) => {
                 let id = get_resilient(table, "Left", 1)
                     .or_else(|| get_resilient(table, "Err", 1))
                     .ok_or_else(|| BridgeError::UnknownDataConName("Left/Err".into()))?;
-                Ok(Value::Con(id, vec![e.to_value(table)?]))
+                Ok(HaskellValue::Con(id, vec![e.to_value(table)?]))
             }
         }
     }
@@ -594,7 +594,7 @@ impl<A, B> FromHaskellSealed for (A, B) {}
 impl<A, B> ToHaskellSealed for (A, B) {}
 
 impl<A: FromHaskell, B: FromHaskell> FromHaskell for (A, B) {
-    fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+    fn from_value(value: &HaskellValue, table: &DataConTable) -> Result<Self, BridgeError> {
         // Missing-constructor is a DIFFERENT failure than "this value isn't a
         // pair": the old `pair_id == Some(*id)` fell through to the same
         // `TypeMismatch("(,)", ...)` in both cases, masking a table that
@@ -602,7 +602,7 @@ impl<A: FromHaskell, B: FromHaskell> FromHaskell for (A, B) {
         let pair_id = get_resilient(table, "(,)", 2)
             .ok_or_else(|| BridgeError::UnknownDataConName("(,)".into()))?;
         match value {
-            Value::Con(id, fields) if *id == pair_id => {
+            HaskellValue::Con(id, fields) if *id == pair_id => {
                 if fields.len() == 2 {
                     Ok((
                         A::from_value(&fields[0], table)?,
@@ -622,10 +622,10 @@ impl<A: FromHaskell, B: FromHaskell> FromHaskell for (A, B) {
 }
 
 impl<A: ToHaskell, B: ToHaskell> ToHaskell for (A, B) {
-    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
         let pair_id = get_resilient(table, "(,)", 2)
             .ok_or_else(|| BridgeError::UnknownDataConName("(,)".into()))?;
-        Ok(Value::Con(
+        Ok(HaskellValue::Con(
             pair_id,
             vec![self.0.to_value(table)?, self.1.to_value(table)?],
         ))
@@ -636,13 +636,13 @@ impl<A, B, C> FromHaskellSealed for (A, B, C) {}
 impl<A, B, C> ToHaskellSealed for (A, B, C) {}
 
 impl<A: FromHaskell, B: FromHaskell, C: FromHaskell> FromHaskell for (A, B, C) {
-    fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
+    fn from_value(value: &HaskellValue, table: &DataConTable) -> Result<Self, BridgeError> {
         // See the 2-tuple impl above: missing-constructor is split out of the
         // type-mismatch arm (#F6).
         let triple_id = get_resilient(table, "(,,)", 3)
             .ok_or_else(|| BridgeError::UnknownDataConName("(,,)".into()))?;
         match value {
-            Value::Con(id, fields) if *id == triple_id => {
+            HaskellValue::Con(id, fields) if *id == triple_id => {
                 if fields.len() == 3 {
                     Ok((
                         A::from_value(&fields[0], table)?,
@@ -663,10 +663,10 @@ impl<A: FromHaskell, B: FromHaskell, C: FromHaskell> FromHaskell for (A, B, C) {
 }
 
 impl<A: ToHaskell, B: ToHaskell, C: ToHaskell> ToHaskell for (A, B, C) {
-    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
+    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
         let triple_id = get_resilient(table, "(,,)", 3)
             .ok_or_else(|| BridgeError::UnknownDataConName("(,,)".into()))?;
-        Ok(Value::Con(
+        Ok(HaskellValue::Con(
             triple_id,
             vec![
                 self.0.to_value(table)?,
@@ -869,7 +869,7 @@ mod tests {
     #[test]
     fn test_unknown_datacon() {
         let table = test_table();
-        let value = Value::Con(DataConId(100), vec![]);
+        let value = HaskellValue::Con(DataConId(100), vec![]);
         let res = bool::from_value(&value, &table);
         assert!(matches!(
             res,
@@ -881,7 +881,7 @@ mod tests {
     fn test_arity_mismatch() {
         let table = test_table();
         let true_id = table.get_by_name("True").unwrap();
-        let value = Value::Con(true_id, vec![Value::Lit(Literal::LitInt(1))]);
+        let value = HaskellValue::Con(true_id, vec![HaskellValue::Lit(Literal::LitInt(1))]);
         let res = bool::from_value(&value, &table);
         assert!(matches!(res, Err(BridgeError::ArityMismatch { .. })));
     }
@@ -889,7 +889,7 @@ mod tests {
     #[test]
     fn test_type_mismatch() {
         let table = test_table();
-        let value = Value::Lit(Literal::LitInt(1));
+        let value = HaskellValue::Lit(Literal::LitInt(1));
         let res = bool::from_value(&value, &table);
         assert!(matches!(res, Err(BridgeError::TypeMismatch { .. })));
     }
@@ -930,7 +930,7 @@ mod tests {
     fn unit_from_value_rejects_other_nullary_constructors() {
         let table = test_table();
         let false_id = table.get_by_name("False").unwrap();
-        let wrong_nullary = Value::Con(false_id, vec![]);
+        let wrong_nullary = HaskellValue::Con(false_id, vec![]);
         let result = <()>::from_value(&wrong_nullary, &table);
         assert!(
             result.is_err(),
@@ -945,7 +945,7 @@ mod tests {
     #[test]
     fn pair_from_value_missing_constructor_is_unknown_dataconname_not_type_mismatch() {
         let table = DataConTable::new(); // no "(,)" registered
-        let some_other_con = Value::Con(DataConId(0), vec![]);
+        let some_other_con = HaskellValue::Con(DataConId(0), vec![]);
         let err = <(i64, i64)>::from_value(&some_other_con, &table).unwrap_err();
         assert!(
             matches!(err, BridgeError::UnknownDataConName(ref n) if n == "(,)"),
@@ -958,7 +958,7 @@ mod tests {
     #[test]
     fn pair_from_value_wrong_shape_is_still_type_mismatch() {
         let table = test_table();
-        let not_a_pair = Value::Con(table.get_by_name("Nothing").unwrap(), vec![]);
+        let not_a_pair = HaskellValue::Con(table.get_by_name("Nothing").unwrap(), vec![]);
         let err = <(i64, i64)>::from_value(&not_a_pair, &table).unwrap_err();
         assert!(
             matches!(err, BridgeError::TypeMismatch { .. }),
@@ -969,7 +969,7 @@ mod tests {
     #[test]
     fn triple_from_value_missing_constructor_is_unknown_dataconname() {
         let table = DataConTable::new(); // no "(,,)" registered
-        let some_other_con = Value::Con(DataConId(0), vec![]);
+        let some_other_con = HaskellValue::Con(DataConId(0), vec![]);
         let err = <(i64, i64, i64)>::from_value(&some_other_con, &table).unwrap_err();
         assert!(
             matches!(err, BridgeError::UnknownDataConName(ref n) if n == "(,,)"),

@@ -1,4 +1,4 @@
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_bridge::{BridgeError, ToHaskell};
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{ResidentHole, RootCustody};
@@ -44,11 +44,11 @@ pub(crate) enum RepliesReq {
     ReserveRequestWith(String, (i64, i64), bool),
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     // Duration reaches Core through its generated constructor representation.
-    SubmitRequestWith(i64, Value, (i64, i64), Option<RequestDuration>),
+    SubmitRequestWith(i64, HaskellValue, (i64, i64), Option<RequestDuration>),
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
-    AttemptReplyWith(i64, Value),
+    AttemptReplyWith(i64, HaskellValue),
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
-    ReplyWith(i64, Value),
+    ReplyWith(i64, HaskellValue),
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     ObserveResponseWith(i64),
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
@@ -58,7 +58,7 @@ pub(crate) enum RepliesReq {
     ObserveReplyWith(i64),
     AttemptAcknowledgeCancellationWith(i64),
     AcknowledgeCancellationWith(i64),
-    PublishProgressWith(i64, Value),
+    PublishProgressWith(i64, HaskellValue),
     ObserveProgressWith(i64),
     UpdateRequestWith(i64, String),
     ObserveRequestUpdateWith(i64, i64),
@@ -73,8 +73,8 @@ pub(crate) enum WatchesReq {
     #[haskell(module = "Tidepool.Agent.Watch.Internal")]
     RegisterWatchWith(String, Vec<AwaitDependency>),
     RegisterWatchGroupsWith(String, Vec<Vec<AwaitDependency>>),
-    RegisterRouteWith(String, tidepool_bridge::Value, Vec<AwaitDependency>),
-    RegisterRouteGroupsWith(String, tidepool_bridge::Value, Vec<Vec<AwaitDependency>>),
+    RegisterRouteWith(String, tidepool_bridge::HaskellValue, Vec<AwaitDependency>),
+    RegisterRouteGroupsWith(String, tidepool_bridge::HaskellValue, Vec<Vec<AwaitDependency>>),
     ObserveRouteWith(i64),
     ListRoutesWith,
     #[haskell(module = "Tidepool.Agent.Watch.Internal")]
@@ -193,7 +193,7 @@ pub(crate) fn watch_id(raw: i64) -> Result<WatchId, BridgeError> {
 pub(crate) fn reply_error_value(
     error: ReplyError,
     table: &DataConTable,
-) -> Result<Value, BridgeError> {
+) -> Result<HaskellValue, BridgeError> {
     let name = match error {
         ReplyError::UpdatePending => "ReplyUpdatePending",
         ReplyError::Stale => "ReplyStale",
@@ -208,17 +208,17 @@ pub(crate) fn reply_error_value(
 pub(crate) fn rejected_reply_value(
     error: ReplyError,
     table: &DataConTable,
-) -> Result<Value, BridgeError> {
+) -> Result<HaskellValue, BridgeError> {
     let error = reply_error_value(error, table)?;
     let constructor = tidepool_bridge::get_resilient(table, "Left", 1)
         .ok_or_else(|| BridgeError::UnknownDataConName("Left".into()))?;
-    Ok(Value::Con(constructor, vec![error]))
+    Ok(HaskellValue::Con(constructor, vec![error]))
 }
 
 pub(crate) fn response_observation_value(
     observation: Result<ResponseObservation, ReplyError>,
     table: &DataConTable,
-) -> Result<Value, BridgeError> {
+) -> Result<HaskellValue, BridgeError> {
     match observation {
         Ok(ResponseObservation::Pending) => constructor(
             table,
@@ -262,7 +262,7 @@ pub(crate) fn response_observation_value(
 pub(crate) fn cancel_request_value(
     outcome: Result<crate::CancelRequestOutcome, ReplyError>,
     table: &DataConTable,
-) -> Result<Value, BridgeError> {
+) -> Result<HaskellValue, BridgeError> {
     let (name, fields) = match outcome {
         Ok(crate::CancelRequestOutcome::Requested) => ("CancellationRequested", Vec::new()),
         Ok(crate::CancelRequestOutcome::AlreadyRequested) => {
@@ -282,7 +282,7 @@ pub(crate) fn cancel_request_value(
 pub(crate) fn abandon_response_value(
     outcome: Result<crate::AbandonResponseOutcome, ReplyError>,
     table: &DataConTable,
-) -> Result<Value, BridgeError> {
+) -> Result<HaskellValue, BridgeError> {
     let (name, fields) = match outcome {
         Ok(crate::AbandonResponseOutcome::AbandonedNow) => ("ResponseAbandonedNow", Vec::new()),
         Ok(crate::AbandonResponseOutcome::AlreadyAbandoned) => {
@@ -302,7 +302,7 @@ pub(crate) fn abandon_response_value(
 pub(crate) fn forget_response_value(
     outcome: Result<crate::ForgetResponseOutcome, ReplyError>,
     table: &DataConTable,
-) -> Result<Value, BridgeError> {
+) -> Result<HaskellValue, BridgeError> {
     let (name, fields) = match outcome {
         Ok(crate::ForgetResponseOutcome::Forgotten) => ("ResponseForgotten", Vec::new()),
         Ok(crate::ForgetResponseOutcome::StillPending) => ("ResponseForgetPending", Vec::new()),
@@ -331,7 +331,7 @@ pub(crate) fn forget_response_value(
 pub(crate) fn forget_watch_value(
     outcome: Result<crate::ForgetWatchOutcome, ReplyError>,
     table: &DataConTable,
-) -> Result<Value, BridgeError> {
+) -> Result<HaskellValue, BridgeError> {
     let (name, fields) = match outcome {
         Ok(crate::ForgetWatchOutcome::Forgotten) => ("WatchForgotten", Vec::new()),
         Ok(crate::ForgetWatchOutcome::StillPending) => ("WatchForgetPending", Vec::new()),
@@ -346,7 +346,7 @@ pub(crate) fn forget_watch_value(
 pub(crate) fn reply_observation_value(
     observation: Result<ReplyObservation, ReplyError>,
     table: &DataConTable,
-) -> Result<Value, BridgeError> {
+) -> Result<HaskellValue, BridgeError> {
     let (name, fields) = match observation {
         Ok(ReplyObservation::Open) => ("RawReplyOpen", Vec::new()),
         Ok(ReplyObservation::CancellationRequested(reason)) => (
@@ -362,7 +362,7 @@ pub(crate) fn reply_observation_value(
 fn cancellation_reason_value(
     reason: CancellationReason,
     table: &DataConTable,
-) -> Result<Value, BridgeError> {
+) -> Result<HaskellValue, BridgeError> {
     let name = match reason {
         CancellationReason::RequesterCancelled => "CancelledByRequester",
         CancellationReason::DeadlineExpired => "DeadlineExpired",
@@ -373,7 +373,7 @@ fn cancellation_reason_value(
 pub(crate) fn watch_observation_value(
     observation: Result<WatchObservation, ReplyError>,
     table: &DataConTable,
-) -> Result<Value, BridgeError> {
+) -> Result<HaskellValue, BridgeError> {
     match observation {
         Ok(WatchObservation::Pending) => constructor(
             table,
@@ -421,7 +421,7 @@ pub(crate) fn watch_observation_value(
 fn response_failure_value(
     failure: ResponseFailure,
     table: &DataConTable,
-) -> Result<Value, BridgeError> {
+) -> Result<HaskellValue, BridgeError> {
     let (name, fields) = match failure {
         ResponseFailure::TargetUnavailable => ("ResponseTargetUnavailable", Vec::new()),
         ResponseFailure::TargetFailed(summary) => {
@@ -445,13 +445,13 @@ pub(crate) fn constructor(
     table: &DataConTable,
     module: &str,
     name: &str,
-    fields: Vec<Value>,
-) -> Result<Value, BridgeError> {
+    fields: Vec<HaskellValue>,
+) -> Result<HaskellValue, BridgeError> {
     let qualified = format!("{module}.{name}");
     let constructor = table
         .get_by_qualified_name(&qualified)
         .ok_or(BridgeError::UnknownDataConName(qualified))?;
-    Ok(Value::Con(constructor, fields))
+    Ok(HaskellValue::Con(constructor, fields))
 }
 
 #[cfg(test)]

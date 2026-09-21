@@ -22,14 +22,14 @@
 //! the REAL closure stays LIVE in the suspended session's heap. The harness
 //! detects this via `finalize_is_closure` and takes the payload as a handle
 //! (`take_live_payload_handle_keep_open`) rather than bridging it to a data
-//! `Value`. An ordinary DATA value still finalizes + terminates correctly
+//! `HaskellValue`. An ordinary DATA value still finalizes + terminates correctly
 //! (`finalize_hands_up_a_plain_data_value`).
 
 use crate::support;
 
 use std::sync::Arc;
 
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::harness::AnswerContract;
 use tidepool_harness::log::{Actor, LogHeader, LogWriter};
@@ -153,9 +153,9 @@ async fn finalize_hands_up_a_plain_data_value() {
     // Accept either shape; what matters is finalize carries the value's OWN
     // native representation (not a JSON round-trip).
     let n = match &value {
-        Value::Lit(tidepool_repr::Literal::LitInt(n)) => *n,
-        Value::Con(_, fields) => match fields.as_slice() {
-            [Value::Lit(tidepool_repr::Literal::LitInt(n))] => *n,
+        HaskellValue::Lit(tidepool_repr::Literal::LitInt(n)) => *n,
+        HaskellValue::Con(_, fields) => match fields.as_slice() {
+            [HaskellValue::Lit(tidepool_repr::Literal::LitInt(n))] => *n,
             _ => panic!("expected a boxed Int (one LitInt field), got {value:?}"),
         },
         other => panic!("expected an Int value, got {other:?}"),

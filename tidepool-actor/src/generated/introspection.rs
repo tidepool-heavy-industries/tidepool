@@ -20,6 +20,6 @@ use tidepool_bridge_derive::FromHaskell;
               that exists only here and is never reused"
 )]
 pub enum IntrospectionReq {
-    IntrospectionInfoWith(tidepool_bridge::Value),
-    IntrospectionTypeOfWith(tidepool_bridge::Value),
+    IntrospectionInfoWith(tidepool_bridge::HaskellValue),
+    IntrospectionTypeOfWith(tidepool_bridge::HaskellValue),
 }

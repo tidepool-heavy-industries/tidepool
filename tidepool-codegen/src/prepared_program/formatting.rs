@@ -184,7 +184,7 @@ mod tests {
     use std::sync::{atomic::AtomicBool, Arc};
     use tidepool_repr::execution_schema::*;
 
-    fn run_intrinsic(symbol: &str, precedence: Option<i64>, value: f64) -> tidepool_bridge::Value {
+    fn run_intrinsic(symbol: &str, precedence: Option<i64>, value: f64) -> tidepool_bridge::HaskellValue {
         let mut wire = testing::wire_program();
         let predicate = symbol == "prepared_double_needs_precedence";
         let result_rep = if predicate {
@@ -416,16 +416,16 @@ mod tests {
             ),
         ] {
             assert!(matches!(run_intrinsic(symbol, precedence, value),
-                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitByteArray(ref bytes))
+                tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitByteArray(ref bytes))
                     if bytes == expected.as_bytes()));
         }
         assert!(matches!(
             run_intrinsic("prepared_double_needs_precedence", None, -0.0),
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(1))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(1))
         ));
         assert!(matches!(
             run_intrinsic("prepared_double_needs_precedence", None, -f64::NAN),
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(0))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(0))
         ));
     }
 
@@ -445,10 +445,10 @@ mod tests {
             .unwrap();
         assert!(result.collections >= 2);
         assert!(matches!(result.values.as_slice(),
-            [tidepool_bridge::Value::Con(id, fields)]
+            [tidepool_bridge::HaskellValue::Con(id, fields)]
                 if *id == tidepool_repr::DataConId(1901)
                     && matches!(fields.as_slice(),
-                        [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitByteArray(bytes))]
+                        [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitByteArray(bytes))]
                             if bytes == b"-0.0")));
     }
 }

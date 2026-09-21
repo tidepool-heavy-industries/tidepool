@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
 
 use super::binding_table::BindingIndex;
@@ -148,20 +148,20 @@ pub enum PreparedRuntimeError {
     #[error("typed site {site} has an unconstructible answer type: {reason}")]
     AnswerUnconstructible { site: u64, reason: String },
     /// The program that produced a suspension admits no decode entry
-    /// (`__decodeValue`), so a `Value`-carrying leaf of its answer could
+    /// (`__decodeValue`), so a `HaskellValue`-carrying leaf of its answer could
     /// never be lowered. Every turn template defines the entry; this is a
     /// stale or foreign artifact, never a user error.
-    #[error("program {program:?} admits no `{entry}` entry, so a Value-carrying answer cannot be decoded")]
+    #[error("program {program:?} admits no `{entry}` entry, so a HaskellValue-carrying answer cannot be decoded")]
     NoDecodeEntry {
         program: ProgramId,
         entry: &'static str,
     },
-    /// A `Value`-carrying leaf's JSON rendering did not decode back to a
+    /// A `HaskellValue`-carrying leaf's JSON rendering did not decode back to a
     /// `Tidepool.Aeson.Value.Value` (aeson's decoder disagrees with the
     /// bridge renderer that produced the text, or the leaf reached a
     /// malformed shape the renderer could not fully express). The frame
     /// stays parked; every handle built before the failure is released.
-    #[error("typed site {site} rejects a Value-carrying answer: {detail}")]
+    #[error("typed site {site} rejects a HaskellValue-carrying answer: {detail}")]
     AnswerRejected { site: u64, detail: String },
     /// A resumed handle (bare or framed) is not live in this engine's
     /// ledger: unknown, released, or minted under a different engine. The
@@ -284,8 +284,8 @@ struct ProgramFacts {
     /// A suspension of a program without one is refused before parking.
     resume: Option<ValueId>,
     /// The turn's admitted decode entry (`__decodeValue :: Text -> Either
-    /// Text Value`, beside the entry in its module), when the artifact
-    /// retained it. A `Value`-carrying leaf of an answer to a program
+    /// Text HaskellValue`, beside the entry in its module), when the artifact
+    /// retained it. A `HaskellValue`-carrying leaf of an answer to a program
     /// without one is refused before anything is built.
     decode: Option<ValueId>,
     /// The turn's admitted generic apply entries (`__applyEntry f n = settle
@@ -306,7 +306,7 @@ struct ProgramFacts {
     verb_sites: Vec<(DataConId, usize)>,
     /// Constructor identities and bridge ids by this program's local
     /// `ConstructorId`, so two programs' type graphs compare by identity
-    /// rather than local index, and a bridge `Value`'s constructor resolves
+    /// rather than local index, and a bridge `HaskellValue`'s constructor resolves
     /// to the row that admits it.
     constructors: Vec<(SymbolIdentity, DataConId)>,
     /// `constructors`, indexed by qualified identity `(module, occurrence)`
@@ -452,7 +452,7 @@ impl ProgramFacts {
             .map(|(identity, _)| identity)
     }
 
-    /// Lower a bridge `Value` offered as the answer at `site` against the type
+    /// Lower a bridge `HaskellValue` offered as the answer at `site` against the type
     /// node `node` of this (evidence-owning) program: every constructor must
     /// be one of the node's rows, every field count must match, every scalar
     /// must fit its declared representation. Text, Integer and Natural leaves
@@ -470,7 +470,7 @@ impl ProgramFacts {
         &self,
         site: u64,
         node: TypeNodeId,
-        value: &Value,
+        value: &HaskellValue,
         depth: usize,
         table: &DataConTable,
     ) -> Result<AnswerPlan, PreparedRuntimeError> {
@@ -488,7 +488,7 @@ impl ProgramFacts {
                 Ok(AnswerPlan::Json(rendered.to_string()))
             }
             Some(TypeNode::Data { rows, .. }) => {
-                let Value::Con(host_id, fields) = value else {
+                let HaskellValue::Con(host_id, fields) = value else {
                     return Err(shape("a constructor of the site's answer type is required"));
                 };
                 let row = rows
@@ -517,7 +517,7 @@ impl ProgramFacts {
                 })
             }
             Some(TypeNode::Scalar(rep)) => {
-                let Value::Lit(literal) = value else {
+                let HaskellValue::Lit(literal) = value else {
                     return Err(shape("a scalar field requires a literal"));
                 };
                 let bits = scalar_bits(*rep, literal).ok_or_else(|| {
@@ -583,15 +583,15 @@ impl ProgramFacts {
     /// `Text`: the bridge's `Text backing off len` (as `String::to_value`
     /// builds it) or a bare string literal; the slice must be in bounds and
     /// valid UTF-8. Built as `Text bytes 0 len` over a fresh byte array.
-    fn lower_text(&self, site: u64, value: &Value) -> Result<AnswerPlan, PreparedRuntimeError> {
+    fn lower_text(&self, site: u64, value: &HaskellValue) -> Result<AnswerPlan, PreparedRuntimeError> {
         let shape = |detail| PreparedRuntimeError::AnswerShape { site, detail };
         let text = self.constructor_named(TEXT_MODULE, "Text");
         let bytes = match value {
-            Value::Lit(Literal::LitString(bytes)) => bytes.clone(),
-            Value::Con(id, fields) if Some(*id) == text && fields.len() == 3 => {
+            HaskellValue::Lit(Literal::LitString(bytes)) => bytes.clone(),
+            HaskellValue::Con(id, fields) if Some(*id) == text && fields.len() == 3 => {
                 let backing = byte_backing(&fields[0])
                     .ok_or(shape("a Text answer's backing must be a byte array"))?;
-                let (Value::Lit(Literal::LitInt(off)), Value::Lit(Literal::LitInt(len))) =
+                let (HaskellValue::Lit(Literal::LitInt(off)), HaskellValue::Lit(Literal::LitInt(len))) =
                     (&fields[1], &fields[2])
                 else {
                     return Err(shape(
@@ -627,7 +627,7 @@ impl ProgramFacts {
     /// 64-bit limbs whose magnitude does not fit `IS` (GHC's invariant, which
     /// generated comparisons and conversions rely on). A bare `Int` literal
     /// is an `IS`.
-    fn lower_integer(&self, site: u64, value: &Value) -> Result<AnswerPlan, PreparedRuntimeError> {
+    fn lower_integer(&self, site: u64, value: &HaskellValue) -> Result<AnswerPlan, PreparedRuntimeError> {
         let shape = |detail| PreparedRuntimeError::AnswerShape { site, detail };
         let named = |occurrence: &str| self.constructor_named(INTEGER_MODULE, occurrence);
         let small = |host_id: DataConId, value: i64| AnswerPlan::Constructor {
@@ -635,16 +635,16 @@ impl ProgramFacts {
             fields: vec![scalar_plan(RuntimeRep::Int(64), value as u128)],
         };
         match value {
-            Value::Lit(Literal::LitInt(value)) => {
+            HaskellValue::Lit(Literal::LitInt(value)) => {
                 let is =
                     named("IS").ok_or(shape("the site's program declares no IS constructor"))?;
                 Ok(small(is, *value))
             }
-            Value::Con(id, fields) if Some(*id) == named("IS") => match fields.as_slice() {
-                [Value::Lit(Literal::LitInt(value))] => Ok(small(*id, *value)),
+            HaskellValue::Con(id, fields) if Some(*id) == named("IS") => match fields.as_slice() {
+                [HaskellValue::Lit(Literal::LitInt(value))] => Ok(small(*id, *value)),
                 _ => Err(shape("IS takes one Int literal")),
             },
-            Value::Con(id, fields) if Some(*id) == named("IP") || Some(*id) == named("IN") => {
+            HaskellValue::Con(id, fields) if Some(*id) == named("IP") || Some(*id) == named("IN") => {
                 let positive = Some(*id) == named("IP");
                 let limbs = bignat_limbs(fields).ok_or(shape(
                     "IP and IN take one canonical BigNat# payload of whole limbs",
@@ -677,7 +677,7 @@ impl ProgramFacts {
 
     /// `Natural`: `NS Word#`, or `NB` over canonical limbs above `u64::MAX`.
     /// A bare word literal, or a non-negative `Int` literal, is an `NS`.
-    fn lower_natural(&self, site: u64, value: &Value) -> Result<AnswerPlan, PreparedRuntimeError> {
+    fn lower_natural(&self, site: u64, value: &HaskellValue) -> Result<AnswerPlan, PreparedRuntimeError> {
         let shape = |detail| PreparedRuntimeError::AnswerShape { site, detail };
         let named = |occurrence: &str| self.constructor_named(NATURAL_MODULE, occurrence);
         let small = |host_id: DataConId, value: u64| AnswerPlan::Constructor {
@@ -686,17 +686,17 @@ impl ProgramFacts {
         };
         let ns = || named("NS").ok_or(shape("the site's program declares no NS constructor"));
         match value {
-            Value::Lit(Literal::LitWord(value)) => Ok(small(ns()?, *value)),
-            Value::Lit(Literal::LitInt(value)) => {
+            HaskellValue::Lit(Literal::LitWord(value)) => Ok(small(ns()?, *value)),
+            HaskellValue::Lit(Literal::LitInt(value)) => {
                 let value = u64::try_from(*value)
                     .map_err(|_| shape("a Natural answer cannot be negative"))?;
                 Ok(small(ns()?, value))
             }
-            Value::Con(id, fields) if Some(*id) == named("NS") => match fields.as_slice() {
-                [Value::Lit(Literal::LitWord(value))] => Ok(small(*id, *value)),
+            HaskellValue::Con(id, fields) if Some(*id) == named("NS") => match fields.as_slice() {
+                [HaskellValue::Lit(Literal::LitWord(value))] => Ok(small(*id, *value)),
                 _ => Err(shape("NS takes one Word literal")),
             },
-            Value::Con(id, fields) if Some(*id) == named("NB") => {
+            HaskellValue::Con(id, fields) if Some(*id) == named("NB") => {
                 let limbs = bignat_limbs(fields).ok_or(shape(
                     "NB takes one canonical BigNat# payload of whole limbs",
                 ))?;
@@ -726,22 +726,22 @@ fn is_aeson_value(family: &SymbolIdentity) -> bool {
 
 /// The raw bytes behind a bridge byte-array value, in any of the forms the
 /// bridge emits for a `ByteArray#` backing.
-fn byte_backing(value: &Value) -> Option<Vec<u8>> {
+fn byte_backing(value: &HaskellValue) -> Option<Vec<u8>> {
     match value {
-        Value::ByteArray(bytes) => Some(
+        HaskellValue::ByteArray(bytes) => Some(
             bytes
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone(),
         ),
-        Value::Lit(Literal::LitByteArray(bytes) | Literal::LitString(bytes)) => Some(bytes.clone()),
+        HaskellValue::Lit(Literal::LitByteArray(bytes) | Literal::LitString(bytes)) => Some(bytes.clone()),
         _ => None,
     }
 }
 
 /// The one `BigNat#` payload of an `IP`/`IN`/`NB` constructor as canonical
 /// little-endian limbs: whole 64-bit words, at least one, top limb nonzero.
-fn bignat_limbs(fields: &[Value]) -> Option<Vec<u8>> {
+fn bignat_limbs(fields: &[HaskellValue]) -> Option<Vec<u8>> {
     let [payload] = fields else {
         return None;
     };
@@ -868,11 +868,11 @@ const UNSITED: u64 = 0;
 
 /// A boxed or unboxed non-negative `Int` field: the leading site argument of
 /// an extractor-sited kernel request.
-fn site_field(field: &Value, table: &DataConTable) -> Option<u64> {
+fn site_field(field: &HaskellValue, table: &DataConTable) -> Option<u64> {
     match field {
-        Value::Lit(Literal::LitInt(n)) => u64::try_from(*n).ok(),
-        Value::Con(id, inner) if table.name_of(*id) == Some("I#") => match inner.as_slice() {
-            [Value::Lit(Literal::LitInt(n))] => u64::try_from(*n).ok(),
+        HaskellValue::Lit(Literal::LitInt(n)) => u64::try_from(*n).ok(),
+        HaskellValue::Con(id, inner) if table.name_of(*id) == Some("I#") => match inner.as_slice() {
+            [HaskellValue::Lit(Literal::LitInt(n))] => u64::try_from(*n).ok(),
             _ => None,
         },
         _ => None,
@@ -885,14 +885,14 @@ fn site_field(field: &Value, table: &DataConTable) -> Option<u64> {
 /// (`tidepool-protocol`'s `ObjectValue::Site`), the same field the harness
 /// uses to classify a suspension. `None` for a request that carries no such
 /// field: an ordinary handled effect.
-fn typed_site_of(request: &Value, table: &DataConTable) -> Option<u64> {
-    /// The `Text`/string-literal content of an aeson `Key`/`Value` leaf.
-    fn value_text(value: &Value, table: &DataConTable) -> Option<String> {
+fn typed_site_of(request: &HaskellValue, table: &DataConTable) -> Option<u64> {
+    /// The `Text`/string-literal content of an aeson `Key`/`HaskellValue` leaf.
+    fn value_text(value: &HaskellValue, table: &DataConTable) -> Option<String> {
         match value {
-            Value::Lit(Literal::LitString(bytes)) => {
+            HaskellValue::Lit(Literal::LitString(bytes)) => {
                 std::str::from_utf8(bytes).ok().map(str::to_owned)
             }
-            Value::Con(id, fields) if table.name_of(*id) == Some("Text") => {
+            HaskellValue::Con(id, fields) if table.name_of(*id) == Some("Text") => {
                 tidepool_bridge::shapes::text_bytes_clamped(fields, table)
                     .and_then(|bytes| String::from_utf8(bytes).ok())
             }
@@ -903,25 +903,25 @@ fn typed_site_of(request: &Value, table: &DataConTable) -> Option<u64> {
     /// integral literal, or an aeson `Number` wrapping one. This is the one
     /// leaf this walk ever renders through the generic JSON decoder — never
     /// the whole request.
-    fn value_u64(value: &Value, table: &DataConTable) -> Option<u64> {
+    fn value_u64(value: &HaskellValue, table: &DataConTable) -> Option<u64> {
         match value {
-            Value::Lit(Literal::LitInt(n)) => u64::try_from(*n).ok(),
-            Value::Lit(Literal::LitWord(n)) => Some(*n),
-            Value::Con(_, _) => match crate::render::value_to_json(value, table, 0) {
+            HaskellValue::Lit(Literal::LitInt(n)) => u64::try_from(*n).ok(),
+            HaskellValue::Lit(Literal::LitWord(n)) => Some(*n),
+            HaskellValue::Con(_, _) => match crate::render::value_to_json(value, table, 0) {
                 serde_json::Value::Number(n) => n.as_u64(),
                 _ => None,
             },
             _ => None,
         }
     }
-    /// Walk the request's `Value` tree directly (never its JSON rendering)
+    /// Walk the request's `HaskellValue` tree directly (never its JSON rendering)
     /// looking for an aeson `Object` layer with a `typedSite` entry, the same
     /// depth bound (4) the JSON walk used.
-    fn search(value: &Value, table: &DataConTable, depth: usize) -> Option<u64> {
+    fn search(value: &HaskellValue, table: &DataConTable, depth: usize) -> Option<u64> {
         if depth > 4 {
             return None;
         }
-        let Value::Con(id, fields) = value else {
+        let HaskellValue::Con(id, fields) = value else {
             return None;
         };
         if table.name_of(*id) == Some("Object") {
@@ -1124,7 +1124,7 @@ const SETTLE_CALL: PreparedCallOptions = PreparedCallOptions {
 /// id and the observed request.
 pub struct PreparedParked {
     pub id: ContinuationId,
-    pub request: Value,
+    pub request: HaskellValue,
 }
 
 /// A parked frame re-entered by [`PreparedEngine::resume_parked`]: the
@@ -1426,7 +1426,7 @@ impl PreparedEngine {
                 }
                 continue;
             };
-            let BoundValue::Prepared { handle, .. } = &entry.value;
+            let BoundValue { handle, .. } = &entry.value;
             let handle = *handle;
             let evaluated = self
                 .machine
@@ -1865,7 +1865,7 @@ impl PreparedEngine {
                 .map(|witness| (site, witness.owner))
                 .ok_or(PreparedRuntimeError::UnknownSite { site }),
             None => match &request {
-                Value::Con(host_id, fields) => Ok(self
+                HaskellValue::Con(host_id, fields) => Ok(self
                     .verb_sites
                     .get(host_id)
                     .and_then(|witness| {
@@ -1945,17 +1945,17 @@ impl PreparedEngine {
         payload: PreparedHandle,
         realm: RealmId,
         policy: LivePayloadPolicy,
-        request: &Value,
+        request: &HaskellValue,
     ) -> Result<Option<tidepool_codegen::old_space::RootSlot>, ExecutionError> {
         let field = match policy {
             LivePayloadPolicy::None => None,
             LivePayloadPolicy::ClosureField(field) => {
-                matches!(request, Value::Con(_, fields)
+                matches!(request, HaskellValue::Con(_, fields)
                     if fields.get(field).is_some_and(tidepool_codegen::observation::contains_closure_sentinel))
                 .then_some(field)
             }
             LivePayloadPolicy::ValueField(field) => {
-                matches!(request, Value::Con(_, fields) if field < fields.len()).then_some(field)
+                matches!(request, HaskellValue::Con(_, fields) if field < fields.len()).then_some(field)
             }
         };
         let Some(field) = field else {
@@ -2131,7 +2131,7 @@ impl PreparedEngine {
     /// Re-enter the frame parked under `id` with a constructor whose final
     /// field borrows `raw` verbatim: `prefix` is lowered against the site's
     /// declared row for `constructor` exactly as an ordinary answer's fields
-    /// are (`Value`-carrying prefix fields resolve through the decode entry
+    /// are (`HaskellValue`-carrying prefix fields resolve through the decode entry
     /// the same way), and the borrowed field is spliced in unvalidated
     /// beyond its `RuntimeRep`, under the framed-delivery contract
     /// (`docs/continuation-parking-contract.md`). The built constructor is
@@ -2142,7 +2142,7 @@ impl PreparedEngine {
         id: ContinuationId,
         raw: ValueHandle,
         constructor: DataConId,
-        prefix: Vec<Value>,
+        prefix: Vec<HaskellValue>,
         table: &DataConTable,
     ) -> Result<PreparedResumed, PreparedRuntimeError> {
         let handle = self
@@ -2249,7 +2249,7 @@ impl PreparedEngine {
     fn answer_plan(
         &self,
         id: ContinuationId,
-        value: &Value,
+        value: &HaskellValue,
         table: &DataConTable,
     ) -> Result<AnswerPlan, PreparedRuntimeError> {
         let (_, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
@@ -2262,7 +2262,7 @@ impl PreparedEngine {
             // interned descriptor (`Nothing` closing a stateful actor's
             // receive on drain). Anything with a field re-enters by handle.
             return match value {
-                Value::Con(host_id, fields) if fields.is_empty() => Ok(AnswerPlan::Constructor {
+                HaskellValue::Con(host_id, fields) if fields.is_empty() => Ok(AnswerPlan::Constructor {
                     host_id: *host_id,
                     fields: Vec::new(),
                 }),
@@ -2291,7 +2291,7 @@ impl PreparedEngine {
         owner.lower_answer(row.site, row.wire, value, 0, table)
     }
 
-    /// Resolve every [`AnswerPlan::Json`] leaf of `plan` (a `Value`-carrying
+    /// Resolve every [`AnswerPlan::Json`] leaf of `plan` (a `HaskellValue`-carrying
     /// field [`ProgramFacts::lower_answer`] could not walk into rows) to an
     /// [`AnswerPlan::Handle`]: render the leaf as a retained `Text`, enter
     /// `runner`'s admitted decode entry, and project `Right v` to `v`'s
@@ -2337,7 +2337,7 @@ impl PreparedEngine {
         }
     }
 
-    /// Decode one `Value`-carrying leaf's JSON text through `runner`'s
+    /// Decode one `HaskellValue`-carrying leaf's JSON text through `runner`'s
     /// admitted decode entry, returning the decoded value's retained handle.
     fn decode_json_leaf(
         &mut self,
@@ -2376,7 +2376,7 @@ impl PreparedEngine {
         };
         let text_plan = owner.lower_text(
             site,
-            &Value::Lit(Literal::LitString(text.as_bytes().to_vec())),
+            &HaskellValue::Lit(Literal::LitString(text.as_bytes().to_vec())),
         )?;
         if self.machine.realm_cancel_handle(realm).is_cancelled() {
             return Err(PreparedRuntimeError::Cancelled);
@@ -2419,7 +2419,7 @@ impl PreparedEngine {
         } else {
             self.release_all(managed);
             if identity == left {
-                Err(reject("the Value-carrying answer failed to decode"))
+                Err(reject("the HaskellValue-carrying answer failed to decode"))
             } else {
                 Err(reject("the decode entry returned neither Left nor Right"))
             }
@@ -2428,19 +2428,19 @@ impl PreparedEngine {
 
     /// Re-enter the frame parked under `id` with a host-built answer: peek,
     /// validate and lower `value` against the site evidence, resolve any
-    /// `Value`-carrying leaves through the decode entry
+    /// `HaskellValue`-carrying leaves through the decode entry
     /// ([`Self::resolve_json_leaves`]), build the result into a realm-owned
     /// handle, then take the frame and enter the resume entry
-    /// ([`Self::resume_parked`]). A plan that is itself one resolved `Value`
-    /// leaf (the site's whole answer type is `Value`) delivers that leaf's
-    /// handle directly — a decoded `Value` is already a retained heap object,
+    /// ([`Self::resume_parked`]). A plan that is itself one resolved `HaskellValue`
+    /// leaf (the site's whole answer type is `HaskellValue`) delivers that leaf's
+    /// handle directly — a decoded `HaskellValue` is already a retained heap object,
     /// so wrapping it in another constructor is unnecessary. Every failure
     /// before the take leaves the frame parked with the handle and root
     /// counts unchanged.
     pub fn resume_with_answer(
         &mut self,
         id: ContinuationId,
-        value: &Value,
+        value: &HaskellValue,
         table: &DataConTable,
     ) -> Result<PreparedResumed, PreparedRuntimeError> {
         let plan = self.answer_plan(id, value, table)?;
@@ -2487,13 +2487,13 @@ impl PreparedEngine {
         Ok(())
     }
 
-    /// Materialize a retained value as a bridge `Value`, forcing its lazy
+    /// Materialize a retained value as a bridge `HaskellValue`, forcing its lazy
     /// fields through `program`'s force adapter. The handle stays retained.
     pub fn observe(
         &mut self,
         program: ProgramId,
         handle: PreparedHandle,
-    ) -> Result<Value, PreparedRuntimeError> {
+    ) -> Result<HaskellValue, PreparedRuntimeError> {
         self.machine
             .observe_handle(program, handle, RunOptions::default().observation_budget)
             .map_err(PreparedRuntimeError::Run)
@@ -2509,7 +2509,7 @@ impl PreparedEngine {
         &mut self,
         program: ProgramId,
         handle: PreparedHandle,
-    ) -> Result<Value, PreparedRuntimeError> {
+    ) -> Result<HaskellValue, PreparedRuntimeError> {
         self.machine
             .observe_handle_bounded(program, handle, RunOptions::default().observation_budget)
             .map_err(PreparedRuntimeError::Run)

@@ -662,7 +662,7 @@ mod tests {
         arguments: Vec<RuntimeRep>,
         results: Vec<RuntimeRep>,
         atoms: Vec<Atom>,
-    ) -> Vec<tidepool_bridge::Value> {
+    ) -> Vec<tidepool_bridge::HaskellValue> {
         run_identity(
             OperationIdentity::PrimOp(identity.into()),
             arguments,
@@ -676,7 +676,7 @@ mod tests {
         arguments: Vec<RuntimeRep>,
         results: Vec<RuntimeRep>,
         atoms: Vec<Atom>,
-    ) -> Vec<tidepool_bridge::Value> {
+    ) -> Vec<tidepool_bridge::HaskellValue> {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(results.clone());
         wire.signatures.push(Signature {
@@ -763,7 +763,7 @@ mod tests {
                     )
                     .unwrap();
                 assert!(matches!(result.values.as_slice(),
-                [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitDouble(bits))]
+                [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitDouble(bits))]
                 if *bits == expected.to_bits()));
             }
         }
@@ -781,7 +781,7 @@ mod tests {
             ],
         );
         assert!(
-            matches!(values.as_slice(), [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitFloat(bits))] if *bits == 0)
+            matches!(values.as_slice(), [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitFloat(bits))] if *bits == 0)
         );
         let values = run(
             "eqFloat#",
@@ -790,7 +790,7 @@ mod tests {
             vec![float(32, 0x7fc0_0001), float(32, 0x7fc0_0001)],
         );
         assert!(
-            matches!(values.as_slice(), [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(value))] if *value == 0)
+            matches!(values.as_slice(), [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(value))] if *value == 0)
         );
         let values = run(
             "float2Double#",
@@ -799,7 +799,7 @@ mod tests {
             vec![float(32, 0x8000_0000)],
         );
         assert!(
-            matches!(values.as_slice(), [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitDouble(bits))] if *bits == (-0.0f64).to_bits())
+            matches!(values.as_slice(), [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitDouble(bits))] if *bits == (-0.0f64).to_bits())
         );
     }
 
@@ -813,7 +813,7 @@ mod tests {
                 vec![float(64, input.to_bits())],
             );
             assert!(matches!(values.as_slice(),
-                [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitDouble(bits))]
+                [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitDouble(bits))]
                     if *bits == expected.to_bits()));
         }
         for (input, expected) in [(0.0_f32, -0.0_f32), (-0.0, 0.0), (1.5, -1.5)] {
@@ -824,7 +824,7 @@ mod tests {
                 vec![float(32, u64::from(input.to_bits()))],
             );
             assert!(matches!(values.as_slice(),
-                [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitFloat(bits))]
+                [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitFloat(bits))]
                     if *bits == u64::from(expected.to_bits())));
         }
     }
@@ -841,7 +841,7 @@ mod tests {
             })],
         );
         assert!(matches!(values.as_slice(),
-            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitDouble(bits))]
+            [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitDouble(bits))]
                 if *bits == (u64::MAX as f64).to_bits()));
         let values = run(
             "int2Double#",
@@ -853,7 +853,7 @@ mod tests {
             })],
         );
         assert!(matches!(values.as_slice(),
-            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitDouble(bits))]
+            [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitDouble(bits))]
                 if *bits == (-3.0_f64).to_bits()));
     }
 
@@ -870,7 +870,7 @@ mod tests {
             let values = run(name, reps, vec![RuntimeRep::Float(64)], atoms);
             assert!(
                 matches!(values.as_slice(),
-                    [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitDouble(bits))]
+                    [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitDouble(bits))]
                         if (f64::from_bits(*bits) - expected).abs() < 1e-12),
                 "{name}: {values:?}"
             );
@@ -882,7 +882,7 @@ mod tests {
             vec![float(32, u64::from(4.0_f32.to_bits()))],
         );
         assert!(matches!(values.as_slice(),
-            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitFloat(bits))]
+            [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitFloat(bits))]
                 if *bits == u64::from(2.0_f32.to_bits())));
         let values = run(
             "logFloat#",
@@ -891,7 +891,7 @@ mod tests {
             vec![float(32, u64::from(1.0_f32.to_bits()))],
         );
         assert!(matches!(values.as_slice(),
-            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitFloat(bits))]
+            [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitFloat(bits))]
                 if *bits == u64::from(0.0_f32.to_bits())));
     }
 
@@ -910,7 +910,7 @@ mod tests {
             );
             assert!(
                 matches!(values.as_slice(),
-                    [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitDouble(bits))]
+                    [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitDouble(bits))]
                         if *bits == expected.to_bits()),
                 "{name}"
             );
@@ -922,7 +922,7 @@ mod tests {
             vec![float(32, u64::from((-1.5_f32).to_bits()))],
         );
         assert!(matches!(values.as_slice(),
-            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitFloat(bits))]
+            [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitFloat(bits))]
                 if *bits == u64::from(1.5_f32.to_bits())));
     }
 
@@ -1073,7 +1073,7 @@ mod tests {
             assert!(
                 matches!(
                     values.as_slice(),
-                    [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(value))]
+                    [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(value))]
                         if *value == expected
                 ),
                 "{name} returned {values:?}"
@@ -1097,8 +1097,8 @@ mod tests {
                 vec![float(64, bits)],
             );
             assert!(matches!(values.as_slice(),
-                [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(mantissa)),
-                 tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(exponent))]
+                [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(mantissa)),
+                 tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(exponent))]
                     if (*mantissa, *exponent) == expected));
         }
     }

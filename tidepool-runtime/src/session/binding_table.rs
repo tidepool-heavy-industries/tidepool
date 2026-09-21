@@ -44,11 +44,11 @@ pub(super) struct BindRecord {
 
 impl BindRecord {
     pub(super) fn of(entry: &BindingEntry) -> Self {
-        let BoundValue::Prepared { identity, .. } = &entry.value;
+        let BoundValue { identity, .. } = &entry.value;
         BindRecord {
             id: entry.id,
             module: entry.module,
-            root: entry.value.root(),
+            root: entry.value.root,
             identity: identity.clone(),
         }
     }

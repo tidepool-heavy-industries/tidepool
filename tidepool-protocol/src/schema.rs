@@ -187,7 +187,7 @@ pub enum Polymorphism {
     /// site. The default for almost every effect, including ones whose
     /// SURFACE helpers (not yet schema-represented) are `@T`-polymorphic one
     /// layer down — `Fork`/`RunLlmTurn`/`Green`'s own GADT constructors all
-    /// return a concrete type (`Value`, or a verb-local `Int`/`()`); their
+    /// return a concrete type (`HaskellValue`, or a verb-local `Int`/`()`); their
     /// `@T` binding lives entirely in a `*Sited` substrate helper's signature,
     /// not in the row/GADT this variant describes.
     None,
@@ -206,9 +206,9 @@ pub enum Polymorphism {
     /// The invocation-bound type variable is a PHANTOM at the GADT level: it
     /// would appear in the GADT's own type parameter list and in a verb's
     /// `ret`, but never in a constructor FIELD — reserved for an effect whose
-    /// constructor genuinely returns the bare tyvar (no wrapping `Value`/
+    /// constructor genuinely returns the bare tyvar (no wrapping `HaskellValue`/
     /// concrete type to marshal through). No effect in this schema uses this
-    /// shape yet (`Fork`/`RunLlmTurn`'s constructors return concrete `Value`,
+    /// shape yet (`Fork`/`RunLlmTurn`'s constructors return concrete `HaskellValue`,
     /// not a bare `a` — their polymorphism lives in a deferred substrate
     /// helper, not the GADT), but the variant is named now so a later
     /// migration of those helpers has a home to bind to rather than inventing
@@ -917,7 +917,7 @@ pub struct Arg {
 
 /// How a Haskell argument type is spelled in Rust.
 ///
-/// Closed over what the registry actually needs. The `Value` split is a real
+/// Closed over what the registry actually needs. The `HaskellValue` split is a real
 /// semantic distinction, not a stylistic one: an errors-tagged verb's method
 /// receives no `cx`, so it has no `DataConTable` to interpret a materialized Haskell value
 /// with — the conversion has to happen at Req-decode time, which is what the
@@ -927,7 +927,7 @@ pub enum RustBinding {
     /// Derived mechanically from the Haskell type: `Text`→`String`,
     /// `Int`→`i64`, `Bool`→`bool`, `[Text]`→`Vec<String>`.
     Derived,
-    /// `tidepool_bridge::Value` — a materialized Haskell value, interpreted by the
+    /// `tidepool_bridge::HaskellValue` — a materialized Haskell value, interpreted by the
     /// method using `cx`'s table.
     HaskellValue,
     /// `crate::effect_glue::JsonArg` — pre-converted to `serde_json::Value` at
@@ -951,7 +951,7 @@ impl RustBinding {
     #[must_use]
     pub fn rust_type(self, ty: &HsType, whose: &str) -> String {
         match self {
-            RustBinding::HaskellValue => "tidepool_bridge::Value".to_string(),
+            RustBinding::HaskellValue => "tidepool_bridge::HaskellValue".to_string(),
             RustBinding::JsonValue => "crate::effect_glue::JsonArg".to_string(),
             RustBinding::Bridged(n) => format!("tidepool_bridge_effects::{n}"),
             RustBinding::Path(p) => (*p).to_string(),
@@ -1237,7 +1237,7 @@ pub enum HelperBody {
     /// `runLLMTurnForkSited`/`runLLMTurnFanoutSited`/`finalizeSited`.
     ///
     /// The declared `params`/`ret` are independent of the wrapped verb's own
-    /// GADT field types (which stay `Value`/`HaskellValue` — see the verb's own
+    /// GADT field types (which stay `HaskellValue`/`HaskellValue` — see the verb's own
     /// `RustBinding`): the extractor only checks the CALLER's answer type is
     /// monomorphic (`Translate.hs`'s `checkRunLLMTurnType`) before resuming
     /// with a value the caller validated against that exact type, so
@@ -1247,7 +1247,7 @@ pub enum HelperBody {
     /// Five real `unsafeCoerce` uses (`coerce: true`); `finalizeSited` is the
     /// sixth, sharing this OPAQUE+Sited shape with `coerce: false` because
     /// its value crosses at its own native representation (`v` itself, never
-    /// `Value`) the whole way — see `finalize.rs`'s module doc.
+    /// `HaskellValue`) the whole way — see `finalize.rs`'s module doc.
     OpaqueSited {
         /// Type variables forall'd ahead of `effs`, beyond the effect's own
         /// applied head parameters.

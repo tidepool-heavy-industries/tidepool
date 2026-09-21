@@ -319,19 +319,19 @@ impl GitHandler {
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use tidepool_bridge::Value;
+    use tidepool_bridge::HaskellValue;
     use tidepool_bridge::{FromHaskell, ToHaskell};
     use tidepool_effect::dispatch::{EffectContext, EffectHandler};
     use tidepool_mcp::CapturedOutput;
 
     /// Peel one `Right`/`Left` Con layer off a #335 errors-tagged response,
     /// panicking with the decoded `GitError` on `Left`. Matches by reference
-    /// (`Value` has a manual `Drop` impl, so it can't be partially moved out
+    /// (`HaskellValue` has a manual `Drop` impl, so it can't be partially moved out
     /// of) and clones just the field it needs.
-    fn unwrap_right(val: Value, table: &tidepool_repr::DataConTable) -> Value {
+    fn unwrap_right(val: HaskellValue, table: &tidepool_repr::DataConTable) -> HaskellValue {
         match &val {
-            Value::Con(id, fields) if table.name_of(*id).unwrap() == "Right" => fields[0].clone(),
-            Value::Con(id, fields) if table.name_of(*id).unwrap() == "Left" => {
+            HaskellValue::Con(id, fields) if table.name_of(*id).unwrap() == "Right" => fields[0].clone(),
+            HaskellValue::Con(id, fields) if table.name_of(*id).unwrap() == "Left" => {
                 let err: GitError = FromHaskell::from_value(&fields[0], table).unwrap();
                 panic!("expected Right, got Left({:?})", err);
             }
@@ -523,7 +523,7 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
 
         let n = (2i64).to_value(&table).unwrap();
         let con_id = table.get_by_name("GitLog").unwrap();
-        let request = Value::Con(con_id, vec![n]);
+        let request = HaskellValue::Con(con_id, vec![n]);
         let result = unwrap_right(
             response_value(handler.handle(GitReq::GitLog(2), &cx).unwrap(), &table),
             &table,
@@ -534,7 +534,7 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
         let mut count = 0;
         loop {
             match node {
-                Value::Con(id, fields) => {
+                HaskellValue::Con(id, fields) => {
                     let name = table.name_of(*id).unwrap();
                     match name {
                         "[]" => break,
@@ -542,7 +542,7 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
                             assert_eq!(fields.len(), 2);
                             // head is a Commit (5 fields)
                             match &fields[0] {
-                                Value::Con(cid, cfields) => {
+                                HaskellValue::Con(cid, cfields) => {
                                     assert_eq!(table.name_of(*cid).unwrap(), "Commit");
                                     assert_eq!(cfields.len(), 5, "Commit must have 5 fields");
                                 }
@@ -580,8 +580,8 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
         let mut node = &result;
         loop {
             match node {
-                Value::Con(id, fields) if table.name_of(*id).unwrap() == ":" => {
-                    if let Value::Con(eid, efields) = &fields[0] {
+                HaskellValue::Con(id, fields) if table.name_of(*id).unwrap() == ":" => {
+                    if let HaskellValue::Con(eid, efields) = &fields[0] {
                         assert_eq!(table.name_of(*eid).unwrap(), "StatusEntry");
                         assert_eq!(efields.len(), 2);
                         // path is efields[0], state is efields[1]
@@ -590,7 +590,7 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
                     }
                     node = &fields[1];
                 }
-                Value::Con(id, _) if table.name_of(*id).unwrap() == "[]" => break,
+                HaskellValue::Con(id, _) if table.name_of(*id).unwrap() == "[]" => break,
                 other => panic!("unexpected: {:?}", other),
             }
         }
@@ -624,9 +624,9 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
         let mut node = &result;
         loop {
             match node {
-                Value::Con(id, fields) if table.name_of(*id).unwrap() == ":" => {
+                HaskellValue::Con(id, fields) if table.name_of(*id).unwrap() == ":" => {
                     match &fields[0] {
-                        Value::Con(did, dfields) => {
+                        HaskellValue::Con(did, dfields) => {
                             assert_eq!(table.name_of(*did).unwrap(), "FileDelta");
                             assert_eq!(dfields.len(), 4, "FileDelta must have 4 fields");
                         }
@@ -635,7 +635,7 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
                     count += 1;
                     node = &fields[1];
                 }
-                Value::Con(id, _) if table.name_of(*id).unwrap() == "[]" => break,
+                HaskellValue::Con(id, _) if table.name_of(*id).unwrap() == "[]" => break,
                 other => panic!("unexpected: {:?}", other),
             }
         }
@@ -666,13 +666,13 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
         let mut node = &result;
         loop {
             match node {
-                Value::Con(id, fields) if table.name_of(*id).unwrap() == ":" => {
+                HaskellValue::Con(id, fields) if table.name_of(*id).unwrap() == ":" => {
                     match &fields[0] {
-                        Value::Con(cdid, cdfields) => {
+                        HaskellValue::Con(cdid, cdfields) => {
                             assert_eq!(table.name_of(*cdid).unwrap(), "CommitDeltas");
                             assert_eq!(cdfields.len(), 2, "CommitDeltas must have 2 fields");
                             match &cdfields[0] {
-                                Value::Con(cid, cfields) => {
+                                HaskellValue::Con(cid, cfields) => {
                                     assert_eq!(table.name_of(*cid).unwrap(), "Commit");
                                     assert_eq!(cfields.len(), 5, "Commit must have 5 fields");
                                 }
@@ -684,7 +684,7 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
                     count += 1;
                     node = &fields[1];
                 }
-                Value::Con(id, _) if table.name_of(*id).unwrap() == "[]" => break,
+                HaskellValue::Con(id, _) if table.name_of(*id).unwrap() == "[]" => break,
                 other => panic!("unexpected: {:?}", other),
             }
         }
@@ -718,7 +718,7 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
             &table,
         );
         match &result {
-            Value::Con(id, fields) => {
+            HaskellValue::Con(id, fields) => {
                 assert_eq!(table.name_of(*id).unwrap(), "Commit");
                 assert_eq!(
                     fields.len(),
@@ -747,7 +747,7 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
             &table,
         );
         match &res {
-            Value::Con(id, fields) if table.name_of(*id).unwrap() == "Left" => {
+            HaskellValue::Con(id, fields) if table.name_of(*id).unwrap() == "Left" => {
                 let err: GitError = FromHaskell::from_value(&fields[0], &table).unwrap();
                 assert!(
                     matches!(err, GitError::GitBadRevspec(_)),

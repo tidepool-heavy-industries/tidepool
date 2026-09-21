@@ -214,7 +214,7 @@ fn captured_effect_request_caf(policy: UpdatePolicy) -> CompiledProgram {
 }
 
 /// The `E`-shaped result of `run_entry`/observation reaches Rust as a real
-/// `Con` — never a suspended-computation marker, because `tidepool_bridge::Value`
+/// `Con` — never a suspended-computation marker, because `tidepool_bridge::HaskellValue`
 /// has no such variant to return in the first place — and its nested union
 /// thunk is likewise fully realized. `run_entry` is one ordinary synchronous
 /// call: no thread, fiber, or other native-stack switch is involved in
@@ -231,13 +231,13 @@ fn effect_constructor_reaches_whnf_through_a_plain_call_return_boundary() {
         )
         .unwrap();
     assert_eq!(result.values.len(), 1);
-    let tidepool_bridge::Value::Con(tag, fields) = &result.values[0] else {
+    let tidepool_bridge::HaskellValue::Con(tag, fields) = &result.values[0] else {
         panic!("effect-request boundary must observe a constructor");
     };
     assert_eq!(*tag, tidepool_repr::DataConId(9700));
     assert!(matches!(
         fields.as_slice(),
-        [tidepool_bridge::Value::Con(union, union_fields), tidepool_bridge::Value::Con(arr, arr_fields)]
+        [tidepool_bridge::HaskellValue::Con(union, union_fields), tidepool_bridge::HaskellValue::Con(arr, arr_fields)]
             if *union == tidepool_repr::DataConId(9701) && union_fields.is_empty()
                 && *arr == tidepool_repr::DataConId(9702) && arr_fields.is_empty()
     ));

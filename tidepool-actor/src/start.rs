@@ -6,7 +6,7 @@
 //! primitive used by green threads.
 
 use std::collections::BTreeSet;
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_bridge::{BridgeError, FromHaskell};
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
@@ -244,7 +244,7 @@ impl ResidentActorStart {
     pub fn capture<H, O>(
         session: &mut ResidentSession<H, O>,
         parent_hole: ResidentHole,
-        request: &Value,
+        request: &HaskellValue,
         table: &DataConTable,
         session_id: tidepool_repr::SessionId,
         parent_actor: crate::ActorRef,

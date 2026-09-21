@@ -412,7 +412,7 @@ fn keep_alive_retains_external_bytes_during_callback_gc() {
     assert!(result.collections > 0, "callback allocation must collect");
     assert!(matches!(
         result.values.as_slice(),
-        [tidepool_bridge::Value::Lit(
+        [tidepool_bridge::HaskellValue::Lit(
             tidepool_repr::Literal::LitWord(0x7b)
         )]
     ));
@@ -438,7 +438,7 @@ fn touch_retains_external_bytes_across_preceding_callback_gc() {
     assert!(result.collections > 0, "callback allocation must collect");
     assert!(matches!(
         result.values.as_slice(),
-        [tidepool_bridge::Value::Lit(
+        [tidepool_bridge::HaskellValue::Lit(
             tidepool_repr::Literal::LitWord(0x7b)
         )]
     ));

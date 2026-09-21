@@ -1,4 +1,4 @@
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_bridge::{BridgeError, FromHaskell, ToHaskell};
 use tidepool_bridge_derive::{FromHaskell, ToHaskell};
 use tidepool_repr::{DataCon, DataConId, DataConTable};
@@ -174,7 +174,7 @@ fn test_generic_derive() {
 #[test]
 fn test_unknown_variant() {
     let table = test_table();
-    let value = Value::Con(DataConId(100), vec![]);
+    let value = HaskellValue::Con(DataConId(100), vec![]);
     let res = MyBool::from_value(&value, &table);
     assert!(matches!(
         res,
@@ -189,7 +189,7 @@ fn nested_unknown_constructor_keeps_the_matched_outer_context() {
         .get_by_name_arity("Just", 1)
         .expect("Just constructor");
     let unknown = DataConId(100);
-    let value = Value::Con(outer, vec![Value::Con(unknown, vec![])]);
+    let value = HaskellValue::Con(outer, vec![HaskellValue::Con(unknown, vec![])]);
 
     let error = MyMaybe::<MyBool>::from_value(&value, &table).unwrap_err();
     assert!(matches!(
@@ -239,7 +239,7 @@ fn test_arity_mismatch() {
 
     let true_id = table.get_by_name("True").unwrap();
 
-    let value = Value::Con(true_id, vec![Value::Lit(tidepool_repr::Literal::LitInt(1))]);
+    let value = HaskellValue::Con(true_id, vec![HaskellValue::Lit(tidepool_repr::Literal::LitInt(1))]);
 
     let res = MyBool::from_value(&value, &table);
 
@@ -301,7 +301,7 @@ fn test_struct_wrong_con() {
     let table = test_table();
     // Use Pair's constructor id with GetBranch's expected type
     let pair_id = table.get_by_name("Pair").unwrap();
-    let value = Value::Con(pair_id, vec![Value::Lit(tidepool_repr::Literal::LitInt(1))]);
+    let value = HaskellValue::Con(pair_id, vec![HaskellValue::Lit(tidepool_repr::Literal::LitInt(1))]);
     let res = GetBranchRequest::from_value(&value, &table);
     assert!(matches!(res, Err(BridgeError::UnknownDataCon(_))));
 }
@@ -311,9 +311,9 @@ fn nested_struct_failure_preserves_the_matched_field() {
     let table = test_table();
     let pair = table.get_by_name_arity("Pair", 2).unwrap();
     let unknown = DataConId(100);
-    let value = Value::Con(
+    let value = HaskellValue::Con(
         pair,
-        vec![true.to_value(&table).unwrap(), Value::Con(unknown, vec![])],
+        vec![true.to_value(&table).unwrap(), HaskellValue::Con(unknown, vec![])],
     );
     let error = GenericStruct::<bool, MyBool>::from_value(&value, &table).unwrap_err();
     assert!(matches!(error, BridgeError::FieldDecode {
@@ -326,11 +326,11 @@ fn test_struct_arity_mismatch() {
     let table = test_table();
     let get_branch_id = table.get_by_name("GetBranch").unwrap();
     // GetBranch expects 1 field, give it 2
-    let value = Value::Con(
+    let value = HaskellValue::Con(
         get_branch_id,
         vec![
-            Value::Lit(tidepool_repr::Literal::LitInt(1)),
-            Value::Lit(tidepool_repr::Literal::LitInt(2)),
+            HaskellValue::Lit(tidepool_repr::Literal::LitInt(1)),
+            HaskellValue::Lit(tidepool_repr::Literal::LitInt(2)),
         ],
     );
     let res = GetBranchRequest::from_value(&value, &table);
@@ -401,9 +401,9 @@ fn partial_two_variant_table() -> DataConTable {
 fn later_variant_decodes_despite_earlier_variants_missing_constructor() {
     let table = partial_two_variant_table();
     let second_id = table.get_by_name("SecondVariant").unwrap();
-    let value = Value::Con(
+    let value = HaskellValue::Con(
         second_id,
-        vec![Value::Lit(tidepool_repr::Literal::LitInt(7))],
+        vec![HaskellValue::Lit(tidepool_repr::Literal::LitInt(7))],
     );
 
     let decoded = TwoVariant::from_value(&value, &table)
@@ -418,7 +418,7 @@ fn later_variant_decodes_despite_earlier_variants_missing_constructor() {
 fn no_variant_matches_is_still_an_error() {
     let table = partial_two_variant_table();
     let unrelated_id = table.get_by_name("True").unwrap();
-    let value = Value::Con(unrelated_id, vec![]);
+    let value = HaskellValue::Con(unrelated_id, vec![]);
 
     let res = TwoVariant::from_value(&value, &table);
     assert!(

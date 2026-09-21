@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::prepared_program::{PreparedHandle, ProgramId};
 use tidepool_repr::execution_schema::SymbolIdentity;
@@ -494,7 +494,7 @@ pub enum ResidentOutcome {
     Suspended {
         output: Vec<String>,
         hole: ResidentHole,
-        request: Value,
+        request: HaskellValue,
     },
 }
 
@@ -597,14 +597,14 @@ enum PreparedTurnMode<'a> {
 pub(crate) enum PreparedRun {
     Done {
         handle: PreparedHandle,
-        value: Value,
+        value: HaskellValue,
     },
     /// A projected tuple split into one retained handle per binder.
     Projected { fields: Vec<PreparedHandle> },
     /// The turn requested a typed effect: its continuation is parked under
     /// `id` in the machine's ledger and `request` is the observed request,
     /// ready for the host to route.
-    Suspended { id: ContinuationId, request: Value },
+    Suspended { id: ContinuationId, request: HaskellValue },
 }
 
 /// The hole a suspension of a turn run in `mode` mints, carrying its
@@ -758,9 +758,9 @@ fn settle_rooted_application<H: DispatchEffect<O>, O>(
 /// The bridge value a handler's [`Response`] delivers as a host-built
 /// answer. A list response arrives as a flat item vector so that no deep
 /// spine exists on the handler side; the answer plan walks the rebuilt spine
-/// iteratively per row, and the spine's own `Drop` is the bridge `Value`'s
+/// iteratively per row, and the spine's own `Drop` is the bridge `HaskellValue`'s
 /// (frame-based, not recursive).
-fn response_value(response: Response) -> Value {
+fn response_value(response: Response) -> HaskellValue {
     match response {
         Response::Complete(value) => value,
         Response::List {
@@ -770,8 +770,8 @@ fn response_value(response: Response) -> Value {
         } => items
             .into_iter()
             .rev()
-            .fold(Value::Con(nil_id, Vec::new()), |rest, item| {
-                Value::Con(cons_id, vec![item, rest])
+            .fold(HaskellValue::Con(nil_id, Vec::new()), |rest, item| {
+                HaskellValue::Con(cons_id, vec![item, rest])
             }),
     }
 }
@@ -847,7 +847,7 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
     };
     match plan {
         // A bare expression's value is DISPLAYED, so unlike a bind this arm
-        // really does need a `Value`. But the budget that bounds
+        // really does need a `HaskellValue`. But the budget that bounds
         // materialization is a display limit, and a display limit must not
         // discard a run whose effects are already committed. So an exhausted
         // budget is answered with a bounded SELECTION of the value rather than
@@ -892,12 +892,12 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
         // command jobs) that way, and `reflect 3` cannot bind at all, since
         // three turns of conversation exceed 100_000 bytes on their own.
         // Keep the handle and report the size, exactly as the closure tier
-        // below keeps a value that has no `Value` representation.
+        // below keeps a value that has no `HaskellValue` representation.
         SettlePlan::Bind(ValueTier::ForceData) => match engine.observe(program, handle) {
             Ok(value) => Ok(PreparedRun::Done { handle, value }),
             Err(error) if is_observation_budget_exhausted(&error) => Ok(PreparedRun::Done {
                 handle,
-                value: Value::Con(tidepool_codegen::observation::OVERSIZE_SENTINEL, Vec::new()),
+                value: HaskellValue::Con(tidepool_codegen::observation::OVERSIZE_SENTINEL, Vec::new()),
             }),
             Err(error) => {
                 engine.release(handle);
@@ -906,7 +906,7 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
         },
         SettlePlan::Bind(ValueTier::RetainOpaque) => Ok(PreparedRun::Done {
             handle,
-            value: Value::Con(tidepool_codegen::observation::CLOSURE_SENTINEL, Vec::new()),
+            value: HaskellValue::Con(tidepool_codegen::observation::CLOSURE_SENTINEL, Vec::new()),
         }),
         SettlePlan::Project(tiers) => {
             let fields = engine.fields(handle, realm, tiers.len());
@@ -1190,7 +1190,7 @@ where
         // A prepared alias shares the source's root and handle, but a later
         // turn imports it by ITS OWN thin value module and name, so the
         // recorded identity is re-minted for the alias.
-        let BoundValue::Prepared { identity, .. } = &mut value;
+        let BoundValue { identity, .. } = &mut value;
         identity.module = alias.module.clone();
         identity.occurrence = alias.name.clone();
         let id = SessionVarId::from_extract(alias.var_id);
@@ -1432,7 +1432,7 @@ where
 
     /// Mint a [`ValueHandle`] over the declared live payload of the frame
     /// parked on `hole` (the payload never bridges to a
-    /// data `Value`; the `Send` handle is how it is passed around and
+    /// data `HaskellValue`; the `Send` handle is how it is passed around and
     /// eventually DELIVERED into a sibling hole via [`Self::resume_handle`]).
     /// The frame stays parked; the handle is owned by the frame's realm.
     /// `None` when `hole` is not parked or its frame holds no untaken live
@@ -1684,7 +1684,7 @@ where
         hole: ResidentHole,
         custody: &RootCustody,
         constructor: tidepool_repr::DataConId,
-        prefix: Vec<Value>,
+        prefix: Vec<HaskellValue>,
     ) -> Result<ResidentOutcome, ResidentError> {
         let Some(handle) = custody.handle else {
             unreachable!("live custody always contains its handle");
@@ -1990,7 +1990,7 @@ where
             .bindings()
             .get(binding)
             .ok_or(BindingAliasError::MissingSource(binding))?;
-        let BoundValue::Prepared { handle, .. } = &entry.value;
+        let BoundValue { handle, .. } = &entry.value;
         self.run_prepared_with_argument(code, PreparedTurnMode::Value, Some(*handle))
     }
 
@@ -2227,7 +2227,7 @@ where
                 name: BindingName(binder.name.clone()),
                 id: SessionVarId::from_extract(binder.var_id),
                 module: SessionModule::val(generation),
-                value: BoundValue::Prepared {
+                value: BoundValue {
                     root,
                     handle: *handle,
                     identity,
@@ -2548,7 +2548,7 @@ where
     pub fn resume(
         &mut self,
         hole: ResidentHole,
-        answer: Value,
+        answer: HaskellValue,
     ) -> Result<ResidentOutcome, ResidentError> {
         let seed = hole.seed();
         let id = match hole {
@@ -2904,7 +2904,7 @@ where
     /// this at all. Returns `None` for an unknown binding.
     pub fn prepared_binding_handle(&self, name: &str) -> Option<RootCustody> {
         let entry = self.state.bindings().resolve(name)?;
-        let BoundValue::Prepared { handle, .. } = &entry.value;
+        let BoundValue { handle, .. } = &entry.value;
         Some(RootCustody::shared(
             handle.raw(),
             Arc::clone(&self.custody_cleanup),
@@ -2936,7 +2936,7 @@ where
     O: OutputSink + Sync,
 {
     type Hole = ResidentHole;
-    type Answer = Value;
+    type Answer = HaskellValue;
     type Context = ();
     type Outcome = ResidentOutcome;
     type Error = ResidentError;
@@ -2969,9 +2969,9 @@ where
 /// presence is dropped because the payload itself is acquired explicitly from
 /// its frame.
 enum ParkedRun {
-    CompletedValue(Value),
+    CompletedValue(HaskellValue),
     CompletedProject,
-    Suspended { id: ContinuationId, request: Value },
+    Suspended { id: ContinuationId, request: HaskellValue },
 }
 
 /// The three ways a resident eval thread's lifecycle can resolve — spawn

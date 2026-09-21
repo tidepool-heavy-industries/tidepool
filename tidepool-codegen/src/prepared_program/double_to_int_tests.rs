@@ -72,7 +72,7 @@ fn double2int_truncates_finite_values_and_preserves_signed_zero() {
         let result = run(&program, value).unwrap();
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(actual))]
+            [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(actual))]
                 if *actual == expected
         ));
     }
@@ -84,7 +84,7 @@ fn double2int_accepts_lower_bound_and_rejects_exclusive_upper_bound() {
     let lower = run(&program, -9_223_372_036_854_775_808.0).unwrap();
     assert!(matches!(
         lower.values.as_slice(),
-        [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(actual))]
+        [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(actual))]
             if *actual == i64::MIN
     ));
 
@@ -93,7 +93,7 @@ fn double2int_accepts_lower_bound_and_rejects_exclusive_upper_bound() {
     let just_below = run(&program, f64::from_bits(0x43dfffffffffffff)).unwrap();
     assert!(matches!(
         just_below.values.as_slice(),
-        [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(actual))]
+        [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(actual))]
             if *actual == 9_223_372_036_854_774_784_i64
     ));
     assert_overflow(run(&program, 9_223_372_036_854_775_808.0));
@@ -111,7 +111,7 @@ fn double2int_non_finite_values_report_reusable_overflow() {
     let valid = run(&program, 12.5).unwrap();
     assert!(matches!(
         valid.values.as_slice(),
-        [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(
+        [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(
             12
         ))]
     ));

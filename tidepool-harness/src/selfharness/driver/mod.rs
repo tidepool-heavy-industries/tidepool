@@ -71,7 +71,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde_json::Value as Json;
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 
 use crate::engine::{self, TurnOutcome};
 use crate::harness::{Harness, HarnessError};
@@ -221,7 +221,7 @@ pub struct LoopIterationOutcome {
 /// verbatim on the shared heap — the closure path (the reason the
 /// collapse exists).
 pub enum FinalAnswer {
-    Value(Value),
+    Value(HaskellValue),
     Handle(tidepool_runtime::session::RootCustody),
 }
 

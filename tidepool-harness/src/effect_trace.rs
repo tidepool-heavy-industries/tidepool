@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_effect::dispatch::{request_constructor, DispatchEffect, EffectContext, Response};
 use tidepool_effect::EffectError;
 use tidepool_mcp::CapturedOutput;
@@ -50,7 +50,7 @@ impl<H> TracingDispatcher<H> {
 impl<H: DispatchEffect<CapturedOutput>> DispatchEffect<CapturedOutput> for TracingDispatcher<H> {
     fn dispatch(
         &mut self,
-        request: &Value,
+        request: &HaskellValue,
         cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<Option<Response>, EffectError> {
         let constructor = request_constructor(request, cx.table());

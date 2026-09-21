@@ -3,29 +3,29 @@
 use crate::error::EffectError;
 use frunk::{HCons, HNil};
 use tidepool_bridge::error::BridgeError;
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_bridge::{FromHaskell, ToHaskell};
 use tidepool_repr::{DataConId, DataConTable, PrincipalId};
 /// A handler's answer to an effect request.
 #[derive(Debug)]
 pub enum Response {
     /// Fully materialized value (the classic path).
-    Complete(Value),
+    Complete(HaskellValue),
     /// A list response with every element already converted. Carried as a
     /// flat `Vec` (plus the list constructor ids) rather than a pre-built
-    /// cons `Value` so the machine can build the spine ITERATIVELY at the
-    /// heap boundary — a deep recursive `Value` spine must never exist,
+    /// cons `HaskellValue` so the machine can build the spine ITERATIVELY at the
+    /// heap boundary — a deep recursive `HaskellValue` spine must never exist,
     /// neither at construction nor at `Drop` (~3 stack frames per cell
     /// overflow the eval thread; see `materialize_cons_list`).
     List {
-        items: Vec<Value>,
+        items: Vec<HaskellValue>,
         cons_id: DataConId,
         nil_id: DataConId,
     },
 }
 
-impl From<Value> for Response {
-    fn from(v: Value) -> Self {
+impl From<HaskellValue> for Response {
+    fn from(v: HaskellValue) -> Self {
         Response::Complete(v)
     }
 }
@@ -126,7 +126,7 @@ impl<'a, U> EffectContext<'a, U> {
 /// ```
 pub trait EffectHandler<U = ()> {
     /// The Haskell-side effect request this handler consumes, decoded from
-    /// the Core `Value` via [`FromHaskell`].
+    /// the Core `HaskellValue` via [`FromHaskell`].
     type Request: FromHaskell;
 
     /// Handle one decoded request and produce a response.
@@ -147,7 +147,7 @@ pub trait DispatchEffect<U = ()> {
     /// Route `request` by its nominal constructor.
     fn dispatch(
         &mut self,
-        request: &Value,
+        request: &HaskellValue,
         cx: &EffectContext<'_, U>,
     ) -> Result<Option<Response>, EffectError>;
 }
@@ -155,9 +155,9 @@ pub trait DispatchEffect<U = ()> {
 /// Name an effect request for diagnostics without assigning routing meaning
 /// to the freer-simple union tag that carried it.
 #[must_use]
-pub fn request_constructor(request: &Value, table: &DataConTable) -> String {
+pub fn request_constructor(request: &HaskellValue, table: &DataConTable) -> String {
     match request {
-        Value::Con(id, _) => table
+        HaskellValue::Con(id, _) => table
             .get(*id)
             .and_then(|con| con.qualified_name.as_deref().or(Some(con.name.as_str())))
             .map(str::to_owned)
@@ -169,7 +169,7 @@ pub fn request_constructor(request: &Value, table: &DataConTable) -> String {
 impl<U> DispatchEffect<U> for HNil {
     fn dispatch(
         &mut self,
-        _request: &Value,
+        _request: &HaskellValue,
         _cx: &EffectContext<'_, U>,
     ) -> Result<Option<Response>, EffectError> {
         Ok(None)
@@ -179,7 +179,7 @@ impl<U> DispatchEffect<U> for HNil {
 impl<U, H: EffectHandler<U>, T: DispatchEffect<U>> DispatchEffect<U> for HCons<H, T> {
     fn dispatch(
         &mut self,
-        request: &Value,
+        request: &HaskellValue,
         cx: &EffectContext<'_, U>,
     ) -> Result<Option<Response>, EffectError> {
         match H::Request::from_value(request, cx.table()) {
@@ -203,7 +203,7 @@ impl<U, H: EffectHandler<U>, T: DispatchEffect<U>> DispatchEffect<U> for HCons<H
 impl<U, H: DispatchEffect<U> + ?Sized> DispatchEffect<U> for &mut H {
     fn dispatch(
         &mut self,
-        request: &Value,
+        request: &HaskellValue,
         cx: &EffectContext<'_, U>,
     ) -> Result<Option<Response>, EffectError> {
         (**self).dispatch(request, cx)
@@ -213,7 +213,7 @@ impl<U, H: DispatchEffect<U> + ?Sized> DispatchEffect<U> for &mut H {
 impl<U, H: DispatchEffect<U> + ?Sized> DispatchEffect<U> for Box<H> {
     fn dispatch(
         &mut self,
-        request: &Value,
+        request: &HaskellValue,
         cx: &EffectContext<'_, U>,
     ) -> Result<Option<Response>, EffectError> {
         (**self).dispatch(request, cx)
@@ -233,8 +233,8 @@ mod tests {
         EffectContext::with_user(table, &())
     }
 
-    fn lit_int(n: i64) -> Value {
-        Value::Lit(Literal::LitInt(n))
+    fn lit_int(n: i64) -> HaskellValue {
+        HaskellValue::Lit(Literal::LitInt(n))
     }
 
     #[test]
@@ -250,7 +250,7 @@ mod tests {
         let cx = make_cx(&table);
         let result = cx.respond(lit_int(42)).unwrap();
         match result {
-            Response::Complete(Value::Lit(Literal::LitInt(42))) => {}
+            Response::Complete(HaskellValue::Lit(Literal::LitInt(42))) => {}
             other => panic!("expected LitInt(42), got {other:?}"),
         }
     }

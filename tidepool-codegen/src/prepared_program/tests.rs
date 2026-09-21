@@ -10,7 +10,7 @@ use cranelift_codegen::ir::{
 };
 use cranelift_jit::JITModule;
 use cranelift_module::{FuncId, FuncOrDataId, Module};
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_repr::execution_schema::{
     link_program, parse_program, Architecture, DecodeLimits, Endianness, MachineImports,
     ProgramRequirements, RuntimeRep, TargetDescriptor, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
@@ -776,17 +776,17 @@ fn multivalue_managed_results_survive_collection_after_return() {
     for index in [0, 2] {
         assert!(matches!(
             &result.values[index],
-            Value::Con(identity, fields)
+            HaskellValue::Con(identity, fields)
                 if *identity == DataConId(100) && fields.is_empty()
         ));
     }
     assert!(matches!(
         &result.values[1],
-        Value::Lit(Literal::LitInt(value)) if *value == 7
+        HaskellValue::Lit(Literal::LitInt(value)) if *value == 7
     ));
     assert!(matches!(
         &result.values[3],
-        Value::Lit(Literal::LitWord(value)) if *value == 9
+        HaskellValue::Lit(Literal::LitWord(value)) if *value == 9
     ));
 }
 
@@ -814,7 +814,7 @@ fn returned_refs_survive_generated_collection_in_the_caller() {
     for index in [0, 2] {
         assert!(matches!(
             &result.values[index],
-            Value::Con(identity, fields)
+            HaskellValue::Con(identity, fields)
                 if *identity == DataConId(100) && fields.is_empty()
         ));
     }
@@ -838,7 +838,7 @@ fn connected_call_case_let_covers_every_admitted_case_classification() {
                 assert_eq!(result.values.len(), 1);
                 assert!(matches!(
                     &result.values[0],
-                    Value::Con(identity, fields)
+                    HaskellValue::Con(identity, fields)
                         if *identity == DataConId(100) && fields.is_empty()
                 ));
             }
@@ -846,18 +846,18 @@ fn connected_call_case_let_covers_every_admitted_case_classification() {
                 assert_eq!(result.values.len(), 1);
                 assert!(matches!(
                     &result.values[0],
-                    Value::Lit(Literal::LitInt(value)) if *value == 7
+                    HaskellValue::Lit(Literal::LitInt(value)) if *value == 7
                 ));
             }
             2 => {
                 assert_eq!(result.values.len(), 2);
                 assert!(matches!(
                     &result.values[0],
-                    Value::Lit(Literal::LitInt(value)) if *value == 7
+                    HaskellValue::Lit(Literal::LitInt(value)) if *value == 7
                 ));
                 assert!(matches!(
                     &result.values[1],
-                    Value::Lit(Literal::LitWord(value)) if *value == 9
+                    HaskellValue::Lit(Literal::LitWord(value)) if *value == 9
                 ));
             }
             _ => unreachable!(),
@@ -882,7 +882,7 @@ fn primitive_case_checks_literals_after_a_default_in_source_order() {
         assert_eq!(result.values.len(), 1);
         assert!(matches!(
             &result.values[0],
-            Value::Lit(Literal::LitInt(value)) if *value == expected
+            HaskellValue::Lit(Literal::LitInt(value)) if *value == expected
         ));
     }
 }
@@ -906,7 +906,7 @@ fn primitive_float_case_uses_native_equality_after_a_default_in_source_order() {
             .unwrap();
         assert!(matches!(
             &result.values[..],
-            [Value::Lit(Literal::LitDouble(value))] if *value == expected
+            [HaskellValue::Lit(Literal::LitDouble(value))] if *value == expected
         ));
     }
 }
@@ -955,7 +955,7 @@ fn connected_join_jump_returns_zero_effect_result() {
     assert_eq!(result.values.len(), 1);
     assert!(matches!(
         &result.values[0],
-        Value::Lit(Literal::LitInt(value)) if *value == 7
+        HaskellValue::Lit(Literal::LitInt(value)) if *value == 7
     ));
 }
 
@@ -1069,11 +1069,11 @@ fn nursery_allocation_gc_preserves_static_child_for_observation() {
     );
     assert!(matches!(
         result.values.as_slice(),
-        [Value::Con(outer, fields)]
+        [HaskellValue::Con(outer, fields)]
             if *outer == DataConId(101)
                 && matches!(
                     fields.as_slice(),
-                    [Value::Con(leaf, leaf_fields)]
+                    [HaskellValue::Con(leaf, leaf_fields)]
                         if *leaf == DataConId(100) && leaf_fields.is_empty()
                 )
     ));

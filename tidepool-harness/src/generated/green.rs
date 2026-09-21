@@ -20,7 +20,7 @@ use tidepool_bridge_derive::FromHaskell;
               that exists only here and is never reused"
 )]
 pub enum GreenReq {
-    AsyncSpawnWith(i64, tidepool_bridge::Value),
+    AsyncSpawnWith(i64, tidepool_bridge::HaskellValue),
     AsyncDoneWith(i64),
     AsyncJoinAnyWith(Vec<i64>),
     AsyncStatusWith(i64),

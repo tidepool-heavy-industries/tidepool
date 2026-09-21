@@ -69,30 +69,17 @@ struct BindingTip {
 }
 
 /// A live value retained by the prepared-STG machine.
+/// A value retained by a prepared-STG `PreparedMachine`: tenured as-is (never
+/// deep-forced, so its preparation policy is Tier-1's), rooted by `root` for
+/// the machine's life. `handle` is the machine's own custody of that same root
+/// (what a later program's `ImportBindings` names), held under the machine's
+/// ROOT scope so no realm close releases it; `identity` is what a later
+/// program links against when it imports this binding.
 #[derive(Clone, Debug)]
-pub enum BoundValue {
-    /// A value retained by a prepared-STG `PreparedMachine`: tenured as-is
-    /// (never deep-forced, so its preparation policy is Tier-1's), rooted by
-    /// `root` for the machine's life. `handle` is the machine's own custody of
-    /// that same root (what a later program's `ImportBindings` names), held
-    /// under the machine's ROOT scope so no realm close releases it;
-    /// `identity` is what a later program links against when it imports this
-    /// binding.
-    Prepared {
-        root: RootSlot,
-        handle: crate::prepared_program::PreparedHandle,
-        identity: tidepool_repr::execution_schema::SymbolIdentity,
-    },
-}
-
-impl BoundValue {
-    /// The GC-updated root slot the value resolution loads through.
-    #[must_use]
-    pub fn root(&self) -> RootSlot {
-        match self {
-            BoundValue::Prepared { root, .. } => *root,
-        }
-    }
+pub struct BoundValue {
+    pub root: RootSlot,
+    pub handle: crate::prepared_program::PreparedHandle,
+    pub identity: tidepool_repr::execution_schema::SymbolIdentity,
 }
 
 /// One resolved session binding — the bridge record for a single `x`.

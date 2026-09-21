@@ -29,7 +29,7 @@ pub use tidepool_repr as repr;
 pub use tidepool_runtime as runtime;
 
 // Convenience re-exports
-pub use tidepool_bridge::Value;
+pub use tidepool_bridge::HaskellValue;
 pub use tidepool_bridge::{FromHaskell, ToHaskell};
 pub use tidepool_effect::dispatch::DispatchEffect;
 pub use tidepool_repr::DataConTable;

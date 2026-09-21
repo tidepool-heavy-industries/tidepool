@@ -428,7 +428,7 @@ mod tests {
                 .unwrap();
             assert!(matches!(
                 result.values.as_slice(),
-                [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(index))]
+                [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(index))]
                     if *index == expected
             ));
         }
@@ -522,7 +522,7 @@ mod tests {
             assert!(
                 matches!(
                     result.values.as_slice(),
-                    [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(measured))]
+                    [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(measured))]
                         if *measured == expected
                 ),
                 "measure_off({offset}, {length}, {count})"

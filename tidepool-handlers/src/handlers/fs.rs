@@ -654,7 +654,7 @@ impl tidepool_effect::dispatch::EffectHandler<CapturedOutput> for FsWriteHandler
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use tidepool_bridge::Value;
+    use tidepool_bridge::HaskellValue;
     use tidepool_bridge::{FromHaskell, ToHaskell};
     use tidepool_effect::dispatch::EffectHandler;
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
@@ -953,7 +953,7 @@ mod tests {
             FsReadReq::FsGrep("x".to_string(), String::new()),
         ] {
             let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-            let decoded: Result<Value, FsError> = FromHaskell::from_value(&res, &table).unwrap();
+            let decoded: Result<HaskellValue, FsError> = FromHaskell::from_value(&res, &table).unwrap();
             match decoded {
                 Err(FsError::FsSandbox(d)) => assert!(
                     d.contains("matches EVERYTHING"),
@@ -1261,7 +1261,7 @@ mod tests {
         let mut handlers = frunk::hlist![FsBackend::new(repo_root())];
         let con_id = table.get_by_name("FsExists").unwrap();
         let path = "Cargo.toml".to_string().to_value(&table).unwrap();
-        let request = Value::Con(con_id, vec![path]);
+        let request = HaskellValue::Con(con_id, vec![path]);
         let result = response_value(
             handlers
                 .dispatch(&request, &cx)
@@ -1282,7 +1282,7 @@ mod tests {
         let mut handlers = frunk::hlist![FsBackend::new(repo_root())];
         let con_id = table.get_by_name("FsListDir").unwrap();
         let path = ".".to_string().to_value(&table).unwrap();
-        let request = Value::Con(con_id, vec![path]);
+        let request = HaskellValue::Con(con_id, vec![path]);
         let result = response_value(
             handlers
                 .dispatch(&request, &cx)

@@ -32,7 +32,7 @@ mod tests {
     use super::*;
     use crate::test_support::*;
     use tidepool_bridge::ToHaskell;
-    use tidepool_bridge::Value;
+    use tidepool_bridge::HaskellValue;
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
 
     #[test]
@@ -43,7 +43,7 @@ mod tests {
         let mut handlers = frunk::hlist![ConsoleHandler];
         let con_id = table.get_by_name("Print").unwrap();
         let msg = "test output".to_string().to_value(&table).unwrap();
-        let request = Value::Con(con_id, vec![msg]);
+        let request = HaskellValue::Con(con_id, vec![msg]);
         handlers
             .dispatch(&request, &cx)
             .unwrap()

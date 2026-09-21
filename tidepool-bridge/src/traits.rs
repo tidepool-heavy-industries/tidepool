@@ -1,5 +1,5 @@
 use crate::error::BridgeError;
-use crate::Value;
+use crate::HaskellValue;
 use tidepool_repr::DataConTable;
 
 /// Implementation detail for sealing traits.
@@ -14,7 +14,7 @@ pub mod sealed {
 /// This trait is used to extract native Rust values from evaluated Haskell data.
 /// Implementations should handle potential type mismatches and arity errors.
 pub trait FromHaskell: Sized + sealed::FromHaskellSealed {
-    /// Convert a Value to this type using the provided DataConTable for lookups.
+    /// Convert a HaskellValue to this type using the provided DataConTable for lookups.
     ///
     /// # Errors
     ///
@@ -24,17 +24,17 @@ pub trait FromHaskell: Sized + sealed::FromHaskellSealed {
     /// is missing. Once a constructor matches, derived decoders wrap nested failures
     /// in `BridgeError::FieldDecode` so dispatch cannot mistake them for outer misses.
     /// Returns `BridgeError::ArityMismatch` if a constructor has the wrong number of fields.
-    fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError>;
+    fn from_value(value: &HaskellValue, table: &DataConTable) -> Result<Self, BridgeError>;
 }
 
 /// Encode a Rust type as a Haskell runtime value.
 ///
 /// This trait is used to encode Rust values for the Haskell runtime.
 pub trait ToHaskell: sealed::ToHaskellSealed {
-    /// Convert this type to a Value using the provided DataConTable for lookups.
+    /// Convert this type to a HaskellValue using the provided DataConTable for lookups.
     ///
     /// # Errors
     ///
     /// Returns `BridgeError::UnknownDataConName` if a required constructor is missing from the table.
-    fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError>;
+    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError>;
 }

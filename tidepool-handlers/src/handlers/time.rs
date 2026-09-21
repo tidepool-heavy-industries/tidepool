@@ -31,7 +31,7 @@ impl TimeHandler {
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use tidepool_bridge::Value;
+    use tidepool_bridge::HaskellValue;
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
 
     #[test]
@@ -41,7 +41,7 @@ mod tests {
         let cx = EffectContext::with_user(&table, &captured);
         let mut handlers = frunk::hlist![TimeHandler];
         let con_id = table.get_by_name("TimeNow").unwrap();
-        let request = Value::Con(con_id, vec![]);
+        let request = HaskellValue::Con(con_id, vec![]);
         let result = response_value(
             handlers
                 .dispatch(&request, &cx)
@@ -51,8 +51,8 @@ mod tests {
         );
         // i64::to_value boxes as Con(I#, [LitInt(n)]).
         let ms = match &result {
-            Value::Con(_, fields) if fields.len() == 1 => match &fields[0] {
-                Value::Lit(tidepool_repr::Literal::LitInt(n)) => *n,
+            HaskellValue::Con(_, fields) if fields.len() == 1 => match &fields[0] {
+                HaskellValue::Lit(tidepool_repr::Literal::LitInt(n)) => *n,
                 _ => panic!("Expected Con(_, [LitInt]), got {:?}", result),
             },
             _ => panic!("Expected Con(I#, [LitInt(ms)]), got {:?}", result),

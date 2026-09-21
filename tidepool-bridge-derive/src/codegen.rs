@@ -262,9 +262,9 @@ pub fn generate_from_haskell(info: &EnumInfo) -> TokenStream {
         impl #impl_generics tidepool_bridge::sealed::FromHaskellSealed for #name #ty_generics #where_clause {}
 
         impl #impl_generics tidepool_bridge::FromHaskell for #name #ty_generics #where_clause {
-            fn from_value(value: &tidepool_bridge::Value, table: &tidepool_repr::DataConTable) -> Result<Self, tidepool_bridge::BridgeError> {
+            fn from_value(value: &tidepool_bridge::HaskellValue, table: &tidepool_repr::DataConTable) -> Result<Self, tidepool_bridge::BridgeError> {
                 match value {
-                    tidepool_bridge::Value::Con(id, fields) => {
+                    tidepool_bridge::HaskellValue::Con(id, fields) => {
                         #(#match_arms)*
                         Err(tidepool_bridge::BridgeError::UnknownDataCon(*id))
                     }
@@ -350,7 +350,7 @@ pub fn generate_to_haskell(info: &EnumInfo) -> TokenStream {
         match_arms.push(quote! {
             #pattern => {
                 let id = #lookup;
-                Ok(tidepool_bridge::Value::Con(id, vec![#(#field_to_values),*]))
+                Ok(tidepool_bridge::HaskellValue::Con(id, vec![#(#field_to_values),*]))
             }
         });
     }
@@ -359,7 +359,7 @@ pub fn generate_to_haskell(info: &EnumInfo) -> TokenStream {
         impl #impl_generics tidepool_bridge::sealed::ToHaskellSealed for #name #ty_generics #where_clause {}
 
         impl #impl_generics tidepool_bridge::ToHaskell for #name #ty_generics #where_clause {
-            fn to_value(&self, table: &tidepool_repr::DataConTable) -> Result<tidepool_bridge::Value, tidepool_bridge::BridgeError> {
+            fn to_value(&self, table: &tidepool_repr::DataConTable) -> Result<tidepool_bridge::HaskellValue, tidepool_bridge::BridgeError> {
                 match self {
                     #(#match_arms)*
                 }
@@ -429,9 +429,9 @@ pub fn generate_struct_from_haskell(info: &StructInfo) -> TokenStream {
         impl #impl_generics tidepool_bridge::sealed::FromHaskellSealed for #name #ty_generics #where_clause {}
 
         impl #impl_generics tidepool_bridge::FromHaskell for #name #ty_generics #where_clause {
-            fn from_value(value: &tidepool_bridge::Value, table: &tidepool_repr::DataConTable) -> Result<Self, tidepool_bridge::BridgeError> {
+            fn from_value(value: &tidepool_bridge::HaskellValue, table: &tidepool_repr::DataConTable) -> Result<Self, tidepool_bridge::BridgeError> {
                 match value {
-                    tidepool_bridge::Value::Con(id, fields) => {
+                    tidepool_bridge::HaskellValue::Con(id, fields) => {
                         let con_id = #lookup;
                         if *id != con_id {
                             return Err(tidepool_bridge::BridgeError::UnknownDataCon(*id));
@@ -516,10 +516,10 @@ pub fn generate_struct_to_haskell(info: &StructInfo) -> TokenStream {
         impl #impl_generics tidepool_bridge::sealed::ToHaskellSealed for #name #ty_generics #where_clause {}
 
         impl #impl_generics tidepool_bridge::ToHaskell for #name #ty_generics #where_clause {
-            fn to_value(&self, table: &tidepool_repr::DataConTable) -> Result<tidepool_bridge::Value, tidepool_bridge::BridgeError> {
+            fn to_value(&self, table: &tidepool_repr::DataConTable) -> Result<tidepool_bridge::HaskellValue, tidepool_bridge::BridgeError> {
                 let #destructure = self;
                 let id = #lookup;
-                Ok(tidepool_bridge::Value::Con(id, vec![#(#field_to_values),*]))
+                Ok(tidepool_bridge::HaskellValue::Con(id, vec![#(#field_to_values),*]))
             }
         }
     }

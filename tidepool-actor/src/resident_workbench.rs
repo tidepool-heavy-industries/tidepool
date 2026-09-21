@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_bridge::{BridgeError, FromHaskell, ToHaskell};
 use tidepool_bridge_derive::FromHaskell as DeriveFromHaskell;
 use tidepool_codegen::suspension::RealmId;
@@ -724,7 +724,7 @@ pub(crate) struct CleanupReceiptProjection {
 fn usage_observation_value(
     table: &DataConTable,
     sample: Option<&crate::ProviderUsageSample>,
-) -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
     let value = sample
         .map(|sample| {
             actor_context_constructor(
@@ -745,7 +745,7 @@ fn usage_observation_value(
 fn usage_summary_value(
     table: &DataConTable,
     summary: Option<&tidepool_model::ProviderUsageSummary>,
-) -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
     use tidepool_model::{ProviderUsageCompleteness, ProviderUsageScope};
     let value = summary
         .map(|summary| {
@@ -789,7 +789,7 @@ fn usage_summary_value(
 fn agent_roster_value(
     table: &DataConTable,
     entry: AgentRosterProjection,
-) -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
     let (health_name, health_fields) =
         match entry.runtime.provider_turn.as_ref().map(|turn| &turn.state) {
             None => ("ProviderUnknown", vec![]),
@@ -1014,7 +1014,7 @@ fn agent_roster_value(
 fn agent_stop_value(
     table: &DataConTable,
     outcome: AgentStopProjection,
-) -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
     let (name, fields) = match outcome {
         AgentStopProjection::StoppedNow => ("AgentStoppedNow", Vec::new()),
         AgentStopProjection::StoppedRetaining(detail) => {
@@ -1032,11 +1032,11 @@ fn agent_stop_value(
 fn cleanup_plan_value(
     table: &DataConTable,
     plan: &CleanupPlanProjection,
-) -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
     let actors = plan
         .actors
         .iter()
-        .map(|actor| -> Result<Value, ResidentActorWorkbenchError> {
+        .map(|actor| -> Result<HaskellValue, ResidentActorWorkbenchError> {
             let state = actor_context_constructor(
                 table,
                 if actor.terminal {
@@ -1088,8 +1088,8 @@ fn cleanup_plan_value(
 fn cleanup_step_value(
     table: &DataConTable,
     step: CleanupStepProjection,
-) -> Result<Value, ResidentActorWorkbenchError> {
-    let ints = |values: Vec<u64>| -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
+    let ints = |values: Vec<u64>| -> Result<HaskellValue, ResidentActorWorkbenchError> {
         values
             .into_iter()
             .map(actor_int)
@@ -1479,7 +1479,7 @@ enum ResidentRequest {
 }
 
 impl ResidentRequest {
-    fn decode(request: &Value, table: &DataConTable) -> Result<Self, ResidentActorWorkbenchError> {
+    fn decode(request: &HaskellValue, table: &DataConTable) -> Result<Self, ResidentActorWorkbenchError> {
         tracing::trace!(
             constructor = %request_constructor(request, table),
             "decoding resident request"
@@ -5328,7 +5328,7 @@ where
                             tidepool_bridge::get_resilient(table, "Right", 1).ok_or_else(|| {
                                 tidepool_bridge::BridgeError::UnknownDataConName("Right".into())
                             })?;
-                        Value::Con(right, vec![value.to_value(table)?])
+                        HaskellValue::Con(right, vec![value.to_value(table)?])
                     }
                     Err(error) => crate::request_effect::rejected_reply_value(error, table)?,
                 };
@@ -5354,7 +5354,7 @@ where
                             tidepool_bridge::get_resilient(table, "Right", 1).ok_or_else(|| {
                                 tidepool_bridge::BridgeError::UnknownDataConName("Right".into())
                             })?;
-                        Value::Con(right, vec![().to_value(table)?])
+                        HaskellValue::Con(right, vec![().to_value(table)?])
                     }
                     Err(error) => crate::request_effect::rejected_reply_value(error, table)?,
                 };
@@ -5670,7 +5670,7 @@ where
                     tidepool_bridge::BridgeError::UnknownDataConName(name.to_owned())
                 })?;
                 session
-                    .resume(hole, Value::Con(constructor, fields))
+                    .resume(hole, HaskellValue::Con(constructor, fields))
                     .map_err(ResidentActorWorkbenchError::Delivered)
             })
             .await
@@ -5691,14 +5691,14 @@ where
                             tidepool_bridge::get_resilient(table, "Just", 1).ok_or_else(|| {
                                 tidepool_bridge::BridgeError::UnknownDataConName("Just".into())
                             })?;
-                        Value::Con(just, vec![crate::actor_terminal_value(&terminal, table)?])
+                        HaskellValue::Con(just, vec![crate::actor_terminal_value(&terminal, table)?])
                     }
                     None => {
                         let nothing = tidepool_bridge::get_resilient(table, "Nothing", 0)
                             .ok_or_else(|| {
                                 tidepool_bridge::BridgeError::UnknownDataConName("Nothing".into())
                             })?;
-                        Value::Con(nothing, Vec::new())
+                        HaskellValue::Con(nothing, Vec::new())
                     }
                 };
                 session
@@ -5970,8 +5970,8 @@ fn workbench_int(value: usize) -> Result<i64, ResidentActorWorkbenchError> {
 fn actor_context_constructor(
     table: &DataConTable,
     name: &str,
-    fields: Vec<Value>,
-) -> Result<Value, tidepool_bridge::BridgeError> {
+    fields: Vec<HaskellValue>,
+) -> Result<HaskellValue, tidepool_bridge::BridgeError> {
     qualified_constructor(table, "Tidepool.Effects.Core", name, fields)
 }
 
@@ -5979,38 +5979,38 @@ fn qualified_constructor(
     table: &DataConTable,
     module: &str,
     name: &str,
-    fields: Vec<Value>,
-) -> Result<Value, tidepool_bridge::BridgeError> {
+    fields: Vec<HaskellValue>,
+) -> Result<HaskellValue, tidepool_bridge::BridgeError> {
     let qualified = format!("{module}.{name}");
     let constructor = table
         .get_by_qualified_name(&qualified)
         .ok_or(tidepool_bridge::BridgeError::UnknownDataConName(qualified))?;
-    Ok(Value::Con(constructor, fields))
+    Ok(HaskellValue::Con(constructor, fields))
 }
 
 fn introspection_constructor(
     table: &DataConTable,
     name: &str,
-    fields: Vec<Value>,
-) -> Result<Value, tidepool_bridge::BridgeError> {
+    fields: Vec<HaskellValue>,
+) -> Result<HaskellValue, tidepool_bridge::BridgeError> {
     actor_context_constructor(table, name, fields)
 }
 
 fn either_constructor(
     table: &DataConTable,
     right: bool,
-    field: Value,
-) -> Result<Value, tidepool_bridge::BridgeError> {
+    field: HaskellValue,
+) -> Result<HaskellValue, tidepool_bridge::BridgeError> {
     let name = if right { "Right" } else { "Left" };
     let constructor = tidepool_bridge::get_resilient(table, name, 1)
         .ok_or_else(|| tidepool_bridge::BridgeError::UnknownDataConName(name.into()))?;
-    Ok(Value::Con(constructor, vec![field]))
+    Ok(HaskellValue::Con(constructor, vec![field]))
 }
 
 fn introspection_scope_value(
     table: &DataConTable,
     scope: &tidepool_runtime::session::NameScope,
-) -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
     use tidepool_runtime::session::NameScope;
     Ok(match scope {
         NameScope::Current => introspection_constructor(table, "CurrentScope", vec![])?,
@@ -6023,7 +6023,7 @@ fn introspection_scope_value(
 fn introspection_query_value(
     table: &DataConTable,
     query: &tidepool_runtime::session::NameQuery,
-) -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
     use tidepool_runtime::session::NameNamespace;
     let namespace = introspection_constructor(
         table,
@@ -6049,7 +6049,7 @@ fn introspection_query_value(
 fn introspection_identifier_value(
     table: &DataConTable,
     identifier: &tidepool_runtime::session::IdentifierRef,
-) -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
     use tidepool_runtime::session::IdentifierNamespace;
     let namespace = introspection_constructor(
         table,
@@ -6075,7 +6075,7 @@ fn introspection_identifier_value(
 fn introspection_type_expression_value(
     table: &DataConTable,
     ty: &tidepool_runtime::session::TypeExpression,
-) -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
     Ok(introspection_constructor(
         table,
         "TypeExpression",
@@ -6090,7 +6090,7 @@ fn introspection_type_expression_value(
 fn introspection_provenance_value(
     table: &DataConTable,
     provenance: &tidepool_runtime::session::ScopeProvenance,
-) -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
     Ok(introspection_constructor(
         table,
         "ScopeProvenance",
@@ -6105,7 +6105,7 @@ fn introspection_provenance_value(
 fn introspection_field_value(
     table: &DataConTable,
     field: &tidepool_runtime::session::FieldInfo,
-) -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
     Ok(introspection_constructor(
         table,
         "FieldInfo",
@@ -6119,7 +6119,7 @@ fn introspection_field_value(
 fn introspection_constructor_value(
     table: &DataConTable,
     constructor: &tidepool_runtime::session::ConstructorInfo,
-) -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
     let arguments = constructor
         .arguments
         .iter()
@@ -6145,7 +6145,7 @@ fn introspection_constructor_value(
 fn introspection_declaration_value(
     table: &DataConTable,
     declaration: &tidepool_runtime::session::DeclarationInfo,
-) -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
     use tidepool_runtime::session::DeclarationInfo;
     let (name, fields) = match declaration {
         DeclarationInfo::Value(ty) => (
@@ -6240,7 +6240,7 @@ fn introspection_declaration_value(
 fn introspection_info_value(
     table: &DataConTable,
     info: &tidepool_runtime::session::IdentifierInfo,
-) -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
     let parent = info
         .parent
         .as_ref()
@@ -6262,7 +6262,7 @@ fn introspection_info_value(
 fn introspection_type_value(
     table: &DataConTable,
     info: &tidepool_runtime::session::TypeInfo,
-) -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
     Ok(introspection_constructor(
         table,
         "TypeInfo",
@@ -6277,7 +6277,7 @@ fn introspection_type_value(
 fn introspection_query_error_value(
     table: &DataConTable,
     error: &tidepool_runtime::session::QueryError,
-) -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
     use tidepool_runtime::session::QueryError;
     let (name, fields) = match error {
         QueryError::Unknown(query) => (
@@ -6311,7 +6311,7 @@ fn introspection_query_error_value(
 fn introspection_compiler_error_value(
     table: &DataConTable,
     detail: impl Into<String>,
-) -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
     Ok(introspection_constructor(
         table,
         "CompilerUnavailable",
@@ -6323,7 +6323,7 @@ fn introspection_scope_changed_value(
     table: &DataConTable,
     before: &tidepool_runtime::session::ScopeProvenance,
     after: &tidepool_runtime::session::ScopeProvenance,
-) -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
     Ok(introspection_constructor(
         table,
         "ScopeChanged",
@@ -6336,8 +6336,8 @@ fn introspection_scope_changed_value(
 
 fn core_list(
     table: &DataConTable,
-    values: Vec<Value>,
-) -> Result<Value, tidepool_bridge::BridgeError> {
+    values: Vec<HaskellValue>,
+) -> Result<HaskellValue, tidepool_bridge::BridgeError> {
     let nil = tidepool_bridge::get_resilient(table, "[]", 0)
         .ok_or_else(|| tidepool_bridge::BridgeError::UnknownDataConName("[]".into()))?;
     let cons = tidepool_bridge::get_resilient(table, ":", 2)
@@ -6345,8 +6345,8 @@ fn core_list(
     Ok(values
         .into_iter()
         .rev()
-        .fold(Value::Con(nil, Vec::new()), |tail, head| {
-            Value::Con(cons, vec![head, tail])
+        .fold(HaskellValue::Con(nil, Vec::new()), |tail, head| {
+            HaskellValue::Con(cons, vec![head, tail])
         }))
 }
 
@@ -7093,7 +7093,7 @@ fn structured_introspection_answer(
     inspected: Result<tidepool_runtime::session::InspectionResult, String>,
     provenance: &tidepool_runtime::session::ScopeProvenance,
     current: &tidepool_runtime::session::ScopeProvenance,
-) -> Result<Value, ResidentActorWorkbenchError> {
+) -> Result<HaskellValue, ResidentActorWorkbenchError> {
     if current != provenance {
         let error = introspection_scope_changed_value(table, provenance, current)?;
         return Ok(either_constructor(table, false, error)?);
@@ -7233,8 +7233,8 @@ mod request_tests {
         .unwrap();
         assert!(matches!(
             answer,
-            Value::Con(DataConId(100), ref fields)
-                if matches!(fields.as_slice(), [Value::Con(DataConId(103), detail)] if detail.len() == 1)
+            HaskellValue::Con(DataConId(100), ref fields)
+                if matches!(fields.as_slice(), [HaskellValue::Con(DataConId(103), detail)] if detail.len() == 1)
         ));
     }
 
@@ -7254,8 +7254,8 @@ mod request_tests {
         .unwrap();
         assert!(matches!(
             answer,
-            Value::Con(DataConId(100), ref fields)
-                if matches!(fields.as_slice(), [Value::Con(DataConId(104), changed)] if changed.len() == 2)
+            HaskellValue::Con(DataConId(100), ref fields)
+                if matches!(fields.as_slice(), [HaskellValue::Con(DataConId(104), changed)] if changed.len() == 2)
         ));
     }
     #[test]
@@ -7272,13 +7272,13 @@ mod request_tests {
             qualified_name: Some("Tidepool.Agent.Reply.Internal.SubmitRequestWith".into()),
             type_name: "Replies".into(),
         });
-        let request = Value::Con(
+        let request = HaskellValue::Con(
             submit,
             vec![
                 1_i64.to_value(&table).unwrap(),
-                Value::Con(DataConId(999), vec![]),
+                HaskellValue::Con(DataConId(999), vec![]),
                 (2_i64, 1_i64).to_value(&table).unwrap(),
-                Some(Value::Con(DataConId(998), vec![]))
+                Some(HaskellValue::Con(DataConId(998), vec![]))
                     .to_value(&table)
                     .unwrap(),
             ],

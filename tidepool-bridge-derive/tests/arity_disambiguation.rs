@@ -4,7 +4,7 @@
 //! (e.g. `Pattern.Memory.Read` and `Pattern.File.Read`). The derive must
 //! disambiguate by arity so decoding doesn't fail with "Unknown DataCon name".
 
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_bridge::{BridgeError, FromHaskell, ToHaskell};
 use tidepool_bridge_derive::{FromHaskell, ToHaskell};
 use tidepool_repr::{DataCon, DataConId, DataConTable};
@@ -60,7 +60,7 @@ fn arity_alpha_roundtrips_when_beta_shares_name() {
         .to_value(&table)
         .expect("Alpha encode must succeed");
     match &encoded {
-        Value::Con(id, fields) => {
+        HaskellValue::Con(id, fields) => {
             assert_eq!(*id, alpha_id, "must encode to the arity-1 Read id");
             assert_eq!(fields.len(), 1, "Alpha encodes with 1 Haskell field");
         }
@@ -78,7 +78,7 @@ fn beta_roundtrips_when_alpha_shares_name() {
 
     let encoded = original.to_value(&table).expect("Beta encode must succeed");
     match &encoded {
-        Value::Con(id, fields) => {
+        HaskellValue::Con(id, fields) => {
             assert_eq!(*id, beta_id, "must encode to the arity-2 Read id");
             assert_eq!(fields.len(), 2, "Beta encodes with 2 Haskell fields");
         }
@@ -98,8 +98,8 @@ fn alpha_decode_rejects_beta_shaped_value() {
 
     // Build a syntactically shaped Con with 2 dummy fields — Alpha's decoder
     // should bail at the id check before touching the fields.
-    let dummy = Value::Con(DataConId(0), vec![]);
-    let beta_value = Value::Con(beta_id, vec![dummy.clone(), dummy]);
+    let dummy = HaskellValue::Con(DataConId(0), vec![]);
+    let beta_value = HaskellValue::Con(beta_id, vec![dummy.clone(), dummy]);
 
     let result = Alpha::from_value(&beta_value, &table);
     match result {

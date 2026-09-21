@@ -20,5 +20,5 @@ use tidepool_bridge_derive::FromHaskell;
               that exists only here and is never reused"
 )]
 pub enum AskReq {
-    AskWith(String, tidepool_bridge::Value),
+    AskWith(String, tidepool_bridge::HaskellValue),
 }

@@ -20,5 +20,5 @@ use tidepool_bridge_derive::FromHaskell;
               that exists only here and is never reused"
 )]
 pub enum FinalizeReq {
-    FinalizeWith(i64, tidepool_bridge::Value),
+    FinalizeWith(i64, tidepool_bridge::HaskellValue),
 }

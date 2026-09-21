@@ -1968,7 +1968,7 @@ mod tests {
                 matches!(
                     &result,
                     Ok(crate::prepared_program::RunResult { values, .. })
-                        if matches!(values.as_slice(), [tidepool_bridge::Value::Con(_, fields)] if fields.len() == expected_len)
+                        if matches!(values.as_slice(), [tidepool_bridge::HaskellValue::Con(_, fields)] if fields.len() == expected_len)
                 ),
                 "{result:?}"
             );
@@ -1999,7 +1999,7 @@ mod tests {
             "fixture must move the array and child"
         );
         assert!(matches!(result.values.as_slice(),
-            [tidepool_bridge::Value::Con(id, fields)] if *id == tidepool_repr::DataConId(1001) && fields.is_empty()));
+            [tidepool_bridge::HaskellValue::Con(id, fields)] if *id == tidepool_repr::DataConId(1001) && fields.is_empty()));
     }
 
     #[test]
@@ -2022,7 +2022,7 @@ mod tests {
             "fixture must move the mutable cell and child"
         );
         assert!(matches!(result.values.as_slice(),
-            [tidepool_bridge::Value::Con(id, fields)] if *id == tidepool_repr::DataConId(1001) && fields.is_empty()));
+            [tidepool_bridge::HaskellValue::Con(id, fields)] if *id == tidepool_repr::DataConId(1001) && fields.is_empty()));
     }
 
     #[test]
@@ -2055,7 +2055,7 @@ mod tests {
                 assert!(result.collections >= 2);
                 assert!(matches!(
                     result.values.as_slice(),
-                    [tidepool_bridge::Value::Con(id, fields)]
+                    [tidepool_bridge::HaskellValue::Con(id, fields)]
                         if *id == tidepool_repr::DataConId(expected) && fields.is_empty()
                 ));
             }
@@ -2073,7 +2073,7 @@ mod tests {
                 .unwrap();
             assert!(matches!(
                 result.values.as_slice(),
-                [tidepool_bridge::Value::Con(id, fields)]
+                [tidepool_bridge::HaskellValue::Con(id, fields)]
                     if *id == tidepool_repr::DataConId(1002) && fields.is_empty()
             ));
         }
@@ -2224,7 +2224,7 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(result.values.as_slice(),
-            [tidepool_bridge::Value::Con(id, fields)] if *id == tidepool_repr::DataConId(1001) && fields.is_empty()));
+            [tidepool_bridge::HaskellValue::Con(id, fields)] if *id == tidepool_repr::DataConId(1001) && fields.is_empty()));
         for (new_name, size_name) in [
             ("newSmallArray#", "sizeofSmallArray#"),
             ("newArray#", "sizeofArray#"),
@@ -2240,7 +2240,7 @@ mod tests {
                 .unwrap();
             assert!(matches!(
                 result.values.as_slice(),
-                [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(
+                [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(
                     3
                 ))]
             ));
@@ -2259,7 +2259,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(
+            [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(
                 1
             ))]
         ));
@@ -2294,8 +2294,8 @@ mod tests {
             let expected_flag = i64::from(!success);
             let expected_constructor = tidepool_repr::DataConId(if success { 1001 } else { 1000 });
             assert!(matches!(result.values.as_slice(),
-                [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(flag)),
-                 tidepool_bridge::Value::Con(id, fields)]
+                [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(flag)),
+                 tidepool_bridge::HaskellValue::Con(id, fields)]
                     if *flag == expected_flag && *id == expected_constructor && fields.is_empty()));
         }
     }

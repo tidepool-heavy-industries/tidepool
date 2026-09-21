@@ -20,14 +20,14 @@ use tidepool_bridge_derive::FromHaskell;
               that exists only here and is never reused"
 )]
 pub enum SubagentReq {
-    SubagentSpawn(tidepool_bridge::Value, tidepool_bridge::Value),
+    SubagentSpawn(tidepool_bridge::HaskellValue, tidepool_bridge::HaskellValue),
     SubagentBegin(
-        tidepool_bridge::Value,
-        tidepool_bridge::Value,
-        tidepool_bridge::Value,
+        tidepool_bridge::HaskellValue,
+        tidepool_bridge::HaskellValue,
+        tidepool_bridge::HaskellValue,
     ),
-    SubagentResume(tidepool_bridge::Value, String, bool, tidepool_bridge::Value),
-    SubagentSpawnAsync(tidepool_bridge::Value, tidepool_bridge::Value),
-    SubagentAwait(tidepool_bridge::Value),
-    SubagentCancel(tidepool_bridge::Value),
+    SubagentResume(tidepool_bridge::HaskellValue, String, bool, tidepool_bridge::HaskellValue),
+    SubagentSpawnAsync(tidepool_bridge::HaskellValue, tidepool_bridge::HaskellValue),
+    SubagentAwait(tidepool_bridge::HaskellValue),
+    SubagentCancel(tidepool_bridge::HaskellValue),
 }

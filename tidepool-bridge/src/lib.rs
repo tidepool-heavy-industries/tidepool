@@ -17,4 +17,4 @@ pub use error::*;
 pub use impls::{field_decode_error, get_resilient, type_mismatch};
 pub use record::*;
 pub use traits::*;
-pub use value::{SharedByteArray, Value};
+pub use value::{HaskellValue, HaskellValueFrame, SharedByteArray};

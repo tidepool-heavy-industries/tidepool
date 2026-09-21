@@ -1388,7 +1388,7 @@ mod tests {
         argument_reps: Vec<RuntimeRep>,
         result_rep: RuntimeRep,
         arguments: Vec<Atom>,
-    ) -> tidepool_bridge::Value {
+    ) -> tidepool_bridge::HaskellValue {
         use tidepool_repr::execution_schema::{testing, *};
 
         let mut wire = testing::wire_program();
@@ -1460,7 +1460,7 @@ mod tests {
         argument_reps: Vec<RuntimeRep>,
         result_reps: [RuntimeRep; 2],
         arguments: Vec<Atom>,
-    ) -> Result<Vec<tidepool_bridge::Value>, super::super::ExecutionError> {
+    ) -> Result<Vec<tidepool_bridge::HaskellValue>, super::super::ExecutionError> {
         use tidepool_repr::execution_schema::{testing, *};
 
         let mut wire = testing::wire_program();
@@ -1607,7 +1607,7 @@ mod tests {
         );
         assert!(matches!(
             chr,
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(u64::MAX))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitWord(u64::MAX))
         ));
 
         for (left, right, expected) in [(0x10ffff, 0x10ffff, 1), (0x10ffff, 65, 0)] {
@@ -1619,7 +1619,7 @@ mod tests {
             );
             assert!(matches!(
                 equal,
-                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(value)) if value == expected
+                tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(value)) if value == expected
             ));
         }
 
@@ -1638,7 +1638,7 @@ mod tests {
             );
             assert!(matches!(
                 comparison,
-                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(value))
+                tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(value))
                     if value == expected
             ));
         }
@@ -1652,7 +1652,7 @@ mod tests {
             );
             assert!(matches!(
                 less_or_equal,
-                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(value))
+                tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(value))
                     if value == expected
             ));
         }
@@ -1666,7 +1666,7 @@ mod tests {
             );
             assert!(matches!(
                 count,
-                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(value)) if value == expected
+                tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitWord(value)) if value == expected
             ));
         }
     }
@@ -1717,7 +1717,7 @@ mod tests {
             *entry_body = body;
         }
 
-        fn run(wire: WireProgram) -> tidepool_bridge::Value {
+        fn run(wire: WireProgram) -> tidepool_bridge::HaskellValue {
             let prepared = testing::prepare(wire).unwrap();
             let linked = link_program(prepared, &MachineImports::default()).unwrap();
             let compiled = super::super::CompiledProgram::compile(&linked).unwrap();
@@ -1757,7 +1757,7 @@ mod tests {
         set_entry_body(&mut same, 1);
         assert!(matches!(
             run(same),
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(1))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(1))
         ));
 
         // Distinct references: two separate allocations of the same nullary
@@ -1793,7 +1793,7 @@ mod tests {
         set_entry_body(&mut distinct, 2);
         assert!(matches!(
             run(distinct),
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(0))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(0))
         ));
     }
 
@@ -1864,7 +1864,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::Value::Lit(
+            [tidepool_bridge::HaskellValue::Lit(
                 tidepool_repr::Literal::LitWord(66)
             )]
         ));
@@ -1912,7 +1912,7 @@ mod tests {
             let result = run_scalar("intToInt32#", vec![Int(64)], Int(32), vec![int(64, input)]);
             assert!(matches!(
                 result,
-                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(value))
+                tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(value))
                     if value == expected
             ));
         }
@@ -1960,8 +1960,8 @@ mod tests {
                 matches!(
                     values.as_slice(),
                     [
-                        tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(actual_sum)),
-                        tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(actual_carry)),
+                        tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitWord(actual_sum)),
+                        tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(actual_carry)),
                     ] if *actual_sum == sum && *actual_carry == carry
                 ),
                 "addWordC#({left}, {right}) returned {values:?}"
@@ -2013,8 +2013,8 @@ mod tests {
                 matches!(
                     values.as_slice(),
                     [
-                        tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(actual_sum)),
-                        tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(actual_overflow)),
+                        tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(actual_sum)),
+                        tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(actual_overflow)),
                     ] if *actual_sum == sum && *actual_overflow == overflow as i64
                 ),
                 "addIntC#({left}, {right}) returned {values:?}"
@@ -2067,8 +2067,8 @@ mod tests {
                 matches!(
                     values.as_slice(),
                     [
-                        tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(actual_difference)),
-                        tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(actual_overflow)),
+                        tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(actual_difference)),
+                        tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(actual_overflow)),
                     ] if *actual_difference == difference && *actual_overflow == overflow as i64
                 ),
                 "subIntC#({left}, {right}) returned {values:?}"
@@ -2126,8 +2126,8 @@ mod tests {
                 matches!(
                     values.as_slice(),
                     [
-                        tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(actual_difference)),
-                        tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(actual_borrow)),
+                        tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitWord(actual_difference)),
+                        tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(actual_borrow)),
                     ] if *actual_difference == difference && *actual_borrow == borrow
                 ),
                 "subWordC#({left}, {right}) returned {values:?}"
@@ -2358,7 +2358,7 @@ mod tests {
         );
         assert!(matches!(
             quotient,
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(-2))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(-2))
         ));
         let remainder = run_scalar(
             "remInt#",
@@ -2368,7 +2368,7 @@ mod tests {
         );
         assert!(matches!(
             remainder,
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(-1))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(-1))
         ));
 
         let word_quotient = run_scalar(
@@ -2379,7 +2379,7 @@ mod tests {
         );
         assert!(matches!(
             word_quotient,
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(2))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitWord(2))
         ));
         let word_remainder = run_scalar(
             "remWord#",
@@ -2389,7 +2389,7 @@ mod tests {
         );
         assert!(matches!(
             word_remainder,
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(1))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitWord(1))
         ));
 
         let tuple = run_tuple_result(
@@ -2402,8 +2402,8 @@ mod tests {
         assert!(matches!(
             tuple.as_slice(),
             [
-                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(-2)),
-                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(-1)),
+                tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(-2)),
+                tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(-1)),
             ]
         ));
         let word_tuple = run_tuple_result(
@@ -2416,8 +2416,8 @@ mod tests {
         assert!(matches!(
             word_tuple.as_slice(),
             [
-                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(2)),
-                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(1)),
+                tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitWord(2)),
+                tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitWord(1)),
             ]
         ));
 
@@ -2429,7 +2429,7 @@ mod tests {
         );
         assert!(matches!(
             narrow_signed,
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(-2))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(-2))
         ));
         let narrow_word = run_scalar(
             "remWord16#",
@@ -2439,7 +2439,7 @@ mod tests {
         );
         assert!(matches!(
             narrow_word,
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(1))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitWord(1))
         ));
     }
 
@@ -2483,7 +2483,7 @@ mod tests {
         );
         assert!(matches!(
             remainder,
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(0))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(0))
         ));
 
         let tuple_zero = run_tuple_result(
@@ -2537,7 +2537,7 @@ mod tests {
                 vec![word(64, input)],
             );
             assert!(
-                matches!(value, tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(n)) if n == expected),
+                matches!(value, tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitWord(n)) if n == expected),
                 "{name}({input:#x}) = {value:?}"
             );
         }
@@ -2575,7 +2575,7 @@ mod tests {
         );
         assert!(matches!(
             shifted,
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(256))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitWord(256))
         ));
     }
 
@@ -2647,7 +2647,7 @@ mod tests {
         );
         assert!(matches!(
             add,
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(i64::MIN))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(i64::MIN))
         ));
 
         let mul = run_scalar(
@@ -2658,7 +2658,7 @@ mod tests {
         );
         assert!(matches!(
             mul,
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(0))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(0))
         ));
 
         let bits = run_scalar(
@@ -2669,7 +2669,7 @@ mod tests {
         );
         assert!(matches!(
             bits,
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(-1))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(-1))
         ));
 
         let word_sub = run_scalar(
@@ -2680,7 +2680,7 @@ mod tests {
         );
         assert!(matches!(
             word_sub,
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(255))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitWord(255))
         ));
     }
 
@@ -2694,7 +2694,7 @@ mod tests {
         );
         assert!(matches!(
             signed,
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(1))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(1))
         ));
 
         let unsigned = run_scalar(
@@ -2705,7 +2705,7 @@ mod tests {
         );
         assert!(matches!(
             unsigned,
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(0))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(0))
         ));
     }
 
@@ -2719,7 +2719,7 @@ mod tests {
         );
         assert!(matches!(
             to_word,
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(u64::MAX))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitWord(u64::MAX))
         ));
 
         let to_int = run_scalar(
@@ -2730,7 +2730,7 @@ mod tests {
         );
         assert!(matches!(
             to_int,
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(-1))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(-1))
         ));
 
         let narrow = run_scalar(
@@ -2741,7 +2741,7 @@ mod tests {
         );
         assert!(matches!(
             narrow,
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(-128))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(-128))
         ));
     }
 
@@ -2784,7 +2784,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(
+            [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(
                 42
             ))]
         ));

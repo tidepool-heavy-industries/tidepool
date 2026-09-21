@@ -1,5 +1,5 @@
 use crate::*;
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_mcp::CapturedOutput;
 use tidepool_repr::{DataCon, DataConId, DataConTable};
 
@@ -12,8 +12,8 @@ pub(crate) fn expect_handled(
 }
 
 /// Unwrap a handler Response: Complete passes through; a List builds the
-/// equivalent cons-list Value (iteratively, back-to-front).
-pub(crate) fn response_value(r: tidepool_effect::Response, table: &DataConTable) -> Value {
+/// equivalent cons-list HaskellValue (iteratively, back-to-front).
+pub(crate) fn response_value(r: tidepool_effect::Response, table: &DataConTable) -> HaskellValue {
     let _ = table;
     match r {
         tidepool_effect::Response::Complete(v) => v,
@@ -22,9 +22,9 @@ pub(crate) fn response_value(r: tidepool_effect::Response, table: &DataConTable)
             cons_id,
             nil_id,
         } => {
-            let mut acc = Value::Con(nil_id, vec![]);
+            let mut acc = HaskellValue::Con(nil_id, vec![]);
             for i in items.into_iter().rev() {
-                acc = Value::Con(cons_id, vec![i, acc]);
+                acc = HaskellValue::Con(cons_id, vec![i, acc]);
             }
             acc
         }
@@ -216,9 +216,9 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
     t
 }
 
-pub(crate) fn assert_is_haskell_list(val: &Value, table: &DataConTable) {
+pub(crate) fn assert_is_haskell_list(val: &HaskellValue, table: &DataConTable) {
     match val {
-        Value::Con(id, fields) => {
+        HaskellValue::Con(id, fields) => {
             let name = table.name_of(*id).unwrap();
             match name {
                 "[]" => assert!(fields.is_empty()),
@@ -234,9 +234,9 @@ pub(crate) fn assert_is_haskell_list(val: &Value, table: &DataConTable) {
     }
 }
 
-pub(crate) fn assert_is_json_value(val: &Value, table: &DataConTable) {
+pub(crate) fn assert_is_json_value(val: &HaskellValue, table: &DataConTable) {
     match val {
-        Value::Con(id, _) => {
+        HaskellValue::Con(id, _) => {
             let name = table.name_of(*id).unwrap();
             assert!(
                 ["Object", "Array", "String", "Number", "Bool", "Null"].contains(&name),
@@ -248,9 +248,9 @@ pub(crate) fn assert_is_json_value(val: &Value, table: &DataConTable) {
     }
 }
 
-pub(crate) fn assert_is_cons_list(val: &Value, table: &DataConTable) {
+pub(crate) fn assert_is_cons_list(val: &HaskellValue, table: &DataConTable) {
     match val {
-        Value::Con(id, fields) => {
+        HaskellValue::Con(id, fields) => {
             let name = table.name_of(*id).unwrap();
             match name {
                 "[]" => assert!(fields.is_empty()),

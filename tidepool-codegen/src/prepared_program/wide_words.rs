@@ -183,7 +183,7 @@ mod tests {
         arguments: Vec<RuntimeRep>,
         results: Vec<RuntimeRep>,
         atoms: Vec<Atom>,
-    ) -> Result<Vec<tidepool_bridge::Value>, super::super::ExecutionError> {
+    ) -> Result<Vec<tidepool_bridge::HaskellValue>, super::super::ExecutionError> {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(results.clone());
         wire.signatures.push(Signature {
@@ -211,8 +211,8 @@ mod tests {
             .map(|run| run.values)
     }
 
-    fn pair(values: Vec<tidepool_bridge::Value>) -> (u64, u64) {
-        use tidepool_bridge::Value;
+    fn pair(values: Vec<tidepool_bridge::HaskellValue>) -> (u64, u64) {
+        use tidepool_bridge::HaskellValue;
         use tidepool_repr::Literal;
         let [Value::Lit(Literal::LitWord(high)), Value::Lit(Literal::LitWord(low))] =
             values.as_slice()
@@ -222,8 +222,8 @@ mod tests {
         (*high, *low)
     }
 
-    fn int_triple(values: Vec<tidepool_bridge::Value>) -> (i64, i64, i64) {
-        use tidepool_bridge::Value;
+    fn int_triple(values: Vec<tidepool_bridge::HaskellValue>) -> (i64, i64, i64) {
+        use tidepool_bridge::HaskellValue;
         use tidepool_repr::Literal;
         let [Value::Lit(Literal::LitInt(high_needed)), Value::Lit(Literal::LitInt(high)), Value::Lit(Literal::LitInt(low))] =
             values.as_slice()
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn word_clz_and_char_real_adapter_results() {
-        use tidepool_bridge::Value;
+        use tidepool_bridge::HaskellValue;
         use tidepool_repr::Literal;
         let w = RuntimeRep::Word(64);
         let i = RuntimeRep::Int(64);

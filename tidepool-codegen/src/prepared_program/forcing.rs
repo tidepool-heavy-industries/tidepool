@@ -27,7 +27,7 @@ use crate::prepared_control::CallStatus;
 use std::cell::UnsafeCell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_heap::static_region::StaticRegion;
 use tidepool_repr::execution_schema::RuntimeRep;
 
@@ -184,7 +184,7 @@ pub(super) fn observe_results(
     seeds: &[super::observe::ObservationSeed],
     budget: usize,
     policy: crate::observation::BudgetPolicy,
-) -> Result<Vec<Value>, ExecutionError> {
+) -> Result<Vec<HaskellValue>, ExecutionError> {
     let mut roots = ObservationRoots::new(machine, budget)?;
     let mut result_slots = Vec::new();
     result_slots
@@ -300,7 +300,7 @@ pub(super) fn observe_results(
                 super::observe::ObservationFrame::Constructor(identity, fields) => {
                     let mut fields = fields;
                     fields.reverse();
-                    Ok(Value::Con(identity, fields))
+                    Ok(HaskellValue::Con(identity, fields))
                 }
             },
         );
@@ -367,30 +367,30 @@ pub(super) fn describe_raised_exception(
 
 /// The message an observed exception carries: the first character list,
 /// searching the exception's own fields before its context.
-fn exception_message(exception: &Value) -> Option<String> {
-    let mut pending: Vec<&Value> = match exception {
-        Value::Con(_, fields) => fields.iter().collect(),
+fn exception_message(exception: &HaskellValue) -> Option<String> {
+    let mut pending: Vec<&HaskellValue> = match exception {
+        HaskellValue::Con(_, fields) => fields.iter().collect(),
         other => vec![other],
     };
     while let Some(value) = pending.pop() {
         if let Some(text) = character_list(value) {
             return Some(text);
         }
-        if let Value::Con(_, fields) = value {
+        if let HaskellValue::Con(_, fields) = value {
             pending.extend(fields.iter().rev());
         }
     }
     None
 }
 
-fn character_list(mut value: &Value) -> Option<String> {
+fn character_list(mut value: &HaskellValue) -> Option<String> {
     let mut text = String::new();
     loop {
         match value {
-            Value::Con(_, fields) if fields.is_empty() => {
+            HaskellValue::Con(_, fields) if fields.is_empty() => {
                 return (!text.is_empty()).then_some(text);
             }
-            Value::Con(_, fields) if fields.len() == 2 => {
+            HaskellValue::Con(_, fields) if fields.len() == 2 => {
                 text.push(character(&fields[0])?);
                 value = &fields[1];
             }
@@ -400,13 +400,13 @@ fn character_list(mut value: &Value) -> Option<String> {
 }
 
 /// A boxed character; observation reads `Char#` as its 32-bit word.
-fn character(value: &Value) -> Option<char> {
+fn character(value: &HaskellValue) -> Option<char> {
     match value {
-        Value::Lit(tidepool_repr::Literal::LitChar(c)) => Some(*c),
-        Value::Lit(tidepool_repr::Literal::LitWord(word)) => {
+        HaskellValue::Lit(tidepool_repr::Literal::LitChar(c)) => Some(*c),
+        HaskellValue::Lit(tidepool_repr::Literal::LitWord(word)) => {
             u32::try_from(*word).ok().and_then(char::from_u32)
         }
-        Value::Con(_, fields) if fields.len() == 1 => character(&fields[0]),
+        HaskellValue::Con(_, fields) if fields.len() == 1 => character(&fields[0]),
         _ => None,
     }
 }
@@ -465,32 +465,32 @@ impl Drop for ObservationRoots<'_> {
 #[cfg(test)]
 mod tests {
     use super::exception_message;
-    use tidepool_bridge::Value;
+    use tidepool_bridge::HaskellValue;
     use tidepool_repr::{DataConId, Literal};
 
-    fn text(s: &str, boxed_word: bool) -> Value {
+    fn text(s: &str, boxed_word: bool) -> HaskellValue {
         s.chars()
             .rev()
-            .fold(Value::Con(DataConId(1), vec![]), |tail, c| {
+            .fold(HaskellValue::Con(DataConId(1), vec![]), |tail, c| {
                 let raw = if boxed_word {
-                    Value::Lit(Literal::LitWord(u64::from(c)))
+                    HaskellValue::Lit(Literal::LitWord(u64::from(c)))
                 } else {
-                    Value::Lit(Literal::LitChar(c))
+                    HaskellValue::Lit(Literal::LitChar(c))
                 };
-                Value::Con(
+                HaskellValue::Con(
                     DataConId(2),
-                    vec![Value::Con(DataConId(3), vec![raw]), tail],
+                    vec![HaskellValue::Con(DataConId(3), vec![raw]), tail],
                 )
             })
     }
 
     #[test]
     fn exception_message_prefers_the_exception_over_its_context() {
-        let exception = Value::Con(
+        let exception = HaskellValue::Con(
             DataConId(4),
             vec![
-                Value::Con(DataConId(5), vec![text("backtrace frame", true)]),
-                Value::Con(DataConId(6), vec![text("failed suffix", true)]),
+                HaskellValue::Con(DataConId(5), vec![text("backtrace frame", true)]),
+                HaskellValue::Con(DataConId(6), vec![text("failed suffix", true)]),
             ],
         );
         assert_eq!(
@@ -501,16 +501,16 @@ mod tests {
 
     #[test]
     fn exception_message_is_absent_without_text() {
-        let exception = Value::Con(
+        let exception = HaskellValue::Con(
             DataConId(4),
             vec![
-                Value::Con(DataConId(1), vec![]),
-                Value::Lit(Literal::LitWord(7)),
+                HaskellValue::Con(DataConId(1), vec![]),
+                HaskellValue::Lit(Literal::LitWord(7)),
             ],
         );
         assert_eq!(exception_message(&exception), None);
         assert_eq!(
-            exception_message(&Value::Con(DataConId(4), vec![text("é", false)])).as_deref(),
+            exception_message(&HaskellValue::Con(DataConId(4), vec![text("é", false)])).as_deref(),
             Some("é")
         );
     }

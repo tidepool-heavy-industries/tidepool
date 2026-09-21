@@ -18,7 +18,7 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-pub use tidepool_bridge::Value;
+pub use tidepool_bridge::HaskellValue;
 pub use tidepool_codegen::host_fns::{drain_diagnostics, push_diagnostic};
 pub use tidepool_codegen::machine::CancelHandle;
 pub use tidepool_codegen::suspension::ResumeInput;
@@ -306,7 +306,7 @@ pub fn run_prepared_program<U, H: DispatchEffect<U>>(
     handlers: &mut H,
     user: &U,
     on_ready: impl FnOnce(CancelHandle),
-) -> Result<Value, RuntimeError> {
+) -> Result<HaskellValue, RuntimeError> {
     use session::prepared::{ParkPolicy, PreparedEngine};
     use session::resident::{finish_prepared, PreparedRun, SettlePlan};
     use tidepool_codegen::suspension::RealmId;

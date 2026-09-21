@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde_json::Value as Json;
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_mcp::CapturedOutput;
@@ -285,11 +285,11 @@ struct PendingSuspension {
     node: NodeId,
     hole: HoleId,
     classified: ClassifiedSuspension,
-    /// The raw suspended request `Value`, kept alongside `classified` (which
+    /// The raw suspended request `HaskellValue`, kept alongside `classified` (which
     /// is JSON-shaped, lossy for a `Finalize` hole — its carried value may be
     /// non-serializable, e.g. a closure). `Harness::take_finalized_value`
     /// reads the finalize payload straight out of this, never through JSON.
-    raw_request: Value,
+    raw_request: HaskellValue,
     /// The typed continuation token for the suspended turn — `resume_parent`
     /// is the sole consumer, via the ONE `ResidentSession::resume`. A
     /// [`ResidentHole::Binding`] carries its own binder/generation obligation
@@ -299,7 +299,7 @@ struct PendingSuspension {
     /// what it owes.
     resident_hole: ResidentHole,
     /// Compile artifacts of the turn that suspended — needed to bridge an
-    /// answer Value against the same constructor set.
+    /// answer HaskellValue against the same constructor set.
     suspend_table: DataConTable,
     suspend_asks: YieldSites,
 }
@@ -2514,7 +2514,7 @@ impl Harness {
     }
 
     /// Like [`Self::pending_suspension_full`], plus the RAW suspended request
-    /// `Value` — what a caller needs to dispatch a suspension whose payload
+    /// `HaskellValue` — what a caller needs to dispatch a suspension whose payload
     /// `ClassifiedSuspension` doesn't carry ([`SuspensionRouting::Subagent`]
     /// is a unit variant — no spec/schema/cycle id — because the OUTER
     /// loop's own equivalent servicing reads those off the original request
@@ -2525,7 +2525,7 @@ impl Harness {
     pub(crate) fn pending_suspension_with_request(
         &self,
         node: NodeId,
-    ) -> Option<(HoleId, ClassifiedSuspension, DataConTable, Value)> {
+    ) -> Option<(HoleId, ClassifiedSuspension, DataConTable, HaskellValue)> {
         let p = self.node_pending(node)?;
         Some((p.hole, p.classified, p.suspend_table, p.raw_request))
     }
@@ -2546,7 +2546,7 @@ impl Harness {
         ClassifiedSuspension,
         DataConTable,
         YieldSites,
-        Value,
+        HaskellValue,
     )> {
         let p = self.node_pending(node)?;
         Some((
@@ -2558,10 +2558,10 @@ impl Harness {
         ))
     }
 
-    /// Resume `node`'s parked continuation with a RAW `Value` answer,
+    /// Resume `node`'s parked continuation with a RAW `HaskellValue` answer,
     /// bypassing [`Self::answer_dialog`]'s `Ask`/`AskUser`/`ReadState`
     /// routing restriction — for a suspension whose answer is already a
-    /// bridged Core `Value` rather than operator-submitted JSON
+    /// bridged Core `HaskellValue` rather than operator-submitted JSON
     /// ([`SuspensionRouting::Subagent`], serviced the same way the AUTHORED outer
     /// loop's own Subagent suspension already is —
     /// `SelfHarnessDriver::service_outer_subagent`'s dispatch, just resumed
@@ -2570,7 +2570,7 @@ impl Harness {
         &self,
         node: NodeId,
         hole: &HoleId,
-        value: Value,
+        value: HaskellValue,
     ) -> Result<(), HarnessError> {
         let _lease = self.acquire_turn_lease(node)?;
         self.resume_parent(node, hole, value).await
@@ -2593,7 +2593,7 @@ impl Harness {
     /// The harness-level primitive `service_typed_request_suspension`
     /// (`selfharness/driver.rs`) calls once a nested Agent node
     /// suspends on `finalize @T x`: read the
-    /// finalized value straight out of the suspended request `Value` (NEVER
+    /// finalized value straight out of the suspended request `HaskellValue` (NEVER
     /// through JSON — it may carry a closure or other non-serializable
     /// value, per `finalize`'s relaxed function-arrow rule) and terminate
     /// the node.
@@ -2606,12 +2606,12 @@ impl Harness {
     /// tree's own state name (`Cancelled`; a `Suspended` node has no
     /// `node_done` transition — that one is reserved for a turn that ran to
     /// completion from `Running`) reads that way. The caller is expected to
-    /// deliver the returned `Value` into the OUTER (Harness-monad)
+    /// deliver the returned `HaskellValue` into the OUTER (Harness-monad)
     /// session to resolve the parent `runLLMTurn` hole.
     ///
     /// Errors if `node` has no live session, isn't suspended, or its pending
     /// hole isn't `Finalize`-routed.
-    pub fn take_finalized_value(&self, node: NodeId) -> Result<Value, HarnessError> {
+    pub fn take_finalized_value(&self, node: NodeId) -> Result<HaskellValue, HarnessError> {
         self.take_finalized_value_with_table(node).map(|(v, _)| v)
     }
 
@@ -2623,7 +2623,7 @@ impl Harness {
     fn take_finalized_value_core(
         &self,
         node: NodeId,
-    ) -> Result<(Value, DataConTable), HarnessError> {
+    ) -> Result<(HaskellValue, DataConTable), HarnessError> {
         let sid = self
             .tree
             .session_of(node)
@@ -2641,7 +2641,7 @@ impl Harness {
                 actual: format!("{:?}", pending.classified.routing),
             });
         }
-        let Value::Con(_, fields) = &pending.raw_request else {
+        let HaskellValue::Con(_, fields) = &pending.raw_request else {
             return Err(HarnessError::Resident(
                 "finalize request was not a Con".into(),
             ));
@@ -2666,7 +2666,7 @@ impl Harness {
     pub fn take_finalized_value_with_table(
         &self,
         node: NodeId,
-    ) -> Result<(Value, DataConTable), HarnessError> {
+    ) -> Result<(HaskellValue, DataConTable), HarnessError> {
         let (value, table) = self.take_finalized_value_core(node)?;
         self.terminate_node(node, "finalized")?;
         Ok((value, table))
@@ -2692,7 +2692,7 @@ impl Harness {
     pub(crate) async fn take_finalized_value_keep_open(
         &self,
         node: NodeId,
-    ) -> Result<(Value, String), HarnessError> {
+    ) -> Result<(HaskellValue, String), HarnessError> {
         // Snapshot the pending finalize hole/continuation id BEFORE clearing it.
         let hole = self
             .node_pending(node)
@@ -2730,7 +2730,7 @@ impl Harness {
 
     /// Closure sibling of [`Self::take_finalized_value_keep_open`]:
     /// the finalize payload is a live closure, so
-    /// instead of bridging a data `Value` (which would sentinel it), MINT a
+    /// instead of bridging a data `HaskellValue` (which would sentinel it), MINT a
     /// custody of a rooted handle over the parked frame's payload, then consume the
     /// finalize hole exactly like the value path (abort the frame — the
     /// resource scope owns the payload root now — restore with the surviving hole
@@ -2891,7 +2891,7 @@ impl Harness {
     /// Answer an operator hole — `askUser` ([`SuspensionRouting::AskUser`]) or a
     /// plain `ask` ([`SuspensionRouting::Ask`]) — with the operator's submission.
     /// Both effects return the submitted value DIRECTLY, so the submission
-    /// JSON always becomes the resume `Value` with zero model turns; the
+    /// JSON always becomes the resume `HaskellValue` with zero model turns; the
     /// program that suspended decides what it means. Typed structure is the
     /// caller's job, via `Tidepool.Form`'s `askUser @T` (which derives its
     /// form from `T`'s own metadata and decodes the reply with `T`'s own
@@ -2917,8 +2917,8 @@ impl Harness {
         }
 
         // The suspend table is the constructor set the hole suspended with; the
-        // submission Value bridges against it. Both `askUser` and `ask` return
-        // a Value, so the submission JSON IS the resume answer — always, no
+        // submission HaskellValue bridges against it. Both `askUser` and `ask` return
+        // a HaskellValue, so the submission JSON IS the resume answer — always, no
         // interpretation.
         let table = pending.suspend_table.clone();
         let value = engine::json_answer_to_value(&submission, &table)?;
@@ -2934,8 +2934,8 @@ impl Harness {
     /// (lease, routing check, `resume_parent`) — the same audited resume
     /// path a mechanical dialog answer uses — but the resumed value is the
     /// REAL Core `()` ([`tidepool_bridge::ToHaskell`] for `()`), not the
-    /// aeson-wire `Value` `answer_dialog`'s submission bridges to:
-    /// `NoteWith`'s continuation is `() -> M ()`, not `Value -> M Value`, so
+    /// aeson-wire `HaskellValue` `answer_dialog`'s submission bridges to:
+    /// `NoteWith`'s continuation is `() -> M ()`, not `HaskellValue -> M HaskellValue`, so
     /// routing it through `json_answer_to_value`'s aeson-`Null` bridge would
     /// hand the continuation the wrong constructor.
     pub async fn answer_note(&self, node: NodeId) -> Result<(), HarnessError> {
@@ -2958,19 +2958,19 @@ impl Harness {
         use tidepool_bridge::ToHaskell;
         let value = ()
             .to_value(&table)
-            .map_err(|e| EngineError::Run(format!("bridge unit answer to Value: {e}")))?;
+            .map_err(|e| EngineError::Run(format!("bridge unit answer to HaskellValue: {e}")))?;
         self.resume_parent(node, &pending.hole, value).await?;
         Ok(())
     }
 
-    /// Resume `node`'s parked continuation with `answer` (a Value in the node's
+    /// Resume `node`'s parked continuation with `answer` (a HaskellValue in the node's
     /// heap). Runs the resume off-reactor; on completion marks the node done, on
     /// a re-suspend re-publishes the new hole.
     async fn resume_parent(
         &self,
         node: NodeId,
         hole: &HoleId,
-        answer: Value,
+        answer: HaskellValue,
     ) -> Result<(), HarnessError> {
         let sid = self
             .tree
@@ -3707,7 +3707,7 @@ mod tests {
                         },
                         prompt: "why".to_string(),
                     },
-                    raw_request: Value::Con(tidepool_repr::DataConId(0), Vec::new()),
+                    raw_request: HaskellValue::Con(tidepool_repr::DataConId(0), Vec::new()),
                     resident_hole: ResidentHole::plain(hole.0.clone()),
                     suspend_table: DataConTable::new(),
                     suspend_asks: YieldSites::from_pairs(Vec::new()),
@@ -3991,7 +3991,7 @@ mod tests {
         let bind_source = fake_bind_source(0, 1);
         let message = "* Ambiguous type variable `f0'\n\
              Relevant bindings include\n  \
-             __b :: f0 (Value, b0) (bound at Expr.hs:1:2)\n  \
+             __b :: f0 (HaskellValue, b0) (bound at Expr.hs:1:2)\n  \
              (Some bindings suppressed; use -fmax-relevant-binds=N or -fno-max-relevant-binds)";
         let err = tidepool_runtime::CompileError::Diagnostics(vec![diag("Expr.hs", 3, 1, message)]);
         let out = render_compile_error(&err, "garbage", &expr_source, &bind_source);

@@ -1594,15 +1594,15 @@ mod tests {
             match (element, result.values.as_slice()) {
                 (
                     Element::Word8,
-                    [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(value))],
+                    [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitWord(value))],
                 ) => assert_eq!(*value, expected),
                 (
                     Element::Word64,
-                    [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(value))],
+                    [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitWord(value))],
                 ) => assert_eq!(*value, expected),
                 (
                     Element::Int64,
-                    [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(value))],
+                    [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(value))],
                 ) => assert_eq!(*value as u64, expected),
                 _ => panic!("unexpected byte-array result: {:?}", result.values),
             }
@@ -1622,7 +1622,7 @@ mod tests {
         assert!(indexed.collections >= 2);
         assert!(matches!(
             indexed.values.as_slice(),
-            [tidepool_bridge::Value::Lit(
+            [tidepool_bridge::HaskellValue::Lit(
                 tidepool_repr::Literal::LitWord(u64::MAX)
             )]
         ));
@@ -1640,7 +1640,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(
+            [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(
                 1
             ))]
         ));
@@ -1682,7 +1682,7 @@ mod tests {
         assert!(result.collections > 0);
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::Value::Lit(
+            [tidepool_bridge::HaskellValue::Lit(
                 tidepool_repr::Literal::LitWord(0x7b)
             )]
         ));
@@ -1825,9 +1825,9 @@ mod tests {
         assert!(matches!(
             result.values.as_slice(),
             [
-                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitByteArray(bytes)),
-                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(1)),
-                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(0xe7)),
+                tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitByteArray(bytes)),
+                tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(1)),
+                tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitWord(0xe7)),
             ] if bytes.as_slice() == [0xe7]
         ));
     }
@@ -2514,7 +2514,7 @@ mod tests {
                 .unwrap();
             assert!(matches!(
                 result.values.as_slice(),
-                [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(
+                [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(
                     17
                 ))]
             ));

@@ -147,7 +147,7 @@ fn resize_bytes_real_adapter_copies_prefix_zeroes_growth_and_survives_gc() {
         assert!(result.collections >= 2);
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitByteArray(bytes))]
+            [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitByteArray(bytes))]
                 if bytes == &expected
         ));
     }
@@ -436,8 +436,8 @@ fn byte_copy_compare_real_adapter_handles_interior_and_empty_spans_across_gc() {
         assert!(matches!(
             result.values.as_slice(),
             [
-                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitByteArray(bytes)),
-                tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(actual_ordering)),
+                tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitByteArray(bytes)),
+                tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(actual_ordering)),
             ] if bytes == expected && *actual_ordering == ordering
         ));
     }
@@ -602,7 +602,7 @@ fn literal_addresses_observe_through_one_shot_and_other_installed_programs() {
         )
         .unwrap();
     assert!(
-        matches!(&result.values[0], tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitString(bytes)) if bytes == &payload)
+        matches!(&result.values[0], tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitString(bytes)) if bytes == &payload)
     );
 
     let (mut machine, _) = PreparedMachine::new(
@@ -648,7 +648,7 @@ fn literal_addresses_observe_through_one_shot_and_other_installed_programs() {
         )
         .unwrap();
     assert!(
-        matches!(&result.values[0], tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitString(bytes)) if bytes == &payload[2..])
+        matches!(&result.values[0], tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitString(bytes)) if bytes == &payload[2..])
     );
 
     // String primitives resolve a literal address through the same machine
@@ -680,7 +680,7 @@ fn literal_addresses_observe_through_one_shot_and_other_installed_programs() {
         .unwrap();
     assert!(matches!(
         length.values.as_slice(),
-        [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(
+        [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(
             2
         ))]
     ));
@@ -950,7 +950,7 @@ fn c_string_len(program: &CompiledProgram, address: usize) -> Result<i64, Execut
         Arc::new(AtomicBool::new(false)),
     )?;
     match result.values.as_slice() {
-        [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(value))] => Ok(*value),
+        [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(value))] => Ok(*value),
         other => panic!("unexpected strlen result: {other:?}"),
     }
 }
@@ -1150,7 +1150,7 @@ fn copy_addr_real_adapter_handles_full_interior_and_empty_spans_after_gc() {
         assert!(result.collections >= 1);
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitByteArray(bytes))]
+            [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitByteArray(bytes))]
                 if bytes == expected
         ));
     }
@@ -1199,7 +1199,7 @@ fn index_char(
         Arc::new(AtomicBool::new(false)),
     )?;
     match result.values.as_slice() {
-        [tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(value))] => Ok(*value),
+        [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitWord(value))] => Ok(*value),
         other => panic!("unexpected indexCharOffAddr# result: {other:?}"),
     }
 }

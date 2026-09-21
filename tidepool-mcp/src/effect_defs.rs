@@ -955,7 +955,7 @@ macro_rules! ask_effect_def {
             type_defs [],
             verbs [
                 { ctor AskWith, method ask_with,
-                  args { prompt: "Text" as String, payload: "Value" as tidepool_bridge::Value },
+                  args { prompt: "Text" as String, payload: "Value" as tidepool_bridge::HaskellValue },
                   ret "Value" },
             ],
             helpers [
@@ -1079,7 +1079,7 @@ macro_rules! kv_effect_def {
                   args { key: "Text" as String },
                   ret "(Maybe Value)" },
                 { ctor KvSet, method kv_set,
-                  args { key: "Text" as String, val: "Value" as tidepool_bridge::Value },
+                  args { key: "Text" as String, val: "Value" as tidepool_bridge::HaskellValue },
                   ret "()" },
                 { ctor KvDelete, method kv_delete,
                   args { key: "Text" as String },
@@ -1105,8 +1105,8 @@ macro_rules! kv_effect_def {
                 // `Left actual` on a mismatch — the lost-update-free primitive.
                 { ctor KvCas, method kv_cas,
                   args { key: "Text" as String,
-                         expected: "Maybe Value" as Option<tidepool_bridge::Value>,
-                         new: "Value" as tidepool_bridge::Value },
+                         expected: "Maybe Value" as Option<tidepool_bridge::HaskellValue>,
+                         new: "Value" as tidepool_bridge::HaskellValue },
                   ret "(Either Value ())" },
             ],
             helpers [

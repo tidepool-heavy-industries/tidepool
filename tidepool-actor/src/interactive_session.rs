@@ -1,7 +1,7 @@
 //! Captured typed boundary for one supervised external-agent session.
 
 use tidepool_bridge::FromHaskell;
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{OutputSink, ResidentHole, ResidentSession, RootCustody};
@@ -141,7 +141,7 @@ impl ResidentInteractiveSession {
     pub(crate) fn capture<H, O>(
         session: &mut ResidentSession<H, O>,
         hole: ResidentHole,
-        request: &Value,
+        request: &HaskellValue,
         table: &DataConTable,
         actor_realm: tidepool_codegen::suspension::RealmId,
     ) -> Result<Self, InteractiveSessionCaptureError>

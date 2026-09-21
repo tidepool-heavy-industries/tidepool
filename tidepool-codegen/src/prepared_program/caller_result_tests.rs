@@ -7,7 +7,7 @@ use crate::host_fns::RuntimeError;
 use crate::machine_state::{MachineDisposition, MachineFailure};
 use crate::suspension::RealmId;
 use std::sync::{atomic::AtomicBool, Arc};
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_repr::execution_schema::{testing, *};
 use tidepool_repr::{DataConId, Literal};
 
@@ -225,13 +225,13 @@ fn compile(wire: WireProgram) -> CompiledProgram {
     CompiledProgram::compile(&linked).expect("CallerResult fixture compiles")
 }
 
-fn assert_answer(values: &[Value], rep: RuntimeRep) {
+fn assert_answer(values: &[HaskellValue], rep: RuntimeRep) {
     match rep {
         RuntimeRep::LiftedRef => {
-            assert!(matches!(values, [Value::Con(DataConId(1980), fields)] if fields.is_empty()))
+            assert!(matches!(values, [HaskellValue::Con(DataConId(1980), fields)] if fields.is_empty()))
         }
-        RuntimeRep::Int(64) => assert!(matches!(values, [Value::Lit(Literal::LitInt(42))])),
-        RuntimeRep::Word(64) => assert!(matches!(values, [Value::Lit(Literal::LitWord(42))])),
+        RuntimeRep::Int(64) => assert!(matches!(values, [HaskellValue::Lit(Literal::LitInt(42))])),
+        RuntimeRep::Word(64) => assert!(matches!(values, [HaskellValue::Lit(Literal::LitWord(42))])),
         _ => panic!("fixture answer representation"),
     }
 }

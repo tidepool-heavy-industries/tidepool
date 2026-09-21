@@ -1,11 +1,11 @@
-//! Value-level Haskell data-shape facts — the ONE home for how common GHC
-//! runtime shapes look as `tidepool_bridge::Value` trees, independent of any
+//! Haskell-value-level Haskell data-shape facts — the ONE home for how common GHC
+//! runtime shapes look as `tidepool_bridge::HaskellValue` trees, independent of any
 //! heap layout.
 //!
-//! A "shape fact" is the materialized Value-tree encoding of a Haskell data
+//! A "shape fact" is the materialized HaskellValue-tree encoding of a Haskell data
 //! type:
 //!   - `Text` as the worker `Text ByteArray# Int# Int#` (UTF-8 bytes), with
-//!     raw `Value::ByteArray`, owned `LitString`/`LitByteArray` snapshots, and
+//!     raw `HaskellValue::ByteArray`, owned `LitString`/`LitByteArray` snapshots, and
 //!     any number of lifted `Con("ByteArray", [..])` wrapper layers (sliced
 //!     Texts from `splitOn` etc. stack them);
 //!   - boxed machine numbers as `I#`/`W#`/`C#`/`D#`/`F#` single-field cons
@@ -37,7 +37,7 @@
 //! a `&DataConTable` and recognize constructors BY NAME (`name_of`), which
 //! tolerates duplicate same-name cons from cross-module closures.
 
-use crate::value::{SharedByteArray, Value};
+use crate::value::{SharedByteArray, HaskellValue};
 use std::sync::{Arc, Mutex, PoisonError};
 use tidepool_repr::{DataConId, DataConTable, Literal};
 
@@ -66,12 +66,12 @@ macro_rules! unbox_lit {
     ($fn_name:ident, $con:literal, $ty:ty, $pat:pat => $out:expr) => {
         /// Unwrap a possibly-boxed literal: accepts the bare literal or any
         /// number of nested single-field boxing-con layers.
-        pub fn $fn_name(v: &Value, table: &DataConTable) -> Option<$ty> {
+        pub fn $fn_name(v: &HaskellValue, table: &DataConTable) -> Option<$ty> {
             let mut cur = v;
             loop {
                 match cur {
-                    Value::Lit($pat) => return Some($out),
-                    Value::Con(id, fields)
+                    HaskellValue::Lit($pat) => return Some($out),
+                    HaskellValue::Con(id, fields)
                         if fields.len() == 1 && is_con_named(*id, $con, table) =>
                     {
                         cur = &fields[0];
@@ -89,57 +89,57 @@ unbox_lit!(unbox_double, "D#", f64, Literal::LitDouble(bits) => f64::from_bits(*
 unbox_lit!(unbox_float, "F#", f32, Literal::LitFloat(bits) => f32::from_bits(*bits as u32));
 
 /// Box an `Int` as `I#(LitInt n)`.
-pub fn box_int(n: i64, i_hash: DataConId) -> Value {
-    Value::Con(i_hash, vec![Value::Lit(Literal::LitInt(n))])
+pub fn box_int(n: i64, i_hash: DataConId) -> HaskellValue {
+    HaskellValue::Con(i_hash, vec![HaskellValue::Lit(Literal::LitInt(n))])
 }
 
 /// Box a `Word` as `W#(LitWord n)`.
-pub fn box_word(n: u64, w_hash: DataConId) -> Value {
-    Value::Con(w_hash, vec![Value::Lit(Literal::LitWord(n))])
+pub fn box_word(n: u64, w_hash: DataConId) -> HaskellValue {
+    HaskellValue::Con(w_hash, vec![HaskellValue::Lit(Literal::LitWord(n))])
 }
 
 /// Box a `Double` as `D#(LitDouble bits)`.
-pub fn box_double(f: f64, d_hash: DataConId) -> Value {
-    Value::Con(d_hash, vec![Value::Lit(Literal::LitDouble(f.to_bits()))])
+pub fn box_double(f: f64, d_hash: DataConId) -> HaskellValue {
+    HaskellValue::Con(d_hash, vec![HaskellValue::Lit(Literal::LitDouble(f.to_bits()))])
 }
 
 /// Box a `Float` as `F#(LitFloat bits)`.
-pub fn box_float(f: f32, f_hash: DataConId) -> Value {
-    Value::Con(
+pub fn box_float(f: f32, f_hash: DataConId) -> HaskellValue {
+    HaskellValue::Con(
         f_hash,
-        vec![Value::Lit(Literal::LitFloat(f.to_bits() as u64))],
+        vec![HaskellValue::Lit(Literal::LitFloat(f.to_bits() as u64))],
     )
 }
 
 /// Box a `Char` as `C#(LitChar c)`.
-pub fn box_char(c: char, c_hash: DataConId) -> Value {
-    Value::Con(c_hash, vec![Value::Lit(Literal::LitChar(c))])
+pub fn box_char(c: char, c_hash: DataConId) -> HaskellValue {
+    HaskellValue::Con(c_hash, vec![HaskellValue::Lit(Literal::LitChar(c))])
 }
 
-/// Extract a `char` from any of its Value shapes:
+/// Extract a `char` from any of its HaskellValue shapes:
 ///   1. bare `LitChar`;
 ///   2. bare target-width `LitWord` for an unboxed `Char#`;
 ///   3. `C#` around either literal;
 ///   4. `C#(Text(backing, off, 1))` — a char smuggled as a single-BYTE Text;
 ///      the byte at `off` is read as a raw 0–255 code point (historical
 ///      renderer semantics, NOT UTF-8 decoding).
-pub fn unbox_char(v: &Value, table: &DataConTable) -> Option<char> {
+pub fn unbox_char(v: &HaskellValue, table: &DataConTable) -> Option<char> {
     match v {
-        Value::Lit(Literal::LitChar(_) | Literal::LitWord(_)) => char_payload(v, table),
-        Value::Con(id, fields) if fields.len() == 1 && is_con_named(*id, "C#", table) => {
+        HaskellValue::Lit(Literal::LitChar(_) | Literal::LitWord(_)) => char_payload(v, table),
+        HaskellValue::Con(id, fields) if fields.len() == 1 && is_con_named(*id, "C#", table) => {
             char_payload(&fields[0], table)
         }
         _ => None,
     }
 }
 
-fn char_payload(v: &Value, table: &DataConTable) -> Option<char> {
+fn char_payload(v: &HaskellValue, table: &DataConTable) -> Option<char> {
     match v {
-        Value::Lit(Literal::LitChar(c)) => Some(*c),
-        Value::Lit(Literal::LitWord(code_point)) => {
+        HaskellValue::Lit(Literal::LitChar(c)) => Some(*c),
+        HaskellValue::Lit(Literal::LitWord(code_point)) => {
             u32::try_from(*code_point).ok().and_then(char::from_u32)
         }
-        Value::Con(id, fields) if fields.len() == 3 && is_con_named(*id, "Text", table) => {
+        HaskellValue::Con(id, fields) if fields.len() == 3 && is_con_named(*id, "Text", table) => {
             let len = unbox_int(&fields[2], table)?;
             if len != 1 {
                 return None;
@@ -159,9 +159,9 @@ fn char_payload(v: &Value, table: &DataConTable) -> Option<char> {
 
 /// Decode a nullary `True`/`False` con. `None` for anything else (including
 /// a True/False con that somehow carries fields).
-pub fn unbox_bool(v: &Value, table: &DataConTable) -> Option<bool> {
+pub fn unbox_bool(v: &HaskellValue, table: &DataConTable) -> Option<bool> {
     match v {
-        Value::Con(id, fields) if fields.is_empty() => match table.name_of(*id) {
+        HaskellValue::Con(id, fields) if fields.is_empty() => match table.name_of(*id) {
             Some("True") => Some(true),
             Some("False") => Some(false),
             _ => None,
@@ -171,8 +171,8 @@ pub fn unbox_bool(v: &Value, table: &DataConTable) -> Option<bool> {
 }
 
 /// Build the nullary `True`/`False` con.
-pub fn make_bool(b: bool, true_id: DataConId, false_id: DataConId) -> Value {
-    Value::Con(if b { true_id } else { false_id }, vec![])
+pub fn make_bool(b: bool, true_id: DataConId, false_id: DataConId) -> HaskellValue {
+    HaskellValue::Con(if b { true_id } else { false_id }, vec![])
 }
 
 // ---------------------------------------------------------------------------
@@ -180,41 +180,41 @@ pub fn make_bool(b: bool, true_id: DataConId, false_id: DataConId) -> Value {
 // ---------------------------------------------------------------------------
 
 /// Build the worker `Text ByteArray# Int# Int#` for a UTF-8 string
-/// (offset 0, raw `Value::ByteArray` backing).
-pub fn make_text(s: &str, text_id: DataConId) -> Value {
+/// (offset 0, raw `HaskellValue::ByteArray` backing).
+pub fn make_text(s: &str, text_id: DataConId) -> HaskellValue {
     let bytes = s.as_bytes().to_vec();
     let len = bytes.len() as i64;
-    Value::Con(
+    HaskellValue::Con(
         text_id,
         vec![
-            Value::ByteArray(Arc::new(Mutex::new(bytes))),
-            Value::Lit(Literal::LitInt(0)),
-            Value::Lit(Literal::LitInt(len)),
+            HaskellValue::ByteArray(Arc::new(Mutex::new(bytes))),
+            HaskellValue::Lit(Literal::LitInt(0)),
+            HaskellValue::Lit(Literal::LitInt(len)),
         ],
     )
 }
 
 /// Unwrap a Text backing field to its raw bytes, given a recognizer for the
 /// lifted `Con("ByteArray", [..])` wrapper layer. Accepts a raw
-/// `Value::ByteArray` or an owned `LitString`/`LitByteArray` snapshot
+/// `HaskellValue::ByteArray` or an owned `LitString`/`LitByteArray` snapshot
 /// unconditionally (literals are copied into a fresh `SharedByteArray`);
 /// table-free callers that cannot
 /// recognize the wrapper con (no `DataConId` for it in hand) pass `|_|
 /// false` and simply won't unwrap that form.
 fn text_backing_with(
-    v: &Value,
+    v: &HaskellValue,
     is_bytearray_con: &dyn Fn(DataConId) -> bool,
 ) -> Option<SharedByteArray> {
     let mut cur = v;
     loop {
         match cur {
-            Value::ByteArray(bs) => return Some(bs.clone()),
+            HaskellValue::ByteArray(bs) => return Some(bs.clone()),
             // Prepared observation publishes owned byte snapshots; both literal
             // forms are data, with no live heap or mutator handle to retain.
-            Value::Lit(Literal::LitString(bytes) | Literal::LitByteArray(bytes)) => {
+            HaskellValue::Lit(Literal::LitString(bytes) | Literal::LitByteArray(bytes)) => {
                 return Some(Arc::new(Mutex::new(bytes.clone())));
             }
-            Value::Con(id, fields) if fields.len() == 1 && is_bytearray_con(*id) => {
+            HaskellValue::Con(id, fields) if fields.len() == 1 && is_bytearray_con(*id) => {
                 cur = &fields[0];
             }
             _ => return None,
@@ -223,22 +223,22 @@ fn text_backing_with(
 }
 
 /// Unwrap a Text backing field to its raw bytes. Accepts a raw
-/// `Value::ByteArray`, an owned `LitString`/`LitByteArray` snapshot, or any
+/// `HaskellValue::ByteArray`, an owned `LitString`/`LitByteArray` snapshot, or any
 /// number of lifted `Con("ByteArray", [..])` wrapper layers around them.
 /// Literal bytes are copied into a fresh `SharedByteArray`.
-pub fn text_backing(v: &Value, table: &DataConTable) -> Option<SharedByteArray> {
+pub fn text_backing(v: &HaskellValue, table: &DataConTable) -> Option<SharedByteArray> {
     text_backing_with(v, &|id| is_con_named(id, "ByteArray", table))
 }
 
 /// Table-free unbox of an `Int`/`I#`-boxed field: a bare `Lit(LitInt)`, or
 /// any number of nested boxing layers recognized by `is_int_con` (a
 /// caller-supplied `DataConId` predicate, not a table name lookup).
-fn unbox_int_with(v: &Value, is_int_con: &dyn Fn(DataConId) -> bool) -> Option<i64> {
+fn unbox_int_with(v: &HaskellValue, is_int_con: &dyn Fn(DataConId) -> bool) -> Option<i64> {
     let mut cur = v;
     loop {
         match cur {
-            Value::Lit(Literal::LitInt(n)) => return Some(*n),
-            Value::Con(id, fields) if fields.len() == 1 && is_int_con(*id) => {
+            HaskellValue::Lit(Literal::LitInt(n)) => return Some(*n),
+            HaskellValue::Con(id, fields) if fields.len() == 1 && is_int_con(*id) => {
                 cur = &fields[0];
             }
             _ => return None,
@@ -274,7 +274,7 @@ pub enum TextShapeError {
 /// typed error instead of clamping. Returns the raw slice bytes; UTF-8
 /// validation is the caller's policy.
 pub fn text_bytes_checked(
-    fields: &[Value],
+    fields: &[HaskellValue],
     table: &DataConTable,
 ) -> Result<Vec<u8>, TextShapeError> {
     if fields.len() != 3 {
@@ -318,7 +318,7 @@ pub fn text_bytes_checked(
 /// concrete id is reachable; that wrapper form then simply goes
 /// unrecognized (`None`/default).
 pub fn text_bytes_clamped_with(
-    fields: &[Value],
+    fields: &[HaskellValue],
     is_bytearray_con: impl Fn(DataConId) -> bool,
     is_int_con: impl Fn(DataConId) -> bool,
 ) -> Option<Vec<u8>> {
@@ -336,7 +336,7 @@ pub fn text_bytes_clamped_with(
 
 /// Table-based entry point for [`text_bytes_clamped_with`]: recognizes the
 /// `ByteArray`/`I#` wrapper cons by name via `table`.
-pub fn text_bytes_clamped(fields: &[Value], table: &DataConTable) -> Option<Vec<u8>> {
+pub fn text_bytes_clamped(fields: &[HaskellValue], table: &DataConTable) -> Option<Vec<u8>> {
     text_bytes_clamped_with(
         fields,
         |id| is_con_named(id, "ByteArray", table),
@@ -349,10 +349,10 @@ pub fn text_bytes_clamped(fields: &[Value], table: &DataConTable) -> Option<Vec<
 // ---------------------------------------------------------------------------
 
 /// Build a cons list (`:`/`[]`) from already-converted elements.
-pub fn make_list(items: Vec<Value>, cons_id: DataConId, nil_id: DataConId) -> Value {
-    let mut acc = Value::Con(nil_id, vec![]);
+pub fn make_list(items: Vec<HaskellValue>, cons_id: DataConId, nil_id: DataConId) -> HaskellValue {
+    let mut acc = HaskellValue::Con(nil_id, vec![]);
     for v in items.into_iter().rev() {
-        acc = Value::Con(cons_id, vec![v, acc]);
+        acc = HaskellValue::Con(cons_id, vec![v, acc]);
     }
     acc
 }
@@ -362,38 +362,38 @@ pub fn make_list(items: Vec<Value>, cons_id: DataConId, nil_id: DataConId) -> Va
 // ---------------------------------------------------------------------------
 
 /// The empty map.
-pub fn map_tip(tip_id: DataConId) -> Value {
-    Value::Con(tip_id, vec![])
+pub fn map_tip(tip_id: DataConId) -> HaskellValue {
+    HaskellValue::Con(tip_id, vec![])
 }
 
 /// One `Bin size k v l r` node. The leading `!Int` (subtree size) is boxed as
 /// `I#(size)` to match GHC's heap.
 pub fn map_bin_node(
     size: i64,
-    key: Value,
-    val: Value,
-    left: Value,
-    right: Value,
+    key: HaskellValue,
+    val: HaskellValue,
+    left: HaskellValue,
+    right: HaskellValue,
     bin_id: DataConId,
     i_hash: DataConId,
-) -> Value {
-    Value::Con(bin_id, vec![box_int(size, i_hash), key, val, left, right])
+) -> HaskellValue {
+    HaskellValue::Con(bin_id, vec![box_int(size, i_hash), key, val, left, right])
 }
 
 /// Build a balanced `Data.Map.Strict` from key-sorted entries by
 /// divide-and-conquer.
 pub fn make_map_from_sorted(
-    entries: Vec<(Value, Value)>,
+    entries: Vec<(HaskellValue, HaskellValue)>,
     bin_id: DataConId,
     tip_id: DataConId,
     i_hash: DataConId,
-) -> Value {
+) -> HaskellValue {
     fn go(
-        entries: &mut [Option<(Value, Value)>],
+        entries: &mut [Option<(HaskellValue, HaskellValue)>],
         bin: DataConId,
         tip: DataConId,
         i: DataConId,
-    ) -> Value {
+    ) -> HaskellValue {
         if entries.is_empty() {
             return map_tip(tip);
         }
@@ -406,7 +406,7 @@ pub fn make_map_from_sorted(
         let right = go(&mut r[1..], bin, tip, i);
         map_bin_node(size, k, v, left, right, bin, i)
     }
-    let mut entries: Vec<Option<(Value, Value)>> = entries.into_iter().map(Some).collect();
+    let mut entries: Vec<Option<(HaskellValue, HaskellValue)>> = entries.into_iter().map(Some).collect();
     go(&mut entries, bin_id, tip_id, i_hash)
 }
 
@@ -416,16 +416,16 @@ pub fn make_map_from_sorted(
 /// historical depth accounting. Nodes deeper than `max_depth`, and any
 /// non-`Bin`/`Tip` value, are silently skipped.
 pub fn walk_map_entries<'a>(
-    v: &'a Value,
+    v: &'a HaskellValue,
     table: &DataConTable,
     depth: usize,
     max_depth: usize,
-    f: &mut dyn FnMut(&'a Value, &'a Value, usize),
+    f: &mut dyn FnMut(&'a HaskellValue, &'a HaskellValue, usize),
 ) {
     if depth > max_depth {
         return;
     }
-    if let Value::Con(id, fields) = v {
+    if let HaskellValue::Con(id, fields) = v {
         match (table.name_of(*id).unwrap_or(""), fields.as_slice()) {
             ("Tip", []) => {}
             ("Bin", [_size, k, val, left, right]) => {
@@ -439,7 +439,7 @@ pub fn walk_map_entries<'a>(
 }
 
 // ---------------------------------------------------------------------------
-// Vendored aeson Value — exact-int number policy
+// Vendored aeson HaskellValue — exact-int number policy
 // ---------------------------------------------------------------------------
 
 /// Constructor ids for building an aeson `Number (Scientific coeff exp)`.
@@ -495,10 +495,8 @@ pub fn parse_decimal_token(tok: &str) -> (String, i64) {
 /// cannot represent as an `i64` — the case it silently maps to `unwrap_or(0)`
 /// (`1e99999999999999999999` would decode as `1×10⁰` instead of erroring).
 /// `parse_decimal_token` itself stays infallible (shared by `tidepool-bridge`
-/// and `tidepool-mcp`'s eval-prep source rendering, neither of which has a
-/// decode-error path); the untrusted-JSON-text boundary that DOES need one —
-/// [`crate::json::decode_json_str`], the `JsonDecode` primop — calls this
-/// first and rejects the token as a decode error instead of building on it.
+/// and `tidepool-mcp`'s eval-prep source rendering); callers at an untrusted
+/// JSON-text boundary can use this to reject the token before building on it.
 pub fn decimal_token_exponent_overflows(tok: &str) -> bool {
     let rest = tok
         .strip_prefix('-')
@@ -515,14 +513,14 @@ pub fn decimal_token_exponent_overflows(tok: &str) -> bool {
 /// number. No precision is lost: the coefficient rides an exact `Integer`
 /// (`IS`/`IP`/`IN`) and the base-10 exponent an `Int`. Requires
 /// `serde_json`'s `arbitrary_precision` so `n.as_str()` is the exact token.
-pub fn scientific_from_number(n: &serde_json::Number, ids: &NumberConIds) -> Value {
+pub fn scientific_from_number(n: &serde_json::Number, ids: &NumberConIds) -> HaskellValue {
     let (coeff, exp) = parse_decimal_token(n.as_str());
     let coefficient = integer_from_decimal(&coeff, ids.is, ids.ip, ids.in_);
-    let sci = Value::Con(
+    let sci = HaskellValue::Con(
         ids.scientific,
-        vec![coefficient, Value::Lit(Literal::LitInt(exp))],
+        vec![coefficient, HaskellValue::Lit(Literal::LitInt(exp))],
     );
-    Value::Con(ids.number, vec![sci])
+    HaskellValue::Con(ids.number, vec![sci])
 }
 
 // ---------------------------------------------------------------------------
@@ -540,10 +538,10 @@ pub fn integer_from_decimal(
     is_id: DataConId,
     ip_id: DataConId,
     in_id: DataConId,
-) -> Value {
+) -> HaskellValue {
     // Machine-Int fast path (the overwhelmingly common case).
     if let Ok(i) = s.parse::<i64>() {
-        return Value::Con(is_id, vec![Value::Lit(Literal::LitInt(i))]);
+        return HaskellValue::Con(is_id, vec![HaskellValue::Lit(Literal::LitInt(i))]);
     }
     let (neg, mag) = match s.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -568,25 +566,25 @@ pub fn integer_from_decimal(
     }
     let bytes: Vec<u8> = limbs.iter().flat_map(|l| l.to_le_bytes()).collect();
     let con = if neg { in_id } else { ip_id };
-    Value::Con(con, vec![Value::Lit(Literal::LitByteArray(bytes))])
+    HaskellValue::Con(con, vec![HaskellValue::Lit(Literal::LitByteArray(bytes))])
 }
 
 /// Unwrap the `BigNat#` payload of an `IP`/`IN` con to its raw limb bytes.
-/// Accepts `Value::ByteArray`, `LitByteArray`, or ONE lifted
+/// Accepts `HaskellValue::ByteArray`, `LitByteArray`, or ONE lifted
 /// `Con("ByteArray", [..])` layer around either — exactly the forms heap
 /// readers emit for bignum payloads. (Deliberately narrower than
 /// [`text_backing`]: no `LitString`, one wrapper layer only, preserving the
 /// historical renderer's accepted set byte-for-byte.)
-pub fn bignat_backing_bytes(v: &Value, table: &DataConTable) -> Option<Vec<u8>> {
-    fn raw(v: &Value) -> Option<Vec<u8>> {
+pub fn bignat_backing_bytes(v: &HaskellValue, table: &DataConTable) -> Option<Vec<u8>> {
+    fn raw(v: &HaskellValue) -> Option<Vec<u8>> {
         match v {
-            Value::ByteArray(bs) => Some(bs.lock().unwrap_or_else(PoisonError::into_inner).clone()),
-            Value::Lit(Literal::LitByteArray(bytes)) => Some(bytes.clone()),
+            HaskellValue::ByteArray(bs) => Some(bs.lock().unwrap_or_else(PoisonError::into_inner).clone()),
+            HaskellValue::Lit(Literal::LitByteArray(bytes)) => Some(bytes.clone()),
             _ => None,
         }
     }
     match v {
-        Value::Con(id, fields) if fields.len() == 1 && is_con_named(*id, "ByteArray", table) => {
+        HaskellValue::Con(id, fields) if fields.len() == 1 && is_con_named(*id, "ByteArray", table) => {
             raw(&fields[0])
         }
         other => raw(other),
@@ -707,13 +705,13 @@ mod tests {
         for s in cases {
             let v = integer_from_decimal(s, is, ip, in_);
             let got = match &v {
-                Value::Con(cid, f) if *cid == is => match &f[0] {
-                    Value::Lit(Literal::LitInt(n)) => n.to_string(),
+                HaskellValue::Con(cid, f) if *cid == is => match &f[0] {
+                    HaskellValue::Lit(Literal::LitInt(n)) => n.to_string(),
                     other => panic!("IS payload not LitInt: {other:?}"),
                 },
-                Value::Con(cid, f) if *cid == ip || *cid == in_ => {
+                HaskellValue::Con(cid, f) if *cid == ip || *cid == in_ => {
                     let bytes = match &f[0] {
-                        Value::Lit(Literal::LitByteArray(b)) => b.clone(),
+                        HaskellValue::Lit(Literal::LitByteArray(b)) => b.clone(),
                         other => panic!("IP/IN payload not LitByteArray: {other:?}"),
                     };
                     let mag = bignat_bytes_to_decimal(&bytes);
@@ -729,7 +727,7 @@ mod tests {
             // Big values must NOT box as IS (that would silently cap at i64).
             if s.parse::<i64>().is_err() {
                 assert!(
-                    matches!(&v, Value::Con(cid, _) if *cid == ip || *cid == in_),
+                    matches!(&v, HaskellValue::Con(cid, _) if *cid == ip || *cid == in_),
                     "{s} should be IP/IN, got {v:?}"
                 );
             }
@@ -740,10 +738,10 @@ mod tests {
     fn unbox_int_unwraps_nested_boxes() {
         let t = test_table();
         let i = id(&t, "I#");
-        let v = Value::Con(i, vec![Value::Con(i, vec![Value::Lit(Literal::LitInt(7))])]);
+        let v = HaskellValue::Con(i, vec![HaskellValue::Con(i, vec![HaskellValue::Lit(Literal::LitInt(7))])]);
         assert_eq!(unbox_int(&v, &t), Some(7));
-        assert_eq!(unbox_int(&Value::Lit(Literal::LitInt(3)), &t), Some(3));
-        assert_eq!(unbox_int(&Value::Lit(Literal::LitWord(3)), &t), None);
+        assert_eq!(unbox_int(&HaskellValue::Lit(Literal::LitInt(3)), &t), Some(3));
+        assert_eq!(unbox_int(&HaskellValue::Lit(Literal::LitWord(3)), &t), None);
     }
 
     #[test]
@@ -763,15 +761,15 @@ mod tests {
     #[test]
     fn char_from_single_byte_text() {
         let t = test_table();
-        let text = Value::Con(
+        let text = HaskellValue::Con(
             id(&t, "Text"),
             vec![
-                Value::ByteArray(Arc::new(Mutex::new(b"xy".to_vec()))),
-                Value::Lit(Literal::LitInt(1)),
-                Value::Lit(Literal::LitInt(1)),
+                HaskellValue::ByteArray(Arc::new(Mutex::new(b"xy".to_vec()))),
+                HaskellValue::Lit(Literal::LitInt(1)),
+                HaskellValue::Lit(Literal::LitInt(1)),
             ],
         );
-        let c = Value::Con(id(&t, "C#"), vec![text]);
+        let c = HaskellValue::Con(id(&t, "C#"), vec![text]);
         assert_eq!(unbox_char(&c, &t), Some('y'));
     }
 
@@ -780,27 +778,27 @@ mod tests {
         let table = test_table();
         let c_hash = id(&table, "C#");
         let cons = id(&table, ":");
-        let nil = Value::Con(id(&table, "[]"), vec![]);
+        let nil = HaskellValue::Con(id(&table, "[]"), vec![]);
         for character in ['A', 'λ'] {
-            let bare = Value::Lit(Literal::LitWord(character as u64));
-            let boxed = Value::Con(c_hash, vec![bare.clone()]);
+            let bare = HaskellValue::Lit(Literal::LitWord(character as u64));
+            let boxed = HaskellValue::Con(c_hash, vec![bare.clone()]);
             assert_eq!(unbox_char(&bare, &table), Some(character));
             assert_eq!(unbox_char(&boxed, &table), Some(character));
         }
         for invalid in [0xd800, 0x11_0000, 0x1_0000_0041] {
-            let bare = Value::Lit(Literal::LitWord(invalid));
-            let boxed = Value::Con(c_hash, vec![bare.clone()]);
+            let bare = HaskellValue::Lit(Literal::LitWord(invalid));
+            let boxed = HaskellValue::Con(c_hash, vec![bare.clone()]);
             assert_eq!(unbox_char(&bare, &table), None);
             assert_eq!(unbox_char(&boxed, &table), None);
         }
-        let string = Value::Con(
+        let string = HaskellValue::Con(
             cons,
             vec![
-                Value::Con(c_hash, vec![Value::Lit(Literal::LitWord('A' as u64))]),
-                Value::Con(
+                HaskellValue::Con(c_hash, vec![HaskellValue::Lit(Literal::LitWord('A' as u64))]),
+                HaskellValue::Con(
                     cons,
                     vec![
-                        Value::Con(c_hash, vec![Value::Lit(Literal::LitWord('λ' as u64))]),
+                        HaskellValue::Con(c_hash, vec![HaskellValue::Lit(Literal::LitWord('λ' as u64))]),
                         nil,
                     ],
                 ),
@@ -815,24 +813,24 @@ mod tests {
         let text_id = id(&t, "Text");
         let v = make_text("hello", text_id);
         match &v {
-            Value::Con(_, fields) => {
+            HaskellValue::Con(_, fields) => {
                 assert_eq!(text_bytes_checked(fields, &t).unwrap(), b"hello");
                 assert_eq!(text_bytes_clamped(fields, &t).unwrap(), b"hello");
             }
             _ => panic!("expected Con"),
         }
         // LitString backing + lifted ByteArray wrapper layers
-        let wrapped = Value::Con(
+        let wrapped = HaskellValue::Con(
             id(&t, "ByteArray"),
-            vec![Value::Con(
+            vec![HaskellValue::Con(
                 id(&t, "ByteArray"),
-                vec![Value::Lit(Literal::LitString(b"abc".to_vec()))],
+                vec![HaskellValue::Lit(Literal::LitString(b"abc".to_vec()))],
             )],
         );
         let fields = vec![
             wrapped,
-            Value::Lit(Literal::LitInt(1)),
-            Value::Lit(Literal::LitInt(2)),
+            HaskellValue::Lit(Literal::LitInt(1)),
+            HaskellValue::Lit(Literal::LitInt(2)),
         ];
         assert_eq!(text_bytes_checked(&fields, &t).unwrap(), b"bc");
     }
@@ -841,11 +839,11 @@ mod tests {
     fn text_lit_byte_array_snapshot_converts_with_and_without_table() {
         let t = test_table();
         let fields = vec![
-            Value::Lit(Literal::LitByteArray(b"_hello_".to_vec())),
-            Value::Lit(Literal::LitInt(1)),
-            Value::Lit(Literal::LitInt(5)),
+            HaskellValue::Lit(Literal::LitByteArray(b"_hello_".to_vec())),
+            HaskellValue::Lit(Literal::LitInt(1)),
+            HaskellValue::Lit(Literal::LitInt(5)),
         ];
-        let text = Value::Con(id(&t, "Text"), fields.clone());
+        let text = HaskellValue::Con(id(&t, "Text"), fields.clone());
         assert_eq!(String::from_value(&text, &t).unwrap(), "hello");
         assert_eq!(
             String::from_utf8(text_bytes_clamped_with(&fields, |_| false, |_| false).unwrap())
@@ -854,9 +852,9 @@ mod tests {
         );
 
         let invalid_bounds = [
-            Value::Lit(Literal::LitByteArray(b"hello".to_vec())),
-            Value::Lit(Literal::LitInt(4)),
-            Value::Lit(Literal::LitInt(2)),
+            HaskellValue::Lit(Literal::LitByteArray(b"hello".to_vec())),
+            HaskellValue::Lit(Literal::LitInt(4)),
+            HaskellValue::Lit(Literal::LitInt(2)),
         ];
         assert!(matches!(
             text_bytes_checked(&invalid_bounds, &t),
@@ -868,11 +866,11 @@ mod tests {
         );
 
         let invalid_utf8_fields = vec![
-            Value::Lit(Literal::LitByteArray(vec![0xff])),
-            Value::Lit(Literal::LitInt(0)),
-            Value::Lit(Literal::LitInt(1)),
+            HaskellValue::Lit(Literal::LitByteArray(vec![0xff])),
+            HaskellValue::Lit(Literal::LitInt(0)),
+            HaskellValue::Lit(Literal::LitInt(1)),
         ];
-        let invalid_utf8 = Value::Con(id(&t, "Text"), invalid_utf8_fields.clone());
+        let invalid_utf8 = HaskellValue::Con(id(&t, "Text"), invalid_utf8_fields.clone());
         assert!(matches!(
             String::from_value(&invalid_utf8, &t),
             Err(crate::BridgeError::TypeMismatch { .. })
@@ -888,9 +886,9 @@ mod tests {
         let t = test_table();
         let mk = |off: i64, len: i64| {
             vec![
-                Value::ByteArray(Arc::new(Mutex::new(b"hello".to_vec()))),
-                Value::Lit(Literal::LitInt(off)),
-                Value::Lit(Literal::LitInt(len)),
+                HaskellValue::ByteArray(Arc::new(Mutex::new(b"hello".to_vec()))),
+                HaskellValue::Lit(Literal::LitInt(off)),
+                HaskellValue::Lit(Literal::LitInt(len)),
             ]
         };
         assert!(matches!(
@@ -912,9 +910,9 @@ mod tests {
         let t = test_table();
         let mk = |off: i64, len: i64| {
             vec![
-                Value::ByteArray(Arc::new(Mutex::new(b"hello".to_vec()))),
-                Value::Lit(Literal::LitInt(off)),
-                Value::Lit(Literal::LitInt(len)),
+                HaskellValue::ByteArray(Arc::new(Mutex::new(b"hello".to_vec()))),
+                HaskellValue::Lit(Literal::LitInt(off)),
+                HaskellValue::Lit(Literal::LitInt(len)),
             ]
         };
         // negative off wraps huge → clamps to EMPTY, not offset 0
@@ -923,9 +921,9 @@ mod tests {
         assert_eq!(text_bytes_clamped(&mk(3, 99), &t).unwrap(), b"lo");
         // non-int off/len default to 0 / backing len
         let fields = vec![
-            Value::ByteArray(Arc::new(Mutex::new(b"hi".to_vec()))),
-            Value::Con(id(&t, "True"), vec![]),
-            Value::Con(id(&t, "True"), vec![]),
+            HaskellValue::ByteArray(Arc::new(Mutex::new(b"hi".to_vec()))),
+            HaskellValue::Con(id(&t, "True"), vec![]),
+            HaskellValue::Con(id(&t, "True"), vec![]),
         ];
         assert_eq!(text_bytes_clamped(&fields, &t).unwrap(), b"hi");
     }
@@ -934,11 +932,11 @@ mod tests {
     fn map_walk_is_in_order_and_depth_capped() {
         let t = test_table();
         let (bin, tip, i) = (id(&t, "Bin"), id(&t, "Tip"), id(&t, "I#"));
-        let entries: Vec<(Value, Value)> = (0..5)
+        let entries: Vec<(HaskellValue, HaskellValue)> = (0..5)
             .map(|n| {
                 (
-                    Value::Lit(Literal::LitInt(n)),
-                    Value::Lit(Literal::LitInt(n * 10)),
+                    HaskellValue::Lit(Literal::LitInt(n)),
+                    HaskellValue::Lit(Literal::LitInt(n * 10)),
                 )
             })
             .collect();
@@ -950,7 +948,7 @@ mod tests {
         assert_eq!(seen, vec![(0, 0), (1, 10), (2, 20), (3, 30), (4, 40)]);
         // root size is the full entry count, boxed as I#
         match &m {
-            Value::Con(_, fields) => assert_eq!(unbox_int(&fields[0], &t), Some(5)),
+            HaskellValue::Con(_, fields) => assert_eq!(unbox_int(&fields[0], &t), Some(5)),
             _ => panic!("expected Bin"),
         }
         // depth cap silences everything
@@ -1005,16 +1003,16 @@ mod tests {
         let big: serde_json::Number =
             serde_json::from_str("265252859812191058636308480000000").unwrap();
         match &scientific_from_number(&big, &ids) {
-            Value::Con(num, nf) => {
+            HaskellValue::Con(num, nf) => {
                 assert_eq!(*num, ids.number);
                 match &nf[0] {
-                    Value::Con(sci, sf) => {
+                    HaskellValue::Con(sci, sf) => {
                         assert_eq!(*sci, ids.scientific);
-                        assert!(matches!(&sf[1], Value::Lit(Literal::LitInt(0))));
+                        assert!(matches!(&sf[1], HaskellValue::Lit(Literal::LitInt(0))));
                         match &sf[0] {
-                            Value::Con(c, cf) if *c == ids.ip => {
+                            HaskellValue::Con(c, cf) if *c == ids.ip => {
                                 let bytes = match &cf[0] {
-                                    Value::Lit(Literal::LitByteArray(b)) => b.clone(),
+                                    HaskellValue::Lit(Literal::LitByteArray(b)) => b.clone(),
                                     o => panic!("coeff not bytes: {o:?}"),
                                 };
                                 assert_eq!(
@@ -1050,21 +1048,21 @@ mod tests {
             "340282366920938463463374607431768211456"
         );
         // backing forms
-        let raw = Value::ByteArray(Arc::new(Mutex::new(vec![42, 0, 0, 0, 0, 0, 0, 0])));
+        let raw = HaskellValue::ByteArray(Arc::new(Mutex::new(vec![42, 0, 0, 0, 0, 0, 0, 0])));
         assert_eq!(
             bignat_backing_bytes(&raw, &t).as_deref(),
             Some(&[42u8, 0, 0, 0, 0, 0, 0, 0][..])
         );
-        let lifted = Value::Con(
+        let lifted = HaskellValue::Con(
             id(&t, "ByteArray"),
-            vec![Value::Lit(Literal::LitByteArray(vec![7]))],
+            vec![HaskellValue::Lit(Literal::LitByteArray(vec![7]))],
         );
         assert_eq!(
             bignat_backing_bytes(&lifted, &t).as_deref(),
             Some(&[7u8][..])
         );
         assert_eq!(
-            bignat_backing_bytes(&Value::Lit(Literal::LitString(b"x".to_vec())), &t),
+            bignat_backing_bytes(&HaskellValue::Lit(Literal::LitString(b"x".to_vec())), &t),
             None
         );
     }

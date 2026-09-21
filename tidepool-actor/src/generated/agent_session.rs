@@ -20,6 +20,6 @@ use tidepool_bridge_derive::FromHaskell;
               that exists only here and is never reused"
 )]
 pub enum AgentSessionReq {
-    AgentSessionWith(i64, tidepool_bridge::Value, i64, Option<String>),
+    AgentSessionWith(i64, tidepool_bridge::HaskellValue, i64, Option<String>),
     AgentAttachWith(Option<String>),
 }

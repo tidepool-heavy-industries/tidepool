@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
 use tidepool_mcp::CapturedOutput;
@@ -116,7 +116,7 @@ impl KvHandler {
         &mut self,
         cx: &EffectContext<'_, CapturedOutput>,
         key: String,
-        val: Value,
+        val: HaskellValue,
     ) -> Result<tidepool_effect::Response, EffectError> {
         let json_val = tidepool_runtime::value_to_json(&val, cx.table(), 0);
         let mut store = self.locked();
@@ -184,8 +184,8 @@ impl KvHandler {
         &mut self,
         cx: &EffectContext<'_, CapturedOutput>,
         key: String,
-        expected: Option<Value>,
-        new: Value,
+        expected: Option<HaskellValue>,
+        new: HaskellValue,
     ) -> Result<tidepool_effect::Response, EffectError> {
         // Cross-process compare-and-swap (#330-for-KV). The resident worker is
         // single-threaded, so the only real race is between separate agent
@@ -280,7 +280,7 @@ mod tests {
     use super::*;
     use crate::test_support::*;
     use tidepool_bridge::ToHaskell;
-    use tidepool_bridge::Value;
+    use tidepool_bridge::HaskellValue;
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
     use tidepool_repr::DataConTable;
 
@@ -292,7 +292,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("tidepool_test_kv.json");
         let mut handlers = frunk::hlist![KvHandler::new(tmp)];
         let con_id = table.get_by_name("KvKeys").unwrap();
-        let request = Value::Con(con_id, vec![]);
+        let request = HaskellValue::Con(con_id, vec![]);
         let result = response_value(expect_handled(handlers.dispatch(&request, &cx)), &table);
         assert_is_haskell_list(&result, &table);
     }
@@ -318,15 +318,15 @@ mod tests {
         let set_id = table.get_by_name("KvSet").unwrap();
         let keys_id = table.get_by_name("KvKeys").unwrap();
         let key_val = "isolation-test-key".to_string().to_value(&table).unwrap();
-        let lit_val = Value::Lit(tidepool_repr::Literal::LitInt(99));
-        let set_req = Value::Con(set_id, vec![key_val, lit_val]);
+        let lit_val = HaskellValue::Lit(tidepool_repr::Literal::LitInt(99));
+        let set_req = HaskellValue::Con(set_id, vec![key_val, lit_val]);
         expect_handled(ha.dispatch(&set_req, &cx));
 
         // kvKeys on handler B (session B) must be empty — no bleed from A.
-        let keys_req = Value::Con(keys_id, vec![]);
+        let keys_req = HaskellValue::Con(keys_id, vec![]);
         let keys_b = response_value(expect_handled(hb.dispatch(&keys_req, &cx)), &table);
         match &keys_b {
-            Value::Con(id, args) => {
+            HaskellValue::Con(id, args) => {
                 let name = table.name_of(*id).unwrap();
                 assert_eq!(
                     name, "[]",
@@ -360,14 +360,14 @@ mod tests {
         // Insert two keys under "ns1/" and one under "ns2/".
         for key in &["ns1/alpha", "ns1/beta", "ns2/gamma"] {
             let k = key.to_string().to_value(&table).unwrap();
-            let v = Value::Lit(tidepool_repr::Literal::LitInt(1));
-            expect_handled(h.dispatch(&Value::Con(set_id, vec![k, v]), &cx));
+            let v = HaskellValue::Lit(tidepool_repr::Literal::LitInt(1));
+            expect_handled(h.dispatch(&HaskellValue::Con(set_id, vec![k, v]), &cx));
         }
 
         // Clear "ns1/" — expect count = 2.
         // i64 is bridged as I#(LitInt(n)); unbox via the shared shape decoder.
         let prefix = "ns1/".to_string().to_value(&table).unwrap();
-        let clear_req = Value::Con(clear_id, vec![prefix]);
+        let clear_req = HaskellValue::Con(clear_id, vec![prefix]);
         let clear_result = response_value(expect_handled(h.dispatch(&clear_req, &cx)), &table);
         let deleted_count = tidepool_bridge::shapes::unbox_int(&clear_result, &table)
             .unwrap_or_else(|| {
@@ -383,13 +383,13 @@ mod tests {
 
         // "ns2/gamma" must still be present.
         let all_keys = response_value(
-            expect_handled(h.dispatch(&Value::Con(keys_id, vec![]), &cx)),
+            expect_handled(h.dispatch(&HaskellValue::Con(keys_id, vec![]), &cx)),
             &table,
         );
         let mut surviving: Vec<String> = Vec::new();
-        fn collect_list(v: &Value, table: &DataConTable, out: &mut Vec<String>) {
+        fn collect_list(v: &HaskellValue, table: &DataConTable, out: &mut Vec<String>) {
             use tidepool_bridge::FromHaskell;
-            if let Value::Con(id, fields) = v {
+            if let HaskellValue::Con(id, fields) = v {
                 let name = table.name_of(*id).unwrap();
                 if name == ":" {
                     if let Ok(s) = String::from_value(&fields[0], table) {
@@ -427,21 +427,21 @@ mod tests {
 
         for key in &["ns1/b", "ns1/a", "ns2/c"] {
             let k = key.to_string().to_value(&table).unwrap();
-            let v = Value::Lit(tidepool_repr::Literal::LitInt(0));
-            expect_handled(h.dispatch(&Value::Con(set_id, vec![k, v]), &cx));
+            let v = HaskellValue::Lit(tidepool_repr::Literal::LitInt(0));
+            expect_handled(h.dispatch(&HaskellValue::Con(set_id, vec![k, v]), &cx));
         }
 
         let prefix = "ns1/".to_string().to_value(&table).unwrap();
         let result = response_value(
-            expect_handled(h.dispatch(&Value::Con(keysp_id, vec![prefix]), &cx)),
+            expect_handled(h.dispatch(&HaskellValue::Con(keysp_id, vec![prefix]), &cx)),
             &table,
         );
 
         // Collect the list into a Vec<String> and verify sorted order.
         let mut keys: Vec<String> = Vec::new();
-        fn collect_strs(v: &Value, table: &DataConTable, out: &mut Vec<String>) {
+        fn collect_strs(v: &HaskellValue, table: &DataConTable, out: &mut Vec<String>) {
             use tidepool_bridge::FromHaskell;
-            if let Value::Con(id, fields) = v {
+            if let HaskellValue::Con(id, fields) = v {
                 let name = table.name_of(*id).unwrap();
                 if name == ":" {
                     if let Ok(s) = String::from_value(&fields[0], table) {
@@ -497,8 +497,8 @@ mod tests {
 
         let set_id = table.get_by_name("KvSet").unwrap();
         let k = "x".to_string().to_value(&table).unwrap();
-        let v = Value::Lit(tidepool_repr::Literal::LitInt(1));
-        expect_handled(h.dispatch(&Value::Con(set_id, vec![k, v]), &cx));
+        let v = HaskellValue::Lit(tidepool_repr::Literal::LitInt(1));
+        expect_handled(h.dispatch(&HaskellValue::Con(set_id, vec![k, v]), &cx));
 
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -529,26 +529,26 @@ mod tests {
         let mut hb = frunk::hlist![KvHandler::new(path.clone())];
 
         let cas_id = table.get_by_name("KvCas").unwrap();
-        let nothing = Value::Con(table.get_by_name("Nothing").unwrap(), vec![]);
+        let nothing = HaskellValue::Con(table.get_by_name("Nothing").unwrap(), vec![]);
         let key = "shared/counter".to_string().to_value(&table).unwrap();
 
         // Handler A: CAS from absent -> 1. Commits (Right ()).
-        let a_new = Value::Lit(tidepool_repr::Literal::LitInt(1));
-        let a_req = Value::Con(cas_id, vec![key.clone(), nothing.clone(), a_new]);
+        let a_new = HaskellValue::Lit(tidepool_repr::Literal::LitInt(1));
+        let a_req = HaskellValue::Con(cas_id, vec![key.clone(), nothing.clone(), a_new]);
         let a_res = response_value(expect_handled(ha.dispatch(&a_req, &cx)), &table);
         let a_name = match &a_res {
-            Value::Con(id, _) => table.name_of(*id).unwrap(),
+            HaskellValue::Con(id, _) => table.name_of(*id).unwrap(),
             other => panic!("expected Con from kvCas, got {other:?}"),
         };
         assert_eq!(a_name, "Right", "handler A's CAS from absent should commit");
 
         // Handler B: CAS from absent -> 2, but the key now exists (A wrote 1).
         // Must be Left (conflict), NOT a silent clobber.
-        let b_new = Value::Lit(tidepool_repr::Literal::LitInt(2));
-        let b_req = Value::Con(cas_id, vec![key, nothing, b_new]);
+        let b_new = HaskellValue::Lit(tidepool_repr::Literal::LitInt(2));
+        let b_req = HaskellValue::Con(cas_id, vec![key, nothing, b_new]);
         let b_res = response_value(expect_handled(hb.dispatch(&b_req, &cx)), &table);
         let b_name = match &b_res {
-            Value::Con(id, _) => table.name_of(*id).unwrap(),
+            HaskellValue::Con(id, _) => table.name_of(*id).unwrap(),
             other => panic!("expected Con from kvCas, got {other:?}"),
         };
         assert_eq!(
@@ -585,19 +585,19 @@ mod tests {
 
         for key in &["a", "b", "c"] {
             let k = key.to_string().to_value(&table).unwrap();
-            let v = Value::Lit(tidepool_repr::Literal::LitInt(1));
-            expect_handled(h.dispatch(&Value::Con(set_id, vec![k, v]), &cx));
+            let v = HaskellValue::Lit(tidepool_repr::Literal::LitInt(1));
+            expect_handled(h.dispatch(&HaskellValue::Con(set_id, vec![k, v]), &cx));
         }
 
-        // kvInfo must not error; the response is a non-null Value.
+        // kvInfo must not error; the response is a non-null HaskellValue.
         let result = response_value(
-            expect_handled(h.dispatch(&Value::Con(info_id, vec![]), &cx)),
+            expect_handled(h.dispatch(&HaskellValue::Con(info_id, vec![]), &cx)),
             &table,
         );
-        // The response is a Haskell-encoded JSON Value. Just verify it's not Null
+        // The response is a Haskell-encoded JSON HaskellValue. Just verify it's not Null
         // (i.e. the Object constructor was selected, not Null).
         let name = match &result {
-            Value::Con(id, _) => table.name_of(*id).unwrap().to_string(),
+            HaskellValue::Con(id, _) => table.name_of(*id).unwrap().to_string(),
             other => panic!("expected Con from kvInfo, got {:?}", other),
         };
         assert_ne!(name, "Null", "kvInfo should return an Object, not Null");

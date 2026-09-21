@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use serde_json::Value as Json;
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{ResidentHole, ResidentOutcome};
 
@@ -1085,7 +1085,7 @@ impl SelfHarnessDriver {
         &mut self,
         prior_state: Option<&Json>,
         precompiled: Option<CompiledTurn>,
-    ) -> Result<(Value, DataConTable), DriverError> {
+    ) -> Result<(HaskellValue, DataConTable), DriverError> {
         self.loop_inference_calls.store(0, Ordering::SeqCst);
         self.cycle_compaction = None;
         self.loop_state_json = prior_state.cloned();
@@ -1149,7 +1149,7 @@ impl SelfHarnessDriver {
         &mut self,
         prior_state: Option<&Json>,
         precompiled: Option<CompiledTurn>,
-    ) -> Result<(Value, DataConTable), DriverError> {
+    ) -> Result<(HaskellValue, DataConTable), DriverError> {
         let compiled = match precompiled {
             Some(compiled) => compiled,
             None => {
@@ -1213,7 +1213,7 @@ impl SelfHarnessDriver {
         // `self` stay borrowed for the block's
         // span and are still owned by this function afterward, which is what
         // the sweep below needs.
-        let outcome_result: Result<(Value, DataConTable), DriverError> = async {
+        let outcome_result: Result<(HaskellValue, DataConTable), DriverError> = async {
             loop {
             // Batch-and-drive every ready item CONCURRENTLY, but ONLY once
             // EVERY item currently in `ready` is SUBAGENT-routed — mirroring
@@ -1258,7 +1258,7 @@ impl SelfHarnessDriver {
                     )
                 });
             if ready_for_subagent_batch {
-                let mut subagent_batch: Vec<(GreenChain, String, Value)> =
+                let mut subagent_batch: Vec<(GreenChain, String, HaskellValue)> =
                     Vec::with_capacity(ready.len());
                 for item in ready.drain(..) {
                     match item.outcome {
@@ -1278,7 +1278,7 @@ impl SelfHarnessDriver {
                 let batch_ref = &subagent_batch;
                 let cap = self.concurrency_cap;
                 #[allow(clippy::type_complexity)]
-                let results: Vec<(usize, Result<Value, DriverError>)> =
+                let results: Vec<(usize, Result<HaskellValue, DriverError>)> =
                     drive_concurrent(cap, subagent_batch.len(), |idx| {
                         let (_, _, request) = &batch_ref[idx];
                         async move {

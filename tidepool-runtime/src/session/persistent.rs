@@ -176,7 +176,7 @@ impl PersistentSession {
             match (&entry.value, self.machine.as_mut()) {
                 // A prepared binding's root IS its adopted handle: releasing
                 // the handle deregisters the root.
-                (BoundValue::Prepared { handle, .. }, Some(engine)) => {
+                (BoundValue { handle, .. }, Some(engine)) => {
                     if engine.release(*handle) {
                         released += 1;
                     }
@@ -942,7 +942,7 @@ impl PersistentSession {
         if let Some(engine) = self.machine.as_mut() {
             // A prepared entry's root is its adopted handle.
             for entry in entries {
-                let BoundValue::Prepared { handle, .. } = entry.value;
+                let BoundValue { handle, .. } = entry.value;
                 engine.release(handle);
             }
             return;

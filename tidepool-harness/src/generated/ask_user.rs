@@ -20,6 +20,6 @@ use tidepool_bridge_derive::FromHaskell;
               that exists only here and is never reused"
 )]
 pub enum AskUserReq {
-    AskUserWith(tidepool_bridge::Value),
+    AskUserWith(tidepool_bridge::HaskellValue),
     NoteWith(String),
 }

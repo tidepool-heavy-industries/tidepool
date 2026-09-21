@@ -983,7 +983,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             result.values.as_slice(),
-            [tidepool_bridge::Value::Lit(
+            [tidepool_bridge::HaskellValue::Lit(
                 tidepool_repr::Literal::LitWord(value)
             )] if *value == u64::from(expected)
         ));
@@ -993,7 +993,7 @@ mod tests {
         name: &str,
         result_rep: RuntimeRep,
         bytes: Vec<u8>,
-    ) -> tidepool_bridge::Value {
+    ) -> tidepool_bridge::HaskellValue {
         use std::sync::atomic::AtomicBool;
         use tidepool_repr::execution_schema::{testing, *};
 
@@ -1038,7 +1038,7 @@ mod tests {
     fn generated_scaled_read_adapters_preserve_signed_and_unsigned_widths() {
         assert!(matches!(
             run_static_read_adapter("readInt8OffAddr#", RuntimeRep::Int(8), vec![0x80]),
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitInt(-128))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(-128))
         ));
         assert!(matches!(
             run_static_read_adapter(
@@ -1046,7 +1046,7 @@ mod tests {
                 RuntimeRep::Word(32),
                 0xf123_4567_u32.to_ne_bytes().to_vec()
             ),
-            tidepool_bridge::Value::Lit(tidepool_repr::Literal::LitWord(0xf123_4567))
+            tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitWord(0xf123_4567))
         ));
     }
 

@@ -83,9 +83,9 @@ fn w5_a4_observation_forces_constructor_child() {
         )
         .unwrap();
     assert!(matches!(result.values.as_slice(),
-        [tidepool_bridge::Value::Con(tidepool_repr::DataConId(920), fields)]
+        [tidepool_bridge::HaskellValue::Con(tidepool_repr::DataConId(920), fields)]
         if matches!(fields.as_slice(),
-            [tidepool_bridge::Value::Con(tidepool_repr::DataConId(921), children)] if children.is_empty())));
+            [tidepool_bridge::HaskellValue::Con(tidepool_repr::DataConId(921), children)] if children.is_empty())));
 }
 
 pub(super) fn caf_program(
@@ -187,7 +187,7 @@ fn w5_a1_top_thunk_constructs_and_observes() {
         .unwrap();
     assert_eq!(result.values.len(), 1);
     assert!(
-        matches!(&result.values[0], tidepool_bridge::Value::Con(id, fields) if *id == tidepool_repr::DataConId(900) && fields.is_empty())
+        matches!(&result.values[0], tidepool_bridge::HaskellValue::Con(id, fields) if *id == tidepool_repr::DataConId(900) && fields.is_empty())
     );
 }
 
@@ -206,7 +206,7 @@ fn w5_a1_collection_during_thunk_body_keeps_update_root_live() {
         "collection must happen during generated body execution"
     );
     assert!(
-        matches!(&result.values[0], tidepool_bridge::Value::Con(id, fields)
+        matches!(&result.values[0], tidepool_bridge::HaskellValue::Con(id, fields)
         if *id == tidepool_repr::DataConId(900) && fields.is_empty())
     );
 }
@@ -224,7 +224,7 @@ fn w5_a1_local_thunk_enter_routes_prepared_entry() {
         .unwrap();
     assert!(matches!(
         &result.values[0],
-        tidepool_bridge::Value::Con(id, fields)
+        tidepool_bridge::HaskellValue::Con(id, fields)
             if *id == tidepool_repr::DataConId(900) && fields.is_empty()
     ));
 }
@@ -242,7 +242,7 @@ fn w5_a1_single_entry_success_is_observable_after_heap_scan() {
         .unwrap();
     assert!(matches!(
         &result.values[0],
-        tidepool_bridge::Value::Con(id, fields)
+        tidepool_bridge::HaskellValue::Con(id, fields)
             if *id == tidepool_repr::DataConId(900) && fields.is_empty()
     ));
 }
@@ -350,7 +350,7 @@ fn w5_a1_function_case_enters_captured_local_thunk_across_collection() {
     assert!(result.collections > 0);
     assert!(matches!(
         result.values.as_slice(),
-        [tidepool_bridge::Value::Con(id, fields)]
+        [tidepool_bridge::HaskellValue::Con(id, fields)]
             if *id == tidepool_repr::DataConId(901) && fields.is_empty()
     ));
 }
@@ -441,7 +441,7 @@ fn w5_a4_lazy_alias_chain_is_observable() {
         .unwrap();
     assert!(matches!(
         result.values.as_slice(),
-        [tidepool_bridge::Value::Con(id, fields)]
+        [tidepool_bridge::HaskellValue::Con(id, fields)]
             if *id == tidepool_repr::DataConId(940) && fields.is_empty()
     ));
 }
@@ -493,10 +493,10 @@ fn w5_a4_function_result_observes_as_the_closure_sentinel() {
         .unwrap();
     assert!(matches!(
         result.values.as_slice(),
-        [tidepool_bridge::Value::Con(_, fields)]
+        [tidepool_bridge::HaskellValue::Con(_, fields)]
             if matches!(
                 fields.as_slice(),
-                [tidepool_bridge::Value::Con(id, inner)]
+                [tidepool_bridge::HaskellValue::Con(id, inner)]
                     if *id == crate::observation::CLOSURE_SENTINEL && inner.is_empty()
             )
     ));
@@ -574,7 +574,7 @@ fn w5_a4_cancelled_run_cleans_observation_roots() {
         .unwrap();
     assert!(matches!(
         result.values.as_slice(),
-        [tidepool_bridge::Value::Con(id, fields)]
+        [tidepool_bridge::HaskellValue::Con(id, fields)]
             if *id == tidepool_repr::DataConId(900) && fields.is_empty()
     ));
 }
@@ -659,12 +659,12 @@ fn w5_a4_child_force_moves_heap_without_losing_sibling_root() {
     );
     assert!(matches!(
         result.values.as_slice(),
-        [tidepool_bridge::Value::Con(parent, fields)]
+        [tidepool_bridge::HaskellValue::Con(parent, fields)]
             if *parent == tidepool_repr::DataConId(941)
                 && matches!(
                     fields.as_slice(),
-                    [tidepool_bridge::Value::Con(left, left_fields),
-                     tidepool_bridge::Value::Con(right, right_fields)]
+                    [tidepool_bridge::HaskellValue::Con(left, left_fields),
+                     tidepool_bridge::HaskellValue::Con(right, right_fields)]
                         if *left == tidepool_repr::DataConId(940)
                             && left_fields.is_empty()
                             && *right == tidepool_repr::DataConId(940)
@@ -816,7 +816,7 @@ mod shared_constructor_rows {
     };
     use super::{caf_linked, caf_program};
     use crate::suspension::RealmId;
-    use tidepool_bridge::Value;
+    use tidepool_bridge::HaskellValue;
     use tidepool_repr::execution_schema::{
         link_program, testing, MachineImports, UpdatePolicy, ValueId,
     };
@@ -896,7 +896,7 @@ mod shared_constructor_rows {
             assert!(
                 matches!(
                     machine.observe_handle(program, unit, 100),
-                    Ok(Value::Con(id, ref fields)) if id == DataConId(900) && fields.is_empty()
+                    Ok(HaskellValue::Con(id, ref fields)) if id == DataConId(900) && fields.is_empty()
                 ),
                 "entering the shared constructor through {program:?} after A retired"
             );

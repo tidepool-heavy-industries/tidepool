@@ -20,5 +20,5 @@ use tidepool_bridge_derive::FromHaskell;
               that exists only here and is never reused"
 )]
 pub enum RunLLMTurnReq {
-    RunLLMTurnWith(String, tidepool_bridge::Value),
+    RunLLMTurnWith(String, tidepool_bridge::HaskellValue),
 }

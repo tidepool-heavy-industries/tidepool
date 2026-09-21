@@ -1,4 +1,4 @@
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_bridge::{get_resilient, BridgeError, FromHaskell, ToHaskell};
 use tidepool_repr::DataConTable;
 
@@ -21,7 +21,7 @@ pub enum ActorWaitError {
 }
 
 pub(crate) fn decode_wait_target(
-    request: &Value,
+    request: &HaskellValue,
     table: &DataConTable,
 ) -> Result<ActorRef, ActorWaitError> {
     let ActorReq::ActorWaitWith((actor_id, incarnation)) = ActorReq::from_value(request, table)?
@@ -32,7 +32,7 @@ pub(crate) fn decode_wait_target(
 }
 
 pub(crate) fn decode_poll_target(
-    request: &Value,
+    request: &HaskellValue,
     table: &DataConTable,
 ) -> Result<ActorRef, ActorWaitError> {
     let ActorReq::ActorPollWith((actor_id, incarnation)) = ActorReq::from_value(request, table)?
@@ -61,7 +61,7 @@ pub(crate) fn decode_address(actor_id: i64, incarnation: i64) -> Result<ActorRef
 pub fn actor_terminal_value(
     terminal: &ActorTerminal,
     table: &DataConTable,
-) -> Result<Value, BridgeError> {
+) -> Result<HaskellValue, BridgeError> {
     let (name, arity, fields) = match terminal.kind {
         ActorExitKind::Completed => ("ActorCompletedStatus", 0, Vec::new()),
         ActorExitKind::Failed => (
@@ -77,5 +77,5 @@ pub fn actor_terminal_value(
     };
     let constructor = get_resilient(table, name, arity)
         .ok_or_else(|| BridgeError::UnknownDataConName(name.to_string()))?;
-    Ok(Value::Con(constructor, fields))
+    Ok(HaskellValue::Con(constructor, fields))
 }

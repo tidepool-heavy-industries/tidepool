@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use tidepool_bridge::Value;
+use tidepool_bridge::HaskellValue;
 use tidepool_heap::execution_descriptor::{
     DescriptorState, DescriptorTraceError, ObjectDescriptor, ObjectKind,
 };
@@ -101,7 +101,7 @@ impl ObservationBudget {
 }
 
 pub(super) enum ObservationFrame<X> {
-    Leaf(Value),
+    Leaf(HaskellValue),
     Constructor(tidepool_repr::DataConId, Vec<X>),
 }
 
@@ -545,7 +545,7 @@ impl ObservationHeap<'_> {
         reps: &[RuntimeRep],
         layout: &StorageLayout,
         budget: usize,
-    ) -> Result<Vec<Value>, ObservationFailure> {
+    ) -> Result<Vec<HaskellValue>, ObservationFailure> {
         self.observe_results_under(
             words,
             reps,
@@ -565,7 +565,7 @@ impl ObservationHeap<'_> {
         reps: &[RuntimeRep],
         layout: &StorageLayout,
         budget: usize,
-    ) -> Result<Vec<Value>, ObservationFailure> {
+    ) -> Result<Vec<HaskellValue>, ObservationFailure> {
         self.observe_results_under(
             words,
             reps,
@@ -583,7 +583,7 @@ impl ObservationHeap<'_> {
         layout: &StorageLayout,
         budget: usize,
         policy: crate::observation::BudgetPolicy,
-    ) -> Result<Vec<Value>, ObservationFailure> {
+    ) -> Result<Vec<HaskellValue>, ObservationFailure> {
         let mut budget = ObservationBudget {
             remaining: budget,
             limit: budget,
@@ -603,7 +603,7 @@ impl ObservationHeap<'_> {
                     ObservationFrame::Constructor(identity, fields) => {
                         let mut fields = fields;
                         fields.reverse();
-                        Ok(Value::Con(identity, fields))
+                        Ok(HaskellValue::Con(identity, fields))
                     }
                 },
             )?;
@@ -673,27 +673,27 @@ impl ObservationHeap<'_> {
                             pool.logical_suffix(seed.word).map(<[u8]>::to_vec)
                         })
                         .ok_or_else(unauthenticated)?;
-                    return Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitString(
+                    return Ok(ObservationFrame::Leaf(HaskellValue::Lit(Literal::LitString(
                         bytes,
                     ))));
                 }
                 RuntimeRep::Int(bits) => {
-                    return Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitInt(
+                    return Ok(ObservationFrame::Leaf(HaskellValue::Lit(Literal::LitInt(
                         signed_value(seed.word, bits)?,
                     ))))
                 }
                 RuntimeRep::Word(bits) => {
-                    return Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitWord(
+                    return Ok(ObservationFrame::Leaf(HaskellValue::Lit(Literal::LitWord(
                         unsigned_value(seed.word, bits)?,
                     ))))
                 }
                 RuntimeRep::Float(32) => {
-                    return Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitFloat(
+                    return Ok(ObservationFrame::Leaf(HaskellValue::Lit(Literal::LitFloat(
                         (seed.word as u32).into(),
                     ))))
                 }
                 RuntimeRep::Float(64) => {
-                    return Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitDouble(
+                    return Ok(ObservationFrame::Leaf(HaskellValue::Lit(Literal::LitDouble(
                         seed.word as u64,
                     ))))
                 }
@@ -746,7 +746,7 @@ impl ObservationHeap<'_> {
                             let bytes = owner
                                 .copy_external_bytes(published)
                                 .map_err(external_observation_error)?;
-                            return Ok(ObservationFrame::Leaf(Value::Lit(Literal::LitByteArray(
+                            return Ok(ObservationFrame::Leaf(HaskellValue::Lit(Literal::LitByteArray(
                                 bytes,
                             ))));
                         }
@@ -792,7 +792,7 @@ impl ObservationHeap<'_> {
                             ));
                         }
                         // A function, PAP, or (post-force, still-callable)
-                        // function-typed object has no data `Value`
+                        // function-typed object has no data `HaskellValue`
                         // representation. `crate::observation::CLOSURE_SENTINEL`
                         // is the reserved placeholder for this case. Using it
                         // lets a request/result value
@@ -806,7 +806,7 @@ impl ObservationHeap<'_> {
                         // a genuine observation-contract violation, not an
                         // opaque-but-legitimate payload.
                         ObjectKind::Function | ObjectKind::Pap => {
-                            return Ok(ObservationFrame::Leaf(Value::Con(
+                            return Ok(ObservationFrame::Leaf(HaskellValue::Con(
                                 crate::observation::CLOSURE_SENTINEL,
                                 Vec::new(),
                             )));
@@ -1109,7 +1109,7 @@ mod tests {
                 )
                 .unwrap();
             assert!(
-                matches!(&values[0], Value::Lit(Literal::LitString(bytes)) if bytes == expected)
+                matches!(&values[0], HaskellValue::Lit(Literal::LitString(bytes)) if bytes == expected)
             );
             assert!(matches!(
                 heap.observe_results(&[(address + offset) as u64], &reps, &layout, expected.len()),
@@ -1156,19 +1156,19 @@ mod tests {
         assert_eq!(result.len(), 4);
         assert!(matches!(
             &result[0],
-            Value::Lit(Literal::LitInt(value)) if *value == -1
+            HaskellValue::Lit(Literal::LitInt(value)) if *value == -1
         ));
         assert!(matches!(
             &result[1],
-            Value::Lit(Literal::LitWord(value)) if *value == 0x1234
+            HaskellValue::Lit(Literal::LitWord(value)) if *value == 0x1234
         ));
         assert!(matches!(
             &result[2],
-            Value::Lit(Literal::LitFloat(value)) if *value == 0x7fc0_0001
+            HaskellValue::Lit(Literal::LitFloat(value)) if *value == 0x7fc0_0001
         ));
         assert!(matches!(
             &result[3],
-            Value::Lit(Literal::LitDouble(value)) if *value == 0x7ff8_0000_0000_0001
+            HaskellValue::Lit(Literal::LitDouble(value)) if *value == 0x7ff8_0000_0000_0001
         ));
 
         let empty = StorageLayout::for_reps(&target(), &[]).unwrap();
@@ -1264,7 +1264,7 @@ mod tests {
         drop(machine);
         drop(nursery);
         assert!(
-            matches!(values.as_slice(), [Value::Lit(Literal::LitByteArray(bytes))] if bytes == b"abc")
+            matches!(values.as_slice(), [HaskellValue::Lit(Literal::LitByteArray(bytes))] if bytes == b"abc")
         );
     }
 
@@ -1305,18 +1305,18 @@ mod tests {
         assert!(contains_oversize_sentinel(&bounded[0]));
         let mut node = &bounded[0];
         for _ in 0..depth {
-            let Value::Con(identity, children) = node else {
+            let HaskellValue::Con(identity, children) = node else {
                 panic!("the affordable prefix must still be the real chain: {node:?}")
             };
             assert_eq!(*identity, DataConId(10));
             node = &children[0];
         }
-        let Value::Con(identity, fields) = node else {
+        let HaskellValue::Con(identity, fields) = node else {
             panic!("expected the leaf constructor: {node:?}")
         };
         assert_eq!(*identity, DataConId(20));
         assert!(
-            matches!(&fields[0], Value::Con(id, cut) if *id == crate::observation::OVERSIZE_SENTINEL && cut.is_empty()),
+            matches!(&fields[0], HaskellValue::Con(id, cut) if *id == crate::observation::OVERSIZE_SENTINEL && cut.is_empty()),
             "the cut belongs exactly where the budget ran out, got {fields:?}"
         );
     }
@@ -1366,7 +1366,7 @@ mod tests {
             .observe_results_bounded(&[encoded as u64], &reps, &layout, 3)
             .unwrap();
         assert!(
-            matches!(&cut[0], Value::Con(id, fields) if *id == crate::observation::OVERSIZE_SENTINEL && fields.is_empty()),
+            matches!(&cut[0], HaskellValue::Con(id, fields) if *id == crate::observation::OVERSIZE_SENTINEL && fields.is_empty()),
             "an unaffordable payload must cut, not half-copy: {:?}",
             cut[0]
         );
@@ -1377,7 +1377,7 @@ mod tests {
             .unwrap();
         assert!(!crate::observation::contains_oversize_sentinel(&whole[0]));
         assert!(
-            matches!(&whole[0], Value::Lit(Literal::LitByteArray(bytes)) if bytes == b"abc"),
+            matches!(&whole[0], HaskellValue::Lit(Literal::LitByteArray(bytes)) if bytes == b"abc"),
             "{:?}",
             whole[0]
         );
@@ -1398,37 +1398,37 @@ mod tests {
 
         let cut = oversize_cut();
         assert!(
-            matches!(&cut, Value::Con(id, fields) if *id == OVERSIZE_SENTINEL && fields.is_empty()),
+            matches!(&cut, HaskellValue::Con(id, fields) if *id == OVERSIZE_SENTINEL && fields.is_empty()),
             "the cut must be a childless sentinel Con, got {cut:?}"
         );
         assert!(contains_oversize_sentinel(&cut));
         // The two reserved markers mean different things and must not answer
         // for each other.
         assert!(!contains_closure_sentinel(&cut));
-        assert!(!contains_oversize_sentinel(&Value::Con(
+        assert!(!contains_oversize_sentinel(&HaskellValue::Con(
             CLOSURE_SENTINEL,
             Vec::new()
         )));
 
         // A cut in the second field, past a `Lit` the scan must step over
         // rather than stop at.
-        let nested = Value::Con(
+        let nested = HaskellValue::Con(
             DataConId(7),
             vec![
-                Value::Lit(Literal::LitInt(41)),
-                Value::Con(DataConId(8), vec![oversize_cut()]),
+                HaskellValue::Lit(Literal::LitInt(41)),
+                HaskellValue::Con(DataConId(8), vec![oversize_cut()]),
             ],
         );
         assert!(contains_oversize_sentinel(&nested));
 
         // Where a bounded walk of a long list actually leaves its cut.
-        let spine = |tail: Value| {
+        let spine = |tail: HaskellValue| {
             (0..100_000).fold(tail, |rest, index| {
-                Value::Con(DataConId(9), vec![Value::Lit(Literal::LitInt(index)), rest])
+                HaskellValue::Con(DataConId(9), vec![HaskellValue::Lit(Literal::LitInt(index)), rest])
             })
         };
         assert!(contains_oversize_sentinel(&spine(oversize_cut())));
-        assert!(!contains_oversize_sentinel(&spine(Value::Con(
+        assert!(!contains_oversize_sentinel(&spine(HaskellValue::Con(
             DataConId(10),
             Vec::new()
         ))));
@@ -1494,7 +1494,7 @@ mod tests {
         let layout = StorageLayout::for_reps(&target(), &reps).unwrap();
         assert!(matches!(
             heap.observe_results(&[root as u64], &reps, &layout, 2),
-            Ok(values) if matches!(values.as_slice(), [Value::Con(DataConId(40), fields)] if fields.is_empty())
+            Ok(values) if matches!(values.as_slice(), [HaskellValue::Con(DataConId(40), fields)] if fields.is_empty())
         ));
         let (_, _, state) = heap.object(root).unwrap();
         assert_eq!(state, DescriptorState::Updated);
@@ -1550,25 +1550,25 @@ mod tests {
             .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].node_count(), depth + 2);
-        let Value::Con(identity, fields) = &result[0] else {
+        let HaskellValue::Con(identity, fields) = &result[0] else {
             panic!("expected constructor result")
         };
         assert_eq!(*identity, DataConId(10));
         let mut leaf = &result[0];
         for _ in 0..depth {
-            let Value::Con(_, children) = leaf else {
+            let HaskellValue::Con(_, children) = leaf else {
                 panic!("expected constructor chain")
             };
             leaf = &children[0];
         }
-        let Value::Con(leaf_identity, leaf_fields) = leaf else {
+        let HaskellValue::Con(leaf_identity, leaf_fields) = leaf else {
             panic!("expected leaf constructor")
         };
         assert_eq!(*leaf_identity, DataConId(20));
         assert_eq!(leaf_fields.len(), 1);
         assert!(matches!(
             &leaf_fields[0],
-            Value::Lit(Literal::LitInt(value)) if *value == 42
+            HaskellValue::Lit(Literal::LitInt(value)) if *value == 42
         ));
         assert_eq!(fields.len(), 1);
     }
@@ -1590,7 +1590,7 @@ mod tests {
         // sentinel rather than erroring -- see the comment on `expand`'s
         // `ObjectKind::Function | ObjectKind::Pap` arm: the real callable
         // stays live in the JIT heap and is applied by reference, never
-        // through this bridged `Value`.
+        // through this bridged `HaskellValue`.
         let function_layout = StorageLayout::for_reps(&target(), &[]).unwrap();
         let function =
             Arc::new(ObjectDescriptor::new(ObjectKind::Function, function_layout, None).unwrap());
@@ -1611,7 +1611,7 @@ mod tests {
         assert_eq!(observed.len(), 1);
         assert!(matches!(
             &observed[0],
-            Value::Con(id, fields) if *id == crate::observation::CLOSURE_SENTINEL && fields.is_empty()
+            HaskellValue::Con(id, fields) if *id == crate::observation::CLOSURE_SENTINEL && fields.is_empty()
         ));
 
         let pap_layout = StorageLayout::for_reps(&target(), &[]).unwrap();
@@ -1628,7 +1628,7 @@ mod tests {
         assert_eq!(observed.len(), 1);
         assert!(matches!(
             &observed[0],
-            Value::Con(id, fields) if *id == crate::observation::CLOSURE_SENTINEL && fields.is_empty()
+            HaskellValue::Con(id, fields) if *id == crate::observation::CLOSURE_SENTINEL && fields.is_empty()
         ));
 
         let address_reps = [RuntimeRep::Address];

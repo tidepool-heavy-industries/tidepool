@@ -20,8 +20,8 @@ use tidepool_bridge_derive::FromHaskell;
               that exists only here and is never reused"
 )]
 pub enum AgentToolsReq {
-    AgentToolsInstallWith(tidepool_bridge::Value, tidepool_bridge::Value),
+    AgentToolsInstallWith(tidepool_bridge::HaskellValue, tidepool_bridge::HaskellValue),
     AgentToolsInputWith,
-    AgentToolsAwaitWith(tidepool_bridge::Value, String, Option<String>),
-    AgentToolsReplyWith(tidepool_bridge::Value),
+    AgentToolsAwaitWith(tidepool_bridge::HaskellValue, String, Option<String>),
+    AgentToolsReplyWith(tidepool_bridge::HaskellValue),
 }
