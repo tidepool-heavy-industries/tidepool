@@ -151,7 +151,8 @@ BATTERY_DAEMON_START_FAILED=0
 BATTERY_ARTIFACT_DIR=""
 BATTERY_NEXTEST_LOG=""
 
-# Failure artifacts for battery entry points. Successful runs leave nothing;
+# Artifacts for battery entry points. Successful runs leave nothing unless
+# TIDEPOOL_KEEP_TEST_LOGS=1 (five runs, 4 MiB per log);
 # test or daemon-startup failures retain the exact command, nextest output,
 # toolchain report, and compile-daemon log under target/tidepool-test-runs/.
 prepare_battery_artifacts() {
@@ -176,7 +177,7 @@ prepare_battery_artifacts() {
 finalize_battery_artifacts() {
   local status="$1"
   [[ -n "$BATTERY_ARTIFACT_DIR" ]] || return 0
-  if [[ "$status" -eq 0 && "$BATTERY_DAEMON_START_FAILED" = 0 ]]; then
+  if [[ "$status" -eq 0 && "$BATTERY_DAEMON_START_FAILED" = 0 && "${TIDEPOOL_KEEP_TEST_LOGS:-0}" != 1 ]]; then
     rm -rf "$BATTERY_ARTIFACT_DIR"
     return 0
   fi
@@ -190,7 +191,32 @@ finalize_battery_artifacts() {
     cp "$compiler_log" "$BATTERY_ARTIFACT_DIR/compiler.log"
   fi
   scripts/toolchain-doctor.sh >"$BATTERY_ARTIFACT_DIR/toolchain-doctor.log" 2>&1 || true
-  echo "==> test/daemon failure artifacts: $BATTERY_ARTIFACT_DIR" >&2
+  if [[ "$status" -eq 0 && "$BATTERY_DAEMON_START_FAILED" = 0 ]]; then
+    # Only marked successful runs are eligible for bounded retention. Never
+    # prune failure evidence or arbitrary directories under the artifact root.
+    python3 - "$BATTERY_ARTIFACT_DIR" <<'PYLOG'
+from pathlib import Path
+import shutil
+import sys
+current = Path(sys.argv[1])
+for log in current.glob("*.log"):
+    limit = 4 * 1024 * 1024
+    if log.stat().st_size > limit:
+        with log.open("rb") as stream:
+            stream.seek(-limit, 2)
+            tail = stream.read()
+        log.write_bytes(b"[truncated: last 4 MiB]\n" + tail)
+(current / ".successful-run").touch()
+runs = sorted((p.parent for p in current.parent.glob("*/.successful-run")),
+              key=lambda p: p.stat().st_mtime, reverse=True)
+for old in runs[5:]:
+    if old != current:
+        shutil.rmtree(old)
+PYLOG
+    echo "==> retained success artifacts (last five runs): $BATTERY_ARTIFACT_DIR" >&2
+  else
+    echo "==> test/daemon failure artifacts: $BATTERY_ARTIFACT_DIR" >&2
+  fi
   echo "==> reproduce: $BATTERY_ARTIFACT_DIR/reproduce.sh" >&2
 }
 
@@ -199,7 +225,7 @@ finalize_battery_artifacts() {
 # many shard invocations must not get a second one started underneath it).
 # `-S` alone only proves the path is a socket special file, which survives a
 # crashed daemon — so also try a real connect via python3 (already used
-# elsewhere in scripts/, e.g. bench-turn.sh) when it's on PATH; without
+# by the toolchain scripts) when it's on PATH; without
 # python3, fall back to the `-S` check alone. Either way this is advisory: a
 # stale socket that refuses connection safely falls back to a direct spawn;
 # once connected, ExtractCmd never replays an indeterminate request

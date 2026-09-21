@@ -61,6 +61,18 @@ Most changes touch one of three layers, and it helps to know which:
   program, put it in an adjacent fixture file and use `include_str!` instead
   of maintaining an escaped Rust string.
 
+## Planning improvements
+
+After removing a subsystem or specializing a boundary, investigate each axis:
+runtime latency and throughput; allocation and retained memory; generated code
+size; artifact and scratch-disk use; build and test time; dependency fanout;
+API and control-flow simplicity; code volume; documentation and prompt clarity;
+correctness and failure isolation; observability; and maintenance cost.
+Look for newly impossible states, duplicate owners, needless conversions,
+repeated fixed-fixture compilation, and tests of deleted behavior. Preserve
+real failure cases. Measure costs before proposing larger caches or dispatch
+redesigns, and distinguish structural savings from measured speedups.
+
 ## Architecture and language boundary
 
 - Keep model-facing Haskell familiar, typed, and small. Optimize it as an LLM
@@ -159,6 +171,22 @@ Keep detailed design references out of always-loaded instructions.
   `just test-target <crate> <target> 'test(<name>)'`, and the owning crate's
   documented focused command. Haskell/extractor-backed tests must use the repository's Nix/toolchain
   setup rather than assuming ambient `cargo` is sufficient.
+- `just quick` runs the explicit extractor-free engine unit-test packages and
+  does not build or start the compiler worker. `just changed-plan BASE` previews
+  affected targets; `just changed BASE` runs each selected target once and
+  compile-checks downstream consumers of production changes. Shared build inputs
+  require an explicit integration check instead of silently launching one.
+- `just test-lib PACKAGE 'test(=NAME)'` selects a unit test;
+  `just test-target PACKAGE TARGET 'test(=NAME)'` selects an integration test.
+  Use `just suite PACKAGE` for its full integration suites and `just verify`
+  at major integration boundaries. Nextest filters select execution, not Cargo
+  compilation: choose the package and target as well as the test name.
+- Share compilation of fixed Haskell fixtures across named test scenarios.
+  Keep fresh machines for mutable state, and preserve process isolation for
+  signal, crash, and global-state tests. Lightweight fixture data belongs below
+  evaluation and corpus support in the dependency graph.
+- Set `TIDEPOOL_KEEP_TEST_LOGS=1` to retain successful battery diagnostics
+  (five runs, at most 4 MiB per log). Failures retain their evidence separately.
 - Spot checks are appropriate during ordinary work. Run the relevant broad
   boundary check at major integration or release points, not after every edit.
 - After extractor translation or serialization changes, run

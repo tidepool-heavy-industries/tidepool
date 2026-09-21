@@ -116,8 +116,9 @@ selected/executed/skipped counts, and observed result independently of expected
 result. Check nonzero execution; compilation, a listing, unknown counts or a
 zero-selection exit cannot close a behavior obligation. `battery.sh` retains
 failure artifacts under `target/tidepool-test-runs` (override with
-`TIDEPOOL_TEST_ARTIFACT_ROOT`) but deletes its artifacts after success. Capture
-successful output separately if it is delivery evidence; when piping through
+`TIDEPOOL_TEST_ARTIFACT_ROOT`) but deletes its artifacts after success unless `TIDEPOOL_KEEP_TEST_LOGS=1`
+retains them (last five successful runs, at most 4 MiB per log). Capture
+additional successful output separately if needed; when piping through
 `tee`, enable `pipefail` so capture cannot mask failure.
 
 For timing, name measured boundaries: environment/build/daemon startup, test

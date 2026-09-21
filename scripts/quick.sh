@@ -3,7 +3,6 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 source scripts/lib-extract.sh
-resolve_tidepool_extract
 prepare_battery_artifacts quick just quick
 cleanup_exit() {
   local status=$?
@@ -13,4 +12,7 @@ cleanup_exit() {
 trap cleanup_exit EXIT
 exec > >(tee -a "$BATTERY_NEXTEST_LOG") 2>&1
 
-cargo nextest run --lib --status-level fail --final-status-level fail
+mapfile -t packages < <(python3 scripts/test-changed.py --quick-packages)
+args=()
+for package in "${packages[@]}"; do args+=(-p "$package"); done
+cargo nextest run --profile battery --lib "${args[@]}" --status-level fail --final-status-level fail

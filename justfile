@@ -6,7 +6,7 @@ shoal_nix := "bash scripts/dev-shell.sh --shoal"
 default:
     @just --list
 
-# Fast process-isolated workspace unit tests.
+# Extractor-free engine unit tests; does not build or start GHC.
 quick:
     {{ nix }} scripts/quick.sh
 
@@ -66,6 +66,11 @@ suite-check:
 [positional-arguments]
 changed base="HEAD":
     {{ nix }} scripts/test-changed.sh "$1"
+
+# Preview affected targets without compiling or running them.
+[positional-arguments]
+changed-plan base="HEAD":
+    {{ nix }} scripts/test-changed.sh "$1" --list
 
 # Check that committed Haskell CBOR fixtures match current extractor output.
 fixtures-check:

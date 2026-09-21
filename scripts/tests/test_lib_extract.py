@@ -200,6 +200,23 @@ class ExtractHelpers(unittest.TestCase):
         self.run_shell("validate_tidepool_extract_endpoint", success=False,
                        TIDEPOOL_EXTRACT=str(self.frontend))
 
+    def test_opt_in_success_logs_are_bounded_without_pruning_failures(self):
+        artifact_root = self.root / "artifacts"
+        artifact_root.mkdir()
+        for index in range(7):
+            old = artifact_root / str(index)
+            old.mkdir()
+            (old / ".successful-run").touch()
+        failure = artifact_root / "failure"
+        failure.mkdir()
+        (failure / "nextest.log").write_text("failure evidence")
+        self.run_shell('prepare_battery_artifacts fixture true\n'
+                       'finalize_battery_artifacts 0\n',
+                       TIDEPOOL_KEEP_TEST_LOGS="1",
+                       TIDEPOOL_TEST_ARTIFACT_ROOT=str(artifact_root))
+        self.assertEqual(len(list(artifact_root.glob("*/.successful-run"))), 5)
+        self.assertEqual((failure / "nextest.log").read_text(), "failure evidence")
+
     def test_successful_tests_preserve_daemon_failure_artifacts(self):
         (self.root / "scripts").mkdir()
         doctor = self.root / "scripts/toolchain-doctor.sh"
