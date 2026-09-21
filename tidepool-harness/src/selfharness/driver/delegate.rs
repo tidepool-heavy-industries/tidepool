@@ -53,7 +53,7 @@ impl SelfHarnessDriver {
     /// `SubagentReq: FromHaskell` (against the loop compile's own table — the
     /// args are bridged ADTs, never JSON-probed), dispatch it into the
     /// driver-owned [`tidepool_handlers::SubagentHandler`], and return the
-    /// `Response::Complete` value the caller resumes the hole with — the
+    /// response value the caller resumes the hole with — the
     /// identical generated conversion path a dispatched effect takes. The
     /// outer resident session uses `SuspendAll`, so this driver owns delivery.
     ///
@@ -333,13 +333,7 @@ impl SelfHarnessDriver {
     /// compile's own table — never JSON-probed), dispatch it into `handler`
     /// under `tokio::task::block_in_place` (the same discipline every
     /// `OperatorGate` call and [`Self::service_outer_subagent`] use), and
-    /// convert the [`tidepool_effect::Response`] back into a resumable
-    /// `HaskellValue` — a `Complete` value as-is, a `List` folded into a cons chain
-    /// from its carried `cons_id`/`nil_id` (mirrors the in-machine dispatch
-    /// path's own fold, `tidepool_effect::machine`; a suspending outer row
-    /// never reaches that path itself, so this is the suspend-side
-    /// equivalent). No outer-row verb returns a list today, but a future one
-    /// (`respond_list`) resumes correctly without another servicing site.
+    /// materialize the owned response source into a resumable `HaskellValue`.
     pub(crate) fn dispatch_outer_effect<H>(
         handler: &mut H,
         request: &HaskellValue,
@@ -356,19 +350,6 @@ impl SelfHarnessDriver {
             let cx = EffectContext::with_user(table, &captured);
             handler.handle(req, &cx)
         })?;
-        Ok(match resp {
-            tidepool_effect::Response::Complete(v) => v,
-            tidepool_effect::Response::List {
-                items,
-                cons_id,
-                nil_id,
-            } => {
-                let mut acc = HaskellValue::Con(nil_id, vec![]);
-                for item in items.into_iter().rev() {
-                    acc = HaskellValue::Con(cons_id, vec![item, acc]);
-                }
-                acc
-            }
-        })
+        Ok(resp.to_value(table)?)
     }
 }

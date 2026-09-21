@@ -776,7 +776,6 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
     setSession previous {hsc_mod_graph = mkModuleGraph
       (filter keepSummary (mgModSummaries' (hsc_mod_graph previous)))}
     modGraphRaw <- depanal (pvDownsweepExcludes variant) False
-    capturedSources <- liftIO (captureDependencySources modGraphRaw)
     -- 'ghc_setup' phase (TIDEPOOL_TIMING): 'guessTarget'/'setTargets' + this
     -- 'depanal' call, nothing else, on EVERY caller — a lone compile also
     -- includes its session bootstrap because 'runCompile' captures
@@ -1262,6 +1261,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                 , prTargetRdrEnv = tcg_rdr_env targetEnvironment
                 , prTargetTcGblEnv = targetEnvironment
                 }
+          capturedSources <- liftIO (captureDependencySources modGraphRaw)
           dependencies <- liftIO (dependencyEvidenceFor capturedSources modGraphRaw summaries fronts)
           pure (pipelineResult, preparedModules, dependencies)
     case selection of
@@ -1315,9 +1315,9 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
               }
           _ -> liftIO $ ioError $ userError "metadata target missing from checked module graph"
 
--- | Hash every source after downsweep and before @load'@ or the extraction
--- loop can consume it. Publication re-hashes these paths, so a source race
--- makes the request fail rather than associating old code with new evidence.
+-- | Hash every source and compare it with the fingerprint captured by GHC's
+-- downsweep. A mismatch makes the evidence incomplete; publication re-hashes
+-- the SHA-256 evidence once more before exposing the artifact bundle.
 captureDependencySources :: ModuleGraph -> IO ([DependencySource], Bool)
 captureDependencySources graph = do
   paths <- forM [summary | ModuleNode _ summary <- mgModSummaries' graph] $ \summary ->
@@ -1326,8 +1326,7 @@ captureDependencySources graph = do
       Just source -> do
         absolute <- normalise <$> makeAbsolute source
         -- GHC's summary fingerprint covers the source read during downsweep.
-        -- Matching it to the file now closes the depanal-to-capture race;
-        -- publication performs the second (SHA-256) read check.
+        -- Matching it here binds the SHA-256 evidence to that compiler input.
         stillSummarized <- (== ms_hs_hash summary) <$> getFileHash source
         pure (Just absolute, stillSummarized)
   let complete = all (\(path, matchesSummary) -> isJust path && matchesSummary) paths

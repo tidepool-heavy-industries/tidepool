@@ -4,8 +4,7 @@
 //! functions and effect results.
 
 use crate::error::BridgeError;
-use crate::traits::{sealed::ToHaskellSealed, ToHaskell};
-use crate::HaskellValue;
+use crate::traits::{sealed::ToHaskellSealed, HaskellVisitor, ToHaskell};
 use tidepool_repr::DataConTable;
 
 impl ToHaskellSealed for serde_json::Value {}
@@ -15,19 +14,24 @@ impl ToHaskellSealed for serde_json::Value {}
 ///
 /// Uses the bridge-owned JSON materialization builder.
 impl ToHaskell for serde_json::Value {
-    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
         let ids = crate::json_builder::JsonConIds::from_table(table).ok_or_else(|| {
             BridgeError::UnknownDataConName(
                 "aeson Value constructors (Object/Array/String/…) not in scope".into(),
             )
         })?;
-        Ok(crate::json_builder::json_to_value(self, &ids))
+        crate::json_builder::json_to_value(self, &ids).visit(table, visitor)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HaskellValue;
     use tidepool_repr::{DataCon, DataConId};
 
     /// Build a DataConTable with all constructors needed for JSON values.

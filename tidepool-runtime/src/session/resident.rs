@@ -763,20 +763,11 @@ fn settle_rooted_application<H: DispatchEffect<O>, O>(
 /// spine exists on the handler side; the answer plan walks the rebuilt spine
 /// iteratively per row, and the spine's own `Drop` is the bridge `HaskellValue`'s
 /// (frame-based, not recursive).
-fn response_value(response: Response) -> HaskellValue {
-    match response {
-        Response::Complete(value) => value,
-        Response::List {
-            items,
-            cons_id,
-            nil_id,
-        } => items
-            .into_iter()
-            .rev()
-            .fold(HaskellValue::Con(nil_id, Vec::new()), |rest, item| {
-                HaskellValue::Con(cons_id, vec![item, rest])
-            }),
-    }
+fn response_value(
+    response: Response,
+    table: &DataConTable,
+) -> Result<HaskellValue, tidepool_bridge::BridgeError> {
+    response.to_value(table)
 }
 
 /// The one completion routine for a settled layer, whichever entry produced
@@ -833,7 +824,17 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
                 request: parked.request,
             });
         };
-        let answer = response_value(response);
+        let answer = match response_value(response, table) {
+            Ok(answer) => answer,
+            Err(error) => {
+                let constructor = request_constructor(&parked.request, table);
+                let _ = engine.abort_parked(parked.id);
+                return Err(PreparedRuntimeError::Handler {
+                    constructor,
+                    detail: error.to_string(),
+                });
+            }
+        };
         let resumed = match engine.resume_with_answer(parked.id, &answer, table) {
             Ok(resumed) => resumed,
             Err(error) => {

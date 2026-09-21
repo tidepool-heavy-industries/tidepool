@@ -100,9 +100,9 @@ impl EffectHandler for SecondHandler {
     }
 }
 
-fn completed_int(response: Option<Response>) -> i64 {
-    match response {
-        Some(Response::Complete(HaskellValue::Lit(Literal::LitInt(n)))) => n,
+fn completed_int(response: Option<Response>, table: &DataConTable) -> i64 {
+    match response.map(|response| response.to_value(table)) {
+        Some(Ok(HaskellValue::Lit(Literal::LitInt(n)))) => n,
         other => panic!("expected a completed integer response, got {other:?}"),
     }
 }
@@ -120,19 +120,19 @@ proptest! {
         let mut reverse = hlist![SecondHandler, FirstHandler];
 
         prop_assert_eq!(
-            completed_int(forward.dispatch(&first, &cx).unwrap()),
+            completed_int(forward.dispatch(&first, &cx).unwrap(), &table),
             value.wrapping_add(10),
         );
         prop_assert_eq!(
-            completed_int(reverse.dispatch(&first, &cx).unwrap()),
+            completed_int(reverse.dispatch(&first, &cx).unwrap(), &table),
             value.wrapping_add(10),
         );
         prop_assert_eq!(
-            completed_int(forward.dispatch(&second, &cx).unwrap()),
+            completed_int(forward.dispatch(&second, &cx).unwrap(), &table),
             value.wrapping_add(20),
         );
         prop_assert_eq!(
-            completed_int(reverse.dispatch(&second, &cx).unwrap()),
+            completed_int(reverse.dispatch(&second, &cx).unwrap(), &table),
             value.wrapping_add(20),
         );
     }

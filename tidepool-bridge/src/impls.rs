@@ -1,7 +1,7 @@
 use crate::error::BridgeError;
 use crate::traits::{
     sealed::{FromHaskellSealed, ToHaskellSealed},
-    FromHaskell, ToHaskell,
+    FromHaskell, HaskellVisitor, ToHaskell,
 };
 use crate::{shapes, HaskellValue};
 use tidepool_repr::{DataConId, DataConTable, Literal};
@@ -112,14 +112,19 @@ impl<T> FromHaskell for std::marker::PhantomData<T> {
 }
 
 impl<T> ToHaskell for std::marker::PhantomData<T> {
-    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
         // PhantomData has no Haskell representation; derived fields still need
         // an arity-0 placeholder. Require "()" because another nullary
         // constructor would corrupt downstream decoding.
         let id = table
             .get_by_name_arity("()", 0)
             .ok_or_else(|| BridgeError::UnknownDataConName("()".into()))?;
-        Ok(HaskellValue::Con(id, vec![]))
+        visitor.begin_constructor(id, 0)?;
+        visitor.end_constructor()
     }
 }
 
@@ -130,8 +135,34 @@ impl FromHaskellSealed for HaskellValue {}
 impl ToHaskellSealed for HaskellValue {}
 
 impl ToHaskell for HaskellValue {
-    fn to_value(&self, _table: &DataConTable) -> Result<HaskellValue, BridgeError> {
-        Ok(self.clone())
+    fn visit(
+        &self,
+        _table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        enum Event<'a> {
+            Value(&'a HaskellValue),
+            End,
+        }
+        let mut events = vec![Event::Value(self)];
+        while let Some(event) = events.pop() {
+            match event {
+                Event::End => visitor.end_constructor()?,
+                Event::Value(HaskellValue::Lit(literal)) => visitor.literal(literal.clone())?,
+                Event::Value(HaskellValue::ByteArray(bytes)) => visitor.byte_array(
+                    bytes
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
+                )?,
+                Event::Value(HaskellValue::Con(id, fields)) => {
+                    visitor.begin_constructor(*id, fields.len())?;
+                    events.push(Event::End);
+                    events.extend(fields.iter().rev().map(Event::Value));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -151,8 +182,12 @@ impl<T: FromHaskell> FromHaskell for Box<T> {
 }
 
 impl<T: ToHaskell> ToHaskell for Box<T> {
-    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
-        (**self).to_value(table)
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        (**self).visit(table, visitor)
     }
 }
 
@@ -162,10 +197,15 @@ impl FromHaskellSealed for () {}
 impl ToHaskellSealed for () {}
 
 impl ToHaskell for () {
-    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
         let id = get_resilient(table, "()", 0)
             .ok_or_else(|| BridgeError::UnknownDataConName("()".into()))?;
-        Ok(HaskellValue::Con(id, vec![]))
+        visitor.begin_constructor(id, 0)?;
+        visitor.end_constructor()
     }
 }
 
@@ -201,10 +241,16 @@ impl FromHaskell for i64 {
 }
 
 impl ToHaskell for i64 {
-    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
         let id = get_resilient(table, "I#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("I#".into()))?;
-        Ok(shapes::box_int(*self, id))
+        visitor.begin_constructor(id, 1)?;
+        visitor.literal(Literal::LitInt(*self))?;
+        visitor.end_constructor()
     }
 }
 
@@ -220,10 +266,16 @@ impl FromHaskell for u64 {
 }
 
 impl ToHaskell for u64 {
-    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
         let id = get_resilient(table, "W#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("W#".into()))?;
-        Ok(shapes::box_word(*self, id))
+        visitor.begin_constructor(id, 1)?;
+        visitor.literal(Literal::LitWord(*self))?;
+        visitor.end_constructor()
     }
 }
 
@@ -239,10 +291,16 @@ impl FromHaskell for f64 {
 }
 
 impl ToHaskell for f64 {
-    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
         let id = get_resilient(table, "D#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("D#".into()))?;
-        Ok(shapes::box_double(*self, id))
+        visitor.begin_constructor(id, 1)?;
+        visitor.literal(Literal::LitDouble(self.to_bits()))?;
+        visitor.end_constructor()
     }
 }
 
@@ -265,8 +323,12 @@ impl FromHaskell for i32 {
 }
 
 impl ToHaskell for i32 {
-    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
-        (*self as i64).to_value(table)
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        (*self as i64).visit(table, visitor)
     }
 }
 
@@ -301,12 +363,17 @@ impl FromHaskell for bool {
 }
 
 impl ToHaskell for bool {
-    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
         let true_id = get_resilient(table, "True", 0)
             .ok_or_else(|| BridgeError::UnknownDataConName("True".into()))?;
         let false_id = get_resilient(table, "False", 0)
             .ok_or_else(|| BridgeError::UnknownDataConName("False".into()))?;
-        Ok(shapes::make_bool(*self, true_id, false_id))
+        visitor.begin_constructor(if *self { true_id } else { false_id }, 0)?;
+        visitor.end_constructor()
     }
 }
 
@@ -321,10 +388,16 @@ impl FromHaskell for char {
 }
 
 impl ToHaskell for char {
-    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
         let id = get_resilient(table, "C#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("C#".into()))?;
-        Ok(shapes::box_char(*self, id))
+        visitor.begin_constructor(id, 1)?;
+        visitor.literal(Literal::LitChar(*self))?;
+        visitor.end_constructor()
     }
 }
 
@@ -404,10 +477,18 @@ impl FromHaskell for String {
 }
 
 impl ToHaskell for String {
-    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
         let text_id = get_resilient(table, "Text", 3)
             .ok_or_else(|| BridgeError::UnknownDataConName("Text".into()))?;
-        Ok(shapes::make_text(self, text_id))
+        visitor.begin_constructor(text_id, 3)?;
+        visitor.byte_array(self.as_bytes().to_vec())?;
+        visitor.literal(Literal::LitInt(0))?;
+        visitor.literal(Literal::LitInt(self.len() as i64))?;
+        visitor.end_constructor()
     }
 }
 
@@ -455,17 +536,24 @@ impl<T: FromHaskell> FromHaskell for Option<T> {
 }
 
 impl<T: ToHaskell> ToHaskell for Option<T> {
-    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
         match self {
             None => {
                 let id = get_resilient(table, "Nothing", 0)
                     .ok_or_else(|| BridgeError::UnknownDataConName("Nothing".into()))?;
-                Ok(HaskellValue::Con(id, vec![]))
+                visitor.begin_constructor(id, 0)?;
+                visitor.end_constructor()
             }
             Some(x) => {
                 let id = get_resilient(table, "Just", 1)
                     .ok_or_else(|| BridgeError::UnknownDataConName("Just".into()))?;
-                Ok(HaskellValue::Con(id, vec![x.to_value(table)?]))
+                visitor.begin_constructor(id, 1)?;
+                x.visit(table, visitor)?;
+                visitor.end_constructor()
             }
         }
     }
@@ -521,17 +609,26 @@ impl<T: FromHaskell> FromHaskell for Vec<T> {
 }
 
 impl<T: ToHaskell> ToHaskell for Vec<T> {
-    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
         let nil_id = get_resilient(table, "[]", 0)
             .ok_or_else(|| BridgeError::UnknownDataConName("[]".into()))?;
         let cons_id = get_resilient(table, ":", 2)
             .ok_or_else(|| BridgeError::UnknownDataConName(":".into()))?;
 
-        let mut res = HaskellValue::Con(nil_id, vec![]);
-        for x in self.iter().rev() {
-            res = HaskellValue::Con(cons_id, vec![x.to_value(table)?, res]);
+        for x in self {
+            visitor.begin_constructor(cons_id, 2)?;
+            x.visit(table, visitor)?;
         }
-        Ok(res)
+        visitor.begin_constructor(nil_id, 0)?;
+        visitor.end_constructor()?;
+        for _ in self {
+            visitor.end_constructor()?;
+        }
+        Ok(())
     }
 }
 
@@ -575,21 +672,28 @@ impl<T: FromHaskell, E: FromHaskell> FromHaskell for Result<T, E> {
 }
 
 impl<T: ToHaskell, E: ToHaskell> ToHaskell for Result<T, E> {
-    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
-        match self {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        let (id, value): (DataConId, &dyn ToHaskell) = match self {
             Ok(x) => {
                 let id = get_resilient(table, "Right", 1)
                     .or_else(|| get_resilient(table, "Ok", 1))
                     .ok_or_else(|| BridgeError::UnknownDataConName("Right/Ok".into()))?;
-                Ok(HaskellValue::Con(id, vec![x.to_value(table)?]))
+                (id, x)
             }
             Err(e) => {
                 let id = get_resilient(table, "Left", 1)
                     .or_else(|| get_resilient(table, "Err", 1))
                     .ok_or_else(|| BridgeError::UnknownDataConName("Left/Err".into()))?;
-                Ok(HaskellValue::Con(id, vec![e.to_value(table)?]))
+                (id, e)
             }
-        }
+        };
+        visitor.begin_constructor(id, 1)?;
+        value.visit(table, visitor)?;
+        visitor.end_constructor()
     }
 }
 
@@ -627,13 +731,17 @@ impl<A: FromHaskell, B: FromHaskell> FromHaskell for (A, B) {
 }
 
 impl<A: ToHaskell, B: ToHaskell> ToHaskell for (A, B) {
-    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
         let pair_id = get_resilient(table, "(,)", 2)
             .ok_or_else(|| BridgeError::UnknownDataConName("(,)".into()))?;
-        Ok(HaskellValue::Con(
-            pair_id,
-            vec![self.0.to_value(table)?, self.1.to_value(table)?],
-        ))
+        visitor.begin_constructor(pair_id, 2)?;
+        self.0.visit(table, visitor)?;
+        self.1.visit(table, visitor)?;
+        visitor.end_constructor()
     }
 }
 
@@ -668,17 +776,18 @@ impl<A: FromHaskell, B: FromHaskell, C: FromHaskell> FromHaskell for (A, B, C) {
 }
 
 impl<A: ToHaskell, B: ToHaskell, C: ToHaskell> ToHaskell for (A, B, C) {
-    fn to_value(&self, table: &DataConTable) -> Result<HaskellValue, BridgeError> {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
         let triple_id = get_resilient(table, "(,,)", 3)
             .ok_or_else(|| BridgeError::UnknownDataConName("(,,)".into()))?;
-        Ok(HaskellValue::Con(
-            triple_id,
-            vec![
-                self.0.to_value(table)?,
-                self.1.to_value(table)?,
-                self.2.to_value(table)?,
-            ],
-        ))
+        visitor.begin_constructor(triple_id, 3)?;
+        self.0.visit(table, visitor)?;
+        self.1.visit(table, visitor)?;
+        self.2.visit(table, visitor)?;
+        visitor.end_constructor()
     }
 }
 

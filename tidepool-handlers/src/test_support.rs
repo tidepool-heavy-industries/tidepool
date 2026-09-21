@@ -11,24 +11,9 @@ pub(crate) fn expect_handled(
         .expect("test request should be handled")
 }
 
-/// Unwrap a handler Response: Complete passes through; a List builds the
-/// equivalent cons-list HaskellValue (iteratively, back-to-front).
 pub(crate) fn response_value(r: tidepool_effect::Response, table: &DataConTable) -> HaskellValue {
-    let _ = table;
-    match r {
-        tidepool_effect::Response::Complete(v) => v,
-        tidepool_effect::Response::List {
-            items,
-            cons_id,
-            nil_id,
-        } => {
-            let mut acc = HaskellValue::Con(nil_id, vec![]);
-            for i in items.into_iter().rev() {
-                acc = HaskellValue::Con(cons_id, vec![i, acc]);
-            }
-            acc
-        }
-    }
+    r.to_value(table)
+        .expect("handler response should materialize")
 }
 
 pub(crate) fn repo_root() -> std::path::PathBuf {

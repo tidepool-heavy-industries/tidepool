@@ -533,7 +533,7 @@ impl FsBackend {
                 }
             })
             .collect();
-        cx.respond_list(results)
+        cx.respond(results)
     }
 
     fn fs_hash(&mut self, path: String) -> Result<Option<String>, FsError> {
