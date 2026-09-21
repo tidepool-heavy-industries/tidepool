@@ -1,38 +1,14 @@
--- | Env-gated, wire-format-inert phase timing for @tidepool-extract@
--- (@TIDEPOOL_TIMING=1@). MEASUREMENT ONLY — this module never changes what
--- gets computed, only whether a stderr line is written about how long it
--- took. See @tidepool-harness\/src\/timing.rs@ for the authoritative
--- @PHASE_*@ name vocabulary and the stderr grammar this emits
--- (@tidepool-timing phase=\<name\> ms=\<int\>@); the two must stay in sync by
--- hand since they live in separate languages/crates.
---
--- __Phases are FLAT, never nested (do not sum a phase into another).__ On
--- both @GhcPipeline.hs@ extraction variants (@normalVariant@ and
--- @sessionVariant@, which share the one @runCompile@ skeleton),
--- @ghc_setup@ (session DynFlags setup +
--- guessTarget\/setTargets + @depanal@) and @ghc_load@ (the @load'@ call
--- alone) are two SEPARATE, NON-OVERLAPPING spans that PARTITION what an
--- older @ghc_session@ bracket used to cover during compilation — see the
--- @PHASE_GHC_SESSION@ tombstone in @tidepool-harness\/src\/timing.rs@. A
--- collector recovers the old coarse figure as the SUM @ghc_setup + ghc_load@
--- (a flat-sum collector already does this for free); neither row is emitted
--- twice, so there is nothing to avoid double-counting. On the session path,
--- @inject@ (the dependency-directed Val-iface splices summed across a session
--- compile) is a third flat row alongside them, with no normal-path
--- counterpart. @load'@ itself gets NO internal
--- decomposition: it already redoes the SAME parse\/typecheck\/core2core work
--- the per-module loop below it redoes a second time, so one row around the
--- whole call answers what matters. Do not redefine an existing phase's
--- MEANING when adding a finer one — see the @classify_extract@ RETIRED
--- tombstone in @plans\/self-iterating-harness\/11-extract-timing-contract.md@
--- for why a same-named stage carrying a different meaning silently poisons
--- longitudinal comparison; new granularity gets a NEW name instead (as
--- @ghc_setup@\/@ghc_load@ did here, rather than repurposing @ghc_session@).
+-- | Opt-in compiler measurements. Flat phases use @tidepool-timing@;
+-- nested breakdowns use @tidepool-timing-detail parent=...@ and must not
+-- be added to their parent. Counts use @tidepool-count@, never milliseconds.
+-- The frontend retains these lines within each request's diagnostic output.
 module Tidepool.Timing
   ( readTimingEnabled
   , timePhase
   , timeSection
   , emitPhase
+  , emitDetailPhase
+  , emitCount
   , emitCompileSummary
   , emitModuleTiming
   , monotonicTime
@@ -54,10 +30,10 @@ readTimingEnabled = (== Just "1") <$> lookupEnv "TIDEPOOL_TIMING"
 -- @tidepool-timing phase=\<name\> ms=\<int\>@ line to stderr AFTER @act@
 -- completes. Emits nothing when @enabled@ is 'False' — the only difference
 -- between the two is that one stderr line.
-timePhase :: Bool -> String -> IO a -> IO a
+timePhase :: MonadIO m => Bool -> String -> m a -> m a
 timePhase enabled name act = do
   (r, ms) <- timeSection act
-  emitPhase enabled name ms
+  liftIO (emitPhase enabled name ms)
   pure r
 
 -- | Time @act@ without emitting anything — for a phase whose wall clock is
@@ -88,6 +64,18 @@ emitPhase :: Bool -> String -> Integer -> IO ()
 emitPhase False _ _ = pure ()
 emitPhase True name ms =
   hPutStrLn stderr ("tidepool-timing phase=" ++ name ++ " ms=" ++ show ms)
+
+-- | Explicitly nested timings stay out of flat-sum collectors.
+emitDetailPhase :: Bool -> String -> String -> Integer -> IO ()
+emitDetailPhase False _ _ _ = pure ()
+emitDetailPhase True parent name ms =
+  hPutStrLn stderr ("tidepool-timing-detail parent=" ++ parent
+    ++ " phase=" ++ name ++ " ms=" ++ show ms)
+
+emitCount :: Bool -> String -> Integer -> IO ()
+emitCount False _ _ = pure ()
+emitCount True name count =
+  hPutStrLn stderr ("tidepool-count name=" ++ name ++ " count=" ++ show count)
 
 elapsedMs :: Double -> Double -> Integer
 elapsedMs t0 t1 = round ((t1 - t0) * 1000)

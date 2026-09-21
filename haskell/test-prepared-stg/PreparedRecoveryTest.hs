@@ -32,7 +32,7 @@ import Tidepool.ExecutionSchema
 import Tidepool.FatIface (newFatIfaceCache, newOwnerInterfaceCache)
 import Tidepool.PreparedRecovery
   ( RecoveryFailure(..), RecoveredClosure(..), insertGroup
-  , recoverPreparedClosure )
+  , recoverPreparedClosure, newPreparedRecovery )
 import Tidepool.PreparedStg
   ( PreparedCoverage(..), PreparedModule(..), RecoveredModuleFailure(..)
   , newPreparedBodyCache, prepareModule, unelaboratedModule )
@@ -81,7 +81,19 @@ main = do
       cache <- newFatIfaceCache
       ownerCache <- newOwnerInterfaceCache
       bodyCache <- newPreparedBodyCache
-      recoverPreparedClosure hsc cache ownerCache bodyCache context modules
+      recover <- newPreparedRecovery hsc cache ownerCache bodyCache context modules
+      first <- recover entry
+      otherEntry <- case [identity | identity <- either (error . show) id (preparedTopIdentities [home])
+                                  , symbolOccurrence identity == Text.pack "homeOther"] of
+        [identity] -> pure identity
+        found -> fail ("expected homeOther entry, got " ++ show found)
+      other <- recover otherEntry
+      assert (not (any recoveredFst (closureModules other)))
+        "second target inherited the first target's fst dependency"
+      repeated <- recover entry
+      assert (any recoveredFst (closureModules repeated))
+        "returning to the first target lost its defining-module recovery"
+      pure first
     liftIO $ assert (any recoveredFst (closureModules closure))
       "closure did not retain the newly prepared defining module for fst"
     liftIO $ assert (all (not . namedResidual) (closureFailures closure))

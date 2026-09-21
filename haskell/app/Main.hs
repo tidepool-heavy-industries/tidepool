@@ -45,7 +45,7 @@ import Tidepool.GhcPipeline
   , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..)
   , withResidentPipelineSelectedRequests, CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances
   , cellExpressionPlans
-  , registerResidentEvictionHook, satisfiesCapturedConstraint, stripMonadHead )
+  , satisfiesCapturedConstraint, stripMonadHead )
 import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), projectPreparedTargetWithConstructors, resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
@@ -57,7 +57,7 @@ import Tidepool.PreparedStg
   ( PreparedModule(..), PreparedBodyCache, newPreparedBodyCache
   , evictPreparedBodyMatching )
 import Tidepool.PreparedRecovery
-  ( RecoveryFailure, RecoveredClosure(..), recoverPreparedClosure )
+  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecovery )
 import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson
   ( ReportOutcome(..), DiagSeverity(..), Diag(..), SourceRejection(..)
@@ -104,17 +104,9 @@ type Compiler =
   -> Maybe FilePath
   -> IO result
 
--- | Prepared-recovery caches ('recoverPreparedClosure'), threaded alongside
--- 'Compiler' into every call site that can reach 'prepareArtifacts'. In the
--- resident daemon ('main''s @--worker-loop-v2@ branch) these are created
--- ONCE, before 'withResidentPipelineSelectedRequests' boots its session, and an
--- eviction hook registered via 'registerResidentEvictionHook' drops every
--- target module compiled by a transaction and any @Tidepool.Session.*@ module from both
--- caches at the same transaction boundary 'sanitizeMemo' cleans the compile
--- memo -- library modules stay warm for the daemon's lifetime (it restarts on
--- a toolchain stamp change). The one-shot (non-daemon) path instead builds a
--- fresh 'RecoveryCaches' per invocation via 'freshRecoveryCaches', since
--- 'main' runs that branch exactly once per process anyway.
+-- | Compiler-owned recovery caches. The resident pipeline invokes their
+-- scoped eviction callback when a transaction ends; one-shot compilation
+-- owns fresh caches for its invocation.
 data RecoveryCaches = RecoveryCaches
   { rcFatIface :: FatIfaceCache
   , rcOwnerIface :: OwnerInterfaceCache
@@ -134,15 +126,11 @@ staleRecoveryModule targetModName' owner =
   moduleName owner == targetModName'
     || isJust (parseSessionModule (moduleNameString (moduleName owner)))
 
--- | Install the daemon-lifetime 'RecoveryCaches'' eviction into
--- 'Tidepool.GhcPipeline''s resident transaction boundary. Call exactly once,
--- before entering 'withResidentPipelineSelectedRequests'.
-registerRecoveryCacheEviction :: RecoveryCaches -> IO ()
-registerRecoveryCacheEviction caches =
-  registerResidentEvictionHook $ \targetModName' -> do
-    evictFatIfaceMatching (rcFatIface caches) (staleRecoveryModule targetModName')
-    evictOwnerInterfaceMatching (rcOwnerIface caches) (staleRecoveryModule targetModName')
-    evictPreparedBodyMatching (rcPreparedBodies caches) (staleRecoveryModule targetModName')
+evictRecoveryCaches :: RecoveryCaches -> ModuleName -> IO ()
+evictRecoveryCaches caches targetModName' = do
+  evictFatIfaceMatching (rcFatIface caches) (staleRecoveryModule targetModName')
+  evictOwnerInterfaceMatching (rcOwnerIface caches) (staleRecoveryModule targetModName')
+  evictPreparedBodyMatching (rcPreparedBodies caches) (staleRecoveryModule targetModName')
 
 data LocatedCellRejection = LocatedCellRejection CellSourceSpan String
   deriving Show
@@ -166,12 +154,8 @@ main = do
     then do
       hSetBinaryMode stdin True
       hSetBinaryMode stdout True
-      -- Daemon-lifetime recovery caches: created ONCE per daemon process,
-      -- before the resident session boots, and evicted at each transaction
-      -- boundary by the hook registered here (see 'RecoveryCaches').
       caches <- freshRecoveryCaches
-      registerRecoveryCacheEviction caches
-      withResidentPipelineSelectedRequests [] $ \runRequest ->
+      withResidentPipelineSelectedRequests [] (evictRecoveryCaches caches) $ \runRequest ->
         WorkerServer.runWorkerLoop $ \serveTransaction ->
           runRequest $ \compiler ->
             serveTransaction (\cwd argv ->
@@ -392,7 +376,7 @@ scopeFromWorkerRequest args = SessionScope
 
 processFile
   :: Compiler -> RecoveryCaches -> Bool -> WorkerRequest -> FilePath -> IO ExitCode
-processFile compiler caches _timing args path = do
+processFile compiler caches timing args path = do
   let mOutDir = requestOutDir args
       mTarget = requestTarget args
   hPutStrLn stderr $ "Processing: " ++ path
@@ -426,9 +410,9 @@ processFile compiler caches _timing args path = do
       (standardAuxiliaryRoots binds) (requestRetainedGenerations args)
     if null preparedArtifacts
       then ioError (userError "prepared extraction requires --target or --targets")
-      else writePreparedSidecars outDir binds tycons mCapturedTy warnTexts preparedArtifacts
+      else timePhase timing "prepared_sidecars" $ writePreparedSidecars outDir binds tycons mCapturedTy warnTexts preparedArtifacts
 
-    writePreparedArtifacts outDir preparedArtifacts
+    timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
 
   reportDiags res
 
@@ -448,15 +432,15 @@ data PreparedArtifact = PreparedArtifact
   , paYieldSites :: [Tidepool.EffectSchema.YieldSite]
   }
 
--- Project before writing either engine's artifacts so the shared constructor
+-- Project before writing artifacts so the shared constructor
 -- table includes exactly the GHC constructors admitted by prepared execution.
 prepareArtifacts :: RecoveryCaches -> FilePath -> HscEnv -> [PreparedModule] -> [String] -> [String]
   -> Map.Map SymbolIdentity Word64 -> IO [PreparedArtifact]
 prepareArtifacts _ _ _ _ [] _ _ = pure []
-prepareArtifacts caches input hscEnv modules targets auxiliaryRoots retainedGenerations = do
+prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliaryRoots retainedGenerations = do
   timing <- readTimingEnabled
-  formattingAuthority <- resolveFormattingAuthority hscEnv
-  textAuthority <- resolveTextPackageUnit hscEnv
+  formattingAuthority <- timePhase timing "formatting_authority" $ resolveFormattingAuthority hscEnv
+  textAuthority <- timePhase timing "text_authority" $ resolveTextPackageUnit hscEnv
   source <- readFile input
   let targetModule = fromMaybe (capitalize (takeBaseName input)) (extractModuleName source)
       matching = [prepared | prepared <- modules,
@@ -468,11 +452,11 @@ prepareArtifacts caches input hscEnv modules targets auxiliaryRoots retainedGene
     "x86_64" -> pure (X86_64, "sysv64")
     "aarch64" -> pure (Aarch64, "aapcs64")
     other -> ioError (userError ("prepared execution is not configured for " ++ other))
-  forM targets $ \target -> do
-    let entry = SymbolIdentity
-          (T.pack (unitString (moduleUnit (pmModule preparedModule))))
-          (T.pack targetModule) "value" (T.pack target) Nothing
-        context = ProjectionContext
+  let contextFor target =
+        let entry = SymbolIdentity
+              (T.pack (unitString (moduleUnit (pmModule preparedModule))))
+              (T.pack targetModule) "value" (T.pack target) Nothing
+        in ProjectionContext
           { projectionProfile = "ghc-9.12-prepared-stg"
           , projectionToolchain = "ghc-9.12.2"
           , projectionTarget = TargetDescriptor architecture LittleEndian 64 64 abi []
@@ -480,17 +464,20 @@ prepareArtifacts caches input hscEnv modules targets auxiliaryRoots retainedGene
           , projectionEntry = entry
           , projectionAuxiliaryRoots =
               [ SymbolIdentity (T.pack (unitString (moduleUnit (pmModule preparedModule))))
-                  (T.pack targetModule) "value" (T.pack root) Nothing
+                      (T.pack targetModule) "value" (T.pack root) Nothing
               | root <- auxiliaryRoots ]
           , projectionFormattingAuthority = formattingAuthority
           , projectionTextUnit = textAuthority
           }
+  recover <- newPreparedRecovery hscEnv (rcFatIface caches) (rcOwnerIface caches)
+    (rcPreparedBodies caches) (contextFor firstTarget) modules
+  forM targets $ \target -> do
+    let context = contextFor target
     -- Three flat phases, one row each per target (see Tidepool.Timing).
     -- Projection is pure and only forced to weak head normal form here, so
     -- part of its cost lands in 'prepared_encode'; read the two together.
     recovered <- timePhase timing "prepared_recover"
-      (recoverPreparedClosure hscEnv (rcFatIface caches) (rcOwnerIface caches)
-        (rcPreparedBodies caches) context modules)
+      (recover (projectionEntry context))
     reportRecoveryResiduals target (closureFailures recovered)
     (program, constructors) <- timePhase timing "prepared_project" $
       case projectPreparedTargetWithConstructors context (closureModules recovered) of
@@ -646,7 +633,7 @@ runTurnMode compiler caches args path = do
           >>= either throwCellSplitError pure
         spliced <- either fail pure (renderDeclarationForTemplate tmplSrc declarationSource)
         (_spliced, modName, modulePath) <- writeSpliced spliced
-        items <- extractBindersNamed modulePath (requestIncludes args) modName
+        items <- timePhase timing "declaration_binders" $ extractBindersNamed modulePath (requestIncludes args) modName
         let binders = if null (sbBinders sb)
                         then map (T.pack . exportItemName) items
                         else map T.pack (sbBinders sb)
@@ -688,8 +675,8 @@ runTurnMode compiler caches args path = do
         preparedArtifacts <- prepareArtifacts caches compiledPath hscEnv preparedModules
           [preparedScaffoldTargetName] (standardAuxiliaryRoots binds) (requestRetainedGenerations args)
         let asksSites = concatMap paYieldSites preparedArtifacts
-        writePreparedSidecars outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
-        writePreparedArtifacts outDir preparedArtifacts
+        timePhase timing "prepared_sidecars" $ writePreparedSidecars outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
+        timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
         let wrapped = T.pack spliced
         case selector of
           SBind -> do

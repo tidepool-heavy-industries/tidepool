@@ -15,7 +15,6 @@ module Tidepool.GhcPipeline
     -- * Resident session
   , withResidentPipelineSelected
   , withResidentPipelineSelectedRequests
-  , registerResidentEvictionHook
   ) where
 
 import GHC hiding (typeKind)
@@ -106,7 +105,6 @@ import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef,
 import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName, takeFileName)
 import System.IO (hPutStrLn, stderr, readFile')
-import System.IO.Unsafe (unsafePerformIO)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, forM_, when)
 import Data.Data (Data, cast, gmapQ)
@@ -120,7 +118,7 @@ import Tidepool.Session
   , isSessionScopeActive, injectSessionScope, renderSessionModule
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule )
 import Tidepool.Timing
-  ( readTimingEnabled, timeSection, emitPhase, monotonicTime, elapsedMs
+  ( readTimingEnabled, timeSection, timePhase, emitPhase, monotonicTime, elapsedMs
   , emitCompileSummary, emitModuleTiming )
 import Tidepool.PreparedStg (PreparedElaboration(..), PreparedModule(..), prepareModule)
 import Tidepool.PreparedSites
@@ -896,8 +894,8 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                     tcGblEnv = fst (tm_internals_ typechecked)
                     -- Capture the inferred type of the eval's top expression NOW,
                     -- before optimization can inline/rename @__user@ away. Types
-                    -- live on the Id in the typechecked type env; our CBOR drops
-                    -- them downstream (Translate.hs).
+                    -- live on the Id in the typechecked type env; the prepared wire program erases
+                    -- them after compiler-owned decisions.
                     capturedTypes = capturedTopLevelTypes tcGblEnv
                     checkedBinderPins = capturedCellBinderPins hscEnv tcGblEnv
                     -- 'cpResultBinders' is the @result@-vs-@__result@ convention:
@@ -934,7 +932,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                 liftIO (modifyIORef' c2cMsRef (+ coreMs))
                 liftIO (modifyIORef' moduleMsRef
                           (Map.insertWith (+) (moduleNameString (ms_mod_name (mfSummary mf))) coreMs))
-                cpAfterModule plan (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
+                timePhase timing "module_interface" $ cpAfterModule plan (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
                 pure
                   ( simplified
                   , ( externalizeInternalTops simplified
@@ -946,12 +944,12 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
               prepareSelected mf simplified = case preparation of
                 CheckOnly -> pure Nothing
                 PrepareStg -> do
-                  (cgGuts, _details) <- liftIO $ hscTidy (mfHscEnv mf) simplified
+                  (cgGuts, _details) <- timePhase timing "prepared_tidy" $ liftIO $ hscTidy (mfHscEnv mf) simplified
                   siblings <- liftIO $ atomicModifyIORef' preparedSiblingsRef $ \known ->
                     let known' = Map.union (resolvePreparedSiblings (cg_binds cgGuts)) known
                     in (known', known')
-                  siteAuthority <- liftIO (resolveSiteAuthority (mfHscEnv mf))
-                  (elaboratedBindings, yieldSites, preparedSites, typeGraph, rejections) <- liftIO $
+                  siteAuthority <- timePhase timing "prepared_site_authority" $ liftIO (resolveSiteAuthority (mfHscEnv mf))
+                  (elaboratedBindings, yieldSites, preparedSites, typeGraph, rejections) <- timePhase timing "prepared_sites" $ liftIO $
                     elaboratePreparedSites siteAuthority siblings (cg_binds cgGuts)
                   let elaboration = PreparedElaboration
                         { peGuts = cgGuts
@@ -962,7 +960,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                         , peTypeGraph = typeGraph
                         , peSiteRejections = rejections
                         }
-                  Just <$> liftIO (prepareModule (mfHscEnv mf) (mfSummary mf) elaboration)
+                  Just <$> timePhase timing "prepared_stg" (liftIO (prepareModule (mfHscEnv mf) (mfSummary mf) elaboration))
               rememberPreparedSiblings prepared = liftIO $
                 modifyIORef' preparedSiblingsRef (\known -> Map.union known (pmSitedSiblings prepared))
           -- Module names do not identify generated content across independent
@@ -1040,7 +1038,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                   Just entry -> do
                     recordValidity modSum True
                     mapM_ rememberPreparedSiblings (gmePrepared entry)
-                    cpAfterModule plan modSum (mfTcGblEnv (gmeFront entry)) (mfHscEnv (gmeFront entry)) (gmeSimplified entry)
+                    timePhase timing "module_interface" $ cpAfterModule plan modSum (mfTcGblEnv (gmeFront entry)) (mfHscEnv (gmeFront entry)) (gmeSimplified entry)
                     prepared <- case (preparation, gmePrepared entry) of
                       (CheckOnly, _) -> pure Nothing
                       (PrepareStg, Just cachedPrepared) -> pure (Just cachedPrepared)
@@ -1193,7 +1191,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                 ++ " reachable_names=" ++ show (map moduleNameString (Set.toList reachableMods))
             _ -> pure ()
           capturedErrors <- liftIO (nub . reverse <$> readIORef errorRef)
-          cpBeforeMerge plan loadFlag capturedErrors
+          timePhase timing "merge_barrier" $ cpBeforeMerge plan loadFlag capturedErrors
           -- Merge: dependency module bindings first, target module last
           let isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
               resultGuts (g, _, _, _) = g
@@ -1320,7 +1318,7 @@ withResidentPipelineSelected
   -> (ResidentCompiler -> IO a)
   -> IO a
 withResidentPipelineSelected baseIncludes useCompiler =
-  withResidentPipelineSelectedRequests baseIncludes $ \runRequest ->
+  withResidentPipelineSelectedRequests baseIncludes (const (pure ())) $ \runRequest ->
     useCompiler $ \selection retained purpose mscope path extraIncludes buildProductsDir ->
       runRequest $ \compile ->
         compile selection retained purpose mscope path extraIncludes buildProductsDir
@@ -1333,9 +1331,10 @@ withResidentPipelineSelected baseIncludes useCompiler =
 -- cannot admit another request without first sanitizing this one's state.
 withResidentPipelineSelectedRequests
   :: [FilePath]
+  -> (ModuleName -> IO ())
   -> (RequestRunner -> IO a)
   -> IO a
-withResidentPipelineSelectedRequests baseIncludes useRequests = do
+withResidentPipelineSelectedRequests baseIncludes evictRecovery useRequests = do
   timing <- readTimingEnabled
   (libdir, startupMs) <- timeSection getLibdir
   emitPhase timing "startup" startupMs
@@ -1355,7 +1354,7 @@ withResidentPipelineSelectedRequests baseIncludes useRequests = do
             targets <- atomicModifyIORef' requestTargetsRef (\pending -> (Set.empty, pending))
             forM_ (Set.toList targets) $ \targetModName' -> do
               sanitizeMemo targetModName' memoRef
-              runResidentEvictionHooks targetModName'
+              evictRecovery targetModName'
           compile :: ResidentCompiler
           compile selection retained purpose mscope path extraIncludes buildProductsDir = do
             targetModName' <- targetModuleNameFor path
@@ -1438,34 +1437,6 @@ sanitizeMemo targetModName' memoRef =
 evictTargetMemo :: ModuleName -> IORef GutsMemo -> IO ()
 evictTargetMemo targetModName' memoRef =
   modifyIORef' memoRef (Map.delete targetModName')
-
--- | Registered eviction hooks for daemon-lifetime caches this module knows
--- nothing about (e.g. 'Tidepool.FatIface.OwnerInterfaceCache' and
--- 'Tidepool.FatIface.FatIfaceCache', hoisted to daemon lifetime by
--- app/Main.hs around 'withResidentPipelineSelectedRequests'). A hook decides for
--- itself, from the request's target 'ModuleName', which of its own cache
--- entries to drop -- the same transaction-boundary invalidation 'sanitizeMemo'
--- performs for 'GutsMemo', run at the same point in the resident cycle.
--- A global 'IORef' (rather than another parameter on the compiler closure)
--- keeps every existing caller of that function -- including test suites this
--- change must not touch -- source-compatible; an unregistered hook list is a
--- no-op, matching today's behavior exactly.
-{-# NOINLINE residentEvictionHooks #-}
-residentEvictionHooks :: IORef [ModuleName -> IO ()]
-residentEvictionHooks = unsafePerformIO (newIORef [])
-
--- | Register a hook to run at every resident transaction boundary, alongside
--- 'sanitizeMemo'. Intended to be called once, before entering
--- 'withResidentPipelineSelectedRequests', by the daemon entry point that owns the
--- cache being registered (see app/Main.hs).
-registerResidentEvictionHook :: (ModuleName -> IO ()) -> IO ()
-registerResidentEvictionHook hook =
-  modifyIORef' residentEvictionHooks (hook :)
-
-runResidentEvictionHooks :: ModuleName -> IO ()
-runResidentEvictionHooks targetModName' = do
-  hooks <- readIORef residentEvictionHooks
-  mapM_ ($ targetModName') hooks
 
 -- | Record target-module warnings for successful results and target-module
 -- errors for the late load barrier. GHC can report a fatal warning from

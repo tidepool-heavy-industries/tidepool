@@ -5,6 +5,7 @@ module Main where
 import Control.Monad (unless)
 import Control.Exception (SomeException, bracket, finally, throwIO, try)
 import Control.Monad.IO.Class (liftIO)
+import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.List (isInfixOf, isPrefixOf, tails)
 import GHC
 import GHC.Driver.Session (parseDynamicFilePragma)
@@ -63,9 +64,10 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
     , "import MetadataDependency"
     , "__tidepool_inspect_0 = value"
     ]
+  evictions <- newIORef []
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
   setEnv "TIDEPOOL_TIMING" "1"
-  (withResidentPipelineSelectedRequests [root] $ \runRequest -> do
+  (withResidentPipelineSelectedRequests [root] (\name -> modifyIORef' evictions (name :)) $ \runRequest -> do
       (checked, output) <- captureStderr root "metadata-check" $
         runRequest $ \compiler ->
           compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
@@ -81,7 +83,9 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
         :: IO (Either SomeException CheckedEnvironmentResult)
       case rejected of
         Left _ -> pure ()
-        Right _ -> fail "metadata reused an invalid dependency")
+        Right _ -> fail "metadata reused an invalid dependency"
+      evicted <- readIORef evictions
+      assertEqual "success and rejection each evict their target" 2 (length evicted))
     `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
   where
     temporary = do
@@ -98,7 +102,7 @@ structuralDisplayCompilation effectsRoot = bracket temporary removeDirectoryRecu
   source <- readFile "test-cell-splitter/DisplayFields.cell.hs"
   plan <- analyzeCell template source >>= either (fail . renderCellSplitError) pure
   let includes = ["lib", "test-cell-splitter", effectsRoot]
-  withResidentPipelineSelectedRequests includes $ \runRequest -> runRequest $ \compiler -> do
+  withResidentPipelineSelectedRequests includes (const (pure ())) $ \runRequest -> runRequest $ \compiler -> do
     let compile current = do
           rendered <- either fail pure (renderCellCheckSource template current)
           let path = root </> "CellCheck.hs"
@@ -187,7 +191,7 @@ requestMemoLifecycle root = do
     ]
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
   setEnv "TIDEPOOL_TIMING" "1"
-  (withResidentPipelineSelectedRequests [root] $ \runRequest -> do
+  (withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
       let compile purpose compiler = compiler CheckedEnvironment mempty purpose Nothing targetPath [root] Nothing
           sessionMiss = "tidepool-memo-miss module=Tidepool.Session.Lib.G1"
           absentSession = sessionMiss ++ " reason=absent"
