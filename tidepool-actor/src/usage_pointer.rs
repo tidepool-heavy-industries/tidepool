@@ -53,7 +53,9 @@ fn qualified_tokens(source: &str) -> impl Iterator<Item = (&str, &str)> {
 /// Build the bare-identifier index from an explicit `(locator, source)`
 /// list — separated from [`build_index`] so it is testable against synthetic
 /// fixtures, independent of the shipped workspace's exact current contents.
-fn index_from_sources(sources: &[(&'static str, &'static str)]) -> HashMap<&'static str, &'static str> {
+fn index_from_sources(
+    sources: &[(&'static str, &'static str)],
+) -> HashMap<&'static str, &'static str> {
     let mut index = HashMap::new();
     for (locator, source) in sources {
         for (_qualifier, identifier) in qualified_tokens(source) {
@@ -88,7 +90,10 @@ fn present(locator: &str, workspace: &std::path::Path) -> Option<String> {
     {
         return Some(format!("skill {skill}"));
     }
-    workspace.join(locator).is_file().then(|| locator.to_owned())
+    workspace
+        .join(locator)
+        .is_file()
+        .then(|| locator.to_owned())
 }
 
 #[cfg(test)]
@@ -111,7 +116,10 @@ mod tests {
             index.get("send").copied(),
             Some(".shoal/checks/handler-call.hs")
         );
-        assert_eq!(index.get("client").copied(), Some(".shoal/checks/handler-call.hs"));
+        assert_eq!(
+            index.get("client").copied(),
+            Some(".shoal/checks/handler-call.hs")
+        );
         // Never scanned: no qualified occurrence of it anywhere in the source.
         assert_eq!(index.get("exitCode"), None);
         // A capitalized-final token (a type/constructor use, e.g. `R.Reply`)
@@ -128,7 +136,10 @@ mod tests {
             present(".shoal/skills/shoal-command/SKILL.md", elsewhere.path()).as_deref(),
             Some("skill shoal-command")
         );
-        assert_eq!(present(".shoal/checks/handler-call.hs", elsewhere.path()), None);
+        assert_eq!(
+            present(".shoal/checks/handler-call.hs", elsewhere.path()),
+            None
+        );
         std::fs::create_dir_all(elsewhere.path().join(".shoal/checks")).unwrap();
         std::fs::write(elsewhere.path().join(".shoal/checks/handler-call.hs"), "").unwrap();
         assert_eq!(

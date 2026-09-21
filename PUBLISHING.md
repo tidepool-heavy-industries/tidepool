@@ -27,7 +27,6 @@ Crates must be published in dependency order. Wait for each crate to appear on c
 17.  tidepool-extract-report
 18.  tidepool-toolchain
 19.  tidepool-runtime
-20.  tidepool-optimize
 21.  tidepool-actor
 22.  tidepool-mcp
 23.  tidepool-handlers

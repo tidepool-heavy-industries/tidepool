@@ -62,9 +62,9 @@ use crate::machine_state::{MachineDisposition, MachineFailure, MachineState};
 use crate::old_space::OldSpace;
 use crate::prepared_control::CallStatus;
 use crate::resource_ledger::{
-    ContinuationFrame, FrameCell, FrameEvidence, HandleClass, PreparedFrameEvidence, ResourceLedger,
+    ContinuationFrame, HandleClass, PreparedFrameEvidence, ResourceLedger,
 };
-use crate::suspension::{ContinuationId, ParkKind, RealmId, ValueHandle};
+use crate::suspension::{ContinuationId, RealmId, ValueHandle};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
@@ -179,7 +179,7 @@ pub struct PreparedMachine<'code> {
     pins: BTreeSet<ProgramId>,
     nursery_bytes: usize,
     /// Value handles, parked continuations AND realm-scoped cancellation
-    /// flags for this machine, shared exactly as `JitEffectMachine` shares
+    /// flags for this machine, shared exactly as `PreparedMachine` shares
     /// its own [`ResourceLedger`]. A parked frame ([`Self::park`]) owns its
     /// continuation's root slot as a stowed root until [`Self::take_parked`]
     /// or [`Self::close_realm`]; the rooting receipt
@@ -1359,7 +1359,7 @@ impl<'code> PreparedMachine<'code> {
     /// only the raw id (a dropped [`crate::suspension::RootCustody`]'s
     /// deferred cleanup, the one case that crosses the runtime session
     /// boundary without its `PreparedHandle` wrapper) can still release it.
-    /// Mirrors `JitEffectMachine::discard_handle` minus that machine's
+    /// Mirrors `PreparedMachine::discard_handle` minus that machine's
     /// immediate `collect_retired_storage` call: the prepared route reclaims
     /// retired storage only at its own quiescent boundary
     /// (`PreparedEngine::quiesce_and_collect`), never inline on release.
@@ -1387,7 +1387,7 @@ impl<'code> PreparedMachine<'code> {
     /// `MachineState`, not a machine-wide flag.
     ///
     /// A cancelled realm's flag is NOT auto-cleared after the cancelled run
-    /// completes -- same discipline as `JitEffectMachine`'s own
+    /// completes -- same discipline as `PreparedMachine`'s own
     /// [`CancelHandle`] (whose own doc says "call `reset` between runs if
     /// you intend to reuse"): the caller decides when a realm is done
     /// retrying and calls [`CancelHandle::reset`] explicitly.
@@ -1396,7 +1396,7 @@ impl<'code> PreparedMachine<'code> {
     }
 
     /// SCOPE EXIT: close `realm`, releasing every parked frame and value
-    /// handle it owns. Mirrors `JitEffectMachine::close_realm`'s contract:
+    /// handle it owns. Mirrors `PreparedMachine::close_realm`'s contract:
     ///
     /// - every frame parked under `realm` ([`Self::park`]) is removed and
     ///   its continuation's stowed root deregistered;
@@ -1422,7 +1422,7 @@ impl<'code> PreparedMachine<'code> {
         let frames_dropped = closed.frames.len();
         let handles_released = closed.handles.len();
         for mut frame in closed.frames {
-            self.machine.deregister_stowed_root(frame.cell.slot());
+            self.machine.deregister_stowed_root(frame.cell.addr());
             if let Some(root) = frame.live_payload_root.take() {
                 self.machine.deregister_persistent_root(root.addr());
             }
@@ -1460,7 +1460,7 @@ impl<'code> PreparedMachine<'code> {
     ///
     /// `live_payload_root` is the frame's already-tenured live payload, if
     /// any -- callers compute it (`PreparedEngine::tenure_live_payload`
-    /// mirrors `JitEffectMachine`'s own pre-park tenure) since minting it
+    /// mirrors `PreparedMachine`'s own pre-park tenure) since minting it
     /// needs a handle inspection this method has no reason to also know how
     /// to do; `park` only stows what it is given.
     pub fn park(
@@ -1470,12 +1470,7 @@ impl<'code> PreparedMachine<'code> {
         live_payload_root: Option<crate::old_space::RootSlot>,
         request: ParkRequest,
     ) -> Result<ContinuationId, ExecutionError> {
-        let ParkRequest {
-            principal,
-            effect_policy,
-            live_payload,
-            evidence,
-        } = request;
+        let ParkRequest { evidence, .. } = request;
         self.ensure_handle_access()?;
         let owned_here = self
             .handles
@@ -1494,17 +1489,11 @@ impl<'code> PreparedMachine<'code> {
         // any collection can run.
         self.machine.deregister_persistent_root(slot.addr());
         self.machine.register_stowed_root(slot.addr());
-        let cancel_flag = self.handles.cancel_flag(realm);
         let id = self.handles.park(ContinuationFrame {
-            cell: FrameCell::Slot(slot),
+            cell: slot,
             realm,
-            principal,
-            effect_policy,
-            kind: ParkKind::Plain,
             live_payload_root,
-            live_payload,
-            cancel_flag,
-            evidence: FrameEvidence::Prepared(evidence),
+            evidence,
         });
         self.assert_rooting_receipt();
         Ok(id)
@@ -1515,10 +1504,7 @@ impl<'code> PreparedMachine<'code> {
     #[must_use]
     pub fn parked(&self, id: ContinuationId) -> Option<(RealmId, &PreparedFrameEvidence)> {
         let frame = self.handles.continuation(id)?;
-        match &frame.evidence {
-            FrameEvidence::Prepared(evidence) => Some((frame.realm, evidence)),
-            FrameEvidence::Core(_) => None,
-        }
+        Some((frame.realm, &frame.evidence))
     }
 
     /// The runtime resource scope owning the frame parked under `id`, if any.
@@ -1562,18 +1548,7 @@ impl<'code> PreparedMachine<'code> {
             .handles
             .continuation(id)
             .ok_or(ExecutionError::UnknownContinuation(id))?;
-        let (FrameEvidence::Prepared(evidence), FrameCell::Slot(slot)) =
-            (&frame.evidence, &frame.cell)
-        else {
-            // Only `park` above inserts frames here, and it inserts exactly
-            // this shape; a Core-shaped frame on a prepared machine is a
-            // registry mismatch (the caller handed this id to the wrong
-            // engine's machine), not evidence the heap itself is corrupt.
-            return Err(ExecutionError::Invariant(
-                "take_parked: continuation is parked with Core evidence on a prepared machine",
-            ));
-        };
-        let (evidence, slot, realm) = (*evidence, *slot, frame.realm);
+        let (evidence, slot, realm) = (frame.evidence, frame.cell, frame.realm);
         let mut frame = self
             .handles
             .take_continuation(id)
@@ -1600,7 +1575,7 @@ impl<'code> PreparedMachine<'code> {
 
     /// Take the frame parked under `id`'s stowed live payload root and mint
     /// a [`ValueHandle`] over it under the frame's realm, mirroring
-    /// `JitEffectMachine::handle_from_live_payload` on the Core route. The
+    /// `PreparedMachine::handle_from_live_payload` on the Core route. The
     /// frame itself stays parked and rooted -- only the payload's root moves
     /// from the frame's own stash into the handle ledger, which now owns its
     /// liveness (it was already a persistent root; [`Self::park`] never
@@ -2185,7 +2160,7 @@ impl<'code> PreparedMachine<'code> {
     /// Adopt a handle's rooted slot into another ownership discipline: the
     /// handle is removed from this machine's ledger atomically and its
     /// persistent-root registration remains active. Mirrors
-    /// `JitEffectMachine::take_handle_root`; the caller must install the
+    /// `PreparedMachine::take_handle_root`; the caller must install the
     /// returned slot in a root-owning structure (a parked frame's own
     /// `live_payload_root` stash, at present -- see
     /// `PreparedEngine::tenure_live_payload`). Unknown or already-released
@@ -2209,7 +2184,7 @@ impl<'code> PreparedMachine<'code> {
 
     /// Every persistent root this machine has registered, whatever program
     /// owns it -- the ledger a session's scope-retirement receipt is checked
-    /// against, as `JitEffectMachine::persistent_roots_count` is for Core.
+    /// against, as `PreparedMachine::persistent_roots_count` is for Core.
     #[must_use]
     pub fn total_persistent_roots(&self) -> usize {
         self.machine.persistent_roots_count()
@@ -2913,7 +2888,7 @@ impl Drop for PreparedMachine<'_> {
         // Parked frames first, so the "registered from park until take, and
         // no longer" invariant holds on every drop path.
         for frame in self.handles.drain_continuations() {
-            self.machine.deregister_stowed_root(frame.cell.slot());
+            self.machine.deregister_stowed_root(frame.cell.addr());
         }
         self.machine.clear_prepared_old_space();
         self.machine.clear_rust_roots();

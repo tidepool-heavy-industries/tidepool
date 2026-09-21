@@ -928,6 +928,7 @@ pub fn template_haskell(
         helpers,
         input,
         budget,
+        settled: true,
         ..Default::default()
     }
     .render()
@@ -957,6 +958,7 @@ pub fn template_haskell_anchored(
         input,
         budget,
         anchor_result: true,
+        settled: true,
         ..Default::default()
     }
     .render()
@@ -985,6 +987,7 @@ pub fn template_haskell_show_default(
         input,
         budget,
         render: Render::ToWire,
+        settled: true,
         ..Default::default()
     }
     .render()

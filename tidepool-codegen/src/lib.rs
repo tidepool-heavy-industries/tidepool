@@ -1,33 +1,26 @@
-//! Cranelift-based JIT compiler for Tidepool Core expressions.
+//! Cranelift compiler and runtime machinery for prepared-STG programs.
 //!
-//! Compiles `CoreExpr` to native code via Cranelift, with effect machine support
-//! for yielding on algebraic effects and resuming with handler responses.
+//! This crate validates prepared execution schemas, emits native code, and
+//! owns heap, collection, rooting, cancellation, and continuation mechanics.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod alloc;
 pub mod binding_table;
 pub mod context;
-pub mod datacon_env;
 pub mod debug;
 pub mod descriptor_bridge;
-pub mod effect_machine;
-pub mod emit;
 pub mod entry_abi;
 pub mod gc;
 pub mod heap_bridge;
 pub mod host_fns;
 pub mod jit_machine;
 pub mod layout;
-pub mod lower;
 pub mod machine_state;
-pub mod nursery;
 pub mod old_space;
 pub mod pipeline;
 pub mod prepared_control;
 pub mod prepared_program;
 mod resource_ledger;
 pub mod scope;
-pub mod signal_safety;
 pub mod stack_map;
 pub mod suspension;
-pub mod yield_type;

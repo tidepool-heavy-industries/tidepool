@@ -427,25 +427,6 @@ impl ResidentToolClient {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) async fn wait_until_sleeping(&self, invocation: &ToolInvocationContext) {
-        let execution = execution_id(self.actor.identity(), &invocation.clone().into());
-        loop {
-            let sleeping = self
-                .active_workbench
-                .lock()
-                .as_ref()
-                .filter(|(active, _)| active == &execution)
-                .is_some_and(|(_, control)| {
-                    control.phase.load(std::sync::atomic::Ordering::Acquire) == WORKBENCH_SLEEPING
-                });
-            if sleeping {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    }
-
     pub(crate) async fn cancel_workbench(
         &self,
         invocation: ToolInvocationContext,

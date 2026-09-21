@@ -1,58 +1,18 @@
-//! Fluent eval-pipeline harness for Tidepool integration tests.
+//! Shared compiler and prepared-runtime setup for integration tests.
 //!
-//! # Why this exists
-//!
-//! ~250 test sites across `tidepool-runtime/tests` and `tidepool-repl/tests`
-//! hand-roll the same setup: derive the Prelude include dir, spawn an 8-256 MiB
-//! stack thread (deep [`Value`] spines overflow the default 2 MiB test-thread
-//! stack), call one of
-//! `compile_and_run` / `compile_and_run_pure` / `compile_haskell`, then unwrap
-//! the [`EvalResult`]. Effectful tests additionally re-declare the base MCP
-//! GADT stack verbatim (~60 lines each) and re-implement mock handlers.
-//!
-//! [`EvalHarness`] centralizes all of that behind a builder while still driving
-//! the REAL `tidepool_runtime` entry points (it *wraps*, never reimplements —
-//! tests must keep exercising the production compile→JIT→dispatch path).
-//!
-//! # New tests use this
-//!
-//! ```no_run
-//! use tidepool_testing::eval_harness::EvalHarness;
-//!
-//! // Pure expression (no effects):
-//! let out = EvalHarness::new().with_stdlib().run_pure(
-//!     "module Test where\nn :: Int\nn = 2 + 3",
-//!     "n",
-//! );
-//! assert_eq!(out.json(), serde_json::json!(5));
-//!
-//! // Effectful, against the base MCP stack + mock handlers:
-//! use tidepool_testing::eval_harness::mock;
-//! let src = mock::mcp_module("result :: M Value\nresult = pure (toJSON (1 :: Int))");
-//! let out = EvalHarness::new()
-//!     .with_stdlib()
-//!     .run(&src, "result", mock::min_stack());
-//! assert!(out.is_ok());
-//! ```
-//!
-//! Guard suites that need GHC with [`require_extract`], which panics loudly
-//! (naming the fix) rather than silently `return`ing — a silent skip reports
-//! as a nextest PASS, defeating every downstream receipt check. GHC-heavy
-//! tests are excluded from the default nextest filter for exactly this
-//! reason; [`require_extract`] only ever fires on a direct
-//! `--ignore-default-filter` invocation missing the environment, which is a
-//! caller error, not a legitimate skip. [`extract_available`] remains for the
-//! rare caller that branches on toolchain presence without a bare skip.
+//! The harness locates the repository Haskell libraries, assembles effect
+//! preambles, runs the production prepared compiler path, and provides mock
+//! handler stacks. Tests that require GHC call [`require_extract`] so missing
+//! toolchain setup is a visible failure.
 
 use std::path::{Path, PathBuf};
 
-use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_repr::DataConTable;
 pub use tidepool_runtime::CompileError;
 use tidepool_runtime::{
-    compile_and_run, compile_and_run_pure, compile_and_run_with_nursery_size, compile_haskell,
-    compile_targets, CompileResult, CompiledArtifacts, DispatchEffect, EvalResult, RuntimeError,
-    Value, DEFAULT_NURSERY_SIZE, EVAL_STACK_SIZE,
+    compile_and_run, compile_and_run_with_nursery_size, compile_haskell, compile_targets,
+    run_prepared_program, CompileResult, CompiledArtifacts, DispatchEffect, EvalResult,
+    RuntimeError, Value, DEFAULT_NURSERY_SIZE, EVAL_STACK_SIZE,
 };
 
 /// Repo root, derived from this crate's manifest dir (`<root>/tidepool-testing`).
@@ -369,17 +329,6 @@ impl EvalHarness {
         compile_targets(source, targets, &includes, None, |_, _, _| {})
     }
 
-    /// Compile + run a PURE expression (no effects / handlers).
-    pub fn run_pure(&self, source: &str, target: &str) -> Outcome {
-        let includes = self.owned_includes();
-        let source = source.to_owned();
-        let target = target.to_owned();
-        Outcome(with_eval_stack(move || {
-            let refs: Vec<&Path> = includes.iter().map(|p| p.as_path()).collect();
-            compile_and_run_pure(&source, &target, &refs)
-        }))
-    }
-
     /// Compile + run an EFFECTFUL expression against `handlers` (user context
     /// `()`). `handlers` is any `frunk` HList of `EffectHandler`s (e.g.
     /// [`mock::min_stack`]).
@@ -534,13 +483,14 @@ impl EvalHarness {
         // `compile_and_run`/`run`/`run_with`'s single-target
         // `compile_haskell` path, verified working. Reported to main rather
         // than guessed at; see `plans/core-engine-removal.md`.
-        let expr = artifacts
+        let prepared = artifacts
             .targets
             .get(target)
             .unwrap_or_else(|| panic!("compile_many did not produce target {target:?}"))
-            .expr
+            .prepared
+            .prepared()
             .clone();
-        let mut table = artifacts.table.clone();
+        let table = artifacts.table.clone();
         let has_io = artifacts.warnings.has_io;
         let nursery = self.nursery.unwrap_or(DEFAULT_NURSERY_SIZE);
         let (result, handlers) = with_eval_stack(move || {
@@ -548,48 +498,13 @@ impl EvalHarness {
                 if has_io {
                     return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
                 }
-                table.populate_siblings_from_expr(&expr);
-                let mut machine = JitEffectMachine::compile(&expr, &table, nursery)?;
-                let value = machine.run(&table, &mut handlers, &user)?;
+                let value =
+                    run_prepared_program(prepared, &table, nursery, &mut handlers, &user, |_| {})?;
                 Ok((value, table))
             })();
             (result, handlers)
         });
         (TargetOutcome(result), handlers)
-    }
-
-    /// Run one target out of a [`compile_many`](Self::compile_many) bundle as
-    /// a PURE (non-`Eff`) expression — the multi-target sibling of
-    /// [`run_pure`](Self::run_pure). Skips freer-simple effect dispatch
-    /// entirely (`JitEffectMachine::run_pure`, mirroring
-    /// `compile_and_run_pure`'s single-target path): a target compiled
-    /// through [`compile_many`]/`compile_targets` carries no freer-simple
-    /// `Val`/`Pure` wrapper for a plain (non-`Eff`) binding, so running it
-    /// through the effectful [`run_target`](Self::run_target) path fails with
-    /// "missing freer-simple constructor 'Val'" — this is the correct entry
-    /// point for a pure check-list/family-bundle target.
-    pub fn run_target_pure(&self, artifacts: &CompiledArtifacts, target: &str) -> TargetOutcome {
-        let expr = artifacts
-            .targets
-            .get(target)
-            .unwrap_or_else(|| panic!("compile_many did not produce target {target:?}"))
-            .expr
-            .clone();
-        let mut table = artifacts.table.clone();
-        let has_io = artifacts.warnings.has_io;
-        let nursery = self.nursery.unwrap_or(DEFAULT_NURSERY_SIZE);
-        let result = with_eval_stack(move || {
-            (|| {
-                if has_io {
-                    return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
-                }
-                table.populate_siblings_from_expr(&expr);
-                let mut machine = JitEffectMachine::compile(&expr, &table, nursery)?;
-                let value = machine.run_pure()?;
-                Ok((value, table))
-            })()
-        });
-        TargetOutcome(result)
     }
 }
 

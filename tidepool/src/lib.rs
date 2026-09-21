@@ -7,9 +7,8 @@
 //!
 //! - **Binary** (`cargo install tidepool`): an MCP server.
 //! - **Library**: re-exports the project's crates. Start with
-//!   [`compile_haskell`] to load a compiled Haskell module, then use
-//!   [`tidepool_codegen::jit_machine::JitEffectMachine`] to JIT-compile and run it
-//!   with your effect handlers.
+//!   [`compile_haskell`] to load a prepared-STG program, then run it with
+//!   [`compile_and_run`] and your effect handlers.
 //!
 //! See the repo-root `CLAUDE.md` for the crate map.
 
@@ -33,7 +32,7 @@ pub use tidepool_runtime as runtime;
 pub use tidepool_bridge::Value;
 pub use tidepool_bridge::{FromCore, ToCore};
 pub use tidepool_effect::dispatch::DispatchEffect;
-pub use tidepool_repr::{CoreExpr, DataConTable};
+pub use tidepool_repr::DataConTable;
 pub use tidepool_runtime::{compile_and_run, compile_haskell, EvalResult, RuntimeError};
 
 pub mod operator;

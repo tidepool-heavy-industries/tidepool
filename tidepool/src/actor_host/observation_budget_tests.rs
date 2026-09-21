@@ -204,11 +204,8 @@ async fn reflect_binds_history_larger_than_the_observation_budget() {
     // the value as the context argument for the questions that follow."
     // `reflect` answers `Either ReflectError [ConversationTurn]`; a `Left`
     // counts as zero turns so it fails the assertion below rather than this one.
-    let used = dispatch_haskell_script(
-        policy.as_ref(),
-        "either (const 0) length editorialContext",
-    )
-    .await;
+    let used =
+        dispatch_haskell_script(policy.as_ref(), "either (const 0) length editorialContext").await;
     assert_eq!(used["status"], "committed", "{used}");
     assert_eq!(
         used["items"][0]["output"], "3",

@@ -29,8 +29,8 @@ use tidepool_toolchain::extract_module_name;
 use tidepool_repr::execution_schema::{
     parse_program, DecodeLimits, PreparedProgram, SymbolIdentity,
 };
-use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings};
-use tidepool_repr::{CoreExpr, DataConTable};
+use tidepool_repr::serial::{read_metadata, MetaWarnings};
+use tidepool_repr::DataConTable;
 
 use crate::{timing, CompileError, NominalHead, SiteType, YieldSite};
 
@@ -467,7 +467,7 @@ pub struct TurnRequest<'a> {
     /// ([`classify_block`]). Forwarded as `--turn-verdict`, skipping the
     /// extract's internal re-parse.
     pub verdict: Option<TurnClassification>,
-    /// The Core binding a compiling template names as its target. `None`
+    /// The binding a compiling template names as its target. `None`
     /// means the extract's scaffold-reserved default (`__result`), which is
     /// what a template authored for this path should use. Supply it only when
     /// a template's target binder is fixed by a builder shared with another
@@ -476,8 +476,8 @@ pub struct TurnRequest<'a> {
     /// uses and which names its target `result`. Forwarded as `--target`; the
     /// output file base is `result.cbor` either way.
     pub target: Option<&'a str>,
-    /// Ask the same compile to also produce this turn's prepared-STG program.
-    /// `None` is the Core-only turn every caller performs today.
+    /// Retained imports visible to this prepared-STG turn.
+    /// Prepared executable imports retained by this turn.
     pub prepared: Option<PreparedTurn<'a>>,
 }
 
@@ -490,13 +490,10 @@ pub struct PreparedTurn<'a> {
 }
 
 impl PreparedTurn<'static> {
-    /// The prepared half of a session's first turn on the current route:
-    /// `None` on Core, and on the prepared route a request linked against
-    /// nothing (there is no retained binding yet).
+    /// A session's first turn links against no retained bindings.
     #[must_use]
     pub fn first_turn() -> Option<PreparedTurn<'static>> {
-        (super::persistent::EngineKind::from_env() == super::persistent::EngineKind::Prepared)
-            .then_some(PreparedTurn { retained: &[] })
+        Some(PreparedTurn { retained: &[] })
     }
 }
 
@@ -546,8 +543,8 @@ pub const PREPARED_DECODE_TARGET: &str = "__decodeValue";
 /// on the worker side): `__applyEntry f n = settle (f (I# n))`, the entry
 /// `ResidentSession::run_rooted_entry`/`run_rooted_entry_borrowed`
 /// (`tidepool-runtime/src/session/resident.rs`) enters to apply a rooted
-/// `Int -> M a` closure to a bare unboxed argument without a Core fragment to
-/// compile it into — actor program start, shutdown hooks, actor source, and
+/// `Int -> M a` closure to a bare unboxed argument — actor program start,
+/// shutdown hooks, actor source, and
 /// green-thread bodies all cross this entry on the prepared route. Because
 /// `settle` is polymorphic in the settled computation's effect row and
 /// result, this entry (unlike the settled scaffold line) is NOT tied to one
@@ -561,8 +558,8 @@ pub const PREPARED_APPLY_ENTRY_TARGET: &str = "__applyEntry";
 /// [`PREPARED_APPLY_ENTRY_TARGET`] (`Tidepool.Session.preparedApplyValueTargetName`
 /// on the worker side): `__applyValue f x = settle (f x)`, the entry
 /// `ResidentSession::run_rooted_application` enters to apply one rooted
-/// Haskell value to another — both retained, neither bridged — without a
-/// Core fragment to compile it into (actor mailboxes, where the handler and
+/// Haskell value to another — both retained and neither bridged (actor
+/// mailboxes, where the handler and
 /// its protocol-indexed request are both live Haskell values). Same
 /// polymorphism and evidence-interning exclusion as
 /// [`PREPARED_APPLY_ENTRY_TARGET`].
@@ -867,8 +864,7 @@ pub fn ambiguous_type_advice(message: &str, submitted: &str) -> Option<String> {
     // instance conflict produces carry no such line.
     let unresolved_overlap = message.contains("Overlapping instances for")
         && message.contains("The choice depends on the instantiation of");
-    (unresolved_overlap || message.contains("ZonkAny"))
-        .then(|| AMBIGUOUS_TYPE_ADVICE.to_owned())
+    (unresolved_overlap || message.contains("ZonkAny")).then(|| AMBIGUOUS_TYPE_ADVICE.to_owned())
 }
 
 /// GHC's `MonadFail` desugaring for a refutable bind in a `do` block, as it
@@ -1512,16 +1508,14 @@ pub fn turn_user_code_line_range(wrapped: &str, turn_text: &str) -> Option<(usiz
 /// of it.
 #[derive(Debug)]
 pub struct CompiledTurn {
-    /// JIT-able Core for the turn's `result` binding.
-    pub expr: CoreExpr,
     /// This turn's DataCon metadata.
     pub table: DataConTable,
     /// Compile warnings (e.g. `has_io`).
     pub warnings: MetaWarnings,
     /// Typed suspension sites decoded from the `TurnOut` wire payload.
     pub asks: Vec<YieldSite>,
-    /// The turn's prepared-STG program, when the request asked for one.
-    pub prepared: Option<PreparedProgram>,
+    /// The turn's prepared-STG program.
+    pub prepared: PreparedProgram,
 }
 
 impl CompiledTurn {
@@ -1529,40 +1523,19 @@ impl CompiledTurn {
     #[must_use]
     pub fn code(&self) -> TurnCode<'_> {
         TurnCode {
-            expr: &self.expr,
             table: &self.table,
             sites: &self.asks,
-            prepared: self.prepared.as_ref(),
+            prepared: &self.prepared,
         }
     }
 }
 
-/// The compiled halves of one turn a resident session may run. The Core
-/// half (`expr`) is what every turn compiles today; `prepared` is the program
-/// a prepared-route turn adds. The session's engine, fixed at construction,
-/// runs its own half and never the other; `table` and `sites` describe both
-/// (one constructor table serves both engines).
+/// The compiled inputs a resident session needs to install and run one turn.
 #[derive(Clone, Copy)]
 pub struct TurnCode<'a> {
-    pub expr: &'a CoreExpr,
     pub table: &'a DataConTable,
     pub sites: &'a [YieldSite],
-    pub prepared: Option<&'a PreparedProgram>,
-}
-
-impl<'a> TurnCode<'a> {
-    /// A Core-only turn: what a caller without a [`CompiledTurn`] (a hand-built
-    /// fragment, a fixture) runs. On the prepared route it is refused, never
-    /// run on Core.
-    #[must_use]
-    pub fn core(expr: &'a CoreExpr, table: &'a DataConTable, sites: &'a [YieldSite]) -> Self {
-        Self {
-            expr,
-            table,
-            sites,
-            prepared: None,
-        }
-    }
+    pub prepared: &'a PreparedProgram,
 }
 
 /// The result of [`run_turn`] — one variant per verdict, each carrying only
@@ -2314,7 +2287,6 @@ fn run_turn_with_pin(
         cmd.turn_pin(pin);
     }
     if let Some(prepared) = &req.prepared {
-        cmd.prepared_turn();
         for (identity, generation) in prepared.retained {
             cmd.retained_generation(extract_identity(identity), *generation);
         }
@@ -2338,7 +2310,7 @@ fn run_turn_with_pin(
     // Default-on per-compile summary + gated per-module breakdown
     // (compile-attribution lane): this `--turn` spawn goes through the SAME
     // `Tidepool.GhcPipeline.runCompile` skeleton `artifacts.rs::extract_and_read`
-    // instruments (`runTurnMode` → `runPipelineSession` → `runCompile` — see
+    // instruments (`runTurnMode` → `runPipelineSessionSelected` → `runCompile` — see
     // `haskell/app/Main.hs`), but reads its own `stderr` here rather than
     // through that shared function, so it needs the same two calls duplicated
     // rather than silently missing them.
@@ -2359,13 +2331,13 @@ fn run_turn_with_pin(
         });
     }
 
-    decode_turn_output_dir(temp.path(), req.prepared.is_some()).map_err(Into::into)
+    decode_turn_output_dir(temp.path()).map_err(Into::into)
 }
 
 /// Decode one item's full output directory into a [`TurnResult`]: the
 /// `TurnOut` CBOR sidecar (`turn.cbor`) plus, for a `Bind`/`Expr` verdict,
 /// `result.cbor`/`meta.cbor` off the SAME directory.
-fn decode_turn_output_dir(dir: &Path, prepared: bool) -> Result<TurnResult, CompileError> {
+fn decode_turn_output_dir(dir: &Path) -> Result<TurnResult, CompileError> {
     let turn_out_path = dir.join("turn.cbor");
     if !turn_out_path.exists() {
         return Err(CompileError::MissingOutput(turn_out_path));
@@ -2390,7 +2362,7 @@ fn decode_turn_output_dir(dir: &Path, prepared: bool) -> Result<TurnResult, Comp
             asks,
             wrapped_source,
         } => {
-            let compiled = read_compiled_turn(dir, asks, prepared)?;
+            let compiled = read_compiled_turn(dir, asks)?;
             Ok(TurnResult::Bind {
                 binders,
                 bound,
@@ -2404,7 +2376,7 @@ fn decode_turn_output_dir(dir: &Path, prepared: bool) -> Result<TurnResult, Comp
             asks,
             wrapped_source,
         } => {
-            let compiled = read_compiled_turn(dir, asks, prepared)?;
+            let compiled = read_compiled_turn(dir, asks)?;
             Ok(TurnResult::Expr {
                 variant,
                 compiled,
@@ -2419,20 +2391,14 @@ fn decode_turn_output_dir(dir: &Path, prepared: bool) -> Result<TurnResult, Comp
 fn read_compiled_turn(
     output_dir: &Path,
     asks: Vec<YieldSite>,
-    prepared: bool,
 ) -> Result<CompiledTurn, CompileError> {
-    let expr_path = output_dir.join("result.cbor");
     let meta_path = output_dir.join("meta.cbor");
-    if !expr_path.exists() {
-        return Err(CompileError::MissingOutput(expr_path));
-    }
     if !meta_path.exists() {
         return Err(CompileError::MissingOutput(meta_path));
     }
     let cbor_read_start = std::time::Instant::now();
-    let expr_bytes = std::fs::read(&expr_path)?;
     let meta_bytes = std::fs::read(&meta_path)?;
-    let cbor_read_bytes = (expr_bytes.len() + meta_bytes.len()) as u64;
+    let cbor_read_bytes = meta_bytes.len() as u64;
     timing::record_stage(
         timing::NO_NODE,
         timing::NO_ROUND,
@@ -2442,7 +2408,6 @@ fn read_compiled_turn(
     );
 
     let deserialize_start = std::time::Instant::now();
-    let expr = read_cbor(&expr_bytes)?;
     let (table, warnings) = read_metadata(&meta_bytes)?;
     timing::record_stage(
         timing::NO_NODE,
@@ -2455,12 +2420,9 @@ fn read_compiled_turn(
     tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
     tidepool_codegen::host_fns::register_poisoned_externals(&warnings.poisoned);
 
-    let prepared = prepared
-        .then(|| read_prepared_program(output_dir))
-        .transpose()?;
+    let prepared = read_prepared_program(output_dir)?;
 
     Ok(CompiledTurn {
-        expr,
         table,
         warnings,
         asks,
@@ -2468,9 +2430,8 @@ fn read_compiled_turn(
     })
 }
 
-/// Read the prepared-STG program the worker wrote beside this turn's Core
-/// artifacts. A requested program that is absent is a missing output, never a
-/// silent Core-only turn.
+/// Read the prepared-STG program the worker wrote for this turn. A requested
+/// program that is absent is a missing output.
 fn read_prepared_program(output_dir: &Path) -> Result<PreparedProgram, CompileError> {
     let path = output_dir.join(format!("{PREPARED_SCAFFOLD_TARGET}.prepared.cbor"));
     if !path.exists() {
@@ -3330,7 +3291,8 @@ mod ambiguity_advice_tests {
             ambiguous_type_advice(AMBIGUOUS_PURE_DISPATCH, "pure (1 :: Int)").as_deref(),
             Some(CELL_PURE_DISPATCH_ADVICE)
         );
-        let rendered = render_cell_compile_error(&cell_error(AMBIGUOUS_PURE_DISPATCH), "pure (1 :: Int)");
+        let rendered =
+            render_cell_compile_error(&cell_error(AMBIGUOUS_PURE_DISPATCH), "pure (1 :: Int)");
         assert!(
             rendered.contains("Ambiguous type variable"),
             "GHC's own text must survive: {rendered}"
@@ -3383,9 +3345,11 @@ mod ambiguity_advice_tests {
             "{rendered}"
         );
         // A handler helper that never got its effect row lands here too.
-        assert!(ambiguous_type_advice(AMBIGUOUS_FIND_ELEM, "announce message = say message")
-            .unwrap()
-            .starts_with("`announce`'s type is ambiguous"));
+        assert!(
+            ambiguous_type_advice(AMBIGUOUS_FIND_ELEM, "announce message = say message")
+                .unwrap()
+                .starts_with("`announce`'s type is ambiguous")
+        );
     }
 
     #[test]
@@ -3418,7 +3382,8 @@ mod ambiguity_advice_tests {
             ambiguous_type_advice(message, "value = toJSON \"src/app.rs\"").as_deref(),
             Some(LITERAL_ANNOTATION_ADVICE)
         );
-        let rendered = render_cell_compile_error(&cell_error(message), "value = toJSON \"src/app.rs\"");
+        let rendered =
+            render_cell_compile_error(&cell_error(message), "value = toJSON \"src/app.rs\"");
         assert!(rendered.contains("arising from the literal"), "{rendered}");
         assert!(rendered.ends_with(LITERAL_ANNOTATION_ADVICE), "{rendered}");
     }
@@ -3429,8 +3394,12 @@ mod ambiguity_advice_tests {
     #[test]
     fn a_signature_without_its_equation_says_they_share_one_item() {
         let message = "<cell>:1:1: error: [GHC-44432]\n    The type signature for \u{2018}summarize\u{2019} lacks an accompanying binding";
-        let rendered = render_cell_compile_error(&cell_error(message), "summarize :: [Text] -> Text");
-        assert!(rendered.contains("lacks an accompanying binding"), "{rendered}");
+        let rendered =
+            render_cell_compile_error(&cell_error(message), "summarize :: [Text] -> Text");
+        assert!(
+            rendered.contains("lacks an accompanying binding"),
+            "{rendered}"
+        );
         assert!(
             rendered.ends_with(&format!(
                 "`summarize` has a signature but no equation in this cell item; \
@@ -3479,7 +3448,8 @@ mod ambiguity_advice_tests {
         // The compiler's own text survives: it names the occurrence, both
         // generations, and the line. The advice is added after it, not
         // substituted for it.
-        let rendered = render_cell_compile_error(&cell_error(AMBIGUOUS_REDECLARED_FIELD), "probe holder");
+        let rendered =
+            render_cell_compile_error(&cell_error(AMBIGUOUS_REDECLARED_FIELD), "probe holder");
         assert!(rendered.contains("Ambiguous occurrence"), "{rendered}");
         assert!(rendered.ends_with(&advice), "{rendered}");
     }
@@ -3573,7 +3543,10 @@ mod ambiguity_advice_tests {
         // The diagnostic survives: it says which types, which the advice does not.
         let rendered = render_cell_compile_error(&cell_error(mismatch), "createWorktree boundHead");
         assert!(rendered.contains("WorktreeSeed"), "{rendered}");
-        assert!(rendered.ends_with(&constructor_advice(mismatch).unwrap()), "{rendered}");
+        assert!(
+            rendered.ends_with(&constructor_advice(mismatch).unwrap()),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -3593,7 +3566,10 @@ mod ambiguity_advice_tests {
         let message = "Couldn't match expected type `RunResult' with actual type \
             `CommandResult'\n    In the first argument of `stdout', namely `event'";
         let rendered = render_cell_compile_error(&cell_error(message), "Cmd.stdout event");
-        assert!(rendered.contains("CommandResult"), "GHC's own text must survive: {rendered}");
+        assert!(
+            rendered.contains("CommandResult"),
+            "GHC's own text must survive: {rendered}"
+        );
         assert!(
             rendered.contains("Cmd.readStdout job"),
             "the recognized-error hint must be added beside GHC's text: {rendered}"
@@ -3606,7 +3582,10 @@ mod ambiguity_advice_tests {
     fn string_text_mismatch_adds_the_stdlib_hint() {
         let message = "Couldn't match expected type `Text' with actual type `[Char]'";
         let rendered = render_cell_compile_error(&cell_error(message), "greet \"hi\"");
-        assert!(rendered.contains("[Char]"), "GHC's own text must survive: {rendered}");
+        assert!(
+            rendered.contains("[Char]"),
+            "GHC's own text must survive: {rendered}"
+        );
         assert!(
             rendered.contains("Text-first"),
             "the recognized-error hint must be added beside GHC's text: {rendered}"
@@ -3643,7 +3622,10 @@ mod ambiguity_advice_tests {
     fn several_refutable_binds_name_the_first_without_claiming_which_failed() {
         let cell = "x <- pure 1\nJust a <- pure Nothing\nRight b <- pure (Left 2)";
         let advice = runtime_failure_advice(DO_BLOCK_FAILURE, cell).unwrap();
-        assert!(advice.starts_with("a pattern bind, first `Just a` on line 2,"), "{advice}");
+        assert!(
+            advice.starts_with("a pattern bind, first `Just a` on line 2,"),
+            "{advice}"
+        );
     }
 
     /// A cell with no refutable bind at all still gets the recovery, because
@@ -4103,7 +4085,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let prelude = tidepool_testing::eval_harness::prelude_path();
         let effects = tidepool_testing::eval_harness::effects_include();
-        let include = [prelude.as_path(), effects[0].as_path(), effects[1].as_path()];
+        let include = [
+            prelude.as_path(),
+            effects[0].as_path(),
+            effects[1].as_path(),
+        ];
         let template = super::super::workbench::resident_cell_check_template(
             &eff_cell_preamble(),
             EFF_ROW,
@@ -4153,7 +4139,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let prelude = tidepool_testing::eval_harness::prelude_path();
         let effects = tidepool_testing::eval_harness::effects_include();
-        let include = [prelude.as_path(), effects[0].as_path(), effects[1].as_path()];
+        let include = [
+            prelude.as_path(),
+            effects[0].as_path(),
+            effects[1].as_path(),
+        ];
         let template = super::super::workbench::resident_cell_check_template(
             &eff_cell_preamble(),
             EFF_ROW,
@@ -4610,57 +4600,6 @@ mod tests {
             matches!(err.error, CompileError::ExtractFailed(_)),
             "expected a clean ExtractFailed, got {err:?}"
         );
-    }
-
-    /// A prepared turn is one compile that yields both halves: the Core the
-    /// session runs today, and the turn target's prepared-STG program.
-    #[test]
-    fn prepared_turn_writes_its_program_beside_the_core_artifacts() {
-        tidepool_testing::eval_harness::require_extract();
-        let session_root = TempDir::new().unwrap();
-        let templates = [TurnTemplate {
-            kind: TemplateSelector::Expr,
-            // A hand-written template still defines the settled scaffold the
-            // prepared route projects; here the turn is pure, so it IS the value.
-            source:
-                "module Expr where\n__result :: Int\n__result = {{TURN}}\n__prepared = __result\n"
-                    .to_string(),
-        }];
-        let request = |prepared| TurnRequest {
-            turn_text: "41 + 1",
-            templates: &templates,
-            include: &[],
-            session_root: session_root.path(),
-            inject_modules: &[],
-            gen: 0,
-            verdict: Some(TurnClassification {
-                kind: TurnKind::Expr,
-                binders: Vec::new(),
-                items: Vec::new(),
-            }),
-            target: None,
-            prepared,
-        };
-
-        let TurnResult::Expr { compiled, .. } = run_turn(request(None)).unwrap() else {
-            panic!("expr verdict produced another variant");
-        };
-        assert!(
-            compiled.prepared.is_none(),
-            "an ordinary turn compiles no prepared program"
-        );
-
-        let TurnResult::Expr { compiled, .. } =
-            run_turn(request(Some(PreparedTurn { retained: &[] }))).unwrap()
-        else {
-            panic!("expr verdict produced another variant");
-        };
-        assert!(
-            compiled.prepared.is_some(),
-            "a prepared turn carries its own program"
-        );
-        // The Core half is unchanged by asking for the prepared half.
-        assert!(!compiled.table.is_empty());
     }
 
     /// Ordered templates are a typechecking fallback, not a blanket recovery

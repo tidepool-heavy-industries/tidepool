@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use tidepool_repr::Generation;
 use tidepool_runtime::session::{
-    resident_workbench_templates, run_turn, BoundBinder, EngineKind, ModuleEnv, ResidentOutcome,
+    resident_workbench_templates, run_turn, BoundBinder, ModuleEnv, ResidentOutcome,
     ResidentSession, SessionLib, TurnRequest, TurnResult, TurnTemplate,
 };
 use tidepool_testing::eval_harness;
@@ -46,7 +46,7 @@ struct Notebook {
 }
 
 impl Notebook {
-    fn new(engine: EngineKind) -> Self {
+    fn new() -> Self {
         eval_harness::require_extract();
         let decls = tidepool_mcp::standard_decls();
         let preamble = tidepool_mcp::build_preamble(&decls, false);
@@ -62,11 +62,9 @@ impl Notebook {
         .expect("open decl plane")
         .with_validation_include(vec![eval_harness::prelude_path()]);
         include.push(lib.include_dir().to_path_buf());
-        let session = ResidentSession::unbootstrapped_on(
-            engine,
+        let session = ResidentSession::unbootstrapped(
             frunk::HNil,
             tidepool_mcp::CapturedOutput::new(),
-            include.clone(),
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             Some(lib),
         );
@@ -202,7 +200,7 @@ fn assert_counts_flat(
 /// retained program per subsequent collection.
 #[test]
 fn prepared_session_residency_stays_bounded_across_many_turns() {
-    let mut notebook = Notebook::new(EngineKind::Prepared);
+    let mut notebook = Notebook::new();
 
     // A multiple of `N`, so the phase ends exactly on a collection boundary
     // and the bind below is the first install of the next window.
@@ -318,7 +316,7 @@ fn prepared_session_residency_stays_bounded_across_many_turns() {
 /// far short of `N`.
 #[test]
 fn prepared_session_large_promotion_triggers_an_early_major_collection() {
-    let mut notebook = Notebook::new(EngineKind::Prepared);
+    let mut notebook = Notebook::new();
 
     for i in 0..N {
         notebook.expression(&format!("1 + {i}"));

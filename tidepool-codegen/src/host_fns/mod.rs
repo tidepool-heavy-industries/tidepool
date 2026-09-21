@@ -19,10 +19,8 @@ mod cancel;
 mod errors;
 mod force;
 mod gc;
-mod list_materialize;
 mod primops;
 
-pub(crate) use cancel::check_cancel_and_set_error;
 pub use cancel::runtime_cancel_check;
 
 pub(crate) use gc::remembered_set_disabled_for_test;
@@ -35,11 +33,10 @@ pub use gc::{
     set_max_heap_bytes_for_test, set_remembered_set_disabled_for_test, truncate_rust_roots,
     write_barrier, GcFaultPoint,
 };
-pub(crate) use gc::{
-    prepared_gc_trigger, run_minor_collection_for_tenure_fixup, GcState, PreparedHeap,
-};
+pub(crate) use gc::{prepared_gc_trigger, GcState, PreparedHeap};
 
 use errors::unresolved_var_trap;
+pub(crate) use errors::MIN_VALID_ADDR;
 pub use errors::{
     debug_app_check, debug_app_return, drain_diagnostics, error_poison_ptr, error_poison_ptr_lazy,
     error_poison_ptr_lazy_msg, error_poison_ptr_lazy_named, get_exec_context, has_runtime_error,
@@ -49,7 +46,6 @@ pub use errors::{
     runtime_oom, runtime_shape_trap, set_exec_context, set_first_cause, surface_error,
     take_runtime_error, RuntimeError, RuntimeErrorKind, ShapeTrapKind,
 };
-pub(crate) use errors::{MIN_VALID_ADDR, SIGNAL_SAFE_CTX, SIGNAL_SAFE_CTX_LEN};
 
 pub use force::{deep_force, heap_demand, heap_force, trampoline_resolve};
 
@@ -68,8 +64,6 @@ pub use primops::{
     runtime_shrink_byte_array, runtime_strlen, runtime_text_measure_off, runtime_text_memchr,
     runtime_text_reverse, runtime_word2_quot, runtime_word2_rem, runtime_word_encode_double,
 };
-
-pub(crate) use list_materialize::materialize_cons_list;
 
 /// Return the list of host function symbols for JIT registration.
 ///

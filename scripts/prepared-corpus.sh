@@ -173,9 +173,7 @@ actor_report="$actor_root/results.json"
   "$actor_report"
 assert_contract_report actor-await-settled-dependencies 1 "$actor_report"
 
-find "$repo_root/haskell/test/suite_cbor" -maxdepth 1 -type f -name '*.cbor' \
-  ! -name meta.cbor -printf '%f\n' \
-  | sed 's/\.cbor$//' \
+jq -r '.source_tops[]' "$repo_root/tidepool-testing/fixtures/prepared-corpus-expectations.json" \
   | LC_ALL=C sort >"$suite_targets"
 suite_count="$(wc -l <"$suite_targets" | tr -d '[:space:]')"
 echo "==> projecting Suite.hs prepared corpus ($suite_count targets)"

@@ -15,7 +15,7 @@
 # turn driven via `ReplayProvider` — zero live model calls).
 #
 # Rows:
-#   oneshot_cold — one compile_and_run_pure-shaped eval, a FRESH compile-memo
+#   oneshot_cold — one stateless prepared eval with a fresh compile memo
 #                  dir every repeat (a genuine cache miss each time).
 #   oneshot_warm — the SAME eval against an already-warm memo dir (a cache
 #                  hit every repeat — no extract spawn at all).

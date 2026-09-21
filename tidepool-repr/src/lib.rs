@@ -1,49 +1,25 @@
-//! Core representation types for Tidepool's GHC Core IR.
-//!
-//! Provides the primary intermediate representation (IR) used by Tidepool.
-//! The IR is a recursive tree of [`CoreFrame`] nodes, typically manipulated
-//! as a [`CoreExpr`]. It also defines identifiers, literals, and a
-//! [`DataConTable`] for constructor metadata.
+//! Shared schemas and metadata for Tidepool prepared-STG programs.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod actor_path;
-pub mod builder;
 pub mod datacon;
 pub mod datacon_table;
 pub mod execution_schema;
-pub mod frame;
-pub mod free_vars;
 pub mod freer_names;
 pub mod id_issuer;
 pub mod jsonl;
-pub mod normalize;
-pub mod pretty;
 pub mod serial;
 pub mod session_ids;
-pub mod subst;
 pub mod tree;
-pub mod trivial_field;
 pub mod types;
-pub mod varid_check;
 pub mod version_ladder;
 
 pub use actor_path::{ActorPath, ActorPathError, ActorPathSegment};
-pub use builder::TreeBuilder;
 pub use datacon::*;
 pub use datacon_table::*;
-pub use frame::*;
 pub use id_issuer::MonotonicIdIssuer;
-pub use normalize::normalize;
 pub use session_ids::{
     BindingName, Generation, PrincipalId, SessionId, SessionModule, SessionModuleKind, SessionVarId,
 };
 pub use tree::*;
 pub use types::*;
-pub use varid_check::{check_toplevel_varids, toplevel_binders, BindingSite, VarIdCollision};
-
-/// Core IR expression: a recursion scheme over [`CoreFrame`] nodes.
-///
-/// This is the primary interchange format between the Haskell frontend
-/// (which translates GHC Core into this tree) and the Rust backend
-/// (which optimizes it or compiles it into machine code).
-pub type CoreExpr = RecursiveTree<CoreFrame<usize>>;

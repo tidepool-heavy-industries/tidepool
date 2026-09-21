@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use tidepool_repr::{Generation, SessionId};
 use tidepool_runtime::session::{
-    resident_workbench_templates, run_turn, EngineKind, ModuleEnv, ResidentOutcome,
-    ResidentSession, SessionLib, TurnRequest, TurnResult, TurnTemplate,
+    resident_workbench_templates, run_turn, ModuleEnv, ResidentOutcome, ResidentSession,
+    SessionLib, TurnRequest, TurnResult, TurnTemplate,
 };
 use tidepool_testing::eval_harness;
 
@@ -131,11 +131,9 @@ impl Notebook {
         .expect("open decl plane")
         .with_validation_include(vec![eval_harness::prelude_path()]);
         include.push(lib.include_dir().to_path_buf());
-        let session = ResidentSession::unbootstrapped_on(
-            EngineKind::Prepared,
+        let session = ResidentSession::unbootstrapped(
             frunk::HNil,
             tidepool_mcp::CapturedOutput::new(),
-            include.clone(),
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             Some(lib),
         );
@@ -194,15 +192,12 @@ impl Notebook {
         };
         let compile = compile_started.elapsed();
         if std::env::var_os("TIDEPOOL_UNIT_COST_DUMP_TOPS").is_some() {
-            dump_tops(compiled.prepared.as_ref().expect("a prepared turn"));
+            dump_tops(&compiled.prepared);
         }
         let [binder] = bound.as_slice() else {
             panic!("{text:?} bound {} names", bound.len());
         };
-        let imports = compiled
-            .prepared
-            .as_ref()
-            .map_or(0, |prepared| prepared.globals().len());
+        let imports = compiled.prepared.globals().len();
         let before = self.session.codegen_totals().unwrap_or((0, 0));
         let run_started = Instant::now();
         let outcome = self

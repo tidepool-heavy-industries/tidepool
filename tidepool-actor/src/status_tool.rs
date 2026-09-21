@@ -79,7 +79,9 @@ mod tests {
         assert_eq!(tool.input_schema["additionalProperties"], false);
         assert_eq!(
             tool.input_schema["properties"]["view"]["enum"],
-            serde_json::json!(["summary", "detailed", "recovery", "lineage", "trace", "bindings", "live"])
+            serde_json::json!([
+                "summary", "detailed", "recovery", "lineage", "trace", "bindings", "live"
+            ])
         );
         assert!(tool.input_schema.get("required").is_none());
     }

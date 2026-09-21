@@ -3,7 +3,6 @@
 
 module Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
-  , runPipeline, runPipelineSession, runPipelineSessionFor
   , runPipelineSelected, runPipelineSessionSelected
   , runPipelineSelectedRetaining
   , CompilePurpose(..), PipelineResult(..), dumpCore
@@ -14,7 +13,7 @@ module Tidepool.GhcPipeline
   , cellExpressionPlans, satisfiesCapturedConstraint
   , checkCellInstances
     -- * Resident session
-  , withResidentPipeline, withResidentPipelineSelected
+  , withResidentPipelineSelected
   , withResidentPipelineSelectedRequests
   , registerResidentEvictionHook
   ) where
@@ -135,11 +134,10 @@ import Tidepool.TurnSource (extractModuleName)
 -- | Selects the compiler representation produced at the internal GHC API
 -- boundary. Metadata consumers stop at the checked environment.
 data PipelineSelection result where
-  LegacyCore :: PipelineSelection PipelineResult
   PreparedStg :: PipelineSelection PreparedPipelineResult
   CheckedEnvironment :: PipelineSelection CheckedEnvironmentResult
 
-data PreparationKind = KeepCore | PrepareStg
+data PreparationKind = CheckOnly | PrepareStg
 
 -- | Prepared mode keeps the ordinary typed pipeline observations alongside
 -- the unflattened per-module STG handoff.
@@ -148,7 +146,7 @@ data PreparedPipelineResult = PreparedPipelineResult
   , pprModules :: [PreparedModule]
   }
 
--- | Metadata has no executable projection or Core payload. The environment
+-- | Metadata has no executable projection. The environment
 -- retains dependency interfaces and the target's exact checked reader scope.
 data CheckedEnvironmentResult = CheckedEnvironmentResult
   { crHscEnv :: HscEnv
@@ -160,9 +158,8 @@ data CheckedEnvironmentResult = CheckedEnvironmentResult
   }
 
 selectionKind :: PipelineSelection result -> PreparationKind
-selectionKind LegacyCore = KeepCore
 selectionKind PreparedStg = PrepareStg
-selectionKind CheckedEnvironment = KeepCore
+selectionKind CheckedEnvironment = CheckOnly
 
 data PipelineResult = PipelineResult
   { prBinds  :: [CoreBind]
@@ -491,12 +488,6 @@ targetModuleNameFor path = do
   let declared = either (const Nothing) extractModuleName contents
   pure (mkModuleName (fromMaybe (capitalize (takeBaseName path)) declared))
 
--- | The normal one-shot extraction. This is exactly
--- @runPipelineSession Nothing@, so no session
--- machinery (iface injection, source-less home modules) ever touches this path.
-runPipeline :: FilePath -> [FilePath] -> IO PipelineResult
-runPipeline = runPipelineSelected LegacyCore
-
 runPipelineSelected :: PipelineSelection result -> FilePath -> [FilePath] -> IO result
 runPipelineSelected selection path includes =
   runPipelineSessionSelected selection Set.empty GeneralCompile Nothing path includes Nothing
@@ -662,15 +653,7 @@ runCompile selection retained variant path includes buildProductsDir = do
     -- 'runCompileCycle''s haddock for what each argument controls.
     runCompileCycle selection Nothing Nothing retained timing sessionT0 variant path
 
--- | Compile with an optional active session scope and an optional persistent
--- build-products directory. Inert scopes use the normal pipeline.
-runPipelineSession :: Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath -> IO PipelineResult
-runPipelineSession = runPipelineSessionFor GeneralCompile
-
-runPipelineSessionFor :: CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath -> IO PipelineResult
-runPipelineSessionFor purpose = runPipelineSessionSelected LegacyCore Set.empty purpose
-
--- | Like 'runPipelineSelected'/'runPipelineSession', but also taking a
+-- | Like 'runPipelineSelected'/'runPipelineSessionSelected', but also taking a
 -- retained-generation set (see 'Tidepool.RetainedUnfoldings') to withhold
 -- from GHC's own simplifier before it runs. This is the production one-shot
 -- entry point 'app/Main.hs' calls for every request; a caller with no
@@ -962,7 +945,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                     )
                   )
               prepareSelected mf simplified = case preparation of
-                KeepCore -> pure Nothing
+                CheckOnly -> pure Nothing
                 PrepareStg -> do
                   (cgGuts, _details) <- liftIO $ hscTidy (mfHscEnv mf) simplified
                   siblings <- liftIO $ atomicModifyIORef' preparedSiblingsRef $ \known ->
@@ -1060,7 +1043,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                     mapM_ rememberPreparedSiblings (gmePrepared entry)
                     cpAfterModule plan modSum (mfTcGblEnv (gmeFront entry)) (mfHscEnv (gmeFront entry)) (gmeSimplified entry)
                     prepared <- case (preparation, gmePrepared entry) of
-                      (KeepCore, _) -> pure Nothing
+                      (CheckOnly, _) -> pure Nothing
                       (PrepareStg, Just cachedPrepared) -> pure (Just cachedPrepared)
                       (PrepareStg, Nothing) -> do
                         freshPrepared <- prepareSelected (gmeFront entry) (gmeSimplified entry)
@@ -1155,7 +1138,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                     Just entry -> do
                       mapM_ rememberPreparedSiblings (gmePrepared entry)
                       prepared <- case (preparation, gmePrepared entry) of
-                        (KeepCore, _) -> pure Nothing
+                        (CheckOnly, _) -> pure Nothing
                         (PrepareStg, Just cachedPrepared) -> pure (Just cachedPrepared)
                         (PrepareStg, Nothing) -> do
                           freshPrepared <- prepareSelected f (gmeSimplified entry)
@@ -1252,7 +1235,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
               ++ "' was typechecked without a retained reader environment"
           hscFinal <- getSession
           warnings <- liftIO (nub . reverse <$> readIORef warnRef)
-          let legacyResult = PipelineResult
+          let pipelineResult = PipelineResult
                 { prBinds  = allBinds
                 , prTyCons = allTyCons
                 , prHscEnv = cpFinalEnv plan hscFinal
@@ -1264,9 +1247,8 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                 , prTargetRdrEnv = tcg_rdr_env targetEnvironment
                 , prTargetTcGblEnv = targetEnvironment
                 }
-          pure (legacyResult, preparedModules)
+          pure (pipelineResult, preparedModules)
     case selection of
-      LegacyCore -> fst <$> compileExecutable
       PreparedStg -> uncurry PreparedPipelineResult <$> compileExecutable
       CheckedEnvironment -> do
         -- load' may need executable dependencies for TH; it never sees the
@@ -1317,21 +1299,9 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
 -- Transport-blind: this module
 -- knows nothing about sockets or frames (the worker transport owns that) —
 -- it hands the caller a plain IO closure shaped exactly like
--- 'runPipelineSession', so app/Main.hs's existing dispatch can substitute it
+-- 'runPipelineSessionSelected', so app/Main.hs's existing dispatch can substitute it
 -- in with no other change to its own call sites.
 -- ---------------------------------------------------------------------------
-
--- | Boot one GHC session and provide a compiler closure that reuses stable
--- dependency interfaces and Core. Transaction-local targets and session modules
--- are removed from the memo after each transaction. Include paths and build-product
--- paths are applied per request without reinitializing the unit state.
-withResidentPipeline
-  :: [FilePath]
-  -> ((CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath -> IO PipelineResult) -> IO a)
-  -> IO a
-withResidentPipeline baseIncludes useCompiler = do
-  withResidentPipelineSelected baseIncludes $ \compile ->
-    useCompiler (compile LegacyCore Set.empty)
 
 -- | Resident compiler with an explicit representation selection per request.
 -- Prepared outputs share the same validity checks and request-scope cleanup as
@@ -1422,8 +1392,8 @@ type RequestRunner = forall requestResult.
   (ResidentCompiler -> IO requestResult) -> IO requestResult
 
 -- | One resident-session compile cycle, against the ALREADY-OPEN session
--- 'withResidentPipeline' booted. Patches @importPaths@ for THIS cycle only
--- (see 'withResidentPipeline'), compiles with the shared 'ModIfaceCache' +
+-- 'withResidentPipelineSelected' booted. Patches @importPaths@ for THIS cycle only
+-- (see 'withResidentPipelineSelected'), compiles with the shared 'ModIfaceCache' +
 -- 'GutsMemo'. The transaction boundary established by
 -- 'withResidentPipelineSelectedRequests' sanitizes the memo after both
 -- successful and exceptional transactions (see 'sanitizeMemo').
@@ -2126,7 +2096,7 @@ enableDiagnosticWarning warning = (`wopt_set` warning)
 -- | Give internal top-level simplifier floats stable module-qualified names.
 --
 -- Top-level binders with INTERNAL names (floats like @k_X1@, @$wk_snOX@) keep
--- per-module uniques. `runPipeline` concatenates several modules' bindings for
+-- per-module uniques. `runPipelineSelected` concatenates several modules' bindings for
 -- translation, so (occName, unique-key) pairs collide across modules — and
 -- @Identity.varId@ hashes exactly that pair. Two distinct floats can
 -- then receive the same VarId and shadow each other in the serialized program.

@@ -73,7 +73,7 @@ compiler identities are environment-sensitive. The update builds both
 worktree extractor halves, owns the complete output directory, and records the
 new source fingerprint.
 
-`--all-closed` treats its output directory as an owned fixture corpus: after a
+`prepared fixture` treats its output directory as an owned fixture corpus: after a
 successful write it removes stale `*.cbor` and `*.asks.json` artifacts from
 earlier runs while preserving unrelated files. Current lifted-local
 `*_t<n>.cbor` fixtures remain part of the differential corpus; do not manually

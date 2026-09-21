@@ -114,7 +114,7 @@ pub const STAGE_TEMPLATE: &str = "template";
 pub const STAGE_EXTRACT_SPAWN: &str = "extract_spawn";
 /// Reading the extract's output files off disk.
 pub const STAGE_CBOR_READ: &str = "cbor_read";
-/// `read_cbor` + `read_metadata` — CBOR → `CoreExpr`/`DataConTable`.
+/// Decode constructor metadata and the prepared execution program.
 pub const STAGE_CBOR_DESERIALIZE: &str = "cbor_deserialize";
 /// Parsing the `asks.json` sidecar.
 pub const STAGE_ASKS_PARSE: &str = "asks_parse";
@@ -177,8 +177,6 @@ pub const PHASE_CLASSIFY: &str = "classify";
 pub const PHASE_TYPECHECK: &str = "typecheck";
 /// Desugar to Core + the simplifier passes GHC runs before we read binds.
 pub const PHASE_CORE: &str = "core";
-/// `Tidepool.Translate`: GHC Core → our `CoreExpr` + `DataConTable`.
-pub const PHASE_TRANSLATE: &str = "translate";
 /// `Tidepool.CborEncode`: serializing the tree + metadata.
 pub const PHASE_CBOR_ENCODE: &str = "cbor_encode";
 /// Writing `<target>.cbor` / `meta.cbor` / `asks.json`.
@@ -516,7 +514,6 @@ tidepool-timing phase=total ms=2100\n";
         assert_eq!(t.get(PHASE_GHC_SESSION), Some(1420));
         assert_eq!(t.get(PHASE_TYPECHECK), Some(310));
         assert_eq!(t.get(PHASE_TOTAL), Some(2100));
-        assert_eq!(t.get(PHASE_TRANSLATE), None);
     }
 
     #[test]

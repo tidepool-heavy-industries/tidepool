@@ -143,7 +143,9 @@ impl ReleaseAwait {
 
 impl std::fmt::Debug for ReleaseAwait {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReleaseAwait").field("actor", &self.actor).finish_non_exhaustive()
+        f.debug_struct("ReleaseAwait")
+            .field("actor", &self.actor)
+            .finish_non_exhaustive()
     }
 }
 
@@ -546,9 +548,11 @@ fn resident_actor_failure_layer(
             Some(WorkbenchFailureLayer::Compile)
         }
         ResidentActorWorkbenchError::Resident(inner) => inner.failure_layer(),
-        ResidentActorWorkbenchError::Delivered(inner) => {
-            Some(inner.failure_layer().unwrap_or(WorkbenchFailureLayer::Effect))
-        }
+        ResidentActorWorkbenchError::Delivered(inner) => Some(
+            inner
+                .failure_layer()
+                .unwrap_or(WorkbenchFailureLayer::Effect),
+        ),
         _ => None,
     }
 }
@@ -917,7 +921,11 @@ impl WorkbenchExecutions {
     /// for status rendering.
     fn terminal_entries(
         &self,
-    ) -> Vec<(WorkbenchExecutionId, &WorkbenchRequest, &crate::KernelWorkbenchReply)> {
+    ) -> Vec<(
+        WorkbenchExecutionId,
+        &WorkbenchRequest,
+        &crate::KernelWorkbenchReply,
+    )> {
         self.0
             .values()
             .filter_map(|record| match &record.state {
@@ -1006,16 +1014,20 @@ fn render_source_drift_section(drift: &crate::ActorSourceDriftObservation) -> St
         None => "  source layer: not observed".to_owned(),
         Some(layer) if layer.changed_modules.is_empty() => format!(
             "  source layer: active={}@{} disk={}@{} (checked, identical)",
-            layer.active_identity, layer.active_generation,
-            layer.disk_identity, layer.disk_generation,
+            layer.active_identity,
+            layer.active_generation,
+            layer.disk_identity,
+            layer.disk_generation,
         ),
         Some(layer) => {
             let mut changed = layer.changed_modules.clone();
             changed.sort();
             format!(
                 "  source layer: active={}@{} disk={}@{} changed_modules={changed:?}",
-                layer.active_identity, layer.active_generation,
-                layer.disk_identity, layer.disk_generation,
+                layer.active_identity,
+                layer.active_generation,
+                layer.disk_identity,
+                layer.disk_generation,
             )
         }
     };
@@ -1075,7 +1087,11 @@ fn render_job_line(job: &crate::command_jobs::CommandJobSnapshot) -> String {
 /// nothing to slice).
 fn defining_execution(
     name: &str,
-    executions: &[(WorkbenchExecutionId, &WorkbenchRequest, &crate::KernelWorkbenchReply)],
+    executions: &[(
+        WorkbenchExecutionId,
+        &WorkbenchRequest,
+        &crate::KernelWorkbenchReply,
+    )],
 ) -> Option<(WorkbenchExecutionId, String, usize)> {
     executions.iter().find_map(|(execution, request, reply)| {
         let response = reply.as_ref().ok()?;
@@ -1106,7 +1122,11 @@ fn defining_execution(
 /// testable without an actor.
 fn render_bindings_section(
     bindings: &[tidepool_runtime::session::WorkbenchBinding],
-    executions: &[(WorkbenchExecutionId, &WorkbenchRequest, &crate::KernelWorkbenchReply)],
+    executions: &[(
+        WorkbenchExecutionId,
+        &WorkbenchRequest,
+        &crate::KernelWorkbenchReply,
+    )],
 ) -> String {
     if bindings.is_empty() {
         return "  (no persistent bindings)".to_owned();
@@ -1121,8 +1141,10 @@ fn render_bindings_section(
             }
         }
     }
-    let live_names: std::collections::HashSet<&str> =
-        bindings.iter().map(|binding| binding.name.as_str()).collect();
+    let live_names: std::collections::HashSet<&str> = bindings
+        .iter()
+        .map(|binding| binding.name.as_str())
+        .collect();
 
     let mut lines = bindings
         .iter()
@@ -3841,9 +3863,9 @@ where
                         registration.dependencies,
                     )
                     .map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(
-                            watch_registration_refusal(error),
-                        )
+                        ResidentActorWorkbenchError::ActorProtocol(watch_registration_refusal(
+                            error,
+                        ))
                     })?;
                 self.publish_watch_notifications(notifications);
                 self.environment
@@ -4234,13 +4256,12 @@ where
         };
 
         let Some(active) = self.compiled_tools.as_ref() else {
-            receipt.push("spec: the active record vanished mid-reload; nothing was swapped.".into());
+            receipt
+                .push("spec: the active record vanished mid-reload; nothing was swapped.".into());
             return reload_receipt("not swapped", started, receipt);
         };
-        let changes = tidepool_tool::surface::compare_surfaces(
-            &active.declarations,
-            &candidate.declarations,
-        );
+        let changes =
+            tidepool_tool::surface::compare_surfaces(&active.declarations, &candidate.declarations);
         if !changes.is_empty() {
             receipt.push(format!(
                 "refused: the rebuilt spec declares a different surface, and the tool list was \
@@ -5144,7 +5165,8 @@ where
                                             );
                                             *text = format!("retained as {binding} :: Cmd.Job\nnext: read_output session_id={job}, stream=Stdout (or Stderr), offset=0. Do not rerun.\n{text}");
                                         } else {
-                                            *text = format!("retained as {binding} :: Cmd.Job\n{text}");
+                                            *text =
+                                                format!("retained as {binding} :: Cmd.Job\n{text}");
                                         }
                                         next_fragment.retain_job_binding(binding);
                                     }
@@ -5774,10 +5796,11 @@ where
                                     // results to consume for this query.
                                     match crate::lookup_tool::qualifier_and_identifier(name) {
                                         Some((qualifier, _identifier)) => {
-                                            let module = crate::lookup_tool::resolve_qualifier_module(
-                                                imports, qualifier,
-                                            )
-                                            .unwrap_or_else(|| qualifier.to_string());
+                                            let module =
+                                                crate::lookup_tool::resolve_qualifier_module(
+                                                    imports, qualifier,
+                                                )
+                                                .unwrap_or_else(|| qualifier.to_string());
                                             vec![
                                                 InspectionQuery::Info(name.clone()),
                                                 InspectionQuery::Browse {
@@ -8296,8 +8319,7 @@ fn cell_check_rejection(
             }
         }
         error => {
-            let rejection =
-                tidepool_runtime::session::render_cell_compile_rejection(error, source);
+            let rejection = tidepool_runtime::session::render_cell_compile_rejection(error, source);
             items[0].status = WorkbenchItemStatus::Rejected;
             items[0].failure_layer = Some(WorkbenchFailureLayer::Compile);
             items[0].output = rejection.output;
@@ -8485,29 +8507,29 @@ fn lookup_response(
                 query: prepared.query,
                 outcome: LookupOutcome::Rejected { diagnostic },
             },
-            PreparedLookupKind::Doc(topic) => match crate::prompt_catalog::workbench_doc(
-                &topic,
-                workspace_modules,
-            ) {
-                Ok(body) => LookupResult::found(
-                    prepared.query,
-                    vec![LookupEntry {
-                        name: topic,
-                        defining_module: None,
-                        kind: LookupEntryKind::Documentation,
-                        signature_or_declaration: body.into(),
-                        origin: LookupOrigin::Documentation,
-                        quality: MatchQuality::Exact,
-                        availability: tidepool_runtime::session::InspectionAvailability::Unknown,
-                        usage_pointer: None,
-                    }],
-                    MATCH_LIMIT,
-                ),
-                Err(diagnostic) => LookupResult {
-                    query: prepared.query,
-                    outcome: LookupOutcome::Rejected { diagnostic },
-                },
-            },
+            PreparedLookupKind::Doc(topic) => {
+                match crate::prompt_catalog::workbench_doc(&topic, workspace_modules) {
+                    Ok(body) => LookupResult::found(
+                        prepared.query,
+                        vec![LookupEntry {
+                            name: topic,
+                            defining_module: None,
+                            kind: LookupEntryKind::Documentation,
+                            signature_or_declaration: body.into(),
+                            origin: LookupOrigin::Documentation,
+                            quality: MatchQuality::Exact,
+                            availability:
+                                tidepool_runtime::session::InspectionAvailability::Unknown,
+                            usage_pointer: None,
+                        }],
+                        MATCH_LIMIT,
+                    ),
+                    Err(diagnostic) => LookupResult {
+                        query: prepared.query,
+                        outcome: LookupOutcome::Rejected { diagnostic },
+                    },
+                }
+            }
             PreparedLookupKind::Name(ref name) => {
                 // A dotted, lowercase-final name (`Cmd.exitCode`) sent a
                 // paired qualifier `Browse` in the same batch (built above,
@@ -9163,7 +9185,9 @@ mod tests {
         ));
         let rendered = response.render_text();
         assert!(
-            rendered.contains("Cmd.exitCode\n  no match: not in scope as a name; close: commandExitCode"),
+            rendered.contains(
+                "Cmd.exitCode\n  no match: not in scope as a name; close: commandExitCode"
+            ),
             "{rendered}"
         );
         assert!(rendered.contains("awaitSettled :: Int"), "{rendered}");
@@ -9682,8 +9706,7 @@ mod tests {
         // crossed the commit point even though something downstream then
         // failed (this is the `reflect` conversation-reader bug: the value
         // was delivered and only a later step failed).
-        let error =
-            crate::ResidentActorWorkbenchError::Delivered(ResidentError::ForeignCustody);
+        let error = crate::ResidentActorWorkbenchError::Delivered(ResidentError::ForeignCustody);
         assert_eq!(
             disposition_for_non_command_failure(&error),
             WorkbenchOperationDisposition::Committed
@@ -9729,7 +9752,11 @@ mod tests {
         digest: u8,
         source: &str,
         binding: &str,
-    ) -> (WorkbenchExecutionId, WorkbenchRequest, crate::KernelWorkbenchReply) {
+    ) -> (
+        WorkbenchExecutionId,
+        WorkbenchRequest,
+        crate::KernelWorkbenchReply,
+    ) {
         let execution = WorkbenchExecutionId::from_digest([digest; 16]);
         let request =
             WorkbenchRequest::from_cell_input(source).with_execution_id(execution.clone());
@@ -9823,8 +9850,8 @@ mod tests {
     fn bindings_section_shows_generation_source_and_execution_for_a_matched_binding() {
         let (execution, request, reply) = committed_execution(5, "answer = 42", "answer");
         let executions = vec![(execution.clone(), &request, &reply)];
-        let binding =
-            WorkbenchBinding::declaration("answer".into(), "answer".into()).with_generation(Some(1));
+        let binding = WorkbenchBinding::declaration("answer".into(), "answer".into())
+            .with_generation(Some(1));
         let text = render_bindings_section(std::slice::from_ref(&binding), &executions);
         assert!(text.contains("gen=1"), "{text}");
         assert!(text.contains(&format!("exec={execution}")), "{text}");
@@ -9852,8 +9879,7 @@ mod tests {
         // Only `total` is still live: `helper` was retracted or shadowed
         // away since its cell ran, but this actor's own journal still
         // remembers it was once a session binding.
-        let binding =
-            WorkbenchBinding::materialized("total".into(), None).with_generation(Some(2));
+        let binding = WorkbenchBinding::materialized("total".into(), None).with_generation(Some(2));
         let text = render_bindings_section(std::slice::from_ref(&binding), &executions);
         assert!(text.contains("unresolved=[\"helper\"]"), "{text}");
     }

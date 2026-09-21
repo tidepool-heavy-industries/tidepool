@@ -1,6 +1,6 @@
 //! External-cancellation safepoint: the check JIT code and other host fns
 //! consult to unwind promptly. The flag itself lives on the per-machine
-//! `MachineState` (installed by `JitEffectMachine::install_registries`,
+//! `MachineState` (installed by `PreparedMachine::install_registries`,
 //! cleared by `RegistryGuard::drop`); this module holds only the check.
 
 use crate::context::VMContext;

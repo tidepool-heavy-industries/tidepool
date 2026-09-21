@@ -1,59 +1,24 @@
-//! `PersistentSession` — the resident-JIT session core shared by
-//! `tidepool-repl` and `tidepool-harness`.
+//! Persistent prepared-STG session state shared by resident consumers.
 //!
-//! Both crates drive a long-lived [`JitEffectMachine`] turn-by-turn, accumulate
-//! declarations (the [`SessionLib`] decl plane) and value bindings (the
-//! [`BindingTable`] value plane), and union each turn's constructor metadata into
-//! one growing [`DataConTable`]. That substrate — machine lifecycle, the two
-//! planes, the accumulated table, and the fragment-run primitives — is identical
-//! between them and lives here.
-//!
-//! Suspension is **threadless** everywhere: an `Ask` stows the machine (or, on
-//! the parked lane below, one continuation of many) as DATA — the eval thread
-//! exits, and a fresh thread re-enters to resume. No OS thread is parked per
-//! suspended session — neither in the harness (a TREE of many
-//! simultaneously-suspended nodes cannot pin N+1 threads) nor in the repl.
-//!
-//! Suspension uses the machine's continuation registry everywhere. This core
-//! exposes a capacity-one façade for the REPL: it remembers one active
-//! continuation id while the machine-level registry supplies rooting,
-//! cancellation, retry, and resume semantics.
-//!
-//! Every run entry here therefore reports either a completion or a suspension,
-//! and every one has a `resume_*` sibling that re-enters the stowed continuation
-//! with an answer or an abort. The four result-materialization policies the JIT
-//! supports — plain `Value`, single `Bind`, projected multi-bind, and
-//! bind+render — each appear as such a pair, each carrying what it actually
-//! produces ([`SuspendableOutcome`] for the two `Value`-completing policies,
-//! [`Suspendable`] over the roots for the other two). See the module docstrings
-//! of [`super::resident`] and `tidepool-repl`'s `session.rs` for the orchestration
-//! around this core.
+//! A session owns one prepared machine, accumulated constructor metadata,
+//! declaration and value planes, scoped bindings, and parked continuations.
+//! Suspension is threadless: a continuation is rooted as data and a later
+//! entry may resume it from a fresh evaluation thread.
 
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
-use tidepool_bridge::Value;
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BindingTipId};
-use tidepool_codegen::emit::ExternalEnv;
-use tidepool_codegen::jit_machine::{CancelHandle, FuncId, JitEffectMachine, MachineDisposition};
-use tidepool_codegen::old_space::RootSlot;
+use tidepool_codegen::jit_machine::{CancelHandle, MachineDisposition};
 use tidepool_codegen::prepared_program::ResidencyCounts;
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
-use tidepool_codegen::suspension::{
-    ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput, Suspendable, SuspendableOutcome,
-    SuspensionRun,
-};
-use tidepool_effect::dispatch::DispatchEffect;
+use tidepool_codegen::suspension::{ContinuationId, RealmId};
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
-use tidepool_repr::{
-    CoreExpr, DataCon, DataConTable, Generation, SessionModule, SessionVarId, VarId,
-};
+use tidepool_repr::{DataCon, DataConTable, Generation, SessionModule, SessionVarId, VarId};
 
 use tidepool_codegen::binding_table::BoundValue;
 use tidepool_repr::execution_schema::{PreparedProgram, SymbolIdentity};
 
 use super::binding_table::{BindRecord, BindingIndex};
-use super::OutputSink;
 use super::prepared::{PreparedEngine, PreparedRuntimeError};
 use super::{
     ExactExportError, ExactExportSurface, SessionCompileView, SessionError, SessionLib,
@@ -61,231 +26,101 @@ use super::{
 };
 use crate::JitError;
 
-/// Which execution engine a resident session runs its turns on. Chosen once
-/// at construction and never switched: a session on the prepared route never
-/// falls back to Core after a turn starts or fails.
-///
-/// This selector is the cutover's temporary explicit migration route; see
-/// `plans/core-removal-order.md` for the current removal-order survey. It is
-/// deleted along with the Core engine.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EngineKind {
-    /// The Core JIT machine every session ran on before the cutover.
-    Core,
-    /// The prepared-STG machine: turns compile through `--prepared-turn` and
-    /// run as settled scaffolds.
-    Prepared,
-}
-
-impl EngineKind {
-    /// The environment variable the composition roots read once per session.
-    pub const ENV: &'static str = "TIDEPOOL_ENGINE";
-
-    /// The route named by `TIDEPOOL_ENGINE` (`core` opts out to the Core
-    /// machine; `prepared`, unset, or anything else selects the prepared
-    /// machine, now the default). Read once at session construction by the
-    /// composition roots, never inside a turn.
-    #[must_use]
-    pub fn from_env() -> Self {
-        match std::env::var(Self::ENV) {
-            Ok(value) if value.eq_ignore_ascii_case("core") => Self::Core,
-            _ => Self::Prepared,
-        }
-    }
-}
-
-/// The session's live execution engine, once its first turn has bootstrapped
-/// it. Exactly one variant ever exists for a session ([`EngineKind`]).
-// One value per session, moved once per turn onto the eval thread; the size
-// difference between the two machines is not a cost worth an indirection.
-#[expect(
-    clippy::large_enum_variant,
-    reason = "one value per session, moved once per turn"
-)]
-pub enum ResidentEngine {
-    Core(JitEffectMachine),
-    Prepared(PreparedEngine),
-}
+/// The session's live prepared-STG engine.
+pub struct ResidentEngine(PreparedEngine);
 
 impl ResidentEngine {
     #[must_use]
-    pub fn core(&self) -> Option<&JitEffectMachine> {
-        match self {
-            Self::Core(machine) => Some(machine),
-            Self::Prepared(_) => None,
-        }
-    }
-
-    pub fn core_mut(&mut self) -> Option<&mut JitEffectMachine> {
-        match self {
-            Self::Core(machine) => Some(machine),
-            Self::Prepared(_) => None,
-        }
-    }
-
     pub fn prepared_mut(&mut self) -> Option<&mut PreparedEngine> {
-        match self {
-            Self::Core(_) => None,
-            Self::Prepared(engine) => Some(engine),
-        }
-    }
-
-    /// The Core machine, or the typed refusal a Core-only turn path reports
-    /// on the prepared route. No path ever falls back across engines.
-    pub fn require_core(&mut self) -> Result<&mut JitEffectMachine, JitError> {
-        self.core_mut().ok_or(JitError::InvalidSuspensionState(
-            "this turn path runs only on the Core engine; the session runs prepared STG",
-        ))
+        Some(&mut self.0)
     }
 
     /// The prepared engine, or the typed refusal a prepared-only turn path
-    /// reports on the Core route. No path ever falls back across engines.
+    /// returns the live prepared machine.
     pub fn require_prepared(&mut self) -> Result<&mut PreparedEngine, JitError> {
-        self.prepared_mut().ok_or(JitError::InvalidSuspensionState(
-            "this session runs prepared STG but holds no prepared engine",
-        ))
+        Ok(&mut self.0)
     }
 
-    /// The continuation ids parked on this session's machine, whichever
-    /// engine it runs.
+    /// The continuation ids parked on this session's machine, on this prepared machine.
     #[must_use]
     pub fn parked_ids(&self) -> Vec<ContinuationId> {
-        match self {
-            Self::Core(machine) => machine.parked_ids(),
-            Self::Prepared(engine) => engine.parked_ids(),
-        }
+        self.0.parked_ids()
     }
 
     /// Cancellation handle for this capacity-one registry realm.
     #[must_use]
     pub fn cancel_handle(&mut self) -> CancelHandle {
-        match self {
-            Self::Core(machine) => machine.realm_cancel_handle(RealmId::ROOT),
-            Self::Prepared(engine) => engine.cancel_handle(RealmId::ROOT),
-        }
+        self.0.cancel_handle(RealmId::ROOT)
     }
 
     #[must_use]
     pub fn disposition(&self) -> MachineDisposition {
-        match self {
-            Self::Core(machine) => machine.disposition(),
-            Self::Prepared(engine) => engine.disposition(),
-        }
-    }
-
-    fn ensure_reusable(&self) -> Result<(), JitError> {
-        match self {
-            Self::Core(machine) => machine.ensure_reusable(),
-            Self::Prepared(engine) => match engine.disposition() {
-                MachineDisposition::Reusable => Ok(()),
-                MachineDisposition::Unavailable => Err(JitError::InvalidSuspensionState(
-                    "prepared machine is unavailable after an integrity failure",
-                )),
-            },
-        }
+        self.0.disposition()
     }
 
     fn persistent_roots_count(&self) -> usize {
-        match self {
-            Self::Core(machine) => machine.persistent_roots_count(),
-            Self::Prepared(engine) => engine.persistent_roots_count(),
-        }
+        self.0.persistent_roots_count()
     }
 
     fn value_handle_count(&self) -> usize {
-        match self {
-            Self::Core(machine) => machine.value_handle_count(),
-            Self::Prepared(engine) => engine.handle_count(),
-        }
+        self.0.handle_count()
     }
 
     fn stowed_roots_count(&self) -> usize {
-        match self {
-            Self::Core(machine) => machine.stowed_roots_count(),
-            Self::Prepared(engine) => engine.stowed_roots_count(),
-        }
+        self.0.stowed_roots_count()
     }
 
     fn parked_count(&self) -> usize {
-        match self {
-            Self::Core(machine) => machine.parked_count(),
-            Self::Prepared(engine) => engine.parked_count(),
-        }
+        self.0.parked_count()
     }
 
     /// The runtime resource scope owning the frame parked under `id`.
     #[must_use]
     pub fn parked_realm(&self, id: ContinuationId) -> Option<RealmId> {
-        match self {
-            Self::Core(machine) => machine.parked_realm(id),
-            Self::Prepared(engine) => engine.parked_realm(id),
-        }
+        self.0.parked_realm(id)
     }
 
     /// Close a runtime resource scope: `(frames, handles_released)`.
     pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
-        match self {
-            Self::Core(machine) => machine.close_realm(realm),
-            Self::Prepared(engine) => engine.close_realm(realm),
-        }
+        self.0.close_realm(realm)
     }
 
-    /// Prepared-machine residency counters; `None` on the Core route (Core
-    /// has no bounded-residency accounting to report).
+    /// Prepared-machine residency counters; `None` before the prepared machine is installed; has no bounded-residency accounting to report).
     #[must_use]
     pub fn residency(&self) -> Option<ResidencyCounts> {
-        match self {
-            Self::Core(_) => None,
-            Self::Prepared(engine) => Some(engine.residency()),
-        }
+        Some(self.0.residency())
     }
 
     /// Lifetime `(functions, code_bytes)` of Cranelift work this engine's
-    /// installs caused; `None` on the Core route.
+    /// installs caused; `None` before the prepared machine is installed.
     #[must_use]
     pub fn codegen_totals(&self) -> Option<(u64, u64)> {
-        match self {
-            Self::Core(_) => None,
-            Self::Prepared(engine) => Some(engine.codegen_totals()),
-        }
+        Some(self.0.codegen_totals())
     }
 
     /// Prepared old-space bytes as of the last successful between-turn
-    /// collection; `None` on the Core route.
+    /// collection; `None` before the prepared machine is installed.
     #[must_use]
     pub fn old_bytes(&self) -> Option<usize> {
-        match self {
-            Self::Core(_) => None,
-            Self::Prepared(engine) => Some(engine.old_bytes()),
-        }
+        Some(self.0.old_bytes())
     }
 
     /// Read-only heap/GC snapshot, whichever engine this session runs -- see
     /// [`PreparedEngine::heap_stats`] for the prepared route's field mapping.
     #[must_use]
     pub fn heap_stats(&self) -> tidepool_codegen::jit_machine::HeapStats {
-        match self {
-            Self::Core(machine) => machine.heap_stats(),
-            Self::Prepared(engine) => engine.heap_stats(),
-        }
+        self.0.heap_stats()
     }
 }
 
 /// Cross-thread custody for one completed bind root. The root never moves
 /// independently: it remains inside the session while that session is stowed,
 /// and is taken only after the session returns to its owning thread.
-struct LinearRootStash(Option<RootSlot>);
-
-// SAFETY: identical to JitEffectMachine's stow-XOR-run guarantee. The raw
-// slot is never dereferenced while the containing session is in transit and
-// has a single owner at every point.
-unsafe impl Send for LinearRootStash {}
-
 // ---------------------------------------------------------------------------
 // The shared session core
 // ---------------------------------------------------------------------------
 
-/// The resident-session substrate both servers own: one live [`JitEffectMachine`]
+/// The resident-session substrate both servers own: one live [`PreparedEngine`]
 /// (`None` until the first turn bootstraps it), the accumulated constructor
 /// [`DataConTable`], the [`SessionLib`] decl plane, the [`BindingTable`] value
 /// plane, and the value-binding generation.
@@ -296,12 +131,8 @@ unsafe impl Send for LinearRootStash {}
 pub struct PersistentSession {
     /// The resident machine — `None` before the first turn bootstraps it,
     /// `Some` when idle/suspended, and moved out onto the eval thread for a
-    /// turn's duration (stowed-XOR-running). Its variant is fixed by
-    /// `engine_kind` for the session's life.
+    /// turn's duration (stowed-XOR-running).
     machine: Option<ResidentEngine>,
-    /// The route this session was constructed on; the only engine `machine`
-    /// will ever hold.
-    engine_kind: EngineKind,
     /// The constructor metadata unioned across turns (`insert_checked`, monotone:
     /// later turns are a subset), so an ADT value bound earlier renders with real
     /// con names later.
@@ -331,28 +162,12 @@ pub struct PersistentSession {
     /// this scope live", and a scoped decl and a scoped binding would drift.
     /// [`ScopeId::ROOT`] is the flat session every pre-C2 caller lives in.
     scopes: ScopeTree,
-    /// Monotonic per-turn counter → unique fragment function names.
-    turn_counter: u64,
     /// How requests interact with the handlers installed for this checkout.
     effect_policy: EffectRunPolicy,
     /// Live-value crossing policy paired with the current effect stack.
     live_payload: LivePayloadPolicy,
-    /// Capacity-one façade state for the REPL/linear session surface.
-    active_continuation: Option<ContinuationId>,
-    /// A bind root completed through the registry and carried home inside the
-    /// session because `RootSlot` is not `Send` on its own.
-    last_bound_root: LinearRootStash,
     /// JIT nursery size for the resident machine.
     nursery_size: usize,
-    /// Set once, by [`Self::mark_ready`], when a caller supplied a real
-    /// first-turn seed on the prepared route even though `machine` stays
-    /// `None` until that turn's prepared program installs
-    /// ([`Self::install_prepared`]). Never reset. [`Self::is_bootstrapped`]
-    /// folds this in so a prepared session built with real intent
-    /// (`ResidentSession::bootstrap`) reports reusable, not uninitialized,
-    /// before its machine exists — matching Core, where `machine.is_some()`
-    /// alone already carries that fact.
-    ready: bool,
 }
 
 /// The committed fact from moving one name to the materialized value plane.
@@ -385,23 +200,18 @@ impl PersistentSession {
     /// Build an idle session core. `lib` is the decl plane (`Some` for the repl
     /// and the accumulating harness; `None` for a value-plane-only session). The
     /// machine is not bootstrapped until the first turn.
-    pub fn new(lib: Option<SessionLib>, nursery_size: usize, engine_kind: EngineKind) -> Self {
+    pub fn new(lib: Option<SessionLib>, nursery_size: usize) -> Self {
         PersistentSession {
             machine: None,
-            engine_kind,
             session_table: DataConTable::new(),
             lib,
             bindings: BindingTable::new(),
             binding_index: BindingIndex::new(),
             val_gen: Generation(0),
             scopes: ScopeTree::new(),
-            turn_counter: 0,
             effect_policy: EffectRunPolicy::HandleOrSuspend,
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-            active_continuation: None,
-            last_bound_root: LinearRootStash(None),
             nursery_size,
-            ready: false,
         }
     }
 
@@ -443,7 +253,6 @@ impl PersistentSession {
     pub(super) fn release_binding_roots(&mut self, entries: Vec<BindingEntry>) -> usize {
         let mut released = 0usize;
         for entry in entries {
-            let slot = entry.value.root();
             // `on_evict` is the single point of truth for whether any OTHER
             // live entry still shares this root slot (an alias published by
             // `bind_alias_in`, or a same-batch sibling evicted alongside
@@ -456,16 +265,8 @@ impl PersistentSession {
             match (&entry.value, self.machine.as_mut()) {
                 // A prepared binding's root IS its adopted handle: releasing
                 // the handle deregisters the root.
-                (BoundValue::Prepared { handle, .. }, Some(ResidentEngine::Prepared(engine))) => {
-                    if engine.release(*handle) {
-                        released += 1;
-                    }
-                }
-                (_, Some(ResidentEngine::Core(machine))) => {
-                    let held = machine.handle_holds_root(slot);
-                    debug_assert!(!held, "retiring binding root still owned by a handle");
-                    if !held {
-                        machine.retire_scope_root(slot);
+                (BoundValue::Prepared { handle, .. }, Some(engine)) => {
+                    if engine.0.release(*handle) {
                         released += 1;
                     }
                 }
@@ -513,49 +314,21 @@ impl PersistentSession {
         self.effect_policy = effect_policy;
         self.live_payload = live_payload;
     }
-    /// Whether the session is reusable without a fresh first-turn bootstrap:
-    /// `machine.is_some()` on Core, where that alone is the fact; on the
-    /// prepared route, also true once [`Self::mark_ready`] recorded a real
-    /// first-turn seed, even before the first prepared install actually
-    /// creates `machine`.
+    /// Whether the first prepared program has installed the session machine.
     pub fn is_bootstrapped(&self) -> bool {
-        self.machine.is_some() || self.ready
+        self.machine.is_some()
     }
 
-    /// Record that a caller supplied a real first-turn seed
-    /// (`ResidentSession::bootstrap`) on the prepared route, where `machine`
-    /// stays `None` until the first prepared program installs
-    /// ([`Self::install_prepared`]). [`Self::is_bootstrapped`] folds this in
-    /// so such a session reports reusable rather than uninitialized in the
-    /// gap before that install. Never reset.
-    pub(crate) fn mark_ready(&mut self) {
-        self.ready = true;
-    }
-    /// The route this session runs on.
-    #[must_use]
-    pub fn engine_kind(&self) -> EngineKind {
-        self.engine_kind
-    }
-    /// The resident Core machine, if bootstrapped (read — e.g. `heap_stats`).
-    /// `None` on the prepared route, whose paths reach the engine through
-    /// [`Self::prepared_mut`] instead; a Core-only path finding `None` here
-    /// reports its typed refusal rather than falling back.
-    pub fn machine(&self) -> Option<&JitEffectMachine> {
-        self.machine.as_ref().and_then(ResidentEngine::core)
-    }
-    /// The resident Core machine, if bootstrapped (mutate).
-    pub fn machine_mut(&mut self) -> Option<&mut JitEffectMachine> {
-        self.machine.as_mut().and_then(ResidentEngine::core_mut)
-    }
     /// The prepared engine, once the first prepared turn has installed it.
     pub fn prepared_mut(&mut self) -> Option<&mut PreparedEngine> {
         self.machine.as_mut().and_then(ResidentEngine::prepared_mut)
     }
 
     /// The prepared engine, or the typed refusal a prepared-only turn path
-    /// reports on the Core route.
+    /// reports before the prepared machine is installed.
     pub fn require_prepared(&mut self) -> Result<&mut PreparedEngine, PreparedRuntimeError> {
-        self.prepared_mut().ok_or(PreparedRuntimeError::WrongEngine)
+        self.prepared_mut()
+            .ok_or(PreparedRuntimeError::MachineNotInstalled)
     }
 
     /// The continuation ids parked on this session's machine, whichever
@@ -582,12 +355,6 @@ impl PersistentSession {
         self.machine.as_ref().map(ResidentEngine::disposition)
     }
 
-    fn ensure_machine_reusable(&self) -> Result<(), JitError> {
-        self.machine
-            .as_ref()
-            .map_or(Ok(()), ResidentEngine::ensure_reusable)
-    }
-
     /// Cancellation handle for this capacity-one registry realm.
     pub fn cancel_handle(&mut self) -> Option<CancelHandle> {
         self.machine.as_mut().map(ResidentEngine::cancel_handle)
@@ -610,22 +377,21 @@ impl PersistentSession {
             .map_or((0, 0), |engine| engine.close_realm(realm))
     }
 
-    /// Prepared-machine residency counters; `None` on the Core route or
-    /// before the machine has bootstrapped.
+    /// Prepared-machine residency counters; `None` before the prepared machine is installed or before the machine has bootstrapped.
     #[must_use]
     pub fn residency(&self) -> Option<ResidencyCounts> {
         self.machine.as_ref()?.residency()
     }
 
     /// Lifetime `(functions, code_bytes)` of Cranelift work this session's
-    /// installs caused; `None` on the Core route or before bootstrap.
+    /// installs caused; `None` before the prepared machine is installed.
     #[must_use]
     pub fn codegen_totals(&self) -> Option<(u64, u64)> {
         self.machine.as_ref()?.codegen_totals()
     }
 
     /// Prepared old-space bytes as of the last successful between-turn
-    /// collection; `None` on the Core route or before the machine has
+    /// collection; `None` before the machine has
     /// bootstrapped.
     #[must_use]
     pub fn old_bytes(&self) -> Option<usize> {
@@ -676,11 +442,7 @@ impl PersistentSession {
         self.session_table
             .extend_checked(incoming)
             .map_err(|e| format!("session DataConTable collision: {e}"))?;
-        if advances_constructor_vocabulary {
-            if let Some(ResidentEngine::Core(machine)) = self.machine.as_mut() {
-                machine.refresh_parked_continuation_tables(&self.session_table);
-            }
-        }
+        let _ = advances_constructor_vocabulary;
         Ok(())
     }
 
@@ -688,7 +450,7 @@ impl PersistentSession {
     //
     // Threading note: [`BindingTable`] holds `RootSlot(*mut *mut u8)` and
     // [`ExternalEnv`] holds raw slot addresses. Both the table and the
-    // [`JitEffectMachine`] carry an `unsafe impl Send` justified by the
+    // [`PreparedEngine`] carry an `unsafe impl Send` justified by the
     // stowed-XOR-running discipline, so a whole `PersistentSession` can be moved
     // to another thread as long as exactly one thread owns it at a time — which
     // is what the repl does (the session is moved into a `spawn_blocking` turn
@@ -699,32 +461,6 @@ impl PersistentSession {
     // `add_function` (which needs the raw-pointer env) therefore always happens
     // on the thread that owns the session.
 
-    /// Bootstrap the resident machine from `expr`/`table` if it is not already
-    /// live (a session machine, so its heap is retained across turns). No-op when
-    /// already bootstrapped. The bootstrap `expr` seeds the machine's ConTags; it
-    /// is NOT run (the harness bootstrap seed, and the repl bind path, both
-    /// bootstrap-then-fragment without running the seed).
-    pub fn bootstrap_if_needed(
-        &mut self,
-        expr: &CoreExpr,
-        table: &DataConTable,
-    ) -> Result<(), JitError> {
-        self.ensure_machine_reusable()?;
-        if self.engine_kind != EngineKind::Core {
-            return Err(JitError::InvalidSuspensionState(
-                "a prepared-route session bootstraps from its first turn's prepared program, not Core",
-            ));
-        }
-        if self.machine.is_none() {
-            self.machine = Some(ResidentEngine::Core(JitEffectMachine::compile_session(
-                expr,
-                table,
-                self.nursery_size,
-            )?));
-        }
-        Ok(())
-    }
-
     /// Install a prepared turn's program on the prepared route, bootstrapping
     /// the machine from it when this is the session's first turn. Every
     /// global the program declares resolves to a live prepared binding by
@@ -734,15 +470,15 @@ impl PersistentSession {
         prepared: PreparedProgram,
     ) -> Result<tidepool_codegen::prepared_program::ProgramId, PreparedRuntimeError> {
         match self.machine.as_mut() {
-            None if self.engine_kind == EngineKind::Prepared => {
-                let (engine, program) = PreparedEngine::bootstrap(prepared)?;
-                self.machine = Some(ResidentEngine::Prepared(engine));
+            None => {
+                let (engine, program) =
+                    PreparedEngine::bootstrap_with_nursery_bytes(prepared, self.nursery_size)?;
+                self.machine = Some(ResidentEngine(engine));
                 Ok(program)
             }
-            Some(ResidentEngine::Prepared(engine)) => {
-                engine.install(prepared, &self.bindings, &self.binding_index)
-            }
-            _ => Err(PreparedRuntimeError::WrongEngine),
+            Some(engine) => engine
+                .0
+                .install(prepared, &self.bindings, &self.binding_index),
         }
     }
 
@@ -753,13 +489,14 @@ impl PersistentSession {
     #[must_use]
     pub fn prepared_retained(&self) -> Vec<(SymbolIdentity, u64)> {
         let mut retained = self.binding_index.prepared_retained();
-        if let Some(ResidentEngine::Prepared(engine)) = self.machine.as_ref() {
+        if let Some(engine) = self.machine.as_ref() {
             // Package tops the machine already carries compiled code for.
             // A value binding wins any collision: the value plane's own
             // generation is what a turn that reads `x` must link against.
             let bound: std::collections::BTreeSet<&SymbolIdentity> =
                 retained.iter().map(|(identity, _)| identity).collect();
             let exported: Vec<(SymbolIdentity, u64)> = engine
+                .0
                 .code_export_retentions()
                 .filter(|(identity, _)| !bound.contains(identity))
                 .collect();
@@ -769,13 +506,10 @@ impl PersistentSession {
     }
 
     /// How many package tops this session's machine can hand a later turn
-    /// instead of recompiling; `None` on the Core route or before bootstrap.
+    /// instead of recompiling; `None` before the prepared machine is installed.
     #[must_use]
     pub fn code_export_count(&self) -> Option<usize> {
-        match self.machine.as_ref()? {
-            ResidentEngine::Core(_) => None,
-            ResidentEngine::Prepared(engine) => Some(engine.code_export_count()),
-        }
+        Some(self.machine.as_ref()?.0.code_export_count())
     }
 
     /// Move the resident machine out onto a [`MachineLease`] (to run a turn on
@@ -807,627 +541,7 @@ impl PersistentSession {
     // would leave a live session whose value-plane `RootSlot`s all dangle — a
     // state with no legitimate use and no way to detect from the outside.
 
-    // -- fragment preparation (CALLER thread; touches the `!Send` env) ------
-
-    /// Add `expr` as a fragment against the ACCUMULATED session table, seeded by
-    /// `env`, minting the fragment name `"{name_hint}_{turn}"`. Returns the
-    /// `FuncId` a later run drives. Merge the turn's table via [`Self::merge_table`]
-    /// first. Requires the machine bootstrapped.
-    pub fn add_fragment_session(
-        &mut self,
-        name_hint: &str,
-        expr: &CoreExpr,
-        env: &ExternalEnv,
-    ) -> Result<FuncId, JitError> {
-        self.ensure_machine_reusable()?;
-        self.turn_counter += 1;
-        let frag_name = format!("{name_hint}_{}", self.turn_counter);
-        let PersistentSession {
-            machine,
-            session_table,
-            ..
-        } = self;
-        #[allow(
-            clippy::expect_used,
-            reason = "machine bootstrapped before add_fragment_session"
-        )]
-        let machine = machine
-            .as_mut()
-            .and_then(ResidentEngine::core_mut)
-            .expect("machine bootstrapped before add_fragment_session");
-        machine.add_function(&frag_name, expr, session_table, env)
-    }
-
-    /// Nested-child sibling of [`Self::add_fragment_session`], minting the name
-    /// `"{name_hint}_child_{turn}"`.
-    pub fn add_child_fragment_session(
-        &mut self,
-        name_hint: &str,
-        expr: &CoreExpr,
-        env: &ExternalEnv,
-    ) -> Result<FuncId, JitError> {
-        self.ensure_machine_reusable()?;
-        self.turn_counter += 1;
-        let frag_name = format!("{name_hint}_child_{}", self.turn_counter);
-        let PersistentSession {
-            machine,
-            session_table,
-            ..
-        } = self;
-        #[allow(
-            clippy::expect_used,
-            reason = "machine bootstrapped before add_child_fragment_session"
-        )]
-        let machine = machine
-            .as_mut()
-            .and_then(ResidentEngine::core_mut)
-            .expect("machine bootstrapped before add_child_fragment_session");
-        machine.add_function(&frag_name, expr, session_table, env)
-    }
-
-    /// Add `expr` as a fragment against an EXTERNAL per-turn table (not the
-    /// accumulated one) — the repl's plain-expression path, where a standalone
-    /// turn carries its own table. Requires the machine bootstrapped.
-    pub fn add_fragment_with_table(
-        &mut self,
-        name_hint: &str,
-        expr: &CoreExpr,
-        run_table: &DataConTable,
-        env: &ExternalEnv,
-    ) -> Result<FuncId, JitError> {
-        self.ensure_machine_reusable()?;
-        self.turn_counter += 1;
-        let frag_name = format!("{name_hint}_{}", self.turn_counter);
-        #[allow(
-            clippy::expect_used,
-            reason = "machine bootstrapped before add_fragment_with_table"
-        )]
-        let machine = self
-            .machine
-            .as_mut()
-            .and_then(ResidentEngine::core_mut)
-            .expect("machine bootstrapped before add_fragment_with_table");
-        machine.add_function(&frag_name, expr, run_table, env)
-    }
-
-    // -- capacity-one registry façade --------------------------------------
-
-    fn track_value_outcome(&mut self, outcome: ParkedOutcome) -> SuspendableOutcome {
-        match outcome {
-            ParkedOutcome::CompletedValue(value) => {
-                self.active_continuation = None;
-                SuspendableOutcome::Completed(value)
-            }
-            ParkedOutcome::Suspended {
-                id,
-                request,
-                has_live_payload,
-            } => {
-                self.active_continuation = Some(id);
-                SuspendableOutcome::Suspended {
-                    request,
-                    has_live_payload,
-                }
-            }
-            other => panic!("plain registry run returned the wrong completion policy: {other:?}"),
-        }
-    }
-
-    fn track_binding_outcome(&mut self, outcome: ParkedOutcome) -> SuspendableOutcome {
-        match outcome {
-            ParkedOutcome::CompletedBinding { value, root } => {
-                self.active_continuation = None;
-                self.last_bound_root.0 = Some(root);
-                SuspendableOutcome::Completed(value)
-            }
-            ParkedOutcome::Suspended {
-                id,
-                request,
-                has_live_payload,
-            } => {
-                self.active_continuation = Some(id);
-                SuspendableOutcome::Suspended {
-                    request,
-                    has_live_payload,
-                }
-            }
-            other => panic!("binding registry run returned the wrong policy: {other:?}"),
-        }
-    }
-
-    fn track_project_outcome(&mut self, outcome: ParkedOutcome) -> Suspendable<Vec<RootSlot>> {
-        match outcome {
-            ParkedOutcome::CompletedProject { roots } => {
-                self.active_continuation = None;
-                Suspendable::Completed(roots)
-            }
-            ParkedOutcome::Suspended {
-                id,
-                request,
-                has_live_payload,
-            } => {
-                self.active_continuation = Some(id);
-                Suspendable::Suspended {
-                    request,
-                    has_live_payload,
-                }
-            }
-            other => panic!("project registry run returned the wrong policy: {other:?}"),
-        }
-    }
-
-    fn track_render_outcome(&mut self, outcome: ParkedOutcome) -> Suspendable<(RootSlot, Value)> {
-        match outcome {
-            ParkedOutcome::CompletedRender { root, rendered } => {
-                self.active_continuation = None;
-                Suspendable::Completed((root, rendered))
-            }
-            ParkedOutcome::Suspended {
-                id,
-                request,
-                has_live_payload,
-            } => {
-                self.active_continuation = Some(id);
-                Suspendable::Suspended {
-                    request,
-                    has_live_payload,
-                }
-            }
-            other => panic!("render registry run returned the wrong policy: {other:?}"),
-        }
-    }
-
-    fn resume_active<O, H>(
-        &mut self,
-        handlers: &mut H,
-        captured: &O,
-        input: ResumeInput,
-    ) -> Result<ParkedOutcome, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>,
-    {
-        self.ensure_machine_reusable()?;
-        let id = self
-            .active_continuation
-            .ok_or(JitError::InvalidSuspensionState(
-                "resume requires an active continuation",
-            ))?;
-        let machine = self
-            .machine
-            .as_mut()
-            .and_then(ResidentEngine::core_mut)
-            .ok_or(JitError::InvalidSuspensionState(
-                "resident machine is absent during resume",
-            ))?;
-        let resumed = machine.resume_continuation(id, handlers, captured, input);
-        // Some errors reject the input before consuming the frame (for example
-        // a non-NF bridged answer); those remain retryable. Abort and failures
-        // after re-entry consume the frame, so keep the capacity-one façade in
-        // sync with the registry even though there is no successful outcome to
-        // pass through `track_*_outcome`.
-        if resumed.is_err() && machine.parked_realm(id).is_none() {
-            self.active_continuation = None;
-        }
-        resumed
-    }
-
-    /// Run the resident machine's ORIGINAL entry (the seed compiled by
-    /// [`Self::bootstrap_if_needed`]) to its first boundary. The repl's first
-    /// bare-expression turn, where the seed IS the program. `run_table` is the
-    /// seed's table; [`Self::resume_with_table`] re-enters with the same one.
-    /// Requires the machine bootstrapped.
-    pub fn run_entry<O, H>(
-        &mut self,
-        run_table: &DataConTable,
-        handlers: &mut H,
-        captured: &O,
-    ) -> Result<SuspendableOutcome, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>,
-    {
-        self.ensure_machine_reusable()?;
-        assert!(
-            self.active_continuation.is_none(),
-            "resume the active turn first"
-        );
-        let effect_policy = self.effect_policy;
-        let live_payload = self.live_payload;
-        #[allow(clippy::expect_used, reason = "machine bootstrapped before run_entry")]
-        let machine = self
-            .machine
-            .as_mut()
-            .and_then(ResidentEngine::core_mut)
-            .expect("machine bootstrapped before run_entry");
-        let run = SuspensionRun::main(run_table, effect_policy, RealmId::ROOT)
-            .with_live_payload(live_payload);
-        let outcome = machine.run_until_suspension(run, handlers, captured)?;
-        Ok(self.track_value_outcome(outcome))
-    }
-
-    /// Drive a fragment (already added) to its first boundary against an
-    /// EXTERNAL table. The repl plain-expression path; resumed by
-    /// [`Self::resume_with_table`].
-    pub fn run_funcid_with_table<O, H>(
-        &mut self,
-        func_id: FuncId,
-        run_table: &DataConTable,
-        handlers: &mut H,
-        captured: &O,
-    ) -> Result<SuspendableOutcome, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>,
-    {
-        self.ensure_machine_reusable()?;
-        assert!(
-            self.active_continuation.is_none(),
-            "resume the active turn first"
-        );
-        let effect_policy = self.effect_policy;
-        let live_payload = self.live_payload;
-        #[allow(
-            clippy::expect_used,
-            reason = "machine bootstrapped before run_funcid_with_table"
-        )]
-        let machine = self
-            .machine
-            .as_mut()
-            .and_then(ResidentEngine::core_mut)
-            .expect("machine bootstrapped before run_funcid_with_table");
-        let run = SuspensionRun::fragment(
-            func_id,
-            run_table,
-            effect_policy,
-            RealmId::ROOT,
-            ParkKind::Plain,
-        )
-        .with_live_payload(live_payload);
-        let outcome = machine.run_until_suspension(run, handlers, captured)?;
-        Ok(self.track_value_outcome(outcome))
-    }
-
-    /// Re-enter a turn suspended by [`Self::run_entry`] or
-    /// [`Self::run_funcid_with_table`], against the SAME external `run_table`
-    /// the run used (the suspend request and the completed value are both
-    /// bridged against it).
-    pub fn resume_with_table<O, H>(
-        &mut self,
-        _run_table: &DataConTable,
-        handlers: &mut H,
-        captured: &O,
-        input: ResumeInput,
-    ) -> Result<SuspendableOutcome, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>,
-    {
-        let outcome = self.resume_active(handlers, captured, input)?;
-        Ok(self.track_value_outcome(outcome))
-    }
-
-    /// Drive a fragment (already added) to its first boundary against the
-    /// ACCUMULATED session table. The repl's effectful session-reference path;
-    /// resumed by [`Self::resume_session`].
-    pub fn run_funcid_session<O, H>(
-        &mut self,
-        func_id: FuncId,
-        handlers: &mut H,
-        captured: &O,
-    ) -> Result<SuspendableOutcome, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>,
-    {
-        self.ensure_machine_reusable()?;
-        assert!(
-            self.active_continuation.is_none(),
-            "resume the active turn first"
-        );
-        let effect_policy = self.effect_policy;
-        let live_payload = self.live_payload;
-        let PersistentSession {
-            machine,
-            session_table,
-            ..
-        } = self;
-        #[allow(
-            clippy::expect_used,
-            reason = "machine bootstrapped before run_funcid_session"
-        )]
-        let machine = machine
-            .as_mut()
-            .and_then(ResidentEngine::core_mut)
-            .expect("machine bootstrapped before run_funcid_session");
-        let run = SuspensionRun::fragment(
-            func_id,
-            session_table,
-            effect_policy,
-            RealmId::ROOT,
-            ParkKind::Plain,
-        )
-        .with_live_payload(live_payload);
-        let outcome = machine.run_until_suspension(run, handlers, captured)?;
-        Ok(self.track_value_outcome(outcome))
-    }
-
-    /// Re-enter a turn suspended by [`Self::run_funcid_session`], against the
-    /// accumulated session table.
-    pub fn resume_session<O, H>(
-        &mut self,
-        handlers: &mut H,
-        captured: &O,
-        input: ResumeInput,
-    ) -> Result<SuspendableOutcome, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>,
-    {
-        let outcome = self.resume_active(handlers, captured, input)?;
-        Ok(self.track_value_outcome(outcome))
-    }
-
-    /// Run a PURE fragment (no effect tree) to a value against the accumulated
-    /// table. The repl's pure session-reference path (`run_fragment_pure`).
-    /// Pure means no effects, hence no `Ask`, hence no suspension — this is the
-    /// one run entry with no `resume_*` sibling.
-    pub fn run_funcid_pure(&mut self, func_id: FuncId) -> Result<Value, JitError> {
-        self.ensure_machine_reusable()?;
-        #[allow(
-            clippy::expect_used,
-            reason = "machine bootstrapped before run_funcid_pure"
-        )]
-        let machine = self
-            .machine
-            .as_mut()
-            .and_then(ResidentEngine::core_mut)
-            .expect("machine bootstrapped before run_funcid_pure");
-        machine.run_fragment_pure(func_id)
-    }
-
-    /// Drive a fragment (already added) as an effectful VALUE BIND against the
-    /// accumulated table: run the effect tree and, on completion, deep-force
-    /// (`forced` → Tier-0 data) or tenure-as-is (Tier-1 closure) and register the
-    /// persistent root. Read the tenured root with [`Self::take_bound_root`]; a
-    /// suspension tenures NOTHING yet, and lands its value on
-    /// [`Self::resume_bind`] with the SAME `forced` flag.
-    pub fn bind_funcid<O, H>(
-        &mut self,
-        func_id: FuncId,
-        handlers: &mut H,
-        captured: &O,
-        forced: bool,
-    ) -> Result<SuspendableOutcome, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>,
-    {
-        self.ensure_machine_reusable()?;
-        assert!(
-            self.active_continuation.is_none(),
-            "resume the active turn first"
-        );
-        let effect_policy = self.effect_policy;
-        let live_payload = self.live_payload;
-        let PersistentSession {
-            machine,
-            session_table,
-            ..
-        } = self;
-        #[allow(
-            clippy::expect_used,
-            reason = "machine bootstrapped before bind_funcid"
-        )]
-        let machine = machine
-            .as_mut()
-            .and_then(ResidentEngine::core_mut)
-            .expect("machine bootstrapped before bind_funcid");
-        let run = SuspensionRun::fragment(
-            func_id,
-            session_table,
-            effect_policy,
-            RealmId::ROOT,
-            ParkKind::Binding { forced },
-        )
-        .with_live_payload(live_payload);
-        let outcome = machine.run_until_suspension(run, handlers, captured)?;
-        Ok(self.track_binding_outcome(outcome))
-    }
-
-    /// Re-enter a turn suspended by [`Self::bind_funcid`]. `forced` is the SAME
-    /// flag the run carried — the caller threads it across the suspension on the
-    /// binder metadata it is already holding.
-    pub fn resume_bind<O, H>(
-        &mut self,
-        handlers: &mut H,
-        captured: &O,
-        input: ResumeInput,
-        forced: bool,
-    ) -> Result<SuspendableOutcome, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>,
-    {
-        let _ = forced;
-        let outcome = self.resume_active(handlers, captured, input)?;
-        Ok(self.track_binding_outcome(outcome))
-    }
-
-    /// Multi-binder sibling of [`Self::bind_funcid`]: on completion, project
-    /// `n_fields` tuple components and tenure each as a separate root.
-    ///
-    /// Completion IS those roots. A projection has no result value of its own,
-    /// and the outcome type says so — there is no bridged tuple to render and
-    /// none to accidentally render.
-    pub fn bind_funcid_projected<O, H>(
-        &mut self,
-        func_id: FuncId,
-        handlers: &mut H,
-        captured: &O,
-        n_fields: usize,
-    ) -> Result<Suspendable<Vec<RootSlot>>, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>,
-    {
-        self.ensure_machine_reusable()?;
-        assert!(
-            self.active_continuation.is_none(),
-            "resume the active turn first"
-        );
-        let effect_policy = self.effect_policy;
-        let live_payload = self.live_payload;
-        let n_fields = NonZeroUsize::new(n_fields).ok_or(JitError::EmptyProjection)?;
-        let PersistentSession {
-            machine,
-            session_table,
-            ..
-        } = self;
-        #[allow(
-            clippy::expect_used,
-            reason = "machine bootstrapped before bind_funcid_projected"
-        )]
-        let machine = machine
-            .as_mut()
-            .and_then(ResidentEngine::core_mut)
-            .expect("machine bootstrapped before bind_funcid_projected");
-        let run = SuspensionRun::fragment(
-            func_id,
-            session_table,
-            effect_policy,
-            RealmId::ROOT,
-            ParkKind::Project { n_fields },
-        )
-        .with_live_payload(live_payload);
-        let outcome = machine.run_until_suspension(run, handlers, captured)?;
-        Ok(self.track_project_outcome(outcome))
-    }
-
-    /// Re-enter a turn suspended by [`Self::bind_funcid_projected`]. `n_fields`
-    /// is the SAME arity the run carried (the caller is holding the binder
-    /// vector across the suspension).
-    pub fn resume_bind_projected<O, H>(
-        &mut self,
-        handlers: &mut H,
-        captured: &O,
-        input: ResumeInput,
-        n_fields: usize,
-    ) -> Result<Suspendable<Vec<RootSlot>>, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>,
-    {
-        let _ = n_fields;
-        let outcome = self.resume_active(handlers, captured, input)?;
-        Ok(self.track_project_outcome(outcome))
-    }
-
-    /// Bind-and-render sibling of [`Self::bind_funcid`]: run the fragment ONCE,
-    /// binding field 0 (`field0_forced` → Tier-0 data) and rendering field 1 in
-    /// the same run. Completion carries BOTH — field 0's tenured root and field
-    /// 1's rendered value. The repl's bare-expression `it` path.
-    pub fn bind_funcid_render<O, H>(
-        &mut self,
-        func_id: FuncId,
-        handlers: &mut H,
-        captured: &O,
-        field0_forced: bool,
-    ) -> Result<Suspendable<(RootSlot, Value)>, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>,
-    {
-        self.ensure_machine_reusable()?;
-        assert!(
-            self.active_continuation.is_none(),
-            "resume the active turn first"
-        );
-        let effect_policy = self.effect_policy;
-        let live_payload = self.live_payload;
-        let PersistentSession {
-            machine,
-            session_table,
-            ..
-        } = self;
-        #[allow(
-            clippy::expect_used,
-            reason = "machine bootstrapped before bind_funcid_render"
-        )]
-        let machine = machine
-            .as_mut()
-            .and_then(ResidentEngine::core_mut)
-            .expect("machine bootstrapped before bind_funcid_render");
-        let run = SuspensionRun::fragment(
-            func_id,
-            session_table,
-            effect_policy,
-            RealmId::ROOT,
-            ParkKind::Render { field0_forced },
-        )
-        .with_live_payload(live_payload);
-        let outcome = machine.run_until_suspension(run, handlers, captured)?;
-        Ok(self.track_render_outcome(outcome))
-    }
-
-    /// Re-enter a turn suspended by [`Self::bind_funcid_render`]. The
-    /// field1-before-field0-tenure ordering that keeps an aliased
-    /// `(it, toWire it)` intact lives in the machine's one `materialize`, so it
-    /// holds identically here and on the first run.
-    pub fn resume_bind_render<O, H>(
-        &mut self,
-        handlers: &mut H,
-        captured: &O,
-        input: ResumeInput,
-        field0_forced: bool,
-    ) -> Result<Suspendable<(RootSlot, Value)>, JitError>
-    where
-        O: OutputSink,
-        H: DispatchEffect<O>,
-    {
-        let _ = field0_forced;
-        let outcome = self.resume_active(handlers, captured, input)?;
-        Ok(self.track_render_outcome(outcome))
-    }
-
-    /// Take the tenured root a completed [`Self::bind_funcid`] (or
-    /// [`Self::resume_bind`]) stashed on the machine. `None` when no bind
-    /// completed — the caller treats that as the infra error it is.
-    ///
-    /// Only the single-bind policy needs this, and NOT because of its outcome
-    /// type's shape. `RootSlot` is `!Send`; bind is the one policy
-    /// [`super::ResidentSession`] drives, and it does so through
-    /// `on_eval_thread`, which returns the completion across a scoped-thread
-    /// join. A slot riding out inline does not compile there — stashing it
-    /// inside the (`Send`-blessed) machine is what carries it across. The
-    /// projected and render policies return their roots inline only because
-    /// nothing drives them across a thread; their sole caller is this
-    /// single-threaded repl path.
-    ///
-    /// Removing this was attempted and reverted: it requires
-    /// `unsafe impl Send for RootSlot`, a standalone soundness claim on a raw
-    /// pointer rather than a refactor.
-    pub fn take_bound_root(&mut self) -> Option<RootSlot> {
-        self.last_bound_root.0.take()
-    }
-
-    /// Whether the machine currently holds a stowed continuation (a turn
-    /// suspended at an `Ask` and has not been resumed or aborted).
-    pub fn is_suspended(&self) -> bool {
-        self.active_continuation.is_some()
-    }
-
     // -- value-plane bookkeeping (delegating over the two planes) ----------
-
-    /// Build the [`ExternalEnv`] a later fragment consults at a `Var`-miss:
-    /// the `SessionVarId → RootSlot` of every live binding `referenced`
-    /// names — typically `tidepool_repr::free_vars(&fragment)`. Not every
-    /// live binding: a binding absent from `referenced` still stays a GC
-    /// root (registered at bind time, independent of this call) but is not
-    /// seeded into this particular fragment's env.
-    pub fn seed_external_env(&self, referenced: &[VarId]) -> ExternalEnv {
-        self.bindings.seed_external_env(referenced)
-    }
 
     /// Record a materialized value binding on the value plane.
     pub fn bind(&mut self, entry: BindingEntry) {
@@ -1918,31 +1032,14 @@ impl PersistentSession {
     /// not ordinary Rust-owned allocations, so dropping `RootSlot` alone would
     /// leak them until session teardown.
     fn discard_unbound_entries(&mut self, entries: Vec<BindingEntry>) {
-        if let Some(ResidentEngine::Prepared(engine)) = self.machine.as_mut() {
+        if let Some(engine) = self.machine.as_mut() {
             // A prepared entry's root is its adopted handle.
             for entry in entries {
-                if let BoundValue::Prepared { handle, .. } = entry.value {
-                    engine.release(handle);
-                }
+                let BoundValue::Prepared { handle, .. } = entry.value;
+                engine.0.release(handle);
             }
             return;
         }
-        let Some(machine) = self.machine.as_mut().and_then(ResidentEngine::core_mut) else {
-            // Unit-level bookkeeping fixtures can carry synthetic slots before
-            // a machine exists; there is no root ledger to release there.
-            return;
-        };
-        let count = entries.len();
-        let roots_before = machine.persistent_roots_count();
-        for entry in entries {
-            machine.abandon_uncommitted_root(entry.value.root());
-        }
-        let roots_after = machine.persistent_roots_count();
-        debug_assert_eq!(
-            roots_before.checked_sub(roots_after),
-            Some(count),
-            "every failed materialization entry must release exactly one persistent root"
-        );
     }
 
     /// Commit declarations, then remove any same-scope materialized names they
@@ -2137,7 +1234,7 @@ impl PersistentSession {
     /// are gone before its parent's, drains each frame
     /// ([`BindingTable::drain_scope`]), and for every drained entry applies the
     /// **sole-ownership rule**: its root is deregistered
-    /// ([`JitEffectMachine::retire_scope_root`]) only when no OTHER live
+    /// ([`PreparedEngine::retire_scope_root`]) only when no OTHER live
     /// `BindingEntry` — in any scope, including the not-yet-drained ancestors
     /// of this same retirement — holds the same slot address, and no live
     /// `ValueHandle` still does.
@@ -2259,253 +1356,4 @@ pub struct ScopeRetirement {
     pub bindings_retired: usize,
     /// Persistent GC roots deregistered — the sole-owner subset of the above.
     pub roots_released: usize,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tidepool_effect::dispatch::EffectContext;
-    use tidepool_effect::error::EffectError;
-    use tidepool_effect::Response;
-    use tidepool_repr::{CoreFrame, Literal, PrimOpKind, TreeBuilder};
-
-    const VAL_ID: tidepool_repr::DataConId = tidepool_repr::DataConId(10);
-    const E_ID: tidepool_repr::DataConId = tidepool_repr::DataConId(11);
-    const UNION_ID: tidepool_repr::DataConId = tidepool_repr::DataConId(12);
-    const LEAF_ID: tidepool_repr::DataConId = tidepool_repr::DataConId(13);
-    const NODE_ID: tidepool_repr::DataConId = tidepool_repr::DataConId(14);
-
-    #[derive(Clone)]
-    struct TestSink;
-
-    impl OutputSink for TestSink {
-        fn drain(&self) -> Vec<String> {
-            Vec::new()
-        }
-
-        fn snapshot(&self) -> Vec<String> {
-            Vec::new()
-        }
-    }
-
-    struct NoDispatch;
-
-    impl DispatchEffect<TestSink> for NoDispatch {
-        fn dispatch(
-            &mut self,
-            _request: &Value,
-            _cx: &EffectContext<'_, TestSink>,
-        ) -> Result<Option<Response>, EffectError> {
-            Ok(None)
-        }
-    }
-
-    struct RespondAfterSuspend {
-        calls: usize,
-    }
-
-    impl DispatchEffect<TestSink> for RespondAfterSuspend {
-        fn dispatch(
-            &mut self,
-            _request: &Value,
-            _cx: &EffectContext<'_, TestSink>,
-        ) -> Result<Option<Response>, EffectError> {
-            self.calls += 1;
-            Ok((self.calls > 1).then(|| Response::Complete(Value::Lit(Literal::LitInt(10)))))
-        }
-    }
-
-    fn effect_table() -> DataConTable {
-        let mut table = DataConTable::new();
-        for (id, name, qualified_name, arity) in [
-            (VAL_ID, "Val", "Control.Monad.Freer.Val", 1),
-            (E_ID, "E", "Control.Monad.Freer.E", 2),
-            (UNION_ID, "Union", "Data.OpenUnion.Union", 2),
-            (LEAF_ID, "Leaf", "Data.FTCQueue.Leaf", 1),
-            (NODE_ID, "Node", "Data.FTCQueue.Node", 2),
-        ] {
-            table.insert(DataCon {
-                id,
-                name: name.to_owned(),
-                tag: 0,
-                rep_arity: arity,
-                field_bangs: Vec::new(),
-                qualified_name: Some(qualified_name.to_owned()),
-                type_name: String::new(),
-            });
-        }
-        table
-    }
-
-    fn suspending_expr() -> CoreExpr {
-        let mut builder = TreeBuilder::new();
-        let final_answer = builder.push(CoreFrame::Var(VarId(2)));
-        let final_val = builder.push(CoreFrame::Con {
-            tag: VAL_ID,
-            fields: vec![final_answer],
-        });
-        let final_continuation = builder.push(CoreFrame::Lam {
-            binder: VarId(2),
-            body: final_val,
-        });
-        let final_leaf = builder.push(CoreFrame::Con {
-            tag: LEAF_ID,
-            fields: vec![final_continuation],
-        });
-        let second_tag = builder.push(CoreFrame::Lit(Literal::LitWord(0)));
-        let second_request = builder.push(CoreFrame::Lit(Literal::LitInt(8)));
-        let second_union = builder.push(CoreFrame::Con {
-            tag: UNION_ID,
-            fields: vec![second_tag, second_request],
-        });
-        let second_effect = builder.push(CoreFrame::Con {
-            tag: E_ID,
-            fields: vec![second_union, final_leaf],
-        });
-        let continuation = builder.push(CoreFrame::Lam {
-            binder: VarId(1),
-            body: second_effect,
-        });
-        let leaf = builder.push(CoreFrame::Con {
-            tag: LEAF_ID,
-            fields: vec![continuation],
-        });
-        let effect_tag = builder.push(CoreFrame::Lit(Literal::LitWord(0)));
-        let request = builder.push(CoreFrame::Lit(Literal::LitInt(7)));
-        let union = builder.push(CoreFrame::Con {
-            tag: UNION_ID,
-            fields: vec![effect_tag, request],
-        });
-        builder.push(CoreFrame::Con {
-            tag: E_ID,
-            fields: vec![union, leaf],
-        });
-        builder.build()
-    }
-
-    #[test]
-    fn persistent_session_allows_reuse_after_language_error_on_core() {
-        let mut builder = TreeBuilder::new();
-        let numerator = builder.push(CoreFrame::Lit(Literal::LitInt(5)));
-        let zero = builder.push(CoreFrame::Lit(Literal::LitInt(0)));
-        builder.push(CoreFrame::PrimOp {
-            op: PrimOpKind::IntQuot,
-            args: vec![numerator, zero],
-        });
-        let expr = builder.build();
-        let table = effect_table();
-        let mut session = PersistentSession::new(None, 4096, EngineKind::Core);
-        session.bootstrap_if_needed(&expr, &table).unwrap();
-
-        let failure = match session.run_entry(&table, &mut NoDispatch, &TestSink) {
-            Err(error) => error,
-            Ok(_) => panic!("division by zero unexpectedly completed"),
-        };
-        assert!(
-            matches!(
-                failure,
-                JitError::Yield(tidepool_codegen::yield_type::YieldError::Runtime(
-                    tidepool_codegen::host_fns::RuntimeError::DivisionByZero
-                ))
-            ),
-            "unexpected language failure: {failure:?}"
-        );
-        assert_eq!(
-            session.machine_disposition(),
-            Some(MachineDisposition::Reusable)
-        );
-        session.bootstrap_if_needed(&expr, &table).unwrap();
-    }
-
-    #[test]
-    fn persistent_session_refuses_unavailable_machine_reuse_on_core() {
-        let mut builder = TreeBuilder::new();
-        builder.push(CoreFrame::Var(VarId(0xfeed)));
-        let expr = builder.build();
-        let table = effect_table();
-        let mut session = PersistentSession::new(None, 4096, EngineKind::Core);
-        session.bootstrap_if_needed(&expr, &table).unwrap();
-
-        let first = match session.run_entry(&table, &mut NoDispatch, &TestSink) {
-            Err(error) => error,
-            Ok(_) => panic!("unresolved variable unexpectedly completed"),
-        };
-        assert!(
-            matches!(
-                first,
-                JitError::Yield(tidepool_codegen::yield_type::YieldError::Runtime(
-                    tidepool_codegen::host_fns::RuntimeError::UnresolvedVar(..)
-                ))
-            ),
-            "unexpected integrity failure: {first:?}"
-        );
-        assert!(matches!(
-            session.bootstrap_if_needed(&expr, &table),
-            Err(JitError::MachineUnavailable { .. })
-        ));
-        assert_eq!(
-            session.machine_disposition(),
-            Some(MachineDisposition::Unavailable)
-        );
-    }
-
-    #[test]
-    fn persistent_session_cancels_suspended_work_without_poisoning_reuse_on_core() {
-        let expr = suspending_expr();
-        let table = effect_table();
-        let mut session = PersistentSession::new(None, 4096, EngineKind::Core);
-        session.bootstrap_if_needed(&expr, &table).unwrap();
-        let mut dispatch = RespondAfterSuspend { calls: 0 };
-
-        assert!(matches!(
-            session.run_entry(&table, &mut dispatch, &TestSink).unwrap(),
-            SuspendableOutcome::Suspended { .. }
-        ));
-        let cancel = session.cancel_handle().expect("bootstrapped machine");
-        cancel.cancel();
-        let failure = match session.resume_with_table(
-            &table,
-            &mut dispatch,
-            &TestSink,
-            ResumeInput::Answer(Value::Lit(Literal::LitInt(9))),
-        ) {
-            Err(error) => error,
-            Ok(_) => panic!("cancelled continuation unexpectedly completed"),
-        };
-        assert!(matches!(
-            failure,
-            JitError::Yield(tidepool_codegen::yield_type::YieldError::Runtime(
-                tidepool_codegen::host_fns::RuntimeError::Cancelled
-            ))
-        ));
-        assert_eq!(
-            session.machine_disposition(),
-            Some(MachineDisposition::Reusable)
-        );
-        assert!(
-            cancel.is_cancelled(),
-            "observing cancellation must not clear the consumer-owned flag"
-        );
-        let repeated = match session.run_entry(&table, &mut dispatch, &TestSink) {
-            Err(error) => error,
-            Ok(_) => panic!("a new run ignored the outstanding cancellation request"),
-        };
-        assert!(matches!(
-            repeated,
-            JitError::Yield(tidepool_codegen::yield_type::YieldError::Runtime(
-                tidepool_codegen::host_fns::RuntimeError::Cancelled
-            ))
-        ));
-        assert!(cancel.is_cancelled());
-        cancel.reset();
-        assert!(!cancel.is_cancelled());
-        session.bootstrap_if_needed(&expr, &table).unwrap();
-        let mut fresh_dispatch = RespondAfterSuspend { calls: 0 };
-        assert!(matches!(
-            session
-                .run_entry(&table, &mut fresh_dispatch, &TestSink)
-                .unwrap(),
-            SuspendableOutcome::Suspended { .. }
-        ));
-    }
 }

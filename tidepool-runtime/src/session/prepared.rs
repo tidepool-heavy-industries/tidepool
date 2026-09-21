@@ -3,9 +3,8 @@
 //! Here `prepared` refers to the GHC prepared-STG handoff. It is distinct from
 //! cell preparation in `workbench.rs` and `resident_workbench.rs`.
 //!
-//! Parsing, linking, compiled-owner construction, execution, cancellation, disposition,
-//! and retained-program reuse cross this boundary in that order. The legacy
-//! `CoreExpr` machine is not a fallback for any operation in this module.
+//! Parsing, linking, compiled-owner construction, execution, cancellation,
+//! disposition, and retained-program reuse cross this boundary in that order.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -77,15 +76,10 @@ pub enum PreparedRuntimeError {
         program: ProgramId,
         detail: &'static str,
     },
-    /// A prepared-route operation on a session constructed for the Core
-    /// engine (or the reverse). Routes are fixed at construction; nothing
-    /// falls back.
-    #[error("the session does not run on the prepared route")]
-    WrongEngine,
-    /// A turn reached the prepared route without its prepared program: the
-    /// request was compiled Core-only. Never a fallback; the turn fails.
-    #[error("the turn was compiled without its prepared program")]
-    MissingProgram,
+    /// An operation requires the prepared machine before its first program
+    /// has installed it.
+    #[error("the prepared machine is not installed")]
+    MachineNotInstalled,
     /// One artifact declares the same typed site twice with different
     /// evidence: a projection defect, refused before anything installs.
     #[error("the artifact declares typed site {site} twice with different evidence")]
@@ -211,8 +205,7 @@ impl PreparedRuntimeError {
             | Self::Link(_)
             | Self::UnknownBinding(_)
             | Self::UnsettledEntry { .. }
-            | Self::WrongEngine
-            | Self::MissingProgram
+            | Self::MachineNotInstalled
             | Self::DuplicateSite { .. }
             | Self::ProjectionShape { .. }
             | Self::SiteConflict { .. }
@@ -1010,7 +1003,7 @@ pub struct PreparedEngine {
     /// Count of major collections [`Self::quiesce_and_collect_now`] has
     /// actually run (incremented only on success, never on a `NotQuiescent`
     /// refusal). The prepared route's analogue of
-    /// `JitEffectMachine::heap_stats`'s `gc_count` -- see [`Self::heap_stats`].
+    /// `PreparedEngine::heap_stats`'s `gc_count` -- see [`Self::heap_stats`].
     major_collections: u64,
     /// Package-defined tops already installed on this machine, offered to
     /// every later turn as executable imports (see [`CodeExport`] and
@@ -1207,11 +1200,9 @@ impl PreparedEngine {
         let exports = exportable_code_tops(&prepared);
         let linked = link_program(prepared, &MachineImports::default())?;
         let compiled = CompiledProgram::compile(&linked).map_err(PreparedRuntimeError::Compile)?;
-        let (machine, program) = PreparedMachine::new(
-            compiled,
-            PreparedMachineOptions { nursery_bytes },
-        )
-        .map_err(PreparedRuntimeError::Run)?;
+        let (machine, program) =
+            PreparedMachine::new(compiled, PreparedMachineOptions { nursery_bytes })
+                .map_err(PreparedRuntimeError::Run)?;
         let mut engine = Self {
             machine,
             programs: BTreeMap::new(),
@@ -1439,9 +1430,7 @@ impl PreparedEngine {
                 }
                 continue;
             };
-            let BoundValue::Prepared { handle, origin, .. } = &entry.value else {
-                return Err(PreparedRuntimeError::UnknownBinding(entry.id));
-            };
+            let BoundValue::Prepared { handle, origin, .. } = &entry.value;
             let handle = *handle;
             let evaluated = self
                 .machine
@@ -1800,7 +1789,7 @@ impl PreparedEngine {
     /// the returned [`PreparedParked::id`] is the caller's to retain — this
     /// engine enforces no capacity limit (e.g. "one outstanding turn") and no
     /// actor-local grant or principal check; those remain the caller's, same
-    /// as on `JitEffectMachine`. A parked frame is a registered GC root until
+    /// as on `PreparedEngine`. A parked frame is a registered GC root until
     /// resumed or its realm closes; an unresumed park that the caller drops
     /// on the floor leaks a root until [`Self::close_realm`].
     pub fn park_suspension(
@@ -1859,7 +1848,7 @@ impl PreparedEngine {
         // A live-payload policy names one field of THIS request Con (the
         // convention's field 1) as the value crossing the runtime boundary
         // by reference; mirror it into a persistent root BEFORE releasing
-        // `payload`, exactly as `JitEffectMachine::run_suspendable_shared`
+        // `payload`, exactly as `PreparedEngine::run_suspendable_shared`
         // tenures the field's raw pointer on Core -- see
         // `Self::tenure_live_payload`.
         let live_payload_root =
@@ -1939,7 +1928,7 @@ impl PreparedEngine {
 
     /// Retain one field of `payload` (the request Con `park_suspension` just
     /// observed) as a persistent root, per `policy` -- the prepared route's
-    /// analogue of `JitEffectMachine`'s `tenure_live_payload`, built from the
+    /// analogue of `PreparedEngine`'s `tenure_live_payload`, built from the
     /// primitives this layer actually has above the JIT boundary:
     /// `payload`'s OWN fields are read through `PreparedMachine::inspect_outer`
     /// (which mints a fresh handle per managed field), the policy's chosen
@@ -1953,7 +1942,7 @@ impl PreparedEngine {
     /// bridged `request` has that many fields, whatever its shape;
     /// `ClosureField(field)` retains it only when the bridge found the
     /// closure sentinel there -- both read `request`, exactly as
-    /// `JitEffectMachine`'s own `request_has_field`/
+    /// `PreparedEngine`'s own `request_has_field`/
     /// `request_field_carries_closure_sentinel` do for Core. `None` when the
     /// policy names no field, the constructor doesn't have it, or (rare: a
     /// nullary/scalar-only request) the field is not itself managed.
@@ -2016,7 +2005,7 @@ impl PreparedEngine {
     }
 
     /// Mint a [`ValueHandle`] over the declared live payload of the frame
-    /// parked under `id`, mirroring `JitEffectMachine::handle_from_live_payload`
+    /// parked under `id`, mirroring `PreparedEngine::handle_from_live_payload`
     /// on the Core route (`PreparedMachine::take_live_payload_handle`). The
     /// frame stays parked; `None` when `id` is not parked or its frame holds
     /// no untaken live payload.
@@ -2811,7 +2800,7 @@ impl PreparedEngine {
         Ok(())
     }
 
-    /// Read-only heap/GC snapshot mirroring `JitEffectMachine::heap_stats` on
+    /// Read-only heap/GC snapshot mirroring `PreparedEngine::heap_stats` on
     /// the Core route. Field mapping onto the prepared machine's own
     /// accounting (`docs/GLOSSARY.md`'s vocabulary does not yet cover this
     /// route, so the mapping is documented here instead):

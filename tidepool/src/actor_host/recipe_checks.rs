@@ -206,16 +206,15 @@ impl Driver {
              import Control.Monad.Freer\nimport Tidepool.Check\n\
              import qualified {module}\n"
         );
+        let source = tidepool_runtime::session::assemble_expression_module(
+            &preamble,
+            "result",
+            "'[RecipeCheck]",
+            entry,
+            tidepool_runtime::session::ExpressionLift::Effectful,
+        );
         tokio::task::block_in_place(|| {
-            tidepool_runtime::compile_and_run(
-                &preamble,
-                "result",
-                "'[RecipeCheck]",
-                entry,
-                &refs,
-                self,
-                &(),
-            )
+            tidepool_runtime::compile_and_run(&source, "result", &refs, self, &())
         })?;
         Ok(())
     }

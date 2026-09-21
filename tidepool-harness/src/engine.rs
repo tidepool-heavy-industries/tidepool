@@ -54,7 +54,7 @@ use serde_json::Value as Json;
 use tidepool_bridge::Value;
 use tidepool_extract_cmd::ResolvedExtractBin;
 pub use tidepool_extract_cmd::{extract_spawn_count, reset_extract_spawn_count};
-use tidepool_repr::{CoreExpr, DataConTable};
+use tidepool_repr::DataConTable;
 use tidepool_runtime::session::turn::{
     prepared_resume_decode_binding, prepared_scaffold_binding_named, with_resume_import,
 };
@@ -74,13 +74,12 @@ use crate::provider::{
 use crate::timing;
 use crate::tree::FanBadge;
 
-/// A compiled turn: the Core expression, its constructor table, and the
-/// typed-yield sidecar. A thin per-target mapping over
+/// A compiled turn: its prepared program, constructor table, and typed-yield
+/// sidecar. A thin per-target mapping over
 /// [`tidepool_runtime::CompiledArtifacts`] onto this crate's own turn
 /// vocabulary — the actual compile mechanics live in
 /// `tidepool_runtime::artifacts`, see this module's doc.
 pub struct CompiledTurn {
-    pub expr: CoreExpr,
     pub table: DataConTable,
     pub asks: YieldSites,
     pub prepared: PreparedArtifact,
@@ -93,18 +92,13 @@ pub struct CompiledTurn {
 }
 
 impl CompiledTurn {
-    /// Borrow the halves a resident session runs — the engine-neutral
-    /// counterpart of [`tidepool_runtime::session::CompiledTurn::code`],
-    /// carrying this turn's [`PreparedArtifact`] (see that type's doc) so a
-    /// run on the prepared route is never silently dropped back to Core-only
-    /// [`TurnCode::core`].
+    /// Borrow the inputs a resident session installs and runs.
     #[must_use]
     pub fn code(&self) -> TurnCode<'_> {
         TurnCode {
-            expr: &self.expr,
             table: &self.table,
             sites: &self.sites,
-            prepared: Some(self.prepared.prepared()),
+            prepared: self.prepared.prepared(),
         }
     }
 }
@@ -160,7 +154,6 @@ pub fn compile_turns(
             (
                 name,
                 CompiledTurn {
-                    expr: a.expr,
                     table: table.clone(),
                     sites: a.asks.sites(),
                     asks: a.asks,
@@ -207,7 +200,6 @@ pub fn compile_turns_with_stable_inject(
             (
                 name,
                 CompiledTurn {
-                    expr: a.expr,
                     table: table.clone(),
                     sites: a.asks.sites(),
                     asks: a.asks,
@@ -247,11 +239,9 @@ fn settled_name(target: &str) -> String {
 /// pieces reuse the SAME text `run_turn`'s resident-turn templates append
 /// (`turn.rs`'s `prepared_scaffold_binding`/`with_resume_import` are built
 /// from the same two functions), not a second copy. Returns the augmented
-/// source and, for each of `targets` in order, the settled binder name to
-/// additionally request as a `--targets` entry: `target` itself stays the
-/// ordinary (unsettled) Core binder every existing reader of `.expr`/
-/// `.table` still gets, while the settled binder is the ONLY one whose
-/// `.prepared` a caller should keep.
+/// source and, for each target in order, the settled binder name to request
+/// as an additional `--targets` entry. The caller retains the settled
+/// binder's prepared artifact.
 fn with_settled_scaffolds(source: &str, targets: &[&str]) -> (String, Vec<String>) {
     let mut out = with_resume_import(source);
     let mut scaffolds = Vec::with_capacity(targets.len());
@@ -269,10 +259,9 @@ fn with_settled_scaffolds(source: &str, targets: &[&str]) -> (String, Vec<String
 /// Pair each of `targets` with its settled artifact from `artifacts` (keyed
 /// by the corresponding entry of `scaffolds`, same order — see
 /// [`with_settled_scaffolds`]), building the [`CompiledTurn`]s
-/// [`compile_turn_prepared`]/[`compile_turns_prepared`] return: `.expr`/
-/// `.asks` come from `target`'s own (unsettled) artifact, `.prepared` comes
-/// from the settled one, `.table` is the one shared merged table every
-/// target in this spawn compiled against.
+/// [`compile_turn_prepared`]/[`compile_turns_prepared`] return. Typed sites
+/// come from the target artifact, the executable program comes from the
+/// settled artifact, and all targets share the merged constructor table.
 fn assemble_prepared_turns(
     targets: &[&str],
     scaffolds: &[String],
@@ -292,7 +281,6 @@ fn assemble_prepared_turns(
             Ok((
                 (*target).to_string(),
                 CompiledTurn {
-                    expr: a.expr,
                     table: table.clone(),
                     sites: a.asks.sites(),
                     asks: a.asks,
@@ -306,12 +294,11 @@ fn assemble_prepared_turns(
 /// As [`compile_turn`], but for a fragment that will be RUN against a
 /// prepared session (`s.run_with_sites`/`s.run_bind_with_sites` — the default
 /// engine): the returned [`CompiledTurn::prepared`] is the SETTLED program
-/// (`Tidepool.Internal.Resume.settle target`), not `target`'s own unsettled
-/// prepared-Core. Without this, a prepared-engine session refuses the run
+/// (`Tidepool.Internal.Resume.settle target`), rather than the target's
+/// unsettled program. Without this, a prepared session refuses the run
 /// with "no settled entry layer" (the program declares no
-/// `Tidepool.Internal.Resume.Settled` constructors) — `target`'s own
-/// prepared-Core never constructs `Settled` at all, since only `settle`
-/// does. A thin wrapper over [`compile_turns_prepared`] (a one-element
+/// `Tidepool.Internal.Resume.Settled` constructors). A thin wrapper over
+/// [`compile_turns_prepared`] (a one-element
 /// target slice), mirroring [`compile_turn`]/[`compile_turns`].
 pub fn compile_turn_prepared(
     extract_bin: &ResolvedExtractBin,

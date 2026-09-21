@@ -29,7 +29,6 @@ data RequestField
   | Target String
   | Targets [String]
   | DumpCore
-  | AllClosed
   | TargetModuleOnly
   | Include FilePath
   | BindGen Word64
@@ -57,7 +56,6 @@ data RequestField
   | InspectOut FilePath
   | InspectTypeBatch FilePath
   | RetainedGeneration SymbolIdentity Word64
-  | PreparedTurn
   | ActivationPreview
   | InspectionStrict
   deriving (Eq, Show)
@@ -69,7 +67,6 @@ data WorkerRequest = WorkerRequest
   , requestTarget :: Maybe String
   , requestTargets :: [String]
   , requestDumpCore :: Bool
-  , requestAllClosed :: Bool
   , requestTargetModuleOnly :: Bool
   , requestIncludes :: [FilePath]
   , requestFiles :: [FilePath]
@@ -98,7 +95,6 @@ data WorkerRequest = WorkerRequest
   , requestRetainedGenerations :: Map SymbolIdentity Word64
   -- | A turn that also writes its target's prepared-STG program from the
   -- same compile, linked against 'requestRetainedGenerations'.
-  , requestPreparedTurn :: Bool
   , requestActivationPreview :: Bool
   , requestInspectionStrict :: Bool
   }
@@ -110,7 +106,6 @@ emptyWorkerRequest = WorkerRequest
   , requestTarget = Nothing
   , requestTargets = []
   , requestDumpCore = False
-  , requestAllClosed = False
   , requestTargetModuleOnly = False
   , requestIncludes = []
   , requestFiles = []
@@ -133,7 +128,6 @@ emptyWorkerRequest = WorkerRequest
   , requestInspectOut = Nothing
   , requestInspectTypeBatch = Nothing
   , requestRetainedGenerations = Map.empty
-  , requestPreparedTurn = False
   , requestActivationPreview = False
   , requestInspectionStrict = False
   }
@@ -182,7 +176,6 @@ requestFromFields = foldl apply emptyWorkerRequest
       Target name -> request { requestTarget = Just name }
       Targets names -> request { requestTargets = requestTargets request ++ names }
       DumpCore -> request { requestDumpCore = True }
-      AllClosed -> request { requestAllClosed = True }
       TargetModuleOnly -> request { requestTargetModuleOnly = True }
       Include path -> request { requestIncludes = requestIncludes request ++ [path] }
       BindGen generation -> request { requestBindGen = Just generation }
@@ -220,12 +213,11 @@ requestFromFields = foldl apply emptyWorkerRequest
       RetainedGeneration identity generation -> request
         { requestRetainedGenerations =
             Map.insert identity generation (requestRetainedGenerations request) }
-      PreparedTurn -> request { requestPreparedTurn = True }
       ActivationPreview -> request { requestActivationPreview = True }
       InspectionStrict -> request { requestInspectionStrict = True }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v8"
+workerRequestFlag = "--worker-request-v9"
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -244,7 +236,7 @@ type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 decodeRequest :: BS.ByteString -> Either String [RequestField]
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ008"
+  if magic /= "TPREQ009"
     then Left "worker request: unsupported magic or version"
     else do
       (count, rest) <- pWord32 body
@@ -254,7 +246,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ008" <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = "TPREQ009" <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
@@ -263,7 +255,6 @@ encodeField field = case field of
   Target value -> taggedText 3 value
   Targets values -> BS.singleton 4 <> putU32 (length values) <> BS.concat (map textFrame values)
   DumpCore -> BS.singleton 5
-  AllClosed -> BS.singleton 6
   TargetModuleOnly -> BS.singleton 7
   Include value -> taggedText 8 value
   BindGen value -> BS.singleton 11 <> putU64 value
@@ -291,7 +282,6 @@ encodeField field = case field of
   InspectStructuredType query -> BS.singleton 37 <> encodeStructuredInspection query
   RetainedGeneration identity generation ->
     BS.singleton 38 <> encodeSymbolIdentity identity <> putU64 generation
-  PreparedTurn -> BS.singleton 39
   InspectTypeBatch value -> taggedText 40 value
   ActivationPreview -> BS.singleton 41
   InspectionStrict -> BS.singleton 42
@@ -358,7 +348,7 @@ pField bytes = do
       (count, rest') <- pWord32 rest
       mapParser Targets (pN (fromIntegral count) pText) rest'
     5  -> Right (DumpCore, rest)
-    6  -> Right (AllClosed, rest)
+    6  -> Left "retired worker request field tag: 6"
     7  -> Right (TargetModuleOnly, rest)
     8  -> mapParser Include pText rest
     9  -> retired tag
@@ -394,7 +384,7 @@ pField bytes = do
       (identity, rest') <- pSymbolIdentity rest
       (generation, rest'') <- pWord64 rest'
       Right (RetainedGeneration identity generation, rest'')
-    39 -> Right (PreparedTurn, rest)
+    39 -> Left "retired worker request field tag: 39"
     40 -> mapParser InspectTypeBatch pText rest
     41 -> Right (ActivationPreview, rest)
     42 -> Right (InspectionStrict, rest)

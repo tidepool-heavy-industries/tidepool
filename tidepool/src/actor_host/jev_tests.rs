@@ -408,10 +408,7 @@ fn pinned_jev_agent_spec_workspace(config: &mut ActorHostConfig) {
     );
 }
 
-async fn probe_topic(
-    policy: &dyn tidepool_actor::ResidentToolEndpoint,
-    topic: &str,
-) -> String {
+async fn probe_topic(policy: &dyn tidepool_actor::ResidentToolEndpoint, topic: &str) -> String {
     dispatch_structured_tool(policy, "probe", serde_json::json!({"topic": topic}))
         .await
         .to_string()
@@ -533,8 +530,7 @@ impl JevBackend for ScriptedNoulJev {
         &self,
         request: String,
     ) -> futures_util::future::BoxFuture<'_, Result<String, JevCallFailure>> {
-        let parsed: serde_json::Value =
-            serde_json::from_str(&request).expect("request is JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&request).expect("request is JSON");
         self.requests.lock().push(parsed.clone());
         let keys: Vec<String> = parsed["questions"]
             .as_object()
@@ -692,10 +688,7 @@ async fn next_watchdog_child(
     .expect("child admission")
 }
 
-async fn watchdog_probe(
-    policy: &dyn tidepool_actor::ResidentToolEndpoint,
-    topic: &str,
-) -> String {
+async fn watchdog_probe(policy: &dyn tidepool_actor::ResidentToolEndpoint, topic: &str) -> String {
     dispatch_structured_tool(policy, "probe", serde_json::json!({"topic": topic}))
         .await
         .to_string()
@@ -718,7 +711,9 @@ async fn next_notification_send(
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return Err(match last_other {
-                Some(kind) => format!("no NotificationSend within the budget; last other event: {kind}"),
+                Some(kind) => {
+                    format!("no NotificationSend within the budget; last other event: {kind}")
+                }
                 None => "no event at all within the budget".to_string(),
             });
         }
@@ -849,7 +844,11 @@ async fn a_childs_watchdog_slot_escalates_to_its_parent() {
         .expect("the watchdog's escalation reaches the deployment channel");
     assert_eq!(command.owner(), escalate_child.actor.identity());
     assert_eq!(command.target(), root_identity);
-    assert!(command.message().contains("out_of_scope"), "{}", command.message());
+    assert!(
+        command.message().contains("out_of_scope"),
+        "{}",
+        command.message()
+    );
     assert!(
         command
             .message()
@@ -865,7 +864,10 @@ async fn a_childs_watchdog_slot_escalates_to_its_parent() {
     .unwrap();
     admit_notification(&command, "watchdog-inbox".into(), &inbox);
     let escalated_result = escalate_call.await.unwrap();
-    assert!(escalated_result.contains("[after-tool]"), "{escalated_result}");
+    assert!(
+        escalated_result.contains("[after-tool]"),
+        "{escalated_result}"
+    );
     assert!(
         escalated_result.contains("escalated to your parent"),
         "{escalated_result}"

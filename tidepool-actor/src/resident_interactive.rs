@@ -300,7 +300,3 @@ mod tests {
         assert_eq!(crate::status_tool::declaration().name(), "status");
     }
 }
-
-#[cfg(test)]
-#[path = "hosted_lifecycle_tests.rs"]
-mod lifecycle_tests;

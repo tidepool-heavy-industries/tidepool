@@ -24,7 +24,7 @@ providers, scheduling, resources, persistence, and argument parsing.
 
 Most changes touch one of three layers, and it helps to know which:
 
-- **The engine**: GHC Core to Cranelift, the heap and collector, the effect
+- **The engine**: prepared STG to Cranelift, the heap and collector, the effect
   machine (`tidepool-repr`, `tidepool-heap`, `tidepool-codegen`). Correctness
   is differential against GHC. Changes here are rare and carefully tested.
 - **The resident runtime**: sessions, the workbench, actors, effects and their
@@ -76,9 +76,8 @@ Most changes touch one of three layers, and it helps to know which:
   concrete resources.
 - Do not put CLI parsing, subprocess lifecycle, provider protocol details,
   resource registries, or actor scheduling into Haskell.
-- Preserve the IR boundary: GHC types, casts, and ticks are erased before Rust
-  CBOR; `CoreExpr` remains a recursive tree; union tags are unboxed indices in
-  the effect list.
+- Preserve the IR boundary: GHC types, casts, and ticks are erased before the
+  prepared-STG wire program; union tags are unboxed indices in the effect list.
 
 ## Repository navigation
 

@@ -982,16 +982,12 @@ async fn hosted_authored_failed_child_cleanup_retains_http_uncertainty() {
     let library = SessionLib::open(session, directory.path(), ModuleEnv::standalone_default())
         .unwrap()
         .with_validation_include(include.clone());
-    let mut machine = ResidentSession::bootstrap(
-        &compiled.expr,
-        compiled.table.clone(),
+    let mut machine = ResidentSession::unbootstrapped(
         NoFixtureHandlers,
         CapturedOutput::default(),
-        include.clone(),
         DEFAULT_NURSERY_SIZE,
         Some(library),
-    )
-    .unwrap();
+    );
     machine.set_effect_execution(
         EffectRunPolicy::SuspendAll,
         LivePayloadPolicy::HASKELL_EFFECT_VALUE,

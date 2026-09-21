@@ -339,7 +339,7 @@ fn read_project_config(workspace: &Path) -> Result<(ShoalConfig, String), Config
                 // gap this field exists for is caught earlier, in
                 // `resolve_workspace` itself.
                 searched_from: None,
-            })
+            });
         }
         Err(error) => {
             return Err(ConfigError::Rejected(runtime_error(format!(

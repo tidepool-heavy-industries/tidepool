@@ -60,8 +60,8 @@ use std::path::{Path, PathBuf};
 use tidepool_mcp::EffectDecl;
 use tidepool_repr::execution_schema::{PreparedProgram, TypeNode, TypeNodeId};
 use tidepool_runtime::session::{
-    resident_workbench_templates, run_turn, EngineKind, ModuleEnv, ResidentSession, SessionLib,
-    TurnRequest, TurnResult, TurnTemplate,
+    resident_workbench_templates, run_turn, ModuleEnv, ResidentSession, SessionLib, TurnRequest,
+    TurnResult, TurnTemplate,
 };
 use tidepool_testing::eval_harness;
 
@@ -81,7 +81,7 @@ struct Notebook {
 }
 
 impl Notebook {
-    fn new(engine: EngineKind, decls: &[EffectDecl]) -> Self {
+    fn new(decls: &[EffectDecl]) -> Self {
         eval_harness::require_extract();
         let preamble = tidepool_mcp::build_preamble(decls, false);
         let effect_stack = tidepool_mcp::build_effect_stack_type(decls);
@@ -112,11 +112,9 @@ impl Notebook {
         .expect("open decl plane")
         .with_validation_include(vec![eval_harness::prelude_path()]);
         include.push(lib.include_dir().to_path_buf());
-        let session = ResidentSession::unbootstrapped_on(
-            engine,
+        let session = ResidentSession::unbootstrapped(
             frunk::HNil,
             tidepool_mcp::CapturedOutput::new(),
-            include.clone(),
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             Some(lib),
         );
@@ -406,7 +404,7 @@ fn audit(surface_name: &str, decls: &[EffectDecl]) -> BTreeSet<String> {
         );
     }
 
-    let mut notebook = Notebook::new(EngineKind::Prepared, decls);
+    let mut notebook = Notebook::new(decls);
     let mut skipped = Vec::new();
     let mut statements = Vec::new();
     for (name, ty) in &verbs {
@@ -447,10 +445,7 @@ fn audit(surface_name: &str, decls: &[EffectDecl]) -> BTreeSet<String> {
     let TurnResult::Expr { compiled, .. } = notebook.compile(&turn_text) else {
         panic!("[{surface_name}] the verb-surface turn did not classify as an expression");
     };
-    let prepared = compiled
-        .prepared
-        .as_ref()
-        .expect("prepared request returned no prepared program");
+    let prepared = &compiled.prepared;
 
     // Verb name -> the site row that answers it, via the synthetic
     // `verb_sites` side table (`ConstructorId` indexes `constructors()`

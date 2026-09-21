@@ -19,7 +19,6 @@ library tidepool-extract-internal
   hs-source-dirs:   src
   exposed-modules:
     Tidepool.Binders
-    Tidepool.Artifacts
     Tidepool.CborEncode
     Tidepool.WorkerServer
     Tidepool.DiagJson
@@ -30,7 +29,6 @@ library tidepool-extract-internal
     Tidepool.GhcPipeline
     Tidepool.Identity
     Tidepool.Introspection
-    Tidepool.IR
     Tidepool.Metadata
     Tidepool.PrimOps
     Tidepool.PreparedStg
@@ -50,7 +48,6 @@ library tidepool-extract-internal
     Tidepool.Session
     Tidepool.SessionArtifacts
     Tidepool.Timing
-    Tidepool.Translate
     Tidepool.TypePolicy
     Tidepool.TurnSource
   build-depends:
@@ -73,17 +70,6 @@ library tidepool-extract-internal
     safe
   default-language: GHC2024
   default-extensions: OverloadedStrings
-  ghc-options:      -Wall
-
-test-suite constructor-arity-test
-  type:             exitcode-stdio-1.0
-  main-is:          ConstructorArityTest.hs
-  hs-source-dirs:   test
-  build-depends:
-    base >= 4.20 && < 5,
-    ghc >= 9.12 && < 9.13,
-    tidepool-extract-internal
-  default-language: GHC2024
   ghc-options:      -Wall
 
 test-suite cell-splitter-test
@@ -209,54 +195,6 @@ test-suite execution-corpus-projection
   default-extensions: OverloadedStrings
   ghc-options:      -Wall
 
--- Wave-3a acceptance test: drives the PRODUCTION Option-C surface
--- (Tidepool.Session + runPipelineSession + translateModuleClosed) and asserts
--- a session-binder reference reaches Core as external NVar(stableVarId).
--- Run: cabal test session-c-test  (needs the nix with-packages GHC on PATH).
-test-suite session-c-test
-  type:             exitcode-stdio-1.0
-  main-is:          SessionCTest.hs
-  hs-source-dirs:   test-session
-  build-depends:
-    base         >= 4.20 && < 5,
-    ghc          >= 9.12 && < 9.13,
-    ghc-boot     >= 9.12 && < 9.13,
-    tidepool-extract-internal,
-    bytestring,
-    containers,
-    filepath,
-    directory,
-    process,
-    text,
-    mtl
-  default-language: GHC2024
-  default-extensions: OverloadedStrings
-
--- Contract pin for the record-selector varId disambiguator (fieldParentDisamb):
--- shared field label under different parent types => distinct disambiguators;
--- non-field Name => empty disambiguator. Pins the mechanism directly (the
--- gotcha_registry canary passes pre-fix, so it does not).
--- Run: cabal test varid-mechanism-test  (needs the nix with-packages GHC on PATH).
-test-suite varid-mechanism-test
-  type:             exitcode-stdio-1.0
-  main-is:          VarIdMechanismTest.hs
-  hs-source-dirs:   test-varid
-  build-depends:
-    base         >= 4.20 && < 5,
-    ghc          >= 9.12 && < 9.13,
-    ghc-boot     >= 9.12 && < 9.13,
-    tidepool-extract-internal,
-    bytestring,
-    containers,
-    filepath,
-    directory,
-    process,
-    text,
-    mtl
-  default-language: GHC2024
-  default-extensions: OverloadedStrings
-
--- Internal GHC API boundary for prepared-STG selection and resident memo use.
 test-suite prepared-stg-pipeline-test
   type:             exitcode-stdio-1.0
   main-is:          Main.hs
@@ -330,18 +268,6 @@ test-suite spike-build-products
   default-language: GHC2024
   default-extensions: OverloadedStrings
 
--- Extract-fidelity regressions: coercion-binder erasure symmetry, intrinsic
--- recognizer module qualification, unboxed-tuple result-arity fail-loud.
--- Drives the real runPipeline + translateModuleClosed path on synthetic
--- fixture modules written under test-fidelity/work/.
--- Run: cabal test extract-fidelity-test  (needs the nix with-packages GHC on PATH).
--- A test-suite, not an executable: `cabal build` builds only the production
--- exe, and every non-production component here is a test-suite so it stays
--- that way. `Main.hs` already exits non-zero unless every check passes, which
--- is exactly the exitcode-stdio-1.0 contract.
--- Reaches the extractor through `tidepool-extract-internal` rather than
--- re-listing src/ modules on its own hs-source-dirs — the whole point of the
--- internal library is that the extractor compiles ONCE per configuration.
 -- Property coverage for "Tidepool.Swarm"'s 'Cycles' budget currency
 -- (operator's type-level review, 2026-08-17): the conservation law
 -- 'splitAllowance' is supposed to hold by construction, checked against many
@@ -373,10 +299,8 @@ test-suite swarm-spec-test
   ghc-options:      -Wall
 
 -- Unit coverage for 'Tidepool.Aeson.Value.eitherDecodeValue''s hand-written
--- RFC 8259 parser (the prepared-STG route's decode body; the Core route
--- intercepts the same name and never runs it — see that function's
--- Haddock and STG_KNOWN_ISSUES.md's "Host answers and effects"). Plain-GHC
--- business logic, so — like swarm-spec-test — this reaches `lib` directly
+-- RFC 8259 parser used by prepared-STG answer decoding. Plain-GHC business
+-- logic, so — like swarm-spec-test — this reaches `lib` directly
 -- and costs no extract compile.
 -- Run: cabal test aeson-value-spec-test  (needs the nix with-packages GHC on PATH).
 test-suite aeson-value-spec-test
@@ -396,55 +320,6 @@ test-suite aeson-value-spec-test
   default-extensions:
     OverloadedStrings
   ghc-options:      -Wall
-
--- Generates test/corpus_cbor/oracle.json: the GHC-computed expected value
--- for every "Corpus" binding, the GATING referee real_core_corpus.rs
--- (tidepool-codegen) compares the JIT against. Run via regen-corpus.sh
--- (which also regenerates the CBOR fixtures from the same source) — not a
--- pass/fail test, but a `test-suite` stanza like the other non-default
--- extras above so it stays out of a bare `cabal build`; `cabal run
--- corpus-oracle-gen -- <output-path>` builds and runs it directly.
--- Deliberately independent of tidepool-extract-internal: this is plain-GHC
--- execution of "Corpus" itself, not the extractor pipeline, so it costs no
--- extract compile.
-test-suite corpus-oracle-gen
-  type:             exitcode-stdio-1.0
-  main-is:          GenOracle.hs
-  hs-source-dirs:   test/corpus
-  other-modules:    Corpus
-  build-depends:
-    base >= 4.20 && < 5
-  default-language: GHC2024
-
-test-suite extract-fidelity-test
-  type:             exitcode-stdio-1.0
-  main-is:          Main.hs
-  hs-source-dirs:   test-fidelity
-  other-modules:
-    Fidelity.Harness
-    Fidelity.Erasure
-    Fidelity.Recognizers
-    Fidelity.PrimopArity
-    Fidelity.MetadataCoverage
-    Fidelity.ClosureTier
-    Fidelity.TopoRecovery
-    Fidelity.ExtractRequest
-    Fidelity.MissingFields
-    Fidelity.Introspection
-  build-depends:
-    tidepool-extract-internal,
-    base         >= 4.20 && < 5,
-    ghc          >= 9.12 && < 9.13,
-    ghc-boot     >= 9.12 && < 9.13,
-    bytestring,
-    containers,
-    filepath,
-    directory,
-    process,
-    text,
-    mtl
-  default-language: GHC2024
-  default-extensions: OverloadedStrings
 
 test-suite fat-iface-exact-test
   type:             exitcode-stdio-1.0

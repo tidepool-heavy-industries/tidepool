@@ -56,9 +56,7 @@ fn main() {
     for (locator, path) in &entries {
         println!("cargo:rerun-if-changed={}", path.display());
         let absolute = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-        generated.push_str(&format!(
-            "    ({locator:?}, include_str!({absolute:?})),\n"
-        ));
+        generated.push_str(&format!("    ({locator:?}, include_str!({absolute:?})),\n"));
     }
     generated.push_str("];\n");
 

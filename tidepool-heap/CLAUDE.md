@@ -4,4 +4,4 @@
 unsafe accessors) and the copying-GC core (Cheney scan, pointer-field
 walking, `gc::raw` copy primitives). Does NOT belong: the nursery, frame
 walker, and collection driver that use these primitives (`tidepool-codegen`),
-`CoreExpr` IR types (`tidepool-repr`).
+prepared execution schemas (`tidepool-repr`).

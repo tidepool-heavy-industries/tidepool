@@ -465,6 +465,3 @@ pub async fn command(
     println!("{body}");
     Ok(())
 }
-
-#[cfg(test)]
-mod tests;

@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Cranelift-based JIT compiler for Tidepool Core"
+description = "Cranelift runtime for Tidepool prepared STG"
 readme = "../README.md"
 
 [dependencies]
@@ -33,13 +33,6 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 parking_lot.workspace = true
 recursion.workspace = true
 rustc-hash.workspace = true
-# Dependency-graph traversal + topological sort for LetRec deferred-simple
-# binding order (emit/expr.rs's `topo_sort_deferred_simple`). Project-wide
-# hard directive: petgraph for graph algorithms, never hand-rolled.
-petgraph = "0.8"
-# Stack-growth insurance at the emit recursion spine (emit_node). Tiny, widely
-# vendored (rustc itself uses it). NEW external dep — sanctioned for the
-# stack-safety pass; flagged for human veto at merge.
 stacker = "0.1"
 
 [target.'cfg(unix)'.dependencies]
@@ -47,29 +40,6 @@ libc.workspace = true
 
 [build-dependencies]
 cc = "1"
-
-[dev-dependencies]
-proptest.workspace = true
-serial_test.workspace = true
-tidepool-testing.workspace = true
-# real_core_corpus.rs: parsing the GHC oracle sidecar (haskell/test/corpus_cbor/oracle.json).
-serde_json.workspace = true
-
-[[test]]
-name = "properties"
-path = "tests/suites/properties.rs"
-
-[[test]]
-name = "gc"
-path = "tests/suites/gc.rs"
-
-[[test]]
-name = "resident"
-path = "tests/suites/resident.rs"
-
-[[test]]
-name = "codegen"
-path = "tests/suites/codegen.rs"
 
 [[test]]
 name = "prepared_control"

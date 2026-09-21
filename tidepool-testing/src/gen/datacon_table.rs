@@ -1,53 +1,5 @@
 use tidepool_repr::datacon::SrcBang;
-use tidepool_repr::frame::CoreFrame;
-use tidepool_repr::types::AltCon;
-use tidepool_repr::{CoreExpr, DataCon, DataConId, DataConTable};
-
-/// Walk the tree to find all `DataConId`s and their maximum observed arities.
-pub fn build_table_for_expr(expr: &CoreExpr) -> DataConTable {
-    let mut table = standard_datacon_table();
-    let mut seen = std::collections::HashMap::new();
-
-    for node in &expr.nodes {
-        match node {
-            CoreFrame::Con { tag, fields } => {
-                let arity = fields.len() as u32;
-                let entry = seen.entry(*tag).or_insert(0);
-                if arity > *entry {
-                    *entry = arity;
-                }
-            }
-            CoreFrame::Case { alts, .. } => {
-                for alt in alts {
-                    if let AltCon::DataAlt(tag) = alt.con {
-                        let arity = alt.binders.len() as u32;
-                        let entry = seen.entry(tag).or_insert(0);
-                        if arity > *entry {
-                            *entry = arity;
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    for (id, arity) in seen {
-        if table.get(id).is_none() {
-            table.insert(DataCon {
-                id,
-                name: format!("C{}", id.0),
-                tag: (id.0 % 100) as u32 + 1,
-                rep_arity: arity,
-                field_bangs: vec![],
-                qualified_name: None,
-                type_name: String::new(),
-            });
-        }
-    }
-
-    table
-}
+use tidepool_repr::{DataCon, DataConId, DataConTable};
 
 /// Returns a standard DataConTable with common types like Maybe, Bool, and Pair.
 pub fn standard_datacon_table() -> DataConTable {

@@ -46,13 +46,10 @@ fn probe(label: &str, text: &str, gen: u64) {
         TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => compiled,
         TurnResult::Decl { .. } => panic!("{label}: classified as a declaration"),
     };
-    let prepared = compiled
-        .prepared
-        .as_ref()
-        .unwrap_or_else(|| panic!("{label}: no prepared program beside the Core artifacts"));
-    // One DataConTable serves both engines: wherever the Core table and the
+    let prepared = &compiled.prepared;
+    // The DataConTable and prepared closure share constructor identities: wherever the table and the
     // prepared closure both declare a constructor, the prepared `host_id` IS
-    // the Core id (both are minted by Tidepool.Identity.varId). The prepared
+    // the host id (both are minted by Tidepool.Identity.varId). The prepared
     // closure legitimately declares more (base's Typeable/exception
     // machinery recovered through fat interfaces), so it is not a subset.
     let mut shared = 0usize;

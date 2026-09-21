@@ -34,7 +34,7 @@ and where to start. This file is the short form, with the mechanism index.
 | Area | Responsibility |
 |---|---|
 | `haskell/` | GHC Core extractor and the Haskell stdlib |
-| `tidepool-repr` | Core IR, constructor metadata, CBOR, shared identifiers |
+| `tidepool-repr` | Prepared execution schema, constructor metadata, CBOR, shared identifiers |
 | `tidepool-heap` | JIT heap layout and copying-GC primitives |
 | `tidepool-codegen` | Cranelift compiler and effect machine |
 | `tidepool-toolchain` | Toolchain discovery, fingerprints, paths, and compile cache |
@@ -129,17 +129,6 @@ After changing extractor translation or serialization, run
 for deployment of the extractor and standard library.
 
 ## Architectural invariants
-
-- `CoreExpr` is `RecursiveTree<CoreFrame>`. Its principal frames are `Var`,
-  `Lit`, `App`, `Lam`, `LetNonRec`, `LetRec`, `Case`, `Con`, `Join`, `Jump`, and
-  `PrimOp`.
-- Haskell serialization removes types, casts, and ticks before Rust reads the
-  CBOR representation.
-- The JIT heap uses a manual object layout and a copying collector. It is not a
-  Rust enum graph.
-- Freer continuations retain the `Leaf`/`Node` type-aligned sequence shape;
-  they are not represented as a single closure.
-- Union tags are unboxed word indices into the effect list.
 
 The public eval API is generated into the MCP tool description. Do not copy
 that live reference into standing documentation.

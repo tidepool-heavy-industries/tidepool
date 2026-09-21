@@ -5,10 +5,12 @@
 //! tmux is process ownership and observability, never message transport.
 
 #[cfg(test)]
-mod command_jobs_tests;
-mod commands;
+mod agent_spec_tests;
 #[cfg(test)]
 mod cell_compile_cost_tests;
+#[cfg(test)]
+mod command_jobs_tests;
+mod commands;
 #[cfg(test)]
 mod compiler_warmup_tests;
 #[cfg(test)]
@@ -22,8 +24,6 @@ mod hosted_retirement;
 mod hosted_tools_tests;
 #[cfg(test)]
 mod jev_tests;
-#[cfg(test)]
-mod agent_spec_tests;
 #[cfg(test)]
 mod lookup_availability_tests;
 #[cfg(test)]
@@ -2182,9 +2182,7 @@ fn compile_root(
     );
     let worktree_handler =
         ActorWorktreeHandler::new(WorktreeHandler::from_manager(worktrees), worktree_authority);
-    let mut machine = ResidentSession::bootstrap(
-        &compiled.expr,
-        compiled.table.clone(),
+    let mut machine = ResidentSession::unbootstrapped(
         hlist![
             source_handler(source),
             ActorBoundWorktreeHandler::new(worktree_handler.clone()),
@@ -2194,10 +2192,9 @@ fn compile_root(
             worktree_handler,
         ],
         CapturedOutput::new(),
-        include.clone(),
         DEFAULT_NURSERY_SIZE,
         Some(library),
-    )?;
+    );
     machine.set_effect_execution(
         EffectRunPolicy::HandleOrSuspend,
         LivePayloadPolicy::HASKELL_EFFECT_VALUE,

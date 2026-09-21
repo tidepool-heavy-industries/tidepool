@@ -45,6 +45,7 @@ use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_mcp::CapturedOutput;
 use tidepool_repr::PrincipalId;
 use tidepool_repr::{DataConTable, Generation, SessionId};
+use tidepool_runtime::session::TurnCode;
 use tidepool_runtime::session::{
     classify_block, run_turn, Aged, BoundBinder, CompiledTurn, ResidentError, ResidentHole,
     ResidentOutcome, ResidentSession, SessionCompileView, SessionLib, SessionRunContext,
@@ -52,7 +53,6 @@ use tidepool_runtime::session::{
     DECL_TEMPLATE_SOURCE,
 };
 use tidepool_runtime::session::{run_block_sequence, BlockExecution, BlockSequenceOutcome};
-use tidepool_runtime::session::{EngineKind, TurnCode};
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 
 use crate::effect_trace::{EffectRecord, EffectTrace, TracingDispatcher};
@@ -900,28 +900,6 @@ impl Harness {
     /// its first REAL turn (`ResidentSession::unbootstrapped` — see that
     /// constructor's doc) — `force` itself pays no GHC extract compile.
     pub fn force(&self, node: NodeId, actor: Actor) -> Result<(), HarnessError> {
-        self.force_with_extra_include(node, actor, Vec::new())
-    }
-
-    /// As [`Self::force`], but with `extra_include` roots ALSO on every
-    /// compile this node's session runs — the seam a fork child's session
-    /// uses to resolve its PARENT's decl-plane module by name:
-    /// `AnswerContract`'s pin (built from
-    /// [`tidepool_runtime::YieldSites::modules_of`]) names the module, and
-    /// this is what makes that name findable on disk. `SessionModule`'s
-    /// dotted name (`Tidepool.Session.{Val|Lib}.G<g>`) carries no node
-    /// identity, so the file layout under any node's own decl root matches
-    /// the same relative path regardless of which node it belongs to —
-    /// adding the PARENT's root here is exactly as if the child's own
-    /// session had declared the SAME thing, without actually sharing a
-    /// session (parent and child still have their own, independent planes —
-    /// see [`Self::force`]'s doc).
-    fn force_with_extra_include(
-        &self,
-        node: NodeId,
-        actor: Actor,
-        extra_include: Vec<PathBuf>,
-    ) -> Result<(), HarnessError> {
         // Register a fresh resident session for this node, keeping a handle to
         // its effect-trace buffer so per-turn effects can be logged.
         let (stack, effect_trace) = self.build_stack();
@@ -932,16 +910,9 @@ impl Harness {
         // separate node with a separate plane. Degrades to no accumulation
         // (`None`) if the session root cannot be created.
         let lib = self.node_decl_plane(node);
-        let mut include = self.cfg.include.clone();
-        include.extend(extra_include);
-        // The engine route is read once per session at this composition root.
-        // The prepared machine is the default; `TIDEPOOL_ENGINE=core` opts
-        // out to the Core engine.
-        let session = ResidentSession::unbootstrapped_on(
-            EngineKind::from_env(),
+        let session = ResidentSession::unbootstrapped(
             stack,
             CapturedOutput::new(),
-            include,
             DEFAULT_NURSERY_SIZE,
             lib,
         );
@@ -1798,7 +1769,6 @@ impl Harness {
                 let asks = YieldSites::from_sites(sites.clone())
                     .map_err(|error| HarnessError::Compile(error.to_string()))?;
                 let table = compiled.table;
-                let expr = compiled.expr;
                 let prepared = compiled.prepared;
 
                 // Run the compiled fragment against the session (move it onto
@@ -1808,10 +1778,9 @@ impl Harness {
                 let run_outcome = self
                     .run_checked_out(node, checkout, move |mut session| {
                         let code = TurnCode {
-                            expr: &expr,
                             table: &run_table,
                             sites: &sites,
-                            prepared: prepared.as_ref(),
+                            prepared: &prepared,
                         };
                         let out = session.run_with_sites("turn", code);
                         (session, out)
@@ -1840,9 +1809,9 @@ impl Harness {
     ) -> Result<LiveTurnContext, HarnessError> {
         let session_view = self.session_compile_view(node);
         let prepared_retained = self.tree.session_of(node).and_then(|sid| {
-            self.tree.registry().peek(sid, |session| {
-                (session.engine_kind() == EngineKind::Prepared).then(|| session.prepared_retained())
-            })?
+            self.tree
+                .registry()
+                .peek(sid, |session| Some(session.prepared_retained()))?
         });
 
         // SessionCompileView is the one source of truth for the exact lexical
@@ -2217,17 +2186,15 @@ impl Harness {
                     let asks = YieldSites::from_sites(sites.clone())
                         .map_err(|error| HarnessError::Compile(error.to_string()))?;
                     let table = compiled.table;
-                    let expr = compiled.expr;
                     let prepared = compiled.prepared;
                     let checkout = self.checkout_run_waiting(node).await?;
                     let run_table = table.clone();
                     let run_outcome = self
                         .run_checked_out(node, checkout, move |mut session| {
                             let code = TurnCode {
-                                expr: &expr,
                                 table: &run_table,
                                 sites: &sites,
-                                prepared: prepared.as_ref(),
+                                prepared: &prepared,
                             };
                             let out = session.run_with_sites("turn", code);
                             (session, out)
@@ -2417,7 +2384,6 @@ impl Harness {
         let asks = YieldSites::from_sites(sites.clone())
             .map_err(|error| HarnessError::Compile(error.to_string()))?;
         let table = compiled.table;
-        let expr = compiled.expr;
         let prepared = compiled.prepared;
 
         let checkout = self.checkout_run_waiting(node).await?;
@@ -2426,10 +2392,9 @@ impl Harness {
         let outcome = self
             .run_checked_out(node, checkout, move |mut session| {
                 let code = TurnCode {
-                    expr: &expr,
                     table: &run_table,
                     sites: &sites,
-                    prepared: prepared.as_ref(),
+                    prepared: &prepared,
                 };
                 let out = session.run_bind_with_sites("bind", code, &binder_for_run, gen);
                 (session, out)
@@ -4109,13 +4074,7 @@ mod tests {
     /// (`#[tokio::test]`) even though nothing here is actually awaited.
     fn fake_session(harness: &Harness) -> Session {
         let (stack, _trace) = harness.build_stack();
-        ResidentSession::unbootstrapped(
-            stack,
-            CapturedOutput::new(),
-            vec![],
-            DEFAULT_NURSERY_SIZE,
-            None,
-        )
+        ResidentSession::unbootstrapped(stack, CapturedOutput::new(), DEFAULT_NURSERY_SIZE, None)
     }
 
     fn insert_convo(harness: &Harness, node: NodeId, effect_trace: EffectTrace) {

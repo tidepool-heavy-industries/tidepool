@@ -16,8 +16,8 @@
 //! policy delta between the lanes. The eval lane
 //! (`tidepool_runtime::compile_haskell`/`tidepool_runtime::compile_haskell_salted`) keys
 //! through [`crate::cache::eval_cache_key`] / [`crate::cache::cache_load`] /
-//! [`crate::cache::cache_store`] (a single target's legacy, prepared, metadata,
-//! and typed-site artifacts, optionally
+//! [`crate::cache::cache_store`] (a single target's prepared, metadata, and
+//! typed-site artifacts, optionally
 //! salted per session/generation); the turn lane ([`compile_targets`]) keys
 //! through [`crate::cache::invocation_key`] / [`crate::cache::artifacts_load`]
 //! / [`crate::cache::artifacts_store`] (a named artifact SET, which is what
@@ -35,8 +35,8 @@ use serde::Deserialize;
 use tempfile::TempDir;
 use tidepool_extract_cmd::{ExtractCmd, ResolvedExtractBin};
 use tidepool_repr::execution_schema::DecodeLimits;
-use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings};
-use tidepool_repr::{CoreExpr, DataConTable};
+use tidepool_repr::serial::{read_metadata, MetaWarnings};
+use tidepool_repr::DataConTable;
 
 use crate::prepared_artifact::{prepared_artifact_name, PreparedArtifact};
 use crate::{cache, diag, extract_module_name, extract_spawn_error, timing, CompileError};
@@ -268,12 +268,11 @@ pub struct SessionInject<'a> {
 // The artifact bundle
 // ---------------------------------------------------------------------------
 
-/// One target's compiled output: the transitional Core expression, checked
-/// prepared program, and typed-yield sidecar. The constructor table and warnings are SHARED across every
+/// One target's checked prepared program and typed-yield sidecar. The
+/// constructor table and warnings are shared across every
 /// target in the same [`CompiledArtifacts`] (one GHC session, one merged
 /// `meta.cbor`).
 pub struct TargetArtifact {
-    pub expr: CoreExpr,
     pub asks: YieldSites,
     /// Versioned execution program decoded under the exact host contract.
     pub prepared: PreparedArtifact,
@@ -288,7 +287,7 @@ pub struct CompiledArtifacts {
     /// Compile warnings (e.g. `has_io`, captured type) — shared by every
     /// target, same reason.
     pub warnings: MetaWarnings,
-    /// Per-target legacy Core + prepared program + asks sidecar, keyed by target name.
+    /// Per-target prepared program and asks sidecar, keyed by target name.
     pub targets: BTreeMap<String, TargetArtifact>,
 }
 
@@ -300,7 +299,7 @@ pub struct CompiledArtifacts {
 /// policy delta between the two lanes; see the module doc.
 pub enum CacheStrategy<'a> {
     /// `tidepool_runtime::compile_haskell`/`tidepool_runtime::compile_haskell_salted`'s scheme:
-    /// a single `(expr, meta)` pair keyed by [`cache::eval_cache_key`].
+    /// a single prepared artifact set keyed by [`cache::eval_cache_key`].
     Eval { salt: Option<&'a str> },
     /// [`compile_targets`]'s scheme: a whole artifact SET keyed by
     /// [`cache::invocation_key`] over the built argv.
@@ -352,12 +351,10 @@ pub struct CompileInvocation<'a> {
 }
 
 /// Compile a [`CompileInvocation`] against ONE `tidepool-extract` spawn:
-/// `targets.len()` `<target>.cbor` trees over a SINGLE shared merged
-/// `meta.cbor` / [`DataConTable`], returning one [`TargetArtifact`] per
+/// `targets.len()` prepared programs over a single shared merged `meta.cbor`
+/// / [`DataConTable`], returning one [`TargetArtifact`] per
 /// target inside a shared [`CompiledArtifacts`]. Drives the extract's
-/// `--targets a,b` mode (`haskell/app/Main.hs`'s `runMultiTargetClosed`,
-/// which handles a single-element list identically to the legacy `--target`
-/// flag).
+/// `--targets a,b` mode, which handles a single-element list identically.
 ///
 /// A REQUESTED target is a contract: a nonzero exit fails the WHOLE spawn if
 /// ANY target can't translate, rather than silently emitting the targets
@@ -417,19 +414,7 @@ pub fn compile_invocation(
 
     // Persistent build-products dir (module-granular GHC recompilation
     // avoidance across spawns — see `crate::paths::build_products_dir`'s
-    // doc). ON BY DEFAULT: turning this on used to change the compiled BYTES
-    // for any turn/eval whose Core contains a nested (non-top-level) binder
-    // (spike-verified, 2026-08-20 — cold-vs-cold was byte-identical, but a
-    // cold-then-warm pair was NOT, because GHC's session-wide Unique-
-    // allocation trajectory shifts when `load'` skips a variable number of
-    // modules, and `Translate.hs`'s `localVarId` baked that raw Unique into
-    // every nested Id's VarId). That gap is closed —
-    // `Tidepool.Translate.stabilizeLocalUniques` (nested Ids) together with
-    // `Tidepool.GhcPipeline.externalizeInternalTops`'s ordinal disambiguator
-    // (internalized top-level floats) make a compile's VarIds a pure
-    // function of Core shape, never of session Unique-allocation history —
-    // see `tidepool-runtime/tests/build_products_dir_differential.rs`, the
-    // byte-identical-cold-vs-warm acceptance gate for this mechanism.
+    // doc). It is on by default and keyed by the bound endpoint identity.
     //
     // `crate::paths::build_products_dir` is keyed by the same bound endpoint
     // identity used for execution, so a changed frontend, worker, GHC
@@ -473,12 +458,11 @@ pub fn compile_invocation(
                         endpoint.identity().as_bytes(),
                     );
                     if let Some(key) = &key {
-                        if let Some((expr_bytes, meta_bytes, asks_bytes, prepared_bytes)) =
+                        if let Some((meta_bytes, asks_bytes, prepared_bytes)) =
                             cache::cache_load(key)
                         {
                             let raw = vec![RawTargetOutput {
                                 target: inv.targets[0].to_string(),
-                                expr_bytes,
                                 asks_bytes,
                                 prepared_bytes,
                             }];
@@ -577,13 +561,7 @@ pub fn compile_invocation(
     // memo costs a recompile, it never fails a compile.
     let artifacts = assemble(&meta_bytes, &raw, &mut on_stage)?;
     if let Some(key) = &eval_key {
-        cache::cache_store(
-            key,
-            &raw[0].expr_bytes,
-            &meta_bytes,
-            &raw[0].asks_bytes,
-            &raw[0].prepared_bytes,
-        );
+        cache::cache_store(key, &meta_bytes, &raw[0].asks_bytes, &raw[0].prepared_bytes);
     }
     if let Some(key) = &inv_key {
         store_memo(key, &name_refs, &meta_bytes, &raw);
@@ -701,7 +679,6 @@ pub fn compile_targets_with_session_inject(
 /// One target's raw (pre-deserialize) bytes.
 pub(crate) struct RawTargetOutput {
     pub(crate) target: String,
-    pub(crate) expr_bytes: Vec<u8>,
     asks_bytes: Vec<u8>,
     prepared_bytes: Vec<u8>,
 }
@@ -767,11 +744,6 @@ pub(crate) fn extract_and_read(
 
     let mut raw = Vec::with_capacity(targets.len());
     for target in targets {
-        let expr_path = temp_dir.join(format!("{target}.cbor"));
-        if !expr_path.exists() {
-            return Err(CompileError::MissingOutput(expr_path));
-        }
-        let expr_bytes = std::fs::read(&expr_path)?;
         let prepared_path = temp_dir.join(prepared_artifact_name(target));
         if !prepared_path.exists() {
             return Err(CompileError::MissingOutput(prepared_path));
@@ -785,7 +757,6 @@ pub(crate) fn extract_and_read(
         let asks_bytes = read_asks_bytes(&asks_path)?;
         raw.push(RawTargetOutput {
             target: (*target).to_string(),
-            expr_bytes,
             asks_bytes,
             prepared_bytes,
         });
@@ -935,10 +906,6 @@ pub(crate) fn assemble(
 ) -> Result<CompiledArtifacts, CompileError> {
     let deserialize_start = Instant::now();
     let (table, warnings) = read_metadata(meta_bytes)?;
-    let exprs: Vec<CoreExpr> = raw
-        .iter()
-        .map(|r| read_cbor(&r.expr_bytes).map_err(CompileError::from))
-        .collect::<Result<Vec<_>, CompileError>>()?;
     let prepared: Vec<PreparedArtifact> = raw
         .iter()
         .map(|r| PreparedArtifact::parse(r.prepared_bytes.clone(), DecodeLimits::default()))
@@ -960,16 +927,9 @@ pub(crate) fn assemble(
 
     let asks_start = Instant::now();
     let mut targets = BTreeMap::new();
-    for ((r, expr), prepared) in raw.iter().zip(exprs.into_iter()).zip(prepared) {
+    for (r, prepared) in raw.iter().zip(prepared) {
         let asks = parse_asks(&r.asks_bytes)?;
-        targets.insert(
-            r.target.clone(),
-            TargetArtifact {
-                expr,
-                asks,
-                prepared,
-            },
-        );
+        targets.insert(r.target.clone(), TargetArtifact { asks, prepared });
     }
     on_stage(timing::STAGE_ASKS_PARSE, asks_start.elapsed(), 0);
 
@@ -1018,10 +978,9 @@ pub fn read_yield_sites(path: &Path) -> Result<Vec<YieldSite>, CompileError> {
 /// `targets.len() > 1` test the Haskell side uses to decide which shape to
 /// write, so the memo's names track the extract's own contract.
 fn artifact_names(targets: &[&str], multi: bool) -> Vec<String> {
-    let mut names = Vec::with_capacity(1 + targets.len() * 3);
+    let mut names = Vec::with_capacity(1 + targets.len() * 2);
     names.push("meta.cbor".to_string());
     for target in targets {
-        names.push(format!("{target}.cbor"));
         names.push(prepared_artifact_name(target));
         names.push(if multi {
             format!("{target}.asks.json")
@@ -1039,7 +998,7 @@ fn total_bytes(meta_bytes: &[u8], raw: &[RawTargetOutput]) -> u64 {
     let total = meta_bytes.len()
         + raw
             .iter()
-            .map(|r| r.expr_bytes.len() + r.prepared_bytes.len() + r.asks_bytes.len())
+            .map(|r| r.prepared_bytes.len() + r.asks_bytes.len())
             .sum::<usize>();
     total as u64
 }
@@ -1059,12 +1018,10 @@ fn load_memo(
     let meta_bytes = it.next()??;
     let mut raw = Vec::with_capacity(targets.len());
     for target in targets {
-        let expr_bytes = it.next()??;
         let prepared_bytes = it.next()??;
         let asks_bytes = it.next()??;
         raw.push(RawTargetOutput {
             target: (*target).to_string(),
-            expr_bytes,
             asks_bytes,
             prepared_bytes,
         });
@@ -1086,12 +1043,9 @@ fn store_memo(
         artifacts.push((name, Some(meta_bytes)));
     }
     for r in raw {
-        let (Some(expr_name), Some(prepared_name), Some(asks_name)) =
-            (names.next(), names.next(), names.next())
-        else {
+        let (Some(prepared_name), Some(asks_name)) = (names.next(), names.next()) else {
             return;
         };
-        artifacts.push((expr_name, Some(r.expr_bytes.as_slice())));
         artifacts.push((prepared_name, Some(r.prepared_bytes.as_slice())));
         artifacts.push((asks_name, Some(r.asks_bytes.as_slice())));
     }
@@ -1205,8 +1159,8 @@ mod typed_site_tests {
 mod constructor_identity_tests {
     use super::*;
     use tidepool_repr::execution_schema::ConstructorDecl;
-    use tidepool_repr::serial::{write_cbor, write_metadata, MetaWarnings};
-    use tidepool_repr::{CoreFrame, DataCon, Literal, SrcBang};
+    use tidepool_repr::serial::{write_metadata, MetaWarnings};
+    use tidepool_repr::{DataCon, SrcBang};
 
     /// A real, GHC-produced prepared program — `M3Vertical.hs`'s `entry`,
     /// which allocates a user `Box` constructor. `PreparedArtifact` has no
@@ -1233,15 +1187,6 @@ mod constructor_identity_tests {
         }
     }
 
-    /// A minimal legacy Core tree — `assemble` still deserializes it
-    /// unconditionally, independent of the prepared program under test.
-    fn trivial_expr_bytes() -> Vec<u8> {
-        write_cbor(&tidepool_repr::CoreExpr {
-            nodes: vec![CoreFrame::Lit(Literal::LitInt(42))],
-        })
-        .expect("trivial tree encodes")
-    }
-
     /// A table that agrees with EVERY constructor `artifact` declares, except
     /// `decl`'s entry, which is passed through `mutate` first. Anchors a
     /// single deliberate disagreement without leaving every OTHER
@@ -1266,7 +1211,6 @@ mod constructor_identity_tests {
     fn raw_target(target: &str, prepared_bytes: Vec<u8>) -> RawTargetOutput {
         RawTargetOutput {
             target: target.to_string(),
-            expr_bytes: trivial_expr_bytes(),
             asks_bytes: b"[]".to_vec(),
             prepared_bytes,
         }

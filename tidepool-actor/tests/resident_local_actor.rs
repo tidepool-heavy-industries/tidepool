@@ -94,13 +94,8 @@ async fn resident_cleanup_case(fail_hook: bool) {
     )
     .expect("declaration plane")
     .with_validation_include(include.clone());
-    let mut machine = ResidentSession::unbootstrapped(
-        NoHandlers,
-        TestSink,
-        include.clone(),
-        DEFAULT_NURSERY_SIZE,
-        Some(lib),
-    );
+    let mut machine =
+        ResidentSession::unbootstrapped(NoHandlers, TestSink, DEFAULT_NURSERY_SIZE, Some(lib));
     let retained = machine.prepared_retained();
     let compiled = match run_turn(HaskellTurnRequest {
         turn_text: if fail_hook {

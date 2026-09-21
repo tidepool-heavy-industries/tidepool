@@ -188,7 +188,7 @@ requestMemoLifecycle root = do
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
   setEnv "TIDEPOOL_TIMING" "1"
   (withResidentPipelineSelectedRequests [root] $ \runRequest -> do
-      let compile purpose compiler = compiler LegacyCore mempty purpose Nothing targetPath [root] Nothing
+      let compile purpose compiler = compiler CheckedEnvironment mempty purpose Nothing targetPath [root] Nothing
           sessionMiss = "tidepool-memo-miss module=Tidepool.Session.Lib.G1"
           absentSession = sessionMiss ++ " reason=absent"
           targetMiss = "tidepool-memo-miss module=MemoTarget"
@@ -202,7 +202,7 @@ requestMemoLifecycle root = do
         assertContains "internal compile evicts its purpose-sensitive target" targetMiss warmLog
         writeFile dependencyPath invalidDependency
         (changed, changedLog) <- captureStderr root "memo-changed"
-          (try (compile GeneralCompile compiler) :: IO (Either SourceError PipelineResult))
+          (try (compile GeneralCompile compiler) :: IO (Either SourceError CheckedEnvironmentResult))
         case changed of
           Left _ -> pure ()
           Right _ -> fail "changed invalid session dependency reused a stale memo entry"

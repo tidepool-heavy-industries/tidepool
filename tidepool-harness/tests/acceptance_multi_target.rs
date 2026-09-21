@@ -1,7 +1,5 @@
 //! Explicit multi-target extraction (`engine::compile_turns`, extract's
-//! `--targets` mode — `haskell/app/Main.hs`'s `runMultiTargetClosed`). These pin
-//! the two requirements that distinguish this mode from `--all-closed`
-//! (whose correct behaviour is the opposite of both):
+//! `--targets` mode). These pin two requirements of batched compilation:
 //!
 //!   - `multi_target_fails_on_any_bad_target`: a two-target request where ONE
 //!     target is bogus must FAIL the whole extraction, not silently emit the
@@ -100,9 +98,8 @@ fn multi_target_fails_on_any_bad_target() {
         tidepool_harness::timing::NO_NODE,
         tidepool_harness::timing::NO_ROUND,
     );
-    // `CompiledTurn` doesn't implement `Debug` (it carries a JIT-relevant
-    // `CoreExpr`/`DataConTable`, not meant for dumping) — match on the error
-    // side only, which does derive `Debug`.
+    // `CompiledTurn` does not implement `Debug`; match on the error side,
+    // which does.
     if let Err(e) = &good {
         panic!("control: targetA alone should compile cleanly, got {e:?}");
     }

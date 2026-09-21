@@ -43,8 +43,12 @@ impl From<&str> for ProxyError {
 /// a still-present operator socket.
 pub fn run_root_for_session(runs_dir: &Path, session: &str) -> Result<PathBuf, ProxyError> {
     let mut matches = Vec::new();
-    let entries = std::fs::read_dir(runs_dir)
-        .map_err(|e| format!("cannot read Shoal runs directory {}: {e}", runs_dir.display()))?;
+    let entries = std::fs::read_dir(runs_dir).map_err(|e| {
+        format!(
+            "cannot read Shoal runs directory {}: {e}",
+            runs_dir.display()
+        )
+    })?;
     for entry in entries {
         let Ok(entry) = entry else { continue };
         let run_root = entry.path();
@@ -91,7 +95,9 @@ pub fn run_root_for_session(runs_dir: &Path, session: &str) -> Result<PathBuf, P
 }
 
 fn default_runs_dir() -> PathBuf {
-    tidepool_runtime::paths::cache_dir().join("shoal").join("runs")
+    tidepool_runtime::paths::cache_dir()
+        .join("shoal")
+        .join("runs")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,8 +129,8 @@ fn read_proxy_record(path: &Path) -> Option<ProxyRecord> {
 }
 
 fn write_proxy_record(path: &Path, record: &ProxyRecord) -> Result<(), ProxyError> {
-    let bytes = serde_json::to_vec(record)
-        .map_err(|e| format!("cannot encode proxy record: {e}"))?;
+    let bytes =
+        serde_json::to_vec(record).map_err(|e| format!("cannot encode proxy record: {e}"))?;
     tidepool_atomic_write::write_best_effort(path, &bytes)
         .map_err(|e| format!("cannot write {}: {e}", path.display()).into())
 }
@@ -165,10 +171,7 @@ fn client_for(socket: &Path) -> Result<reqwest::Client, ProxyError> {
 }
 
 /// Provision a fresh operator workbench and record it.
-async fn provision(
-    client: &reqwest::Client,
-    proxy_json: &Path,
-) -> Result<String, ProxyError> {
+async fn provision(client: &reqwest::Client, proxy_json: &Path) -> Result<String, ProxyError> {
     let response = client
         .post("http://localhost/host/operators")
         .send()
@@ -210,7 +213,9 @@ async fn stop(client: &reqwest::Client, session: &str) -> Result<(), ProxyError>
     if !response.status().is_success() && response.status() != reqwest::StatusCode::NOT_FOUND {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(format!("cannot stop stale operator session {session}: {status}: {body}").into());
+        return Err(
+            format!("cannot stop stale operator session {session}: {status}: {body}").into(),
+        );
     }
     Ok(())
 }
@@ -428,7 +433,9 @@ mod tests {
         );
         let error = run_root_for_session(runs.path(), "missing").unwrap_err();
         assert!(error.to_string().contains("missing"));
-        assert!(error.to_string().contains(&runs.path().display().to_string()));
+        assert!(error
+            .to_string()
+            .contains(&runs.path().display().to_string()));
     }
 
     #[test]
@@ -484,10 +491,7 @@ mod tests {
             decide(Some("s".into()), false, true),
             Decision::Reuse("s".into())
         );
-        assert_eq!(
-            decide(Some("s".into()), false, false),
-            Decision::Provision
-        );
+        assert_eq!(decide(Some("s".into()), false, false), Decision::Provision);
         assert_eq!(
             decide(Some("s".into()), true, true),
             Decision::StopThenProvision("s".into())

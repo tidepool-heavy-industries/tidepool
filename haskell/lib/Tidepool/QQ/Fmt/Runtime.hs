@@ -21,7 +21,7 @@
 -- intermediate (possibly empty) 'Text' values, which the tree-walking
 -- interpreter cannot read.
 --
--- Kept lens-free (like "Tidepool.Render") so the @--all-closed@ extract
+-- Kept lens-free (like "Tidepool.Render") so the @prepared fixture@ extract
 -- session can load it; "Tidepool.Prelude" re-exports everything here.
 module Tidepool.QQ.Fmt.Runtime
   ( FSign (..)

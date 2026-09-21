@@ -6,8 +6,6 @@ mod support;
 mod agent_stack_scoping;
 #[path = "../decl_plane_run_scoping.rs"]
 mod decl_plane_run_scoping;
-#[path = "../dogfood_harness_typecheck.rs"]
-mod dogfood_harness_typecheck;
 #[path = "../dogfood_observability.rs"]
 mod dogfood_observability;
 #[path = "../finalize_type_pinning.rs"]

@@ -27,7 +27,7 @@ pub trait FromCore: Sized + sealed::FromCoreSealed {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError>;
 }
 
-/// Convert a Rust type to a Core Value (for interpolation into CoreExpr or evaluation).
+/// Convert a Rust type to the runtime Value representation.
 ///
 /// This trait is used to inject Rust values into the Core evaluator.
 pub trait ToCore: sealed::ToCoreSealed {

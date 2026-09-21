@@ -1,7 +1,7 @@
 //! A lookup table for data constructor metadata.
 
 use crate::datacon::DataCon;
-use crate::types::{AltCon, DataConId};
+use crate::types::DataConId;
 use std::collections::{HashMap, HashSet};
 
 /// The module-qualified identity of a constructor, used to distinguish a true
@@ -502,35 +502,6 @@ impl DataConTable {
     /// the same algebraic type. This information is used by `get_companion` to
     /// disambiguate constructors that share unqualified names (e.g., Bin/Tip from
     /// Data.Map vs Data.Set).
-    pub fn populate_siblings_from_expr(&mut self, expr: &crate::CoreExpr) {
-        use crate::frame::CoreFrame;
-
-        for node in &expr.nodes {
-            if let CoreFrame::Case { alts, .. } = node {
-                let data_con_ids: Vec<DataConId> = alts
-                    .iter()
-                    .filter_map(|alt| {
-                        if let AltCon::DataAlt(id) = alt.con {
-                            Some(id)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                if data_con_ids.len() >= 2 {
-                    for &id in &data_con_ids {
-                        let sibs = self.siblings.entry(id).or_default();
-                        for &other in &data_con_ids {
-                            if other != id && !sibs.contains(&other) {
-                                sibs.push(other);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     /// Number of entries.
     pub fn len(&self) -> usize {

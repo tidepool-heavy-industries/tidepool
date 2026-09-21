@@ -13,7 +13,6 @@ publish = false
 tidepool-repr.workspace = true
 tidepool-heap.workspace = true
 tidepool-codegen.workspace = true
-proptest = "1.10.0"
 serde_json = { workspace = true, features = ["float_roundtrip"] }
 serde.workspace = true
 tidepool-runtime.workspace = true
@@ -25,15 +24,3 @@ tidepool-bridge-derive.workspace = true
 tidepool-bridge-effects.workspace = true
 frunk.workspace = true
 libc.workspace = true
-
-[dev-dependencies]
-criterion = { version = "0.8", features = ["html_reports"] }
-serial_test.workspace = true
-
-[[bench]]
-name = "codegen"
-harness = false
-
-[[test]]
-name = "haskell_verified"
-path = "tests/haskell_verified/mod.rs"

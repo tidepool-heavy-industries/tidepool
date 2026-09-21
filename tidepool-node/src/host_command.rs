@@ -129,8 +129,7 @@ impl StreamBuffer {
         let available = self.dropped + self.bytes.len() as u64;
         let start = start.clamp(self.dropped, available);
         let end = end.clamp(start, available);
-        let slice =
-            &self.bytes[(start - self.dropped) as usize..(end - self.dropped) as usize];
+        let slice = &self.bytes[(start - self.dropped) as usize..(end - self.dropped) as usize];
 
         let leading = slice
             .iter()

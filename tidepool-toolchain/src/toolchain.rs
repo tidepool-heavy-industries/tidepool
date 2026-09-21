@@ -1,4 +1,4 @@
-//! The ONE toolchain locator — where the GHC→Core extract binary and the
+//! The ONE toolchain locator — where the GHC→prepared-STG extractor and the
 //! Haskell stdlib source tree live — plus the startup **handshake** that
 //! refuses to serve an extract/stdlib pair that was not deployed together.
 //!

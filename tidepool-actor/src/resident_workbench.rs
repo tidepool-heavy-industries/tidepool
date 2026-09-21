@@ -2156,9 +2156,10 @@ where
                     let installation =
                         tidepool_runtime::value_to_json(&declarations, session.data_con_table(), 0);
                     let SpecInstallation { tools, slots } = decode_installation(installation)?;
-                    let declarations = crate::resident_interactive::project_tools(tools).map_err(
-                        |error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
-                    )?;
+                    let declarations =
+                        crate::resident_interactive::project_tools(tools).map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                        })?;
                     let dispatch = session
                         .live_payload_handle_owned_by(
                             hole.cont_id(),
@@ -2716,8 +2717,7 @@ where
     pub(crate) async fn live_bindings(
         &self,
         context: crate::ActorSessionContext,
-    ) -> Result<Vec<tidepool_runtime::session::WorkbenchBinding>, ResidentActorWorkbenchError>
-    {
+    ) -> Result<Vec<tidepool_runtime::session::WorkbenchBinding>, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, |session, context, _| {
                 Ok(session.workbench_bindings_in(context.placement.lexical_scope))
@@ -3069,40 +3069,39 @@ where
     } = compiled;
     match result {
         TurnResult::Decl(receipt) => {
-            let result =
-                match session.define_scoped_with_imports_in(
-                    context.placement.lexical_scope,
-                    &[&declaration_source],
-                    &declaration_imports,
-                ) {
-                    Ok(generation) => ResidentWorkbenchStep::Committed {
-                        output: format!(
-                            "defined {} at generation {}",
-                            if receipt.binders.is_empty() {
-                                "declaration".to_string()
-                            } else {
-                                receipt.binders.join(", ")
-                            },
-                            generation.0
-                        ),
-                        warnings: Vec::new(),
-                        installed_bindings: receipt.binders.clone(),
-                    },
-                    Err(tidepool_runtime::session::SessionError::ValidationFailed(failure)) => {
-                        ResidentWorkbenchStep::Rejected(failure.rejection_for_input(
-                            &format!("<cell item {}>", block.ordinal),
-                            &block.source,
-                        ))
-                    }
-                    Err(error) if classify_session(&error).class == FailureClass::UserHaskell => {
-                        ResidentWorkbenchStep::Rejected(classify_session(&error).message.into())
-                    }
-                    Err(error) => {
-                        return Err(ResidentActorWorkbenchError::Resident(
-                            ResidentError::Session(error),
-                        ))
-                    }
-                };
+            let result = match session.define_scoped_with_imports_in(
+                context.placement.lexical_scope,
+                &[&declaration_source],
+                &declaration_imports,
+            ) {
+                Ok(generation) => ResidentWorkbenchStep::Committed {
+                    output: format!(
+                        "defined {} at generation {}",
+                        if receipt.binders.is_empty() {
+                            "declaration".to_string()
+                        } else {
+                            receipt.binders.join(", ")
+                        },
+                        generation.0
+                    ),
+                    warnings: Vec::new(),
+                    installed_bindings: receipt.binders.clone(),
+                },
+                Err(tidepool_runtime::session::SessionError::ValidationFailed(failure)) => {
+                    ResidentWorkbenchStep::Rejected(failure.rejection_for_input(
+                        &format!("<cell item {}>", block.ordinal),
+                        &block.source,
+                    ))
+                }
+                Err(error) if classify_session(&error).class == FailureClass::UserHaskell => {
+                    ResidentWorkbenchStep::Rejected(classify_session(&error).message.into())
+                }
+                Err(error) => {
+                    return Err(ResidentActorWorkbenchError::Resident(
+                        ResidentError::Session(error),
+                    ))
+                }
+            };
             Ok(result)
         }
         TurnResult::Bind {
@@ -3198,9 +3197,8 @@ where
         Err(ResidentError::Run(error)) => Ok(ResidentWorkbenchStep::Rejected(
             render_runtime_rejection(input_ordinal, &error, &cell_text).into(),
         )),
-        // A prepared-route Haskell failure is the same user-level rejection Core
-        // reports as `ResidentError::Run`; integrity and infrastructure failures
-        // stay infrastructure errors.
+        // Haskell language failures are user-level rejections; integrity and
+        // infrastructure failures stay infrastructure errors.
         Err(ResidentError::Prepared(error))
             if error.kind() == tidepool_runtime::session::PreparedFailureKind::Language =>
         {
@@ -3217,13 +3215,7 @@ fn render_runtime_rejection(
     error: &tidepool_runtime::RuntimeError,
     cell_text: &str,
 ) -> String {
-    use tidepool_codegen::{jit_machine::JitError, yield_type::YieldError};
-    let detail = match error {
-        tidepool_runtime::RuntimeError::Jit(JitError::Yield(YieldError::Runtime(cause))) => {
-            cause.to_string()
-        }
-        _ => error.to_string(),
-    };
+    let detail = error.to_string();
     render_cell_runtime_failure(input_ordinal, &detail, cell_text)
 }
 
@@ -6640,19 +6632,7 @@ where
                 ready: PreparedCellStep::Executable(Box::new(ready)),
             });
         }
-        let referenced = result
-            .iter()
-            .flat_map(|item| match &item.ready {
-                PreparedCellStep::Executable(step) => match &step.result {
-                    TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => {
-                        tidepool_repr::free_vars::free_vars(&compiled.expr)
-                    }
-                    _ => Vec::new(),
-                },
-                _ => Vec::new(),
-            })
-            .collect::<Vec<_>>();
-        let dependencies = session.lease_bindings(&referenced);
+        let dependencies = session.lease_bindings(&[]);
         Ok(PreparedCell::Ready {
             items: result,
             dependencies,
@@ -7280,213 +7260,6 @@ mod request_tests {
                 if matches!(fields.as_slice(), [Value::Con(DataConId(104), changed)] if changed.len() == 2)
         ));
     }
-
-    #[tokio::test]
-    async fn incomplete_compilation_retires_only_its_registered_machine() {
-        use tidepool_repr::{CoreFrame, Literal, PrimOpKind, SessionId, TreeBuilder, VarId};
-        use tidepool_runtime::session::{EngineKind, PreparedRuntimeError, TurnCode};
-        let machines = Arc::new(SessionRegistry::new());
-        for id in [SessionId(1), SessionId(2)] {
-            let mut b = TreeBuilder::new();
-            b.push(CoreFrame::Lit(Literal::LitInt(42)));
-            let session = ResidentSession::bootstrap(
-                &b.build(),
-                DataConTable::new(),
-                frunk::HNil,
-                tidepool_mcp::CapturedOutput::new(),
-                Vec::new(),
-                64 * 1024,
-                None,
-            )
-            .unwrap();
-            machines.insert_idle(id, Box::new(session));
-        }
-        let access =
-            ResidentMachineAccess::new(machines.clone(), ActorWorkbenchSource::new("", Vec::new()));
-        let failed = access
-            .with_host_machine(SessionId(1), None, |session, _| {
-                let mut b = TreeBuilder::new();
-                let invalid = b.push(CoreFrame::PrimOp {
-                    op: PrimOpKind::SeqOp,
-                    args: vec![],
-                });
-                b.push(CoreFrame::Lam {
-                    binder: VarId(1),
-                    body: invalid,
-                });
-                session
-                    .run_with_sites(
-                        "invalid_job",
-                        TurnCode::core(&b.build(), &DataConTable::new(), &[]),
-                    )
-                    .map(|_| ())
-                    .map_err(ResidentActorWorkbenchError::Resident)
-            })
-            .await;
-        // The invalid fragment has no prepared program (it is a hand-built,
-        // never-extracted `CoreExpr`), so on the prepared route the turn
-        // never reaches fragment compilation at all: it is refused earlier,
-        // as a turn compiled without its prepared program. On Core, the
-        // SAME invalid fragment fails during `add_function`.
-        match EngineKind::from_env() {
-            EngineKind::Core => assert!(matches!(
-                failed,
-                Err(ResidentActorWorkbenchError::Resident(
-                    ResidentError::AddFunction(_)
-                ))
-            )),
-            EngineKind::Prepared => assert!(matches!(
-                failed,
-                Err(ResidentActorWorkbenchError::Resident(
-                    ResidentError::Prepared(PreparedRuntimeError::MissingProgram)
-                ))
-            )),
-        }
-        // Whether the FAILED turn's machine is retired is route-specific
-        // today: `with_host_machine` only retires on
-        // `ResidentSession::compilation_failed`, which reads
-        // `PersistentSession::machine()` — a Core-only accessor (`None` on
-        // the prepared route by construction, see `ResidentEngine::core`).
-        // So a prepared-route failure NEVER retires the machine yet,
-        // regardless of what failed — there is no prepared-route notion of
-        // a "poisoned machine" analogous to Core's `compilation_failed`
-        // flag. This is a real gap (a genuinely broken prepared install
-        // should probably retire its machine too), not something to paper
-        // over here: assert what the engine actually does per route, and
-        // the sibling checks below still prove session 2 is unaffected
-        // either way.
-        match EngineKind::from_env() {
-            EngineKind::Core => assert!(matches!(
-                machines.checkout_run(SessionId(1)),
-                Err(CheckoutError::Unknown(SessionId(1)))
-            )),
-            EngineKind::Prepared => assert!(
-                machines.checkout_run(SessionId(1)).is_ok(),
-                "prepared route: a MissingProgram turn failure does not (yet) retire its machine"
-            ),
-        }
-        let sibling = access
-            .with_host_machine(SessionId(2), None, |session, _| {
-                assert!(!session.compilation_failed());
-                Ok(42)
-            })
-            .await
-            .unwrap();
-        assert_eq!(sibling, 42);
-        assert!(machines.checkout_run(SessionId(2)).is_ok());
-    }
-
-    #[tokio::test]
-    async fn resident_reentry_state_tracks_unavailable_busy_and_stale_checkout() {
-        use std::time::Instant;
-        use tidepool_repr::{CoreFrame, Literal, SessionId, TreeBuilder};
-        use tidepool_runtime::session::{ResidentSessionState, Slot};
-
-        fn unbootstrapped() -> ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput> {
-            ResidentSession::unbootstrapped(
-                frunk::HNil,
-                tidepool_mcp::CapturedOutput::new(),
-                Vec::new(),
-                64 * 1024,
-                None,
-            )
-        }
-
-        fn bootstrapped(
-            expression: tidepool_repr::CoreExpr,
-        ) -> ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput> {
-            let table = tidepool_testing::gen::standard_datacon_table();
-            ResidentSession::bootstrap(
-                &expression,
-                table,
-                frunk::HNil,
-                tidepool_mcp::CapturedOutput::new(),
-                Vec::new(),
-                64 * 1024,
-                None,
-            )
-            .unwrap()
-        }
-
-        let machines = Arc::new(SessionRegistry::new());
-        let uninitialized_id = SessionId(11);
-        let reusable_id = SessionId(12);
-        let unavailable_id = SessionId(13);
-        machines.insert_idle(uninitialized_id, Box::new(unbootstrapped()));
-        let mut literal = TreeBuilder::new();
-        literal.push(CoreFrame::Lit(Literal::LitInt(42)));
-        machines.insert_idle(reusable_id, Box::new(bootstrapped(literal.build())));
-        let mut literal = TreeBuilder::new();
-        literal.push(CoreFrame::Lit(Literal::LitInt(42)));
-        machines.insert_idle(unavailable_id, Box::new(bootstrapped(literal.build())));
-
-        let source = ActorWorkbenchSource::new("", Vec::new());
-        let runner = ResidentActorRunner::new(Arc::clone(&machines), source.clone());
-        assert_eq!(
-            runner.resident_session_state(uninitialized_id),
-            ResidentSessionState::Uninitialized
-        );
-        assert_eq!(
-            runner.resident_session_state(reusable_id),
-            ResidentSessionState::Reusable
-        );
-
-        machines
-            .checkout_run(unavailable_id)
-            .unwrap()
-            .mark_wedged(Instant::now());
-        assert_eq!(
-            runner.resident_session_state(unavailable_id),
-            ResidentSessionState::Unavailable
-        );
-        assert_eq!(
-            runner.resident_session_state(reusable_id),
-            ResidentSessionState::Reusable,
-            "one unavailable session must not poison its sibling"
-        );
-
-        let checkout = machines.checkout_run(reusable_id).unwrap();
-        assert_eq!(
-            runner.resident_session_state(reusable_id),
-            ResidentSessionState::Running
-        );
-        assert!(matches!(
-            machines.remove(reusable_id),
-            Some(Slot::Running { .. })
-        ));
-        machines.insert_idle(reusable_id, Box::new(unbootstrapped()));
-        drop(checkout);
-        assert_eq!(
-            runner.resident_session_state(reusable_id),
-            ResidentSessionState::Uninitialized,
-            "stale checkout settlement must not replace the new incarnation"
-        );
-        assert_eq!(
-            runner.resident_session_state(SessionId(99)),
-            ResidentSessionState::Gone
-        );
-    }
-
-    #[test]
-    fn runtime_rejection_identifies_input_and_preserves_pattern_cause() {
-        use tidepool_codegen::{
-            host_fns::RuntimeError, jit_machine::JitError, yield_type::YieldError,
-        };
-        let error = tidepool_runtime::RuntimeError::Jit(JitError::Yield(YieldError::Runtime(
-            RuntimeError::PatternMatchFailure("Expr.hs:35:7-55|Just x".into()),
-        )));
-        assert_eq!(
-            render_runtime_rejection(4, &error, ""),
-            "<cell item 4>: runtime error: pattern match failure: Expr.hs:35:7-55|Just x"
-        );
-        let error =
-            tidepool_runtime::RuntimeError::Jit(JitError::InvalidSuspensionState("missing"));
-        assert_eq!(
-            render_runtime_rejection(2, &error, ""),
-            "<cell item 2>: runtime error: invalid suspension state: missing"
-        );
-    }
-
     #[test]
     fn matched_request_with_invalid_deadline_is_not_skipped_by_dispatch() {
         use tidepool_repr::{DataCon, DataConId};
@@ -7535,304 +7308,6 @@ mod request_tests {
             }
         }
     }
-
-    /// One notebook, two engines, through the production cell path
-    /// (`begin_fragment`): a pattern bind projected from its tuple, an
-    /// expression cell rendered through `render_cell_observation`
-    /// (`cellDisplay`), a failing cell reported as a rejection with the
-    /// committed prefix intact, and a later cell importing the prefix.
-    fn notebook_cells_on(engine: tidepool_runtime::session::EngineKind) {
-        use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
-        use tidepool_runtime::session::{ModuleEnv, SessionLib};
-
-        tidepool_testing::eval_harness::require_extract();
-        // effects/preamble exactly as resident_local_actor.rs does but with the
-        // smaller declaration set:
-        let declarations = [tidepool_mcp::notifications_decl()];
-        let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
-        let mut include = effects.include_paths().to_vec();
-        include.push(tidepool_testing::eval_harness::prelude_path());
-        include.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../haskell/actors"));
-        // The effect row is a concrete row literal, as `ActorRole::
-        // haskell_effects_type` renders it: a turn-module alias would be
-        // persisted into the display page's thin interface and dangle.
-        let preamble = insert_preamble_imports(
-            &tidepool_mcp::build_preamble(&declarations, false),
-            "qualified Tidepool.Actors.Shoal as Shoal",
-        );
-        let effects_alias = "'[Shoal.Notifications]";
-        let engine_discriminant: u64 =
-            matches!(engine, tidepool_runtime::session::EngineKind::Prepared) as u64;
-        let session_id = tidepool_repr::SessionId(
-            (u64::from(std::process::id()) << 16) | 4_242 | engine_discriminant,
-        );
-        let session_root = tempfile::tempdir().expect("session root");
-        let lib = SessionLib::open(
-            session_id,
-            session_root.path(),
-            ModuleEnv::standalone_default(),
-        )
-        .expect("declaration plane")
-        .with_validation_include(include.clone());
-        let mut session = ResidentSession::unbootstrapped_on(
-            engine,
-            frunk::HNil,
-            tidepool_mcp::CapturedOutput::new(),
-            include.clone(),
-            tidepool_runtime::DEFAULT_NURSERY_SIZE,
-            Some(lib),
-        );
-        let lexical_scope = session.mint_isolated_scope();
-        let resource_scope = RealmId::fresh();
-        session
-            .set_actor_execution(
-                tidepool_runtime::session::SessionRunContext {
-                    lexical_scope,
-                    resource_scope,
-                    ..tidepool_runtime::session::SessionRunContext::ROOT
-                },
-                EffectRunPolicy::HandleOrSuspend,
-                LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-            )
-            .expect("actor execution context");
-        let context = crate::ActorSessionContext {
-            actor: crate::ActorRef::first(crate::ActorId(1)),
-            placement: crate::ActorPlacement {
-                session: session_id,
-                resource_scope,
-                lexical_scope,
-            },
-            effect_policy: EffectRunPolicy::HandleOrSuspend,
-            live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-            source_imports: crate::ActorSourceImports::default(),
-            haskell_effects_alias: effects_alias.into(),
-            source_layer: std::sync::Arc::from([]),
-        };
-        let source = ActorWorkbenchSource::new(preamble, include);
-        let mut ordinal = 0usize;
-        let mut run = |text: &str| -> ResidentWorkbenchStep {
-            ordinal += 1;
-            begin_fragment(
-                &mut session,
-                &context,
-                &source,
-                RequestWorkbenchScope {
-                    response: None,
-                    request: None,
-                    type_modules: &[],
-                },
-                ParsedBlock {
-                    ordinal,
-                    total: 1,
-                    source: text.into(),
-                },
-                None,
-                None,
-            )
-            .unwrap_or_else(|error| panic!("{engine:?}: {text:?}: {error}"))
-        };
-
-        // 1. pattern bind: both names bound from the projected tuple
-        match run("(x, y) <- pure (20 :: Int, 22 :: Int)") {
-            ResidentWorkbenchStep::Committed {
-                output,
-                installed_bindings,
-                ..
-            } => {
-                assert_eq!(installed_bindings, vec!["x".to_string(), "y".to_string()]);
-                assert!(output.contains("x, y"), "{engine:?}: {output}");
-            }
-            other => panic!(
-                "{engine:?}: expected Committed, got {}",
-                describe_step(&other)
-            ),
-        }
-
-        // 2. expression cell: rendered through the cell display
-        match run("x + y") {
-            ResidentWorkbenchStep::Committed { output, .. } => {
-                assert!(output.contains("42"), "{engine:?}: {output}");
-            }
-            other => panic!(
-                "{engine:?}: expected Committed, got {}",
-                describe_step(&other)
-            ),
-        }
-
-        // 3. a failing cell is a rejection, not an infrastructure error
-        match run("Just impossible <- pure (Nothing :: Maybe Int)") {
-            ResidentWorkbenchStep::Rejected(rejection) => {
-                let text = rejection.output;
-                assert!(text.contains("runtime error"), "{engine:?}: {text}");
-            }
-            other => panic!(
-                "{engine:?}: expected Rejected, got {}",
-                describe_step(&other)
-            ),
-        }
-
-        // 4. the committed prefix survives the failure
-        match run("y - x") {
-            ResidentWorkbenchStep::Committed { output, .. } => {
-                assert!(output.contains('2'), "{engine:?}: {output}");
-            }
-            other => panic!(
-                "{engine:?}: expected Committed, got {}",
-                describe_step(&other)
-            ),
-        }
-
-        // Declaration publication retains its checked GHC type. The real
-        // status path must therefore answer repeatedly without asking the
-        // compiler to rediscover an unchanged generation.
-        match run("answer :: Int\nanswer = 42") {
-            ResidentWorkbenchStep::Committed { .. } => {}
-            other => panic!(
-                "{engine:?}: expected declaration commit, got {}",
-                describe_step(&other)
-            ),
-        }
-        if engine == tidepool_runtime::session::EngineKind::Prepared {
-            assert!(matches!(
-                run("previewAction <- pure (pure (1 :: Int) :: Eff '[Shoal.Notifications] Int)"),
-                ResidentWorkbenchStep::Committed { .. }
-            ));
-        }
-        drop(run);
-        let before_status = tidepool_extract_cmd::extract_spawn_count();
-        for _ in 0..2 {
-            let status = run_status_discovery(
-                &mut session,
-                &context,
-                &source,
-                &[],
-                crate::status_tool::StatusDiscovery::Bindings,
-            )
-            .expect("binding status infrastructure")
-            .expect("binding status result");
-            assert!(status.contains("answer :: Int [declaration]"), "{status}");
-        }
-        assert_eq!(
-            tidepool_extract_cmd::extract_spawn_count(),
-            before_status,
-            "unchanged binding status must issue zero compiler requests"
-        );
-
-        if engine == tidepool_runtime::session::EngineKind::Prepared {
-            use tidepool_runtime::session::turn::{
-                assemble_activation_module, run_activation_turn,
-            };
-            use tidepool_runtime::session::{TemplateSelector, TurnTemplate};
-            for (input_name, input_type, fail_renderer) in [
-                ("x", "Int", false),
-                ("x", "Int", true),
-                ("previewAction", "Eff '[Shoal.Notifications] Int", false),
-            ] {
-                let (input, _, _, _) = session
-                    .current_binding_in(lexical_scope, input_name)
-                    .unwrap();
-                let view = actor_compile_view(&session, &context, &source, &[]).unwrap();
-                let prepared = source.prepare(&view);
-                let mut preamble = insert_preamble_imports(&prepared.preamble, &prepared.imports);
-                if fail_renderer {
-                    preamble.push_str("\ninstance TidepoolInspection.WorkbenchDisplay Int where { workbenchDisplay _ = error \"preview failed\" }\n");
-                }
-                let templates = [TurnTemplate {
-                    kind: TemplateSelector::Bind,
-                    source: assemble_activation_module(&preamble, effects_alias, input_type, 4096),
-                }];
-                let includes: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
-                let retained = session.prepared_retained();
-                let before = tidepool_extract_cmd::extract_spawn_count();
-                let result = run_activation_turn(TurnRequest {
-                    turn_text: "sessionInput <- pure undefined",
-                    templates: &templates,
-                    include: &includes,
-                    session_root: view.session_root(),
-                    inject_modules: &prepared.injected,
-                    gen: view.next_value_generation().0,
-                    verdict: Some(generated_bind_verdict("sessionInput")),
-                    target: None,
-                    prepared: session.prepared_turn_request(&retained),
-                })
-                .unwrap();
-                assert_eq!(
-                    tidepool_extract_cmd::extract_spawn_count() - before,
-                    1,
-                    "activation uses one request without classification"
-                );
-                let TurnResult::Bind { compiled, .. } = result else {
-                    panic!("activation bind")
-                };
-                assert!(compiled.prepared.is_some());
-                if input_name == "x" && !fail_renderer {
-                    let mut installer_source = source.clone();
-                    installer_source.workbench_imports.extend_text(
-                        "qualified Tidepool.Agent.Contract\nqualified Tidepool.Effects.Core",
-                    );
-                    installer_source.preamble = format!(
-                        "{}\ntype HostedToolEffects = Tidepool.Effects.Core.AgentTools ': {effects_alias}\n",
-                        installer_source.preamble
-                    ).into();
-                    let installer = compile_block(
-                        &mut session,
-                        &context,
-                        &installer_source,
-                        "HostedToolEffects",
-                        &[],
-                        &ParsedBlock {
-                            ordinal: 1,
-                            total: 1,
-                            source: format!("_ <- Tidepool.Agent.Contract.installSpec @({effects_alias}) Tidepool.Agent.Contract.defaultSpec"),
-                        },
-                        None,
-                        Some(&TurnClassification {
-                            kind: TurnKind::Bind,
-                            binders: Vec::new(),
-                            items: Vec::new(),
-                        }),
-                    ).expect("known-shape tool installer compile");
-                    match installer {
-                        CompiledBlock::Ready(ready) => match ready.result {
-                            TurnResult::Bind { compiled, .. } => {
-                                assert!(compiled.prepared.is_some())
-                            }
-                            _ => panic!("installer must produce a prepared bind"),
-                        },
-                        CompiledBlock::Rejected(rejection) => {
-                            panic!("installer rejected: {rejection:?}")
-                        }
-                    }
-                    assert_eq!(
-                        tidepool_extract_cmd::extract_spawn_count() - before,
-                        2,
-                        "input/preview and installer each compile once without classification",
-                    );
-                }
-                let preview = session.run_mounted_inspection_with_sites(compiled.code(), input);
-                if fail_renderer {
-                    assert!(preview.is_err(), "renderer must fail");
-                } else {
-                    assert_eq!(
-                        decode_activation_observation(preview.unwrap()).unwrap(),
-                        (if input_name == "x" { "20" } else { "<opaque value>\nUse the input type to select fields or apply sessionInput." }.into(), false)
-                    );
-                }
-                assert!(
-                    session
-                        .current_binding_in(lexical_scope, input_name)
-                        .is_some(),
-                    "preview preserves the retained input"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn notebook_cells_run_on_prepared_stg() {
-        notebook_cells_on(tidepool_runtime::session::EngineKind::Prepared);
-    }
-
     /// The same-cell shape from a live Shoal session (2026-09-17): one cell
     /// that both RE-DECLARES a name and USES it from a bind statement in
     /// that SAME cell. `notebook_cells_on`'s per-statement `run` closure
@@ -7869,11 +7344,9 @@ mod request_tests {
         )
         .expect("declaration plane")
         .with_validation_include(include.clone());
-        let mut session = ResidentSession::unbootstrapped_on(
-            tidepool_runtime::session::EngineKind::Prepared,
+        let mut session = ResidentSession::unbootstrapped(
             frunk::HNil,
             tidepool_mcp::CapturedOutput::new(),
-            include.clone(),
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             Some(lib),
         );

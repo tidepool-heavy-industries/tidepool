@@ -8,14 +8,13 @@ import System.Directory (createDirectoryIfMissing, setCurrentDirectory)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import qualified Data.Sequence as Seq
 import Control.Exception
   ( evaluate, try, throwIO, SomeAsyncException, SomeException, Exception
   , fromException, toException )
-import Data.List (isPrefixOf, intercalate)
+import Data.List (intercalate)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
 import Data.Word (Word64)
-import Control.Monad (foldM, forM, forM_, void)
+import Control.Monad (foldM, forM, forM_)
 import System.Exit (ExitCode(..), exitWith)
 import System.IO (hPutStrLn, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8)
 import qualified System.Info as SystemInfo
@@ -26,7 +25,8 @@ import GHC.Driver.Env (HscEnv)
 import GHC.Unit.Types (unitString)
 import GHC.Core (Bind(..), CoreBind)
 import GHC.Core.DataCon (DataCon)
-import GHC.Types.Name (nameOccName, nameModule_maybe)
+import GHC.Core.TyCon (TyCon)
+import GHC.Types.Name (nameOccName)
 import GHC.Types.Id (idName)
 import GHC.Types.Name.Occurrence (occNameString)
 import qualified Data.Text as T
@@ -39,10 +39,7 @@ import Tidepool.Binders
   , declarationSourceWithTemplate, renderDeclarationForTemplate
   , TurnKind(..), parseTurnKind
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
-  , StmtBinders(..), TurnOut(..), renderVerdictsJson )
-import Tidepool.Artifacts
-  ( cborFileName, pruneAllClosedArtifacts, writeClosedTargets
-  , writeWholeModuleClosed, runMultiTargetClosed, renderAsksJson )
+  , StmtBinders(..), TurnOut(..), renderAskJson, renderVerdictsJson )
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
   , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..), dumpCore
@@ -53,7 +50,9 @@ import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), projectPreparedTargetWithConstructors, resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.ExecutionSchema
-  ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..) )
+  ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..)
+  , WireProgram(..), SiteRow(..) )
+import qualified Tidepool.EffectSchema
 import Tidepool.PreparedStg
   ( PreparedModule(..), PreparedBodyCache, newPreparedBodyCache
   , evictPreparedBodyMatching )
@@ -67,22 +66,23 @@ import Tidepool.ExtractUtil (capitalize)
 import Tidepool.ExtractRequest (InspectionRequest(..), WorkerRequest(..), workerRequestFromArgv)
 import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
 import Tidepool.Session
-  ( SessionScope(..), scaffoldTargetName, preparedScaffoldTargetName, preparedResumeTargetName
+  ( SessionScope(..), preparedScaffoldTargetName, preparedResumeTargetName
   , preparedDecodeTargetName, preparedApplyEntryTargetName, preparedApplyValueTargetName
-  , scaffoldOutputBase, parseSessionModule )
+  , parseSessionModule )
 import Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, evictFatIfaceMatching
   , OwnerInterfaceCache, newOwnerInterfaceCache, evictOwnerInterfaceMatching )
 import Tidepool.SessionArtifacts
   ( mkBoundBinders, parseValModule )
-import Tidepool.Translate
-  ( ClosedModule(..), UnresolvedVar(..), collectDataCons
-  , collectTransitiveDCons, collectUsedDataCons, mergeMetaPreserving
-  , targetBindingHasIO, translateBinds, translateModuleClosed
+import Tidepool.Metadata
+  ( collectDataCons, dcToMeta, mergeMetaPreserving, targetBindingHasIO
   , wiredInDataCons )
-import Tidepool.CborEncode (encodeTree, encodeMetadata, encodeTurnOut, encodeCellOut)
+import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut)
 import Tidepool.Timing (readTimingEnabled, timePhase)
 import Tidepool.TurnSource (extractModuleName, spliceTemplate)
+
+renderAsksJson :: [Tidepool.EffectSchema.YieldSite] -> String
+renderAsksJson sites = "[" ++ intercalate "," (map renderAskJson sites) ++ "]"
 
 -- | The retained-generation 'Set.Set' threads a request's
 -- @--retained-generation@ symbols (see 'Tidepool.RetainedUnfoldings') into
@@ -90,9 +90,8 @@ import Tidepool.TurnSource (extractModuleName, spliceTemplate)
 -- withheld from GHC's own simplifier rather than being inlined into a
 -- consumer compiled in the same session. Every call site outside
 -- 'processFile''s 'PreparedStg' compile passes 'Set.empty' (a true no-op):
--- only a prepared-STG compile ever recovers/persists a retained-generation
--- 'GlobalDecl' reference, so metadata checks and legacy Core compiles have
--- nothing to withhold. The resident-daemon path ('withResidentPipelineSelectedRequests',
+-- only a prepared-STG compile recovers and persists retained-generation
+-- 'GlobalDecl' references; metadata checks have nothing to withhold. The resident-daemon path ('withResidentPipelineSelectedRequests',
 -- used only behind @--worker-loop-v2@) honors this parameter per compile too,
 -- via a single installed plugin that reads a transaction-local 'IORef' cell.
 type Compiler =
@@ -225,7 +224,7 @@ dispatch compiler caches timing args =
         | isJust (requestInspectTypeBatch args)
           && not (length (requestInspections args) > 1 && all isInspectionTypeQuery (requestInspections args))
                                                   -> reportDiags (Left (toException (userError "inspection type batch requires at least two type queries and no other query kinds")))
-        | requestActivationPreview args && (not (requestTurn args) || not (requestPreparedTurn args) || not (isJust (requestTurnVerdict args)))
+        | requestActivationPreview args && (not (requestTurn args) || not (isJust (requestTurnVerdict args)))
                                                   -> reportDiags (Left (toException (userError "activation requires a prepared turn with a generated bind verdict")))
         | requestCell args                        -> runCellMode compiler args file
         | requestClassify args                    -> runClassifyMode timing args
@@ -393,7 +392,7 @@ scopeFromWorkerRequest args = SessionScope
 
 processFile
   :: Compiler -> RecoveryCaches -> Bool -> WorkerRequest -> FilePath -> IO ExitCode
-processFile compiler caches timing args path = do
+processFile compiler caches _timing args path = do
   let mOutDir = requestOutDir args
       mTarget = requestTarget args
   hPutStrLn stderr $ "Processing: " ++ path
@@ -429,132 +428,9 @@ processFile compiler caches timing args path = do
           [] -> maybe [] pure mTarget
     preparedArtifacts <- prepareArtifacts caches path hscEnv (pprModules prepared) preparedTargets
       (standardAuxiliaryRoots binds) (requestRetainedGenerations args)
-    let preparedConstructors = concatMap paConstructors preparedArtifacts
-
-    if not (null (requestTargets args))
-      -- Explicit multi-target mode (--targets a,b): takes priority over
-      -- --target/--all-closed, which stay untouched below for every other
-      -- caller. One runPipeline invocation (already run, above), several
-      -- named targets, one merged meta.cbor — see 'runMultiTargetClosed'.
-      then runMultiTargetClosed timing outDir hscEnv binds tycons preparedConstructors mCapturedTy warnTexts (requestTargets args)
-      else case (mTarget, requestAllClosed args) of
-      (_, True) -> do
-        -- All-closed mode: translate each binding independently via translateModuleClosed
-        -- Use original names (not deduped) since translateModuleClosed looks up by name.
-        -- Skip duplicates (GHC may produce multiple bindings with the same name).
-        -- Include all top-level binders, not just External ones.
-        -- GHC may mark user-defined bindings as Internal after optimization.
-        -- Filter out GHC-generated names (starting with '$').
-        -- Errors from translateModuleClosed are caught and those bindings are skipped.
-        -- With --target-module-only, restrict fixture emission to binders
-        -- DEFINED in the target module (by basename convention, mirroring
-        -- GhcPipeline). Dep-module bindings (e.g. quasi-quoter internals
-        -- from Tidepool.QQ) still participate in closed translation as
-        -- dependencies — they just don't get their own fixtures, keeping
-        -- the fixture sweep (and the JIT differential that walks it) to
-        -- user-authored bindings.
-        let targetModName = capitalize (takeBaseName path)
-            keepBinder b
-              | not (requestTargetModuleOnly args) = True
-              | otherwise = case nameModule_maybe (idName b) of
-                  Just m  -> moduleNameString (moduleName m) == targetModName
-                  Nothing -> True
-            allBinders = [ b | bind <- binds
-                         , b <- case bind of
-                                  NonRec b _ -> [b]
-                                  Rec pairs  -> map fst pairs ]
-            uniqueNames = Map.keys $ Map.fromList
-              [(n, ()) | b <- allBinders
-              , keepBinder b
-              , let n = occNameString (nameOccName (idName b))
-              , not ("$" `isPrefixOf` n)]
-        -- The try-and-skip loop stays UPSTREAM of the shared writer (per
-        -- 'translateTargetClosed''s haddock — this is a completely separate
-        -- function/loop, never folded into it behind a policy flag). It
-        -- forces each candidate's CBOR encoding here (not just its
-        -- translation) so a lazy-thunk failure (e.g. unsupported FFI calls,
-        -- the reason 'evaluate' is used at all) still causes a skip rather
-        -- than aborting the whole sweep — 'writeClosedTargets' below has no
-        -- per-target skip of its own and re-encodes every survivor for the
-        -- actual write.
-        closedTargets <- foldM (\acc name -> do
-          compileAttempt <- try $ do
-            closed@ClosedModule { cmNodes = nodes, cmUnresolved = unresolved } <- translateModuleClosed hscEnv binds name
-            if not (null unresolved) then do
-              let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
-              hPutStrLn stderr $ "  SKIPPED (" ++ name ++ "): unresolved external(s): " ++ unwords names
-              return Nothing
-            else do
-              _ <- evaluate (BS.length (encodeTree nodes))
-              return (Just closed)
-          case compileAttempt of
-            Left (e :: SomeException) -> do
-              hPutStrLn stderr $ "  SKIPPED (" ++ name ++ "): " ++ show e
-              return acc
-            Right Nothing -> return acc
-            Right (Just closed) -> return (acc ++ [(name, name, closed)])
-          ) [] uniqueNames
-        -- Validate and emit all surviving fixtures through the shared writer.
-        void $ writeClosedTargets timing outDir binds tycons preparedConstructors mCapturedTy warnTexts closedTargets
-        pruneAllClosedArtifacts outDir (map (\(_, outFileBase, _) -> outFileBase) closedTargets)
-
-      (Just targetName, False) ->
-        -- Whole-module mode: serialize all bindings as nested lets around the
-        -- target (shared with the session path; see 'writeWholeModuleClosed').
-        -- File base name matches the lookup name here (the general CLI
-        -- contract: --target foo produces foo.cbor). This is the branch the
-        -- self-iterating harness's full-compile path actually exercises
-        -- (tidepool-harness/src/compile.rs passes --target, never
-        -- --all-closed), so it's the one carrying translate/cbor_encode/write
-        -- timing.
-        void $ writeWholeModuleClosed timing outDir hscEnv binds tycons preparedConstructors mCapturedTy warnTexts targetName targetName
-
-      (Nothing, False) -> do
-        -- Per-binding mode (original behavior). NOT unified with
-        -- 'writeClosedTargets': 'translateBinds' translates each binding
-        -- standalone, over a bare 'TransState' with no unresolved-id set and
-        -- none of the runLLMTurn interception's aux var ids wired (see its
-        -- definition in Translate.hs) — it never runs the
-        -- 'resolveExternals'/reachability closure 'translateModuleClosed'
-        -- does, so it produces no 'ClosedModule' and structurally has
-        -- neither 'cmReachBinds' (required for metadata validation) nor any
-        -- unresolved/dangling tracking (what 'cmVarNames' is built from).
-        -- Routing it through the shared writer would mean rebuilding that
-        -- closure machinery here, i.e. changing Translate.hs's translation
-        -- semantics for this call site, which is outside this write path,
-        -- and not a real unification if faked. It still gains the two
-        -- things its own data honestly supports: a real 'hasIO' (was
-        -- hardcoded False) and the asks.json sidecar's loud-absence
-        -- contract — sites are structurally always empty on this path,
-        -- since 'translateBind' never wires the runLLMTurn interception.
-        let translated = translateBinds binds
-            dedupd = dedup Map.empty translated
-        mapM_ (\(name, nodes) -> do
-          let cbor = encodeTree nodes
-          let outFile = outDir </> cborFileName name
-          BS.writeFile outFile cbor
-          hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (Seq.length nodes) ++ " nodes, " ++ show (BS.length cbor) ++ " bytes)"
-          ) dedupd
-
-        -- Write DataCon metadata: merge TyCon-derived + usage-derived + transitive + wired-in
-        let tyconMeta = collectDataCons tycons
-            usedMeta = collectUsedDataCons binds
-            transitiveMeta = collectTransitiveDCons tycons binds
-            wiredInMeta = wiredInDataCons
-            -- Highest priority first; mergeMetaPreserving keeps colliding
-            -- (same-varId, different-qualified-name) entries distinct so the
-            -- loader rejects them loudly instead of one silently winning.
-            allMeta = mergeMetaPreserving
-                        [ wiredInMeta, tyconMeta, usedMeta, transitiveMeta ]
-            hasIO = any (targetBindingHasIO binds . fst) dedupd
-        let metaCbor = encodeMetadata allMeta hasIO mCapturedTy [] warnTexts []
-        let metaFile = outDir </> "meta.cbor"
-        BS.writeFile metaFile metaCbor
-        hPutStrLn stderr $ "  Wrote: " ++ metaFile ++ " (" ++ show (length allMeta) ++ " entries, " ++ show (BS.length metaCbor) ++ " bytes)"
-
-        let asksFile = outDir </> "asks.json"
-        writeFile asksFile (renderAsksJson [])
-        hPutStrLn stderr $ "  Wrote: " ++ asksFile ++ " (0 sites)"
+    if null preparedArtifacts
+      then ioError (userError "prepared extraction requires --target or --targets")
+      else writePreparedSidecars outDir binds tycons mCapturedTy warnTexts preparedArtifacts
 
     writePreparedArtifacts outDir preparedArtifacts
 
@@ -573,6 +449,7 @@ data PreparedArtifact = PreparedArtifact
   { paTarget :: String
   , paBytes :: BS.ByteString
   , paConstructors :: [DataCon]
+  , paYieldSites :: [Tidepool.EffectSchema.YieldSite]
   }
 
 -- Project before writing either engine's artifacts so the shared constructor
@@ -626,7 +503,14 @@ prepareArtifacts caches input hscEnv modules targets auxiliaryRoots retainedGene
         Left failure -> ioError (userError ("prepared projection failed: " <> show failure))
         Right projected -> evaluate projected
     bytes <- timePhase timing "prepared_encode" (evaluate (encodeWireProgram program))
-    pure (PreparedArtifact target bytes constructors)
+    let admitted = Set.fromList (map siteId (programSites program))
+        yieldSites =
+          [ site
+          | preparedModule' <- closureModules recovered
+          , site <- pmYieldSites preparedModule'
+          , Tidepool.EffectSchema.ysSite site `Set.member` admitted
+          ]
+    pure (PreparedArtifact target bytes constructors yieldSites)
 
 -- | Filter the standard prepared-turn auxiliary root names
 -- ('preparedResumeTargetName', 'preparedDecodeTargetName') down to those the
@@ -658,6 +542,21 @@ writePreparedArtifacts outDir artifacts = forM_ artifacts $ \artifact -> do
   BS.writeFile output (paBytes artifact)
   hPutStrLn stderr $ "  Wrote: " ++ output ++ " (prepared execution)"
 
+writePreparedSidecars
+  :: FilePath -> [CoreBind] -> [TyCon] -> Maybe T.Text -> [T.Text]
+  -> [PreparedArtifact] -> IO ()
+writePreparedSidecars outDir binds tycons capturedType warnings artifacts = do
+  let constructors = concatMap paConstructors artifacts
+      metadata = mergeMetaPreserving
+        [ wiredInDataCons, collectDataCons tycons, map dcToMeta constructors ]
+      hasIO = any (targetBindingHasIO binds . paTarget) artifacts
+      metaBytes = encodeMetadata metadata hasIO capturedType [] warnings []
+  BS.writeFile (outDir </> "meta.cbor") metaBytes
+  let multiple = length artifacts > 1
+  forM_ artifacts $ \artifact -> do
+    let asksName = if multiple then paTarget artifact ++ ".asks.json" else "asks.json"
+    writeFile (outDir </> asksName) (renderAsksJson (paYieldSites artifact))
+
 reportRecoveryResiduals :: String -> [RecoveryFailure] -> IO ()
 reportRecoveryResiduals _ [] = pure ()
 reportRecoveryResiduals target failures =
@@ -666,8 +565,7 @@ reportRecoveryResiduals target failures =
 
 -- | Turn mode (@--turn@): classify the raw
 -- turn text (or accept a caller-supplied @--turn-verdict@), splice the
--- matching template, compile through the resident session path
--- ('runPipelineSession' \/ 'writeWholeModuleClosed'), and write the rich
+-- matching template, compile through the resident prepared-STG path, and write the rich
 -- 'TurnOut' result as CBOR (@--turn-out@). A @decl@ verdict never compiles: its
 -- 'toDeclItems' come from a whole-module parse over the turn's OWN spliced
 -- scratch module ('extractBindersNamed', exact-name match — see
@@ -706,7 +604,7 @@ runTurnMode compiler caches args path = do
         -- Splice @tmplFile@ against the turn text, write the spliced module
         -- to a scratch file under 'outDir', and return it alongside the
         -- module name derived from its own @module X where@ header. The
-        -- scratch file's basename must match that header — 'runPipelineSession'
+        -- scratch file's basename must match that header — 'runPipelineSessionSelected'
         -- looks up the compiled module by @capitalize (takeBaseName path)@
         -- (GhcPipeline.hs) exactly as 'tidepool_runtime::extract_module_name'
         -- does today for the existing two-spawn wrap_* templates
@@ -766,15 +664,11 @@ runTurnMode compiler caches args path = do
         let selector = templateSelectorForVerdict kind (sbBinders sb)
         let scope = scopeFromWorkerRequest args
             matching = [f | (name, f) <- templates, name == templateSelectorWireName selector]
-            -- A prepared turn is one PreparedStg compile: it yields the same
-            -- Core result the legacy path reads, plus the prepared modules.
-            compileTurn modulePath
-              | requestPreparedTurn args = do
-                  prepared <- compiler PreparedStg (Map.keysSet (requestRetainedGenerations args)) GeneralCompile (Just scope) modulePath (requestIncludes args) (requestBuildProductsDir args)
-                  return (pprPipelineResult prepared, pprModules prepared)
-              | otherwise = do
-                  legacy <- compiler LegacyCore Set.empty GeneralCompile (Just scope) modulePath (requestIncludes args) (requestBuildProductsDir args)
-                  return (legacy, [])
+            -- A prepared turn uses one compiler pass for the checked metadata
+            -- and the prepared modules.
+            compileTurn modulePath = do
+              prepared <- compiler PreparedStg (Map.keysSet (requestRetainedGenerations args)) GeneralCompile (Just scope) modulePath (requestIncludes args) (requestBuildProductsDir args)
+              return (pprPipelineResult prepared, pprModules prepared)
             compileVariants _ [] = error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
             compileVariants index (tmplFile:rest) = do
               (spliced, _modName, modulePath) <- spliceInto tmplFile
@@ -785,7 +679,7 @@ runTurnMode compiler caches args path = do
                   (Just _, _ : _) -> compileVariants (index + 1) rest
                   _               -> throwIO err
         if requestActivationPreview args
-            && (not (requestPreparedTurn args) || selector /= SBind || length (sbBinders sb) /= 1 || length matching /= 1)
+            && (selector /= SBind || length (sbBinders sb) /= 1 || length matching /= 1)
           then fail "activation requires one prepared bind template"
           else pure ()
         (variant, spliced, compiledPath, result, preparedModules) <- compileVariants (0 :: Int) matching
@@ -793,20 +687,12 @@ runTurnMode compiler caches args path = do
             hscEnv      = prHscEnv result
             mCapturedTy = fmap T.pack (prCapturedType result)
             warnTexts   = map T.pack (prWarnings result)
-        -- The Core binding to look up. Scaffold-reserved by default, but a
-        -- caller whose template names its own target says so with --target.
-        -- The output file base
-        -- stays "result" regardless — every Rust caller reads result.cbor.
-        let targetName = fromMaybe scaffoldTargetName (requestTarget args)
-        -- Projection remains outside compileVariants: a prepared rejection
-        -- cannot select a Core template fallback. Its entry is the settled
+        -- Projection remains outside compileVariants. Its entry is the settled
         -- scaffold, and its constructors join the shared metadata before write.
-        preparedArtifacts <- if requestPreparedTurn args
-          then prepareArtifacts caches compiledPath hscEnv preparedModules
-                 [preparedScaffoldTargetName] (standardAuxiliaryRoots binds) (requestRetainedGenerations args)
-          else pure []
-        asksSites <- writeWholeModuleClosed timing outDir hscEnv binds (prTyCons result)
-          (concatMap paConstructors preparedArtifacts) mCapturedTy warnTexts targetName scaffoldOutputBase
+        preparedArtifacts <- prepareArtifacts caches compiledPath hscEnv preparedModules
+          [preparedScaffoldTargetName] (standardAuxiliaryRoots binds) (requestRetainedGenerations args)
+        let asksSites = concatMap paYieldSites preparedArtifacts
+        writePreparedSidecars outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
         writePreparedArtifacts outDir preparedArtifacts
         let wrapped = T.pack spliced
         case selector of

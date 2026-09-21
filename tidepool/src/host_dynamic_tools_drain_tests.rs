@@ -573,22 +573,17 @@ mod actual_seal {
             TurnResult::Expr { compiled, .. } => Arc::new(compiled),
             _ => panic!("expected compiled program"),
         };
-        let boot = compile("pure (0 :: Int)", 1);
-        let program = compile("rootDriver", 2);
+        let program = compile("rootDriver", 1);
         let session = tidepool_repr::SessionId((u64::from(std::process::id()) << 32) | 917);
         let lib = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
             .unwrap()
             .with_validation_include(include.clone());
-        let mut machine = ResidentSession::bootstrap(
-            &boot.expr,
-            boot.table.clone(),
+        let mut machine = ResidentSession::unbootstrapped(
             NoHandlers,
             TestSink,
-            include.clone(),
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             Some(lib),
-        )
-        .unwrap();
+        );
         machine.set_effect_execution(
             EffectRunPolicy::SuspendAll,
             LivePayloadPolicy::HASKELL_EFFECT_VALUE,

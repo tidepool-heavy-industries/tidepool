@@ -7,7 +7,7 @@
 -- the drift between the hint and where the hunk actually landed.
 --
 -- This module is deliberately lens-free and template-haskell-free (it imports
--- only boot packages plus "Tidepool.Aeson.Value"), so the @--all-closed@
+-- only boot packages plus "Tidepool.Aeson.Value"), so the @prepared fixture@
 -- extract session can load it and the Cranelift JIT can run every function:
 -- all recursion is tail- or constructor-guarded, all parsing is range-compare
 -- + 'Data.Char.ord' (never @read@\/@isDigit@), and 'Either' is threaded by

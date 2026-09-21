@@ -29,21 +29,6 @@
 -- reachable from the tenured closure's transitive graph, alongside sibling
 -- Ints captured via ordinary handled-effect responses.
 --
--- # What this does NOT resolve
---
--- Hand-built `CoreExpr` repros in `tidepool-runtime/tests/tenure_resume_gc_repro.rs`
--- reconstruct this EXACT shape — the same list Con, the same sibling
--- Int captures via a handled dispatch, the same suspend/tenure/resume
--- order, even real in-flight GC via a byte-scale nursery — and all of them
--- PASS cleanly under `TIDEPOOL_GC_POISON`/`TIDEPOOL_HEAP_VERIFY`. The
--- rooting discipline (stowed roots, persistent roots, `RootedLocal`/
--- `RootedStack`, the write barrier) is verified SOUND for every structural
--- variant reachable through hand-built `CoreExpr`. Whatever the real GHC
--- pipeline produces here differs from every hand-built reconstruction in a
--- way not yet identified — plausibly a JIT-codegen (Cranelift stack-map
--- coverage) difference rather than a Rust-side rooting gap. See this lane's
--- `notify_parent` report for the full diagnosis.
---
 -- GHC-heavy: needs `TIDEPOOL_EXTRACT` + the with-packages GHC on PATH.
 module MinimalWatchListHarness
   ( State (..)

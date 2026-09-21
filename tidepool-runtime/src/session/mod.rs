@@ -43,7 +43,7 @@ pub use inspection::{
 pub use kernel::{admit_checkout, Aged, SuspendableSession};
 
 pub use persistent::{
-    DeclarationPlaneCommit, EngineKind, MachineLease, MaterializationSetCommit, PersistentSession,
+    DeclarationPlaneCommit, MachineLease, MaterializationSetCommit, PersistentSession,
     ResidentEngine, ScopeRetirement, ValuePlaneCommit,
 };
 

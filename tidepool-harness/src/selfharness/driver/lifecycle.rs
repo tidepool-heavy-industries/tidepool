@@ -143,7 +143,7 @@ impl SelfHarnessDriver {
         .map_err(|e| DriverError::Session(format!("outer engine config: {e}")))?;
         outer_cfg.include.push(source.source_dir.clone());
 
-        let session = Self::build_outer_session(&outer_cfg, Self::open_outer_plane(&outer_cfg));
+        let session = Self::build_outer_session(Self::open_outer_plane(&outer_cfg));
 
         // The outer session lives in the tree's
         // registry (uniform checkout discipline, panic-safety Drop), the
@@ -205,7 +205,6 @@ impl SelfHarnessDriver {
     }
 
     pub(crate) fn build_outer_session(
-        cfg: &EngineConfig,
         lib: Option<tidepool_runtime::session::SessionLib>,
     ) -> crate::harness::Session {
         let handler_cfg = tidepool_handlers::HandlerConfig {
@@ -216,11 +215,9 @@ impl SelfHarnessDriver {
         };
         let stack: crate::harness::BoxedStack =
             Box::new(tidepool_handlers::build_base_stack(&handler_cfg));
-        let mut session = crate::harness::Session::unbootstrapped_on(
-            tidepool_runtime::session::EngineKind::from_env(),
+        let mut session = crate::harness::Session::unbootstrapped(
             stack,
             tidepool_mcp::CapturedOutput::new(),
-            cfg.include.clone(),
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             lib,
         );
@@ -282,8 +279,7 @@ impl SelfHarnessDriver {
             .agent
             .with_session(sid, |s| s.take_lib())
             .map_err(|e| DriverError::Session(e.to_string()))?;
-        let cfg = &self.outer.as_ref().ok_or_else(not_bootstrapped)?.cfg;
-        let fresh = Self::build_outer_session(cfg, lib);
+        let fresh = Self::build_outer_session(lib);
         self.agent
             .replace_session(sid, fresh)
             .map_err(|e| DriverError::Session(e.to_string()))?;
@@ -563,10 +559,7 @@ impl SelfHarnessDriver {
         let sid = self.outer_sid()?;
         let prepared_retained = self
             .agent
-            .with_session(sid, |session| {
-                (session.engine_kind() == tidepool_runtime::session::EngineKind::Prepared)
-                    .then(|| session.prepared_retained())
-            })
+            .with_session(sid, |session| Some(session.prepared_retained()))
             .map_err(|e| DriverError::Session(e.to_string()))?;
         // The outer session's include set: the template's scaffold imports
         // `Tidepool.Internal.Resume`, which the Core route resolves from the

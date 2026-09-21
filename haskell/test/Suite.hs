@@ -7,7 +7,7 @@ import qualified Data.Text as T
 -- qq-suite: regen now needs `--include lib --target-module-only
 -- --output-dir test/suite_cbor` (see haskell/CLAUDE.md "Regenerating Test Fixtures")
 import Tidepool.QQ (fmt, j, patch, uri)
--- Patch core types/functions are lens-free, so the --all-closed extract
+-- Patch core types/functions are lens-free, so the prepared fixture extract
 -- session can import them directly (like Tidepool.Render below).
 import Tidepool.Patch
   ( FilePatch (..), Hunk (..), HunkLine (..), HunkResult (..)
@@ -17,17 +17,17 @@ import Tidepool.Patch
   , hunkOldSide, hOldStart, hNewStart, hBody, hrDrift )
 -- render lives in lens-free Tidepool.Render (re-exported by Tidepool.Prelude);
 -- Suite.hs cannot import Tidepool.Prelude here (it pulls Control.Lens, which
--- the --all-closed extract session cannot see), so import render directly.
+-- the prepared fixture extract session cannot see), so import render directly.
 import Tidepool.Render (render)
 import Tidepool.Double (renderDouble, renderDoublePrec)
 -- Spec'd [fmt|{expr:spec}|] holes expand to calls into Tidepool.QQ.Fmt.Runtime
 -- (FSign/FAlign + the fmt* helpers). Like render, these live in a lens-free
--- module so the --all-closed extract session can import them directly.
+-- module so the prepared fixture extract session can import them directly.
 import Tidepool.QQ.Fmt.Runtime
 -- Value module directly, NOT the Tidepool.Aeson facade: the facade
 -- re-exports Tidepool.Aeson.Lens -> Control.Lens, which the extract GHC
 -- session cannot see (lens is not a boot package), so the facade kills
--- --all-closed regen at compile time.
+-- prepared fixture regen at compile time.
 import Tidepool.Aeson.Value (Value (..))
 type Text = T.Text
 

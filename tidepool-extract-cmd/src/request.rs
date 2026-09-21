@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v8";
-const MAGIC: &[u8; 8] = b"TPREQ008";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v9";
+const MAGIC: &[u8; 8] = b"TPREQ009";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InspectionScope {
@@ -48,7 +48,6 @@ enum Field {
     Target(OsString),
     Targets(Vec<String>),
     DumpCore,
-    AllClosed,
     TargetModuleOnly,
     Include(OsString),
     Turn,
@@ -83,7 +82,6 @@ enum Field {
     RetainedGeneration(SymbolIdentity, u64),
     /// A `--turn` request that also writes its target's prepared-STG program
     /// (`<target>.prepared.cbor`), compiled against the retained generations.
-    PreparedTurn,
     ActivationPreview,
     /// Inspection source failures reject the whole request with structured
     /// diagnostics instead of becoming per-query `Rejected` results.
@@ -118,7 +116,6 @@ impl ExtractRequest {
                         .push(Field::Targets(raw.split(',').map(str::to_owned).collect()));
                 }
                 Some("--dump-core") => request.fields.push(Field::DumpCore),
-                Some("--all-closed") => request.fields.push(Field::AllClosed),
                 Some("--target-module-only") => request.fields.push(Field::TargetModuleOnly),
                 Some("--include") => request.include(value(&mut args, "--include")?),
                 Some("--turn") => request.turn(),
@@ -213,7 +210,7 @@ impl ExtractRequest {
                     Field::Targets(values)
                 }
                 5 => Field::DumpCore,
-                6 => Field::AllClosed,
+                6 | 39 => return Err(ProtocolError::RetiredFieldTag(tag)),
                 7 => Field::TargetModuleOnly,
                 8 => Field::Include(decoder.os_string()?),
                 9 | 10 | 14 => return Err(ProtocolError::RetiredFieldTag(tag)),
@@ -247,7 +244,6 @@ impl ExtractRequest {
                     let identity = decoder.symbol_identity()?;
                     Field::RetainedGeneration(identity, decoder.u64()?)
                 }
-                39 => Field::PreparedTurn,
                 40 => Field::InspectTypeBatch(PathBuf::from(decoder.os_string()?)),
                 41 => Field::ActivationPreview,
                 42 => Field::InspectionStrict,
@@ -308,12 +304,6 @@ impl ExtractRequest {
     }
 
     /// Whether this turn request also asks for its prepared-STG program.
-    pub fn prepared_turn_requested(&self) -> bool {
-        self.fields
-            .iter()
-            .any(|field| matches!(field, Field::PreparedTurn))
-    }
-
     pub(crate) fn input(&mut self, value: impl AsRef<OsStr>) {
         self.fields.push(Field::Input(value.as_ref().to_owned()));
     }
@@ -413,10 +403,6 @@ impl ExtractRequest {
             .push(Field::RetainedGeneration(identity, generation));
     }
 
-    pub(crate) fn prepared_turn(&mut self) {
-        self.fields.push(Field::PreparedTurn);
-    }
-
     pub(crate) fn activation_preview(&mut self) {
         self.fields.push(Field::ActivationPreview);
     }
@@ -474,7 +460,6 @@ impl ExtractRequest {
                     flag(&mut flags, "--targets", OsStr::new(&values.join(",")))
                 }
                 Field::DumpCore => flags.push("--dump-core".into()),
-                Field::AllClosed => flags.push("--all-closed".into()),
                 Field::TargetModuleOnly => flags.push("--target-module-only".into()),
                 Field::Include(value) => flag(&mut flags, "--include", value),
                 Field::Turn => flags.push("--turn".into()),
@@ -533,7 +518,6 @@ impl ExtractRequest {
                         identity.record_parent.as_deref().unwrap_or(""),
                     )),
                 ),
-                Field::PreparedTurn => flags.push("--prepared-turn".into()),
                 Field::ActivationPreview => flags.push("--activation-preview".into()),
                 Field::InspectionStrict => flags.push("--inspection-strict".into()),
             }
@@ -696,7 +680,7 @@ impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidWorkerArgv => {
-                f.write_str("worker argv must be exactly --worker-request-v8 PAYLOAD")
+                f.write_str("worker argv must be exactly --worker-request-v9 PAYLOAD")
             }
             Self::NonUtf8Payload => f.write_str("worker request payload is not UTF-8"),
             Self::InvalidHeader => f.write_str("invalid worker request header"),
@@ -755,7 +739,6 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
             }
         }
         Field::DumpCore => out.push(5),
-        Field::AllClosed => out.push(6),
         Field::TargetModuleOnly => out.push(7),
         Field::Include(value) => tagged_frame(out, 8, value),
         Field::Turn => out.push(16),
@@ -793,7 +776,6 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
             encode_symbol_identity(out, identity);
             out.extend_from_slice(&generation.to_le_bytes());
         }
-        Field::PreparedTurn => out.push(39),
         Field::InspectTypeBatch(value) => {
             out.push(40);
             push_frame(out, value.as_os_str());
@@ -955,13 +937,13 @@ mod tests {
     #[test]
     fn payload_free_tags_are_one_byte_fields() {
         let mut request = MAGIC.to_vec();
-        request.extend_from_slice(&3u32.to_le_bytes());
-        request.extend_from_slice(&[5, 6, 7]);
+        request.extend_from_slice(&2u32.to_le_bytes());
+        request.extend_from_slice(&[5, 7]);
 
         let decoded = ExtractRequest::decode(&request).unwrap();
         assert!(matches!(
             decoded.fields.as_slice(),
-            [Field::DumpCore, Field::AllClosed, Field::TargetModuleOnly]
+            [Field::DumpCore, Field::TargetModuleOnly]
         ));
     }
 
@@ -1012,24 +994,6 @@ mod tests {
         request.retained_generation(identity.clone(), 3);
         let decoded = ExtractRequest::decode(&request.encode()).unwrap();
         assert_eq!(decoded.retained_generations().get(&identity), Some(&3u64));
-    }
-
-    #[test]
-    fn prepared_turn_round_trips_through_the_typed_protocol() {
-        let mut request = ExtractRequest::default();
-        request.input("turn.txt");
-        request.turn();
-        assert!(!ExtractRequest::decode(&request.encode())
-            .unwrap()
-            .prepared_turn_requested());
-        request.prepared_turn();
-        let decoded = ExtractRequest::decode(&request.encode()).unwrap();
-        assert!(decoded.prepared_turn_requested());
-        // A prepared turn writes different artifacts, so it keys differently.
-        assert!(request
-            .cli_argv()
-            .iter()
-            .any(|arg| arg == "--prepared-turn"));
     }
 
     #[test]
@@ -1126,6 +1090,8 @@ mod tests {
             "--worker-request-v4",
             "--worker-request-v5",
             "--worker-request-v6",
+            "--worker-request-v7",
+            "--worker-request-v8",
         ] {
             assert_eq!(
                 ExtractRequest::decode_worker_argv(&[flag.into(), payload.clone()]).unwrap_err(),
@@ -1136,7 +1102,16 @@ mod tests {
 
     #[test]
     fn typed_protocol_rejects_retired_magic_versions() {
-        for magic in [b"TPREQ001", b"TPREQ002", b"TPREQ003", b"TPREQ004"] {
+        for magic in [
+            b"TPREQ001",
+            b"TPREQ002",
+            b"TPREQ003",
+            b"TPREQ004",
+            b"TPREQ005",
+            b"TPREQ006",
+            b"TPREQ007",
+            b"TPREQ008",
+        ] {
             let mut request = magic.to_vec();
             request.extend_from_slice(&0u32.to_le_bytes());
             assert_eq!(
@@ -1210,8 +1185,8 @@ mod tests {
     }
 
     #[test]
-    fn typed_protocol_rejects_retired_session_bind_fields_explicitly() {
-        for tag in [9, 10, 14] {
+    fn typed_protocol_rejects_retired_fields_explicitly() {
+        for tag in [6, 9, 10, 14, 39] {
             let mut request = MAGIC.to_vec();
             request.extend_from_slice(&1u32.to_le_bytes());
             request.push(tag);

@@ -86,8 +86,7 @@ done
 
 set +e
 "$TIDEPOOL_EXTRACT" \
-  --all-closed \
-  --target-module-only \
+  --target result \
   --output-dir "$output_dir" \
   "${include_args[@]}" \
   "$compiler_source" \

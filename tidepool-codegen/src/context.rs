@@ -30,7 +30,7 @@ pub struct VMContext {
     pub tail_arg: *mut u8,
     /// Per-machine ambient state (cancellation, JSON con ids, stack-map
     /// registry, call depth, diagnostics, ...). Null until installed by
-    /// `JitEffectMachine::install_registries` (or wired directly onto a
+    /// `PreparedMachine::install_registries` (or wired directly onto a
     /// manually-constructed VMContext by a test).
     pub machine_state: *mut crate::machine_state::MachineState,
     /// Lowest permitted stack pointer for prepared native code. This is the

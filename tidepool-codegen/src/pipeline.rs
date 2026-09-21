@@ -128,7 +128,6 @@ pub struct CodegenPipeline {
     /// `compile_expr` can stamp it onto every `EmitSession` without threading
     /// the table through its signature. Defaults to empty (no wrapper
     /// tolerance), which preserves behavior for direct test callers.
-    pub lit_wrappers: crate::emit::LitWrapperIds,
     /// Session-lifetime count of Cranelift functions successfully compiled
     /// (fragment entries, lambda bodies, thunk bodies — every
     /// [`Self::define_function`] call that returned `Ok`). Never reset, so
@@ -235,7 +234,6 @@ impl CodegenPipeline {
             lambda_registry: Rc::new(LambdaRegistry::new()),
             lambda_registry_built_upto: 0,
             lambda_names_finalized: 0,
-            lit_wrappers: crate::emit::LitWrapperIds::default(),
             functions_defined: 0,
             blocks_emitted: 0,
             code_bytes: 0,
@@ -556,9 +554,8 @@ mod tests {
         enum Failure {
             None,
             Definition,
-            ClosureJob,
         }
-        for fail in [Failure::None, Failure::Definition, Failure::ClosureJob] {
+        for fail in [Failure::None, Failure::Definition] {
             let address = {
                 let mut pipeline = CodegenPipeline::new(&[]).unwrap();
                 let function = define_trivial_lambda(&mut pipeline, "owned_code", 42);
@@ -570,26 +567,6 @@ mod tests {
                     Failure::Definition => {
                         let mut ctx = pipeline.module.make_context();
                         assert!(pipeline.define_function(function, &mut ctx).is_err());
-                    }
-                    Failure::ClosureJob => {
-                        use tidepool_repr::{CoreFrame, PrimOpKind, TreeBuilder, VarId};
-                        let mut tree = TreeBuilder::new();
-                        let invalid = tree.push(CoreFrame::PrimOp {
-                            op: PrimOpKind::SeqOp,
-                            args: vec![],
-                        });
-                        tree.push(CoreFrame::Lam {
-                            binder: VarId(1),
-                            body: invalid,
-                        });
-                        assert!(crate::emit::expr::compile_expr(
-                            &mut pipeline,
-                            &tree.build(),
-                            "failed_job",
-                            &crate::emit::ExternalEnv::new()
-                        )
-                        .is_err());
-                        assert!(pipeline.compilation_failed());
                     }
                 }
                 address

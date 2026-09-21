@@ -11,36 +11,12 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
-use tidepool_repr::{DataConTable, PrincipalId};
-
 use crate::old_space::RootSlot;
 use crate::prepared_program::ProgramId;
-use crate::suspension::{ContinuationId, ParkKind, RealmId, ValueHandle};
+use crate::suspension::{ContinuationId, RealmId, ValueHandle};
 use tidepool_repr::execution_schema::{RuntimeRep, ValueId};
 
-/// The GC-tracked cell holding a parked continuation's heap pointer. Both
-/// shapes are registered as stowed roots for the frame's whole parked
-/// lifetime; the collector rewrites the cell in place on every collection.
-pub(crate) enum FrameCell {
-    /// Core: a heap-stable `Box` cell minted at park time.
-    Boxed(Box<*mut u8>),
-    /// Prepared: the continuation handle's own `OldSpace` root slot, moved
-    /// from the machine's persistent-root list to its stowed-root list for
-    /// the park. The slot cell stays with `OldSpace` for the machine's life;
-    /// only its registration moves.
-    Slot(RootSlot),
-}
-
-impl FrameCell {
-    /// The slot address the collector reads and rewrites.
-    pub(crate) fn slot(&self) -> *mut *mut u8 {
-        match self {
-            Self::Boxed(cell) => std::ptr::from_ref::<*mut u8>(&**cell).cast_mut(),
-            Self::Slot(slot) => slot.addr(),
-        }
-    }
-}
+pub(crate) type FrameCell = RootSlot;
 
 /// What a resume needs to interpret the answer and re-enter a prepared
 /// continuation. The evidence owner and the runner can be different
@@ -60,25 +36,13 @@ pub struct PreparedFrameEvidence {
     pub continuation_rep: RuntimeRep,
 }
 
-/// Per-engine evidence a parked frame carries for its eventual resume.
-pub(crate) enum FrameEvidence {
-    /// Core decodes answers and requests through the session's constructor
-    /// snapshot, refreshed as later fragments extend the vocabulary.
-    Core(Arc<DataConTable>),
-    /// Prepared validates answers against installed site evidence.
-    Prepared(PreparedFrameEvidence),
-}
+pub(crate) type FrameEvidence = PreparedFrameEvidence;
 
 /// One parked continuation and all policy needed to resume it.
 pub(crate) struct ContinuationFrame {
     pub(crate) cell: FrameCell,
     pub(crate) realm: RealmId,
-    pub(crate) principal: PrincipalId,
-    pub(crate) effect_policy: EffectRunPolicy,
-    pub(crate) kind: ParkKind,
     pub(crate) live_payload_root: Option<RootSlot>,
-    pub(crate) live_payload: LivePayloadPolicy,
-    pub(crate) cancel_flag: Arc<AtomicBool>,
     pub(crate) evidence: FrameEvidence,
 }
 
@@ -188,12 +152,6 @@ impl RootHandleLedger {
         true
     }
 
-    pub(crate) fn holds_root(&self, slot: RootSlot) -> bool {
-        self.handles
-            .values()
-            .any(|entry| std::ptr::eq(entry.slot.addr(), slot.addr()))
-    }
-
     /// Every live handle's root slot.
     pub(crate) fn slots(&self) -> impl Iterator<Item = RootSlot> + '_ {
         self.handles.values().map(|entry| entry.slot)
@@ -236,7 +194,7 @@ pub struct ResourceCounts {
 }
 
 /// External handle for cancelling a running machine — either engine's:
-/// `JitEffectMachine::cancel_handle`/`realm_cancel_handle` and
+/// `PreparedMachine::cancel_handle`/`realm_cancel_handle` and
 /// `PreparedMachine::realm_cancel_handle` both wrap one of this module's own
 /// `cancel_flag` entries in this same handle type rather than each defining
 /// their own.
@@ -249,7 +207,7 @@ pub struct ResourceCounts {
 /// prepared, it's observed at the next `PreparedSafepoint`
 /// (`Allocation`/`FunctionEntry`/`Backedge`/`ThunkEntry`/`ThunkCommit`).
 ///
-/// The flag is per-scope (per-`JitEffectMachine`, or per-`RealmId` on the
+/// The flag is per-scope (per-`PreparedMachine`, or per-`RealmId` on the
 /// prepared route), not per-run: call [`Self::reset`] between runs if you
 /// intend to reuse the machine/realm after a cancellation.
 #[derive(Clone, Debug)]
@@ -344,12 +302,9 @@ impl ResourceLedger {
         self.continuations
             .values()
             .flat_map(|frame| {
-                let evidence = match &frame.evidence {
-                    FrameEvidence::Prepared(evidence) => Some(evidence),
-                    FrameEvidence::Core(_) => None,
-                };
+                let evidence = Some(&frame.evidence);
                 let payload = frame.live_payload_root.map(|root| (root.addr(), evidence));
-                std::iter::once((frame.cell.slot(), evidence)).chain(payload)
+                std::iter::once((frame.cell.addr(), evidence)).chain(payload)
             })
             .collect()
     }
@@ -358,22 +313,6 @@ impl ResourceLedger {
         let mut ids: Vec<_> = self.continuations.keys().copied().collect();
         ids.sort_unstable();
         ids
-    }
-
-    /// Replace every parked Core frame's constructor view with one already
-    /// validated, monotone session-table snapshot.
-    ///
-    /// A live closure compiled by a later resident turn can be delivered into
-    /// an older continuation. That continuation must then interpret effect
-    /// responses using the whole session's constructor vocabulary, not only
-    /// the vocabulary present when the frame first parked. Prepared frames
-    /// carry installed site evidence instead and are left untouched.
-    pub(crate) fn refresh_continuation_tables(&mut self, table: Arc<DataConTable>) {
-        for frame in self.continuations.values_mut() {
-            if let FrameEvidence::Core(current) = &mut frame.evidence {
-                *current = Arc::clone(&table);
-            }
-        }
     }
 
     pub(crate) fn try_reserve_handles(
@@ -411,10 +350,6 @@ impl ResourceLedger {
 
     pub(crate) fn rehome_handle(&mut self, handle: ValueHandle, realm: RealmId) -> bool {
         self.handles.rehome(handle, realm)
-    }
-
-    pub(crate) fn handle_holds_root(&self, slot: RootSlot) -> bool {
-        self.handles.holds_root(slot)
     }
 
     /// ROOT is the machine's own scope, not a closable realm: its handles,
@@ -500,37 +435,5 @@ mod tests {
         assert!(closed.handles.is_empty());
         assert!(Arc::ptr_eq(&root, &ledger.cancel_flag(RealmId::ROOT)));
         assert_eq!(ledger.counts().cancellation_scopes, 1);
-    }
-
-    #[test]
-    fn parked_frames_receive_one_shared_newer_constructor_table() {
-        let mut ledger = ResourceLedger::default();
-        let realm = RealmId::fresh();
-        let original = Arc::new(DataConTable::new());
-        for value in [std::ptr::null_mut(), std::ptr::dangling_mut()] {
-            ledger.park(ContinuationFrame {
-                cell: FrameCell::Boxed(Box::new(value)),
-                realm,
-                principal: tidepool_repr::PrincipalId::SYSTEM,
-                effect_policy: EffectRunPolicy::SuspendAll,
-                kind: ParkKind::Plain,
-                live_payload_root: None,
-                live_payload: LivePayloadPolicy::None,
-                cancel_flag: Arc::new(AtomicBool::new(false)),
-                evidence: FrameEvidence::Core(Arc::clone(&original)),
-            });
-        }
-
-        let current = Arc::new(DataConTable::new());
-        ledger.refresh_continuation_tables(Arc::clone(&current));
-
-        for id in ledger.parked_ids() {
-            let FrameEvidence::Core(table) =
-                &ledger.continuation(id).expect("parked frame").evidence
-            else {
-                panic!("a Core frame keeps Core evidence");
-            };
-            assert!(Arc::ptr_eq(table, &current));
-        }
     }
 }

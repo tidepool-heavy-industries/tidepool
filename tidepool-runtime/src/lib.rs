@@ -1,10 +1,9 @@
 //! High-level runtime for compiling and executing Haskell source via Tidepool.
 //!
-//! Provides `compile_haskell` (source to a checked prepared program, plus
-//! the `CoreExpr`/`DataConTable` the pure-eval path in `compile_and_run_pure`
-//! still needs) and `compile_and_run` (source to evaluated result — a bare
-//! one-shot [`session::prepared::PreparedEngine`], no session/actor/decl
-//! plane involved), with filesystem caching of compiled artifacts.
+//! Provides `compile_haskell` (source to a checked prepared-STG program and
+//! constructor metadata) and `compile_and_run` (source to evaluated result
+//! through a one-shot [`session::prepared::PreparedEngine`]), with filesystem
+//! caching of compiled artifacts.
 //!
 //! Toolchain location, validation, fingerprinting, and the compile-output
 //! cache live in `tidepool-toolchain` (a crate this one depends on and sits
@@ -21,7 +20,6 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 pub use tidepool_bridge::Value;
 pub use tidepool_codegen::host_fns::{drain_diagnostics, push_diagnostic};
-use tidepool_codegen::jit_machine::JitEffectMachine;
 pub use tidepool_codegen::jit_machine::{CancelHandle, JitError};
 pub use tidepool_codegen::suspension::ResumeInput;
 pub use tidepool_effect::dispatch::DispatchEffect;
@@ -30,7 +28,7 @@ pub use tidepool_extract_cmd::{
     CompilerTransactionCancellation,
 };
 use tidepool_repr::serial::MetaWarnings;
-use tidepool_repr::{CoreExpr, DataConTable};
+use tidepool_repr::DataConTable;
 
 pub(crate) use tidepool_toolchain::extract_spawn_error;
 pub use tidepool_toolchain::prepared_artifact::PreparedArtifact;
@@ -71,22 +69,14 @@ pub fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-/// Result of successful Haskell compilation, including the checked prepared
-/// program and the `CoreExpr`/`DataConTable` [`compile_and_run_pure`] still
-/// runs directly (its Core-only pure path has not yet migrated).
+/// Result of successful Haskell compilation.
 #[derive(Debug)]
 pub struct CompileResult {
-    /// The compiled Core expression. Read by [`compile_and_run_pure`]'s
-    /// bare-`JitEffectMachine` path; the effectful `compile_and_run` family
-    /// runs `prepared` instead and does not read this field.
-    pub expr: CoreExpr,
-    /// DataCon metadata for constructor dispatch — read on both routes
-    /// (prepared execution and [`compile_and_run_pure`] alike).
+    /// DataCon metadata for constructor dispatch.
     pub table: DataConTable,
     /// Compile warnings (e.g. `has_io`, captured type).
     pub warnings: MetaWarnings,
-    /// Checked versioned prepared-STG program — what `compile_and_run`'s
-    /// effectful family actually executes.
+    /// Checked versioned prepared-STG program.
     pub prepared: PreparedArtifact,
 }
 
@@ -96,10 +86,7 @@ pub enum RuntimeError {
     /// Error during Haskell compilation.
     #[error(transparent)]
     Compile(#[from] CompileError),
-    /// A runtime/effect-handling failure, on either engine — `JitError`'s
-    /// name is a historical holdover from when it wrapped only Core JIT
-    /// execution; `resident.rs`'s prepared-route turn paths already reuse it
-    /// (via `JitError::Effect`) as the shared handler-failure vocabulary.
+    /// A runtime or effect-handler failure from prepared execution.
     #[error(transparent)]
     Jit(#[from] JitError),
     /// The prepared engine refused or failed a bare one-shot run (bootstrap,
@@ -109,24 +96,11 @@ pub enum RuntimeError {
     Prepared(#[from] session::prepared::PreparedRuntimeError),
 }
 
-/// Compiles Haskell source code to Tidepool Core at runtime.
+/// Compile Haskell source to a checked prepared-STG program.
 ///
-/// This function shells out to `tidepool-extract` (which must be available on the system `$PATH`)
-/// to perform GHC parsing, type-checking, and Core translation. It writes the source to a
-/// temporary file, executes the extractor, and reads back the resulting CBOR and metadata.
-///
-/// Compiled results are cached in the XDG cache directory (typically `~/.cache/tidepool`)
-/// to speed up repeated compilations. The cache key is derived from the source code,
-/// the target binder, and a fingerprint of any included dependency directories.
-///
-/// # Arguments
-/// * `source` - The Haskell source code to compile.
-/// * `target` - The name of the top-level binder to use as the entry point (e.g., "main").
-/// * `include` - Paths to directories containing Haskell modules to include in the search path.
-///
-/// # Returns
-/// * `Ok((CoreExpr, DataConTable))` on success.
-/// * `Err(CompileError)` if compilation fails, the extractor is missing, or output is invalid.
+/// GHC parses, typechecks, desugars, optimizes, and lowers the requested target
+/// to STG. Tidepool serializes the prepared program and constructor metadata;
+/// repeated compilations may be served from the toolchain cache.
 pub fn compile_haskell(
     source: &str,
     target: &str,
@@ -162,7 +136,7 @@ pub fn compile_haskell_salted(
         clippy::expect_used,
         reason = "compile_invocation compiled exactly this target"
     )]
-    let TargetArtifact { expr, prepared, .. } = bundle
+    let TargetArtifact { prepared, .. } = bundle
         .targets
         .remove(target)
         .expect("compile_invocation compiled exactly this target");
@@ -174,7 +148,6 @@ pub fn compile_haskell_salted(
     // externals for this compile — see its doc.
 
     Ok(CompileResult {
-        expr,
         table,
         warnings,
         prepared,
@@ -182,7 +155,7 @@ pub fn compile_haskell_salted(
 }
 
 /// Default JIT allocation nursery size (64 MiB), used by [`compile_and_run`]
-/// and [`compile_and_run_pure`].
+/// and [`compile_and_run`].
 pub const DEFAULT_NURSERY_SIZE: usize = 1 << 26; // 64 MiB
 
 /// Stack size for eval threads. The JIT's clean recursion-overflow guard needs
@@ -237,20 +210,16 @@ pub const EVAL_STACK_SIZE: usize = 256 * 1024 * 1024; // 256 MiB
 /// * `Err(RuntimeError)` for compilation or execution errors.
 #[allow(clippy::too_many_arguments)]
 pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
-    preamble: &str,
+    source: &str,
     target: &str,
-    effect_stack: &str,
-    expression: &str,
     include: &[&Path],
     handlers: &mut H,
     user: &U,
     nursery_size: usize,
 ) -> Result<EvalResult, RuntimeError> {
     compile_and_run_cancellable(
-        preamble,
+        source,
         target,
-        effect_stack,
-        expression,
         include,
         handlers,
         user,
@@ -283,43 +252,23 @@ pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
 /// it later.
 #[allow(clippy::too_many_arguments)]
 pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
-    preamble: &str,
+    source: &str,
     target: &str,
-    effect_stack: &str,
-    expression: &str,
     include: &[&Path],
     handlers: &mut H,
     user: &U,
     nursery_size: usize,
     on_ready: impl FnOnce(CancelHandle),
 ) -> Result<EvalResult, RuntimeError> {
-    let assembled = session::assemble_expression_module(
-        preamble,
-        target,
-        effect_stack,
-        expression,
-        session::ExpressionLift::Effectful,
-    );
+    let _ = target;
     let CompileResult {
-        expr,
-        mut table,
+        table,
         warnings,
         prepared,
-    } = compile_haskell(&assembled, session::PREPARED_SCAFFOLD_TARGET, include)?;
+    } = compile_haskell(source, session::PREPARED_SCAFFOLD_TARGET, include)?;
     if warnings.has_io {
         return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
     }
-    // Populate type-sibling groups from case branches so that get_companion
-    // can disambiguate constructors sharing unqualified names (e.g. Bin/Tip
-    // from Data.Map vs Data.Set) when a response value renders to JSON.
-    // NOT YET VERIFIED against a real GHC compile (build windows closed at
-    // the time this was written): `expr` is now __prepared's own extracted
-    // Core, a thin `settle target` wrapper — whether GHC's simplifier
-    // inlines `target`'s body into it before serialization (so its case
-    // branches are still visible here) or leaves it a bare application
-    // (losing sibling info from deep inside the real computation) needs a
-    // real compile to confirm.
-    table.populate_siblings_from_expr(&expr);
     let value = run_prepared_program(
         prepared.prepared().clone(),
         &table,
@@ -407,130 +356,20 @@ pub fn run_prepared_program<U, H: DispatchEffect<U>>(
     }
 }
 
-/// Compile a WHOLE already-assembled module string and run it effectfully
-/// against a bare `JitEffectMachine` — Core, not the prepared route.
-///
-/// This is [`compile_and_run`]'s pre-prepared-scaffold implementation,
-/// preserved under its own name rather than deleted: `compile_and_run`
-/// itself now takes preamble/target/effect_stack/expression pieces so it
-/// can assemble the prepared-STG scaffold
-/// ([`session::assemble_expression_module`] +
-/// [`session::PREPARED_SCAFFOLD_TARGET`] — see its doc and
-/// `plans/core-engine-removal.md`'s "The `UnsettledEntry` condition" for
-/// why a whole module string can't safely get that scaffold spliced in
-/// after the fact). A caller that only holds an already-fully-assembled
-/// module string (`tidepool-testing::eval_harness::EvalHarness::run_with`/
-/// `run_with_owned`, whose own callers build source via
-/// `tidepool_mcp::template_haskell` — a separate, richer templating system
-/// with `imports`/`helpers`/`budget`/`Render` capabilities
-/// `assemble_expression_module` does not have) is exactly the caller this
-/// task's instructions say does not get a splice invented for it: it stays
-/// here, on Core, until a decision is made about whether/how that shape
-/// reaches the prepared route.
-pub fn compile_and_run_whole_string_core<U, H: DispatchEffect<U>>(
-    source: &str,
-    target: &str,
-    include: &[&Path],
-    handlers: &mut H,
-    user: &U,
-    nursery_size: usize,
-) -> Result<EvalResult, RuntimeError> {
-    compile_and_run_cancellable_whole_string_core(
-        source,
-        target,
-        include,
-        handlers,
-        user,
-        nursery_size,
-        |_| {},
-    )
-}
-
-/// As [`compile_and_run_whole_string_core`], but hands the freshly-built
-/// machine's [`CancelHandle`] to `on_ready` BEFORE the (blocking) run
-/// begins — see [`compile_and_run_cancellable`]'s doc for the shape; this
-/// is that same behavior over a whole already-assembled module string,
-/// preserved for the same reason [`compile_and_run_whole_string_core`] is.
-pub fn compile_and_run_cancellable_whole_string_core<U, H: DispatchEffect<U>>(
-    source: &str,
-    target: &str,
-    include: &[&Path],
-    handlers: &mut H,
-    user: &U,
-    nursery_size: usize,
-    on_ready: impl FnOnce(CancelHandle),
-) -> Result<EvalResult, RuntimeError> {
-    let CompileResult {
-        expr,
-        mut table,
-        warnings,
-        ..
-    } = compile_haskell(source, target, include)?;
-    if warnings.has_io {
-        return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
-    }
-    table.populate_siblings_from_expr(&expr);
-    let mut machine = JitEffectMachine::compile(&expr, &table, nursery_size)?;
-    on_ready(machine.cancel_handle());
-    let value = machine.run(&table, handlers, user)?;
-    Ok(EvalResult::new(value, table, warnings.warnings))
-}
-
-/// Compile Haskell source and run it as a pure (non-effectful) program.
-///
-/// Skips freer-simple effect dispatch — the result is converted directly
-/// from the heap. Use this for programs that don't use an `Eff` wrapper.
-pub fn compile_and_run_pure(
-    source: &str,
-    target: &str,
-    include: &[&Path],
-) -> Result<EvalResult, RuntimeError> {
-    compile_and_run_pure_salted(source, target, include, None)
-}
-
-/// As [`compile_and_run_pure`], but threads a `(session, generation)` cache salt
-/// (see [`compile_haskell_salted`]). The declaration-accumulation lane passes
-/// [`session::SessionLib::cache_salt`] so per-session, per-generation compiles
-/// of identical-text probes never collide and a generation bump invalidates.
-pub fn compile_and_run_pure_salted(
-    source: &str,
-    target: &str,
-    include: &[&Path],
-    cache_salt: Option<&str>,
-) -> Result<EvalResult, RuntimeError> {
-    let CompileResult {
-        expr,
-        mut table,
-        warnings,
-        ..
-    } = compile_haskell_salted(source, target, include, cache_salt)?;
-    if warnings.has_io {
-        return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
-    }
-    table.populate_siblings_from_expr(&expr);
-    let mut machine = JitEffectMachine::compile(&expr, &table, DEFAULT_NURSERY_SIZE)?;
-    let value = machine.run_pure()?;
-    Ok(EvalResult::new(value, table, warnings.warnings))
-}
-
 /// Compile one `Eff` expression and run it with the given effect handlers,
 /// using the default nursery size (64 MiB). See
 /// [`compile_and_run_with_nursery_size`] for the full argument doc and why
 /// this takes assembly pieces rather than a whole module string.
 pub fn compile_and_run<U, H: DispatchEffect<U>>(
-    preamble: &str,
+    source: &str,
     target: &str,
-    effect_stack: &str,
-    expression: &str,
     include: &[&Path],
     handlers: &mut H,
     user: &U,
 ) -> Result<EvalResult, RuntimeError> {
     compile_and_run_with_nursery_size(
-        preamble,
+        source,
         target,
-        effect_stack,
-        expression,
         include,
         handlers,
         user,
@@ -548,11 +387,8 @@ mod tests {
     fn test_compile_identity() {
         tidepool_testing::eval_harness::require_extract();
         let source = "module Test where\nidentity x = x";
-        let CompileResult { expr, prepared, .. } =
+        let CompileResult { prepared, .. } =
             compile_haskell(source, "identity", &[]).expect("Failed to compile identity");
-
-        // identity = \x -> x — node count varies with GHC optimization level
-        assert!(expr.nodes.len() >= 2);
         assert!(!prepared.bytes().is_empty());
         assert!(!prepared.prepared().bindings().is_empty());
     }

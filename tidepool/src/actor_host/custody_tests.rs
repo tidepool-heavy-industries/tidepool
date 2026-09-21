@@ -137,7 +137,9 @@ fn custody_rejects_missing_worktrees_without_binding() {
     let (_repo, _runtime, _tree, bindings, admission) = custody_fixture();
     let actor = ActorRef::first(tidepool_actor::ActorId(7));
     for tree in ["../outside", "wt-absent"] {
-        assert!(admission.install_custody(actor, tree, tidepool_actor::ActorRole::Coding).is_err());
+        assert!(admission
+            .install_custody(actor, tree, tidepool_actor::ActorRole::Coding)
+            .is_err());
         assert!(bindings
             .lock()
             .current(&WorktreeId::from_raw(tree))
@@ -1019,7 +1021,11 @@ async fn a_resident_actor_may_write_its_own_worktree_and_nothing_else() {
     let (_repo, _runtime, tree, bindings, admission) = custody_fixture();
     let holder = ActorRef::first(tidepool_actor::ActorId(11));
     let _custody = admission
-        .install_custody(holder, tree.id().as_str(), tidepool_actor::ActorRole::Coding)
+        .install_custody(
+            holder,
+            tree.id().as_str(),
+            tidepool_actor::ActorRole::Coding,
+        )
         .unwrap();
     let authority = ActorWorktreeAuthority::new("custody-test", bindings);
     let source = admission.manager.source_repository().to_owned();

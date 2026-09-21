@@ -3,7 +3,7 @@
 //! (vmctx-less host fns and the external ambient shims).
 //!
 //! Homes all per-machine ambient state in one place, owned inline by each
-//! `JitEffectMachine`: the external-cancellation flag, the JSON decode
+//! `PreparedMachine`: the external-cancellation flag, the JSON decode
 //! constructor ids, the stack-map registry pointer, and the call-depth
 //! counter (leaf 1); the first-cause runtime error and diagnostics (leaf 2);
 //! the GC state + GC root registries (leaf 3: `GC_STATE`, `RUST_ROOTS`,
@@ -33,7 +33,7 @@
 //! the existing byte/boxed allocation ABIs have no vmctx argument, so they
 //! register through `CURRENT_MACHINE` before initializing or returning the
 //! payload. `RegistryGuard` installs that pointer from the same
-//! `JitEffectMachine::machine_state` placed in vmctx, and restores it before
+//! `PreparedMachine::machine_state` placed in vmctx, and restores it before
 //! another machine can run on the thread. Collection reaches the ledger back
 //! through vmctx; `MachineState::drop` reaches it directly. Thus allocation,
 //! tracing/sweep, and teardown converge on the same owner without a process
@@ -51,7 +51,7 @@
 //! `MachineState` is `pub`, and several of its methods plus
 //! [`install_current_machine`]/[`restore_current_machine`] are `pub` (not
 //! `pub(crate)`): a test that manually drives the JIT (without a
-//! `JitEffectMachine`) owns one directly, wires `vmctx.machine_state` at it,
+//! `PreparedMachine`) owns one directly, wires `vmctx.machine_state` at it,
 //! and/or installs it as `CURRENT_MACHINE`, exercising the same reach paths
 //! as production instead of a test-only backdoor.
 
@@ -128,6 +128,7 @@ impl GcRootSnapshot {
     /// Strong roots for a full graph trace. Remembered slots describe edges
     /// from old/external owners; they are not independent roots when deciding
     /// whether those owners themselves are live.
+    #[cfg(test)]
     pub(crate) fn into_major_slots(self) -> Vec<*mut *mut u8> {
         self.slots
     }
@@ -289,7 +290,7 @@ pub struct MachineState {
     /// place exactly like any other root.
     remembered_slots: RefCell<HashSet<*mut *mut u8>>,
     /// Byte ranges of every currently-live old-space arena. `OldSpace` owns
-    /// its arenas but hangs off `JitEffectMachine`/`SessionState`, not
+    /// its arenas but hangs off `PreparedMachine`/`SessionState`, not
     /// reachable from `perform_gc` (vmctx -> `MachineState` only) — recording
     /// each arena's range here as it is allocated gives a diagnostic pass
     /// old-space bounds without threading `OldSpace` itself through vmctx.
@@ -345,7 +346,7 @@ pub struct MachineState {
 }
 
 // SAFETY: MachineState is only ever accessed from the single thread driving
-// the owning JitEffectMachine's run; the raw stack-map pointer is never
+// the owning PreparedMachine's run; the raw stack-map pointer is never
 // dereferenced off that thread.
 unsafe impl Send for MachineState {}
 
@@ -416,7 +417,7 @@ impl MachineState {
 
     // --- stack map registry ---------------------------------------------
     // `pub`: bare-VMContext test harnesses (separate crates, no
-    // JitEffectMachine) install this directly on their own MachineState.
+    // PreparedMachine) install this directly on their own MachineState.
 
     /// Replace the whole chain with exactly this one registry. Single-program
     /// owners (the one-shot `PreparedInvocation`, and a `PreparedMachine`'s
@@ -629,24 +630,12 @@ impl MachineState {
 
     // --- Host-built value constructor ids ----------------------------------
 
-    pub(crate) fn set_text_con_id(&self, id: Option<tidepool_repr::DataConId>) {
-        self.text_con_id.set(id);
-    }
-
     pub(crate) fn text_con_id(&self) -> Option<tidepool_repr::DataConId> {
         self.text_con_id.get()
     }
 
-    pub(crate) fn set_json_con_ids(&self, ids: Option<tidepool_bridge::json_builder::JsonConIds>) {
-        self.json_con_ids.set(ids);
-    }
-
     pub(crate) fn json_con_ids(&self) -> Option<tidepool_bridge::json_builder::JsonConIds> {
         self.json_con_ids.get()
-    }
-
-    pub(crate) fn set_time_con_ids(&self, ids: Option<tidepool_bridge::time::TimeConIds>) {
-        self.time_con_ids.set(ids);
     }
 
     pub(crate) fn time_con_ids(&self) -> Option<tidepool_bridge::time::TimeConIds> {
@@ -911,17 +900,6 @@ impl MachineState {
     }
 
     /// Install a retained session heap buffer as the active GC region.
-    pub(crate) fn install_session_buffer(&self, mut buffer: Vec<u64>) {
-        let start = buffer.as_mut_ptr() as *mut u8;
-        let size = buffer.len() * 8;
-        *self.gc_state.borrow_mut() = Some(GcState {
-            active_start: start,
-            active_size: size,
-            active_buffer: Some(buffer),
-            prepared: None,
-        });
-    }
-
     /// Install one prepared heap with its pinned compiled-layout owners.
     /// A live heap must be retired by its owning run before another is installed.
     #[cfg(test)]
@@ -1091,6 +1069,7 @@ impl MachineState {
     /// GC state, called from `RegistryGuard::drop` BEFORE `clear_run_scratch`
     /// takes the `GcState`. Returns `(None, 0)` when there's no `GcState`
     /// installed (e.g. a run that never reached GC setup).
+    #[cfg(test)]
     pub(crate) fn reclaim_session_heap(&self, alloc_ptr: *mut u8) -> (Option<Vec<u64>>, usize) {
         match self.gc_state.borrow_mut().as_mut() {
             Some(state) => {
@@ -1123,6 +1102,7 @@ impl MachineState {
     /// reclaimed by `reclaim_session_heap` before this runs) and clear the
     /// per-run rust roots. Does NOT touch `persistent_roots` — those are
     /// session-scoped and survive until `free_session_heap`.
+    #[cfg(test)]
     pub(crate) fn clear_run_scratch(&self) {
         self.prepared_exception.set(std::ptr::null_mut());
         self.gc_state.borrow_mut().take();
@@ -1130,7 +1110,7 @@ impl MachineState {
     }
 
     /// MACHINE-DROP teardown: clear session-scoped persistent roots and take
-    /// `GcState`. Called by `JitEffectMachine::drop`. Operates directly on
+    /// `GcState`. Called by `PreparedMachine::drop`. Operates directly on
     /// `self` (not through any ambient reach) so it always clears exactly
     /// the dying machine's own registries.
     pub(crate) fn free_session_heap(&self) {
@@ -1139,7 +1119,7 @@ impl MachineState {
         // Defensive: a machine dropped mid-nested-child (a child panicked and
         // its guard unwound) must not leave a dangling stowed slot registered.
         self.clear_stowed_roots();
-        // Per-arena `retire_old_space_arena` calls (JitEffectMachine::drop,
+        // Per-arena `retire_old_space_arena` calls (PreparedMachine::drop,
         // before this runs) already forget slots pointing into old-space; this
         // is the blanket net for anything left (e.g. a boxed-array payload
         // slot, which lives in an external malloc'd buffer outside every
@@ -1209,7 +1189,7 @@ impl MachineState {
     /// remove-by-position semantics (a slot registered once is removed once;
     /// an already-removed slot is a no-op, so release paths that can race a
     /// wholesale teardown stay idempotent). Added for per-runtime-resource-scope release
-    /// (`JitEffectMachine::close_realm`): a released value's slot cell stays
+    /// (`PreparedMachine::close_realm`): a released value's slot cell stays
     /// allocated (owned by `OldSpace::slots` for the machine's life — 8 bytes),
     /// but the GC stops tracing and rewriting it, so the value it pinned can
     /// be collected once nothing else reaches it.
@@ -1301,6 +1281,7 @@ impl MachineState {
         out.extend(self.stowed_roots.borrow().iter().copied());
     }
 
+    #[cfg(test)]
     pub(crate) fn register_code_roots(&self, roots: impl IntoIterator<Item = *mut *mut u8>) {
         self.code_roots.borrow_mut().extend(roots);
     }
@@ -2834,21 +2815,6 @@ impl MachineState {
         self.external_payload_view(published, expected)
     }
 
-    /// Validate wrapper-declared payloads and remember every boxed element
-    /// slot. This is called when wrappers first move into old-space, before
-    /// the tenure fixup minor collection, so initialization performed while
-    /// the barrier was disarmed cannot strand a nursery child.
-    pub(crate) fn remember_external_payload_edges(
-        &self,
-        payloads: impl IntoIterator<Item = (*mut u8, ExternalStorageKind)>,
-    ) -> Result<(), ExternalStorageValidationError> {
-        let selected: Vec<_> = payloads
-            .into_iter()
-            .map(|(ptr, kind)| (ptr as usize, kind))
-            .collect();
-        self.retain_external_payloads(&selected)
-    }
-
     fn stage_external_dead(
         storage: &HashMap<*mut u8, ExternalStorage>,
         marked: &HashSet<*mut u8>,
@@ -2987,7 +2953,7 @@ impl Default for MachineState {
 ///
 /// # Safety
 /// `vmctx` must be non-null and `(*vmctx).machine_state` must have been
-/// installed (by `JitEffectMachine::install_registries`, or wired directly
+/// installed (by `PreparedMachine::install_registries`, or wired directly
 /// onto a manually-constructed `VMContext` in a test) before this is called.
 pub(crate) unsafe fn machine_state<'a>(vmctx: *mut VMContext) -> &'a MachineState {
     debug_assert!(!vmctx.is_null() && !(*vmctx).machine_state.is_null());
@@ -3038,9 +3004,9 @@ thread_local! {
 
 /// Install `ms` as this thread's current machine, returning the
 /// previously-installed pointer (null if none). Called by
-/// `JitEffectMachine::install_registries`; the returned previous value is
+/// `PreparedMachine::install_registries`; the returned previous value is
 /// restored by `RegistryGuard::drop`. `pub` (not `pub(crate)`): bare-VMContext
-/// test harnesses in `tests/` (separate crates, no `JitEffectMachine`) call
+/// test harnesses in `tests/` (separate crates, no `PreparedMachine`) call
 /// this directly on their own `MachineState`, exercising the same reach path
 /// as production instead of a test-only backdoor — same rationale as the
 /// `pub` `MachineState` methods above.
@@ -3060,7 +3026,7 @@ pub fn restore_current_machine(prev: *mut MachineState) {
 ///
 /// # Safety
 /// The returned reference must not be retained past the call that produced
-/// it: the pointee is owned by a `JitEffectMachine` whose run may end (and
+/// it: the pointee is owned by a `PreparedMachine` whose run may end (and
 /// clear `CURRENT_MACHINE`) at any safepoint.
 pub(crate) unsafe fn current_machine<'a>() -> Option<&'a MachineState> {
     let p = CURRENT_MACHINE.with(|c| c.get());
@@ -3072,7 +3038,7 @@ pub(crate) unsafe fn current_machine<'a>() -> Option<&'a MachineState> {
 }
 
 /// Test-only support for exercising the ambient shims / vmctx-less host fns
-/// outside a full `JitEffectMachine` run.
+/// outside a full `PreparedMachine` run.
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::{install_current_machine, restore_current_machine, MachineState};
@@ -3080,7 +3046,7 @@ pub(crate) mod test_support {
     /// Install a fresh throwaway `MachineState` as this thread's current
     /// machine for the duration of `f`, restoring whatever was previously
     /// installed afterward (mirrors `install_registries`/`RegistryGuard::drop`
-    /// without needing a full `JitEffectMachine`).
+    /// without needing a full `PreparedMachine`).
     pub(crate) fn with_test_machine<R>(f: impl FnOnce() -> R) -> R {
         struct Restore(*mut MachineState);
         impl Drop for Restore {

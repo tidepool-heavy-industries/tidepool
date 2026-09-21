@@ -1,7 +1,6 @@
 //! WHNF/NF forcing (`heap_force`, `deep_force`) and the tail-call trampoline.
 
 use crate::context::VMContext;
-use crate::effect_machine::RootedLocal;
 use crate::layout;
 use crate::machine_state::machine_state;
 use rustc_hash::FxHashSet;
@@ -13,6 +12,32 @@ use super::errors::{
     runtime_blackhole_trap, RuntimeError,
 };
 use super::gc::{register_rust_root, rust_roots_mark, truncate_rust_roots};
+
+/// A stable heap pointer cell registered as a GC root for this guard's life.
+struct RootedLocal {
+    cell: Box<*mut u8>,
+    vmctx: *mut VMContext,
+    mark: usize,
+}
+
+impl RootedLocal {
+    unsafe fn new(vmctx: *mut VMContext, ptr: *mut u8) -> Self {
+        let mark = rust_roots_mark(vmctx);
+        let mut cell = Box::new(ptr);
+        unsafe { register_rust_root(vmctx, &mut *cell as *mut *mut u8) };
+        Self { cell, vmctx, mark }
+    }
+
+    fn get(&self) -> *mut u8 {
+        *self.cell
+    }
+}
+
+impl Drop for RootedLocal {
+    fn drop(&mut self) {
+        unsafe { truncate_rust_roots(self.vmctx, self.mark) };
+    }
+}
 
 /// Upper bound on consecutive EVALUATED-indirection follows in one
 /// `heap_force` call. A genuine chain needs one distinct (>=48-byte) thunk per
@@ -378,7 +403,7 @@ pub extern "C" fn trampoline_resolve(vmctx: *mut VMContext) -> *mut u8 {
             // here — otherwise a runaway loop observes the cancel in
             // `gc_trigger`, receives a poison pointer from `runtime_oom`, and
             // immediately re-enters the trampoline forever. Returning the
-            // poison here unwinds up to `JitEffectMachine::run_pure`, which
+            // poison here unwinds up to `PreparedMachine::run_pure`, which
             // then surfaces `RuntimeError::Cancelled`.
             if check_cancel_and_set_error(vmctx) {
                 (*vmctx).tail_callee = std::ptr::null_mut();

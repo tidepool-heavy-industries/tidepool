@@ -548,7 +548,10 @@ mod tests {
     fn a_worktree_less_launch_can_neither_write_nor_spawn() {
         let errand = super::ActorLaunchRoleWire::ActorInheritedRole.effective_role(false);
         assert_eq!(errand.role(), crate::ActorRole::Research);
-        assert_eq!(errand.native_tools(), crate::NativeToolClass::InspectionOnly);
+        assert_eq!(
+            errand.native_tools(),
+            crate::NativeToolClass::InspectionOnly
+        );
         assert_eq!(errand.workspace(), crate::WorkspaceAccess::InspectOnly);
         assert_eq!(errand.descendants().maximum_active_children, Some(0));
         assert_eq!(errand.descendants().maximum_depth, 0);

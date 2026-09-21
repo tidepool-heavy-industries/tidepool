@@ -1,28 +1,11 @@
-# Cranelift JIT and effect machine
+# Prepared-STG codegen and runtime
 
-This crate compiles `CoreExpr`, runs the JIT effect machine, traces JIT frames,
-and bridges live heap values. High-level compilation, sessions, and actor policy
-belong above it.
+This crate validates prepared execution programs, lowers them to Cranelift, and owns the heap, collector integration, root ledger, cancellation, and continuation machine. High-level compilation, sessions, and actor policy belong above it.
 
-- Every parked continuation is an explicit `ContinuationId` registered as a GC
-  root. Single-continuation policy belongs to callers, not a second JIT path.
-- Initial and resumed completion use the same materialization implementation.
-  Do not add resume-only epilogues or parallel suspension APIs.
-- Keep parked-continuation, value-handle, persistent-binding, and persistent
-  ledger roots separately observable. Deregistration does not imply immediate
-  old-space reclamation.
-- Every allocation/forcing path installs the complete root registry set used by
-  collection. Partial registry installation is corruption, not an optimization.
-- Heap mutations record generational edges at the store. Ordinary Rust field
-  replacements use `store_heap_pointer`; emitted, atomic, and bulk writes use
-  `write_barrier`. Never remember movable nursery slot addresses or predict
-  future writes at tenure.
-- `ValueHandle` carries opaque live values between continuations without
-  serialization. Unknown handles and continuations are typed errors.
-- Unexpected runtime shapes produce a poisoned result with a useful breadcrumb;
-  never emit SIGILL or fabricate a fallback value.
-- Reject bottom-bearing resume answers before consuming the continuation.
-- Diagnostic and forcing hooks are opt-in, deterministic, test-only where
-  appropriate, and never promoted into production recovery APIs.
-- Consult `docs/continuation-parking-contract.md` when touching suspension,
-  rooting, resumption, or cleanup behavior.
+- Every parked continuation has an explicit `ContinuationId` and registered roots.
+- Initial and resumed completion share one settlement implementation.
+- Keep continuation, value-handle, binding, and code-export roots separately observable.
+- Every allocating path installs the complete root set used by collection.
+- Heap mutations record generational edges at the store.
+- Unknown handles, continuations, and runtime shapes are typed failures.
+- Reject invalid resume answers before consuming the continuation.

@@ -32,7 +32,7 @@
 --     synthetic type-only modules.
 --
 -- GATING: nothing here runs on the normal one-shot eval path. 'SessionScope'
--- with an empty 'ssValIfaces' is inert; 'GhcPipeline.runPipeline' calls the
+-- with an empty 'ssValIfaces' is inert; 'GhcPipeline.runPipelineSelected' calls the
 -- session machinery only when a scope is supplied.
 --
 -- 'typecheckIface' reconstructs an

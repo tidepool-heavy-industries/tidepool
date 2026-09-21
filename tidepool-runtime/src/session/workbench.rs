@@ -695,11 +695,9 @@ pub fn classify_workbench_item(source: &str) -> Result<WorkbenchItem, String> {
 // already in scope (an import). [`detect_hoisted_declaration_collision`]
 // catches the shape lexically, before the cell ever reaches GHC.
 //
-// This is a SOURCE-LEVEL APPROXIMATION, not a real parse, and deliberately
-// not built on `tidepool_repr::free_vars`: that engine computes free
-// variables over `CoreExpr`, GHC's own post-typecheck Core, which does not
-// exist yet at this point in the pipeline (a raw notebook cell is exactly
-// what GHC has not seen). The approximation below is biased throughout
+// This is a source-level approximation rather than a real parse because the
+// raw notebook cell has not reached GHC. The approximation below is biased
+// throughout
 // toward a MISSED detection over a FALSE rejection: ambiguous shapes (a
 // pattern-binding LHS, an operator definition, anything inside a
 // pragma/import/data/class/instance header) fall through to `Other` and are
@@ -873,8 +871,18 @@ enum SourceUnitShape<'a> {
 /// Mirrors `classify_workbench_item`'s `DECLARATION_PREFIXES` list, kept as
 /// its own copy so this heuristic stays in its own region of the file.
 const CONSERVATIVE_DECLARATION_PREFIXES: &[&str] = &[
-    "data ", "newtype ", "type ", "class ", "instance ", "infixl ", "infixr ", "infix ",
-    "foreign ", "import ", "default ", "{-# ",
+    "data ",
+    "newtype ",
+    "type ",
+    "class ",
+    "instance ",
+    "infixl ",
+    "infixr ",
+    "infix ",
+    "foreign ",
+    "import ",
+    "default ",
+    "{-# ",
 ];
 
 fn classify_source_unit(text: &str) -> SourceUnitShape<'_> {
@@ -1869,7 +1877,8 @@ mod tests {
     /// rejected — silently binding to the import instead would be worse.
     #[test]
     fn silent_shadow_by_an_in_scope_import_is_still_rejected() {
-        let cell = "import Control.Lens (previews)\n\nprevious <- computePreviews\nsummary = previous\n";
+        let cell =
+            "import Control.Lens (previews)\n\nprevious <- computePreviews\nsummary = previous\n";
         let hit = detect_hoisted_declaration_collision(cell)
             .expect("a same-named import must not suppress the rejection");
         assert_eq!(hit.declaration_name, "summary");

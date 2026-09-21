@@ -122,9 +122,9 @@ pub(crate) fn workbench_doc(
     workspace_modules: &[String],
 ) -> Result<Cow<'static, str>, String> {
     match topic {
-        "tree" | "worktree" | "worktrees" => {
-            Ok(Cow::Borrowed(include_str!("../../prompts/shoal/docs/tree.md")))
-        }
+        "tree" | "worktree" | "worktrees" => Ok(Cow::Borrowed(include_str!(
+            "../../prompts/shoal/docs/tree.md"
+        ))),
         "workbench" => Ok(Cow::Borrowed(include_str!(
             "../../prompts/shoal/docs/workbench.md"
         ))),
@@ -134,7 +134,9 @@ pub(crate) fn workbench_doc(
         "unfold" | "fork" | "forks" => Ok(Cow::Borrowed(include_str!(
             "../../prompts/shoal/docs/unfold.md"
         ))),
-        "jev" => Ok(Cow::Borrowed(include_str!("../../prompts/shoal/docs/jev.md"))),
+        "jev" => Ok(Cow::Borrowed(include_str!(
+            "../../prompts/shoal/docs/jev.md"
+        ))),
         "actors" | "actor" | "record" => Ok(Cow::Borrowed(include_str!(
             "../../prompts/shoal/docs/actors.md"
         ))),
@@ -173,9 +175,7 @@ pub(crate) fn workbench_doc(
             Ok(Cow::Owned(body))
         }
         other => {
-            let mut message = format!(
-                "unknown Shoal documentation topic `{other}`"
-            );
+            let mut message = format!("unknown Shoal documentation topic `{other}`");
             // A topic that names a shipped skill is the most likely thing the
             // asker actually wanted, and the seat's own rule is to load the
             // skill before falling back to a topic. Saying so costs one line
@@ -235,7 +235,9 @@ mod tests {
             .contains("retained handles"));
         assert!(workbench_doc("lineage", &[]).unwrap().contains("trace"));
         assert!(workbench_doc("recovery", &[]).unwrap().contains("recovery"));
-        assert!(workbench_doc("actors", &[]).unwrap().contains("R.settlement"));
+        assert!(workbench_doc("actors", &[])
+            .unwrap()
+            .contains("R.settlement"));
         // Every topic with a workspace skill names it on its last line, and the
         // topic listing names the skills beside the topics.
         for (topic, skill) in [
@@ -273,7 +275,10 @@ mod tests {
         // is not already a topic in its own right.
         for topic in ["shoal-command", "review", "coordinate", "orchestrate"] {
             let refusal = workbench_doc(topic, &[]).unwrap_err();
-            assert!(refusal.contains("skill covers this"), "`doc {topic}`: {refusal}");
+            assert!(
+                refusal.contains("skill covers this"),
+                "`doc {topic}`: {refusal}"
+            );
         }
 
         // A topic that names nothing still refuses plainly, with no skill line.
@@ -283,7 +288,10 @@ mod tests {
 
     #[test]
     fn topics_and_unknown_topic_error_name_configured_workspace_modules() {
-        let modules = vec!["Project.Investigate".to_string(), "Project.Recall".to_string()];
+        let modules = vec![
+            "Project.Investigate".to_string(),
+            "Project.Recall".to_string(),
+        ];
 
         // No workspace modules: identical to a workspace with none configured.
         assert!(!workbench_doc("topics", &[])
