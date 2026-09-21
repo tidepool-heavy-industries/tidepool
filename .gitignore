@@ -113,3 +113,6 @@ haskell/spike-build-products/work/
 # before harness runs, so the dir appears in every worktree.
 .cache/
 .cache-bisect*/
+# Python test/import caches
+__pycache__/
+*.pyc

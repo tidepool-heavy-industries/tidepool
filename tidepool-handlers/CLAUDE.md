@@ -73,21 +73,18 @@ effect type needs a new definition, a new module under `src/handlers/`, a
 `src/lib.rs`. Rust dispatch is by the request constructor's nominal identity;
 the Haskell union position is not a handler slot.
 
-## `cx.respond*` — pick by result shape, not habit
+## `cx.respond` — one structural response boundary
 
-- **`respond(val)`** — the default. One value, converted eagerly via `ToHaskell`.
+- **`respond(val)`** owns the response until the runtime visits its structure
+  directly into managed construction. Lists, records, enums, JSON, and ordinary
+  containers all use this path; do not add a second list or eager-value channel.
   For a TYPED per-verb failure (#335), the errors-tagged method returns
   `Result<T, <ErrEnum>>` and takes no `cx`; the generated dispatch arm wraps it
   with `cx.respond` (`Ok → Right v`, `Err → Left e`), so the handler is total by
   construction — no eval abort for a verb-level failure. (A genuine panic or a
   non-`Handler` `EffectError` — real corruption — is the only abort path.)
-- **`respond_list(vec)`** — an owned `Vec<T>` returned as a Haskell list.
-  Every element converts eagerly at dispatch time; what stays special is
-  that the machine builds the heap spine ITERATIVELY (stack safety on long
-  lists — `host_fns::list_materialize`). The FsRead `readGlob` verb
-  (`fs_read_glob`, `src/handlers/fs.rs`) is the live call site. There is no
-  lazy/streaming response channel; if an unbounded source ever needs
-  exposure, add explicit pagination at the verb level.
+  The visitor and managed builder keep long list construction iterative. If an
+  unbounded source needs exposure, add explicit pagination at the verb level.
 
 ## Subagent handler: six verbs, one saga, a bounded cycle table
 
