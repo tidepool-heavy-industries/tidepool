@@ -81,6 +81,8 @@ import Tidepool.Metadata
 import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut)
 import Tidepool.Timing (readTimingEnabled, timePhase)
 import Tidepool.TurnSource (extractModuleName, spliceTemplate)
+import Tidepool.DependencyEvidence
+  ( DependencyEvidence, renderDependencyEvidence, revalidateDependencyEvidence )
 
 renderAsksJson :: [Tidepool.EffectSchema.YieldSite] -> String
 renderAsksJson sites = "[" ++ intercalate "," (map renderAskJson sites) ++ "]"
@@ -414,6 +416,7 @@ processFile compiler caches timing args path = do
       else timePhase timing "prepared_sidecars" $ writePreparedSidecars outDir binds tycons mCapturedTy warnTexts preparedArtifacts
 
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
+    writeDependencyEvidence outDir (pprDependencies prepared)
 
   reportDiags res
 
@@ -532,6 +535,13 @@ writePreparedArtifacts outDir artifacts = forM_ artifacts $ \artifact -> do
   let output = outDir </> paTarget artifact ++ ".prepared.cbor"
   BS.writeFile output (paBytes artifact)
   hPutStrLn stderr $ "  Wrote: " ++ output ++ " (prepared execution)"
+
+writeDependencyEvidence :: FilePath -> DependencyEvidence -> IO ()
+writeDependencyEvidence outDir evidence = do
+  unchanged <- revalidateDependencyEvidence evidence
+  if unchanged
+    then writeFile (outDir </> "dependencies.json") (renderDependencyEvidence evidence)
+    else ioError (userError "source changed while compiler artifacts were being published")
 
 writePreparedSidecars
   :: FilePath -> [CoreBind] -> [TyCon] -> Maybe T.Text -> [T.Text]
@@ -659,13 +669,14 @@ runTurnMode compiler caches args path = do
             -- and the prepared modules.
             compileTurn modulePath = do
               prepared <- compiler PreparedStg (Map.keysSet (requestRetainedGenerations args)) GeneralCompile (Just scope) modulePath (requestIncludes args) (requestBuildProductsDir args)
-              return (pprPipelineResult prepared, pprModules prepared)
+              return (pprPipelineResult prepared, pprModules prepared, pprDependencies prepared)
             compileVariants _ [] = error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
             compileVariants index (tmplFile:rest) = do
               (spliced, _modName, modulePath) <- spliceInto tmplFile
               attempted <- try (compileTurn modulePath)
               case attempted of
-                Right (result, preparedModules) -> return (index, spliced, modulePath, result, preparedModules)
+                Right (result, preparedModules, dependencies) ->
+                  return (index, spliced, modulePath, result, preparedModules, dependencies)
                 Left err@(_ :: SomeException) -> case (fromException err :: Maybe SourceError, rest) of
                   (Just _, _ : _) -> compileVariants (index + 1) rest
                   _               -> throwIO err
@@ -673,7 +684,7 @@ runTurnMode compiler caches args path = do
             && (selector /= SBind || length (sbBinders sb) /= 1 || length matching /= 1)
           then fail "activation requires one prepared bind template"
           else pure ()
-        (variant, spliced, compiledPath, result, preparedModules) <- compileVariants (0 :: Int) matching
+        (variant, spliced, compiledPath, result, preparedModules, dependencies) <- compileVariants (0 :: Int) matching
         let binds       = prBinds result
             hscEnv      = prHscEnv result
             mCapturedTy = fmap T.pack (prCapturedType result)
@@ -685,6 +696,7 @@ runTurnMode compiler caches args path = do
         let asksSites = concatMap paYieldSites preparedArtifacts
         timePhase timing "prepared_sidecars" $ writePreparedSidecars outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
         timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
+        writeDependencyEvidence outDir dependencies
         let wrapped = T.pack spliced
         case selector of
           SBind -> do

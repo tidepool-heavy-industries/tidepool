@@ -153,6 +153,7 @@
             freer-simple
             lens
             errors
+            cryptohash-sha256
             witherable
             safe
             random

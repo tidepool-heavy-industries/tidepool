@@ -33,6 +33,7 @@ import GHC.Driver.Errors.Types (GhcMessage(..))
 import GHC.Tc.Errors.Types (TcRnMessage(..), TcRnMessageDetailed(..), DeriveInstanceErrReason(..))
 import GHC.Utils.Logger (LogAction)
 import GHC.Data.FastString (unpackFS, mkFastString)
+import GHC.Utils.Fingerprint (getFileHash)
 import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..))
 import GHC.Unit.Home (homeUnitId)
 import GHC.Data.Graph.Directed (flattenSCCs)
@@ -100,10 +101,11 @@ import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
 import Control.Applicative ((<|>))
 import Control.Exception (finally, try, throwIO, IOException)
 import Data.Maybe (fromMaybe, isJust, isNothing)
-import Data.List (find, isPrefixOf, nub, nubBy, sortOn, intercalate)
+import Data.List (find, isPrefixOf, nub, nubBy, sort, sortOn, intercalate)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef, writeIORef)
 import System.Environment (lookupEnv)
-import System.FilePath (takeBaseName, takeFileName)
+import System.FilePath (takeBaseName, takeFileName, normalise, pathSeparator, (</>))
+import System.Directory (makeAbsolute)
 import System.IO (hPutStrLn, stderr, readFile')
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, forM_, when)
@@ -127,6 +129,8 @@ import Tidepool.ExecutionSchema (SymbolIdentity)
 import Tidepool.RetainedUnfoldings
   (installRetainedUnfoldingsPlugin, retainedDefinedBy, scopeRetainedModuleGraph)
 import Tidepool.TurnSource (extractModuleName)
+import Tidepool.DependencyEvidence
+  ( DependencyEvidence(..), DependencySource, DependencyResolution(..), sourceEvidence )
 
 -- | Selects the compiler representation produced at the internal GHC API
 -- boundary. Metadata consumers stop at the checked environment.
@@ -141,6 +145,7 @@ data PreparationKind = CheckOnly | PrepareStg
 data PreparedPipelineResult = PreparedPipelineResult
   { pprPipelineResult :: PipelineResult
   , pprModules :: [PreparedModule]
+  , pprDependencies :: DependencyEvidence
   }
 
 -- | Metadata has no executable projection. The environment
@@ -673,10 +678,7 @@ runPipelineSessionSelected selection retained purpose mscope path includes build
 -- resident worker's requests. Request-local modules are removed after each
 -- compile; only stable dependency modules remain reusable.
 data GutsMemoEntry = GutsMemoEntry
-  { gmeFront      :: ModuleFront
-    -- ^ For 'allTyCons' (TyCons never change across cycles — 'core2core'
-    -- transforms 'mg_binds' only, see the comment at 'runCompileCycle''s own
-    -- 'allTyCons' computation).
+  { gmeFront :: ModuleFront
   , gmeSimplified :: ModGuts
     -- ^ Post-'core2core', PRE-'externalizeInternalTops' — needed to redo
     -- 'cpAfterModule''s HPT (re-)registration on a later cycle: 'load''
@@ -685,9 +687,8 @@ data GutsMemoEntry = GutsMemoEntry
     -- registration REDONE (cheaply — no recompilation, just 'hscTidy' +
     -- 'mkIfaceTc' over already-computed guts) whenever it is deferred again
     -- in a LATER cycle.
-  , gmeResult     ::
+  , gmeResult ::
       (ModGuts, Map.Map String String, [CheckedBinderPin], Maybe Type)
-    -- ^ Post-externalize result, exactly the shape 'results' carries.
   , gmePrepared :: Maybe PreparedModule
   , gmeRetained :: Set.Set SymbolIdentity
     -- ^ The retained identities this module DEFINES, from the set THIS entry
@@ -775,6 +776,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
     setSession previous {hsc_mod_graph = mkModuleGraph
       (filter keepSummary (mgModSummaries' (hsc_mod_graph previous)))}
     modGraphRaw <- depanal (pvDownsweepExcludes variant) False
+    capturedSources <- liftIO (captureDependencySources modGraphRaw)
     -- 'ghc_setup' phase (TIDEPOOL_TIMING): 'guessTarget'/'setTargets' + this
     -- 'depanal' call, nothing else, on EVERY caller — a lone compile also
     -- includes its session bootstrap because 'runCompile' captures
@@ -1124,7 +1126,8 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
               -- a passing extraction; it only skips work whose result was always
               -- going to be thrown away.
               forceValidationOnly <- liftIO (lookupEnv "TIDEPOOL_TEST_FORCE_VALIDATION_ONLY")
-              let gutsByMod = Map.fromList [ (ms_mod_name (mfSummary f), mfDesugared f) | f <- fs ]
+              let gutsByMod = Map.fromList
+                    [ (ms_mod_name (mfSummary f), mfDesugared f) | f <- fs ]
                   reachableMods0 = reachableModuleClosure targetModName' gutsByMod
                   -- E6 mis-tiering fault injection (detection-power demonstration,
                   -- see 00-spec.md's VERIFY section): forcibly deny a NAMED module
@@ -1259,9 +1262,16 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                 , prTargetRdrEnv = tcg_rdr_env targetEnvironment
                 , prTargetTcGblEnv = targetEnvironment
                 }
-          pure (pipelineResult, preparedModules)
+          dependencies <- liftIO (dependencyEvidenceFor capturedSources modGraphRaw summaries fronts)
+          pure (pipelineResult, preparedModules, dependencies)
     case selection of
-      PreparedStg -> uncurry PreparedPipelineResult <$> compileExecutable
+      PreparedStg -> do
+        (result, modules, dependencies) <- compileExecutable
+        pure PreparedPipelineResult
+          { pprPipelineResult = result
+          , pprModules = modules
+          , pprDependencies = dependencies
+          }
       CheckedEnvironment -> do
         -- load' may need executable dependencies for TH; it never sees the
         -- metadata target. Restore the full graph for instance visibility.
@@ -1304,6 +1314,94 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
               , crCheckedBinderPins = capturedCellBinderPins (cpFinalEnv plan env) tcg
               }
           _ -> liftIO $ ioError $ userError "metadata target missing from checked module graph"
+
+-- | Hash every source after downsweep and before @load'@ or the extraction
+-- loop can consume it. Publication re-hashes these paths, so a source race
+-- makes the request fail rather than associating old code with new evidence.
+captureDependencySources :: ModuleGraph -> IO ([DependencySource], Bool)
+captureDependencySources graph = do
+  paths <- forM [summary | ModuleNode _ summary <- mgModSummaries' graph] $ \summary ->
+    case ml_hs_file (ms_location summary) of
+      Nothing -> pure (Nothing, False)
+      Just source -> do
+        absolute <- normalise <$> makeAbsolute source
+        -- GHC's summary fingerprint covers the source read during downsweep.
+        -- Matching it to the file now closes the depanal-to-capture race;
+        -- publication performs the second (SHA-256) read check.
+        stillSummarized <- (== ms_hs_hash summary) <$> getFileHash source
+        pure (Just absolute, stillSummarized)
+  let complete = all (\(path, matchesSummary) -> isJust path && matchesSummary) paths
+      uniquePaths = sort (Set.toList (Set.fromList [path | (Just path, _) <- paths]))
+  evidence <- mapM sourceEvidence uniquePaths
+  pure (evidence, complete)
+
+-- | Capture import-resolution witnesses from the exact module graph. Package
+-- imports have no selected home path; their ordered absent home candidates
+-- remain evidence because creating one later would introduce shadowing.
+dependencyEvidenceFor
+  :: ([DependencySource], Bool) -> ModuleGraph -> [ModSummary] -> [ModuleFront]
+  -> IO DependencyEvidence
+dependencyEvidenceFor (sources, sourcesComplete) graph summaries fronts = do
+  selectedPairs <- forM
+    [summary | ModuleNode _ summary <- mgModSummaries' graph] $ \summary ->
+      case ml_hs_file (ms_location summary) of
+        Nothing -> pure Nothing
+        Just source -> do
+          absolute <- makeAbsolute source
+          pure (Just ((ms_mod_name summary, ms_hsc_src summary == HsBootFile), normalise absolute))
+  let selected = Map.fromList [pair | Just pair <- selectedPairs]
+      allImports = sort . Set.toList . Set.fromList $
+        [ (unLoc imported, False)
+        | summary <- summaries
+        , (_, imported) <- ms_textual_imps summary
+        ] ++
+        [ (unLoc imported, True)
+        | summary <- summaries
+        , (_, imported) <- ms_srcimps summary
+        ]
+      roots = nub (concatMap (importPaths . ms_hspp_opts) summaries)
+      moduleRelative name =
+        map (\c -> if c == '.' then pathSeparator else c) (moduleNameString name)
+      rawCandidates name isBoot =
+        [ root </> moduleRelative name ++ extension
+        | root <- roots
+        , extension <- if isBoot then [".hs-boot", ".lhs-boot"]
+            else [".hs", ".lhs", ".hsig", ".lhsig"]
+        ]
+  absoluteCandidates <- forM allImports $ \(imported, isBoot) -> do
+    candidates <- mapM (fmap normalise . makeAbsolute) (rawCandidates imported isBoot)
+    let chosen = Map.lookup (imported, isBoot) selected
+        throughSelected = case chosen of
+          Nothing -> candidates
+          Just path -> case break (== path) candidates of
+            (higher, _ : _) -> higher ++ [path]
+            _ -> candidates ++ [path]
+    pure DependencyResolution
+      { dependencyResolutionModule = moduleNameString imported
+      , dependencyResolutionSelected = chosen
+      , dependencyResolutionCandidates = nub throughSelected
+      }
+  dependentFiles <- fmap concat $ forM fronts $ \front ->
+    readIORef (tcg_dependent_files (mfTcGblEnv front))
+  let hasUntrackedPreprocessing = any (\summary ->
+        xopt LangExt.Cpp (ms_hspp_opts summary)
+          || xopt LangExt.TemplateHaskell (ms_hspp_opts summary)) summaries
+      complete = sourcesComplete && null dependentFiles
+        && not hasUntrackedPreprocessing
+        && all (not . null . dependencyResolutionCandidates) absoluteCandidates
+      packages = sort
+        [ moduleNameString imported
+        | (imported, isBoot) <- allImports
+        , not isBoot
+        , isNothing (Map.lookup (imported, False) selected)
+        ]
+  pure DependencyEvidence
+    { dependencyCacheSafe = complete
+    , dependencySelectionComplete = complete
+    , dependencySources = sources
+    , dependencyResolutions = absoluteCandidates
+    , dependencyPackages = packages
+    }
 
 
 -- ---------------------------------------------------------------------------

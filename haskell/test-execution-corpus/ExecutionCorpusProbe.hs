@@ -8,6 +8,7 @@ import Control.Exception
   ( AsyncException, SomeException, evaluate, fromException, throwIO, try )
 import Data.ByteString qualified as BS
 import Data.List (intercalate, isInfixOf)
+import qualified Data.Set as Set
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
 import GHC.Builtin.PrimOps (PrimCall(..))
@@ -42,7 +43,8 @@ import Tidepool.ExecutionSchema
 import Tidepool.FatIface (newFatIfaceCache, newOwnerInterfaceCache)
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PipelineResult(..), PreparedPipelineResult(..)
-  , runPipelineSelected )
+  , runPipelineSelected, withResidentPipelineSelected
+  , CompilePurpose(GeneralCompile) )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecovery )
 import Tidepool.PreparedStg (newPreparedBodyCache)
@@ -54,6 +56,8 @@ import Tidepool.Metadata
   (collectDataCons, dcToMeta, mergeMetaPreserving, targetBindingHasIO, wiredInDataCons)
 import Tidepool.CborEncode (encodeMetadata)
 import Tidepool.Json (jsonString)
+import Tidepool.DependencyEvidence
+  ( renderDependencyEvidence, revalidateDependencyEvidence )
 
 data Record = Record String (Maybe String) [RecoveryFailure] Outcome
 
@@ -65,10 +69,23 @@ main :: IO ()
 main = getArgs >>= \arguments -> case arguments of
   [] -> mappingSelfTest
   ["--self-test"] -> mappingSelfTest
-  _ -> runProbe arguments
+  "--batch" : requests ->
+    withResidentPipelineSelected [] $ \compiler ->
+      mapM_ (runProbe (\source includes ->
+        compiler PreparedStg Set.empty GeneralCompile Nothing source includes Nothing))
+        (splitRequests requests)
+  _ -> runProbe (runPipelineSelected PreparedStg) arguments
 
-runProbe :: [String] -> IO ()
-runProbe rawArguments = do
+-- Each cohort remains a compiler transaction with its own output and cleanup.
+-- The process and stable dependency memo are shared across the batch.
+splitRequests :: [String] -> [[String]]
+splitRequests [] = []
+splitRequests arguments = case break (== "--next") arguments of
+  (request, []) -> [request]
+  (request, _ : rest) -> request : splitRequests rest
+
+runProbe :: (FilePath -> [FilePath] -> IO PreparedPipelineResult) -> [String] -> IO ()
+runProbe compile rawArguments = do
   let (metadataTargets, arguments) = case rawArguments of
         "--metadata-targets" : names : rest -> (words names, rest)
         rest -> ([], rest)
@@ -81,7 +98,7 @@ runProbe rawArguments = do
       "usage: execution-corpus-projection [--metadata-targets NAMES] [--all-tops] SOURCE MODULE TARGETS_FILE OUTPUT_DIR INCLUDE...")
   targets <- lines <$> readFile targetsFile
   createDirectoryIfMissing True outputDir
-  compiled <- trySync (runPipelineSelected PreparedStg source includes)
+  compiled <- trySync (compile source includes)
   (records, sourceTargets, inventories) <- case compiled of
     Left failure -> if allTops
       then ioError (userError
@@ -94,6 +111,11 @@ runProbe rawArguments = do
               (missingName moduleNameArg target) [] reason) targets
           )
     Right prepared -> do
+      unchanged <- revalidateDependencyEvidence (pprDependencies prepared)
+      unless unchanged $
+        ioError (userError "source changed while corpus artifacts were being published")
+      writeFile (outputDir </> "dependencies.json")
+        (renderDependencyEvidence (pprDependencies prepared))
       formattingAuthority <- resolveFormattingAuthority
         (prHscEnv (pprPipelineResult prepared))
       timeAuthority <- resolveTimeAuthority (prHscEnv (pprPipelineResult prepared))
