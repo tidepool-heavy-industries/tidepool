@@ -47,7 +47,7 @@ pub(crate) struct ContinuationFrame {
 }
 
 /// One live handle's rooted slot, cleanup owner, and the representation of
-/// the word its slot holds. Core mints only lifted heap pointers; the
+/// the word its slot holds. Prepared STG mints only lifted heap pointers; the
 /// prepared machine also mints `UnliftedRef` handles (byte arrays, boxed
 /// arrays), and a bare-handle delivery must recover that representation from
 /// the ledger, not assume it.
@@ -200,7 +200,7 @@ pub struct ResourceCounts {
 /// their own.
 ///
 /// `CancelHandle` is `Send + Sync + Clone`, so callers can hand clones to
-/// watchdog threads. On Core, cancellation is observed at the next GC
+/// watchdog threads. In prepared execution, cancellation is observed at the next GC
 /// safepoint (heap check), which fires on essentially every non-trivial
 /// allocation in Haskell code, and the running program unwinds via the
 /// normal error path with `JitError::Yield(YieldError::Cancelled)`. On

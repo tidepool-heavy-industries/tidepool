@@ -11,7 +11,7 @@
 //! `TIDEPOOL_WARMUP=1` turns the warm-up on. Running this test once against a
 //! fresh daemon with it off and once against another fresh daemon with it on is
 //! the A/B; the compiler daemon's own log carries the per-request
-//! `tidepool-timing phase=core` and `tidepool-memo-miss` lines that say where
+//! `tidepool-timing phase=lowering` and `tidepool-memo-miss` lines that say where
 //! the difference came from.
 
 use std::time::Instant;

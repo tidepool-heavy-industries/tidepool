@@ -1,7 +1,7 @@
 //! Single source of truth for the six bridged Rust↔Haskell wire records.
 //!
-//! Each type here derives `CoreRecord` (its Haskell `data` decl is generated
-//! from the Rust struct — see `tidepool_bridge::CoreRecord`) plus `ToCore`,
+//! Each type here derives `HaskellRecord` (its Haskell `data` decl is generated
+//! from the Rust struct — see `tidepool_bridge::HaskellRecord`) plus `ToHaskell`,
 //! so it can be handed straight to `EffectContext::respond`. Living in a LOW
 //! crate (depends only on `tidepool-bridge` and `tidepool-repr`)
 //! means both the real handlers (`tidepool-handlers`, a TOP crate) and test
@@ -10,7 +10,7 @@
 //! longer hand-build a stale wire shape for one of these effect results.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
-use tidepool_bridge_derive::{CoreRecord, ToCore};
+use tidepool_bridge_derive::{HaskellRecord, ToHaskell};
 
 /// The GENERATED wire families. One ordered field list in `tidepool-protocol`
 /// renders both the Haskell declaration and the Rust struct, so the positional
@@ -63,7 +63,7 @@ impl EvRepositoryEvent {
 }
 
 /// Haskell `Proc` record: exitCode / stdout / stderr — a finished subprocess.
-#[derive(ToCore, Clone, CoreRecord)]
+#[derive(ToHaskell, Clone, HaskellRecord)]
 pub struct Proc {
     pub exit_code: i64,
     pub stdout: String,
@@ -73,12 +73,12 @@ pub struct Proc {
 /// Haskell `Hit` record: path / line / text — a search match (`grepGlob` and
 /// the shared structural-search surface).
 #[derive(
-    tidepool_bridge_derive::ToCore,
-    tidepool_bridge_derive::FromCore,
+    tidepool_bridge_derive::ToHaskell,
+    tidepool_bridge_derive::FromHaskell,
     Clone,
     Debug,
     PartialEq,
-    CoreRecord,
+    HaskellRecord,
 )]
 pub struct Hit {
     pub path: String,
@@ -90,12 +90,12 @@ pub struct Hit {
 /// a path (`fsMeta`/`FsMetadata`). Absence of the path is `Nothing` at the
 /// `Maybe FileMeta` level, not a field on this record.
 #[derive(
-    tidepool_bridge_derive::ToCore,
-    tidepool_bridge_derive::FromCore,
+    tidepool_bridge_derive::ToHaskell,
+    tidepool_bridge_derive::FromHaskell,
     Clone,
     Debug,
     PartialEq,
-    CoreRecord,
+    HaskellRecord,
 )]
 pub struct FileMeta {
     pub size: i64,
@@ -104,8 +104,8 @@ pub struct FileMeta {
 }
 
 /// Haskell `Commit` record: sha / subject / author / date / files.
-#[derive(ToCore, Clone, CoreRecord)]
-#[core(name = "Commit")]
+#[derive(ToHaskell, Clone, HaskellRecord)]
+#[haskell(name = "Commit")]
 pub struct GitCommit {
     pub sha: String,
     pub subject: String,
@@ -115,16 +115,16 @@ pub struct GitCommit {
 }
 
 /// Haskell `StatusEntry` record: path / state (2-char XY code).
-#[derive(ToCore, Clone, CoreRecord)]
-#[core(name = "StatusEntry")]
+#[derive(ToHaskell, Clone, HaskellRecord)]
+#[haskell(name = "StatusEntry")]
 pub struct GitStatusEntry {
     pub path: String,
     pub state: String,
 }
 
 /// Haskell `FileDelta` record: path / adds / dels / binary.
-#[derive(ToCore, Clone, CoreRecord)]
-#[core(name = "FileDelta")]
+#[derive(ToHaskell, Clone, HaskellRecord)]
+#[haskell(name = "FileDelta")]
 pub struct GitFileDelta {
     pub path: String,
     pub adds: i64,
@@ -137,23 +137,23 @@ pub struct GitFileDelta {
 /// where before a bulk git-history investigation needed `gitLog` (paths only)
 /// plus a `mapM gitDiffStat` (one subprocess per commit) to assemble the same
 /// shape by hand.
-#[derive(ToCore, Clone, CoreRecord)]
-#[core(name = "CommitDeltas")]
+#[derive(ToHaskell, Clone, HaskellRecord)]
+#[haskell(name = "CommitDeltas")]
 pub struct GitCommitDeltas {
-    #[core(hs_type = "Commit")]
+    #[haskell(hs_type = "Commit")]
     pub commit: GitCommit,
-    #[core(hs_type = "[FileDelta]")]
+    #[haskell(hs_type = "[FileDelta]")]
     pub deltas: Vec<GitFileDelta>,
 }
 
-use tidepool_bridge_derive::FromCore;
+use tidepool_bridge_derive::FromHaskell;
 
 // ============================================================================
 // Subagent wire types (coupled spawn), `Ag*`-prefixed.
 //
 // THE `Wt*`/`Ev*` FAMILIES NO LONGER LIVE HERE — both are generated into
 // `src/generated/` from `tidepool-protocol`. `Ag*` below
-// still does NOT derive `CoreRecord` (its Haskell decls are single-sourced
+// still does NOT derive `HaskellRecord` (its Haskell decls are single-sourced
 // from `subagent_effect_def!`'s `type_defs`), and field ORDER in each struct
 // is the wire contract, matching those decls positionally. PROVISIONAL
 // shapes — renames land here + in the
@@ -162,8 +162,8 @@ use tidepool_bridge_derive::FromCore;
 
 /// Haskell `AgentId` — Tidepool's identity for one agent, minted by the
 /// runtime, never by a backend.
-#[derive(ToCore, FromCore, Clone, Copy, Debug, PartialEq, Eq)]
-#[core(name = "AgentId")]
+#[derive(ToHaskell, FromHaskell, Clone, Copy, Debug, PartialEq, Eq)]
+#[haskell(name = "AgentId")]
 pub struct AgAgentId {
     pub raw: i64,
 }
@@ -171,23 +171,23 @@ pub struct AgAgentId {
 /// Haskell `CycleId` — the handler-scoped identity of one running cycle.
 /// Opaque: Tidepool mints it, echoes it, and never parses it. Cycle-scoped —
 /// it never crosses a resident-cycle boundary.
-#[derive(ToCore, FromCore, Clone, Copy, Debug, PartialEq, Eq)]
-#[core(name = "CycleId")]
+#[derive(ToHaskell, FromHaskell, Clone, Copy, Debug, PartialEq, Eq)]
+#[haskell(name = "CycleId")]
 pub struct AgCycleId {
     pub raw: i64,
 }
 
 /// Haskell `BackendThreadId` — a backend's identity for the hosting thread.
 /// Opaque: stored, compared, echoed, never parsed.
-#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
-#[core(name = "BackendThreadId")]
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(name = "BackendThreadId")]
 pub struct AgBackendThreadId {
     pub raw: String,
 }
 
 /// Haskell `SpawnWorkspace` — a new managed worktree, or an existing UNBOUND
 /// one by durable id (coupled-only surface).
-#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 pub enum AgSpawnWorkspace {
     SpawnNewWorktree(WtWorktreeSpec),
     SpawnExistingWorktree(WtWorktreeId),
@@ -196,8 +196,8 @@ pub enum AgSpawnWorkspace {
 /// Haskell `SpawnSpec` — built in Haskell, consumed in Rust. The result
 /// schema rides the verb's separate `Value` argument (the JsonArg argument),
 /// not this record.
-#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
-#[core(name = "SpawnSpec")]
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(name = "SpawnSpec")]
 pub struct AgSpawnSpec {
     pub spawn_workspace: AgSpawnWorkspace,
     pub spawn_agent_label: String,
@@ -205,7 +205,7 @@ pub struct AgSpawnSpec {
 }
 
 /// Haskell `SpawnStage` — how far the spawn got; carried on every SpawnError.
-#[derive(ToCore, FromCore, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(ToHaskell, FromHaskell, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgSpawnStage {
     StageAllocating,
     StageWorktreeReady,
@@ -216,7 +216,7 @@ pub enum AgSpawnStage {
 
 /// Haskell `BackendFailure` — the backend boundary's `AgentBackendError`,
 /// case-matchable (retryable-vs-not, mine-vs-theirs).
-#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 pub enum AgBackendFailure {
     BackendUnavailable(String),
     ProtocolRejected(String),
@@ -226,8 +226,8 @@ pub enum AgBackendFailure {
 /// Haskell `CyclePayload` — what the terminal message actually was.
 /// `PayloadStructured` is not yet a typed success: decoding against the
 /// caller's type happens Haskell-side, and a decode failure there is a typed
-/// error. ToCore-only: this is outbound (`serde_json::Value` has no FromCore).
-#[derive(ToCore, Clone, Debug, PartialEq)]
+/// error. ToHaskell-only: this is outbound (`serde_json::Value` has no FromHaskell).
+#[derive(ToHaskell, Clone, Debug, PartialEq)]
 pub enum AgCyclePayload {
     PayloadStructured(serde_json::Value),
     PayloadUnstructured(String),
@@ -239,7 +239,7 @@ pub enum AgCyclePayload {
 /// authoritative — so `ActivityCommand`'s exit code is what the process
 /// returned, and `Nothing` is "the backend reported no exit code" (killed by a
 /// signal, or still the only thing it said), never "it succeeded".
-#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 pub enum AgAgentActivity {
     ActivityCommand(String, Option<i64>),
     ActivityFileChanged(String),
@@ -249,8 +249,8 @@ pub enum AgAgentActivity {
 /// it. Every counter is present or the whole record is absent
 /// (`AgSpawnReceipt::receipt_usage`'s `Option`): a backend that reports usage
 /// reports all of it.
-#[derive(ToCore, FromCore, Clone, Copy, Debug, PartialEq, Eq)]
-#[core(name = "TokenUsage")]
+#[derive(ToHaskell, FromHaskell, Clone, Copy, Debug, PartialEq, Eq)]
+#[haskell(name = "TokenUsage")]
 pub struct AgTokenUsage {
     pub usage_input: i64,
     pub usage_cached_input: i64,
@@ -261,8 +261,8 @@ pub struct AgTokenUsage {
 
 /// Haskell `WorkerRun` — the coupled pair one spawn yields plus the backend
 /// thread identity.
-#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
-#[core(name = "WorkerRun")]
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(name = "WorkerRun")]
 pub struct AgWorkerRun {
     pub run_agent: AgAgentId,
     pub run_worktree: WtWorktreeHandle,
@@ -271,8 +271,8 @@ pub struct AgWorkerRun {
 
 /// Haskell `SpawnReceipt` — every field checkable against disk or the
 /// backend; `receipt_model` is the EXACT resolved model, never a tier name.
-#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
-#[core(name = "SpawnReceipt")]
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(name = "SpawnReceipt")]
 pub struct AgSpawnReceipt {
     pub receipt_agent: AgAgentId,
     pub receipt_worktree: WtWorktreeId,
@@ -289,10 +289,10 @@ pub struct AgSpawnReceipt {
     pub receipt_usage: Option<AgTokenUsage>,
 }
 
-/// Haskell `SpawnOutcome` — the verb's success payload. ToCore-only (carries
+/// Haskell `SpawnOutcome` — the verb's success payload. ToHaskell-only (carries
 /// `AgCyclePayload`).
-#[derive(ToCore, Clone, Debug, PartialEq)]
-#[core(name = "SpawnOutcome")]
+#[derive(ToHaskell, Clone, Debug, PartialEq)]
+#[haskell(name = "SpawnOutcome")]
 pub struct AgSpawnOutcome {
     pub outcome_run: AgWorkerRun,
     pub outcome_payload: AgCyclePayload,
@@ -308,14 +308,14 @@ pub struct AgSpawnOutcome {
 ///
 /// `StepToolCall`'s fields are positional — agent, call id, tool name,
 /// arguments — matching `AgCyclePayload`'s style for a sum carrying a `Value`.
-/// ToCore-only: this is OUTBOUND, and `serde_json::Value` has no `FromCore`
+/// ToHaskell-only: this is OUTBOUND, and `serde_json::Value` has no `FromHaskell`
 /// (which is also why the inbound tool declarations and tool answer ride flat
 /// `Value` verb arguments through `JsonArg` instead of a bridged record).
-/// The outcome is BOXED — transparently, since `ToCore for Box<T>` delegates
+/// The outcome is BOXED — transparently, since `ToHaskell for Box<T>` delegates
 /// to `T`, so the wire shape is still `StepDone SpawnOutcome`. Same reason the
 /// domain's `SpawnStep::Done` boxes: a whole outcome inside a two-variant enum
 /// makes every parked call pay for the finished one.
-#[derive(ToCore, Clone, Debug, PartialEq)]
+#[derive(ToHaskell, Clone, Debug, PartialEq)]
 pub enum AgAgentStep {
     StepToolCall(AgAgentId, String, String, serde_json::Value),
     StepDone(Box<AgSpawnOutcome>),
@@ -328,10 +328,10 @@ pub enum AgAgentStep {
 /// `bridged_records` test) and re-exported by `Tidepool.Records` →
 /// `Tidepool.Prelude`.
 ///
-/// Field ORDER is the wire contract: `ToCore` builds the `Con` in Rust struct
+/// Field ORDER is the wire contract: `ToHaskell` builds the `Con` in Rust struct
 /// field order; the extract assigns positions from this decl's field order.
 pub fn bridged_records_module() -> String {
-    use tidepool_bridge::CoreRecord;
+    use tidepool_bridge::HaskellRecord;
     let decls = [
         GitCommit::haskell_decl(),
         GitStatusEntry::haskell_decl(),
@@ -351,7 +351,7 @@ pub fn bridged_records_module() -> String {
     out.push_str(
         "-- | GENERATED from the Rust bridged-record structs in tidepool-bridge-effects\n",
     );
-    out.push_str("-- (each carries `#[derive(CoreRecord)]`). DO NOT EDIT BY HAND: the Rust\n");
+    out.push_str("-- (each carries `#[derive(HaskellRecord)]`). DO NOT EDIT BY HAND: the Rust\n");
     out.push_str("-- struct is the single source of truth for field order / name / type, and\n");
     out.push_str("-- this file is regenerated + verified by the `bridged_records` test\n");
     out.push_str(

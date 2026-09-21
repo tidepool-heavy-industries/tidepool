@@ -8,7 +8,7 @@
 -- @Answerer@ namespace makes the two lifecycle contracts explicit.
 --
 -- 'forkMap'\/'forkCata' need a CALLER-chosen answer type @b@, which
--- 'forkFilter' (always 'Bool') never did. Extract's @Tidepool.Translate@
+-- 'forkFilter' (always 'Bool') never did. The compiler worker
 -- recognizes 'forkMap'\/'forkCata' by name (like 'fork'\/'forkAll'
 -- themselves) and captures the answer type at the USER CALL SITE, where the
 -- type application is concrete, instead of inside these combinators' own

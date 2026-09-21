@@ -1,5 +1,5 @@
 //! Cross-module unqualified-name ambiguity must fail LOUDLY, not silently
-//! pick a constructor, in the hand-written `FromCore`/`ToCore` impls.
+//! pick a constructor, in the hand-written `FromHaskell`/`ToHaskell` impls.
 //!
 //! The hand-written impls in `tidepool-bridge/src/impls.rs` resolve
 //! unqualified constructor names (e.g. "I#") via `get_resilient(table, name,
@@ -17,7 +17,7 @@
 //! reintroduced as a fallback and the existing roundtrip / proptest suites
 //! would not notice — they all build tables with unique names.
 
-use tidepool_bridge::{BridgeError, ToCore};
+use tidepool_bridge::{BridgeError, ToHaskell};
 use tidepool_repr::{DataCon, DataConId, DataConTable};
 
 /// Build a table containing two `I#` entries at distinct `DataConId`s,
@@ -94,7 +94,7 @@ fn unambiguous_i_hash_resolves_cleanly() {
 fn wrong_arity_same_name_is_not_a_fallback_candidate() {
     let mut t = DataConTable::new();
     // "I#" exists, but only at arity 2 — never the arity-1 shape i64's
-    // ToCore impl requests. The old fallback (`matches.first().copied()`)
+    // ToHaskell impl requests. The old fallback (`matches.first().copied()`)
     // would have returned this id anyway.
     t.insert(DataCon {
         id: DataConId(100),

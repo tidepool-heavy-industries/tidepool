@@ -22,9 +22,6 @@ archive).
   [unrun ideas](jev-lab/breadth/NOT-RUN.md) are read from `NEXT.md`. The
   [observation-budget finding](jev-lab/observation-limit/FINDING.md) is fixed,
   kept as regression evidence for `observation_budget_tests.rs`.
-- [Core removal order](core-removal-order.md): live, verified survey of
-  exactly what still blocks deleting the Core engine now that prepared STG is
-  the default — evidence-backed blockers, not a stale checkpoint.
 - [Shared execution server](interactive-applications/shared-server.md):
   direction for one native execution server per swarm shared across ordinary
   interactive TUIs, reusing the existing app-server/client boundary.

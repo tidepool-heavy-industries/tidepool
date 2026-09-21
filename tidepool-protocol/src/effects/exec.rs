@@ -20,7 +20,7 @@ use crate::schema::{
 
 /// `Proc` — the bridged result record. Its Haskell declaration is NOT generated
 /// from this schema: it is single-sourced from the Rust struct in
-/// `tidepool-bridge-effects` through the `CoreRecord` derive, into the committed
+/// `tidepool-bridge-effects` through the `HaskellRecord` derive, into the committed
 /// `haskell/lib/Tidepool/Records/Bridged.hs`. Folding that mechanism into the
 /// schema is a later lane; here the type is referenced by name only.
 fn proc() -> HsType {

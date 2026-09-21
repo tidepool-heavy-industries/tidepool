@@ -194,9 +194,7 @@ fn resize_bytes_invalid_lengths_leave_old_active_and_new_wrapper_empty() {
             .install_prepared_buffer(vec![0_u64; extent * 2 / 8], vec![descriptor.clone()])
             .unwrap();
         let (start, size) = machine.gc_active_range().unwrap();
-        let mut vmctx = unsafe {
-            crate::context::VMContext::new(start, start.add(size), crate::host_fns::gc_trigger)
-        };
+        let mut vmctx = unsafe { crate::context::VMContext::new(start, start.add(size)) };
         vmctx.alloc_ptr = unsafe { start.add(extent * 2) };
         vmctx.machine_state = &machine as *const _ as *mut _;
         let replacement_wrapper = unsafe { start.add(extent) };
@@ -490,9 +488,7 @@ fn byte_copy_compare_hosts_reject_bad_ranges_alias_copy_and_revocation() {
             .unwrap();
         let (start, size) = machine.gc_active_range().unwrap();
         let second = unsafe { start.add(extent) };
-        let mut vmctx = unsafe {
-            crate::context::VMContext::new(start, start.add(size), crate::host_fns::gc_trigger)
-        };
+        let mut vmctx = unsafe { crate::context::VMContext::new(start, start.add(size)) };
         vmctx.alloc_ptr = unsafe { start.add(extent * 2) };
         vmctx.machine_state = &machine as *const _ as *mut _;
         let source_ref = (start as usize | usize::from(descriptor.tag())) as *mut u8;

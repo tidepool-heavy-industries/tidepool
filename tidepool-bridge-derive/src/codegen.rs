@@ -8,8 +8,8 @@ fn collect_type_params(ty: &Type, params: &HashSet<syn::Ident>, used: &mut HashS
     match ty {
         Type::Path(tp) if tp.qself.is_none() => {
             // If it's PhantomData<T>, we DON'T consider T "used" for the purpose
-            // of adding FromCore/ToCore bounds, because our PhantomData impl
-            // doesn't require T to be FromCore/ToCore.
+            // of adding FromHaskell/ToHaskell bounds, because our PhantomData impl
+            // doesn't require T to be FromHaskell/ToHaskell.
             if tp
                 .path
                 .segments
@@ -46,8 +46,8 @@ fn collect_type_params(ty: &Type, params: &HashSet<syn::Ident>, used: &mut HashS
 }
 
 /// A field is a phantom (`std::marker::PhantomData<_>`) if its outermost path
-/// segment is `PhantomData`. Such fields have no Core representation and are
-/// skipped when computing a variant/struct's Core arity and when encoding or
+/// segment is `PhantomData`. Such fields have no Haskell representation and are
+/// skipped when computing a variant/struct's Haskell arity and when encoding or
 /// decoding fields — analogous to how they are skipped for trait-bound
 /// inference in `collect_type_params`.
 fn is_phantom_data(ty: &Type) -> bool {
@@ -76,16 +76,16 @@ fn is_phantom_data(ty: &Type) -> bool {
 /// `question_mark` selects whether the emitted expression ends in `?`
 /// (unwrap-or-propagate — the right call for a single-shape decode/encode
 /// site where a missing constructor IS the whole failure) or is left as a
-/// bare `Result` for the caller to match on (the enum `FromCore` per-variant
+/// bare `Result` for the caller to match on (the enum `FromHaskell` per-variant
 /// site: a missing constructor there means "this variant can't match, try
-/// the next one", not "abort" — see `generate_from_core`, #F7). Keeping one
+/// the next one", not "abort" — see `generate_from_haskell`, #F7). Keeping one
 /// shared emitter (instead of a second copy without the `?`) is what keeps
 /// the qualified/unqualified resolution logic itself single-sourced.
 fn emit_datacon_lookup(
     module: Option<&String>,
-    core_name: &str,
-    core_arity_u32: u32,
-    core_arity_usize: usize,
+    haskell_name: &str,
+    haskell_arity_u32: u32,
+    haskell_arity_usize: usize,
     question_mark: bool,
 ) -> TokenStream {
     let suffix = if question_mark {
@@ -94,7 +94,7 @@ fn emit_datacon_lookup(
         quote! {}
     };
     if let Some(module) = module {
-        let qualified = format!("{}.{}", module, core_name);
+        let qualified = format!("{}.{}", module, haskell_name);
         quote! {
             table.get_by_qualified_name(#qualified)
                 .ok_or_else(|| tidepool_bridge::BridgeError::UnknownDataConQualified {
@@ -104,20 +104,20 @@ fn emit_datacon_lookup(
     } else {
         // Silence unused-var warnings in the `Some` branch where arity isn't
         // consumed by the emitted code.
-        let _ = core_arity_usize;
+        let _ = haskell_arity_usize;
         // `get_by_name_arity_checked`, not the lenient `get_by_name_arity`:
         // two distinct constructors sharing this name+arity must be a loud,
         // candidate-naming error — insertion order must never silently
         // decide which one the derive resolves to.
         quote! {
-            match table.get_by_name_arity_checked(#core_name, #core_arity_u32) {
+            match table.get_by_name_arity_checked(#haskell_name, #haskell_arity_u32) {
                 ::std::result::Result::Ok(::std::option::Option::Some(id)) => {
                     ::std::result::Result::Ok(id)
                 }
                 ::std::result::Result::Ok(::std::option::Option::None) => {
                     ::std::result::Result::Err(tidepool_bridge::BridgeError::UnknownDataConNameArity {
-                        name: #core_name.to_string(),
-                        arity: #core_arity_u32 as usize,
+                        name: #haskell_name.to_string(),
+                        arity: #haskell_arity_u32 as usize,
                     })
                 }
                 ::std::result::Result::Err(ambiguous) => {
@@ -132,11 +132,11 @@ fn emit_datacon_lookup(
     }
 }
 
-/// Core arity of a constructor: how many of its Rust fields carry a Core
+/// Haskell arity of a constructor: how many of its Rust fields carry a Haskell
 /// representation — every `PhantomData` field is excluded, since it consumes
-/// no slot in the encoded `Con`. Shared by both directions (`FromCore`/
-/// `ToCore`) and both shapes (enum variant/struct).
-fn core_arity<'a>(field_types: impl Iterator<Item = &'a Type>) -> usize {
+/// no slot in the encoded `Con`. Shared by both directions (`FromHaskell`/
+/// `ToHaskell`) and both shapes (enum variant/struct).
+fn haskell_arity<'a>(field_types: impl Iterator<Item = &'a Type>) -> usize {
     field_types.filter(|ty| !is_phantom_data(ty)).count()
 }
 
@@ -164,16 +164,16 @@ fn add_trait_bounds(
 fn emit_field_decode(ty: &Type, index: usize, constructor: &str) -> TokenStream {
     let field = index + 1;
     quote! {
-        <#ty as tidepool_bridge::FromCore>::from_value(&fields[#index], table)
+        <#ty as tidepool_bridge::FromHaskell>::from_value(&fields[#index], table)
             .map_err(|source| tidepool_bridge::field_decode_error(
                 #constructor, #field, &fields[#index], table, source,
             ))?
     }
 }
 
-pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
+pub fn generate_from_haskell(info: &EnumInfo) -> TokenStream {
     let name = &info.name;
-    let trait_path: syn::Path = parse_quote!(tidepool_bridge::FromCore);
+    let trait_path: syn::Path = parse_quote!(tidepool_bridge::FromHaskell);
     let mut generics = info.generics.clone();
 
     add_trait_bounds(
@@ -190,28 +190,28 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
 
     for variant in &info.variants {
         let rust_name = &variant.rust_name;
-        let core_name = &variant.core_name;
-        let core_module = variant.core_module.as_ref();
-        let constructor_identity = core_module
-            .map(|module| format!("{module}.{core_name}"))
-            .unwrap_or_else(|| core_name.clone());
+        let haskell_name = &variant.haskell_name;
+        let haskell_module = variant.haskell_module.as_ref();
+        let constructor_identity = haskell_module
+            .map(|module| format!("{module}.{haskell_name}"))
+            .unwrap_or_else(|| haskell_name.clone());
         let fields = variant.shape.types();
         let rust_arity = fields.len();
 
-        let core_arity: usize = core_arity(fields.iter().copied());
-        let core_arity_u32 = core_arity as u32;
+        let haskell_arity: usize = haskell_arity(fields.iter().copied());
+        let haskell_arity_u32 = haskell_arity as u32;
 
         // Build per-Rust-field construction expressions. PhantomData fields
         // get a default `PhantomData` literal; other fields pull from the next
-        // Core field slot.
-        let mut core_ix: usize = 0;
+        // Haskell field slot.
+        let mut haskell_ix: usize = 0;
         let mut field_exprs: Vec<TokenStream> = Vec::with_capacity(rust_arity);
         for ty in &fields {
             if is_phantom_data(ty) {
                 field_exprs.push(quote! { <#ty as core::default::Default>::default() });
             } else {
-                let i = core_ix;
-                core_ix += 1;
+                let i = haskell_ix;
+                haskell_ix += 1;
                 field_exprs.push(emit_field_decode(ty, i, &constructor_identity));
             }
         }
@@ -234,15 +234,21 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
         // `Result` instead means a missing constructor just skips to the next
         // variant; only `Err(UnknownDataCon)` after every variant has had a
         // turn is a genuine decode failure.
-        let lookup = emit_datacon_lookup(core_module, core_name, core_arity_u32, core_arity, false);
+        let lookup = emit_datacon_lookup(
+            haskell_module,
+            haskell_name,
+            haskell_arity_u32,
+            haskell_arity,
+            false,
+        );
 
         match_arms.push(quote! {
             if let Ok(variant_id) = #lookup {
                 if *id == variant_id {
-                    if fields.len() != #core_arity {
+                    if fields.len() != #haskell_arity {
                         return Err(tidepool_bridge::BridgeError::ArityMismatch {
                             con: *id,
-                            expected: #core_arity,
+                            expected: #haskell_arity,
                             got: fields.len(),
                         });
                     }
@@ -253,9 +259,9 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
     }
 
     quote! {
-        impl #impl_generics tidepool_bridge::sealed::FromCoreSealed for #name #ty_generics #where_clause {}
+        impl #impl_generics tidepool_bridge::sealed::FromHaskellSealed for #name #ty_generics #where_clause {}
 
-        impl #impl_generics tidepool_bridge::FromCore for #name #ty_generics #where_clause {
+        impl #impl_generics tidepool_bridge::FromHaskell for #name #ty_generics #where_clause {
             fn from_value(value: &tidepool_bridge::Value, table: &tidepool_repr::DataConTable) -> Result<Self, tidepool_bridge::BridgeError> {
                 match value {
                     tidepool_bridge::Value::Con(id, fields) => {
@@ -269,9 +275,9 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
     }
 }
 
-pub fn generate_to_core(info: &EnumInfo) -> TokenStream {
+pub fn generate_to_haskell(info: &EnumInfo) -> TokenStream {
     let name = &info.name;
-    let trait_path: syn::Path = parse_quote!(tidepool_bridge::ToCore);
+    let trait_path: syn::Path = parse_quote!(tidepool_bridge::ToHaskell);
     let mut generics = info.generics.clone();
 
     add_trait_bounds(
@@ -288,12 +294,12 @@ pub fn generate_to_core(info: &EnumInfo) -> TokenStream {
 
     for variant in &info.variants {
         let rust_name = &variant.rust_name;
-        let core_name = &variant.core_name;
-        let core_module = variant.core_module.as_ref();
+        let haskell_name = &variant.haskell_name;
+        let haskell_module = variant.haskell_module.as_ref();
         let fields = variant.shape.types();
 
-        let core_arity: usize = fields.iter().filter(|ty| !is_phantom_data(ty)).count();
-        let core_arity_u32 = core_arity as u32;
+        let haskell_arity: usize = fields.iter().filter(|ty| !is_phantom_data(ty)).count();
+        let haskell_arity_u32 = haskell_arity as u32;
 
         // Bind ALL rust fields (so the pattern compiles) but we underscore
         // phantom fields since they aren't encoded.
@@ -316,7 +322,7 @@ pub fn generate_to_core(info: &EnumInfo) -> TokenStream {
         // A 0-arity TUPLE variant (`Foo::Bar()`, e.g. an `errors`-block ADT's
         // nullary constructor — #335's `LlmBudget`) still needs the `()`
         // pattern; only a genuine unit variant (`Foo::Bar`) omits it. Mirrors
-        // `generate_from_core`'s construction-side check just below.
+        // `generate_from_haskell`'s construction-side check just below.
         let pattern = match &variant.shape {
             VariantShape::Unit => quote! { #name::#rust_name },
             VariantShape::Tuple(_) => quote! { #name::#rust_name(#(#pattern_idents),*) },
@@ -330,10 +336,16 @@ pub fn generate_to_core(info: &EnumInfo) -> TokenStream {
             .iter()
             .filter(|(_, is_phantom)| !is_phantom)
             .map(|(ident, _)| {
-                quote! { tidepool_bridge::ToCore::to_value(#ident, table)? }
+                quote! { tidepool_bridge::ToHaskell::to_value(#ident, table)? }
             });
 
-        let lookup = emit_datacon_lookup(core_module, core_name, core_arity_u32, core_arity, true);
+        let lookup = emit_datacon_lookup(
+            haskell_module,
+            haskell_name,
+            haskell_arity_u32,
+            haskell_arity,
+            true,
+        );
 
         match_arms.push(quote! {
             #pattern => {
@@ -344,9 +356,9 @@ pub fn generate_to_core(info: &EnumInfo) -> TokenStream {
     }
 
     quote! {
-        impl #impl_generics tidepool_bridge::sealed::ToCoreSealed for #name #ty_generics #where_clause {}
+        impl #impl_generics tidepool_bridge::sealed::ToHaskellSealed for #name #ty_generics #where_clause {}
 
-        impl #impl_generics tidepool_bridge::ToCore for #name #ty_generics #where_clause {
+        impl #impl_generics tidepool_bridge::ToHaskell for #name #ty_generics #where_clause {
             fn to_value(&self, table: &tidepool_repr::DataConTable) -> Result<tidepool_bridge::Value, tidepool_bridge::BridgeError> {
                 match self {
                     #(#match_arms)*
@@ -356,14 +368,14 @@ pub fn generate_to_core(info: &EnumInfo) -> TokenStream {
     }
 }
 
-pub fn generate_struct_from_core(info: &StructInfo) -> TokenStream {
+pub fn generate_struct_from_haskell(info: &StructInfo) -> TokenStream {
     let name = &info.name;
-    let core_name = &info.core_name;
-    let core_module = info.core_module.as_ref();
-    let constructor_identity = core_module
-        .map(|module| format!("{module}.{core_name}"))
-        .unwrap_or_else(|| core_name.clone());
-    let trait_path: syn::Path = parse_quote!(tidepool_bridge::FromCore);
+    let haskell_name = &info.haskell_name;
+    let haskell_module = info.haskell_module.as_ref();
+    let constructor_identity = haskell_module
+        .map(|module| format!("{module}.{haskell_name}"))
+        .unwrap_or_else(|| haskell_name.clone());
+    let trait_path: syn::Path = parse_quote!(tidepool_bridge::FromHaskell);
     let mut generics = info.generics.clone();
 
     add_trait_bounds(
@@ -374,10 +386,10 @@ pub fn generate_struct_from_core(info: &StructInfo) -> TokenStream {
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
-    let core_arity: usize = core_arity(info.fields.iter().map(|f| &f.ty));
-    let core_arity_u32 = core_arity as u32;
+    let haskell_arity: usize = haskell_arity(info.fields.iter().map(|f| &f.ty));
+    let haskell_arity_u32 = haskell_arity as u32;
 
-    let mut core_ix: usize = 0;
+    let mut haskell_ix: usize = 0;
     let field_constructions: Vec<_> = info
         .fields
         .iter()
@@ -389,8 +401,8 @@ pub fn generate_struct_from_core(info: &StructInfo) -> TokenStream {
                     #field_name: <#field_ty as core::default::Default>::default()
                 }
             } else {
-                let i = core_ix;
-                core_ix += 1;
+                let i = haskell_ix;
+                haskell_ix += 1;
                 let decode = emit_field_decode(field_ty, i, &constructor_identity);
                 quote! {
                     #field_name: #decode
@@ -405,12 +417,18 @@ pub fn generate_struct_from_core(info: &StructInfo) -> TokenStream {
         quote! { #name { #(#field_constructions),* } }
     };
 
-    let lookup = emit_datacon_lookup(core_module, core_name, core_arity_u32, core_arity, true);
+    let lookup = emit_datacon_lookup(
+        haskell_module,
+        haskell_name,
+        haskell_arity_u32,
+        haskell_arity,
+        true,
+    );
 
     quote! {
-        impl #impl_generics tidepool_bridge::sealed::FromCoreSealed for #name #ty_generics #where_clause {}
+        impl #impl_generics tidepool_bridge::sealed::FromHaskellSealed for #name #ty_generics #where_clause {}
 
-        impl #impl_generics tidepool_bridge::FromCore for #name #ty_generics #where_clause {
+        impl #impl_generics tidepool_bridge::FromHaskell for #name #ty_generics #where_clause {
             fn from_value(value: &tidepool_bridge::Value, table: &tidepool_repr::DataConTable) -> Result<Self, tidepool_bridge::BridgeError> {
                 match value {
                     tidepool_bridge::Value::Con(id, fields) => {
@@ -418,10 +436,10 @@ pub fn generate_struct_from_core(info: &StructInfo) -> TokenStream {
                         if *id != con_id {
                             return Err(tidepool_bridge::BridgeError::UnknownDataCon(*id));
                         }
-                        if fields.len() != #core_arity {
+                        if fields.len() != #haskell_arity {
                             return Err(tidepool_bridge::BridgeError::ArityMismatch {
                                 con: *id,
-                                expected: #core_arity,
+                                expected: #haskell_arity,
                                 got: fields.len(),
                             });
                         }
@@ -434,11 +452,11 @@ pub fn generate_struct_from_core(info: &StructInfo) -> TokenStream {
     }
 }
 
-pub fn generate_struct_to_core(info: &StructInfo) -> TokenStream {
+pub fn generate_struct_to_haskell(info: &StructInfo) -> TokenStream {
     let name = &info.name;
-    let core_name = &info.core_name;
-    let core_module = info.core_module.as_ref();
-    let trait_path: syn::Path = parse_quote!(tidepool_bridge::ToCore);
+    let haskell_name = &info.haskell_name;
+    let haskell_module = info.haskell_module.as_ref();
+    let trait_path: syn::Path = parse_quote!(tidepool_bridge::ToHaskell);
     let mut generics = info.generics.clone();
 
     add_trait_bounds(
@@ -449,8 +467,8 @@ pub fn generate_struct_to_core(info: &StructInfo) -> TokenStream {
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
-    let core_arity: usize = core_arity(info.fields.iter().map(|f| &f.ty));
-    let core_arity_u32 = core_arity as u32;
+    let haskell_arity: usize = haskell_arity(info.fields.iter().map(|f| &f.ty));
+    let haskell_arity_u32 = haskell_arity as u32;
 
     // Bind ALL fields in the destructure pattern; phantom fields get `_` prefix
     // to silence unused warnings (the pattern must still cover them).
@@ -476,7 +494,7 @@ pub fn generate_struct_to_core(info: &StructInfo) -> TokenStream {
         .iter()
         .filter(|(_, _, is_phantom)| !is_phantom)
         .map(|(f, _, _)| {
-            quote! { tidepool_bridge::ToCore::to_value(#f, table)? }
+            quote! { tidepool_bridge::ToHaskell::to_value(#f, table)? }
         })
         .collect();
 
@@ -486,12 +504,18 @@ pub fn generate_struct_to_core(info: &StructInfo) -> TokenStream {
         quote! { #name { #(#destructure_fields),* } }
     };
 
-    let lookup = emit_datacon_lookup(core_module, core_name, core_arity_u32, core_arity, true);
+    let lookup = emit_datacon_lookup(
+        haskell_module,
+        haskell_name,
+        haskell_arity_u32,
+        haskell_arity,
+        true,
+    );
 
     quote! {
-        impl #impl_generics tidepool_bridge::sealed::ToCoreSealed for #name #ty_generics #where_clause {}
+        impl #impl_generics tidepool_bridge::sealed::ToHaskellSealed for #name #ty_generics #where_clause {}
 
-        impl #impl_generics tidepool_bridge::ToCore for #name #ty_generics #where_clause {
+        impl #impl_generics tidepool_bridge::ToHaskell for #name #ty_generics #where_clause {
             fn to_value(&self, table: &tidepool_repr::DataConTable) -> Result<tidepool_bridge::Value, tidepool_bridge::BridgeError> {
                 let #destructure = self;
                 let id = #lookup;

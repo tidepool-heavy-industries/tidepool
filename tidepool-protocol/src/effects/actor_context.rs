@@ -62,7 +62,7 @@ pub fn actor_context() -> Effect {
 fn type_defs() -> Vec<TypeDef> {
     vec![
         TypeDef {
-            name: "ProviderUsageObservation", wire_rust: None, core_module: None,
+            name: "ProviderUsageObservation", wire_rust: None, haskell_module: None,
             shape: TypeShape::Record { fields: vec![
                 field("usageObservationId", HsType::Text),
                 field("usageTimestamp", HsType::maybe(HsType::Text)),
@@ -73,7 +73,7 @@ fn type_defs() -> Vec<TypeDef> {
             doc: &["One durable provider usage observation; legacy sources may repeat the same response. No activation attribution is inferred."],
         },
         TypeDef {
-            name: "ProviderUsageScope", wire_rust: None, core_module: None,
+            name: "ProviderUsageScope", wire_rust: None, haskell_module: None,
             shape: TypeShape::Sum { variants: vec![
                 SumVariant { ctor: "UsageThread", fields: VariantFields::Positional(vec![HsType::Text]), doc: &[] },
                 SumVariant { ctor: "UsageTurn", fields: VariantFields::Positional(vec![HsType::Text, HsType::Text]), doc: &[] },
@@ -83,7 +83,7 @@ fn type_defs() -> Vec<TypeDef> {
         },
         closed_sum("ProviderUsageCompleteness", &["UsagePartial", "UsageComplete"]),
         TypeDef {
-            name: "ProviderUsageSummary", wire_rust: None, core_module: None,
+            name: "ProviderUsageSummary", wire_rust: None, haskell_module: None,
             shape: TypeShape::Record { fields: vec![
                 field("usageSummaryScope", HsType::Named("ProviderUsageScope")),
                 field("usageSummaryCompleteness", HsType::Named("ProviderUsageCompleteness")),
@@ -128,7 +128,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "ActivationKind",
             wire_rust: None,
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
@@ -158,7 +158,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "ActorContextInfo",
             wire_rust: None,
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     field("contextActorId", HsType::Int),
@@ -201,7 +201,7 @@ fn closed_sum(name: &'static str, constructors: &'static [&'static str]) -> Type
     TypeDef {
         name,
         wire_rust: None,
-        core_module: None,
+        haskell_module: None,
         shape: TypeShape::Sum {
             variants: constructors
                 .iter()

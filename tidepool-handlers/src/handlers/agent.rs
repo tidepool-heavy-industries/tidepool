@@ -785,7 +785,7 @@ impl SubagentHandler {
     /// dynamic tools.
     ///
     /// `tools` arrives as a flat `Value` rather than inside `spec` because
-    /// `serde_json::Value` has no `FromCore` — see `AgAgentStep`'s docs for the
+    /// `serde_json::Value` has no `FromHaskell` — see `AgAgentStep`'s docs for the
     /// asymmetry that forces. Parsing it is the FIRST thing that happens: a
     /// malformed declaration fails at `StageAllocating`, where nothing has been
     /// allocated, bound, or spawned.

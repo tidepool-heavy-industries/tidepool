@@ -150,7 +150,7 @@ fn pap_undersaturation_allocates() {
     assert!(matches!(
         result.values.as_slice(),
         [tidepool_bridge::Value::Con(id, fields)]
-            if *id == crate::heap_bridge::CLOSURE_SENTINEL && fields.is_empty()
+            if *id == crate::observation::CLOSURE_SENTINEL && fields.is_empty()
     ));
 }
 
@@ -185,7 +185,7 @@ fn pap_allocation_cancellation_publishes_no_result() {
     assert!(matches!(
         retry.as_ref().map(|result| result.values.as_slice()),
         Ok([tidepool_bridge::Value::Con(id, fields)])
-            if *id == crate::heap_bridge::CLOSURE_SENTINEL && fields.is_empty()
+            if *id == crate::observation::CLOSURE_SENTINEL && fields.is_empty()
     ));
 }
 

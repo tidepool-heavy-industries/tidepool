@@ -9,7 +9,7 @@
 //! A shared budget covers value nodes and copied payload bytes; unknown/function/PAP
 //! shapes are typed observation failures, and an exhausted budget is one too
 //! unless the caller asked for a bounded walk, which cuts and marks the cut
-//! (`heap_bridge::BudgetPolicy`). Cancellation
+//! (`observation::BudgetPolicy`). Cancellation
 //! governs evaluation inside force (a node budget cannot bound a diverging body).
 //!
 //! Exact-start indexing is observation-local, not a per-allocation registry:
@@ -163,10 +163,10 @@ fn is_budget_exhaustion(error: &ExecutionError) -> bool {
 /// only after the force returns and is dropped before the next force begins.
 ///
 /// `policy` chooses what an exhausted budget means:
-/// [`crate::heap_bridge::BudgetPolicy::Complete`] fails the whole observation,
+/// [`crate::observation::BudgetPolicy::Complete`] fails the whole observation,
 /// which is what every caller asked for before a bounded one existed;
 /// `Bounded` stops the walk there and leaves
-/// [`crate::heap_bridge::oversize_cut`] in place of the subtree it did not
+/// [`crate::observation::oversize_cut`] in place of the subtree it did not
 /// read. A bounded walk also stops FORCING at that point: a value it cannot
 /// materialize is not worth evaluating, and the retained handle keeps it
 /// reachable for a later, smaller look.
@@ -183,7 +183,7 @@ pub(super) fn observe_results(
     old_space: &OldSpace,
     seeds: &[super::observe::ObservationSeed],
     budget: usize,
-    policy: crate::heap_bridge::BudgetPolicy,
+    policy: crate::observation::BudgetPolicy,
 ) -> Result<Vec<Value>, ExecutionError> {
     let mut roots = ObservationRoots::new(machine, budget)?;
     let mut result_slots = Vec::new();
@@ -219,14 +219,14 @@ pub(super) fn observe_results(
                     // forcing anything.
                     Frontier::Cut => {
                         return Ok(super::observe::ObservationFrame::Leaf(
-                            crate::heap_bridge::oversize_cut(),
+                            crate::observation::oversize_cut(),
                         ))
                     }
                     Frontier::Slot(slot) => slot,
                 };
                 if policy.cuts() && observation_budget.remaining == 0 {
                     return Ok(super::observe::ObservationFrame::Leaf(
-                        crate::heap_bridge::oversize_cut(),
+                        crate::observation::oversize_cut(),
                     ));
                 }
                 if matches!(slot.rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
@@ -356,7 +356,7 @@ pub(super) fn describe_raised_exception(
             rep: RuntimeRep::LiftedRef,
         }],
         EXCEPTION_DESCRIPTION_BUDGET,
-        crate::heap_bridge::BudgetPolicy::Complete,
+        crate::observation::BudgetPolicy::Complete,
     );
     drop(scope);
     let message = observed

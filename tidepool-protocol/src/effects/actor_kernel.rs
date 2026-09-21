@@ -24,7 +24,7 @@ fn actor_lifecycle() -> TypeDef {
     TypeDef {
         name: "ActorLifecycle",
         wire_rust: None,
-        core_module: Some("Tidepool.Effects.Core"),
+        haskell_module: Some("Tidepool.Effects.Core"),
         shape: TypeShape::Sum {
             variants: vec![
                 SumVariant {
@@ -89,7 +89,7 @@ pub fn actor_kernel() -> Effect {
                                 HsType::Unit,
                             ),
                         ),
-                        rust: crate::schema::RustBinding::CoreValue,
+                        rust: crate::schema::RustBinding::HaskellValue,
                     },
                 ],
                 ret: HsType::Unit,
@@ -118,7 +118,7 @@ pub fn actor_kernel() -> Effect {
                     crate::schema::Arg {
                         name: "reply",
                         ty: HsType::Var("result"),
-                        rust: crate::schema::RustBinding::CoreValue,
+                        rust: crate::schema::RustBinding::HaskellValue,
                     },
                 ],
                 ret: HsType::Unit,
@@ -138,7 +138,7 @@ pub fn actor_kernel() -> Effect {
                     crate::schema::Arg {
                         name: "next",
                         ty: HsType::Var("next"),
-                        rust: crate::schema::RustBinding::CoreValue,
+                        rust: crate::schema::RustBinding::HaskellValue,
                     },
                 ],
                 ret: HsType::Unit,
@@ -230,7 +230,7 @@ fn source_install(ctor: &'static str, method: &'static str, target: Arg) -> Verb
                         HsType::Unit,
                     ),
                 ),
-                rust: RustBinding::CoreValue,
+                rust: RustBinding::HaskellValue,
             },
         ],
         ret: HsType::Unit,

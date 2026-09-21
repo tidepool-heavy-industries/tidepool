@@ -4,7 +4,7 @@ use crate::error::EffectError;
 use frunk::{HCons, HNil};
 use tidepool_bridge::error::BridgeError;
 use tidepool_bridge::Value;
-use tidepool_bridge::{FromCore, ToCore};
+use tidepool_bridge::{FromHaskell, ToHaskell};
 use tidepool_repr::{DataConId, DataConTable, PrincipalId};
 /// A handler's answer to an effect request.
 #[derive(Debug)]
@@ -32,7 +32,7 @@ impl From<Value> for Response {
 
 /// Shared context passed to effect handlers during dispatch.
 ///
-/// Carries the [`DataConTable`] (needed for `FromCore`/`ToCore` conversions),
+/// Carries the [`DataConTable`] (needed for `FromHaskell`/`ToHaskell` conversions),
 /// the exact runtime principal for this execution entry, and an optional
 /// user-defined state value `U` that handlers can read.
 pub struct EffectContext<'a, U = ()> {
@@ -60,7 +60,7 @@ impl<'a, U> EffectContext<'a, U> {
     }
 
     /// Convert a Rust value into a complete response for the JIT.
-    pub fn respond<T: ToCore>(&self, val: T) -> Result<Response, EffectError> {
+    pub fn respond<T: ToHaskell>(&self, val: T) -> Result<Response, EffectError> {
         val.to_value(self.table)
             .map(Response::Complete)
             .map_err(EffectError::Bridge)
@@ -73,7 +73,7 @@ impl<'a, U> EffectContext<'a, U> {
     /// long lists), which is why this is not just `respond(items)`.
     pub fn respond_list<T>(&self, items: Vec<T>) -> Result<Response, EffectError>
     where
-        T: ToCore,
+        T: ToHaskell,
     {
         let cons_id = tidepool_bridge::get_resilient(self.table, ":", 2)
             .ok_or_else(|| EffectError::Bridge(BridgeError::UnknownDataConName(":".into())))?;
@@ -91,7 +91,7 @@ impl<'a, U> EffectContext<'a, U> {
         })
     }
 
-    /// Access the data constructor table (for manual `FromCore`/`ToCore` calls).
+    /// Access the data constructor table (for manual `FromHaskell`/`ToHaskell` calls).
     pub fn table(&self) -> &DataConTable {
         self.table
     }
@@ -110,7 +110,7 @@ impl<'a, U> EffectContext<'a, U> {
 /// Handler for a single effect type.
 ///
 /// Implement this trait for each Rust struct that handles one Haskell effect.
-/// `Request` is typically a `#[derive(FromCore)]` enum mirroring the Haskell GADT.
+/// `Request` is typically a `#[derive(FromHaskell)]` enum mirroring the Haskell GADT.
 ///
 /// ```no_run
 /// use tidepool_effect::{EffectHandler, EffectContext, EffectError, Response};
@@ -126,8 +126,8 @@ impl<'a, U> EffectContext<'a, U> {
 /// ```
 pub trait EffectHandler<U = ()> {
     /// The Haskell-side effect request this handler consumes, decoded from
-    /// the Core `Value` via [`FromCore`].
-    type Request: FromCore;
+    /// the Core `Value` via [`FromHaskell`].
+    type Request: FromHaskell;
 
     /// Handle one decoded request and produce a response.
     fn handle(

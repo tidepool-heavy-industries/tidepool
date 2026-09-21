@@ -482,7 +482,7 @@ fn w5_a4_function_result_observes_as_the_closure_sentinel() {
         },
     ])];
     // A function-valued field observes as the closure sentinel inside its
-    // parent constructor (the Core contract), not as a typed refusal.
+    // parent constructor, preserving the surrounding data value.
     let result = compile_wire(wire)
         .run_entry(
             ValueId(0),
@@ -497,7 +497,7 @@ fn w5_a4_function_result_observes_as_the_closure_sentinel() {
             if matches!(
                 fields.as_slice(),
                 [tidepool_bridge::Value::Con(id, inner)]
-                    if *id == crate::heap_bridge::CLOSURE_SENTINEL && inner.is_empty()
+                    if *id == crate::observation::CLOSURE_SENTINEL && inner.is_empty()
             )
     ));
 }

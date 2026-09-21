@@ -235,7 +235,7 @@ data FieldRef (name :: Symbol) = FieldRef
 -- entirely, so this is a real gap in tidepool-extract's Core→CBOR
 -- reachability (most likely: no 'wiredInDataCons'-style entry for the
 -- wired-in boxed-equality witness), not a mistake in this instance. Fixing
--- it needs a change in @haskell/src/Tidepool/Translate.hs@, outside this
+-- it needs a change in the compiler worker, outside this
 -- module's scope — until then, 'field' typechecks correctly but a real
 -- @askUserWith@\/@formShapeWith@ call using it traps at extract time.
 -- 'title'\/'help'\/'formShapeWith'\/'askUserWith' with NO 'field' use are

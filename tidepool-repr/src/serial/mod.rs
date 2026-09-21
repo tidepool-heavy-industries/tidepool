@@ -58,11 +58,9 @@ pub const HEADER_MAGIC: [u8; 4] = [0x54, 0x50, 0x4C, 0x52];
 /// only on a breaking shape change, in the same commit as the Haskell
 /// serializer and the regenerated fixture corpora.
 ///
-/// `3.0` changed every metadata entry from 8 to 9 REQUIRED elements (added
-/// rendered field types, in field order),
-/// so a `2.x` payload is a hard `UnsupportedVersion` reject, not a tolerated
-/// short form; committed fixture corpora were regenerated in the same commit.
-pub const VERSION_MAJOR: u16 = 3;
+/// `4.0` removes obsolete variable-name and poison tables. Older payloads are
+/// rejected so stale artifacts cannot silently preserve that runtime contract.
+pub const VERSION_MAJOR: u16 = 4;
 /// Wire format minor version. An older minor within the same major is
 /// accepted (forward-compatible read); a newer minor than this build
 /// supports is rejected.

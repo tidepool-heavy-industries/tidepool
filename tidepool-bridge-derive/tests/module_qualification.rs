@@ -1,4 +1,4 @@
-//! `#[core(module = "...")]` qualified-name disambiguation.
+//! `#[haskell(module = "...")]` qualified-name disambiguation.
 //!
 //! When two types declare variants that share both unqualified name AND arity
 //! but come from different source modules, the plain name+arity lookup can't
@@ -7,21 +7,21 @@
 //! instead, producing a single unambiguous `DataConId`.
 
 use tidepool_bridge::Value;
-use tidepool_bridge::{BridgeError, FromCore, ToCore};
-use tidepool_bridge_derive::{FromCore, ToCore};
+use tidepool_bridge::{BridgeError, FromHaskell, ToHaskell};
+use tidepool_bridge_derive::{FromHaskell, ToHaskell};
 use tidepool_repr::{DataCon, DataConId, DataConTable};
 
 // Nullary variants keep the test focused on DataCon lookup — avoids pulling
 // in `Text` / `C#` / list-constructor table-setup just to carry a payload.
-#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
+#[derive(Debug, PartialEq, Eq, FromHaskell, ToHaskell)]
 enum Alpha {
-    #[core(module = "TestMod.Alpha", name = "Read")]
+    #[haskell(module = "TestMod.Alpha", name = "Read")]
     Read,
 }
 
-#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
+#[derive(Debug, PartialEq, Eq, FromHaskell, ToHaskell)]
 enum Beta {
-    #[core(module = "TestMod.Beta", name = "Read")]
+    #[haskell(module = "TestMod.Beta", name = "Read")]
     Read,
 }
 

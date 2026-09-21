@@ -3,10 +3,10 @@
 //! Six verbs, one saga (`tidepool-handlers`'s `SubagentHandler`). Routed by
 //! CONSTRUCTOR NAME only — `tidepool-harness::engine::classify_hole` never
 //! decodes a Subagent verb's payload; the args here exist ONLY so this
-//! effect's request enum matches the real wire ARITY (a `FromCore` decode
+//! effect's request enum matches the real wire ARITY (a `FromHaskell` decode
 //! matches a `Con` by name+arity, so a wrong arity here would make a
 //! legitimate `SubagentSpawn` request fail to classify). Every payload field
-//! is bound as [`crate::schema::RustBinding::CoreValue`]/`Derived` rather than
+//! is bound as [`crate::schema::RustBinding::HaskellValue`]/`Derived` rather than
 //! the real bridged types (`AgSpawnSpec`, `AgAgentId`, `AgCycleId`, …):
 //! classify_hole's job is recognition, not interpretation — the real decode,
 //! against the real bridged types, happens once, at the servicing site
@@ -25,7 +25,7 @@ fn value_arg(name: &'static str) -> Arg {
     Arg {
         name,
         ty: HsType::Value,
-        rust: RustBinding::CoreValue,
+        rust: RustBinding::HaskellValue,
     }
 }
 

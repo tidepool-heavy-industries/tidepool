@@ -2,7 +2,7 @@
 //! [`DataConTable`] — no Haskell Generic machinery, no fluency tax.
 //!
 //! The table carries both field LABELS and, since the `meta.cbor` 9-element
-//! wire bump, rendered field TYPES (`Tidepool.Translate.dcFieldTypes`), so
+//! wire bump, rendered constructor field types, so
 //! [`type_document`] can render a full GHC-style `data` declaration for a
 //! hole's answer type instead of a names-only synopsis — a harness author
 //! never hand-embeds an answer type's declaration in a prompt. Consumed by a
@@ -579,7 +579,7 @@ mod tests {
 
     /// Also the (2)+(4) composition pin: a non-vanilla (existential/GADT)
     /// constructor emits NO field types at all
-    /// (`Tidepool.Translate.dcFieldTypes`'s `isVanillaDataCon` guard), which
+    /// (the compiler worker's `isVanillaDataCon` guard), which
     /// is exactly this shape at the table level — rep_arity > 0, field types
     /// absent. The two fixes compose into one honest degrade: absent types
     /// on a non-nullary constructor is unrenderable, so the whole type

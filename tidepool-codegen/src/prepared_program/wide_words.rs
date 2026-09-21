@@ -516,7 +516,6 @@ mod tests {
         let mut vmctx = crate::context::VMContext::new(
             buffer.as_mut_ptr().cast(),
             buffer.as_mut_ptr().wrapping_add(buffer.len()).cast(),
-            crate::host_fns::gc_trigger,
         );
         vmctx.machine_state = &machine as *const _ as *mut _;
         let mut output = [0xaaaa_u64, 0xbbbb];

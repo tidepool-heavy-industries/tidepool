@@ -333,7 +333,7 @@ impl Effect {
         }
         panic!(
             "{}: no type_defs entry (own or foreign_types) declares `{name}`, so it has \
-             no wire Rust spelling. A type from another mechanism (a `CoreRecord` bridged \
+             no wire Rust spelling. A type from another mechanism (a `HaskellRecord` bridged \
              record) cannot appear in a generated wire struct.",
             self.name
         )
@@ -919,17 +919,17 @@ pub struct Arg {
 ///
 /// Closed over what the registry actually needs. The `Value` split is a real
 /// semantic distinction, not a stylistic one: an errors-tagged verb's method
-/// receives no `cx`, so it has no `DataConTable` to interpret a core value
+/// receives no `cx`, so it has no `DataConTable` to interpret a materialized Haskell value
 /// with — the conversion has to happen at Req-decode time, which is what the
-/// `JsonArg` wrapper's `FromCore` impl is for.
+/// `JsonArg` wrapper's `FromHaskell` impl is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RustBinding {
     /// Derived mechanically from the Haskell type: `Text`→`String`,
     /// `Int`→`i64`, `Bool`→`bool`, `[Text]`→`Vec<String>`.
     Derived,
-    /// `tidepool_bridge::Value` — a materialized core value, interpreted by the
+    /// `tidepool_bridge::Value` — a materialized Haskell value, interpreted by the
     /// method using `cx`'s table.
-    CoreValue,
+    HaskellValue,
     /// `crate::effect_glue::JsonArg` — pre-converted to `serde_json::Value` at
     /// decode time, for a method that gets no `cx`.
     JsonValue,
@@ -951,7 +951,7 @@ impl RustBinding {
     #[must_use]
     pub fn rust_type(self, ty: &HsType, whose: &str) -> String {
         match self {
-            RustBinding::CoreValue => "tidepool_bridge::Value".to_string(),
+            RustBinding::HaskellValue => "tidepool_bridge::Value".to_string(),
             RustBinding::JsonValue => "crate::effect_glue::JsonArg".to_string(),
             RustBinding::Bridged(n) => format!("tidepool_bridge_effects::{n}"),
             RustBinding::Path(p) => (*p).to_string(),
@@ -1237,7 +1237,7 @@ pub enum HelperBody {
     /// `runLLMTurnForkSited`/`runLLMTurnFanoutSited`/`finalizeSited`.
     ///
     /// The declared `params`/`ret` are independent of the wrapped verb's own
-    /// GADT field types (which stay `Value`/`CoreValue` — see the verb's own
+    /// GADT field types (which stay `Value`/`HaskellValue` — see the verb's own
     /// `RustBinding`): the extractor only checks the CALLER's answer type is
     /// monomorphic (`Translate.hs`'s `checkRunLLMTurnType`) before resuming
     /// with a value the caller validated against that exact type, so

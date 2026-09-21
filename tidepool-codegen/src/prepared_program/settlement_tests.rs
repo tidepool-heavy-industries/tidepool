@@ -52,8 +52,7 @@ impl<'a> Invocation<'a> {
         unsafe { descriptor.initialize_header(start) };
         let mut root = Box::new(start as usize);
         machine.register_rust_root((&mut *root as *mut usize).cast());
-        let mut vmctx =
-            unsafe { VMContext::new(start, start.add(size), crate::host_fns::gc_trigger) };
+        let mut vmctx = unsafe { VMContext::new(start, start.add(size)) };
         vmctx.alloc_ptr = unsafe { start.add(descriptor.allocation_extent() as usize) };
         vmctx.machine_state = (&*machine as *const MachineState).cast_mut();
         vmctx.prepared_stack_limit = NativeStackBounds::current()

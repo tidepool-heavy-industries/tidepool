@@ -5,15 +5,15 @@ use tidepool_repr::DataConTable;
 /// Implementation detail for sealing traits.
 #[doc(hidden)]
 pub mod sealed {
-    pub trait FromCoreSealed {}
-    pub trait ToCoreSealed {}
+    pub trait FromHaskellSealed {}
+    pub trait ToHaskellSealed {}
 }
 
-/// Convert a Core Value (from evaluation) to a Rust type.
+/// Decode an evaluated Haskell value into a Rust type.
 ///
-/// This trait is used to extract native Rust values from evaluated Core expressions.
+/// This trait is used to extract native Rust values from evaluated Haskell data.
 /// Implementations should handle potential type mismatches and arity errors.
-pub trait FromCore: Sized + sealed::FromCoreSealed {
+pub trait FromHaskell: Sized + sealed::FromHaskellSealed {
     /// Convert a Value to this type using the provided DataConTable for lookups.
     ///
     /// # Errors
@@ -27,10 +27,10 @@ pub trait FromCore: Sized + sealed::FromCoreSealed {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError>;
 }
 
-/// Convert a Rust type to the runtime Value representation.
+/// Encode a Rust type as a Haskell runtime value.
 ///
-/// This trait is used to inject Rust values into the Core evaluator.
-pub trait ToCore: sealed::ToCoreSealed {
+/// This trait is used to encode Rust values for the Haskell runtime.
+pub trait ToHaskell: sealed::ToHaskellSealed {
     /// Convert this type to a Value using the provided DataConTable for lookups.
     ///
     /// # Errors

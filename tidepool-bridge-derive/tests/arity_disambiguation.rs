@@ -1,24 +1,24 @@
-//! Regression tests for DataCon lookup by (name, arity) in `FromCore`/`ToCore` derives.
+//! Regression tests for DataCon lookup by (name, arity) in `FromHaskell`/`ToHaskell` derives.
 //!
 //! Two GADTs from different Haskell modules can declare same-named constructors
 //! (e.g. `Pattern.Memory.Read` and `Pattern.File.Read`). The derive must
 //! disambiguate by arity so decoding doesn't fail with "Unknown DataCon name".
 
 use tidepool_bridge::Value;
-use tidepool_bridge::{BridgeError, FromCore, ToCore};
-use tidepool_bridge_derive::{FromCore, ToCore};
+use tidepool_bridge::{BridgeError, FromHaskell, ToHaskell};
+use tidepool_bridge_derive::{FromHaskell, ToHaskell};
 use tidepool_repr::{DataCon, DataConId, DataConTable};
 use tidepool_testing::gen::datacon_table::standard_datacon_table;
 
-#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
+#[derive(Debug, PartialEq, Eq, FromHaskell, ToHaskell)]
 enum Alpha {
-    #[core(name = "Read")]
+    #[haskell(name = "Read")]
     Read(i64),
 }
 
-#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
+#[derive(Debug, PartialEq, Eq, FromHaskell, ToHaskell)]
 enum Beta {
-    #[core(name = "Read")]
+    #[haskell(name = "Read")]
     Read(i64, u64),
 }
 
@@ -62,7 +62,7 @@ fn arity_alpha_roundtrips_when_beta_shares_name() {
     match &encoded {
         Value::Con(id, fields) => {
             assert_eq!(*id, alpha_id, "must encode to the arity-1 Read id");
-            assert_eq!(fields.len(), 1, "Alpha encodes with 1 Core field");
+            assert_eq!(fields.len(), 1, "Alpha encodes with 1 Haskell field");
         }
         other => panic!("expected Con, got {:?}", other),
     }
@@ -80,7 +80,7 @@ fn beta_roundtrips_when_alpha_shares_name() {
     match &encoded {
         Value::Con(id, fields) => {
             assert_eq!(*id, beta_id, "must encode to the arity-2 Read id");
-            assert_eq!(fields.len(), 2, "Beta encodes with 2 Core fields");
+            assert_eq!(fields.len(), 2, "Beta encodes with 2 Haskell fields");
         }
         other => panic!("expected Con, got {:?}", other),
     }

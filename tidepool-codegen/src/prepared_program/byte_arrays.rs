@@ -2151,9 +2151,7 @@ mod tests {
                 .install_prepared_buffer(vec![0_u64; extent / 8], vec![descriptor.clone()])
                 .unwrap();
             let (start, size) = machine.gc_active_range().unwrap();
-            let mut vmctx = unsafe {
-                crate::context::VMContext::new(start, start.add(size), crate::host_fns::gc_trigger)
-            };
+            let mut vmctx = unsafe { crate::context::VMContext::new(start, start.add(size)) };
             vmctx.alloc_ptr = unsafe { start.add(extent) };
             vmctx.machine_state = &machine as *const _ as *mut _;
             let reference = (start as usize | usize::from(descriptor.tag())) as *mut u8;
@@ -2191,11 +2189,7 @@ mod tests {
             let mut heap = [0_u64; 4];
             let start = heap.as_mut_ptr().cast::<u8>();
             let mut vmctx = unsafe {
-                crate::context::VMContext::new(
-                    start,
-                    start.add(std::mem::size_of_val(&heap)),
-                    crate::host_fns::gc_trigger,
-                )
+                crate::context::VMContext::new(start, start.add(std::mem::size_of_val(&heap)))
             };
             vmctx.machine_state = &machine as *const _ as *mut _;
             let mut wrapper = [0_u64; 2];
@@ -2223,11 +2217,7 @@ mod tests {
         let mut heap = [0_u64; 4];
         let start = heap.as_mut_ptr().cast::<u8>();
         let mut vmctx = unsafe {
-            crate::context::VMContext::new(
-                start,
-                start.add(std::mem::size_of_val(&heap)),
-                crate::host_fns::gc_trigger,
-            )
+            crate::context::VMContext::new(start, start.add(std::mem::size_of_val(&heap)))
         };
         vmctx.machine_state = &machine as *const _ as *mut _;
         let mut wrapper = [0_u64; 2];
@@ -2259,9 +2249,7 @@ mod tests {
             .install_prepared_buffer(vec![0_u64; extent / 8], vec![descriptor.clone()])
             .unwrap();
         let (start, size) = machine.gc_active_range().unwrap();
-        let mut vmctx = unsafe {
-            crate::context::VMContext::new(start, start.add(size), crate::host_fns::gc_trigger)
-        };
+        let mut vmctx = unsafe { crate::context::VMContext::new(start, start.add(size)) };
         vmctx.alloc_ptr = unsafe { start.add(extent) };
         vmctx.machine_state = &machine as *const _ as *mut _;
         let reference = (start as usize | usize::from(descriptor.tag())) as *mut u8;
@@ -2328,9 +2316,7 @@ mod tests {
                 .install_prepared_buffer(vec![0_u64; extent / 8], vec![descriptor.clone()])
                 .unwrap();
             let (start, size) = machine.gc_active_range().unwrap();
-            let mut vmctx = unsafe {
-                crate::context::VMContext::new(start, start.add(size), crate::host_fns::gc_trigger)
-            };
+            let mut vmctx = unsafe { crate::context::VMContext::new(start, start.add(size)) };
             vmctx.alloc_ptr = unsafe { start.add(extent) };
             vmctx.machine_state = &machine as *const _ as *mut _;
             let reference = (start as usize | usize::from(descriptor.tag())) as *mut u8;

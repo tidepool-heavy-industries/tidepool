@@ -1,16 +1,14 @@
-use cranelift_codegen::ir::{self, types, AbiParam};
+use cranelift_codegen::ir;
 use cranelift_codegen::isa::TargetIsa;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::Context;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
-use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::debug::LambdaRegistry;
 use crate::stack_map::{RawStackMap, RawStackMapEntry, StackMapRegistry};
 
 /// Owns executable allocations for exactly the module's lifetime. Raw code and
@@ -92,7 +90,7 @@ pub struct CodegenPipeline {
     ///
     /// This field is public as an **escape hatch** for advanced use cases and tests
     /// that need direct access to Cranelift's `JITModule`. Most users should prefer
-    /// the safe wrapper methods on `CodegenPipeline` (e.g., `declare_function`)
+    /// the safe wrapper methods on `CodegenPipeline`
     /// instead of calling into `module` directly.
     pub module: OwnedJitModule,
     /// Target ISA (needed for Context::compile).
@@ -106,23 +104,6 @@ pub struct CodegenPipeline {
     /// retained only after `finalize`, so callers cannot preflight against a
     /// frame whose code was not made callable.
     native_frame_maximum: usize,
-    /// Lambda name registry: (func_id, name). Populated during define_function.
-    /// Never truncated — `lambda_registry`/`lambda_registry_built_upto` below
-    /// track how much of this has already been folded into the accumulated
-    /// registry, so a fresh `build_lambda_registry` call only walks the tail.
-    lambda_names: Vec<(FuncId, String)>,
-    /// Accumulated code-ptr -> name registry, shared via `Rc` with whatever
-    /// thread-local slot last installed it (`debug::set_lambda_registry`).
-    /// `build_lambda_registry` extends this in place: once the previous
-    /// run's thread-local handle is dropped (refcount back to 1), extending
-    /// is `Rc::make_mut` + insert of only the NEW entries, not a rebuild of
-    /// the whole session's lambda history.
-    lambda_registry: Rc<LambdaRegistry>,
-    /// How many of `lambda_names`'s entries are already folded into
-    /// `lambda_registry`.
-    lambda_registry_built_upto: usize,
-    /// Only finalized names may be resolved, including during failed-job cleanup.
-    lambda_names_finalized: usize,
     /// Boxed-literal wrapper constructor ids (I#/W#/C#/F#/D#) for this compile,
     /// set by the JIT entry point from the DataConTable. Transported here so
     /// `compile_expr` can stamp it onto every `EmitSession` without threading
@@ -149,24 +130,13 @@ pub struct CodegenPipeline {
     /// diff-after way as [`Self::functions_defined`]; it is the size half of
     /// the same question — how much executable memory one turn cost.
     code_bytes: u64,
-    /// String-intern arena for diagnostic strings (e.g. enclosing-function
-    /// names) that compiled code holds a raw pointer to.
-    ///
-    /// INVARIANT: this arena outlives all code compiled by this pipeline —
-    /// a pointer handed out by [`Self::intern_name`] is valid exactly as
-    /// long as `self` is alive. A `Box<str>`'s heap-allocated bytes don't
-    /// move when the `HashSet` rehashes (only the box handle does), so the
-    /// pointer stays stable across further `intern_name` calls. Deduped by
-    /// name, so N case sites in one function share one allocation, and
-    /// recompiling the same function doesn't grow the set.
-    name_arena: HashSet<Box<str>>,
 }
 
 impl CodegenPipeline {
     /// Create a new CodegenPipeline with default x86-64 settings.
     ///
     /// `symbols` is a list of (name, pointer) pairs for host functions
-    /// that JIT code can call (e.g., gc_trigger).
+    /// that JIT code can call (e.g.).
     pub fn new(symbols: &[(&str, *const u8)]) -> Result<Self, PipelineError> {
         let mut flag_builder = settings::builder();
         flag_builder
@@ -230,14 +200,9 @@ impl CodegenPipeline {
             stack_maps: StackMapRegistry::new(),
             pending_stack_maps: Vec::new(),
             native_frame_maximum: 0,
-            lambda_names: Vec::new(),
-            lambda_registry: Rc::new(LambdaRegistry::new()),
-            lambda_registry_built_upto: 0,
-            lambda_names_finalized: 0,
             functions_defined: 0,
             blocks_emitted: 0,
             code_bytes: 0,
-            name_arena: HashSet::new(),
         })
     }
 
@@ -256,27 +221,6 @@ impl CodegenPipeline {
 
     pub(crate) fn invalidate(&mut self) {
         self.compilation_state = CompilationState::Failed;
-    }
-
-    /// Intern `name` in the pipeline-owned arena, returning a raw pointer +
-    /// length valid for the pipeline's lifetime. Dedupes by name, so
-    /// repeated interning of the same name (e.g. multiple case sites in one
-    /// function, or recompiling the same function) returns the same
-    /// allocation instead of growing the arena.
-    pub fn intern_name(&mut self, name: &str) -> (*const u8, usize) {
-        if let Some(existing) = self.name_arena.get(name) {
-            return (existing.as_ptr(), existing.len());
-        }
-        let boxed: Box<str> = name.into();
-        let ptr = boxed.as_ptr();
-        let len = boxed.len();
-        self.name_arena.insert(boxed);
-        (ptr, len)
-    }
-
-    /// Number of distinct names currently interned. Test/diagnostic hook.
-    pub fn interned_name_count(&self) -> usize {
-        self.name_arena.len()
     }
 
     /// Session-lifetime count of Cranelift functions successfully compiled.
@@ -308,31 +252,10 @@ impl CodegenPipeline {
         self.native_frame_maximum
     }
 
-    /// Create the standard function signature for compiled tidepool functions.
-    ///
-    /// Uses the target ISA's default C ABI calling convention, with vmctx: i64
-    /// as the first parameter and an i64 return value.
-    pub fn make_func_signature(&self) -> ir::Signature {
-        let mut sig = ir::Signature::new(self.isa.default_call_conv());
-        sig.params.push(AbiParam::new(types::I64)); // vmctx pointer
-        sig.returns.push(AbiParam::new(types::I64)); // result pointer
-        sig
-    }
-
-    /// Declare a function in the JIT module.
-    pub fn declare_function(&mut self, name: &str) -> Result<FuncId, PipelineError> {
-        self.ensure_usable()?;
-        let sig = self.make_func_signature();
-        self.module
-            .declare_function(name, Linkage::Export, &sig)
-            .map_err(|e| PipelineError::Declaration(format!("failed to declare `{}`: {}", name, e)))
-    }
-
     /// Declare a function with a caller-supplied checked signature.
     ///
     /// Prepared-program emitters use this path so definitions, calls and C
-    /// adapters all consume the same [`crate::entry_abi::EntryAbi`] lowering;
-    /// the legacy unary Core ABI remains confined to `declare_function`.
+    /// adapters all consume the same [`crate::entry_abi::EntryAbi`] lowering.
     pub fn declare_function_with_signature(
         &mut self,
         name: &str,
@@ -479,7 +402,6 @@ impl CodegenPipeline {
             self.stack_maps.register(base_ptr, func_size, &raw_maps);
             self.native_frame_maximum = self.native_frame_maximum.max(frame_reserve);
         }
-        self.lambda_names_finalized = self.lambda_names.len();
         self.compilation_state = CompilationState::Ready;
         Ok(())
     }
@@ -489,50 +411,28 @@ impl CodegenPipeline {
     pub fn get_function_ptr(&self, func_id: FuncId) -> *const u8 {
         self.module.get_finalized_function(func_id)
     }
-
-    /// Register a lambda name for a function ID (call before finalize).
-    pub fn register_lambda(&mut self, func_id: FuncId, name: String) {
-        self.lambda_names.push((func_id, name));
-    }
-
-    /// Return the accumulated `LambdaRegistry`, incrementally extended with
-    /// any lambdas registered since the last call.
-    ///
-    /// Must be called after `finalize()` so code pointers are available for
-    /// the newly-registered entries. Once resolved, a JIT function's code
-    /// pointer never moves (finalized allocations stay at stable addresses),
-    /// so entries folded in on an earlier call
-    /// stay valid forever and never need re-resolving.
-    ///
-    /// `Rc::make_mut` extends in place (O(new entries)) when this is the only
-    /// outstanding handle — true whenever the previous run's thread-local
-    /// install has already been cleared (`debug::clear_lambda_registry`,
-    /// called from `RegistryGuard::drop` before the next run starts). It
-    /// falls back to a clone-then-extend only if a handle is still
-    /// outstanding (e.g. a nested child run compiling new lambdas while the
-    /// parent's registry handle is still installed) — correctness-preserving,
-    /// just not O(1)/O(new) in that rarer reentrant case.
-    pub fn build_lambda_registry(&mut self) -> Rc<LambdaRegistry> {
-        if self.lambda_registry_built_upto < self.lambda_names_finalized {
-            let registry = Rc::make_mut(&mut self.lambda_registry);
-            for (func_id, name) in
-                &self.lambda_names[self.lambda_registry_built_upto..self.lambda_names_finalized]
-            {
-                let ptr = self.module.get_finalized_function(*func_id) as usize;
-                registry.register(ptr, name.clone());
-            }
-            self.lambda_registry_built_upto = self.lambda_names_finalized;
-        }
-        Rc::clone(&self.lambda_registry)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cranelift_codegen::ir::InstBuilder;
+    use cranelift_codegen::ir::{types, AbiParam, InstBuilder};
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
-    use std::collections::HashMap;
+
+    fn test_signature(pipeline: &CodegenPipeline) -> ir::Signature {
+        let mut signature = ir::Signature::new(pipeline.isa.default_call_conv());
+        signature.params.push(AbiParam::new(types::I64));
+        signature.returns.push(AbiParam::new(types::I64));
+        signature
+    }
+
+    fn declare_test_function(
+        pipeline: &mut CodegenPipeline,
+        name: &str,
+    ) -> Result<FuncId, PipelineError> {
+        let signature = test_signature(pipeline);
+        pipeline.declare_function_with_signature(name, Linkage::Export, &signature)
+    }
 
     #[cfg(target_os = "linux")]
     pub(crate) fn address_is_executable(address: usize) -> bool {
@@ -644,14 +544,14 @@ mod tests {
         // Export linkage asks Cranelift for colocated references by default,
         // just like emitted local lambdas and anonymous literal data. Resolve
         // these through the symbol table to exercise distant placement.
-        let leaf = pipeline.declare_function("distant_leaf").unwrap();
+        let leaf = declare_test_function(&mut pipeline, "distant_leaf").unwrap();
         let data = pipeline
             .module
             .declare_data("distant_data", Linkage::Export, false, false)
             .unwrap();
-        let caller = pipeline.declare_function("distant_caller").unwrap();
+        let caller = declare_test_function(&mut pipeline, "distant_caller").unwrap();
         let mut ctx = pipeline.module.make_context();
-        ctx.func.signature = pipeline.make_func_signature();
+        ctx.func.signature = test_signature(&pipeline);
         let mut frontend = FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut frontend);
         let block = builder.create_block();
@@ -663,7 +563,7 @@ mod tests {
         let direct = builder.ins().call(callee, &[vmctx]);
         let direct = builder.inst_results(direct)[0];
         let address = builder.ins().func_addr(types::I64, callee);
-        let sig = builder.import_signature(pipeline.make_func_signature());
+        let sig = builder.import_signature(test_signature(&pipeline));
         let indirect = builder.ins().call_indirect(sig, address, &[vmctx]);
         let indirect = builder.inst_results(indirect)[0];
         let symbol = pipeline.module.declare_data_in_func(data, builder.func);
@@ -693,10 +593,10 @@ mod tests {
     #[test]
     fn test_declare_define_finalize() {
         let mut pipeline = CodegenPipeline::new(&[]).unwrap();
-        let func_id = pipeline.declare_function("test_fn").unwrap();
+        let func_id = declare_test_function(&mut pipeline, "test_fn").unwrap();
 
         let mut ctx = pipeline.module.make_context();
-        ctx.func.signature = pipeline.make_func_signature();
+        ctx.func.signature = test_signature(&pipeline);
 
         let mut builder_context = FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
@@ -724,50 +624,6 @@ mod tests {
     }
 
     #[test]
-    fn w5_a1_stack_limit_reserves_finalized_frames() {
-        let mut pipeline = CodegenPipeline::new(&[]).unwrap();
-        let function = define_trivial_lambda(&mut pipeline, "stack_limit_frame", 42);
-
-        // A compiled-but-unfinalized frame is not callable and must not become
-        // the VMContext preflight reserve early.
-        assert_eq!(pipeline.native_frame_maximum(), 0);
-        pipeline.finalize().unwrap();
-
-        // x86-64 Cranelift's finalized metadata contributes the active frame;
-        // the setup area (saved RBP + return address) makes even this leaf's
-        // reserve nonzero.
-        assert!(pipeline.native_frame_maximum() >= 16);
-        let ptr = pipeline.get_function_ptr(function);
-        assert!(!ptr.is_null());
-    }
-
-    #[test]
-    fn test_build_lambda_registry() {
-        let mut pipeline = CodegenPipeline::new(&[]).unwrap();
-        let func_id = pipeline.declare_function("f1").unwrap();
-
-        let mut ctx = pipeline.module.make_context();
-        ctx.func.signature = pipeline.make_func_signature();
-        let mut builder_context = FunctionBuilderContext::new();
-        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
-        let block = builder.create_block();
-        builder.append_block_params_for_function_params(block);
-        builder.switch_to_block(block);
-        builder.seal_block(block);
-        let val = builder.ins().iconst(types::I64, 0);
-        builder.ins().return_(&[val]);
-        builder.finalize();
-
-        pipeline.define_function(func_id, &mut ctx).unwrap();
-        pipeline.register_lambda(func_id, "my_lambda".to_string());
-        pipeline.finalize().unwrap();
-
-        let registry = pipeline.build_lambda_registry();
-        let ptr = pipeline.get_function_ptr(func_id);
-        assert_eq!(registry.lookup(ptr as usize), Some("my_lambda"));
-    }
-
-    #[test]
     fn test_host_fn_symbols_integration() {
         extern "C" fn my_host_fn() -> i64 {
             123
@@ -775,9 +631,9 @@ mod tests {
         let symbols = [("my_host_fn", my_host_fn as *const u8)];
         let mut pipeline = CodegenPipeline::new(&symbols).unwrap();
 
-        let func_id = pipeline.declare_function("call_host").unwrap();
+        let func_id = declare_test_function(&mut pipeline, "call_host").unwrap();
         let mut ctx = pipeline.module.make_context();
-        ctx.func.signature = pipeline.make_func_signature();
+        ctx.func.signature = test_signature(&pipeline);
 
         let mut builder_context = FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
@@ -809,45 +665,11 @@ mod tests {
         // SAFETY: Calling the JIT-compiled function with a dummy vmctx (0).
         assert_eq!(unsafe { func(0) }, 123);
     }
-
-    #[test]
-    fn intern_name_dedupes_by_name_not_by_call_count() {
-        let mut pipeline = CodegenPipeline::new(&[]).unwrap();
-
-        // Simulate multiple case sites in the same function, across
-        // multiple "compiles" of that function (e.g. repeated calls in a
-        // long-lived server process): the arena must hold one entry per
-        // DISTINCT name, not one per call.
-        let (ptr_a1, len_a1) = pipeline.intern_name("foo");
-        let (ptr_a2, len_a2) = pipeline.intern_name("foo");
-        let (ptr_b, len_b) = pipeline.intern_name("bar");
-        let (ptr_a3, len_a3) = pipeline.intern_name("foo");
-
-        assert_eq!(pipeline.interned_name_count(), 2);
-        assert_eq!(ptr_a1, ptr_a2);
-        assert_eq!(ptr_a1, ptr_a3);
-        assert_eq!(len_a1, len_a2);
-        assert_eq!(len_a1, len_a3);
-        assert_ne!(ptr_a1, ptr_b);
-        assert_eq!(len_b, "bar".len());
-
-        // Interning ten more distinct names doesn't touch the existing two.
-        for i in 0..10 {
-            pipeline.intern_name(&format!("fn_{i}"));
-        }
-        assert_eq!(pipeline.interned_name_count(), 12);
-        let (ptr_a4, _) = pipeline.intern_name("foo");
-        assert_eq!(ptr_a1, ptr_a4, "rehashing must not move the interned bytes");
-    }
-
-    /// Declares, defines and registers a trivial constant-returning function
-    /// named `name` in `pipeline`, without finalizing. Shared by the
-    /// incremental-registry tests below, which need to control exactly when
-    /// `finalize`/`build_lambda_registry` runs relative to registration.
+    /// Declares and defines a trivial constant-returning function without finalizing.
     fn define_trivial_lambda(pipeline: &mut CodegenPipeline, name: &str, ret: i64) -> FuncId {
-        let func_id = pipeline.declare_function(name).unwrap();
+        let func_id = declare_test_function(pipeline, name).unwrap();
         let mut ctx = pipeline.module.make_context();
-        ctx.func.signature = pipeline.make_func_signature();
+        ctx.func.signature = test_signature(pipeline);
         let mut builder_context = FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
         let block = builder.create_block();
@@ -858,83 +680,6 @@ mod tests {
         builder.ins().return_(&[val]);
         builder.finalize();
         pipeline.define_function(func_id, &mut ctx).unwrap();
-        pipeline.register_lambda(func_id, name.to_string());
         func_id
-    }
-
-    /// Across several "turns" (declare/define/register a few lambdas,
-    /// finalize, then read the registry — the same shape `add_function` +
-    /// `install_registries` drive per session turn), the incremental
-    /// `build_lambda_registry` must contain exactly what a from-scratch
-    /// rebuild over the FULL lambda history so far would contain: the
-    /// incremental path may only change the cost, never the observable
-    /// contents, of a full rebuild.
-    #[test]
-    fn build_lambda_registry_incremental_matches_full_rebuild() {
-        let mut pipeline = CodegenPipeline::new(&[]).unwrap();
-        // Independent shadow of `lambda_names: Vec<(FuncId, String)>`'s
-        // accumulation, used only to compute the reference full rebuild — it
-        // does not touch `pipeline`'s own bookkeeping.
-        let mut lambda_names_shadow: Vec<(FuncId, String)> = Vec::new();
-
-        for turn in 0..4usize {
-            for i in 0..3usize {
-                let name = format!("turn{turn}_lambda{i}");
-                let func_id = define_trivial_lambda(&mut pipeline, &name, (turn * 10 + i) as i64);
-                lambda_names_shadow.push((func_id, name));
-            }
-            pipeline.finalize().unwrap();
-
-            // Reference: a full-rebuild algorithm walking the ENTIRE history
-            // every turn, computed independently of the incremental path's state.
-            let mut full_rebuild: HashMap<usize, String> = HashMap::new();
-            for (func_id, name) in &lambda_names_shadow {
-                let ptr = pipeline.module.get_finalized_function(*func_id) as usize;
-                full_rebuild.insert(ptr, name.clone());
-            }
-
-            let incremental = pipeline.build_lambda_registry();
-            assert_eq!(
-                incremental.len(),
-                full_rebuild.len(),
-                "turn {turn}: incremental registry size diverged from full rebuild"
-            );
-            for (ptr, name) in &full_rebuild {
-                assert_eq!(
-                    incremental.lookup(*ptr),
-                    Some(name.as_str()),
-                    "turn {turn}: incremental registry missing/mismatched entry for {name}"
-                );
-            }
-
-            // Simulate the run boundary: the thread-local handle this run
-            // would have installed is dropped here (RegistryGuard::drop calls
-            // clear_lambda_registry), so the next turn's build_lambda_registry
-            // call sees refcount 1 and extends in place rather than cloning.
-            drop(incremental);
-        }
-    }
-
-    /// A call to `build_lambda_registry` with no new lambdas registered
-    /// since the last call (i.e. a run that compiles nothing new — the common
-    /// case once a session has already declared everything the fragment
-    /// needs) must return the SAME accumulated contents, not an empty or
-    /// partial registry. This is the amortized-O(1) no-op path.
-    #[test]
-    fn build_lambda_registry_stable_across_calls_with_no_new_lambdas() {
-        let mut pipeline = CodegenPipeline::new(&[]).unwrap();
-        let func_id = define_trivial_lambda(&mut pipeline, "only_lambda", 7);
-        pipeline.finalize().unwrap();
-
-        let first = pipeline.build_lambda_registry();
-        let ptr = pipeline.get_function_ptr(func_id) as usize;
-        assert_eq!(first.lookup(ptr), Some("only_lambda"));
-        drop(first);
-
-        // No new registrations, no new finalize — just re-read the registry,
-        // as a run with nothing new to compile would.
-        let second = pipeline.build_lambda_registry();
-        assert_eq!(second.len(), 1);
-        assert_eq!(second.lookup(ptr), Some("only_lambda"));
     }
 }

@@ -43,9 +43,9 @@ enum Command {
 #[derive(serde::Serialize)]
 struct CorpusReport {
     version: u32,
-    legacy_targets: Vec<tidepool_testing::prepared_corpus::LegacyTargetMapping>,
-    legacy_mapped: usize,
-    legacy_unmapped: usize,
+    source_targets: Vec<tidepool_testing::prepared_corpus::SourceTargetMapping>,
+    source_mapped: usize,
+    source_unmapped: usize,
     stg_programs: usize,
     programs: Vec<ProgramRecord>,
     stage_totals: Vec<StageTotal>,
@@ -53,8 +53,8 @@ struct CorpusReport {
 
 #[derive(Debug, Clone, Copy)]
 struct ManifestSummary {
-    legacy_mapped: usize,
-    legacy_unmapped: usize,
+    source_mapped: usize,
+    source_unmapped: usize,
 }
 
 #[derive(serde::Serialize)]
@@ -342,9 +342,9 @@ fn run_corpus_with(
 
     let report = CorpusReport {
         version: REPORT_VERSION,
-        legacy_targets: manifest.legacy_targets,
-        legacy_mapped: summary.legacy_mapped,
-        legacy_unmapped: summary.legacy_unmapped,
+        source_targets: manifest.source_targets,
+        source_mapped: summary.source_mapped,
+        source_unmapped: summary.source_unmapped,
         stg_programs: programs.len(),
         stage_totals: stage_totals(&programs),
         programs,
@@ -515,45 +515,45 @@ fn validate_manifest(manifest: &ProjectionManifest) -> Result<ManifestSummary, B
             }
         }
     }
-    let mut legacy_names = BTreeSet::new();
-    let mut legacy_mapped = 0;
-    let mut legacy_unmapped = 0;
-    for target in &manifest.legacy_targets {
-        if target.legacy_name.is_empty() || !legacy_names.insert(target.legacy_name.clone()) {
+    let mut source_names = BTreeSet::new();
+    let mut source_mapped = 0;
+    let mut source_unmapped = 0;
+    for target in &manifest.source_targets {
+        if target.source_name.is_empty() || !source_names.insert(target.source_name.clone()) {
             return Err(invalid_manifest(format!(
-                "legacy target names must be unique and non-empty: {:?}",
-                target.legacy_name
+                "source target names must be unique and non-empty: {:?}",
+                target.source_name
             )));
         }
         match &target.identity {
-            None => legacy_unmapped += 1,
+            None => source_unmapped += 1,
             Some(identity) => {
                 if !is_external_identity(identity) {
                     return Err(invalid_manifest(format!(
-                        "legacy target {:?} maps to an internal identity {:?}",
-                        target.legacy_name, identity
+                        "source target {:?} maps to an internal identity {:?}",
+                        target.source_name, identity
                     )));
                 }
-                if target.legacy_name != identity.occurrence {
+                if target.source_name != identity.occurrence {
                     return Err(invalid_manifest(format!(
-                        "legacy target {:?} is not the exact external occurrence {:?}",
-                        target.legacy_name, identity.occurrence
+                        "source target {:?} is not the exact external occurrence {:?}",
+                        target.source_name, identity.occurrence
                     )));
                 }
                 let canonical = canonical_identity(identity);
                 if !names.contains(&canonical) {
                     return Err(invalid_manifest(format!(
-                        "legacy target {:?} maps to missing program {:?}",
-                        target.legacy_name, canonical
+                        "source target {:?} maps to missing program {:?}",
+                        target.source_name, canonical
                     )));
                 }
-                legacy_mapped += 1;
+                source_mapped += 1;
             }
         }
     }
     Ok(ManifestSummary {
-        legacy_mapped,
-        legacy_unmapped,
+        source_mapped,
+        source_unmapped,
     })
 }
 
@@ -824,36 +824,36 @@ mod tests {
     }
 
     fn rejected_manifest() -> String {
-        r#"{"version":2,"legacy_targets":[],"programs":[{"name":"rejected","status":"rejected","reason":"projection is unsupported"}]}"#.into()
+        r#"{"version":2,"source_targets":[],"programs":[{"name":"rejected","status":"rejected","reason":"projection is unsupported"}]}"#.into()
     }
 
     #[test]
     fn manifest_requires_version_unique_names_and_relative_artifacts() {
         let duplicate: ProjectionManifest = serde_json::from_str(
-            r#"{"version":2,"legacy_targets":[],"programs":[{"name":"x","status":"rejected","reason":"no"},{"name":"x","status":"rejected","reason":"no"}]}"#,
+            r#"{"version":2,"source_targets":[],"programs":[{"name":"x","status":"rejected","reason":"no"},{"name":"x","status":"rejected","reason":"no"}]}"#,
         )
         .unwrap();
         assert!(validate_manifest(&duplicate).is_err());
         let absolute: ProjectionManifest = serde_json::from_str(
-            r#"{"version":2,"legacy_targets":[],"programs":[{"name":"u:M:value:x","status":"projected","artifact":"/tmp/x.cbor","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"x"}}]}"#,
+            r#"{"version":2,"source_targets":[],"programs":[{"name":"u:M:value:x","status":"projected","artifact":"/tmp/x.cbor","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"x"}}]}"#,
         )
         .unwrap();
         assert!(validate_manifest(&absolute).is_err());
         let parent: ProjectionManifest = serde_json::from_str(
-            r#"{"version":2,"legacy_targets":[],"programs":[{"name":"u:M:value:x","status":"projected","artifact":"../x.cbor","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"x"}}]}"#,
+            r#"{"version":2,"source_targets":[],"programs":[{"name":"u:M:value:x","status":"projected","artifact":"../x.cbor","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"x"}}]}"#,
         )
         .unwrap();
         assert!(validate_manifest(&parent).is_err());
     }
 
     #[test]
-    fn manifest_keeps_legacy_mapping_separate_from_stg_rows() {
+    fn manifest_keeps_source_mapping_separate_from_stg_rows() {
         let manifest: ProjectionManifest = serde_json::from_str(
             r#"{
                 "version":2,
-                "legacy_targets":[
-                    {"legacy_name":"value","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"value"}},
-                    {"legacy_name":"retired_local","identity":null}
+                "source_targets":[
+                    {"source_name":"value","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"value"}},
+                    {"source_name":"unmapped_local","identity":null}
                 ],
                 "programs":[
                     {"name":"u:M:value:value","expectation_key":"value","status":"projected","artifact":"0.prepared.cbor","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"value"}},
@@ -863,21 +863,21 @@ mod tests {
         )
         .unwrap();
         let summary = validate_manifest(&manifest).unwrap();
-        assert_eq!(summary.legacy_mapped, 1);
-        assert_eq!(summary.legacy_unmapped, 1);
+        assert_eq!(summary.source_mapped, 1);
+        assert_eq!(summary.source_unmapped, 1);
         assert_eq!(manifest.programs.len(), 2);
     }
 
     #[test]
     fn manifest_rejects_internal_or_ambiguous_oracle_keys() {
         let internal: ProjectionManifest = serde_json::from_str(
-            r#"{"version":2,"legacy_targets":[],"programs":[{"name":"u:M:local:x","expectation_key":"x","status":"projected","artifact":"x","identity":{"unit":"u","module":"M","namespace":"local","occurrence":"x"}}]}"#,
+            r#"{"version":2,"source_targets":[],"programs":[{"name":"u:M:local:x","expectation_key":"x","status":"projected","artifact":"x","identity":{"unit":"u","module":"M","namespace":"local","occurrence":"x"}}]}"#,
         )
         .unwrap();
         assert!(validate_manifest(&internal).is_err());
 
         let ambiguous: ProjectionManifest = serde_json::from_str(
-            r#"{"version":2,"legacy_targets":[],"programs":[
+            r#"{"version":2,"source_targets":[],"programs":[
                 {"name":"u:One:value:x","expectation_key":"x","status":"projected","artifact":"one","identity":{"unit":"u","module":"One","namespace":"value","occurrence":"x"}},
                 {"name":"u:Two:value:x","expectation_key":"x","status":"projected","artifact":"two","identity":{"unit":"u","module":"Two","namespace":"value","occurrence":"x"}}
             ]}"#,
@@ -887,18 +887,18 @@ mod tests {
     }
 
     #[test]
-    fn manifest_rejects_legacy_identity_not_in_authoritative_rows() {
+    fn manifest_rejects_source_identity_not_in_authoritative_rows() {
         let manifest: ProjectionManifest = serde_json::from_str(
-            r#"{"version":2,"legacy_targets":[{"legacy_name":"old","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"missing"}}],"programs":[{"name":"u:M:value:present","status":"rejected","reason":"unsupported"}]}"#,
+            r#"{"version":2,"source_targets":[{"source_name":"missing","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"missing"}}],"programs":[{"name":"u:M:value:present","status":"rejected","reason":"unsupported"}]}"#,
         )
         .unwrap();
         assert!(validate_manifest(&manifest).is_err());
     }
 
     #[test]
-    fn manifest_rejects_legacy_suffix_aliases() {
+    fn manifest_rejects_source_suffix_aliases() {
         let manifest: ProjectionManifest = serde_json::from_str(
-            r#"{"version":2,"legacy_targets":[{"legacy_name":"value_t123","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"value"}}],"programs":[{"name":"u:M:value:value","status":"rejected","reason":"unsupported"}]}"#,
+            r#"{"version":2,"source_targets":[{"source_name":"value_t123","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"value"}}],"programs":[{"name":"u:M:value:value","status":"rejected","reason":"unsupported"}]}"#,
         )
         .unwrap();
         assert!(validate_manifest(&manifest).is_err());
@@ -926,7 +926,7 @@ mod tests {
     #[test]
     fn oracle_domain_must_name_manifest_keys_and_keep_values_on_source_tops() {
         let manifest: ProjectionManifest = serde_json::from_str(
-            r#"{"version":2,"legacy_targets":[],"programs":[
+            r#"{"version":2,"source_targets":[],"programs":[
                 {"name":"u:M:value:t_swap","expectation_key":"t_swap","status":"projected","artifact":"0","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"t_swap"}},
                 {"name":"u:M:value:t_swap1","expectation_key":"t_swap1","status":"projected","artifact":"1","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"t_swap1"}}
             ]}"#,
@@ -965,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_identity_preserves_legacy_keys_and_distinguishes_record_fields() {
+    fn canonical_identity_preserves_source_keys_and_distinguishes_record_fields() {
         let no_parent = tidepool_testing::prepared_corpus::SourceIdentity {
             unit: "u".into(),
             module: "M".into(),
@@ -1117,7 +1117,7 @@ mod tests {
             &manifest,
             serde_json::to_vec(&serde_json::json!({
                 "version": 2,
-                "legacy_targets": [],
+                "source_targets": [],
                 "programs": [
                     {
                         "name": "u:M:value:decoded",
@@ -1205,7 +1205,7 @@ mod tests {
         let output = temporary_path("projected-report");
         fs::write(
             &manifest,
-            r#"{"version":2,"legacy_targets":[],"programs":[{"name":"u:M:value:projected","status":"projected","artifact":"missing.prepared.cbor","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"projected"}}]}"#,
+            r#"{"version":2,"source_targets":[],"programs":[{"name":"u:M:value:projected","status":"projected","artifact":"missing.prepared.cbor","identity":{"unit":"u","module":"M","namespace":"value","occurrence":"projected"}}]}"#,
         )
         .unwrap();
         run_one(

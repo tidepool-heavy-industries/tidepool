@@ -1,15 +1,15 @@
-//! Unit tests for the `CoreRecord` derive: exact Haskell-decl rendering for a
+//! Unit tests for the `HaskellRecord` derive: exact Haskell-decl rendering for a
 //! representative struct and enum, exercising the type map, snake→camel field
-//! naming, `#[core(hs = ...)]` / `#[core(hs_type = ...)]` overrides, and the
+//! naming, `#[haskell(hs = ...)]` / `#[haskell(hs_type = ...)]` overrides, and the
 //! `inventory` registration.
 #![allow(dead_code)]
 
-use tidepool_bridge::{all_record_decls, CoreRecord};
-use tidepool_bridge_derive::CoreRecord;
+use tidepool_bridge::{all_record_decls, HaskellRecord};
+use tidepool_bridge_derive::HaskellRecord;
 
 // A nested record referenced by type name (`pos: SamplePos` → `SamplePos`).
-#[derive(CoreRecord)]
-#[core(name = "SamplePos")]
+#[derive(HaskellRecord)]
+#[haskell(name = "SamplePos")]
 struct SamplePos {
     line: i64,
     character: i64,
@@ -17,10 +17,10 @@ struct SamplePos {
 
 // Exercises: field-name override (`hs`), whole-type override (`hs_type`),
 // snake→camel default, Vec, Option, tuple, and a nested named type.
-#[derive(CoreRecord)]
-#[core(name = "Sample")]
+#[derive(HaskellRecord)]
+#[haskell(name = "Sample")]
 struct Sample {
-    #[core(hs = "sampleText")]
+    #[haskell(hs = "sampleText")]
     text: String,
     exit_code: i64,
     ok: bool,
@@ -29,20 +29,20 @@ struct Sample {
     pairs: Vec<(String, String)>,
     note: Option<String>,
     counts: Option<i64>,
-    #[core(hs = "samplePos", hs_type = "Position")]
+    #[haskell(hs = "samplePos", hs_type = "Position")]
     pos: SamplePos,
 }
 
-#[derive(CoreRecord)]
+#[derive(HaskellRecord)]
 enum SampleEnum {
-    #[core(name = "Rust")]
+    #[haskell(name = "Rust")]
     Rust,
-    #[core(name = "Python")]
+    #[haskell(name = "Python")]
     Python,
-    #[core(name = "Tagged")]
+    #[haskell(name = "Tagged")]
     Tagged(i64, Option<String>),
     Located {
-        #[core(hs = "source", hs_type = "FilePath")]
+        #[haskell(hs = "source", hs_type = "FilePath")]
         source_path: String,
         line: i64,
     },

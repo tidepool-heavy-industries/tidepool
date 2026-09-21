@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use tidepool_bridge_derive::FromCore;
+use tidepool_bridge_derive::FromHaskell;
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
 use tidepool_mcp::CapturedOutput;
@@ -24,9 +24,9 @@ fn prelude_dir() -> &'static Path {
         .leak()
 }
 
-#[derive(FromCore)]
+#[derive(FromHaskell)]
 enum ConsoleReq {
-    #[core(name = "Print")]
+    #[haskell(name = "Print")]
     Print(String),
 }
 

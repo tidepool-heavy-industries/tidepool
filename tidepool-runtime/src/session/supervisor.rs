@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use tokio::time::timeout;
 
-use tidepool_codegen::jit_machine::CancelHandle;
+use tidepool_codegen::machine::CancelHandle;
 
 /// The result of racing `awaited` against a bounded abort grace window.
 pub enum GraceOutcome<T> {

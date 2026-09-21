@@ -1,6 +1,6 @@
 use proptest::prelude::*;
 use std::sync::OnceLock;
-use tidepool_bridge::traits::{FromCore, ToCore};
+use tidepool_bridge::traits::{FromHaskell, ToHaskell};
 use tidepool_repr::{DataCon, DataConId, DataConTable, SrcBang};
 use tidepool_testing::bridge_roundtrip::roundtrip;
 
@@ -56,8 +56,8 @@ proptest! {
         } else {
             // For NaN, compare bits as NaN != NaN
             let table = get_table();
-            let value = val.to_value(table).expect("ToCore failed");
-            let back = f64::from_value(&value, table).expect("FromCore failed");
+            let value = val.to_value(table).expect("ToHaskell failed");
+            let back = f64::from_value(&value, table).expect("FromHaskell failed");
             assert_eq!(val.to_bits(), back.to_bits());
         }
     }

@@ -1,6 +1,6 @@
 //! Captured typed boundary for one supervised external-agent session.
 
-use tidepool_bridge::FromCore;
+use tidepool_bridge::FromHaskell;
 use tidepool_bridge::Value;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_repr::DataConTable;

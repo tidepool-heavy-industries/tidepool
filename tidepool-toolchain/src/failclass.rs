@@ -10,7 +10,7 @@
 //!   operation failed → an environment problem), and
 //!   [`FailureClass::VersionSkew`] (the extractor's wire format was rejected by
 //!   this server's reader → redeploy/reconnect so both sides run one build).
-//! - **phase** — WHEN it failed: [`Phase::Compile`] (during source→Core
+//! - **phase** — WHEN it failed: [`Phase::Compile`] (during source compilation
 //!   extraction) or [`Phase::Run`] (during JIT execution).
 //!
 //! Splitting the two axes is the fix for the class of bug where a wire-format
@@ -67,7 +67,7 @@ impl FailureClass {
 /// WHEN it failed — the compile→run boundary is machine creation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
-    /// During source→Core extraction (the `tidepool-extract` shell-out + read).
+    /// During source compilation (the `tidepool-extract` shell-out + read).
     Compile,
     /// During JIT execution of the compiled program.
     Run,

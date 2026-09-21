@@ -1,7 +1,6 @@
 //! JIT debugging tools.
 //!
 //! Provides reusable infrastructure for debugging JIT-compiled code:
-//! - **LambdaRegistry**: maps code pointers back to lambda names
 //! - **heap_describe**: human-readable description of heap objects
 //! - **heap_validate**: structural integrity checks for heap objects
 //!
@@ -25,113 +24,7 @@
 //! - `TIDEPOOL_FP_DEBUG=1` → `tidepool::fp=debug`
 
 use crate::layout;
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
 use tidepool_heap::layout as heap_layout;
-
-// ── Lambda Registry ──────────────────────────────────────────
-
-thread_local! {
-    // Rc, not an owned LambdaRegistry: `CodegenPipeline` keeps its own Rc to
-    // the same accumulated registry (see `build_lambda_registry`) and extends
-    // it in place via `Rc::make_mut` between runs. Installing/clearing here is
-    // then a refcount bump/drop (O(1)), not a clone of the whole map, which
-    // would make the per-run rebuild quadratic in session length.
-    static LAMBDA_REGISTRY: RefCell<Option<Rc<LambdaRegistry>>> = const { RefCell::new(None) };
-}
-
-/// Maps JIT code pointers to human-readable lambda names.
-///
-/// Populated during compilation, queried during execution to identify
-/// which closure is being called when debugging crashes.
-#[derive(Default, Clone)]
-pub struct LambdaRegistry {
-    /// code_ptr → lambda name
-    entries: HashMap<usize, String>,
-}
-
-impl LambdaRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Register a lambda's code pointer and name.
-    pub fn register(&mut self, code_ptr: usize, name: String) {
-        self.entries.insert(code_ptr, name);
-    }
-
-    /// Look up a lambda name by code pointer.
-    pub fn lookup(&self, code_ptr: usize) -> Option<&str> {
-        self.entries.get(&code_ptr).map(|s| s.as_str())
-    }
-
-    /// Look up a lambda name by an address within its body.
-    /// Finds the entry point <= addr that is closest to addr.
-    pub fn lookup_by_address(&self, addr: usize) -> Option<&str> {
-        let mut best: Option<(usize, &str)> = None;
-        for (&ptr, name) in &self.entries {
-            if ptr <= addr {
-                if let Some((best_ptr, _)) = best {
-                    if ptr > best_ptr {
-                        best = Some((ptr, name.as_str()));
-                    }
-                } else {
-                    best = Some((ptr, name.as_str()));
-                }
-            }
-        }
-        best.map(|(_, name)| name)
-    }
-
-    /// Number of registered lambdas.
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Whether no lambdas are registered.
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-}
-
-/// Install a registry as the thread-local singleton. Returns the old one if any.
-pub fn set_lambda_registry(registry: Rc<LambdaRegistry>) -> Option<Rc<LambdaRegistry>> {
-    LAMBDA_REGISTRY.with(|cell| cell.borrow_mut().replace(registry))
-}
-
-/// Clear the thread-local registry.
-///
-/// This only drops the thread-local's *handle* (an `Rc` clone) to the
-/// registry a run installed — it does not touch `CodegenPipeline`'s own copy,
-/// which is the accumulating source of truth across the pipeline's whole
-/// lifetime. Dropping this handle is exactly what lets the next
-/// `build_lambda_registry` call extend the shared registry in place via
-/// `Rc::make_mut` instead of falling back to a clone: once this is the only
-/// remaining reference, the refcount is back to 1.
-pub fn clear_lambda_registry() -> Option<Rc<LambdaRegistry>> {
-    LAMBDA_REGISTRY.with(|cell| cell.borrow_mut().take())
-}
-
-/// Look up a code pointer in the thread-local registry.
-pub fn lookup_lambda(code_ptr: usize) -> Option<String> {
-    LAMBDA_REGISTRY.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|r| r.lookup(code_ptr))
-            .map(|s| s.to_string())
-    })
-}
-
-/// Look up a lambda name by an address within its body in the thread-local registry.
-pub fn lookup_lambda_by_address(addr: usize) -> Option<String> {
-    LAMBDA_REGISTRY.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|r| r.lookup_by_address(addr))
-            .map(|s| s.to_string())
-    })
-}
 
 // ── Heap Object Inspection ───────────────────────────────────
 
@@ -173,14 +66,9 @@ pub unsafe fn heap_describe(ptr: *const u8) -> String {
             let code_ptr = *(ptr.add(layout::CLOSURE_CODE_PTR_OFFSET as usize) as *const usize);
             let num_captured =
                 *(ptr.add(layout::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16);
-            let name = lookup_lambda(code_ptr);
-            let name_str = name
-                .as_deref()
-                .map(|n| format!(" [{}]", n))
-                .unwrap_or_default();
             format!(
-                "Closure(code=0x{:x}, {} captures, size={}){}",
-                code_ptr, num_captured, size, name_str
+                "Closure(code=0x{:x}, {} captures, size={})",
+                code_ptr, num_captured, size
             )
         }
         Some(heap_layout::HeapTag::Thunk) => {

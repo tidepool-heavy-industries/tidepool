@@ -88,7 +88,7 @@ impl ObservationBudget {
 
     /// Spend the budget down to nothing, so every later step of a BOUNDED walk
     /// cuts too instead of paying for a partial subtree that can never be
-    /// completed. Only a [`crate::heap_bridge::BudgetPolicy::Bounded`] decode
+    /// completed. Only a [`crate::observation::BudgetPolicy::Bounded`] decode
     /// calls this, and only where a `Complete` one would have failed.
     pub(super) fn exhaust(&mut self) {
         self.remaining = 0;
@@ -536,12 +536,12 @@ impl ObservationHeap<'_> {
             reps,
             layout,
             budget,
-            crate::heap_bridge::BudgetPolicy::Complete,
+            crate::observation::BudgetPolicy::Complete,
         )
     }
 
     /// [`Self::observe_results`] under
-    /// [`crate::heap_bridge::BudgetPolicy::Bounded`]: an exhausted budget cuts
+    /// [`crate::observation::BudgetPolicy::Bounded`]: an exhausted budget cuts
     /// the walk and marks the cut instead of failing the whole observation.
     #[cfg(test)]
     pub fn observe_results_bounded(
@@ -556,7 +556,7 @@ impl ObservationHeap<'_> {
             reps,
             layout,
             budget,
-            crate::heap_bridge::BudgetPolicy::Bounded,
+            crate::observation::BudgetPolicy::Bounded,
         )
     }
 
@@ -567,7 +567,7 @@ impl ObservationHeap<'_> {
         reps: &[RuntimeRep],
         layout: &StorageLayout,
         budget: usize,
-        policy: crate::heap_bridge::BudgetPolicy,
+        policy: crate::observation::BudgetPolicy,
     ) -> Result<Vec<Value>, ObservationFailure> {
         let mut budget = ObservationBudget {
             remaining: budget,
@@ -602,16 +602,16 @@ impl ObservationHeap<'_> {
     /// `Complete` is the historical contract: an exhausted budget is an error
     /// and nothing partial is produced. `Bounded` instead stops at the point
     /// the budget runs out and returns
-    /// [`crate::heap_bridge::oversize_cut`] in place of the subtree it did not
+    /// [`crate::observation::oversize_cut`] in place of the subtree it did not
     /// read — the caller then holds a SELECTION, and
-    /// [`crate::heap_bridge::contains_oversize_sentinel`] tells it so. Either
+    /// [`crate::observation::contains_oversize_sentinel`] tells it so. Either
     /// way this is a read: it copies payload bytes out, follows managed edges,
     /// and neither retains nor moves a heap object.
     pub(super) fn expand(
         &self,
         mut seed: ObservationSeed,
         budget: &mut ObservationBudget,
-        policy: crate::heap_bridge::BudgetPolicy,
+        policy: crate::observation::BudgetPolicy,
     ) -> Result<ObservationFrame<ObservationSeed>, ObservationFailure> {
         // An exhausted budget under `Bounded`: cut here. `exhaust` keeps the
         // budget at zero so every sibling still on the worklist cuts as well,
@@ -622,7 +622,7 @@ impl ObservationHeap<'_> {
                     return Err(budget.exceeded());
                 }
                 budget.exhaust();
-                return Ok(ObservationFrame::Leaf(crate::heap_bridge::oversize_cut()));
+                return Ok(ObservationFrame::Leaf(crate::observation::oversize_cut()));
             }};
         }
         loop {
@@ -735,10 +735,9 @@ impl ObservationHeap<'_> {
                                 bytes,
                             ))));
                         }
-                        // `SmallArray#`/`Array#` observe as Core's bridge
-                        // does: `DataConId(0)` over the elements
-                        // (docs/core-shapes/audit-heap-bridge.md), the
-                        // wrapping constructor carrying the type context.
+                        // `SmallArray#`/`Array#` observe as `DataConId(0)` over
+                        // the elements; the wrapping constructor carries the
+                        // type context.
                         ObjectKind::External(ExternalStorageKind::BoxedArray) => {
                             let owner = self
                                 .external_owner
@@ -779,26 +778,21 @@ impl ObservationHeap<'_> {
                         }
                         // A function, PAP, or (post-force, still-callable)
                         // function-typed object has no data `Value`
-                        // representation -- `crate::heap_bridge::CLOSURE_SENTINEL`
-                        // is the ONE reserved placeholder Core's own tolerant
-                        // bridge already substitutes for exactly this case
-                        // (`tidepool-codegen/CLAUDE.md` "Value handles and
-                        // scope closure": "Observation may bridge a closure as
-                        // the documented sentinel; delivery uses the heap
-                        // pointer itself"). Matching that sentinel here --
-                        // rather than refusing -- lets a request/result value
+                        // representation. `crate::observation::CLOSURE_SENTINEL`
+                        // is the reserved placeholder for this case. Using it
+                        // lets a request/result value
                         // that carries a closure at any depth (the
                         // self-harness's `withHandler`/green-thread/`after`
                         // payloads) observe successfully; the real callable
                         // stays live in the JIT heap and is applied by
-                        // reference through its handle, never through this
-                        // bridged `Value`. `Continuation` and a post-force
+                        // reference through its handle, never through the
+                        // materialized observation. `Continuation` and a post-force
                         // `Thunk` remain refused below: those shapes indicate
                         // a genuine observation-contract violation, not an
                         // opaque-but-legitimate payload.
                         ObjectKind::Function | ObjectKind::Pap => {
                             return Ok(ObservationFrame::Leaf(Value::Con(
-                                crate::heap_bridge::CLOSURE_SENTINEL,
+                                crate::observation::CLOSURE_SENTINEL,
                                 Vec::new(),
                             )));
                         }
@@ -1265,7 +1259,7 @@ mod tests {
     /// value, not a stub, and the cut says the result is a selection.
     #[test]
     fn a_bounded_walk_keeps_what_it_can_afford_and_cuts_where_it_stops() {
-        use crate::heap_bridge::contains_oversize_sentinel;
+        use crate::observation::contains_oversize_sentinel;
 
         let statics = statics();
         let (nursery, descriptors, constructors, depth) = constructor_chain(8, false);
@@ -1307,7 +1301,7 @@ mod tests {
         };
         assert_eq!(*identity, DataConId(20));
         assert!(
-            matches!(&fields[0], Value::Con(id, cut) if *id == crate::heap_bridge::OVERSIZE_SENTINEL && cut.is_empty()),
+            matches!(&fields[0], Value::Con(id, cut) if *id == crate::observation::OVERSIZE_SENTINEL && cut.is_empty()),
             "the cut belongs exactly where the budget ran out, got {fields:?}"
         );
     }
@@ -1357,7 +1351,7 @@ mod tests {
             .observe_results_bounded(&[encoded as u64], &reps, &layout, 3)
             .unwrap();
         assert!(
-            matches!(&cut[0], Value::Con(id, fields) if *id == crate::heap_bridge::OVERSIZE_SENTINEL && fields.is_empty()),
+            matches!(&cut[0], Value::Con(id, fields) if *id == crate::observation::OVERSIZE_SENTINEL && fields.is_empty()),
             "an unaffordable payload must cut, not half-copy: {:?}",
             cut[0]
         );
@@ -1366,7 +1360,7 @@ mod tests {
         let whole = heap
             .observe_results_bounded(&[encoded as u64], &reps, &layout, 4)
             .unwrap();
-        assert!(!crate::heap_bridge::contains_oversize_sentinel(&whole[0]));
+        assert!(!crate::observation::contains_oversize_sentinel(&whole[0]));
         assert!(
             matches!(&whole[0], Value::Lit(Literal::LitByteArray(bytes)) if bytes == b"abc"),
             "{:?}",
@@ -1382,7 +1376,7 @@ mod tests {
     /// present a result as complete.
     #[test]
     fn an_oversize_cut_is_found_at_any_depth_and_is_absent_from_a_whole_value() {
-        use crate::heap_bridge::{
+        use crate::observation::{
             contains_closure_sentinel, contains_oversize_sentinel, oversize_cut, CLOSURE_SENTINEL,
             OVERSIZE_SENTINEL,
         };
@@ -1602,7 +1596,7 @@ mod tests {
         assert_eq!(observed.len(), 1);
         assert!(matches!(
             &observed[0],
-            Value::Con(id, fields) if *id == crate::heap_bridge::CLOSURE_SENTINEL && fields.is_empty()
+            Value::Con(id, fields) if *id == crate::observation::CLOSURE_SENTINEL && fields.is_empty()
         ));
 
         let pap_layout = StorageLayout::for_reps(&target(), &[]).unwrap();
@@ -1619,7 +1613,7 @@ mod tests {
         assert_eq!(observed.len(), 1);
         assert!(matches!(
             &observed[0],
-            Value::Con(id, fields) if *id == crate::heap_bridge::CLOSURE_SENTINEL && fields.is_empty()
+            Value::Con(id, fields) if *id == crate::observation::CLOSURE_SENTINEL && fields.is_empty()
         ));
 
         let address_reps = [RuntimeRep::Address];

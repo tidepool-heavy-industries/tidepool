@@ -6,8 +6,8 @@ use crate::schema::{
 };
 
 const DERIVES: WireDerives = WireDerives(&[
-    WireDerive::ToCore,
-    WireDerive::FromCore,
+    WireDerive::ToHaskell,
+    WireDerive::FromHaskell,
     WireDerive::Clone,
     WireDerive::Debug,
     WireDerive::PartialEq,
@@ -22,7 +22,7 @@ fn sum(name: &'static str, variants: Vec<(&'static str, Vec<HsType>)>) -> TypeDe
     TypeDef {
         name,
         wire_rust: Some(name),
-        core_module: Some("Tidepool.Effects.Core"),
+        haskell_module: Some("Tidepool.Effects.Core"),
         shape: TypeShape::Sum {
             variants: variants
                 .into_iter()
@@ -43,7 +43,7 @@ fn record(name: &'static str, fields: Vec<(&'static str, &'static str, HsType)>)
     TypeDef {
         name,
         wire_rust: Some(name),
-        core_module: Some("Tidepool.Effects.Core"),
+        haskell_module: Some("Tidepool.Effects.Core"),
         shape: TypeShape::Record {
             fields: fields
                 .into_iter()

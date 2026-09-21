@@ -30,7 +30,7 @@ pub use tidepool_runtime as runtime;
 
 // Convenience re-exports
 pub use tidepool_bridge::Value;
-pub use tidepool_bridge::{FromCore, ToCore};
+pub use tidepool_bridge::{FromHaskell, ToHaskell};
 pub use tidepool_effect::dispatch::DispatchEffect;
 pub use tidepool_repr::DataConTable;
 pub use tidepool_runtime::{compile_and_run, compile_haskell, EvalResult, RuntimeError};

@@ -10,7 +10,7 @@ use std::error::Error as _;
 tidepool_mcp::http_effect_def!(crate::effect_glue::effect_rust_projection);
 
 /// Headroom below the machine's `MAX_EFFECT_RESPONSE_NODES` (100_000, in
-/// `tidepool_codegen::jit_machine`). The count from `bridged_node_count` is the
+/// `tidepool_codegen::machine`). The count from `bridged_node_count` is the
 /// exact size of the response `Value`; the machine additionally counts the
 /// `Right`/effect-envelope nodes wrapping it, so this leaves room for those and
 /// guarantees a response that passes here can NEVER hit the generic abort. The

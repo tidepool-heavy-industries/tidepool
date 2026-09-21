@@ -279,7 +279,7 @@ impl KvHandler {
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use tidepool_bridge::ToCore;
+    use tidepool_bridge::ToHaskell;
     use tidepool_bridge::Value;
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
     use tidepool_repr::DataConTable;
@@ -388,7 +388,7 @@ mod tests {
         );
         let mut surviving: Vec<String> = Vec::new();
         fn collect_list(v: &Value, table: &DataConTable, out: &mut Vec<String>) {
-            use tidepool_bridge::FromCore;
+            use tidepool_bridge::FromHaskell;
             if let Value::Con(id, fields) = v {
                 let name = table.name_of(*id).unwrap();
                 if name == ":" {
@@ -440,7 +440,7 @@ mod tests {
         // Collect the list into a Vec<String> and verify sorted order.
         let mut keys: Vec<String> = Vec::new();
         fn collect_strs(v: &Value, table: &DataConTable, out: &mut Vec<String>) {
-            use tidepool_bridge::FromCore;
+            use tidepool_bridge::FromHaskell;
             if let Value::Con(id, fields) = v {
                 let name = table.name_of(*id).unwrap();
                 if name == ":" {

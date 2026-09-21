@@ -48,8 +48,8 @@ parent handler is authored Haskell (`Tidepool.Agent.Contract`'s `Tool` carries
 `handler :: input -> m output`). No Rust closure can run one:
 `EffectHandler::handle` has no machine handle, the machine is already
 `&mut`-borrowed at the dispatch site, and a Haskell closure cannot even reach a
-handler as data (`heap_bridge.rs`'s `ClosurePolicy` rejects `TAG_CLOSURE` or
-substitutes `CLOSURE_SENTINEL`). So the loop lives in Haskell
+handler as data (prepared observation represents it with `CLOSURE_SENTINEL`).
+So the loop lives in Haskell
 (`Tidepool.Agent.Spawn.spawnAgentWithTools`) and this seam is what it steps.
 
 Between a `ToolCall` and its `resume`, the child's JSON-RPC request is simply

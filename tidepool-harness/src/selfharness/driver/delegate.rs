@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use tidepool_bridge::ToCore;
+use tidepool_bridge::ToHaskell;
 use tidepool_bridge::Value;
 use tidepool_repr::DataConTable;
 
@@ -50,7 +50,7 @@ impl SelfHarnessDriver {
     /// (in either order) drives to completion without a model round.
     /// Service ONE `Subagent` suspension raised by the AUTHORED outer loop:
     /// decode the ORIGINAL suspended request through the generated
-    /// `SubagentReq: FromCore` (against the loop compile's own table — the
+    /// `SubagentReq: FromHaskell` (against the loop compile's own table — the
     /// args are bridged ADTs, never JSON-probed), dispatch it into the
     /// driver-owned [`tidepool_handlers::SubagentHandler`], and return the
     /// `Response::Complete` value the caller resumes the hole with — the
@@ -191,7 +191,7 @@ impl SelfHarnessDriver {
     ) -> Result<Value, DriverError> {
         if kind == engine::OuterEffectKind::Console {
             if let Ok(tidepool_handlers::ConsoleReq::Print(text)) =
-                <tidepool_handlers::ConsoleReq as tidepool_bridge::FromCore>::from_value(
+                <tidepool_handlers::ConsoleReq as tidepool_bridge::FromHaskell>::from_value(
                     request, table,
                 )
             {
@@ -229,7 +229,7 @@ impl SelfHarnessDriver {
                 // subscription time. Do not create a second terminal-state
                 // registry in the event handler.
                 if let Ok(tidepool_handlers::RepoEventReq::RepoEventSubscribe(watches)) =
-                    <tidepool_handlers::RepoEventReq as tidepool_bridge::FromCore>::from_value(
+                    <tidepool_handlers::RepoEventReq as tidepool_bridge::FromHaskell>::from_value(
                         request, table,
                     )
                 {
@@ -237,7 +237,7 @@ impl SelfHarnessDriver {
                         watches,
                         terminal_async.iter().copied(),
                     );
-                    return tidepool_bridge::ToCore::to_value(&result, table).map_err(|e| {
+                    return tidepool_bridge::ToHaskell::to_value(&result, table).map_err(|e| {
                         DriverError::Session(format!("RepoEvent subscribe encode: {e}"))
                     });
                 }
@@ -278,7 +278,7 @@ impl SelfHarnessDriver {
         request: &Value,
         table: &DataConTable,
     ) -> Result<Option<Value>, DriverError> {
-        use tidepool_bridge::FromCore;
+        use tidepool_bridge::FromHaskell;
         let mut handlers = self.handlers.lock();
         let handler = handlers.event.as_mut().ok_or_else(|| {
             Self::unwired_outer_effect_error(
@@ -329,7 +329,7 @@ impl SelfHarnessDriver {
 
     /// The shared decode-dispatch-convert shape every outer-row effect
     /// suspension goes through: decode the ORIGINAL suspended request `Value`
-    /// via the handler's generated `<Eff>Req: FromCore` (against the loop
+    /// via the handler's generated `<Eff>Req: FromHaskell` (against the loop
     /// compile's own table — never JSON-probed), dispatch it into `handler`
     /// under `tokio::task::block_in_place` (the same discipline every
     /// `OperatorGate` call and [`Self::service_outer_subagent`] use), and
@@ -348,7 +348,7 @@ impl SelfHarnessDriver {
     where
         H: tidepool_effect::EffectHandler<tidepool_mcp::CapturedOutput>,
     {
-        use tidepool_bridge::FromCore;
+        use tidepool_bridge::FromHaskell;
         use tidepool_effect::dispatch::EffectContext;
         let req = H::Request::from_value(request, table)?;
         let captured = tidepool_mcp::CapturedOutput::new();

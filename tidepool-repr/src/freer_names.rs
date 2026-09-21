@@ -30,7 +30,7 @@ pub const LEAF: &str = "Leaf";
 pub const NODE: &str = "Node";
 
 /// Module-qualified spelling of `Val`, as recorded in the `DataConTable`
-/// (`Module.Ctor`, via `Tidepool.Translate.qualifiedName`).
+/// (`Module.Ctor`, as emitted by constructor metadata).
 pub const VAL_QUALIFIED: &str = "Control.Monad.Freer.Val";
 /// Module-qualified spelling of `E`.
 pub const E_QUALIFIED: &str = "Control.Monad.Freer.E";

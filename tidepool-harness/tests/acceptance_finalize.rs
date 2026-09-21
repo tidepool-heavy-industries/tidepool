@@ -16,10 +16,8 @@
 //! (`checkFinalizeType` in Translate.hs skips `typeHasFunctionArrow`, so
 //! `finalize @(Int -> Int) f` compiles where `runLLMTurn @(Int -> Int)` is
 //! rejected — see `finalize_accepts_function_typed_site_where_runllmturn_rejects_it`)
-//! AND the runtime does not choke on a `TAG_CLOSURE` finalize value at
-//! suspend: `tidepool-codegen/src/heap_bridge.rs`'s TOLERANT bridge
-//! (`heap_to_value_forcing_tolerant`, used only for the suspend request)
-//! substitutes a `CLOSURE_SENTINEL` placeholder for the closure field so the
+//! AND prepared observation accepts a function-typed finalize value at
+//! suspend by substituting a `CLOSURE_SENTINEL` placeholder for the closure field so the
 //! surrounding `FinalizeWith(site, _)` still bridges for the classifier, while
 //! the REAL closure stays LIVE in the suspended session's heap. The harness
 //! detects this via `finalize_is_closure` and takes the payload as a handle

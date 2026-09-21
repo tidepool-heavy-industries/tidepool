@@ -536,9 +536,7 @@ mod tests {
                 .unwrap()
                 .write(payload);
         }
-        let mut vmctx = unsafe {
-            crate::context::VMContext::new(start, start.add(size), crate::host_fns::gc_trigger)
-        };
+        let mut vmctx = unsafe { crate::context::VMContext::new(start, start.add(size)) };
         vmctx.alloc_ptr = unsafe { start.add(extent) };
         vmctx.machine_state = &machine as *const _ as *mut _;
         let storage: Arc<[u8]> = Arc::from(&b"ab\0"[..]);

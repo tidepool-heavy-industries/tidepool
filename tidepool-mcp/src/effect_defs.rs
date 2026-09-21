@@ -11,7 +11,7 @@
 //!    *_decl() -> EffectDecl` builder, producing output identical to the
 //!    hand-written builders in `effect_decls.rs`.
 //! 2. `effect_rust_projection!` (`tidepool-handlers/src/effect_glue.rs`) —
-//!    generates the `#[derive(FromCore)] enum *Req`, the `DescribeEffect`
+//!    generates the `#[derive(FromHaskell)] enum *Req`, the `DescribeEffect`
 //!    impl, and the `EffectHandler` dispatch match whose arms call
 //!    hand-written inherent methods on the handler struct.
 //!
@@ -74,8 +74,8 @@
 //!   `errors`-tagged verb's result as `<Effect> (Either FsError <ret>)` (via
 //!   [`ctor_sig!`]). The `Either` threads through the generated helper sigs.
 //! - **Rust projection** (`effect_rust_projection!`) emits
-//!   `#[derive(ToCore, FromCore, Debug, PartialEq, Eq)] pub enum FsError {
-//!   FsNotFound(String), … }` (ToCore/FromCore use plain name+arity lookup, like
+//!   `#[derive(ToHaskell, FromHaskell, Debug, PartialEq, Eq)] pub enum FsError {
+//!   FsNotFound(String), … }` (ToHaskell/FromHaskell use plain name+arity lookup, like
 //!   the bridged records — the variant names are unique), and an
 //!   `errors`-tagged dispatch arm calls a hand-written method
 //!   returning `Result<T, FsError>` and wraps it with `cx.respond` (Ok→Right,
@@ -256,7 +256,7 @@ macro_rules! extra_imports_for {
     //
     // `Ask` stays hand-carried (see `ask_effect_def!`'s doc and
     // `tidepool-protocol/src/effects/ask.rs`'s module doc for why it can't
-    // flip onto the generator), but its pure `Schema`/`schemaToValue`/
+    // flip onto the generator), but its pure `Schema`/`schemaToHaskell`/
     // `isOpt`/`innerSchema` vocabulary moved OUT of the decl's `type_defs`
     // and into `Tidepool.Form.Schema` (issue #24's first act) — a SEPARATE
     // module from `Tidepool.Form` proper, because `Ask` (unlike the gated
@@ -270,7 +270,7 @@ macro_rules! extra_imports_for {
     (Ask) => {
         &["import Tidepool.Form.Schema"]
     };
-    // `Llm`'s composed `llm` (built on `schemaToValue`, `Tidepool.Form.
+    // `Llm`'s composed `llm` (built on `schemaToHaskell`, `Tidepool.Form.
     // Schema`'s vocabulary) lives in its OWN module, `Tidepool.Llm` —
     // independent of `Ask`'s arm above, because `Llm` and `Ask` are
     // independently-gated effects (see `Tidepool.Llm`'s module doc). `Llm`
@@ -931,7 +931,7 @@ macro_rules! ask_effect_def {
                 "Extract fields from the returned Value with optics, e.g. ",
                 "`v ^? key \"path\" . _String`.",
             ],
-            // The Schema vocabulary (`data Schema`, `schemaToValue`, `isOpt`,
+            // The Schema vocabulary (`data Schema`, `schemaToHaskell`, `isOpt`,
             // `innerSchema`) AND `ask` itself now live in the stdlib —
             // `Tidepool.Form.Schema`, auto-imported via
             // `extra_imports_for!(Ask)` — because they are ordinary pure/
@@ -941,7 +941,7 @@ macro_rules! ask_effect_def {
             // (Ctor …)`) stays spliced into the generated module below — the
             // generated module cannot import authored library code (see
             // `extra_imports_for!`'s own doc), so anything referencing
-            // `Schema`/`schemaToValue` must live OUTSIDE it, same split as
+            // `Schema`/`schemaToHaskell` must live OUTSIDE it, same split as
             // `AskUser`'s `askUserRaw` (thin, generated) vs. `Tidepool.Form`'s
             // `askUser` (composed, authored) and `Entropy`'s `entropySeed`
             // (thin, generated) vs. `Tidepool.Random`'s `newStdGen` (composed,
@@ -1028,7 +1028,7 @@ macro_rules! llm_effect_def {
                   ret "Value", errors LlmError },
             ],
             helpers [
-                // The composed `llm` (which calls `schemaToValue`) lives in
+                // The composed `llm` (which calls `schemaToHaskell`) lives in
                 // its own `Tidepool.Llm` module now — the generated module
                 // cannot import authored library code, so only the thin raw
                 // verb wrapper stays here, same split as `Ask`'s
@@ -1435,7 +1435,7 @@ macro_rules! subagent_effect_def {
                   ret "SpawnOutcome", errors SpawnError },
                 // The tool-dispatch pair. `tools` and the tool answer ride FLAT
                 // `Value` arguments rather than bridged records because
-                // `serde_json::Value` has ToCore but no FromCore — inbound JSON
+                // `serde_json::Value` has ToHaskell but no FromHaskell — inbound JSON
                 // cannot ride inside a bridged record, and `SubagentSpawn`'s
                 // `schema` is the same lane.
                 { ctor SubagentBegin, method subagent_begin,

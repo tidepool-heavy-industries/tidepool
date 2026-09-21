@@ -1709,7 +1709,7 @@ tidepool-target phase=desugar module=Execute\n",
     #[test]
     fn compiler_request_correlation_is_stable_and_content_addressed() {
         let argv = [
-            OsString::from("--worker-request-v9"),
+            OsString::from("--worker-request-v10"),
             OsString::from("payload"),
         ];
         assert_eq!(
@@ -1741,7 +1741,7 @@ tidepool-target phase=desugar module=Execute\n",
     fn malformed_typed_worker_request_is_rejected() {
         let malformed = vec![
             crate::request::WORKER_REQUEST_FLAG.into(),
-            "54505245513030380100000009".into(),
+            "54505245513031300100000009".into(),
         ];
         assert!(matches!(
             normalize_worker_argv(malformed),

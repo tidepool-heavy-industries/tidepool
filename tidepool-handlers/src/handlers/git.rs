@@ -320,7 +320,7 @@ mod tests {
     use super::*;
     use crate::test_support::*;
     use tidepool_bridge::Value;
-    use tidepool_bridge::{FromCore, ToCore};
+    use tidepool_bridge::{FromHaskell, ToHaskell};
     use tidepool_effect::dispatch::{EffectContext, EffectHandler};
     use tidepool_mcp::CapturedOutput;
 
@@ -332,7 +332,7 @@ mod tests {
         match &val {
             Value::Con(id, fields) if table.name_of(*id).unwrap() == "Right" => fields[0].clone(),
             Value::Con(id, fields) if table.name_of(*id).unwrap() == "Left" => {
-                let err: GitError = FromCore::from_value(&fields[0], table).unwrap();
+                let err: GitError = FromHaskell::from_value(&fields[0], table).unwrap();
                 panic!("expected Right, got Left({:?})", err);
             }
             other => panic!("expected Right/Left, got {:?}", other),
@@ -558,7 +558,7 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
             }
         }
         assert_eq!(count, 2, "gitLog 2 should return exactly 2 commits");
-        // Suppress unused warning from the FromCore round-trip test above
+        // Suppress unused warning from the FromHaskell round-trip test above
         let _ = request;
     }
 
@@ -748,7 +748,7 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
         );
         match &res {
             Value::Con(id, fields) if table.name_of(*id).unwrap() == "Left" => {
-                let err: GitError = FromCore::from_value(&fields[0], &table).unwrap();
+                let err: GitError = FromHaskell::from_value(&fields[0], &table).unwrap();
                 assert!(
                     matches!(err, GitError::GitBadRevspec(_)),
                     "expected GitBadRevspec, got {:?}",

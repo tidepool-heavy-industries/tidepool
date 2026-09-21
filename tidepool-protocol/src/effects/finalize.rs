@@ -5,7 +5,7 @@
 //! field crosses IN-HEAP and may carry a non-serializable payload (a
 //! closure) — it is never JSON-decoded, here or anywhere in
 //! `tidepool-harness`; only the leading `Int` site id is read. `value`'s
-//! Rust binding is [`crate::schema::RustBinding::CoreValue`] for exactly that
+//! Rust binding is [`crate::schema::RustBinding::HaskellValue`] for exactly that
 //! reason: identity capture, no interpretation.
 //!
 //! `finalize @T x = finalizeSited 0 x` is an OPAQUE call-forwarding stub the
@@ -75,7 +75,7 @@ pub fn finalize() -> Effect {
                 Arg {
                     name: "value",
                     ty: HsType::Var("v"),
-                    rust: RustBinding::CoreValue,
+                    rust: RustBinding::HaskellValue,
                 },
             ],
             // `a` is finalize's own "return type" — genuinely free, never
@@ -99,7 +99,7 @@ pub fn finalize() -> Effect {
                     params: vec![Arg {
                         name: "v",
                         ty: HsType::Var("v"),
-                        rust: RustBinding::CoreValue,
+                        rust: RustBinding::HaskellValue,
                     }],
                     target: "finalizeSited",
                     ret: HsType::Var("a"),
@@ -116,7 +116,7 @@ pub fn finalize() -> Effect {
                     params: vec![Arg {
                         name: "v",
                         ty: HsType::Var("v"),
-                        rust: RustBinding::CoreValue,
+                        rust: RustBinding::HaskellValue,
                     }],
                     ctor_args: vec![SitedCtorArg::Site, SitedCtorArg::Param("v")],
                     coerce: false,

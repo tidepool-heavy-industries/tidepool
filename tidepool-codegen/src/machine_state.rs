@@ -26,8 +26,7 @@
 //! (or is threaded to have) a `vmctx`; when `vmctx` is null OR
 //! `(*vmctx).machine_state` is null, root registration/reads are a **no-op**
 //! (register does nothing; reads return 0/empty/`None`) rather than a panic —
-//! see the null-vmctx invariant on `RootScope`/`heap_to_value` in
-//! `heap_bridge.rs` for why that no-op is temporally safe.
+//! this permits hand-built test contexts that do not install a machine.
 //!
 //! External allocation is the narrow exception to the vmctx-only GC reach:
 //! the existing byte/boxed allocation ABIs have no vmctx argument, so they
@@ -217,9 +216,6 @@ pub struct MachineState {
     cancel_flag: RefCell<Option<Arc<AtomicBool>>>,
     #[cfg(test)]
     prepared_test_failure: RefCell<Option<PreparedTestFailure>>,
-    text_con_id: Cell<Option<tidepool_repr::DataConId>>,
-    json_con_ids: Cell<Option<tidepool_bridge::json_builder::JsonConIds>>,
-    time_con_ids: Cell<Option<tidepool_bridge::time::TimeConIds>>,
     stack_map_registry: RefCell<Vec<*const StackMapRegistry>>,
     /// Code-range index over `stack_map_registry`, populated exactly while
     /// two or more registries are linked (a single registry is searched
@@ -227,7 +223,6 @@ pub struct MachineState {
     /// chain; a frame walk takes an `Arc` snapshot so a walk never borrows
     /// the cell.
     stack_map_index: RefCell<Arc<StackMapIndex>>,
-    call_depth: Cell<u32>,
     runtime_error: RefCell<Option<RuntimeError>>,
     /// Prepared exception operand; independent of temporary observation marks.
     /// Prepared invocations keep this machine in Rc storage while snapshots use
@@ -378,12 +373,8 @@ impl MachineState {
             cancel_flag: RefCell::new(None),
             #[cfg(test)]
             prepared_test_failure: RefCell::new(None),
-            text_con_id: Cell::new(None),
-            json_con_ids: Cell::new(None),
-            time_con_ids: Cell::new(None),
             stack_map_registry: RefCell::new(Vec::new()),
             stack_map_index: RefCell::new(Arc::default()),
-            call_depth: Cell::new(0),
             runtime_error: RefCell::new(None),
             disposition: Cell::new(MachineDisposition::Reusable),
             last_failure: RefCell::new(None),
@@ -536,33 +527,6 @@ impl MachineState {
         self.stack_map_registry.borrow().len()
     }
 
-    /// Depth of generated non-tail calls currently on the native stack: zero
-    /// at quiescence.
-    pub(crate) fn call_depth(&self) -> u32 {
-        self.call_depth.get()
-    }
-
-    // --- call depth ------------------------------------------------------
-    // `pub`: bare-VMContext test harnesses reset this directly.
-
-    pub fn reset_call_depth(&self) {
-        self.call_depth.set(0);
-    }
-
-    /// Pair with `incr_call_depth`: called when a non-tail call RETURNS, so
-    /// the counter tracks the number of currently-active (unreturned) calls
-    /// — actual nesting depth — instead of a monotonically increasing total.
-    /// Saturating: never underflows past 0 even if some path double-decrements.
-    pub(crate) fn decr_call_depth(&self) {
-        self.call_depth.set(self.call_depth.get().saturating_sub(1));
-    }
-
-    pub(crate) fn incr_call_depth(&self) -> u32 {
-        let d = self.call_depth.get() + 1;
-        self.call_depth.set(d);
-        d
-    }
-
     // --- cancel flag -------------------------------------------------------
 
     pub(crate) fn set_cancel_flag(&self, flag: Arc<AtomicBool>) {
@@ -629,18 +593,6 @@ impl MachineState {
     }
 
     // --- Host-built value constructor ids ----------------------------------
-
-    pub(crate) fn text_con_id(&self) -> Option<tidepool_repr::DataConId> {
-        self.text_con_id.get()
-    }
-
-    pub(crate) fn json_con_ids(&self) -> Option<tidepool_bridge::json_builder::JsonConIds> {
-        self.json_con_ids.get()
-    }
-
-    pub(crate) fn time_con_ids(&self) -> Option<tidepool_bridge::time::TimeConIds> {
-        self.time_con_ids.get()
-    }
 
     // --- runtime error (first-cause cell) -----------------------------------
 
@@ -792,7 +744,6 @@ impl MachineState {
         self.runtime_error.borrow_mut().take();
         // `last_failure` is the Unavailable latch and is never cleared; a
         // reusable machine has none to clear.
-        self.reset_call_depth();
         Ok(())
     }
 
@@ -822,19 +773,6 @@ impl MachineState {
             self.prepared_exception.set(std::ptr::null_mut());
         }
         cause
-    }
-
-    /// Same `try_borrow` defense as [`Self::take_runtime_error`]. Falls
-    /// back to `true` (conservatively "yes, treat this as an error") rather
-    /// than panicking — a caller asking this is about to gate on the answer,
-    /// and if the cell is unreadable because something is mid-write on a
-    /// signal-recovery path, the safe assumption is that there IS a pending
-    /// cause, not that there isn't.
-    pub(crate) fn has_runtime_error(&self) -> bool {
-        self.runtime_error
-            .try_borrow()
-            .map(|e| e.is_some())
-            .unwrap_or(true)
     }
 
     /// Inspect the first cause without consuming it at an emitted ABI boundary.
@@ -882,22 +820,7 @@ impl MachineState {
         self.gc_generation.get()
     }
 
-    // --- GC state (leaf 3) ------------------------------------------------
-    // `set_gc_state`/`clear_gc_state` are `pub`: bare-VMContext test
-    // harnesses (e.g. proptest_parked_registry.rs) own a MachineState, wire
-    // `vmctx.machine_state` at it, and drive GC state directly — same
-    // pattern leaf 1 used for `set_stack_map_registry`. The rest stay
-    // `pub(crate)`.
-
-    /// Set the active GC region for this machine.
-    pub fn set_gc_state(&self, start: *mut u8, size: usize) {
-        *self.gc_state.borrow_mut() = Some(GcState {
-            active_start: start,
-            active_size: size,
-            active_buffer: None,
-            prepared: None,
-        });
-    }
+    // --- Prepared nursery state (leaf 3) ----------------------------------
 
     /// Install a retained session heap buffer as the active GC region.
     /// Install one prepared heap with its pinned compiled-layout owners.
@@ -1484,12 +1407,6 @@ impl MachineState {
 
     /// Join a successful generated-frame walk with every ambient root registry.
     ///
-    /// `tail_callee_slot` and `tail_arg_slot` are stable fields in the live
-    /// `VMContext`. They are omitted only when their current value is null,
-    /// preserving the existing collector behavior. Other categories retain
-    /// null-valued slots: the slot itself is stable and a later collection may
-    /// need to rewrite it after its owner fills the value.
-    ///
     /// This method does not make an unsuccessful frame walk complete. Its caller
     /// must construct the stack-root slice only after `walk_frames` succeeds;
     /// the opaque return type then prevents downstream collectors from rebuilding
@@ -1497,8 +1414,6 @@ impl MachineState {
     pub(crate) unsafe fn complete_root_snapshot(
         &self,
         stack_roots: &[*mut *mut u8],
-        tail_callee_slot: *mut *mut u8,
-        tail_arg_slot: *mut *mut u8,
     ) -> GcRootSnapshot {
         let mut slots = Vec::with_capacity(
             stack_roots.len()
@@ -1507,7 +1422,6 @@ impl MachineState {
                 + self.stowed_roots.borrow().len()
                 + self.code_roots.borrow().len()
                 + self.remembered_slots.borrow().len()
-                + 2
                 + usize::from(!self.prepared_exception.get().is_null()),
         );
         slots.extend_from_slice(stack_roots);
@@ -1518,15 +1432,6 @@ impl MachineState {
         let mut remembered_slots = Vec::with_capacity(self.remembered_slots.borrow().len());
         self.extend_remembered_slots(&mut remembered_slots);
 
-        // SAFETY: the caller supplies valid VMContext field addresses.
-        if !tail_callee_slot.is_null() && !unsafe { *tail_callee_slot }.is_null() {
-            slots.push(tail_callee_slot);
-        }
-        // SAFETY: the caller supplies valid VMContext field addresses.
-        if !tail_arg_slot.is_null() && !unsafe { *tail_arg_slot }.is_null() {
-            slots.push(tail_arg_slot);
-        }
-
         GcRootSnapshot {
             slots,
             remembered_slots,
@@ -1536,6 +1441,7 @@ impl MachineState {
     /// Snapshot of every currently-remembered slot. Read-only; does not
     /// affect GC. Read by `host_fns::gc`'s post-GC `verify_remembered_slots`
     /// pass under `TIDEPOOL_HEAP_VERIFY`.
+    #[cfg(test)]
     pub(crate) fn remembered_slots_snapshot(&self) -> Vec<*mut *mut u8> {
         self.remembered_slots.borrow().iter().copied().collect()
     }
@@ -2517,6 +2423,7 @@ impl MachineState {
         self.external_changed();
     }
 
+    #[cfg(test)]
     pub(crate) fn set_external_logical_len(&self, ptr: *mut u8, logical_len: usize) {
         if let Some(record) = self.external_storage.borrow_mut().get_mut(&ptr) {
             if record.logical_len != logical_len {
@@ -2948,8 +2855,7 @@ impl Default for MachineState {
 }
 
 /// Reach the per-machine ambient state from a live `VMContext`. Host fns
-/// that hold `vmctx` use this. Never consulted by the `heap_to_value`
-/// null-vmctx path — leaf-1 fields are not reached from there.
+/// that hold `vmctx` use this.
 ///
 /// # Safety
 /// `vmctx` must be non-null and `(*vmctx).machine_state` must have been
@@ -2965,10 +2871,8 @@ pub(crate) unsafe fn machine_state<'a>(vmctx: *mut VMContext) -> &'a MachineStat
 /// `truncate_rust_roots`/`clear_rust_roots`/`register_persistent_root`/
 /// `persistent_roots_count` all reach through this instead of panicking on a
 /// null `vmctx`. Returns `None` — a legitimate no-op, not an error — when
-/// `vmctx` is null (the `heap_to_value` null-vmctx bridge path; see the
-/// invariant on `RootScope` in `heap_bridge.rs` for why that is temporally
-/// safe) OR `(*vmctx).machine_state` is null (a hand-built `VMContext` in a
-/// unit test that never wired a machine, e.g. `force.rs`'s raw-thunk tests).
+/// `vmctx` is null or `(*vmctx).machine_state` is null, as in a hand-built
+/// test context that does not install a machine.
 ///
 /// # Safety
 /// If `vmctx` is non-null, it must point to a live `VMContext`.
@@ -3037,35 +2941,6 @@ pub(crate) unsafe fn current_machine<'a>() -> Option<&'a MachineState> {
     }
 }
 
-/// Test-only support for exercising the ambient shims / vmctx-less host fns
-/// outside a full `PreparedMachine` run.
-#[cfg(test)]
-pub(crate) mod test_support {
-    use super::{install_current_machine, restore_current_machine, MachineState};
-
-    /// Install a fresh throwaway `MachineState` as this thread's current
-    /// machine for the duration of `f`, restoring whatever was previously
-    /// installed afterward (mirrors `install_registries`/`RegistryGuard::drop`
-    /// without needing a full `PreparedMachine`).
-    pub(crate) fn with_test_machine<R>(f: impl FnOnce() -> R) -> R {
-        struct Restore(*mut MachineState);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                restore_current_machine(self.0);
-            }
-        }
-        let ms = MachineState::new();
-        // Declared after `ms`, so this drops before `ms` on every exit —
-        // return OR unwind — restoring CURRENT_MACHINE off `ms` before `ms`
-        // is freed, so a panicking `f()` cannot leave a dangling pointer for
-        // a later test on the same worker thread.
-        let _restore = Restore(install_current_machine(
-            &ms as *const MachineState as *mut MachineState,
-        ));
-        f()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3084,8 +2959,6 @@ mod tests {
         let ms = MachineState::new();
         let _guard = ms.runtime_error.borrow_mut(); // simulates a stuck signal-path borrow
 
-        // has_runtime_error: conservative `true` fallback, not a panic.
-        assert!(ms.has_runtime_error());
         // set_first_cause: silently cannot write the cause, but does not panic.
         ms.set_first_cause(RuntimeError::Cancelled);
         // take_runtime_error: None, not a panic.
@@ -3455,7 +3328,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_root_snapshot_joins_every_registry_and_live_tail_slot() {
+    fn complete_root_snapshot_joins_every_registry() {
         let ms = MachineState::new();
         let mut stack_value: *mut u8 = std::ptr::without_provenance_mut(1);
         let mut rust_value = 2usize as *mut u8;
@@ -3463,8 +3336,6 @@ mod tests {
         let mut stowed_value = 4usize as *mut u8;
         let mut remembered_value = 5usize as *mut u8;
         let mut code_value = 6usize as *mut u8;
-        let mut tail_callee = 7usize as *mut u8;
-        let mut tail_arg = std::ptr::null_mut();
 
         ms.register_rust_root(&mut rust_value);
         ms.register_persistent_root(&mut persistent_value);
@@ -3474,12 +3345,9 @@ mod tests {
 
         // SAFETY: every argument is the stable address of a live local pointer
         // slot for the duration of this assertion.
-        let slots = unsafe {
-            ms.complete_root_snapshot(&[&mut stack_value], &mut tail_callee, &mut tail_arg)
-        }
-        .into_slots();
+        let slots = unsafe { ms.complete_root_snapshot(&[&mut stack_value]) }.into_slots();
 
-        assert_eq!(slots.len(), 7);
+        assert_eq!(slots.len(), 6);
         for expected in [
             &mut stack_value as *mut *mut u8,
             &mut rust_value,
@@ -3487,11 +3355,9 @@ mod tests {
             &mut stowed_value,
             &mut code_value,
             &mut remembered_value,
-            &mut tail_callee,
         ] {
             assert!(slots.contains(&expected));
         }
-        assert!(!slots.contains(&(&mut tail_arg as *mut *mut u8)));
     }
 
     #[test]
@@ -3502,9 +3368,7 @@ mod tests {
         ms.register_persistent_root(&mut persistent);
         ms.register_remembered_slot(&mut remembered);
 
-        let slots =
-            unsafe { ms.complete_root_snapshot(&[], std::ptr::null_mut(), std::ptr::null_mut()) }
-                .into_major_slots();
+        let slots = unsafe { ms.complete_root_snapshot(&[]) }.into_major_slots();
         assert_eq!(slots, vec![&mut persistent as *mut *mut u8]);
         assert!(!slots.contains(&(&mut remembered as *mut *mut u8)));
     }
@@ -4640,7 +4504,8 @@ mod tests {
     #[test]
     fn gc_state_take_put_back_round_trips() {
         let ms = MachineState::new();
-        ms.set_gc_state(std::ptr::dangling_mut(), 128);
+        ms.install_prepared_buffer(vec![0_u64; 16], Vec::new())
+            .unwrap();
 
         let state = ms.take_gc_state();
         assert!(state.is_some());
@@ -4665,7 +4530,8 @@ mod tests {
     #[test]
     fn gc_state_abandoned_take_leaves_cell_empty_and_teardown_is_safe() {
         let ms = MachineState::new();
-        ms.set_gc_state(std::ptr::dangling_mut(), 128);
+        ms.install_prepared_buffer(vec![0_u64; 16], Vec::new())
+            .unwrap();
 
         let _abandoned = ms.take_gc_state(); // never put back
 

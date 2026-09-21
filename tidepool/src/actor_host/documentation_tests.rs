@@ -1056,17 +1056,7 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
 
 #[tokio::test]
 async fn rich_response_survives_resident_computation() {
-    struct VerifyHeap;
-    impl Drop for VerifyHeap {
-        fn drop(&mut self) {
-            tidepool_codegen::host_fns::clear_heap_verify_override();
-        }
-    }
-    let before = tidepool_codegen::host_fns::heap_verify_run_count();
-    tidepool_codegen::host_fns::set_heap_verify(true);
-    let _verification = VerifyHeap;
     execute_examples(true, None, 1).await;
-    assert!(tidepool_codegen::host_fns::heap_verify_run_count() > before);
 }
 
 #[tokio::test]

@@ -13,7 +13,7 @@
 //! Two rules this emitter encodes, both promoted from convention in the
 //! hand-written block:
 //!
-//! - `#[core(name = …)]` goes on a STRUCT whose Rust name differs from its
+//! - `#[haskell(name = …)]` goes on a STRUCT whose Rust name differs from its
 //!   Haskell name, and NEVER on an enum. An enum's data constructors ARE its
 //!   variant names, so the bridge never looks the type name up.
 //! - Every [`crate::types::TypeShape::Identity`] gets a FALLIBLE boundary
@@ -128,15 +128,15 @@ fn used_bridge_derives(e: &Effect) -> Vec<&'static str> {
     let mut idents = Vec::new();
     if e.type_defs
         .iter()
-        .any(|t| t.derives.has(WireDerive::FromCore))
+        .any(|t| t.derives.has(WireDerive::FromHaskell))
     {
-        idents.push("FromCore");
+        idents.push("FromHaskell");
     }
     if e.type_defs
         .iter()
-        .any(|t| t.derives.has(WireDerive::ToCore))
+        .any(|t| t.derives.has(WireDerive::ToHaskell))
     {
-        idents.push("ToCore");
+        idents.push("ToHaskell");
     }
     idents.sort_unstable();
     idents
@@ -154,7 +154,7 @@ fn rust_type(e: &Effect, ty: &HsType) -> String {
         // The vendored aeson JSON value, ret-only wherever it appears in a wire
         // record today (`RepositoryEvent::ObservedMessage`'s bare payload) — the
         // same `serde_json::Value` spelling `AgCyclePayload`/`AgAgentStep` use
-        // for the same reason (no `FromCore` for it, so it never decodes).
+        // for the same reason (no `FromHaskell` for it, so it never decodes).
         HsType::Value => "serde_json::Value".to_string(),
         HsType::List(inner) => format!("Vec<{}>", rust_type(e, inner)),
         HsType::Maybe(inner) => format!("Option<{}>", rust_type(e, inner)),
@@ -227,7 +227,7 @@ fn wire_error_enum(e: &Effect) -> Option<String> {
     Some(out)
 }
 
-/// One `TypeDef`'s doc comment, derive line, optional `#[core(name = …)]`, and
+/// One `TypeDef`'s doc comment, derive line, optional `#[haskell(name = …)]`, and
 /// its struct/enum body.
 fn emit_type_decl(e: &Effect, t: &TypeDef, out: &mut String) {
     for line in t.doc {
@@ -238,13 +238,13 @@ fn emit_type_decl(e: &Effect, t: &TypeDef, out: &mut String) {
     out.push_str(&t.derives.render());
     out.push('\n');
     if let Some(module) = t
-        .core_module
+        .haskell_module
         .filter(|_| !matches!(t.shape, TypeShape::Sum { .. }))
     {
-        out.push_str(&format!("#[core(module = \"{module}\")]\n"));
+        out.push_str(&format!("#[haskell(module = \"{module}\")]\n"));
     }
-    if t.needs_core_name() {
-        out.push_str(&format!("#[core(name = \"{}\")]\n", t.name));
+    if t.needs_haskell_name() {
+        out.push_str(&format!("#[haskell(name = \"{}\")]\n", t.name));
     }
 
     match &t.shape {
@@ -268,8 +268,8 @@ fn emit_type_decl(e: &Effect, t: &TypeDef, out: &mut String) {
                 for line in v.doc {
                     out.push_str(&format!("    /// {line}\n"));
                 }
-                if let Some(module) = t.core_module {
-                    out.push_str(&format!("    #[core(module = \"{module}\")]\n"));
+                if let Some(module) = t.haskell_module {
+                    out.push_str(&format!("    #[haskell(module = \"{module}\")]\n"));
                 }
                 match &v.fields {
                     VariantFields::Positional(fields) if fields.is_empty() => {

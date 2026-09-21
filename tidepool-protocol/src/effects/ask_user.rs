@@ -95,7 +95,7 @@ pub fn ask_user() -> Effect {
                 args: vec![Arg {
                     name: "spec",
                     ty: HsType::Value,
-                    rust: RustBinding::CoreValue,
+                    rust: RustBinding::HaskellValue,
                 }],
                 ret: HsType::Value,
                 errors: None,

@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v9";
-const MAGIC: &[u8; 8] = b"TPREQ009";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v10";
+const MAGIC: &[u8; 8] = b"TPREQ010";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InspectionScope {
@@ -47,7 +47,6 @@ enum Field {
     OutputDir(OsString),
     Target(OsString),
     Targets(Vec<String>),
-    DumpCore,
     TargetModuleOnly,
     Include(OsString),
     Turn,
@@ -115,7 +114,6 @@ impl ExtractRequest {
                         .fields
                         .push(Field::Targets(raw.split(',').map(str::to_owned).collect()));
                 }
-                Some("--dump-core") => request.fields.push(Field::DumpCore),
                 Some("--target-module-only") => request.fields.push(Field::TargetModuleOnly),
                 Some("--include") => request.include(value(&mut args, "--include")?),
                 Some("--turn") => request.turn(),
@@ -209,7 +207,7 @@ impl ExtractRequest {
                     }
                     Field::Targets(values)
                 }
-                5 => Field::DumpCore,
+                5 => return Err(ProtocolError::RetiredFieldTag(5)),
                 6 | 39 => return Err(ProtocolError::RetiredFieldTag(tag)),
                 7 => Field::TargetModuleOnly,
                 8 => Field::Include(decoder.os_string()?),
@@ -459,7 +457,6 @@ impl ExtractRequest {
                 Field::Targets(values) => {
                     flag(&mut flags, "--targets", OsStr::new(&values.join(",")))
                 }
-                Field::DumpCore => flags.push("--dump-core".into()),
                 Field::TargetModuleOnly => flags.push("--target-module-only".into()),
                 Field::Include(value) => flag(&mut flags, "--include", value),
                 Field::Turn => flags.push("--turn".into()),
@@ -680,7 +677,7 @@ impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidWorkerArgv => {
-                f.write_str("worker argv must be exactly --worker-request-v9 PAYLOAD")
+                f.write_str("worker argv must be exactly --worker-request-v10 PAYLOAD")
             }
             Self::NonUtf8Payload => f.write_str("worker request payload is not UTF-8"),
             Self::InvalidHeader => f.write_str("invalid worker request header"),
@@ -738,7 +735,7 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
                 push_frame(out, OsStr::new(value));
             }
         }
-        Field::DumpCore => out.push(5),
+        // Tag 5 was the retired Core dump request.
         Field::TargetModuleOnly => out.push(7),
         Field::Include(value) => tagged_frame(out, 8, value),
         Field::Turn => out.push(16),
@@ -938,12 +935,12 @@ mod tests {
     fn payload_free_tags_are_one_byte_fields() {
         let mut request = MAGIC.to_vec();
         request.extend_from_slice(&2u32.to_le_bytes());
-        request.extend_from_slice(&[5, 7]);
+        request.extend_from_slice(&[7, 16]);
 
         let decoded = ExtractRequest::decode(&request).unwrap();
         assert!(matches!(
             decoded.fields.as_slice(),
-            [Field::DumpCore, Field::TargetModuleOnly]
+            [Field::TargetModuleOnly, Field::Turn]
         ));
     }
 
@@ -1092,6 +1089,7 @@ mod tests {
             "--worker-request-v6",
             "--worker-request-v7",
             "--worker-request-v8",
+            "--worker-request-v9",
         ] {
             assert_eq!(
                 ExtractRequest::decode_worker_argv(&[flag.into(), payload.clone()]).unwrap_err(),

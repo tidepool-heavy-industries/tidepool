@@ -6,21 +6,21 @@ use std::sync::Arc;
 use futures_util::future::BoxFuture;
 
 /// `Tidepool.Effects.Core.JevCallError`, constructor for constructor.
-#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::ToCore)]
+#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::ToHaskell)]
 pub enum JevCallFailure {
-    #[core(module = "Tidepool.Effects.Core", name = "JevUnconfigured")]
+    #[haskell(module = "Tidepool.Effects.Core", name = "JevUnconfigured")]
     Unconfigured,
-    #[core(module = "Tidepool.Effects.Core", name = "JevCallCap")]
+    #[haskell(module = "Tidepool.Effects.Core", name = "JevCallCap")]
     CallCap,
-    #[core(module = "Tidepool.Effects.Core", name = "JevTransport")]
+    #[haskell(module = "Tidepool.Effects.Core", name = "JevTransport")]
     Transport(String),
-    #[core(module = "Tidepool.Effects.Core", name = "JevTimeout")]
+    #[haskell(module = "Tidepool.Effects.Core", name = "JevTimeout")]
     Timeout,
-    #[core(module = "Tidepool.Effects.Core", name = "JevHttp")]
+    #[haskell(module = "Tidepool.Effects.Core", name = "JevHttp")]
     Http(i64, String),
-    #[core(module = "Tidepool.Effects.Core", name = "JevBodyLimit")]
+    #[haskell(module = "Tidepool.Effects.Core", name = "JevBodyLimit")]
     BodyLimit,
-    #[core(module = "Tidepool.Effects.Core", name = "JevMalformed")]
+    #[haskell(module = "Tidepool.Effects.Core", name = "JevMalformed")]
     Malformed(String),
 }
 

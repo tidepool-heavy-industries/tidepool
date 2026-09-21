@@ -21,7 +21,7 @@ use crate::schema::{
 use crate::types::JsonInstance;
 
 const WIRE: WireDerives = WireDerives(&[
-    WireDerive::ToCore,
+    WireDerive::ToHaskell,
     WireDerive::Clone,
     WireDerive::Debug,
     WireDerive::PartialEq,
@@ -68,7 +68,7 @@ pub fn source() -> Effect {
             TypeDef {
                 name: "SourceModule",
                 wire_rust: Some("SrModule"),
-                core_module: None,
+                haskell_module: None,
                 shape: TypeShape::Record {
                     fields: vec![
                         field("sourceModuleName", "name", HsType::Text),
@@ -86,7 +86,7 @@ pub fn source() -> Effect {
             TypeDef {
                 name: "SourceRevision",
                 wire_rust: Some("SrRevision"),
-                core_module: None,
+                haskell_module: None,
                 shape: TypeShape::Record {
                     fields: vec![
                         field("revisionIdentity", "identity", HsType::Text),
@@ -113,7 +113,7 @@ pub fn source() -> Effect {
             TypeDef {
                 name: "SourceStatus",
                 wire_rust: Some("SrStatus"),
-                core_module: None,
+                haskell_module: None,
                 shape: TypeShape::Record {
                     fields: vec![
                         field("statusActive", "active", HsType::Named("SourceRevision")),
@@ -132,7 +132,7 @@ pub fn source() -> Effect {
             TypeDef {
                 name: "ReloadOutcome",
                 wire_rust: Some("SrReloadOutcome"),
-                core_module: None,
+                haskell_module: None,
                 shape: TypeShape::Sum {
                     variants: vec![
                         SumVariant {

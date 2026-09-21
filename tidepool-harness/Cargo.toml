@@ -22,11 +22,11 @@ tidepool-handlers.workspace = true
 tidepool-extract-cmd.workspace = true
 tidepool-effect.workspace = true
 tidepool-bridge.workspace = true
-# `#[derive(FromCore)]` for the generated suspension-decode request enums
+# `#[derive(FromHaskell)]` for the generated suspension-decode request enums
 # under `src/generated/` — the same derive
 # `tidepool-handlers`'s generated `<Eff>Req` enums use.
 tidepool-bridge-derive.workspace = true
-# The FromCore-capable bridge record types (`EvRepositoryEvent`/`WtWorktreeId`)
+# The FromHaskell-capable bridge record types (`EvRepositoryEvent`/`WtWorktreeId`)
 # tests decode RepoEvent/Worktree suspensions against.
 tidepool-bridge-effects.workspace = true
 tidepool-codegen.workspace = true

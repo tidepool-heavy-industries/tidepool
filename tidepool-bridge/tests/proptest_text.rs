@@ -34,7 +34,7 @@ fn get_table() -> &'static DataConTable {
 }
 
 proptest! {
-    /// For any String, FromCore(ToCore(s)) == s
+    /// For any String, FromHaskell(ToHaskell(s)) == s
     #[test]
     fn string_round_trip(s in any::<String>()) {
         roundtrip(s, get_table());

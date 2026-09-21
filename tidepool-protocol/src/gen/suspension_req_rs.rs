@@ -7,7 +7,7 @@
 //! migrated outer effects reused from `tidepool-handlers`) is classified and
 //! handed to the driver's OWN orchestration, never routed through an
 //! `EffectHandler`. So this generator emits only the middle third of
-//! [`super::handler_rs`]'s output — the `#[derive(FromCore)] pub enum <Req>`
+//! [`super::handler_rs`]'s output — the `#[derive(FromHaskell)] pub enum <Req>`
 //! request enum, one variant per GADT constructor named exactly as in
 //! Haskell — and none of the error ADT / `DescribeEffect` / `EffectHandler`
 //! dispatch glue, which presuppose a handler these effects don't have.
@@ -70,20 +70,20 @@ pub fn file(e: &Effect, crate_dir: &str) -> GeneratedFile {
 fn body(e: &Effect) -> String {
     let mut out = header("//! ", &format!("`{}` suspension request type", e.name));
     out.push('\n');
-    out.push_str("use tidepool_bridge_derive::FromCore;\n\n");
+    out.push_str("use tidepool_bridge_derive::FromHaskell;\n\n");
 
     out.push_str(&format!(
         "/// One variant per `{}` GADT constructor, named EXACTLY as in Haskell.\n\
          /// Decode-only: this effect suspends to the consuming crate's own\n\
          /// orchestration rather than an `EffectHandler`, so there is no dispatch\n\
          /// glue here — see this module's crate-level generator doc. A field's\n\
-         /// only job is making the `FromCore` name+arity match correct; the\n\
+         /// only job is making the `FromHaskell` name+arity match correct; the\n\
          /// consumer's own roster composition decides which fields (if any)\n\
          /// it goes on to read, so an all-recognition, no-field-read effect is\n\
          /// expected here, not a bug.\n",
         e.name
     ));
-    out.push_str("#[derive(FromCore)]\n");
+    out.push_str("#[derive(FromHaskell)]\n");
     // Every variant is named EXACTLY as its Haskell constructor (this
     // module's whole point), so a shared verb-family prefix (`Async*`,
     // `Subagent*`) is the CORRECT spelling, not a naming smell — clippy's

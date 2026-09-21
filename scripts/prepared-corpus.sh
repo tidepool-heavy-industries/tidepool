@@ -329,7 +329,7 @@ echo "  named limitation: awaitSettled's continuation is not executed by this de
 report_totals priority "$priority_report"
 report_totals actor-stdlib "$actor_report"
 report_totals suite "$suite_report"
-echo "  separate acceptance contracts (not part of Suite or legacy counts):"
+echo "  separate acceptance contracts (not part of Suite or source counts):"
 report_totals recovered-base "$recovered_report"
 report_totals formatting-execution "$formatting_report"
 report_totals formatting-dependency-shadow "$formatting_shadow_report"
@@ -340,17 +340,17 @@ report_totals bignum "$bignum_root/results.json"
 report_totals usertypes "$usertypes_root/results.json"
 report_totals text "$text_root/results.json"
 
-report_legacy_totals() {
+report_source_totals() {
   local cohort="$1"
   local manifest="$2"
   jq -r --arg cohort "$cohort" '
-    ([.legacy_targets[] | select(.identity != null)] | length) as $mapped
-    | ([.legacy_targets[] | select(.identity == null)] | length) as $unmapped
+    ([.source_targets[] | select(.identity != null)] | length) as $mapped
+    | ([.source_targets[] | select(.identity == null)] | length) as $unmapped
     | (.programs | length) as $stg_tops
-    | "  \($cohort) manifest: stg_tops=\($stg_tops) legacy_mapped=\($mapped) legacy_unmapped=\($unmapped)"
+    | "  \($cohort) manifest: stg_tops=\($stg_tops) source_mapped=\($mapped) source_unmapped=\($unmapped)"
   ' "$manifest"
 }
 
-report_legacy_totals priority "$priority_root/manifest.json"
-report_legacy_totals actor-stdlib "$actor_root/manifest.json"
-report_legacy_totals suite "$suite_root/manifest.json"
+report_source_totals priority "$priority_root/manifest.json"
+report_source_totals actor-stdlib "$actor_root/manifest.json"
+report_source_totals suite "$suite_root/manifest.json"

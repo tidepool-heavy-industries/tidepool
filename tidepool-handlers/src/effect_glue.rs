@@ -5,9 +5,9 @@
 //! Expanding a definition through [`effect_rust_projection!`] generates the
 //! whole mechanical Rust half of the effect contract:
 //!
-//! - `#[derive(FromCore)] pub enum <Eff>Req` — one variant per GADT
+//! - `#[derive(FromHaskell)] pub enum <Eff>Req` — one variant per GADT
 //!   constructor, named EXACTLY as the Haskell constructor (no
-//!   `#[core(name)]` rename layer), fields from the definition's Rust arg
+//!   `#[haskell(name)]` rename layer), fields from the definition's Rust arg
 //!   types;
 //! - `impl DescribeEffect for <Handler>` — wired to the generated
 //!   `tidepool_mcp::<decl_fn>()`;
@@ -57,10 +57,10 @@ macro_rules! effect_rust_projection {
     ) => {
         // Generated failure ADT (#335). Present only when the definition has an
         // `errors` block; its variants live in the generated `Tidepool.Effects`
-        // module, so ToCore resolves them by qualified name.
+        // module, so ToHaskell resolves them by qualified name.
         $( crate::effect_glue::error_enum!($errname, $($evariant),*); )?
 
-        #[derive(tidepool_bridge_derive::FromCore)]
+        #[derive(tidepool_bridge_derive::FromHaskell)]
         pub enum $req {
             $( $ctor($($ar),*) ),*
         }
@@ -95,7 +95,7 @@ pub(crate) use effect_rust_projection;
 /// Emit the whole `errors` ADT as one item (a macro can't sit in enum-variant
 /// position, so the variants are built inline here from the re-matched block).
 /// `Debug` lets `Display`/`fs_err_to_effect` render it when an untagged method
-/// forwards a shared-helper failure. ToCore/FromCore use plain name+arity lookup
+/// forwards a shared-helper failure. ToHaskell/FromHaskell use plain name+arity lookup
 /// (the variant names are unique), matching the bridged records — no module
 /// qualifier (the generated `data` decl's constructors are not registered under
 /// a `Module.Ctor` qualified name).
@@ -103,12 +103,12 @@ macro_rules! error_enum {
     ( $errname:ident, $({ ctor $c:ident,
                           fields { $($efn:ident : $efh:literal as $efr:ty),* $(,)? },
                           doc $d:literal $(,)? }),* $(,)? ) => {
-        // FromCore is for test-side decoding of a `Left err`; the error is only
-        // ever SENT (ToCore) in production. Debug backs the `Display` path;
+        // FromHaskell is for test-side decoding of a `Left err`; the error is only
+        // ever SENT (ToHaskell) in production. Debug backs the `Display` path;
         // PartialEq/Eq let handler tests assert on decoded `Left` payloads.
         #[derive(
-            tidepool_bridge_derive::ToCore,
-            tidepool_bridge_derive::FromCore,
+            tidepool_bridge_derive::ToHaskell,
+            tidepool_bridge_derive::FromHaskell,
             Debug,
             PartialEq,
             Eq
@@ -144,18 +144,18 @@ pub(crate) use dispatch_body;
 /// `LlmStructured`'s schema), pre-converted to `serde_json::Value`.
 ///
 /// An `errors`-tagged verb's method receives no `cx` (see [`dispatch_body!`]),
-/// so it has no `DataConTable` to interpret a raw core `Value` — the table
+/// so it has no `DataConTable` to interpret a materialized Haskell `Value` — the table
 /// lookup has to happen at Req-decode time instead, while `cx` (and so the
-/// table) is still in scope. `FromCore` for a LOCAL wrapper type is exactly
+/// table) is still in scope. `FromHaskell` for a LOCAL wrapper type is exactly
 /// that decode-time hook: `tidepool_bridge_derive`'s enum derive calls
-/// `<$ar as FromCore>::from_value(&fields[i], table)` for every GADT arg
+/// `<$ar as FromHaskell>::from_value(&fields[i], table)` for every GADT arg
 /// (`$ar` here is `JsonArg`), so the conversion rides the SAME table the
 /// dispatch already has, before the tagged method ever runs.
 pub struct JsonArg(pub serde_json::Value);
 
-impl tidepool_bridge::sealed::FromCoreSealed for JsonArg {}
+impl tidepool_bridge::sealed::FromHaskellSealed for JsonArg {}
 
-impl tidepool_bridge::FromCore for JsonArg {
+impl tidepool_bridge::FromHaskell for JsonArg {
     fn from_value(
         value: &tidepool_bridge::Value,
         table: &tidepool_repr::DataConTable,

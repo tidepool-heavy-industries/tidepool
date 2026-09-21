@@ -33,7 +33,7 @@ and where to start. This file is the short form, with the mechanism index.
 
 | Area | Responsibility |
 |---|---|
-| `haskell/` | GHC Core extractor and the Haskell stdlib |
+| `haskell/` | GHC-to-prepared-STG compiler worker and the Haskell stdlib |
 | `tidepool-repr` | Prepared execution schema, constructor metadata, CBOR, shared identifiers |
 | `tidepool-heap` | JIT heap layout and copying-GC primitives |
 | `tidepool-codegen` | Cranelift compiler and effect machine |
@@ -73,8 +73,8 @@ Small support crates have short local charters describing their exact scope.
 | turn timeout, cancellation, and crash supervision | `tidepool-runtime::TurnSupervisor` |
 | machine-session checkout and ownership | `tidepool_runtime::session::registry` |
 | MCP transport and resource catalog | helpers in `tidepool-mcp` |
-| heap-to-`Value` decoding | `tidepool-codegen::heap_bridge` |
-| Core free-variable analysis | `tidepool-repr::free_vars` |
+| prepared-heap observation | `tidepool-codegen::prepared_program::observe` |
+| prepared-program free-variable analysis | `tidepool-repr::free_vars` |
 | field/laziness triviality policy | `tidepool-repr` |
 | authored Haskell concurrency | `Tidepool.Async` |
 | operator forms, gates, and steering | `OperatorGate::present_form` and `Tidepool.Form` |

@@ -45,7 +45,7 @@ pub struct TypeDef {
     /// one sweep.
     pub wire_rust: Option<&'static str>,
     /// Defining Haskell module for nominal bridge lookup, when known.
-    pub core_module: Option<&'static str>,
+    pub haskell_module: Option<&'static str>,
     /// What kind of declaration this is.
     pub shape: TypeShape,
     /// Which `ToJSON` instance to emit, if any.
@@ -66,7 +66,7 @@ impl TypeDef {
         self.wire_rust.unwrap_or(self.name)
     }
 
-    /// Does the emitted Rust type need `#[core(name = …)]`?
+    /// Does the emitted Rust type need `#[haskell(name = …)]`?
     ///
     /// Only when the Rust name differs from the Haskell name AND the type is a
     /// struct. An ENUM's data constructors ARE its variant names, so the
@@ -75,7 +75,7 @@ impl TypeDef {
     /// block follows today (every struct carries it, no enum does), promoted
     /// from convention to a function.
     #[must_use]
-    pub fn needs_core_name(&self) -> bool {
+    pub fn needs_haskell_name(&self) -> bool {
         self.wire_rust.is_some_and(|w| w != self.name)
             && !matches!(self.shape, TypeShape::Sum { .. })
     }
@@ -301,7 +301,7 @@ pub enum TypeShape {
     ///
     /// `data`, not `newtype` and not a synonym: a synonym would let a `GitOid`
     /// be passed where a `WorktreeId` is wanted, and a `newtype` is erased in
-    /// Core so the Rust `ToCore` side would build a one-field `Con` the Haskell
+    /// Core so the Rust `ToHaskell` side would build a one-field `Con` the Haskell
     /// side no longer has.
     ///
     /// This is the shape that mints a Rust newtype WITH a fallible boundary
@@ -408,7 +408,7 @@ impl VariantFields {
 pub struct SumVariant {
     /// The constructor name. Identical on both sides — a Haskell data
     /// constructor IS the Rust variant name, which is why an enum needs no
-    /// `#[core(name)]`.
+    /// `#[haskell(name)]`.
     pub ctor: &'static str,
     /// Constructor payload fields, in Core order.
     pub fields: VariantFields,
@@ -535,10 +535,10 @@ pub enum WireDerive {
     Serialize,
     /// Deserialization at private native transport boundaries.
     Deserialize,
-    /// `tidepool_bridge_derive::ToCore` — Rust value out to Core.
-    ToCore,
-    /// `tidepool_bridge_derive::FromCore` — Core value in to Rust.
-    FromCore,
+    /// `tidepool_bridge_derive::ToHaskell` — Rust value out to Haskell.
+    ToHaskell,
+    /// `tidepool_bridge_derive::FromHaskell` — Haskell value in to Rust.
+    FromHaskell,
     /// `Clone`.
     Clone,
     /// `Copy`.
@@ -567,8 +567,8 @@ impl WireDerive {
     #[must_use]
     pub fn rank(self) -> u8 {
         match self {
-            WireDerive::ToCore => 0,
-            WireDerive::FromCore => 1,
+            WireDerive::ToHaskell => 0,
+            WireDerive::FromHaskell => 1,
             WireDerive::Clone => 2,
             WireDerive::Copy => 3,
             WireDerive::Debug => 4,
@@ -587,8 +587,8 @@ impl WireDerive {
     #[must_use]
     pub fn ident(self) -> &'static str {
         match self {
-            WireDerive::ToCore => "ToCore",
-            WireDerive::FromCore => "FromCore",
+            WireDerive::ToHaskell => "ToHaskell",
+            WireDerive::FromHaskell => "FromHaskell",
             WireDerive::Clone => "Clone",
             WireDerive::Copy => "Copy",
             WireDerive::Debug => "Debug",
@@ -621,13 +621,19 @@ impl WireDerives {
         self.0.contains(&d)
     }
 
-    /// The rendered attribute: `#[derive(ToCore, FromCore, Clone, Debug, …)]`.
+    /// The rendered attribute: `#[derive(ToHaskell, FromHaskell, Clone, Debug, …)]`.
     #[must_use]
     pub fn render(self) -> String {
         let mut ds: Vec<WireDerive> = self.0.to_vec();
         ds.sort_by_key(|d| d.rank());
         let idents: Vec<&str> = ds.iter().map(|d| d.ident()).collect();
-        format!("#[derive({})]", idents.join(", "))
+        let body = idents.join(", ");
+        let single_line = format!("#[derive({body})]");
+        if single_line.len() < 100 {
+            single_line
+        } else {
+            format!("#[derive(\n    {body},\n)]")
+        }
     }
 
     /// Structural problems with the set.
@@ -895,7 +901,7 @@ mod tests {
         let type_def = TypeDef {
             name: "Head",
             wire_rust: None,
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
@@ -953,7 +959,7 @@ mod tests {
         let type_def = TypeDef {
             name: "Payload",
             wire_rust: None,
-            core_module: None,
+            haskell_module: None,
             shape,
             json: JsonInstance::None,
             derives: WireDerives(&[]),
@@ -972,7 +978,7 @@ mod tests {
         let type_def = TypeDef {
             name: "Empty",
             wire_rust: None,
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Sum {
                 variants: vec![SumVariant {
                     ctor: "Empty",

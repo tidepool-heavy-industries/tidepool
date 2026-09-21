@@ -1,6 +1,6 @@
-//! Bidirectional conversion between Rust types and Tidepool Core values.
+//! Bidirectional conversion between Rust types and materialized Tidepool values.
 //!
-//! Defines `FromCore` and `ToCore` traits with derive macros for automatic
+//! Defines `FromHaskell` and `ToHaskell` traits with derive macros for automatic
 //! marshalling across the Haskell-Rust boundary.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]

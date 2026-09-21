@@ -1248,7 +1248,7 @@ mod tests {
                 integrate: true,
             },
         );
-        use tidepool_bridge::FromCore;
+        use tidepool_bridge::FromHaskell;
         use tidepool_effect::dispatch::{EffectContext, EffectHandler};
         let table = crate::test_support::full_effect_test_table();
         let captured = tidepool_mcp::CapturedOutput::new();

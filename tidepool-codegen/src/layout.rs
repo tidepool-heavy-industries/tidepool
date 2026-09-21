@@ -21,9 +21,6 @@ pub use tidepool_heap::layout::LitTag;
 
 pub const VMCTX_ALLOC_PTR_OFFSET: i32 = 0;
 pub const VMCTX_ALLOC_LIMIT_OFFSET: i32 = 8;
-pub const VMCTX_GC_TRIGGER_OFFSET: i32 = 16;
-pub const VMCTX_TAIL_CALLEE_OFFSET: i32 = 24;
-pub const VMCTX_TAIL_ARG_OFFSET: i32 = 32;
 pub const VMCTX_PREPARED_STACK_LIMIT_OFFSET: i32 =
     std::mem::offset_of!(crate::context::VMContext, prepared_stack_limit) as i32;
 

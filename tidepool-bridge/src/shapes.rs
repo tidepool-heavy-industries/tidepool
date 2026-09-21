@@ -2,8 +2,8 @@
 //! runtime shapes look as `tidepool_bridge::Value` trees, independent of any
 //! heap layout.
 //!
-//! A "shape fact" is the Value-tree encoding of a Haskell data type as GHC
-//! -O2 Core sees it:
+//! A "shape fact" is the materialized Value-tree encoding of a Haskell data
+//! type:
 //!   - `Text` as the worker `Text ByteArray# Int# Int#` (UTF-8 bytes), with
 //!     raw `Value::ByteArray`, owned `LitString`/`LitByteArray` snapshots, and
 //!     any number of lifted `Con("ByteArray", [..])` wrapper layers (sliced
@@ -21,14 +21,12 @@
 //!     `Int`).
 //!
 //! Encode and decode of the same shape live here, side by side —
-//! `tidepool-runtime`'s renderer, `tidepool-bridge`'s FromCore/ToCore impls,
+//! `tidepool-runtime`'s renderer, `tidepool-bridge`'s FromHaskell/ToHaskell impls,
 //! and the native `JsonDecode` primop read/write these shapes through this
 //! module so they agree by construction.
 //!
 //! What does NOT live here:
-//!   - heap BYTE layouts — `tidepool-codegen/src/heap_bridge.rs` owns the
-//!     HeapObject encoding (and `tidepool-testing/src/compare.rs` documents
-//!     its own mirror of it);
+//!   - prepared heap layouts and observation — `tidepool-codegen` owns them;
 //!   - presentation policy — UTF-8 error surfaces, JSON depth/length
 //!     truncation, and error-type mapping stay with each caller. Decoders
 //!     here return raw bytes / `Option` / typed errors and let the caller
@@ -46,9 +44,7 @@ use tidepool_repr::{DataConId, DataConTable, Literal};
 /// The sentinel `DataConId` under which heap readers surface `Array#` /
 /// `SmallArray#` payloads as `Con(ARRAY_SENTINEL, elems)` — a bare element
 /// vector with no real constructor. Produced by
-/// `tidepool-codegen/src/heap_bridge.rs` (and its documented mirror in
-/// `tidepool-testing/src/compare.rs`); consumed by e.g. the renderer's
-/// `Vector` arm.
+/// prepared-heap observation; consumed by e.g. the renderer's `Vector` arm.
 ///
 /// CONTRACT: `0` can collide with a legitimate `DataConId` in any table, so
 /// consumers must rely on the surrounding typed context (e.g. "this is the
@@ -648,7 +644,7 @@ pub fn bignat_bytes_to_decimal(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::FromCore;
+    use crate::FromHaskell;
     use tidepool_repr::DataCon;
 
     fn test_table() -> DataConTable {

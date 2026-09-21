@@ -1,8 +1,5 @@
 //! Shared identifiers and literals used by prepared-STG programs.
 
-/// Tag byte stored in high bits of VarId to mark error-sentinel bindings.
-pub const ERROR_SENTINEL_TAG: u8 = 0x45;
-
 /// High-byte tag marking an external (Option-C session/library) binder id.
 /// A real external under Option C: `stableVarId = 0xFE<<56 | fingerprint`.
 pub const EXTERNAL_TAG: u8 = 0xFE;
@@ -11,31 +8,12 @@ pub const EXTERNAL_TAG: u8 = 0xFE;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VarId(pub u64);
 
-/// The decoded payload of a `0x45` error-sentinel [`VarId`].
-///
-/// Layout (`Translate.errorSentinelVar`): `0x45 << 56 | slot << 8 | kind`.
-/// The kind stays in the LOW byte, so sentinels that carry no slot are
-/// byte-identical to the pre-slot encoding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SentinelPayload {
-    /// Which sentinel this is: 0 = div-by-zero, 1 = overflow, 2 = error,
-    /// 3 = undefined, 4 = type metadata / unresolved-external poison.
-    pub kind: u8,
-    /// Per-module identity slot of the symbol this sentinel REPLACED, or `0`
-    /// when the sentinel records no identity (every kind but the
-    /// unresolved-external poison, plus payloads from pre-2.1 extractors).
-    /// Resolved to a qualified name through `meta.cbor`'s `poisoned` table.
-    pub slot: u64,
-}
-
 /// Decoded high-byte tag of a [`VarId`]. Replaces bare byte
 /// comparisons (`v >> 56 == 0x..`) at resolution sites with an exhaustive match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VarKind {
     /// `0xFE` — a real external (library unfolding OR a session binder).
     External,
-    /// `0x45` — an error/undefined/type-metadata sentinel (`Translate.hs`).
-    ErrorSentinel,
     /// Any other high byte — an ordinary local binder.
     Local,
 }
@@ -52,24 +30,8 @@ impl VarId {
     pub fn kind(self) -> VarKind {
         match self.tag() {
             EXTERNAL_TAG => VarKind::External,
-            ERROR_SENTINEL_TAG => VarKind::ErrorSentinel,
             _ => VarKind::Local,
         }
-    }
-
-    /// Decode an error sentinel's kind byte and identity slot; `None` for any
-    /// id that isn't `0x45`-tagged. The ONE place the sentinel bit layout is
-    /// decoded — every consumer (the eval oracle, the JIT's poison emission)
-    /// goes through here rather than open-coding the shifts.
-    #[must_use]
-    pub fn sentinel(self) -> Option<SentinelPayload> {
-        if self.tag() != ERROR_SENTINEL_TAG {
-            return None;
-        }
-        Some(SentinelPayload {
-            kind: (self.0 & 0xFF) as u8,
-            slot: (self.0 >> 8) & 0xFFFF_FFFF_FFFF,
-        })
     }
 }
 

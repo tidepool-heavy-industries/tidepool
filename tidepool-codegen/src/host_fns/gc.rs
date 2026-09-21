@@ -10,9 +10,8 @@
 //! the identical machine, and a per-thread slot can diverge from the `vmctx`
 //! a given call actually belongs to. The functions below that take a
 //! `vmctx: *mut VMContext` no-op (return / 0 / empty) when `vmctx` is null or
-//! `(*vmctx).machine_state` is null — see
-//! [`crate::machine_state::machine_state_opt`] and the null-vmctx invariant
-//! documented on `RootScope`/`heap_to_value` in `heap_bridge.rs`.
+//! `(*vmctx).machine_state` is null; this permits hand-built test contexts
+//! that do not install a machine.
 //!
 //! Isolation invariant: per-machine (not process-global) GC state is what
 //! lets `MAX_CONCURRENT_EVALS` machines run concurrently on separate threads
@@ -23,9 +22,7 @@ use crate::context::VMContext;
 use crate::gc::frame_walker;
 use crate::machine_state::{machine_state, machine_state_opt, MachineState};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
-
-use super::cancel::check_cancel_and_set_error;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 /// Register a Rust stack/heap slot containing a heap pointer as a GC root on
 /// the machine `vmctx` belongs to. GC will update the slot's value in-place
@@ -224,6 +221,7 @@ pub extern "C" fn write_barrier(vmctx: *mut VMContext, slot: *mut *mut u8) {
 /// # Safety
 /// `slot` must be a valid writable pointer field. If it is outside the nursery,
 /// its address must remain valid until the owning allocation is retired.
+#[cfg(test)]
 pub(super) unsafe fn store_heap_pointer(vmctx: *mut VMContext, slot: *mut *mut u8, value: *mut u8) {
     unsafe { *slot = value };
     write_barrier(vmctx, slot);
@@ -234,7 +232,7 @@ pub(crate) struct GcState {
     pub active_start: *mut u8,
     pub active_size: usize,
     /// `Vec<u64>`, not `Vec<u8>` — see `SessionState::heap`'s doc
-    /// (jit_machine.rs) for why.
+    /// (machine.rs) for why.
     pub active_buffer: Option<Vec<u64>>,
     pub prepared: Option<PreparedHeap>,
 }
@@ -245,13 +243,6 @@ pub(crate) struct PreparedHeap {
     /// Remains owned even when copying stops after moving only part of the heap.
     pub spare: Vec<u64>,
     pub used: usize,
-}
-
-/// A zeroed byte buffer at least `size` bytes, 8-byte aligned by
-/// construction (backed by `Vec<u64>`, not `Vec<u8>` — see
-/// `GcState::active_buffer`'s doc for why).
-fn alloc_aligned_zeroed(size: usize) -> Vec<u64> {
-    vec![0u64; size.div_ceil(8)]
 }
 
 /// Byte-slice view over a `Vec<u64>` buffer, for callers (like
@@ -269,64 +260,6 @@ fn as_bytes_mut(words: &mut [u64]) -> &mut [u8] {
 // SAFETY: GcState contains raw pointers but is only accessed from the thread
 // driving the owning MachineState's machine.
 unsafe impl Send for GcState {}
-
-/// GC trigger: called by JIT code when alloc_ptr exceeds alloc_limit.
-///
-/// This function MUST be compiled with frame pointers preserved
-/// (the whole crate uses preserve_frame_pointers, and the Rust profile
-/// should have force-frame-pointers = true for the gc path).
-///
-/// The frame walker in gc_trigger reads RBP to walk the JIT stack.
-///
-/// `reserve` is the size in bytes of the allocation that failed to bump (see
-/// `VMContext::gc_trigger`); the growth decision guarantees room for it.
-/// Host-initiated collections pass zero.
-#[inline(never)]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn gc_trigger(vmctx: *mut VMContext, reserve: usize) {
-    // Force a frame to be created
-    let mut _dummy = [0u64; 2];
-    std::hint::black_box(&mut _dummy);
-
-    GC_TRIGGER_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
-    GC_TRIGGER_LAST_VMCTX.store(vmctx as usize, Ordering::SeqCst);
-
-    // External cancellation safepoint. Record `RuntimeError::Cancelled` and
-    // skip `perform_gc`: the JIT's slow-path post-GC re-check will fail
-    // (alloc_ptr/alloc_limit are unchanged), routing the next allocation
-    // through `runtime_oom`'s poison path. `runtime_oom`'s first-write-wins
-    // `set_first_cause` preserves the `Cancelled` cause so the unwind
-    // surfaces it via `surface_error`, not as `HeapOverflow`.
-    //
-    // The other cancel safepoints (trampoline loop, join back-edge,
-    // effect-dispatch boundary) give prompt unwind for tail-recursive,
-    // join-looping, and effect-driven programs; this path closes the gap for
-    // pure non-tail-call allocator loops that never reach any of them.
-    if check_cancel_and_set_error(vmctx) {
-        return;
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        let fp: usize;
-        // SAFETY: Reading the frame pointer register (RBP) via inline asm.
-        // nomem/nostack options are correct — this is a pure register read.
-        unsafe {
-            std::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack));
-        }
-        perform_gc_request(fp, vmctx, reserve);
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        let fp: usize;
-        // SAFETY: Reading the frame pointer register (x29) via inline asm.
-        unsafe {
-            std::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack));
-        }
-        perform_gc_request(fp, vmctx, reserve);
-    }
-}
 
 static MAX_HEAP_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
 
@@ -496,422 +429,6 @@ pub(crate) fn heap_growth_target(
     Ok(None)
 }
 
-/// Count of completed `verify_heap_post_gc` runs, process-wide. Lets a test
-/// prove the verifier actually fired rather than silently no-op'ing.
-static HEAP_VERIFY_RUNS: AtomicUsize = AtomicUsize::new(0);
-
-/// Test-only: how many times `verify_heap_post_gc` has run in this process.
-#[doc(hidden)]
-pub fn heap_verify_run_count() -> usize {
-    HEAP_VERIFY_RUNS.load(Ordering::Relaxed)
-}
-
-/// Count of completed heap-doubling passes (`perform_gc`'s doubling branch),
-/// process-wide. Lets a test prove a collection actually took the doubling
-/// path rather than assuming a nursery size forces it.
-static GC_DOUBLING_RUNS: AtomicUsize = AtomicUsize::new(0);
-
-/// Test-only: how many times the heap-doubling branch has run in this process.
-#[doc(hidden)]
-pub fn gc_doubling_run_count() -> usize {
-    GC_DOUBLING_RUNS.load(Ordering::Relaxed)
-}
-
-/// Verdict for a pointer value read from a live-heap slot, post-GC.
-enum FieldPtrVerdict {
-    /// Null (legal mid-LetRec construction), inside to-space and 8-aligned,
-    /// or outside every space this collection touched (a poison object, a
-    /// malloc'd byte array, or any other address this walk has no opinion
-    /// on).
-    Ok,
-    /// Lands inside a `retired` range: a dangling evacuation.
-    DanglingIntoRetired,
-    /// Lands inside to-space but is not 8-aligned.
-    MisalignedToSpace,
-}
-
-/// The single owner for "is this pointer target acceptable post-GC" — every
-/// slot classification in [`verify_heap_post_gc`] goes through this, so a
-/// future pass over a different slot population (e.g. old-space's external
-/// array payloads) can call the same predicate instead of reimplementing the
-/// to-space/retired-range comparison.
-fn classify_field_ptr(
-    p: *const u8,
-    to_start: *const u8,
-    to_end: *const u8,
-    retired: &[(*const u8, *const u8)],
-) -> FieldPtrVerdict {
-    if p.is_null() {
-        return FieldPtrVerdict::Ok;
-    }
-    if p >= to_start && p < to_end {
-        return if (p as usize).is_multiple_of(8) {
-            FieldPtrVerdict::Ok
-        } else {
-            FieldPtrVerdict::MisalignedToSpace
-        };
-    }
-    if retired.iter().any(|&(start, end)| p >= start && p < end) {
-        return FieldPtrVerdict::DanglingIntoRetired;
-    }
-    FieldPtrVerdict::Ok
-}
-
-/// Post-GC walk of the TENURED graph, reachable from this machine's
-/// persistent roots (see `heap_verify_enabled`).
-///
-/// A minor collection never scans old-space, and `verify_heap_post_gc` walks
-/// only the packed to-space it just produced — so neither sees a pointer slot
-/// living in old-space or in a boxed array's external malloc'd payload
-/// buffer. This pass covers exactly that population: starting from each
-/// persistent root (a tenured binding's stable slot), it follows the object
-/// graph and classifies every pointer slot `for_each_pointer_field` yields,
-/// including a `TAG_LIT` array wrapper's payload slots.
-///
-/// It is deliberately INDEPENDENT of the write barrier. The barrier's
-/// remembered set enumerates only the stores the barrier itself recorded, so
-/// a verifier built on it would inherit the barrier's blind spot and could
-/// never see the failure that matters — a store the barrier MISSED. Following
-/// the object graph instead means an unrecorded old-to-young store still
-/// leaves a slot pointing into a retired range, and it fails loudly here, at
-/// the collection that stranded it, instead of as a tag-221 case trap
-/// whenever something next dereferences it.
-///
-/// Recursion is confined to memory that is safe to read: a target is followed
-/// only when it lies in to-space or inside a live old-space arena. Targets
-/// outside both (external payload buffers, poison, statics) are classified
-/// but never dereferenced, and a target in a `retired` range fails before any
-/// dereference — that memory is freed and possibly poisoned.
-///
-/// # Safety
-/// `persistent_roots` must hold valid, registered root slots; `arenas` must
-/// bound live old-space allocations; `retired` ranges are compared, never
-/// dereferenced.
-unsafe fn verify_tenured_graph(
-    persistent_roots: &[*mut *mut u8],
-    arenas: &[(*const u8, *const u8)],
-    to_start: *const u8,
-    to_end: *const u8,
-    retired: &[(*const u8, *const u8)],
-) {
-    let in_arena = |p: *const u8| arenas.iter().any(|&(start, end)| p >= start && p < end);
-    let readable = |p: *const u8| (p >= to_start && p < to_end) || in_arena(p);
-    // Real bytes readable from `p` onward: the distance to the end of
-    // whichever region (to-space or a live old-space arena) actually
-    // contains it. `p` is only ever passed here for a pointer `readable`
-    // already accepted, so one of the two arms below always matches.
-    let avail_from = |p: *const u8| -> usize {
-        if p >= to_start && p < to_end {
-            return to_end as usize - p as usize;
-        }
-        arenas
-            .iter()
-            .find(|&&(start, end)| p >= start && p < end)
-            .map(|&(_, end)| end as usize - p as usize)
-            .unwrap_or(0)
-    };
-
-    let fail = |owner: *const u8, target: *const u8, what: &str| -> ! {
-        panic!(
-            "[HEAP VERIFY] tenured-graph violation after GC: {what}\n  \
-             slot owner object at {owner:p}, target {target:p}\n  \
-             retired ranges were {retired:?}, to-space {to_start:p}..{to_end:p}\n  \
-             a tenured slot pointing into a retired range means an old-to-young \
-             store was never recorded by the write barrier (see old_space.rs)"
-        )
-    };
-
-    let mut visited: std::collections::HashSet<*mut u8> = std::collections::HashSet::new();
-    let mut work: Vec<*mut u8> = Vec::new();
-
-    for &slot in persistent_roots {
-        let root = *slot;
-        if !root.is_null() && readable(root as *const u8) {
-            work.push(root);
-        }
-    }
-
-    while let Some(obj) = work.pop() {
-        if !visited.insert(obj) {
-            continue;
-        }
-        let avail = avail_from(obj as *const u8);
-        tidepool_heap::gc::raw::for_each_pointer_field(obj, avail, |field_slot| {
-            let target = *field_slot;
-            match classify_field_ptr(target as *const u8, to_start, to_end, retired) {
-                FieldPtrVerdict::Ok => {}
-                FieldPtrVerdict::DanglingIntoRetired => fail(
-                    obj as *const u8,
-                    target as *const u8,
-                    "a slot reachable from a tenured binding points into a RETIRED space \
-                     (dangling old-to-young reference)",
-                ),
-                FieldPtrVerdict::MisalignedToSpace => fail(
-                    obj as *const u8,
-                    target as *const u8,
-                    "a slot reachable from a tenured binding holds a misaligned to-space pointer",
-                ),
-            }
-            if !target.is_null() && readable(target as *const u8) && !visited.contains(&target) {
-                work.push(target);
-            }
-        });
-    }
-}
-
-/// Post-GC check that every slot the write barrier remembered still holds an
-/// acceptable target (see `heap_verify_enabled`).
-///
-/// Defense-in-depth on the barrier's own tracing, NOT on its coverage: a
-/// remembered slot is handed to `perform_gc` as a root, so its target must
-/// have been evacuated and the slot rewritten. A stale target here means the
-/// GC mishandled a root it was given — a different failure from the barrier
-/// failing to record the slot at all, which is [`verify_tenured_graph`]'s job.
-///
-/// # Safety
-/// `slots` must hold valid remembered-slot addresses; `retired` ranges are
-/// compared, never dereferenced.
-unsafe fn verify_remembered_slots(
-    slots: &[*mut *mut u8],
-    to_start: *const u8,
-    to_end: *const u8,
-    retired: &[(*const u8, *const u8)],
-) {
-    for &slot in slots {
-        let target = *slot;
-        match classify_field_ptr(target as *const u8, to_start, to_end, retired) {
-            FieldPtrVerdict::Ok => {}
-            FieldPtrVerdict::DanglingIntoRetired => panic!(
-                "[HEAP VERIFY] remembered slot {slot:p} holds a RETIRED-space pointer \
-                 {target:p} after GC — the barrier recorded this slot, so the collector \
-                 was handed it as a root and should have rewritten it\n  \
-                 retired ranges were {retired:?}, to-space {to_start:p}..{to_end:p}"
-            ),
-            FieldPtrVerdict::MisalignedToSpace => panic!(
-                "[HEAP VERIFY] remembered slot {slot:p} holds a misaligned to-space \
-                 pointer {target:p} after GC"
-            ),
-        }
-    }
-}
-
-/// Post-GC heap invariant walk (see `heap_verify_enabled`).
-///
-/// Walks the packed live set `to_start..+live_bytes` exactly like the Cheney
-/// scan and validates every object:
-/// - known tag (a FORWARDED header surviving into to-space is corruption);
-/// - header size consistent with the tag (for Cons: `24 + 8*num_fields`
-///   EXACTLY — catches the u16 size-wrap class);
-/// - Lit tags within the known set (catches constant drift);
-/// - thunk state bytes valid;
-/// - every pointer field classifies as [`FieldPtrVerdict::Ok`] via
-///   [`classify_field_ptr`] — a pointer into a `retired` range is a dangling
-///   evacuation and fails loudly here instead of as a SIGSEGV collections
-///   later. BLACKHOLE capture slots are checked too, as defense-in-depth
-///   alongside the general field walk: `for_each_pointer_field` traces
-///   `THUNK_UNEVALUATED`/`THUNK_BLACKHOLE` captures identically, so a
-///   from-space capture here is also caught by the main Cheney scan — this
-///   check just guards the invariant a second way, not a live gap.
-///
-/// `retired` covers every space THIS collection evacuated OUT of: the
-/// original nursery, and, on the heap-doubling path, the intermediate
-/// to-space as well (doubling runs a second Cheney pass over what was, for
-/// that pass, itself a from-space — a pointer dangling into it is exactly as
-/// much a dangling evacuation as one into the original nursery). Addresses in
-/// `retired` are COMPARED, never dereferenced — the buffer may already be
-/// freed by the time this runs. That's sound because nothing allocates
-/// between a range's free and this call, and every `retired` range was
-/// allocated while still live and is disjoint from `to_start..+live_bytes`
-/// and from every other `retired` range (each doubling pass allocates a
-/// fresh, larger buffer before the prior one is dropped).
-///
-/// Scope: this walk covers only the packed to-space `perform_gc` just
-/// produced. Old-space and boxed arrays' external malloc'd payload buffers
-/// are covered separately by [`verify_tenured_graph`], which `perform_gc`
-/// runs immediately after this.
-unsafe fn verify_heap_post_gc(
-    to_start: *const u8,
-    live_bytes: usize,
-    retired: &[(*const u8, *const u8)],
-) {
-    HEAP_VERIFY_RUNS.fetch_add(1, Ordering::Relaxed);
-    use crate::layout as l;
-    let to_end = to_start.add(live_bytes);
-
-    let fail = |off: usize, idx: usize, what: &str, obj: *const u8| -> ! {
-        let dump_len = 32.min(live_bytes - off);
-        let bytes = std::slice::from_raw_parts(obj, dump_len);
-        panic!(
-            "[HEAP VERIFY] violation after GC: {what}\n  object #{idx} at to-space offset {off:#x} \
-             (live_bytes={live_bytes:#x})\n  first {dump_len} bytes: {bytes:02x?}\n  \
-             retired ranges were {retired:?}, to-space {to_start:p}..{to_end:p}"
-        )
-    };
-
-    let check_field = |off: usize, idx: usize, obj: *const u8, slot: usize, label: &str| {
-        let p = *(obj.add(slot) as *const *const u8);
-        match classify_field_ptr(p, to_start, to_end, retired) {
-            FieldPtrVerdict::Ok => {}
-            FieldPtrVerdict::DanglingIntoRetired => fail(
-                off,
-                idx,
-                &format!(
-                    "{label} slot +{slot} holds a FROM-SPACE pointer {p:p} (dangling evacuation)"
-                ),
-                obj,
-            ),
-            FieldPtrVerdict::MisalignedToSpace => fail(
-                off,
-                idx,
-                &format!("{label} slot +{slot} holds a misaligned to-space pointer {p:p}"),
-                obj,
-            ),
-        }
-    };
-
-    let mut off = 0usize;
-    let mut idx = 0usize;
-    while off < live_bytes {
-        let obj = to_start.add(off);
-        let tag = *obj;
-        // Size is a u32 at byte offset 1 — intentionally unaligned in the
-        // header layout; must be read_unaligned (debug builds abort on
-        // misaligned derefs).
-        let size = std::ptr::read_unaligned(obj.add(1) as *const u32) as usize;
-        if size < 8 || off + size > live_bytes {
-            fail(
-                off,
-                idx,
-                &format!("size {size} out of bounds for tag {tag}"),
-                obj,
-            );
-        }
-        match tag {
-            l::TAG_CON => {
-                let nf = *(obj.add(l::CON_NUM_FIELDS_OFFSET as usize) as *const u16) as usize;
-                let expect = 24 + 8 * nf;
-                if size != expect {
-                    fail(
-                        off,
-                        idx,
-                        &format!("Con size {size} != 24 + 8*num_fields({nf}) = {expect} (size-wrap class)"),
-                        obj,
-                    );
-                }
-                // Field offsets come from the shared, validated visitor
-                // (tidepool_heap::gc::raw::inspect_object) rather than being
-                // re-derived here — the `size == expect` check just above
-                // already guarantees `avail` (== size, since size == expect
-                // == off+size <= live_bytes was checked before this match)
-                // covers every field it reports.
-                for slot in tidepool_heap::gc::raw::inspect_object(obj as *mut u8, size) {
-                    check_field(off, idx, obj, slot.offset, slot.label);
-                }
-            }
-            l::TAG_LIT => {
-                if size != l::LIT_TOTAL_SIZE as usize {
-                    fail(
-                        off,
-                        idx,
-                        &format!("Lit size {size} != {}", l::LIT_TOTAL_SIZE),
-                        obj,
-                    );
-                }
-                let lt = *obj.add(l::LIT_TAG_OFFSET as usize);
-                if lt as i64 > l::LIT_TAG_ARRAY as i64 {
-                    fail(
-                        off,
-                        idx,
-                        &format!("unknown lit tag {lt} (constant drift?)"),
-                        obj,
-                    );
-                }
-                // SmallArray#/Array#: the value field points at a malloc'd,
-                // GC-external payload `[u64 len][ptr0..ptrN]` (never itself
-                // evacuated — see `for_each_pointer_field`'s TAG_LIT arm), but
-                // its SLOT CONTENTS are ordinary heap pointers that must obey
-                // the same from/to-space invariants as any other field.
-                if lt == l::LIT_TAG_SMALLARRAY as u8 || lt == l::LIT_TAG_ARRAY as u8 {
-                    let payload = *(obj.add(l::LIT_VALUE_OFFSET as usize) as *const *const u8);
-                    if !payload.is_null() {
-                        let len = *(payload as *const u64) as usize;
-                        for i in 0..len {
-                            let slot_addr = payload.add(8 + i * 8);
-                            let p = *(slot_addr as *const *const u8);
-                            match classify_field_ptr(p, to_start, to_end, retired) {
-                                FieldPtrVerdict::Ok => {}
-                                FieldPtrVerdict::DanglingIntoRetired => fail(
-                                    off,
-                                    idx,
-                                    &format!(
-                                        "array elem[{i}] holds a FROM-SPACE pointer {p:p} (dangling evacuation)"
-                                    ),
-                                    obj,
-                                ),
-                                FieldPtrVerdict::MisalignedToSpace => fail(
-                                    off,
-                                    idx,
-                                    &format!(
-                                        "array elem[{i}] holds a misaligned to-space pointer {p:p}"
-                                    ),
-                                    obj,
-                                ),
-                            }
-                        }
-                    }
-                }
-            }
-            l::TAG_CLOSURE => {
-                let nc = *(obj.add(l::CLOSURE_NUM_CAPTURED_OFFSET as usize) as *const u16) as usize;
-                let min = l::CLOSURE_CAPTURED_OFFSET as usize + 8 * nc;
-                if size < min {
-                    fail(
-                        off,
-                        idx,
-                        &format!("Closure size {size} < captures end {min} (num_captured={nc})"),
-                        obj,
-                    );
-                }
-                // A null code pointer is LEGAL mid-LetRec: Phase 1 pre-allocs
-                // every closure in the group (header + num_captured, slots
-                // zeroed) and Phase 3a fills code pointers — any GC point
-                // between (the next binding's pre-alloc, a capture's
-                // ensure_heap_ptr) sees this state. Same allowance as null Con
-                // fields below; the verifier must not fail on it.
-                for slot in tidepool_heap::gc::raw::inspect_object(obj as *mut u8, size) {
-                    check_field(off, idx, obj, slot.offset, slot.label);
-                }
-            }
-            l::TAG_THUNK => {
-                let state = *obj.add(l::THUNK_STATE_OFFSET as usize);
-                match state {
-                    // for_each_pointer_field traces THUNK_BLACKHOLE captures
-                    // identically to THUNK_UNEVALUATED (a blackhole's code
-                    // may still read its capture slots after a GC it
-                    // triggered itself) — inspect_object shares that
-                    // dispatch, so both states are covered by the same call
-                    // below; this is a second, redundant check on the same
-                    // invariant, not a gap.
-                    l::THUNK_UNEVALUATED | l::THUNK_BLACKHOLE | l::THUNK_EVALUATED => {
-                        for slot in tidepool_heap::gc::raw::inspect_object(obj as *mut u8, size) {
-                            check_field(off, idx, obj, slot.offset, slot.label);
-                        }
-                    }
-                    other => fail(off, idx, &format!("invalid thunk state {other}"), obj),
-                }
-            }
-            l::TAG_FORWARDED => fail(off, idx, "FORWARDED header in to-space", obj),
-            other => fail(off, idx, &format!("unknown heap tag {other}"), obj),
-        }
-        off += (size + 7) & !7;
-        idx += 1;
-    }
-}
-
-/// Copy once into the reusable semispace, then grow from exact live size if
-/// required. Every completed copy is published before attempting growth.
-/// A corrupt edge may leave both spaces live: the caller must retire the
-/// machine, and both owned buffers stay allocated through native unwinding.
 fn collect_prepared(
     machine: &MachineState,
     state: &mut GcState,
@@ -1118,9 +635,6 @@ fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
     if let Some(mut state) = ms.take_gc_state() {
         let from_start = state.active_start;
         let from_size = state.active_size;
-        // SAFETY: from_start + from_size stays within the active GC region.
-        let from_end = unsafe { from_start.add(from_size) };
-
         let alloc_ptr = unsafe { (*vmctx).alloc_ptr } as usize;
         let from_used = alloc_ptr.checked_sub(from_start as usize);
         let Some(from_used) = from_used.filter(|&used| used <= from_size) else {
@@ -1129,365 +643,53 @@ fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
             return;
         };
 
-        // Compact descriptor headers are not readable by the Core collector.
-        // Both formats acquire exactly the same checked root snapshot.
-        if state.prepared.is_some() {
-            let stack_slots: Vec<*mut *mut u8> = roots
-                .iter()
-                .map(|root| root.stack_slot_addr as *mut *mut u8)
-                .collect();
-            let snapshot = unsafe {
-                ms.complete_root_snapshot(
-                    &stack_slots,
-                    &mut (*vmctx).tail_callee,
-                    &mut (*vmctx).tail_arg,
-                )
-            };
-            let mut completed_copy = false;
-            // The invocation-owned OldSpace is boxed and remains stable while
-            // this collection runs. Its exact-start admission rejects stale
-            // interiors and preexisting forwarded headers.
-            let admitted = unsafe {
-                ms.prepared_old_space()
-                    .map(|owner| owner as &dyn tidepool_heap::descriptor_region::DescriptorOldSpace)
-            };
-            let result = collect_prepared(
-                ms,
-                &mut state,
-                &snapshot.into_slots(),
-                from_used,
-                reserve,
-                &mut completed_copy,
-                admitted,
-            );
-            // Even a later growth failure leaves the first completed copy
-            // published. Never restore a cursor into the retired semispace.
-            if completed_copy {
-                ms.bump_gc_generation();
-                if let Some(prepared) = state.prepared.as_ref() {
-                    unsafe {
-                        (*vmctx).alloc_ptr = state.active_start.add(prepared.used);
-                        (*vmctx).alloc_limit = state.active_start.add(state.active_size);
-                    }
-                }
-            }
-            match result {
-                Ok(used) => unsafe {
-                    (*vmctx).alloc_ptr = state.active_start.add(used);
-                    (*vmctx).alloc_limit = state.active_start.add(state.active_size);
-                },
-                Err(error) => ms.set_first_cause(error),
-            }
-            ms.put_gc_state(state);
-            return;
-        }
-
-        // A real collection is about to run — bump the generation
-        // counter so callers holding an address-keyed cache across this
-        // call (e.g. deep_force's visited set) know to invalidate it.
-        ms.bump_gc_generation();
-
-        let mut tospace = alloc_aligned_zeroed(from_size);
-
-        // Convert the checked frame walk to raw slots, then join every ambient
-        // root category through MachineState's sole snapshot constructor.
-        let stack_root_slots: Vec<*mut *mut u8> = roots
+        let stack_slots: Vec<*mut *mut u8> = roots
             .iter()
-            .map(|r| r.stack_slot_addr as *mut *mut u8)
+            .map(|root| root.stack_slot_addr as *mut *mut u8)
             .collect();
-        // SAFETY: vmctx is live for this collection; these are the addresses
-        // of its stable tail-call fields. The frame walk succeeded above.
-        let root_snapshot = unsafe {
-            ms.complete_root_snapshot(
-                &stack_root_slots,
-                &mut (*vmctx).tail_callee,
-                &mut (*vmctx).tail_arg,
-            )
+        let snapshot = unsafe { ms.complete_root_snapshot(&stack_slots) };
+        let mut completed_copy = false;
+        // The invocation-owned OldSpace is boxed and remains stable while
+        // this collection runs. Its exact-start admission rejects stale
+        // interiors and preexisting forwarded headers.
+        let admitted = unsafe {
+            ms.prepared_old_space()
+                .map(|owner| owner as &dyn tidepool_heap::descriptor_region::DescriptorOldSpace)
         };
-        let mut root_slots = root_snapshot.into_slots();
-        let mut expanded_payloads = HashSet::new();
-        loop {
-            let reach = match unsafe {
-                crate::old_space::trace_heap_region(from_start, from_used, &root_slots)
-            } {
-                Ok(reach) => reach,
-                Err(_) => {
-                    ms.put_gc_state(state);
-                    ms.set_first_cause(crate::host_fns::RuntimeError::BadPointer);
-                    return;
-                }
-            };
-            let mut added = false;
-            for (payload, kind) in reach.external_storage {
-                if expanded_payloads.insert(payload) {
-                    match ms.external_payload_view(payload, kind) {
-                        Ok(view) => {
-                            added |= !view.pointer_slots.is_empty();
-                            root_slots.extend(view.pointer_slots);
-                        }
-                        Err(_) => {
-                            ms.put_gc_state(state);
-                            ms.set_first_cause(crate::host_fns::RuntimeError::BadPointer);
-                            return;
-                        }
-                    }
+        let result = collect_prepared(
+            ms,
+            &mut state,
+            &snapshot.into_slots(),
+            from_used,
+            reserve,
+            &mut completed_copy,
+            admitted,
+        );
+        // Even a later growth failure leaves the first completed copy
+        // published. Never restore a cursor into the retired semispace.
+        if completed_copy {
+            ms.bump_gc_generation();
+            if let Some(prepared) = state.prepared.as_ref() {
+                unsafe {
+                    (*vmctx).alloc_ptr = state.active_start.add(prepared.used);
+                    (*vmctx).alloc_limit = state.active_start.add(state.active_size);
                 }
             }
-            if !added {
-                break;
-            }
         }
-
-        // Test-only one-shot fault injection (see `arm_gc_fault`), fired
-        // here to exercise the extract-then-siglongjmp design above: a
-        // fault at this moment must find the `GcState` cell empty
-        // (owned by this frame), never a live borrow.
-        maybe_raise_gc_fault(GcFaultPoint::DuringCopy);
-
-        // SAFETY: root_slots point to valid stack locations from walk_frames.
-        // from_start..from_end is the active nursery region. tospace is freshly
-        // allocated with the same size, which always suffices: live data is a
-        // subset of from-space and objects are copied at identical sizes.
-        let result = unsafe {
-            tidepool_heap::gc::raw::cheney_copy(
-                &root_slots,
-                from_start as *const u8,
-                from_end as *const u8,
-                as_bytes_mut(&mut tospace),
-            )
-        };
-
-        maybe_raise_gc_fault(GcFaultPoint::AfterCopy);
-
-        // Heap growth, decided by `heap_growth_target` (shared with the
-        // prepared collector): re-evacuate once into a bigger space when
-        // utilization is high or the triggering request would not fit. The
-        // root slot ADDRESSES collected above remain valid; their values now
-        // point into `tospace`, so a second Cheney pass with from = tospace
-        // relocates everything and re-updates them.
-        let mut active = tospace;
-        let mut live_bytes = result.bytes_copied;
-        let mut new_size = from_size;
-        // Every range this collection evacuates OUT of, for the post-GC
-        // verifier: the original nursery, plus (if the doubling branch
-        // below runs) the intermediate to-space it evacuates a second
-        // time.
-        let mut retired_ranges: Vec<(*const u8, *const u8)> =
-            vec![(from_start as *const u8, from_end as *const u8)];
-        // `Err` (the request cannot fit even at the ceiling) is left to the
-        // caller's post-GC re-check, which reports `HeapOverflow` through
-        // `runtime_oom`; the copy just completed is still published below.
-        let growth = heap_growth_target(from_size, live_bytes, reserve, max_heap_bytes())
-            .ok()
-            .flatten();
-        if let Some(target) = growth {
-            new_size = target;
-            let mut bigger = alloc_aligned_zeroed(new_size);
-            // SAFETY: same contract as above; from-space is the live
-            // prefix of `active`, disjoint from `bigger`.
-            let second = unsafe {
-                let active_start = active.as_ptr() as *const u8;
-                tidepool_heap::gc::raw::cheney_copy(
-                    &root_slots,
-                    active_start,
-                    active_start.add(live_bytes),
-                    as_bytes_mut(&mut bigger),
-                )
-            };
-            live_bytes = second.bytes_copied;
-            GC_DOUBLING_RUNS.fetch_add(1, Ordering::Relaxed);
-            // Capture the intermediate to-space's full allocated range
-            // BEFORE `active = bigger` drops it below: for this second
-            // Cheney pass it was itself a from-space, so a pointer left
-            // dangling into it is exactly as much a dangling evacuation
-            // as one into the original nursery, and the verifier needs
-            // both ranges to catch it.
-            let intermediate_start = active.as_ptr() as *const u8;
-            // SAFETY: `active` is a `Vec<u64>` of `active.len()` words;
-            // the byte range it backs is valid for reads for its full
-            // length.
-            let intermediate_end = unsafe { intermediate_start.add(active.len() * 8) };
-            retired_ranges.push((intermediate_start, intermediate_end));
-            if gc_poison_enabled() {
-                // The intermediate to-space is a second (now-retired)
-                // from-space; poison it so anything left dangling into
-                // it fails loudly (see `gc_poison_enabled`).
-                active.iter_mut().for_each(|w| *w = 0xDDDD_DDDD_DDDD_DDDD);
-            }
-            active = bigger; // drops the intermediate tospace
+        match result {
+            Ok(used) => unsafe {
+                (*vmctx).alloc_ptr = state.active_start.add(used);
+                (*vmctx).alloc_limit = state.active_start.add(state.active_size);
+            },
+            Err(error) => ms.set_first_cause(error),
         }
-
-        if gc_poison_enabled() {
-            // SAFETY: from_start..from_size is the pre-collection
-            // nursery — still allocated here (the buffer is freed only
-            // when `state.active_buffer` is replaced below, or is the
-            // machine-owned initial nursery). All live data has been
-            // evacuated; any pointer still aimed here is a GC bug this
-            // poison makes deterministic.
-            unsafe { std::ptr::write_bytes(from_start, 0xDD, from_size) };
-        }
-
-        // Update the owned GcState: swap to the surviving space.
-        let to_start = active.as_mut_ptr() as *mut u8;
-        state.active_start = to_start;
-        state.active_size = new_size;
-        state.active_buffer = Some(active); // drops old buffer if any
-
-        // Put the state back BEFORE the post-GC verifier: the verifier
-        // panics by design on an invariant violation, and that unwind
-        // must not skip the restore the way a signal-triggered
-        // siglongjmp would.
         ms.put_gc_state(state);
-
-        // SAFETY: vmctx is a valid pointer passed from JIT code. to_start points
-        // to the new active buffer which is now the nursery.
-        unsafe {
-            (*vmctx).alloc_ptr = to_start.add(live_bytes);
-            (*vmctx).alloc_limit = to_start.add(new_size) as *const u8;
-        }
-
-        // This is a nursery collection, not a full old-space collection. An
-        // old-space Lit wrapper can remain consumable through generated return
-        // state even when it is absent from this collection's root snapshot.
-        // Reclaiming its separately allocated payload here would leave the
-        // wrapper pointing at freed memory. External storage therefore follows
-        // the machine lifetime until a future full collector can retire the
-        // wrapper and payload together; explicit resize/release paths still
-        // release replaced allocations immediately.
-
-        // Fail-loud heap invariant walk (TIDEPOOL_HEAP_VERIFY=1).
-        // Runs while every retired range is still distinguishable, so a
-        // surviving from-space pointer — a dangling evacuation, into
-        // the original nursery OR (on the doubling path) the
-        // intermediate to-space — is detected HERE, not three
-        // collections later as a SIGSEGV.
-        if heap_verify_enabled() {
-            let arenas = ms.old_space_arena_ranges();
-            // SAFETY: to_start..+live_bytes is the packed live set
-            // cheney_copy just produced; retired_ranges covers every
-            // space this collection evacuated out of (addresses are
-            // only compared, never dereferenced — see
-            // `verify_heap_post_gc`'s doc).
-            unsafe {
-                verify_heap_post_gc(to_start, live_bytes, &retired_ranges);
-            }
-
-            // The to-space walk above cannot reach old-space or a boxed
-            // array's external payload buffer. These two cover that
-            // population: the tenured-graph traversal catches an
-            // old-to-young store the write barrier never recorded
-            // (independent of the barrier, so it sees the barrier's own
-            // misses), and the remembered-slot check confirms the
-            // collector correctly rewrote every slot it WAS handed.
-            let to_end = unsafe { to_start.add(live_bytes) as *const u8 };
-            let mut persistent: Vec<*mut *mut u8> = Vec::new();
-            ms.extend_persistent_roots(&mut persistent);
-            // SAFETY: persistent roots and arena ranges are this
-            // machine's own registrations; retired ranges are compared,
-            // never dereferenced.
-            unsafe {
-                verify_tenured_graph(
-                    &persistent,
-                    &arenas,
-                    to_start as *const u8,
-                    to_end,
-                    &retired_ranges,
-                );
-                verify_remembered_slots(
-                    &ms.remembered_slots_snapshot(),
-                    to_start as *const u8,
-                    to_end,
-                    &retired_ranges,
-                );
-            }
-        }
     }
-    // ── End GC ─────────────────────────────────────────
-}
-
-// Test instrumentation — NOT part of the public API.
-// These use atomics to be thread-safe during parallel test execution.
-static GC_TRIGGER_CALL_COUNT: AtomicU64 = AtomicU64::new(0);
-static GC_TRIGGER_LAST_VMCTX: AtomicUsize = AtomicUsize::new(0);
-
-/// A point inside `perform_gc`'s Cheney-copy body where a one-shot fault can
-/// be injected via [`arm_gc_fault`]. Test instrumentation — NOT part of the
-/// public API.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum GcFaultPoint {
-    None,
-    /// After the `GcState` is taken out of its cell and to-space is
-    /// allocated, immediately before `cheney_copy`.
-    DuringCopy,
-    /// After `cheney_copy` returns and before the `GcState` is put back.
-    AfterCopy,
-}
-
-impl GcFaultPoint {
-    fn to_u8(self) -> u8 {
-        match self {
-            GcFaultPoint::None => 0,
-            GcFaultPoint::DuringCopy => 1,
-            GcFaultPoint::AfterCopy => 2,
-        }
-    }
-}
-
-/// Process-global one-shot GC fault arm point. Test instrumentation — NOT
-/// part of the public API.
-static GC_FAULT_POINT: AtomicU8 = AtomicU8::new(0);
-
-/// Test-only: arm a one-shot fault at `point`. The next `perform_gc` pass
-/// that reaches `point` disarms (stores `None`) before raising `SIGILL`, so
-/// one `arm_gc_fault` call fires exactly one fault. Not part of the public
-/// API.
-#[doc(hidden)]
-pub fn arm_gc_fault(point: GcFaultPoint) {
-    GC_FAULT_POINT.store(point.to_u8(), Ordering::SeqCst);
-}
-
-/// Check-and-fire the fault armed for `point`, if any. `SIGILL` via
-/// `libc::raise` is delivered synchronously to the calling thread before
-/// `raise` returns and involves no UB, unlike an inline trap instruction
-/// whose undefined behavior the optimizer is free to exploit.
-///
-/// The disarmed case costs one relaxed load — every collection runs this, so
-/// the locked read-modify-write stays behind the armed check.
-fn maybe_raise_gc_fault(point: GcFaultPoint) {
-    if point == GcFaultPoint::None || GC_FAULT_POINT.load(Ordering::Relaxed) == 0 {
-        return;
-    }
-    let armed = GC_FAULT_POINT.compare_exchange(
-        point.to_u8(),
-        GcFaultPoint::None.to_u8(),
-        Ordering::SeqCst,
-        Ordering::SeqCst,
-    );
-    if armed.is_ok() {
-        unsafe { libc::raise(libc::SIGILL) };
-    }
-}
-
-/// Reset test counters. Only call from tests.
-pub fn reset_test_counters() {
-    GC_TRIGGER_CALL_COUNT.store(0, Ordering::SeqCst);
-    GC_TRIGGER_LAST_VMCTX.store(0, Ordering::SeqCst);
-}
-
-/// Get gc_trigger call count. Only call from tests.
-pub fn gc_trigger_call_count() -> u64 {
-    GC_TRIGGER_CALL_COUNT.load(Ordering::SeqCst)
-}
-
-/// Get last vmctx passed to gc_trigger. Only call from tests.
-pub fn gc_trigger_last_vmctx() -> usize {
-    GC_TRIGGER_LAST_VMCTX.load(Ordering::SeqCst)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout;
 
     #[test]
     fn prepared_collection_reserves_capacity_and_rewrites_only_managed_fields() {
@@ -1518,7 +720,7 @@ mod tests {
         ms.install_prepared_buffer(vec![0_u64; extent / 8], vec![Arc::clone(&descriptor)])
             .unwrap();
         let (start, size) = ms.gc_active_range().unwrap();
-        let mut vmctx = unsafe { VMContext::new(start, start.add(size), gc_trigger) };
+        let mut vmctx = unsafe { VMContext::new(start, start.add(size)) };
         vmctx.machine_state = &ms as *const _ as *mut _;
         vmctx.alloc_ptr = unsafe { start.add(extent) };
         let managed_offset = descriptor.trace_offsets()[0] as usize;
@@ -1655,7 +857,7 @@ mod tests {
         ms.register_rust_root(&mut root);
         let maps = crate::stack_map::StackMapRegistry::new();
         ms.set_stack_map_registry(&maps);
-        let mut vmctx = unsafe { VMContext::new(start, start.add(size), gc_trigger) };
+        let mut vmctx = unsafe { VMContext::new(start, start.add(size)) };
         vmctx.machine_state = &ms as *const _ as *mut _;
         vmctx.alloc_ptr = unsafe { start.add(used) };
         perform_gc_request(0, &mut vmctx, used * 4);
@@ -1731,7 +933,7 @@ mod tests {
         ms.install_prepared_buffer(vec![0_u64; 8], Vec::new())
             .unwrap();
         let (start, size) = ms.gc_active_range().unwrap();
-        let mut vmctx = unsafe { VMContext::new(start, start.add(size), gc_trigger) };
+        let mut vmctx = unsafe { VMContext::new(start, start.add(size)) };
         vmctx.machine_state = &ms as *const _ as *mut _;
         let maps = crate::stack_map::StackMapRegistry::new();
         ms.set_stack_map_registry(&maps);
@@ -1767,17 +969,11 @@ mod tests {
 
     #[test]
     fn missing_root_registry_aborts_before_collection_and_marks_unavailable() {
-        let mut nursery = [0u64; 8];
-        let start = nursery.as_mut_ptr() as *mut u8;
         let ms = crate::machine_state::MachineState::new();
-        ms.set_gc_state(start, std::mem::size_of_val(&nursery));
-        let mut vmctx = unsafe {
-            VMContext::new(
-                start,
-                start.add(std::mem::size_of_val(&nursery)),
-                gc_trigger,
-            )
-        };
+        ms.install_prepared_buffer(vec![0_u64; 8], Vec::new())
+            .unwrap();
+        let (start, size) = ms.gc_active_range().unwrap();
+        let mut vmctx = unsafe { VMContext::new(start, start.add(size)) };
         vmctx.alloc_ptr = unsafe { start.add(16) };
         vmctx.machine_state = &ms as *const _ as *mut _;
         let before_range = ms.gc_active_range();
@@ -1805,12 +1001,12 @@ mod tests {
 
     #[test]
     fn barrier_remembers_stable_fields_but_never_nursery_addresses() {
-        let mut nursery = [0u64; 8];
-        let start = nursery.as_mut_ptr() as *mut u8;
         let ms = crate::machine_state::MachineState::new();
-        ms.set_gc_state(start, std::mem::size_of_val(&nursery));
+        ms.install_prepared_buffer(vec![0_u64; 8], Vec::new())
+            .unwrap();
+        let (start, size) = ms.gc_active_range().unwrap();
         ms.arm_write_barrier();
-        let mut vmctx = unsafe { VMContext::new(start, start.add(64), gc_trigger) };
+        let mut vmctx = unsafe { VMContext::new(start, start.add(size)) };
         vmctx.machine_state = &ms as *const _ as *mut _;
         let mut external = std::ptr::null_mut();
         unsafe {
@@ -1820,78 +1016,5 @@ mod tests {
         let remembered = ms.remembered_slots_snapshot();
         assert_eq!(remembered, vec![&mut external as *mut *mut u8]);
         assert_eq!(external, unsafe { start.add(32) });
-    }
-
-    /// The verifier must FIRE on a corrupted heap (a size-wrap Con) and stay
-    /// SILENT on a healthy one.
-    #[test]
-    fn test_heap_verifier_fires_and_passes() {
-        // Healthy to-space: one Lit(Int) + one 1-field Con pointing at it.
-        // u64 backing => 8-aligned base (object starts must be 8-aligned).
-        let mut buf = vec![0u64; 8];
-        let base = buf.as_mut_ptr() as *mut u8;
-        unsafe {
-            // Lit at offset 0: tag=3, size=24, lit_tag=0 (Int), value=42.
-            *base = layout::TAG_LIT;
-            std::ptr::write_unaligned(base.add(1) as *mut u32, 24);
-            *base.add(layout::LIT_TAG_OFFSET as usize) = 0;
-            *(base.add(layout::LIT_VALUE_OFFSET as usize) as *mut i64) = 42;
-            // Con at offset 24: tag=2, size=32, con_tag, num_fields=1, field -> Lit.
-            let con = base.add(24);
-            *con = layout::TAG_CON;
-            std::ptr::write_unaligned(con.add(1) as *mut u32, 32);
-            *(con.add(layout::CON_TAG_OFFSET as usize) as *mut u64) = 7;
-            *(con.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16) = 1;
-            *(con.add(layout::CON_FIELDS_OFFSET as usize) as *mut *mut u8) = base;
-            // from-space: an unrelated range that contains nothing we point at.
-            let fake_from = 0x1000 as *const u8;
-            let fake_from_end = 0x2000 as *const u8;
-            let retired = [(fake_from, fake_from_end)];
-            verify_heap_post_gc(base, 56, &retired); // silent
-
-            // Corruption 1 (size-wrap Con): num_fields says 4 but size says 32.
-            *(con.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16) = 4;
-            let r = std::panic::catch_unwind(|| verify_heap_post_gc(base, 56, &retired));
-            assert!(
-                r.is_err(),
-                "verifier must fire on Con size/num_fields mismatch"
-            );
-            *(con.add(layout::CON_NUM_FIELDS_OFFSET as usize) as *mut u16) = 1;
-
-            // Corruption 2: dangling evacuation — field points into from-space.
-            *(con.add(layout::CON_FIELDS_OFFSET as usize) as *mut *mut u8) = 0x1800 as *mut u8;
-            let r = std::panic::catch_unwind(|| verify_heap_post_gc(base, 56, &retired));
-            assert!(r.is_err(), "verifier must fire on from-space pointer");
-            *(con.add(layout::CON_FIELDS_OFFSET as usize) as *mut *mut u8) = base;
-
-            // Corruption 3: unknown lit tag (constant-drift class).
-            *base.add(layout::LIT_TAG_OFFSET as usize) = 99;
-            let r = std::panic::catch_unwind(|| verify_heap_post_gc(base, 56, &retired));
-            assert!(r.is_err(), "verifier must fire on unknown lit tag");
-        }
-    }
-
-    /// `alloc_aligned_zeroed`'s buffer must be 8-byte aligned regardless of
-    /// size (including a size that ISN'T already a multiple of 8 — the
-    /// rounding-up path), and `as_bytes_mut`'s byte view must cover the
-    /// full requested length, zeroed.
-    #[test]
-    fn alloc_aligned_zeroed_is_always_8_aligned() {
-        for size in [0usize, 1, 7, 8, 9, 63, 64, 65, 4096, 4099] {
-            let mut words = alloc_aligned_zeroed(size);
-            let ptr = words.as_mut_ptr() as usize;
-            assert_eq!(
-                ptr % 8,
-                0,
-                "size {size}: buffer base must be 8-aligned, got {ptr:#x}"
-            );
-            let bytes = as_bytes_mut(&mut words);
-            assert!(
-                bytes.len() >= size,
-                "size {size}: byte view ({} bytes) must cover the requested size",
-                bytes.len()
-            );
-            assert!(bytes.iter().all(|&b| b == 0), "size {size}: must be zeroed");
-        }
     }
 }

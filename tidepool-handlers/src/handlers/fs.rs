@@ -42,9 +42,9 @@ tidepool_mcp::fs_read_effect_def!(crate::effect_glue::effect_rust_projection);
 /// `path` plus a typed `contents` — `Right text` on a clean UTF-8 read, `Left
 /// (FsError)` on a per-file failure. Named record per the records-over-tuples
 /// house rule; its Haskell `data FileRead = FileRead { path, contents }` decl is
-/// emitted into `Tidepool.Effects` via the Fs `type_defs`. ToCore/FromCore use
+/// emitted into `Tidepool.Effects` via the Fs `type_defs`. ToHaskell/FromHaskell use
 /// plain name+arity lookup (unique name), like the bridged records.
-#[derive(tidepool_bridge_derive::ToCore, tidepool_bridge_derive::FromCore, Debug)]
+#[derive(tidepool_bridge_derive::ToHaskell, tidepool_bridge_derive::FromHaskell, Debug)]
 struct FileRead {
     path: String,
     contents: Result<String, FsError>,
@@ -614,7 +614,7 @@ impl FsWriteHandler {
     }
 }
 
-#[derive(tidepool_bridge_derive::FromCore)]
+#[derive(tidepool_bridge_derive::FromHaskell)]
 pub enum FsWriteReq {
     FsWrite(String, String),
     FsWriteCas(String, Option<String>, String),
@@ -655,7 +655,7 @@ mod tests {
     use super::*;
     use crate::test_support::*;
     use tidepool_bridge::Value;
-    use tidepool_bridge::{FromCore, ToCore};
+    use tidepool_bridge::{FromHaskell, ToHaskell};
     use tidepool_effect::dispatch::EffectHandler;
     use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
     use tidepool_repr::DataConTable;
@@ -808,7 +808,7 @@ mod tests {
 
         let req = FsReadReq::FsReadGlob("*".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let mut results: Vec<FileRead> = FromCore::from_value(&res, &table).unwrap();
+        let mut results: Vec<FileRead> = FromHaskell::from_value(&res, &table).unwrap();
         results.sort_by(|a, b| a.path.cmp(&b.path));
         assert_eq!(results.len(), 2, "{results:?}");
         // bad.bin -> contents Left err (isolated), good.txt -> Right (survives).
@@ -873,7 +873,7 @@ mod tests {
 
         let req = FsReadReq::FsListDir(".".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let decoded: Result<Vec<String>, FsError> = FromCore::from_value(&res, &table).unwrap();
+        let decoded: Result<Vec<String>, FsError> = FromHaskell::from_value(&res, &table).unwrap();
         assert!(
             matches!(decoded, Err(FsError::FsNonUtf8Path(_))),
             "{decoded:?}"
@@ -912,17 +912,17 @@ mod tests {
 
         let req = FsReadReq::FsGlob("*".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let decoded: Result<Vec<String>, FsError> = FromCore::from_value(&res, &table).unwrap();
+        let decoded: Result<Vec<String>, FsError> = FromHaskell::from_value(&res, &table).unwrap();
         assert_eq!(decoded, Ok(vec!["good.txt".to_string()]), "{decoded:?}");
 
         let req = FsReadReq::FsGrep("won".to_string(), "*".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let decoded: Result<Vec<Hit>, FsError> = FromCore::from_value(&res, &table).unwrap();
+        let decoded: Result<Vec<Hit>, FsError> = FromHaskell::from_value(&res, &table).unwrap();
         assert_eq!(decoded, Ok(Vec::new()), "{decoded:?}");
 
         let req = FsReadReq::FsReadGlob("*".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let results: Vec<FileRead> = FromCore::from_value(&res, &table).unwrap();
+        let results: Vec<FileRead> = FromHaskell::from_value(&res, &table).unwrap();
         assert_eq!(results.len(), 1, "{results:?}");
         assert_eq!(results[0].path, "good.txt");
         assert_eq!(results[0].contents.as_deref(), Ok("hello"));
@@ -953,7 +953,7 @@ mod tests {
             FsReadReq::FsGrep("x".to_string(), String::new()),
         ] {
             let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-            let decoded: Result<Value, FsError> = FromCore::from_value(&res, &table).unwrap();
+            let decoded: Result<Value, FsError> = FromHaskell::from_value(&res, &table).unwrap();
             match decoded {
                 Err(FsError::FsSandbox(d)) => assert!(
                     d.contains("matches EVERYTHING"),
@@ -1003,7 +1003,7 @@ mod tests {
 
         let decode =
             |r: tidepool_effect::Response, t: &DataConTable| -> Result<(), Option<String>> {
-                FromCore::from_value(&response_value(r, t), t).unwrap()
+                FromHaskell::from_value(&response_value(r, t), t).unwrap()
             };
 
         // create-only (expected = None): file absent → writes.
@@ -1015,14 +1015,14 @@ mod tests {
         // tagged, so the digest arrives as `Right (Just hash)`.
         let req = FsReadReq::FsHash("f.txt".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let h: Result<Option<String>, FsError> = FromCore::from_value(&res, &table).unwrap();
+        let h: Result<Option<String>, FsError> = FromHaskell::from_value(&res, &table).unwrap();
         let h = h.unwrap().expect("hash of an existing file");
         assert_eq!(h, blake3_hex(b"v1"));
 
         // FsHash on an absent file → Right Nothing (absence is data, not error).
         let req = FsReadReq::FsHash("missing.txt".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let none: Result<Option<String>, FsError> = FromCore::from_value(&res, &table).unwrap();
+        let none: Result<Option<String>, FsError> = FromHaskell::from_value(&res, &table).unwrap();
         assert_eq!(none.unwrap(), None);
 
         // CAS HIT: expected == current hash → writes v2.
@@ -1092,7 +1092,7 @@ mod tests {
 
         let req = FsReadReq::FsGrep("hello".to_string(), "**/*.txt".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let decoded: Result<Vec<Hit>, FsError> = FromCore::from_value(&res, &table).unwrap();
+        let decoded: Result<Vec<Hit>, FsError> = FromHaskell::from_value(&res, &table).unwrap();
         let results = decoded.unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(
@@ -1114,7 +1114,7 @@ mod tests {
 
         let req = FsReadReq::FsGrep("hello".to_string(), "**/*".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let decoded: Result<Vec<Hit>, FsError> = FromCore::from_value(&res, &table).unwrap();
+        let decoded: Result<Vec<Hit>, FsError> = FromHaskell::from_value(&res, &table).unwrap();
         assert_eq!(decoded.unwrap().len(), 2);
     }
 
@@ -1137,7 +1137,7 @@ mod tests {
 
         let req = FsReadReq::FsGrep("match".to_string(), "large.txt".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let decoded: Result<Vec<Hit>, FsError> = FromCore::from_value(&res, &table).unwrap();
+        let decoded: Result<Vec<Hit>, FsError> = FromHaskell::from_value(&res, &table).unwrap();
         let results = decoded.unwrap();
 
         assert_eq!(results.len(), 2005);
@@ -1173,7 +1173,7 @@ mod tests {
 
         let req = FsReadReq::FsGrep("req-0002".to_string(), "batch.json".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let decoded: Result<Vec<Hit>, FsError> = FromCore::from_value(&res, &table).unwrap();
+        let decoded: Result<Vec<Hit>, FsError> = FromHaskell::from_value(&res, &table).unwrap();
         let results = decoded.unwrap();
 
         assert_eq!(results.len(), 1);
@@ -1270,7 +1270,7 @@ mod tests {
             &table,
         );
         // FsExists is errors-tagged: `Right True` for an existing path.
-        let decoded: Result<bool, FsError> = FromCore::from_value(&result, &table).unwrap();
+        let decoded: Result<bool, FsError> = FromHaskell::from_value(&result, &table).unwrap();
         assert_eq!(decoded, Ok(true), "Cargo.toml should exist");
     }
 
@@ -1291,7 +1291,8 @@ mod tests {
             &table,
         );
         // FsListDir is errors-tagged: `Right [entries]`.
-        let decoded: Result<Vec<String>, FsError> = FromCore::from_value(&result, &table).unwrap();
+        let decoded: Result<Vec<String>, FsError> =
+            FromHaskell::from_value(&result, &table).unwrap();
         assert!(
             !decoded.unwrap().is_empty(),
             "repo root should have entries"
@@ -1330,7 +1331,7 @@ mod tests {
         // (FsSandbox _)` DATA, not an abort (#335).
         let req = FsWriteReq::FsWrite("../../escape/evil.txt".into(), "bad".into());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let decoded: Result<(), FsError> = FromCore::from_value(&res, &table).unwrap();
+        let decoded: Result<(), FsError> = FromHaskell::from_value(&res, &table).unwrap();
         match decoded {
             Err(FsError::FsSandbox(msg)) => {
                 assert!(
@@ -1356,7 +1357,7 @@ mod tests {
         for escape in ["/etc/passwd", "../../escape.txt"] {
             let req = FsReadReq::FsMetadata(escape.into());
             let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-            let decoded: Option<FileMeta> = FromCore::from_value(&res, &table).unwrap();
+            let decoded: Option<FileMeta> = FromHaskell::from_value(&res, &table).unwrap();
             assert_eq!(decoded, None, "escape path {escape} must be None");
         }
     }
@@ -1373,13 +1374,13 @@ mod tests {
         // A file: is_file, not is_dir.
         let req = FsReadReq::FsMetadata("Cargo.toml".into());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let meta: Option<FileMeta> = FromCore::from_value(&res, &table).unwrap();
+        let meta: Option<FileMeta> = FromHaskell::from_value(&res, &table).unwrap();
         let meta = meta.expect("Cargo.toml has metadata");
         assert!(meta.is_file && !meta.is_dir);
         // A directory: is_dir, not is_file (doesFileExist folds this to False).
         let req = FsReadReq::FsMetadata("tidepool-handlers".into());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
-        let meta: Option<FileMeta> = FromCore::from_value(&res, &table).unwrap();
+        let meta: Option<FileMeta> = FromHaskell::from_value(&res, &table).unwrap();
         let meta = meta.expect("tidepool-handlers/ has metadata");
         assert!(meta.is_dir && !meta.is_file);
     }

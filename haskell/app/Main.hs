@@ -42,7 +42,7 @@ import Tidepool.Binders
   , StmtBinders(..), TurnOut(..), renderAskJson, renderVerdictsJson )
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
-  , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..), dumpCore
+  , runPipelineSessionSelected, CompilePurpose(..), PipelineResult(..)
   , withResidentPipelineSelectedRequests, CellDisplayPass(..), cellDisplayDeclarations, checkCellInstances
   , cellExpressionPlans
   , registerResidentEvictionHook, satisfiesCapturedConstraint, stripMonadHead )
@@ -414,10 +414,6 @@ processFile compiler caches _timing args path = do
         warnTexts = map T.pack (prWarnings result)
     hPutStrLn stderr $ "  Top-level bindings: " ++ show (length binds)
 
-    if requestDumpCore args
-      then hPutStrLn stderr (dumpCore binds)
-      else return ()
-
     let outDir = case mOutDir of
           Just dir -> dir
           Nothing  -> takeDirectory path </> takeBaseName path ++ "_cbor"
@@ -550,7 +546,7 @@ writePreparedSidecars outDir binds tycons capturedType warnings artifacts = do
       metadata = mergeMetaPreserving
         [ wiredInDataCons, collectDataCons tycons, map dcToMeta constructors ]
       hasIO = any (targetBindingHasIO binds . paTarget) artifacts
-      metaBytes = encodeMetadata metadata hasIO capturedType [] warnings []
+      metaBytes = encodeMetadata metadata hasIO capturedType warnings
   BS.writeFile (outDir </> "meta.cbor") metaBytes
   let multiple = length artifacts > 1
   forM_ artifacts $ \artifact -> do

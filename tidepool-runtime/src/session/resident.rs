@@ -915,27 +915,27 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
         // three turns of conversation exceed 100_000 bytes on their own.
         // Keep the handle and report the size, exactly as the closure tier
         // below keeps a value that has no `Value` representation.
-        SettlePlan::Bind(ValueTier::Tier0Data) => match engine.observe(program, handle) {
+        SettlePlan::Bind(ValueTier::ForceData) => match engine.observe(program, handle) {
             Ok(value) => Ok(PreparedRun::Done { handle, value }),
             Err(error) if is_observation_budget_exhausted(&error) => Ok(PreparedRun::Done {
                 handle,
-                value: Value::Con(tidepool_codegen::heap_bridge::OVERSIZE_SENTINEL, Vec::new()),
+                value: Value::Con(tidepool_codegen::observation::OVERSIZE_SENTINEL, Vec::new()),
             }),
             Err(error) => {
                 engine.release(handle);
                 Err(error)
             }
         },
-        SettlePlan::Bind(ValueTier::Tier1Closure) => Ok(PreparedRun::Done {
+        SettlePlan::Bind(ValueTier::RetainOpaque) => Ok(PreparedRun::Done {
             handle,
-            value: Value::Con(tidepool_codegen::heap_bridge::CLOSURE_SENTINEL, Vec::new()),
+            value: Value::Con(tidepool_codegen::observation::CLOSURE_SENTINEL, Vec::new()),
         }),
         SettlePlan::Project(tiers) => {
             let fields = engine.fields(handle, realm, tiers.len());
             engine.release(handle);
             let fields = fields?;
             for (index, (field, tier)) in fields.iter().zip(&tiers).enumerate() {
-                if *tier != ValueTier::Tier0Data {
+                if *tier != ValueTier::ForceData {
                     continue;
                 }
                 // This lane discards the observed value outright — it forces
@@ -991,12 +991,12 @@ fn is_observation_budget_exhausted(error: &PreparedRuntimeError) -> bool {
 /// [`super::ResidentEngine`]. The registry (`tidepool-harness`) instantiates
 /// `Slot<ResidentSession<H, O>>`.
 pub struct ResidentSession<H, O> {
-    /// The shared persistent-session core (machine + accumulated table + the two
+    /// The shared persistent session state (machine + accumulated table + the two
     /// planes). The harness does not (yet) accumulate on the decl/value planes —
     /// they sit empty here until enabled — but the machine lifecycle + table
-    /// merge + fragment-run primitives all live in the core, shared with the
+    /// merge + fragment-run primitives all live in the session state, shared with the
     /// repl's resident session.
-    core: PersistentSession,
+    state: PersistentSession,
     /// The effect handler stack, borrowed by each turn's eval thread.
     handlers: H,
     /// The console-output buffer turns write into.
@@ -1039,9 +1039,9 @@ where
         nursery_size: usize,
         lib: Option<SessionLib>,
     ) -> Self {
-        let core = PersistentSession::new(lib, nursery_size);
+        let state = PersistentSession::new(lib, nursery_size);
         ResidentSession {
-            core,
+            state,
             handlers,
             captured,
             cont_id_issuer: MonotonicIdIssuer::new("scont"),
@@ -1062,7 +1062,7 @@ where
         &mut self,
         decls: &[&str],
     ) -> Result<tidepool_repr::Generation, SessionError> {
-        self.core.define_scoped(decls)
+        self.state.define_scoped(decls)
     }
 
     /// Scoped [`Self::define_scoped`]: append to `scope`'s own decl tip, which
@@ -1074,7 +1074,7 @@ where
         scope: ScopeId,
         decls: &[&str],
     ) -> Result<tidepool_repr::Generation, SessionError> {
-        self.core.define_scoped_in(scope, decls)
+        self.state.define_scoped_in(scope, decls)
     }
 
     /// Commit declarations against frontend-owned imports without recording
@@ -1085,7 +1085,7 @@ where
         decls: &[&str],
         imports: &SourceImports,
     ) -> Result<tidepool_repr::Generation, SessionError> {
-        self.core
+        self.state
             .define_scoped_with_imports_in(scope, decls, imports)
     }
 
@@ -1095,7 +1095,7 @@ where
         receipt: &super::DeclarationReceipt,
         imports: &super::SourceImports,
     ) -> Result<super::StagedDeclaration, SessionError> {
-        self.core.stage_declarations_in(scope, receipt, imports)
+        self.state.stage_declarations_in(scope, receipt, imports)
     }
 
     pub fn commit_declaration_receipt_in(
@@ -1104,7 +1104,7 @@ where
         receipt: &super::DeclarationReceipt,
         imports: &SourceImports,
     ) -> Result<super::DeclarationPlaneCommit, SessionError> {
-        self.core
+        self.state
             .commit_declaration_receipt_in(scope, receipt, imports)
     }
 
@@ -1112,17 +1112,17 @@ where
         &mut self,
         staged: super::StagedDeclaration,
     ) -> Result<super::DeclarationPlaneCommit, SessionError> {
-        self.core.adopt_staged_declaration_in(staged)
+        self.state.adopt_staged_declaration_in(staged)
     }
 
     pub fn discard_staged_declaration(&self, staged: &super::StagedDeclaration) {
-        self.core.discard_staged_declaration(staged);
+        self.state.discard_staged_declaration(staged);
     }
 
     /// The current decl-plane module name (`Tidepool.Session.Lib.G<g>`) a later
     /// turn imports to see accumulated declarations, or `None` before any decl.
     pub fn session_import_module(&self) -> Option<String> {
-        self.core.current_lib_module().map(|m| m.module_name())
+        self.state.current_lib_module().map(|m| m.module_name())
     }
 
     /// Scoped [`Self::session_import_module`]: the `Lib.G<g>` module at
@@ -1131,20 +1131,20 @@ where
     /// child" on the real compile path, since the child's tip module re-exports
     /// its parent's chain.
     pub fn session_import_module_in(&self, scope: ScopeId) -> Option<String> {
-        self.core
+        self.state
             .current_lib_module_in(scope)
             .map(|m| m.module_name())
     }
 
     #[must_use]
     pub fn next_declaration_module(&self) -> Option<tidepool_repr::SessionModule> {
-        self.core.next_lib_module()
+        self.state.next_lib_module()
     }
 
     /// The decl-plane include directory to add to a later turn's compile search
     /// path (so `import Lib.G<g>` resolves), or `None` with no decl plane.
     pub fn lib_include_dir(&self) -> Option<PathBuf> {
-        self.core.lib_include_dir().map(Path::to_path_buf)
+        self.state.lib_include_dir().map(Path::to_path_buf)
     }
 
     /// The current value-binding generation. The caller mints the NEXT one
@@ -1152,7 +1152,7 @@ where
     /// generation into `Val.G<g>`, and [`Self::run_bind`]/[`Self::resume`]
     /// (via a [`ResidentHole::Binding`]) materialize at the same `g`.
     pub fn val_gen(&self) -> Generation {
-        self.core.val_gen()
+        self.state.val_gen()
     }
 
     /// Retain dependencies of prepared Core through the existing binding owner.
@@ -1160,7 +1160,7 @@ where
     pub fn lease_bindings(&mut self, referenced: &[tidepool_repr::VarId]) -> BindingLease {
         self.settle_dropped_custody();
         let retained = self
-            .core
+            .state
             .bindings_mut()
             .acquire_leases(referenced.iter().copied().map(SessionVarId::from_var))
             .into_iter()
@@ -1186,7 +1186,7 @@ where
         lease: &BindingLease,
     ) -> Result<super::ValuePlaneCommit, ResidentError> {
         self.settle_dropped_custody();
-        if !self.core.scope_tree().is_live(scope) {
+        if !self.state.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope).into());
         }
         if !Arc::ptr_eq(&lease.cleanup, &self.custody_cleanup) {
@@ -1196,7 +1196,7 @@ where
             return Err(BindingAliasError::SourceNotLeased(source).into());
         }
         let source_entry = self
-            .core
+            .state
             .bindings()
             .get(source)
             .ok_or(BindingAliasError::MissingSource(source))?;
@@ -1221,7 +1221,7 @@ where
             origin.identity.occurrence = alias.name.clone();
         }
         let id = SessionVarId::from_extract(alias.var_id);
-        if self.core.bindings().get(id).is_some() {
+        if self.state.bindings().get(id).is_some() {
             return Err(BindingAliasError::IdentityInUse(id).into());
         }
         let module = SessionModule::val(generation);
@@ -1229,14 +1229,14 @@ where
             return Err(BindingAliasError::WrongModule.into());
         }
         if self
-            .core
+            .state
             .resolve_in(scope, &alias.name)
             .is_some_and(|entry| entry.module.gen().0 >= generation.0)
         {
             return Err(BindingAliasError::StaleGeneration.into());
         }
         let provenance = self.binding_provenance.get(&source.raw()).cloned();
-        let committed = self.core.publish_alias_in(
+        let committed = self.state.publish_alias_in(
             scope,
             BindingEntry {
                 name: BindingName(alias.name.clone()),
@@ -1249,12 +1249,12 @@ where
             },
             source,
         )?;
-        self.core.set_val_gen(generation);
+        self.state.set_val_gen(generation);
         if let Some(provenance) = provenance {
             self.binding_provenance.insert(id.raw(), provenance);
         }
         self.binding_provenance.retain(|id, _| {
-            self.core
+            self.state
                 .bindings()
                 .get(SessionVarId::from_extract(*id))
                 .is_some()
@@ -1265,20 +1265,20 @@ where
     /// Reserve identities for compiled cell values before releasing exclusive
     /// session access. Aborted cells leave gaps; reserved identities are never reused.
     pub fn reserve_value_generations_through(&mut self, generation: Generation) {
-        self.core.set_val_gen(generation);
+        self.state.set_val_gen(generation);
     }
 
     /// The live `Val.G<g>` module names to inject (`--inject-val`) so a turn can
     /// reference earlier value bindings — ALL live gens (incl. shadowed).
     pub fn inject_val_modules(&self) -> Vec<String> {
-        self.core.live_val_modules()
+        self.state.live_val_modules()
     }
 
     /// The CURRENT `Val.G<g>` module per still-live name — what a turn IMPORTS
     /// (unqualified) so the reference typechecks. Excludes shadowed older gens
     /// (those are injected but not imported, to avoid an ambiguous occurrence).
     pub fn current_val_modules(&self) -> Vec<String> {
-        self.core.current_val_modules()
+        self.state.current_val_modules()
     }
 
     /// Scoped [`Self::current_val_modules`]: the `Val.G<g>` module per name
@@ -1286,13 +1286,13 @@ where
     /// frame winning. A sibling scope's bindings are never in this list, so a
     /// turn compiled here cannot even name them.
     pub fn current_val_modules_in(&self, scope: ScopeId) -> Vec<String> {
-        self.core.current_val_modules_in(scope)
+        self.state.current_val_modules_in(scope)
     }
 
     /// Immutable compile environment for `scope`, suitable for carrying out of
     /// a registry peek before a blocking GHC invocation.
     pub fn compile_view_in(&self, scope: ScopeId) -> Option<super::SessionCompileView> {
-        self.core.compile_view_in(scope)
+        self.state.compile_view_in(scope)
     }
 
     /// Capture an exact, selective declaration surface from `scope` for a
@@ -1302,7 +1302,7 @@ where
         scope: ScopeId,
         heads: &[&str],
     ) -> Result<super::ExactExportSurface, super::ExactExportError> {
-        self.core.exact_exports_in(scope, heads)
+        self.state.exact_exports_in(scope, heads)
     }
 
     /// Exact declaration-head incarnations visible from `scope`.
@@ -1312,7 +1312,7 @@ where
     /// cannot replace the program's original type.
     #[must_use]
     pub fn current_decl_heads_in(&self, scope: ScopeId) -> Vec<(String, u64)> {
-        self.core.lib().current_decl_heads_in(scope)
+        self.state.lib().current_decl_heads_in(scope)
     }
 
     /// The most recently parked hole (top of the stack), if any.
@@ -1336,7 +1336,7 @@ where
             .parked
             .iter()
             .find(|(name, _)| name == hole.cont_id())?;
-        self.core.parked_realm(id)
+        self.state.parked_realm(id)
     }
 
     #[must_use]
@@ -1359,7 +1359,7 @@ where
     /// Validation happens before assignment, so a dead lexical scope leaves
     /// both halves of the previous context unchanged.
     pub fn set_run_context(&mut self, context: SessionRunContext) -> Result<(), ResidentError> {
-        if !self.core.scope_tree().is_live(context.lexical_scope) {
+        if !self.state.scope_tree().is_live(context.lexical_scope) {
             return Err(SessionError::DeadScope(context.lexical_scope).into());
         }
         self.run_context = context;
@@ -1373,7 +1373,7 @@ where
         effect_policy: EffectRunPolicy,
         live_payload: LivePayloadPolicy,
     ) {
-        self.core.set_effect_execution(effect_policy, live_payload);
+        self.state.set_effect_execution(effect_policy, live_payload);
     }
 
     /// Atomically select one actor's authority/scopes and request policy.
@@ -1385,7 +1385,7 @@ where
         effect_policy: EffectRunPolicy,
         live_payload: LivePayloadPolicy,
     ) -> Result<(), ResidentError> {
-        if !self.core.scope_tree().is_live(context.lexical_scope) {
+        if !self.state.scope_tree().is_live(context.lexical_scope) {
             return Err(SessionError::DeadScope(context.lexical_scope).into());
         }
         self.run_context = context;
@@ -1402,13 +1402,13 @@ where
     /// Request policy currently selected for resident entries.
     #[must_use]
     pub fn effect_policy(&self) -> EffectRunPolicy {
-        self.core.effect_policy()
+        self.state.effect_policy()
     }
 
     /// Live-value crossing policy currently installed with the effect stack.
     #[must_use]
     pub fn live_payload_policy(&self) -> LivePayloadPolicy {
-        self.core.live_payload_policy()
+        self.state.live_payload_policy()
     }
 
     /// Scope exit for `realm`: close the realm
@@ -1421,8 +1421,8 @@ where
     /// nothing (idempotent).
     pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
         self.settle_dropped_custody();
-        let counts = self.core.close_realm(realm);
-        let survivors = self.core.parked_ids();
+        let counts = self.state.close_realm(realm);
+        let survivors = self.state.parked_ids();
         self.parked.retain(|(_, id)| survivors.contains(id));
         self.parked_provenance
             .retain(|id, _| survivors.contains(id));
@@ -1433,7 +1433,7 @@ where
     /// before the machine has bootstrapped.
     #[must_use]
     pub fn residency(&self) -> Option<tidepool_codegen::prepared_program::ResidencyCounts> {
-        self.core.residency()
+        self.state.residency()
     }
 
     /// Lifetime `(functions, code_bytes)` of Cranelift work this session's
@@ -1442,14 +1442,14 @@ where
     /// turn's code generation.
     #[must_use]
     pub fn codegen_totals(&self) -> Option<(u64, u64)> {
-        self.core.codegen_totals()
+        self.state.codegen_totals()
     }
 
     /// How many package tops this session's machine can hand a later turn
     /// instead of recompiling; `None` before the prepared machine is installed or before bootstrap.
     #[must_use]
     pub fn code_export_count(&self) -> Option<usize> {
-        self.core.code_export_count()
+        self.state.code_export_count()
     }
 
     /// Prepared old-space bytes as of the last successful between-turn
@@ -1457,7 +1457,7 @@ where
     /// bootstrapped.
     #[must_use]
     pub fn old_bytes(&self) -> Option<usize> {
-        self.core.old_bytes()
+        self.state.old_bytes()
     }
 
     /// Mint a [`ValueHandle`] over the declared live payload of the frame
@@ -1476,7 +1476,7 @@ where
             return Ok(None);
         };
         let provenance = self.parked_provenance.get(&id).cloned().unwrap_or_default();
-        let handle = match self.core.prepared_mut() {
+        let handle = match self.state.prepared_mut() {
             Some(engine) => engine.live_payload_handle(id)?,
             None => return Ok(None),
         };
@@ -1503,7 +1503,7 @@ where
             return Ok(None);
         };
         let provenance = self.parked_provenance.get(&id).cloned().unwrap_or_default();
-        let handle = match self.core.prepared_mut() {
+        let handle = match self.state.prepared_mut() {
             Some(engine) => match engine.live_payload_handle_owned_by(id, realm)? {
                 Some(handle) => handle,
                 None => return Ok(None),
@@ -1539,7 +1539,7 @@ where
         let transfer = custody.into_transfer();
         let handle = transfer.handle;
         let moved = self
-            .core
+            .state
             .prepared_mut()
             .is_some_and(|engine| engine.rehome_handle(handle, owner));
         if !moved {
@@ -1557,7 +1557,7 @@ where
         self.settle_dropped_custody();
         let transfer = custody.into_transfer();
         let discarded = self
-            .core
+            .state
             .prepared_mut()
             .is_some_and(|engine| engine.discard_handle(transfer.handle));
         if discarded {
@@ -1630,8 +1630,8 @@ where
         scope: ScopeId,
         name: &str,
     ) -> Option<(SessionVarId, SessionModule, ValueTier, Option<String>)> {
-        let entry = self.core.resolve_in(scope, name)?;
-        let tier = ValueTier::Tier1Closure;
+        let entry = self.state.resolve_in(scope, name)?;
+        let tier = ValueTier::RetainOpaque;
         Some((entry.id, entry.module, tier, entry.type_display.clone()))
     }
 
@@ -1658,7 +1658,7 @@ where
         custody: RootCustody,
     ) -> Result<(), ResidentError> {
         self.settle_dropped_custody();
-        if !self.core.scope_tree().is_live(scope) {
+        if !self.state.scope_tree().is_live(scope) {
             self.discard_custody(custody);
             return Err(SessionError::DeadScope(scope).into());
         }
@@ -1672,7 +1672,7 @@ where
                 )),
             ))));
         }
-        self.core
+        self.state
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
         self.mount_compiled_binding_prepared(scope, binder, gen, custody)
@@ -1691,7 +1691,7 @@ where
         let transfer = custody.into_transfer();
         let provenance = Arc::clone(&transfer.provenance);
         let raw = transfer.handle;
-        let engine = self.core.require_prepared()?;
+        let engine = self.state.require_prepared()?;
         let located = engine
             .prepared_handle_of(raw)
             .and_then(|handle| Some((handle, engine.hosting_program(handle)?)));
@@ -1702,7 +1702,7 @@ where
                 ),
             ))));
         };
-        self.core.retract_in(scope, &binder.name)?;
+        self.state.retract_in(scope, &binder.name)?;
         // `bind_prepared` owns the handle from here, releasing it on failure.
         transfer.commit();
         self.bind_prepared(program, scope, gen, &[(binder, handle)])?;
@@ -1749,20 +1749,20 @@ where
     /// even before the first prepared install (see
     /// `PersistentSession::mark_ready`).
     pub fn is_bootstrapped(&self) -> bool {
-        self.core.is_bootstrapped()
+        self.state.is_bootstrapped()
     }
 
     /// Typed machine-integrity observation for the host reentry boundary.
     /// Registry ownership remains outside this value, so callers must still
     /// acquire an ordinary checkout before executing anything.
     #[must_use]
-    pub fn machine_disposition(&self) -> Option<tidepool_codegen::jit_machine::MachineDisposition> {
-        self.core.machine_disposition()
+    pub fn machine_disposition(&self) -> Option<tidepool_codegen::machine::MachineDisposition> {
+        self.state.machine_disposition()
     }
 
     #[must_use]
     pub fn data_con_table(&self) -> &DataConTable {
-        self.core.session_table()
+        self.state.session_table()
     }
 
     /// Read-only heap/GC snapshot of this session's live machine (observatory
@@ -1773,7 +1773,7 @@ where
     /// Move the decl plane out for a machine rotation — see
     /// [`super::persistent::PersistentSession::take_lib`].
     pub fn take_lib(&mut self) -> Option<crate::session::SessionLib> {
-        self.core.take_lib()
+        self.state.take_lib()
     }
 
     /// Number of live [`ValueHandle`]s outstanding on this session's machine
@@ -1784,24 +1784,24 @@ where
     /// a realm close releases it.
     pub fn value_handle_count(&mut self) -> usize {
         self.settle_dropped_custody();
-        self.core.value_handle_count()
+        self.state.value_handle_count()
     }
 
     /// Whether the resident compiler has an incomplete, unusable module.
     pub fn compilation_failed(&self) -> bool {
-        self.core.machine_disposition().is_some_and(|disposition| {
+        self.state.machine_disposition().is_some_and(|disposition| {
             disposition == tidepool_codegen::machine_state::MachineDisposition::Unavailable
         })
     }
 
-    pub fn heap_stats(&self) -> Option<tidepool_codegen::jit_machine::HeapStats> {
-        self.core.heap_stats()
+    pub fn heap_stats(&self) -> Option<tidepool_codegen::machine::HeapStats> {
+        self.state.heap_stats()
     }
 
     /// The CURRENT value-plane binding names (newest gen per name) — what a
     /// machine rotation would lose (enumerated, legible loss, never silent).
     pub fn binding_names(&self) -> Vec<String> {
-        self.core
+        self.state
             .bindings()
             .iter_current()
             .map(|(name, _)| name.0.clone())
@@ -1813,7 +1813,7 @@ where
     /// Mint a fresh child scope of `parent` ([`ScopeId::ROOT`] for a top-level
     /// invocation scope). `None` if `parent` is not live.
     pub fn mint_scope(&mut self, parent: ScopeId) -> Option<ScopeId> {
-        self.core.mint_scope(parent)
+        self.state.mint_scope(parent)
     }
 
     /// Immutable value-binding snapshot captured when `scope` was minted.
@@ -1822,22 +1822,22 @@ where
         &self,
         scope: ScopeId,
     ) -> Option<tidepool_codegen::binding_table::BindingTipId> {
-        self.core.binding_tip_id(scope)
+        self.state.binding_tip_id(scope)
     }
 
     /// Mint a fresh actor lexical root with no ambient declaration or value
     /// ancestry. Program visibility must be supplied through exact imports.
     pub fn mint_isolated_scope(&mut self) -> ScopeId {
-        self.core.mint_isolated_scope()
+        self.state.mint_isolated_scope()
     }
 
     /// The value-plane names visible at `scope`: its own mutable frame over
     /// the immutable inherited tip captured when the scope was minted.
     /// `binding_names_in(ScopeId::ROOT)` is [`Self::binding_names`]'s set.
     pub fn binding_names_in(&self, scope: ScopeId) -> Vec<String> {
-        self.core
+        self.state
             .bindings()
-            .iter_current_in(self.core.scope_tree(), scope)
+            .iter_current_in(self.state.scope_tree(), scope)
             .into_iter()
             .map(|(name, _)| name.0.clone())
             .collect()
@@ -1851,9 +1851,9 @@ where
     /// never forces a live value.
     pub fn workbench_bindings_in(&self, scope: ScopeId) -> Vec<super::WorkbenchBinding> {
         let mut bindings = std::collections::BTreeMap::new();
-        for (item, generation) in self.core.lib().current_declarations_in(scope) {
+        for (item, generation) in self.state.lib().current_declarations_in(scope) {
             if let super::ExportItem::Value { name } = &item {
-                let binding = match self.core.lib().declaration_value_type(generation, name) {
+                let binding = match self.state.lib().declaration_value_type(generation, name) {
                     Some(ty) => {
                         super::WorkbenchBinding::typed_declaration(name.clone(), ty.to_owned())
                     }
@@ -1884,7 +1884,7 @@ where
         scope: ScopeId,
         types: &[(String, u64, String)],
     ) {
-        self.core
+        self.state
             .lib_mut()
             .retain_declaration_value_types_in(scope, types);
     }
@@ -1901,7 +1901,7 @@ where
         if self.current_binding_in(scope, name).is_some() {
             return false;
         }
-        let library = self.core.lib();
+        let library = self.state.lib();
         library
             .current_declarations_in(scope)
             .into_iter()
@@ -1928,21 +1928,21 @@ where
     /// survive machine replacement.
     #[must_use]
     pub fn declaration_recovery_report(&self) -> Option<&super::DeclarationRecoveryReport> {
-        self.core.lib().declaration_recovery_report()
+        self.state.lib().declaration_recovery_report()
     }
 
     /// A manifest publication failure that happened after a successful
     /// declaration commit, if durability has not recovered since.
     #[must_use]
     pub fn recovery_manifest_warning(&self) -> Option<&str> {
-        self.core.lib().recovery_manifest_warning()
+        self.state.lib().recovery_manifest_warning()
     }
 
     /// How many names `scope`'s OWN frame binds (accounting class 3, per
     /// scope — inherited names are not counted, only locally-bound ones).
     /// Returns to 0 when the scope retires.
     pub fn scope_binding_count(&self, scope: ScopeId) -> usize {
-        self.core.scope_binding_count(scope)
+        self.state.scope_binding_count(scope)
     }
 
     /// Number of persistent GC roots registered on this session's machine
@@ -1956,7 +1956,7 @@ where
     /// leak invisible.
     pub fn persistent_roots_count(&mut self) -> usize {
         self.settle_dropped_custody();
-        self.core.persistent_roots_count()
+        self.state.persistent_roots_count()
     }
 
     /// Accounting class 1 — the PARKED-CONTINUATION roots, as the pair that
@@ -1966,13 +1966,13 @@ where
     /// a realm's, not a scope's, and folding the two classes together is how a
     /// leak becomes invisible.
     pub fn stowed_roots_count(&self) -> usize {
-        self.core.stowed_roots_count()
+        self.state.stowed_roots_count()
     }
 
     /// The parked-frame half of accounting class 1 — see
     /// [`Self::stowed_roots_count`].
     pub fn parked_count(&self) -> usize {
-        self.core.parked_count()
+        self.state.parked_count()
     }
 
     /// Retire `scope` and its subtree: drop their value-plane frames and
@@ -1981,7 +1981,7 @@ where
     /// deregistered-is-not-reclaimed bound; retiring ROOT or an already-retired
     /// scope is a no-op returning an all-zero receipt.
     pub fn retire_scope(&mut self, scope: ScopeId) -> ScopeRetirement {
-        self.core.retire_scope(scope)
+        self.state.retire_scope(scope)
     }
 
     fn provenance_for(&self, sites: &[YieldSite]) -> Result<Arc<ProgramProvenance>, ResidentError> {
@@ -2023,7 +2023,7 @@ where
         binding: SessionVarId,
     ) -> Result<ResidentOutcome, ResidentError> {
         let entry = self
-            .core
+            .state
             .bindings()
             .get(binding)
             .ok_or(BindingAliasError::MissingSource(binding))?;
@@ -2036,7 +2036,7 @@ where
     /// [`Self::prepared_turn_request`].
     #[must_use]
     pub fn prepared_retained(&self) -> Vec<(SymbolIdentity, u64)> {
-        self.core.prepared_retained()
+        self.state.prepared_retained()
     }
 
     /// The prepared half a [`super::TurnRequest`] carries on this session's
@@ -2072,7 +2072,7 @@ where
     ) -> Result<ResidentOutcome, ResidentError> {
         let prepared = code.prepared;
         let provenance = self.provenance_for(code.sites)?;
-        self.core
+        self.state
             .merge_table(code.table)
             .map_err(ResidentError::TableCollision)?;
         if let PreparedTurnMode::Binding { generation, .. }
@@ -2080,10 +2080,10 @@ where
         {
             // Claim the value-module identity before the turn runs, as the
             // Core bind path does.
-            self.core.set_val_gen(*generation);
+            self.state.set_val_gen(*generation);
         }
         let install_prepared_started = std::time::Instant::now();
-        let program = self.core.install_prepared(prepared.clone())?;
+        let program = self.state.install_prepared(prepared.clone())?;
         timing::record_stage(
             timing::NO_NODE,
             timing::NO_ROUND,
@@ -2096,8 +2096,8 @@ where
         let plan = settle_plan_of(&mode);
         let park = ParkPolicy {
             principal: self.run_context.principal,
-            effect_policy: self.core.effect_policy(),
-            live_payload: self.core.live_payload_policy(),
+            effect_policy: self.state.effect_policy(),
+            live_payload: self.state.live_payload_policy(),
         };
         let run_exec_started = std::time::Instant::now();
         let ran = self.on_eval_thread(move |engine, table, handlers, captured| {
@@ -2117,7 +2117,7 @@ where
         // completed or parked outcome is protected from here on by the
         // session's persistent roots or the parked frame's own evidence, and
         // a failed run has nothing left to protect.
-        if let Some(engine) = self.core.prepared_mut() {
+        if let Some(engine) = self.state.prepared_mut() {
             engine.unpin(program);
         }
         self.complete_prepared(ran??, mode, program, lexical_scope, provenance, None)
@@ -2140,7 +2140,7 @@ where
         let seed = hole_seed_of(&mode, lexical_scope);
         let outcome = match run {
             PreparedRun::Done { handle, value } => {
-                let engine = self.core.require_prepared()?;
+                let engine = self.state.require_prepared()?;
                 match mode {
                     PreparedTurnMode::Value => {
                         engine.release(handle);
@@ -2182,7 +2182,7 @@ where
                     generation,
                 } = mode
                 else {
-                    if let Some(engine) = self.core.prepared_mut() {
+                    if let Some(engine) = self.state.prepared_mut() {
                         engine.release_all(fields);
                     }
                     return Err(PreparedRuntimeError::UnsettledEntry {
@@ -2224,8 +2224,8 @@ where
         // quiesce over, and the next successful turn drains instead. A
         // collection failure (anything but "not quiescent yet") is this
         // turn's failure.
-        if let Some(engine) = self.core.prepared_mut() {
-            if engine.disposition() == tidepool_codegen::jit_machine::MachineDisposition::Reusable {
+        if let Some(engine) = self.state.prepared_mut() {
+            if engine.disposition() == tidepool_codegen::machine::MachineDisposition::Reusable {
                 engine.quiesce_and_collect()?;
             }
         }
@@ -2246,8 +2246,8 @@ where
         generation: Generation,
         bound: &[(&BoundBinder, PreparedHandle)],
     ) -> Result<(), ResidentError> {
-        let scope_is_live = self.core.scope_tree().is_live(scope);
-        let engine = self.core.require_prepared()?;
+        let scope_is_live = self.state.scope_tree().is_live(scope);
+        let engine = self.state.require_prepared()?;
         if !scope_is_live {
             engine.release_all(bound.iter().map(|(_, handle)| *handle));
             return Err(SessionError::DeadScope(scope).into());
@@ -2293,14 +2293,14 @@ where
                 defining_expr: None,
                 scope,
             };
-            if let Err(error) = self.core.bind_replacing_decl_in(scope, entry) {
-                if let Some(engine) = self.core.prepared_mut() {
+            if let Err(error) = self.state.bind_replacing_decl_in(scope, entry) {
+                if let Some(engine) = self.state.prepared_mut() {
                     engine.release_all(bound[index..].iter().map(|(_, handle)| *handle));
                 }
                 return Err(error.into());
             }
         }
-        self.core.set_val_gen(generation);
+        self.state.set_val_gen(generation);
         Ok(())
     }
 
@@ -2363,10 +2363,10 @@ where
     }
 
     fn finish_observation(&mut self, binder: &BoundBinder, dependencies: &[tidepool_repr::VarId]) {
-        self.core
+        self.state
             .save_observation(SessionVarId::from_extract(binder.var_id), dependencies);
         self.binding_provenance.retain(|id, _| {
-            self.core
+            self.state
                 .bindings()
                 .get(SessionVarId::from_extract(*id))
                 .is_some()
@@ -2519,11 +2519,11 @@ where
     ) -> Result<ResidentOutcome, ResidentError> {
         let table = run_table
             .cloned()
-            .unwrap_or_else(|| self.core.session_table().clone());
+            .unwrap_or_else(|| self.state.session_table().clone());
         let park = ParkPolicy {
             principal: self.run_context.principal,
-            effect_policy: self.core.effect_policy(),
-            live_payload: self.core.live_payload_policy(),
+            effect_policy: self.state.effect_policy(),
+            live_payload: self.state.live_payload_policy(),
         };
         let ran = self.on_eval_thread(move |engine, _table, handlers, captured| {
             Ok(settle_rooted_entry(
@@ -2547,11 +2547,11 @@ where
     ) -> Result<ResidentOutcome, ResidentError> {
         let table = run_table
             .cloned()
-            .unwrap_or_else(|| self.core.session_table().clone());
+            .unwrap_or_else(|| self.state.session_table().clone());
         let park = ParkPolicy {
             principal: self.run_context.principal,
-            effect_policy: self.core.effect_policy(),
-            live_payload: self.core.live_payload_policy(),
+            effect_policy: self.state.effect_policy(),
+            live_payload: self.state.live_payload_policy(),
         };
         let ran = self.on_eval_thread(move |engine, _table, handlers, captured| {
             Ok(settle_rooted_application(
@@ -2677,7 +2677,7 @@ where
     /// core is `!Send` (raw-pointer roots) and stays here.
     ///
     /// The machine is taken via [`PersistentSession::lease_machine`], whose
-    /// [`super::MachineLease`] restores it into `self.core` on EVERY exit from
+    /// [`super::MachineLease`] restores it into `self.state` on EVERY exit from
     /// this function — success, a `JitError`, a caught panic, or a failed
     /// thread spawn (a transient OS resource failure, not a bug) — so no path
     /// can leave the session permanently machineless.
@@ -2704,7 +2704,7 @@ where
         F: FnOnce(&mut ResidentEngine, &DataConTable, &mut H, &O) -> Result<T, JitError> + Send,
     {
         self.settle_dropped_custody();
-        let mut lease = self.core.lease_machine();
+        let mut lease = self.state.lease_machine();
         let (machine_ref, table) = lease.parts();
         let handlers = &mut self.handlers;
         // The sink is Arc-backed (`OutputSink: Clone + Send`) and shares its
@@ -2737,7 +2737,7 @@ where
         });
 
         // `lease` drops here (function-end, on every path above), restoring
-        // the machine into `self.core` regardless of how `outcome` resolved.
+        // the machine into `self.state` regardless of how `outcome` resolved.
         match outcome {
             EvalThreadOutcome::Ran(Ok(t)) => Ok(t),
             EvalThreadOutcome::Ran(Err(e)) => Err(ResidentError::Run(RuntimeError::Jit(e))),
@@ -2752,13 +2752,13 @@ where
         let leases = std::mem::take(&mut *self.custody_cleanup.binding_leases.lock());
         let mut released = Vec::new();
         for retained in leases {
-            released.extend(self.core.bindings_mut().release_leases(retained));
+            released.extend(self.state.bindings_mut().release_leases(retained));
         }
-        released.extend(self.core.bindings_mut().collect_observations());
-        let binding_count = self.core.release_binding_roots(released);
+        released.extend(self.state.bindings_mut().collect_observations());
+        let binding_count = self.state.release_binding_roots(released);
         let handles = self.custody_cleanup.take_all();
         let count = handles.len();
-        if let Some(engine) = self.core.prepared_mut() {
+        if let Some(engine) = self.state.prepared_mut() {
             for handle in handles {
                 engine.discard_handle(handle);
             }
@@ -2785,7 +2785,7 @@ where
                 let output = self.captured.drain();
                 ResidentOutcome::Completed {
                     output,
-                    result: EvalResult::new(value, self.core.session_table().clone(), Vec::new()),
+                    result: EvalResult::new(value, self.state.session_table().clone(), Vec::new()),
                 }
             }
             ParkedRun::CompletedProject => {
@@ -2820,7 +2820,7 @@ where
     /// untouched. A boolean "is the machine suspended" cannot answer this
     /// with N frames parked; membership can.
     fn reconcile_failed_reentry(&mut self, cont_id: &str, frame_id: ContinuationId) {
-        let still_parked = self.core.parked_ids().contains(&frame_id);
+        let still_parked = self.state.parked_ids().contains(&frame_id);
         if !still_parked {
             self.parked_provenance.remove(&frame_id);
             self.parked.retain(|(h, _)| h != cont_id);
@@ -2893,8 +2893,8 @@ where
         let plan = settle_plan_of(&mode);
         let park = ParkPolicy {
             principal: self.run_context.principal,
-            effect_policy: self.core.effect_policy(),
-            live_payload: self.core.live_payload_policy(),
+            effect_policy: self.state.effect_policy(),
+            live_payload: self.state.live_payload_policy(),
         };
         let resumed = self.on_eval_thread(move |engine, table, handlers, captured| {
             let engine = engine.require_prepared()?;
@@ -2954,7 +2954,7 @@ where
     /// it leaves `name`'s binding exactly as it was, same as never calling
     /// this at all. Returns `None` for an unknown binding.
     pub fn prepared_binding_handle(&self, name: &str) -> Option<RootCustody> {
-        let entry = self.core.bindings().resolve(name)?;
+        let entry = self.state.bindings().resolve(name)?;
         let BoundValue::Prepared { handle, .. } = &entry.value;
         Some(RootCustody::shared(
             handle.raw(),

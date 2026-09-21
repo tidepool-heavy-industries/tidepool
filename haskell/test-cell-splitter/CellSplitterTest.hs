@@ -73,7 +73,7 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
         (show (crCapturedTypes checked))
       assertEqual "exactly one checked target" 1
         (length (filter (isInfixOf "tidepool-checked module=MetadataTarget target=True") (lines output)))
-      unless (not ("tidepool-target phase=desugar" `isInfixOf` output || "phase=core " `isInfixOf` output)) $
+      unless (not ("tidepool-target phase=desugar" `isInfixOf` output || "phase=lowering " `isInfixOf` output)) $
         fail "metadata target entered the executable pipeline"
       writeFile dependency "module MetadataDependency where\nvalue = missingDependencyName\n"
       rejected <- try (runRequest $ \compiler ->

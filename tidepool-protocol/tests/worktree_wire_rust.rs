@@ -17,7 +17,7 @@
 //!    a `Vec`, never as a set — a permutation is exactly the failure the
 //!    hand-written struct's positional comment stood guard against and a set
 //!    comparison would pass straight through), the Rust field types, the
-//!    exact derive line, and the presence/absence of `#[core(name = …)]`.
+//!    exact derive line, and the presence/absence of `#[haskell(name = …)]`.
 //!
 //! Every expected value in test 2 is HAND-TRANSCRIBED by reading the
 //! still-live struct block in `tidepool-bridge-effects/src/lib.rs` (roughly
@@ -38,9 +38,10 @@ use tidepool_protocol::gen::wire_rs;
 // The independent, hand-transcribed structural cross-check.
 // ---------------------------------------------------------------------------
 
-const WIRE: &str = "#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]";
-const WIRE_COPY: &str = "#[derive(ToCore, FromCore, Clone, Copy, Debug, PartialEq, Eq)]";
-const WIRE_DEFAULT: &str = "#[derive(ToCore, FromCore, Clone, Debug, Default, PartialEq, Eq)]";
+const WIRE: &str = "#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]";
+const WIRE_COPY: &str = "#[derive(ToHaskell, FromHaskell, Clone, Copy, Debug, PartialEq, Eq)]";
+const WIRE_DEFAULT: &str =
+    "#[derive(ToHaskell, FromHaskell, Clone, Debug, Default, PartialEq, Eq)]";
 
 /// `(rust_field_name, rust_field_type)` pairs inside `pub struct NAME { … }`,
 /// in source order. Skips a field's own doc-comment lines, so a field
@@ -104,7 +105,7 @@ fn enum_variants(module: &str, name: &str) -> Vec<String> {
     variants
 }
 
-/// The doc/derive/`#[core(name = …)]` text immediately preceding a
+/// The doc/derive/`#[haskell(name = …)]` text immediately preceding a
 /// `pub struct NAME {` / `pub enum NAME {` declaration — bounded by the
 /// nearest preceding blank line, which is how every type is separated in the
 /// emitted module.
@@ -122,7 +123,7 @@ fn assert_struct(
     wire_name: &str,
     hs_name: &str,
     derive_line: &str,
-    needs_core_name: bool,
+    needs_haskell_name: bool,
     fields: &[(&str, &str)],
 ) {
     let marker = format!("pub struct {wire_name} {{");
@@ -131,11 +132,11 @@ fn assert_struct(
         prelude.contains(derive_line),
         "{wire_name}: expected derive line `{derive_line}` in:\n{prelude}"
     );
-    let core_attr = format!("#[core(name = \"{hs_name}\")]");
+    let core_attr = format!("#[haskell(name = \"{hs_name}\")]");
     assert_eq!(
         prelude.contains(&core_attr),
-        needs_core_name,
-        "{wire_name}: #[core(name = \"{hs_name}\")] presence mismatch in:\n{prelude}"
+        needs_haskell_name,
+        "{wire_name}: #[haskell(name = \"{hs_name}\")] presence mismatch in:\n{prelude}"
     );
     assert_eq!(
         struct_fields(module, wire_name),
@@ -152,8 +153,8 @@ fn assert_enum(module: &str, wire_name: &str, derive_line: &str, variants: &[&st
         "{wire_name}: expected derive line `{derive_line}` in:\n{prelude}"
     );
     assert!(
-        !prelude.contains("#[core(name"),
-        "{wire_name}: an enum must never carry #[core(name = …)] — its data \
+        !prelude.contains("#[haskell(name"),
+        "{wire_name}: an enum must never carry #[haskell(name = …)] — its data \
          constructors ARE its variant names"
     );
     assert_eq!(enum_variants(module, wire_name), variants);

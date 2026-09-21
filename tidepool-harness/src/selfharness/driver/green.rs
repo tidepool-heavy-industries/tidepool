@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use tidepool_bridge::ToCore;
+use tidepool_bridge::ToHaskell;
 use tidepool_bridge::Value;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{ResidentHole, ResidentOutcome};
@@ -384,7 +384,7 @@ impl SelfHarnessDriver {
                 // with the fresh id, then start the thread; either push lands
                 // on `ready` so both eventually run regardless.
                 //
-                // Boxed via `i64: ToCore` (an `I#` Con looked up in THIS
+                // Boxed via `i64: ToHaskell` (an `I#` Con looked up in THIS
                 // compile's own table) — NOT `engine::json_answer_to_value`
                 // (which bridges to `Tidepool.Aeson.Value`, the wrong TYPE
                 // for a plain `Int` `send` delivers natively — that generic

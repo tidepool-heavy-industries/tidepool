@@ -1,4 +1,4 @@
-//! Decl↔bridge drift guard (friction #25): every `#[core(name = "X")]` in
+//! Decl↔bridge drift guard (friction #25): every `#[haskell(name = "X")]` in
 //! tidepool-handlers must name something the effect decls actually declare.
 //! The LspNode outage (fdc82ce renamed the Haskell constructor `Node` →
 //! `LspNode`; the bridge attr kept `"Node"`) was invisible for a day because
@@ -27,7 +27,7 @@ fn bridge_core_names_appear_in_effect_decls() {
         false,
     ));
 
-    const NEEDLE: &str = "#[core(name = \"";
+    const NEEDLE: &str = "#[haskell(name = \"";
     let mut missing = Vec::new();
     let mut rest = handlers_src;
     while let Some(i) = rest.find(NEEDLE) {
@@ -39,7 +39,7 @@ fn bridge_core_names_appear_in_effect_decls() {
     }
     assert!(
         missing.is_empty(),
-        "bridge #[core(name)] attrs with no matching declaration in the effect \
+        "bridge #[haskell(name)] attrs with no matching declaration in the effect \
          decls / preamble (rename drift — the LspNode-outage class): {missing:?}"
     );
 }

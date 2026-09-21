@@ -97,7 +97,7 @@ elapsedMs t0 t1 = round ((t1 - t0) * 1000)
 -- the operator-visible-by-default line (compile-attribution lane,
 -- plans/turn-latency-state-injection.md's companion measurement): an
 -- operator reading plain harness logs sees module count, wall time, the
--- typecheck\/core phase split, and the top-3 modules by wall time with NO
+-- typecheck/lowering phase split, and the top-3 modules by wall time with NO
 -- env var to set. Deliberately ONE line, not a dump — the per-module BREAKDOWN
 -- (every module, not just the top 3) stays behind 'readTimingEnabled' via
 -- 'emitModuleTiming', same discipline as every other detailed diagnostic here.
@@ -105,12 +105,12 @@ elapsedMs t0 t1 = round ((t1 - t0) * 1000)
 -- so 'ExtractTiming::parse' on the Rust side (which matches the
 -- @tidepool-timing \<space\>@ prefix only) never sees or misparses this line.
 emitCompileSummary :: Int -> Integer -> Integer -> Integer -> [(String, Integer)] -> IO ()
-emitCompileSummary moduleCount wallMs typecheckMs coreMs topModules =
+emitCompileSummary moduleCount wallMs typecheckMs loweringMs topModules =
   hPutStrLn stderr $
     "tidepool-compile-summary modules=" ++ show moduleCount
     ++ " wall_ms=" ++ show wallMs
     ++ " typecheck_ms=" ++ show typecheckMs
-    ++ " core_ms=" ++ show coreMs
+    ++ " lowering_ms=" ++ show loweringMs
     ++ " top=" ++ intercalate "," [ name ++ ":" ++ show ms | (name, ms) <- topModules ]
 
 -- | Write one @tidepool-timing-module module=\<name\> ms=\<ms\>@ line per

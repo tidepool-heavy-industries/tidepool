@@ -57,7 +57,7 @@ pub(crate) fn launch_args(forked: bool) -> Vec<Arg> {
                     HsType::Unit,
                 ),
             ),
-            rust: RustBinding::CoreValue,
+            rust: RustBinding::HaskellValue,
         },
     ];
     if forked {

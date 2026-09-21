@@ -1,9 +1,7 @@
-//! Invocation-local descriptor retention uses OldSpace's lifetime, not the
-//! legacy Core scanner. Prepared arenas are isolated from Core compaction;
-//! ordinary prepared GC and observation borrow their exact-start admission
-//! owner. The invocation boxes this owner, clears the MachineState borrow at
-//! teardown, and remains !Send so compiled-code custody is never widened into
-//! OldSpace's legacy unsafe-Send boundary.
+//! Invocation-local descriptor retention uses the old-space lifetime.
+//! Prepared GC and observation borrow their exact-start admission owner. The
+//! invocation boxes this owner, clears the machine-state borrow at teardown,
+//! and remains !Send so compiled-code custody stays on its owning thread.
 
 use crate::{context::VMContext, host_fns::RuntimeError, machine_state::MachineState};
 use std::collections::HashMap;
@@ -203,9 +201,7 @@ impl super::OldSpace {
                 .current_failure()
                 .map_or(RuntimeError::BadPointer, |failure| failure.cause));
         }
-        let snapshot = machine
-            .complete_root_snapshot(&[], &mut vmctx.tail_callee, &mut vmctx.tail_arg)
-            .into_slots();
+        let snapshot = machine.complete_root_snapshot(&[]).into_slots();
         let mut state = machine.take_gc_state().ok_or(RuntimeError::BadPointer)?;
         // Always restore the owning GcState, including terminal failure: a
         // partially forwarded source still holds live pointers.
@@ -418,9 +414,7 @@ impl super::OldSpace {
         if already_stable {
             return Ok(());
         }
-        let roots = machine
-            .complete_root_snapshot(&[], &mut vmctx.tail_callee, &mut vmctx.tail_arg)
-            .into_slots();
+        let roots = machine.complete_root_snapshot(&[]).into_slots();
         let mut state = machine.take_gc_state().ok_or(RuntimeError::BadPointer)?;
         // Always restore the owning GcState, including terminal failure. Its
         // semispaces may both contain live pointers after partial forwarding.
@@ -635,8 +629,7 @@ mod tests {
         }
         let mut root = start;
         machine.register_rust_root(&mut root);
-        let mut vmctx =
-            unsafe { VMContext::new(start, start.add(size), crate::host_fns::gc_trigger) };
+        let mut vmctx = unsafe { VMContext::new(start, start.add(size)) };
         vmctx.machine_state = &machine as *const _ as *mut _;
         vmctx.alloc_ptr = unsafe { start.add(used) };
         let mut old = super::super::OldSpace::new();
@@ -714,8 +707,7 @@ mod tests {
         let mut root_g = tagged(leaf_g);
         machine.register_rust_root(&mut root_o);
         machine.register_rust_root(&mut root_g);
-        let mut vmctx =
-            unsafe { VMContext::new(start, start.add(size), crate::host_fns::gc_trigger) };
+        let mut vmctx = unsafe { VMContext::new(start, start.add(size)) };
         vmctx.machine_state = &machine as *const _ as *mut _;
         vmctx.alloc_ptr = unsafe { start.add(w + 2 * l) };
         let mut old = super::super::OldSpace::new();

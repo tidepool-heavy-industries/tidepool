@@ -1,4 +1,4 @@
-//! `CoreRecord` derive: render the Haskell `data` declaration a Rust
+//! `HaskellRecord` derive: render the Haskell `data` declaration a Rust
 //! wire-struct/enum mirrors, so the two can no longer drift.
 //!
 //! The whole decl is computed here at macro-expansion time (the Rust AST fully
@@ -16,7 +16,7 @@ use syn::{Ident, Type};
 /// `bool` → `Bool`; `f32`/`f64` → `Double`; `Vec<T>` → `[<hs T>]`;
 /// `Option<T>` → `Maybe (<hs T>)`; a tuple → `(<hs A>, <hs B>, ...)`; any other
 /// named ident `X` → `X` (assumed to be a nested record whose Haskell name
-/// matches — override with `#[core(hs_type = "...")]` when it differs).
+/// matches — override with `#[haskell(hs_type = "...")]` when it differs).
 fn hs_type(ty: &Type) -> Result<String, syn::Error> {
     match ty {
         Type::Path(tp) if tp.qself.is_none() => {
@@ -52,7 +52,7 @@ fn hs_type(ty: &Type) -> Result<String, syn::Error> {
                     _ => {
                         return Err(syn::Error::new_spanned(
                             ty,
-                            format!("unsupported generic type `{ident}` for CoreRecord; add a #[core(hs_type = \"...\")] override"),
+                            format!("unsupported generic type `{ident}` for HaskellRecord; add a #[haskell(hs_type = \"...\")] override"),
                         ));
                     }
                 }
@@ -78,7 +78,7 @@ fn hs_type(ty: &Type) -> Result<String, syn::Error> {
         }
         _ => Err(syn::Error::new_spanned(
             ty,
-            "unsupported type for CoreRecord; add a #[core(hs_type = \"...\")] override",
+            "unsupported type for HaskellRecord; add a #[haskell(hs_type = \"...\")] override",
         )),
     }
 }
@@ -114,7 +114,7 @@ fn snake_to_camel(s: &str) -> String {
 
 /// Render the Haskell `data` decl for a struct record.
 fn struct_decl(info: &StructInfo) -> Result<String, syn::Error> {
-    let core = &info.core_name;
+    let haskell = &info.haskell_name;
     let mut fields = Vec::with_capacity(info.fields.len());
     for f in &info.fields {
         let hs_name = f
@@ -128,10 +128,10 @@ fn struct_decl(info: &StructInfo) -> Result<String, syn::Error> {
         fields.push(format!("{hs_name} :: {hs_ty}"));
     }
     if fields.is_empty() {
-        Ok(format!("data {core} = {core} deriving (Show, Eq)"))
+        Ok(format!("data {haskell} = {haskell} deriving (Show, Eq)"))
     } else {
         Ok(format!(
-            "data {core} = {core} {{ {} }} deriving (Show, Eq)",
+            "data {haskell} = {haskell} {{ {} }} deriving (Show, Eq)",
             fields.join(", ")
         ))
     }
@@ -139,15 +139,15 @@ fn struct_decl(info: &StructInfo) -> Result<String, syn::Error> {
 
 /// Render the Haskell `data` decl for an enum. Rust tuple constructors remain
 /// positional; Rust struct constructors become Haskell record constructors.
-/// Both retain the same positional Core field order.
+/// Both retain the same positional Haskell field order.
 fn enum_decl(info: &EnumInfo) -> Result<String, syn::Error> {
     let name = info.name.to_string();
     let mut variants = Vec::with_capacity(info.variants.len());
     for variant in &info.variants {
         let rendered = match &variant.shape {
-            VariantShape::Unit => variant.core_name.clone(),
+            VariantShape::Unit => variant.haskell_name.clone(),
             VariantShape::Tuple(fields) => {
-                let mut parts = vec![variant.core_name.clone()];
+                let mut parts = vec![variant.haskell_name.clone()];
                 for ty in fields {
                     parts.push(paren_if_multi(&hs_type(ty)?));
                 }
@@ -156,7 +156,7 @@ fn enum_decl(info: &EnumInfo) -> Result<String, syn::Error> {
             VariantShape::Named(fields) if fields.is_empty() => {
                 return Err(syn::Error::new_spanned(
                     &variant.rust_name,
-                    "CoreRecord cannot render an empty named variant; use a unit variant",
+                    "HaskellRecord cannot render an empty named variant; use a unit variant",
                 ));
             }
             VariantShape::Named(fields) => {
@@ -178,7 +178,7 @@ fn enum_decl(info: &EnumInfo) -> Result<String, syn::Error> {
                     .collect();
                 format!(
                     "{} {{ {} }}",
-                    variant.core_name,
+                    variant.haskell_name,
                     rendered_fields?.join(", ")
                 )
             }
@@ -191,15 +191,15 @@ fn enum_decl(info: &EnumInfo) -> Result<String, syn::Error> {
     ))
 }
 
-/// Build the `impl CoreRecord` + inventory registration for a derive input.
-pub fn generate_core_record(info: &DataInfo) -> Result<TokenStream, syn::Error> {
+/// Build the `impl HaskellRecord` + inventory registration for a derive input.
+pub fn generate_haskell_record(info: &DataInfo) -> Result<TokenStream, syn::Error> {
     let (rust_name, hs_name, decl): (&Ident, String, String) = match info {
-        DataInfo::Struct(s) => (&s.name, s.core_name.clone(), struct_decl(s)?),
+        DataInfo::Struct(s) => (&s.name, s.haskell_name.clone(), struct_decl(s)?),
         DataInfo::Enum(e) => (&e.name, e.name.to_string(), enum_decl(e)?),
     };
 
     Ok(quote! {
-        impl tidepool_bridge::CoreRecord for #rust_name {
+        impl tidepool_bridge::HaskellRecord for #rust_name {
             fn haskell_decl() -> String {
                 #decl.to_string()
             }
@@ -208,7 +208,7 @@ pub fn generate_core_record(info: &DataInfo) -> Result<TokenStream, syn::Error> 
         inventory::submit! {
             tidepool_bridge::RegisteredRecord {
                 name: #hs_name,
-                decl: <#rust_name as tidepool_bridge::CoreRecord>::haskell_decl,
+                decl: <#rust_name as tidepool_bridge::HaskellRecord>::haskell_decl,
             }
         }
     })

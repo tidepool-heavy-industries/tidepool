@@ -6,13 +6,12 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Bridge between Rust types and Tidepool Core values"
+description = "Bridge between Rust types and Tidepool runtime values"
 readme = "../README.md"
 
 [dependencies]
 thiserror.workspace = true
 tidepool-repr.workspace = true
-tidepool-bignum.workspace = true
 recursion.workspace = true
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
 inventory.workspace = true

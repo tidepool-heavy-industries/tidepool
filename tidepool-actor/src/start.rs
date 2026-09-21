@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 use tidepool_bridge::Value;
-use tidepool_bridge::{BridgeError, FromCore};
+use tidepool_bridge::{BridgeError, FromHaskell};
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_repr::{DataConTable, Generation, SessionModule};
@@ -23,25 +23,25 @@ use crate::ActorDescriptor;
     Copy,
     PartialEq,
     Eq,
-    tidepool_bridge_derive::FromCore,
-    tidepool_bridge_derive::ToCore,
+    tidepool_bridge_derive::FromHaskell,
+    tidepool_bridge_derive::ToHaskell,
 )]
 pub enum ForkEffort {
-    #[core(module = "Tidepool.Effects.Core")]
+    #[haskell(module = "Tidepool.Effects.Core")]
     Low,
-    #[core(module = "Tidepool.Effects.Core")]
+    #[haskell(module = "Tidepool.Effects.Core")]
     Medium,
-    #[core(module = "Tidepool.Effects.Core")]
+    #[haskell(module = "Tidepool.Effects.Core")]
     High,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromCore)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromHaskell)]
 pub enum ForkContext {
     InheritedContext,
     SelectedContext,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::FromCore)]
+#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::FromHaskell)]
 pub enum Model {
     Alias(String),
     Literal(String),
@@ -64,7 +64,7 @@ impl std::ops::Deref for Model {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromCore)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, tidepool_bridge_derive::FromHaskell)]
 pub enum WorkerLifetime {
     ParentOwned,
     SwarmOwned,
@@ -96,7 +96,7 @@ impl ActorStartRequest {
     pub(crate) const FRESH_LAUNCH_LIFETIME: WorkerLifetime = WorkerLifetime::ParentOwned;
 }
 
-#[derive(tidepool_bridge_derive::FromCore)]
+#[derive(tidepool_bridge_derive::FromHaskell)]
 pub enum ActorEffectProfileWire {
     ActorReadWriteProfile,
     ActorReadOnlyProfile,
@@ -122,7 +122,7 @@ impl ActorEffectProfileWire {
     }
 }
 
-#[derive(tidepool_bridge_derive::FromCore)]
+#[derive(tidepool_bridge_derive::FromHaskell)]
 pub enum ActorLaunchRoleWire {
     ActorRootRole,
     ActorResearchRole,
@@ -132,7 +132,7 @@ pub enum ActorLaunchRoleWire {
     ActorInheritedRole,
 }
 
-#[derive(tidepool_bridge_derive::FromCore)]
+#[derive(tidepool_bridge_derive::FromHaskell)]
 pub enum ActorEffectKeyWire {
     EffectReplies,
     EffectWatches,
@@ -594,8 +594,8 @@ pub struct WorkerLaunchRequest {
     pub instructions: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, tidepool_bridge_derive::ToCore)]
-#[core(module = "Tidepool.Effects.Core")]
+#[derive(Clone, Debug, PartialEq, Eq, tidepool_bridge_derive::ToHaskell)]
+#[haskell(module = "Tidepool.Effects.Core")]
 pub struct WorkerLaunchPreview {
     pub model: Option<String>,
     pub effort: ForkEffort,

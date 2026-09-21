@@ -44,17 +44,17 @@ impl fmt::Display for UpdateReconciliationError {
 
 impl std::error::Error for UpdateReconciliationError {}
 
-#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::ToCore)]
+#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::ToHaskell)]
 pub enum RequestUpdateState {
-    #[core(module = "Tidepool.Agent.Reply.Internal")]
+    #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     UpdateQueued,
-    #[core(module = "Tidepool.Agent.Reply.Internal")]
+    #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     UpdatePresented,
-    #[core(module = "Tidepool.Agent.Reply.Internal")]
+    #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     UpdateTooLate,
-    #[core(module = "Tidepool.Agent.Reply.Internal")]
+    #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     UpdateUnconfirmed(String),
-    #[core(module = "Tidepool.Agent.Reply.Internal")]
+    #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     UpdateNotPresented(String),
 }
 

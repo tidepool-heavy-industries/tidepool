@@ -1872,7 +1872,7 @@ mod tests {
     }
 
     #[test]
-    fn boxed_arrays_and_mut_vars_remain_unobservable_after_result_collection() {
+    fn boxed_arrays_and_mut_vars_render_after_result_collection() {
         for (name, signature, arguments) in [
             (
                 "newSmallArray#",
@@ -1963,16 +1963,15 @@ mod tests {
                 },
                 Arc::new(AtomicBool::new(false)),
             );
-            assert!(matches!(
-                result,
-                Err(crate::prepared_program::ExecutionError::Observation(
-                    crate::prepared_program::ObservationFailure::Unobservable(
-                        tidepool_heap::execution_descriptor::ObjectKind::External(
-                            ExternalStorageKind::BoxedArray
-                        )
-                    )
-                ))
-            ));
+            let expected_len = if name == "newSmallArray#" { 3 } else { 1 };
+            assert!(
+                matches!(
+                    &result,
+                    Ok(crate::prepared_program::RunResult { values, .. })
+                        if matches!(values.as_slice(), [tidepool_bridge::Value::Con(_, fields)] if fields.len() == expected_len)
+                ),
+                "{result:?}"
+            );
         }
     }
 
@@ -2167,9 +2166,7 @@ mod tests {
                 .unwrap()
                 .write(destination);
         }
-        let mut vmctx = unsafe {
-            crate::context::VMContext::new(start, start.add(size), crate::host_fns::gc_trigger)
-        };
+        let mut vmctx = unsafe { crate::context::VMContext::new(start, start.add(size)) };
         vmctx.alloc_ptr = unsafe { second.add(extent) };
         vmctx.machine_state = &machine as *const _ as *mut _;
         let status = unsafe {
@@ -2332,9 +2329,7 @@ mod tests {
                 .unwrap()
                 .write(payload);
         }
-        let mut vmctx = unsafe {
-            crate::context::VMContext::new(start, start.add(size), crate::host_fns::gc_trigger)
-        };
+        let mut vmctx = unsafe { crate::context::VMContext::new(start, start.add(size)) };
         vmctx.alloc_ptr = unsafe { start.add(extent) };
         vmctx.machine_state = &machine as *const _ as *mut _;
         machine
@@ -2400,9 +2395,7 @@ mod tests {
                 .unwrap()
                 .write(payload);
         }
-        let mut vmctx = unsafe {
-            crate::context::VMContext::new(start, start.add(size), crate::host_fns::gc_trigger)
-        };
+        let mut vmctx = unsafe { crate::context::VMContext::new(start, start.add(size)) };
         vmctx.alloc_ptr = unsafe { start.add(extent) };
         vmctx.machine_state = &machine as *const _ as *mut _;
         let reference = (start as usize | usize::from(mut_var.tag())) as *mut u8;
@@ -2457,9 +2450,7 @@ mod tests {
                 .unwrap()
                 .write(payload);
         }
-        let mut vmctx = unsafe {
-            crate::context::VMContext::new(start, start.add(size), crate::host_fns::gc_trigger)
-        };
+        let mut vmctx = unsafe { crate::context::VMContext::new(start, start.add(size)) };
         vmctx.alloc_ptr = unsafe { start.add(extent) };
         vmctx.machine_state = &machine as *const _ as *mut _;
         let alias = (start as usize | usize::from(descriptor.tag())) as *mut u8;

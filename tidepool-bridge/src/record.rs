@@ -2,16 +2,16 @@
 //!
 //! A record type mirrored on both sides of the boundary (a Haskell result
 //! record like `Commit` and its Rust wire-struct `GitCommit`) used to be
-//! hand-written twice — the Haskell `data` decl and the Rust `#[derive(ToCore)]`
+//! hand-written twice — the Haskell `data` decl and the Rust `#[derive(ToHaskell)]`
 //! struct — with nothing tying field order/name/arity together. They drifted
 //! silently (the `LspNode`→`Node` outage, friction #25).
 //!
-//! [`CoreRecord`] closes that class: the Rust struct is the source of truth and
-//! the Haskell `data` decl is GENERATED from it (via the `CoreRecord` derive in
+//! [`HaskellRecord`] closes that class: the Rust struct is the source of truth and
+//! the Haskell `data` decl is GENERATED from it (via the `HaskellRecord` derive in
 //! `tidepool-bridge-derive`). Every deriving type also registers itself in an
 //! [`inventory`] so a generator can collect the whole set with one call.
 //!
-//! Field ORDER is the wire contract: `ToCore` builds the `Con` in Rust struct
+//! Field ORDER is the wire contract: `ToHaskell` builds the `Con` in Rust struct
 //! field order and the extract assigns field positions from the Haskell `data`
 //! decl order, so the generated decl's field order (= Rust struct order) is,
 //! by construction, exactly the order the bridge encodes.
@@ -19,10 +19,10 @@
 /// A Rust type that mirrors a Haskell record/enum and can render the exact
 /// Haskell `data` declaration it corresponds to.
 ///
-/// Derive it with `#[derive(CoreRecord)]` alongside `ToCore`/`FromCore`; the
+/// Derive it with `#[derive(HaskellRecord)]` alongside `ToHaskell`/`FromHaskell`; the
 /// derive resolves each Rust field type to its Haskell counterpart and applies
-/// `#[core(hs = "...")]` / `#[core(hs_type = "...")]` field overrides.
-pub trait CoreRecord {
+/// `#[haskell(hs = "...")]` / `#[haskell(hs_type = "...")]` field overrides.
+pub trait HaskellRecord {
     /// The Haskell `data` declaration this type mirrors, e.g.
     /// `data Commit = Commit { sha :: Text, ... } deriving (Show, Eq)`.
     fn haskell_decl() -> String;
@@ -33,7 +33,7 @@ pub trait CoreRecord {
 pub struct RegisteredRecord {
     /// The Haskell type name — a stable sort key for deterministic output.
     pub name: &'static str,
-    /// Renders the Haskell `data` declaration (`<T as CoreRecord>::haskell_decl`).
+    /// Renders the Haskell `data` declaration (`<T as HaskellRecord>::haskell_decl`).
     pub decl: fn() -> String,
 }
 

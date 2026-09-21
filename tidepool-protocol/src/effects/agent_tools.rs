@@ -39,7 +39,7 @@ pub fn agent_tools() -> Effect {
                     Arg {
                         name: "declarations",
                         ty: HsType::Value,
-                        rust: RustBinding::CoreValue,
+                        rust: RustBinding::HaskellValue,
                     },
                     Arg {
                         name: "dispatch",
@@ -50,7 +50,7 @@ pub fn agent_tools() -> Effect {
                                 HsType::Text,
                             ),
                         ),
-                        rust: RustBinding::CoreValue,
+                        rust: RustBinding::HaskellValue,
                     },
                 ],
                 ret: HsType::Unit,
@@ -74,7 +74,7 @@ pub fn agent_tools() -> Effect {
                     Arg {
                         name: "declarations",
                         ty: HsType::Value,
-                        rust: RustBinding::CoreValue,
+                        rust: RustBinding::HaskellValue,
                     },
                     Arg {
                         name: "synopsis",
@@ -98,7 +98,7 @@ pub fn agent_tools() -> Effect {
                 args: vec![Arg {
                     name: "result",
                     ty: HsType::Value,
-                    rust: RustBinding::CoreValue,
+                    rust: RustBinding::HaskellValue,
                 }],
                 ret: HsType::Unit,
                 errors: None,

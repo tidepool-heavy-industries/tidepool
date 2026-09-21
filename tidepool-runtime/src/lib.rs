@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 pub use tidepool_bridge::Value;
 pub use tidepool_codegen::host_fns::{drain_diagnostics, push_diagnostic};
-pub use tidepool_codegen::jit_machine::{CancelHandle, JitError};
+pub use tidepool_codegen::machine::{CancelHandle, JitError};
 pub use tidepool_codegen::suspension::ResumeInput;
 pub use tidepool_effect::dispatch::DispatchEffect;
 pub use tidepool_extract_cmd::{
@@ -143,10 +143,6 @@ pub fn compile_haskell_salted(
     let CompiledArtifacts {
         table, warnings, ..
     } = bundle;
-    // `artifacts::assemble` (which `compile_invocation` always routes
-    // through, cache hit or miss) already registered var names/poisoned
-    // externals for this compile — see its doc.
-
     Ok(CompileResult {
         table,
         warnings,

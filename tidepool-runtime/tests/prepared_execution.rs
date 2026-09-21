@@ -2,7 +2,7 @@ use std::sync::{atomic::AtomicBool, Arc};
 
 use tidepool_bridge::Value;
 use tidepool_codegen::host_fns::RuntimeError;
-use tidepool_codegen::jit_machine::MachineDisposition;
+use tidepool_codegen::machine::MachineDisposition;
 use tidepool_codegen::prepared_program::{
     CompiledProgram, ExecutionError, ImportBindings, ObservationFailure, PreparedCallOptions,
     PreparedHandle, PreparedInput as CodegenPreparedInput, PreparedMachine, PreparedMachineOptions,
@@ -241,6 +241,7 @@ fn strict_artifact() -> Vec<u8> {
         uint(0),
         array([]),
         array([]),
+        array([]), // verb sites
     ])
 }
 

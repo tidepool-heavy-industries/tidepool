@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tidepool_bridge::Value;
-use tidepool_bridge::{BridgeError, FromCore, ToCore};
-use tidepool_bridge_derive::FromCore as DeriveFromCore;
+use tidepool_bridge::{BridgeError, FromHaskell, ToHaskell};
+use tidepool_bridge_derive::FromHaskell as DeriveFromHaskell;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{request_constructor, DispatchEffect};
 use tidepool_repr::DataConTable;
@@ -1406,24 +1406,24 @@ pub(crate) enum StructuredInspectionKind {
     Type,
 }
 
-#[derive(DeriveFromCore)]
-#[core(name = "NameQuery")]
+#[derive(DeriveFromHaskell)]
+#[haskell(name = "NameQuery")]
 struct IntrospectionNameQuery {
     scope: IntrospectionNameScope,
     namespace: IntrospectionNameNamespace,
     name: String,
 }
 
-#[derive(DeriveFromCore)]
+#[derive(DeriveFromHaskell)]
 enum IntrospectionNameScope {
     CurrentScope,
     PublicModule(String),
 }
 
-#[derive(DeriveFromCore)]
+#[derive(DeriveFromHaskell)]
 #[allow(
     clippy::enum_variant_names,
-    reason = "variant names are the wire truth: FromCore matches them \
+    reason = "variant names are the wire truth: FromHaskell matches them \
               verbatim against Haskell constructor names, so the shared \
               `Name` suffix must stay exactly as spelled, not be trimmed"
 )]
@@ -1486,7 +1486,7 @@ impl ResidentRequest {
         );
         macro_rules! try_member {
             ($variant:path, $request:ty) => {
-                match <$request as FromCore>::from_value(request, table) {
+                match <$request as FromHaskell>::from_value(request, table) {
                     Ok(decoded) => return Ok($variant(decoded)),
                     Err(BridgeError::UnknownDataCon(_)) => {}
                     Err(source) => {
@@ -2554,7 +2554,7 @@ where
             .with_machine(context, move |session, context, _| {
                 tidepool_runtime::with_compiler_transaction_cancellable(cancellation, || {
                     if session.machine_disposition()
-                        == Some(tidepool_codegen::jit_machine::MachineDisposition::Unavailable)
+                        == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
                     {
                         return Err(ResidentActorWorkbenchError::MachineLost);
                     }
@@ -3253,7 +3253,7 @@ where
                     // A bounded observation marks what it could not afford to
                     // materialize. That is a size answer, so say so instead of
                     // letting the decoder call it a type mismatch.
-                    if tidepool_codegen::heap_bridge::contains_oversize_sentinel(result.value()) {
+                    if tidepool_codegen::observation::contains_oversize_sentinel(result.value()) {
                         return Err(ResidentActorWorkbenchError::Inspection(
                             "the tool's answer exceeded the observation budget; return a \
                              smaller Text, or bind the whole value in a cell and select from it"
@@ -3386,7 +3386,7 @@ fn decode_activation_observation(
 ) -> Result<(String, bool), ResidentActorWorkbenchError> {
     match outcome {
         ResidentOutcome::Completed { result, .. } => {
-            if tidepool_codegen::heap_bridge::contains_oversize_sentinel(result.value()) {
+            if tidepool_codegen::observation::contains_oversize_sentinel(result.value()) {
                 return Err(ResidentActorWorkbenchError::Inspection(
                     "input preview exceeded the observation budget".into(),
                 ));
@@ -3400,7 +3400,7 @@ fn decode_activation_observation(
     }
 }
 
-fn inspect_rendered_value<H, O, T: FromCore>(
+fn inspect_rendered_value<H, O, T: FromHaskell>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
@@ -3470,7 +3470,7 @@ where
             // and marks the cut. That is a size answer, not a shape one, so
             // report it as such rather than letting the decoder call it a type
             // mismatch.
-            if tidepool_codegen::heap_bridge::contains_oversize_sentinel(result.value()) {
+            if tidepool_codegen::observation::contains_oversize_sentinel(result.value()) {
                 return Err(ResidentActorWorkbenchError::Inspection(format!(
                     "reading {expression} exceeded the observation budget; only a selection of it \
                      could be materialized"
@@ -5178,7 +5178,7 @@ where
             .await
     }
 
-    pub(crate) async fn resume_value<T: ToCore + Send + 'static>(
+    pub(crate) async fn resume_value<T: ToHaskell + Send + 'static>(
         &self,
         context: crate::ActorSessionContext,
         hole: ResidentHole,
@@ -5315,7 +5315,7 @@ where
             .await
     }
 
-    pub(crate) async fn resume_request_update<T: ToCore + Send + 'static>(
+    pub(crate) async fn resume_request_update<T: ToHaskell + Send + 'static>(
         &self,
         context: crate::ActorSessionContext,
         hole: ResidentHole,

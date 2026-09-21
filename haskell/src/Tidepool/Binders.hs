@@ -1087,8 +1087,8 @@ renderVerdictsJson sbs =
 -- thin session iface module it was written under, its closure/data tier, and
 -- its rendered type. Carried by the 'Bind' turn result.
 data ValueTier
-  = Tier0Data
-  | Tier1Closure
+  = ForceData
+  | RetainOpaque
   deriving (Eq, Show)
 
 data BoundBinder = BoundBinder

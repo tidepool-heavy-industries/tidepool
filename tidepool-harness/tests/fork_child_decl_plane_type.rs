@@ -32,7 +32,7 @@
 //!    was declared (`PersistentSession::define_scoped_in` splices that in
 //!    unconditionally), so the probe needs the SAME session-value-injection
 //!    capability the real turn compile already had.
-//! 2. **Haskell side.** `Tidepool.Translate.modulesOfType` (extract) resolved
+//! 2. **Haskell side.** The compiler worker resolved
 //!    a TYPE SYNONYM's defining module by walking the type via
 //!    `tyConsOfType`, which looks THROUGH synonyms — so `type KyotoResearch
 //!    = Int` reported `GHC.Types` (`Int`'s home) instead of the decl-plane

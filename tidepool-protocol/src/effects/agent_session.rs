@@ -45,7 +45,7 @@ pub fn agent_session() -> Effect {
                     Arg {
                         name: "input",
                         ty: HsType::Var("input"),
-                        rust: RustBinding::CoreValue,
+                        rust: RustBinding::HaskellValue,
                     },
                     Arg {
                         name: "requestId",

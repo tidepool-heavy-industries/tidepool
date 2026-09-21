@@ -48,8 +48,8 @@ use crate::{cache, diag, extract_module_name, extract_spawn_error, timing, Compi
 /// One compiler sidecar entry: a typed suspension-site id, its rendered answer
 /// type, any live input types, and the defining modules needed to resolve each
 /// type by name —
-/// `Tidepool.Translate.modulesOfType`'s result for every tycon the type
-/// mentions (the type's own head plus every type argument's head). Extract
+/// The compiler worker reports every defining module for tycons the type
+/// mentions (the type's own head plus every type argument's head). It
 /// has the type environment in hand at the call site, so it reports this
 /// directly; `modules` is NOT `#[serde(default)]` — an extract binary old
 /// enough not to emit it fails this deserialization loudly (`CompileError::
@@ -772,8 +772,7 @@ pub(crate) fn extract_and_read(
 /// A prepared program's constructor declaration RESOLVES in the accompanying
 /// `DataConTable` (by `host_id`) but disagrees with the entry it resolves
 /// to — a different occurrence name, or a different field count. Both sides
-/// mint `host_id` identically (`varId (dataConWorkId con)`, in
-/// `Tidepool.Translate` and `Tidepool.ExecutionProjection` respectively), so
+/// mint `host_id` identically from `dataConWorkId`, so
 /// a correctly paired artifact and table can never produce this — it is
 /// exactly the signal that the two were NOT compiled together (e.g. metadata
 /// from one compile assembled with a prepared program from another), caught
@@ -835,10 +834,9 @@ pub enum ConstructorIdentityMismatch {
 ///   exception settlement — reachable from virtually any nontrivial entry
 ///   (any partial pattern match, `error`, div-by-zero, ...), independent of
 ///   whether the user's source ever mentions `Typeable`. The legacy
-///   metadata's four collection sources
+///   metadata's constructor collection sources
 ///   (`wiredInDataCons`/`collectDataCons`/`collectUsedDataCons`/
-///   `collectTransitiveDCons`, merged in
-///   `Tidepool.Translate.mergeMetaPreserving`) were never built against that
+///   `collectTransitiveDCons`) were never built against that
 ///   requirement and do not reliably cover it — confirmed empirically: a
 ///   real compile (`tidepool-runtime`'s
 ///   `build_products_dir_differential` fixture) declares a prepared
@@ -922,8 +920,6 @@ pub(crate) fn assemble(
     // name the symbol, and sentinel-slot → external-name pairs so a forced
     // kind-4 poison names the symbol it replaced — once, over the shared
     // merged table.
-    tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
-    tidepool_codegen::host_fns::register_poisoned_externals(&warnings.poisoned);
 
     let asks_start = Instant::now();
     let mut targets = BTreeMap::new();

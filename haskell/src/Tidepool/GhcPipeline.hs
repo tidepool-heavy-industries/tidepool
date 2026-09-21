@@ -5,7 +5,7 @@ module Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), CheckedEnvironmentResult(..)
   , runPipelineSelected, runPipelineSessionSelected
   , runPipelineSelectedRetaining
-  , CompilePurpose(..), PipelineResult(..), dumpCore
+  , CompilePurpose(..), PipelineResult(..)
     -- * Bound-value type analysis
   , stripMonadHead, isClosureType, renderType
   , splitTupleType
@@ -38,7 +38,6 @@ import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..))
 import GHC.Unit.Home (homeUnitId)
 import GHC.Data.Graph.Directed (flattenSCCs)
 import GHC.Core.Opt.Pipeline (core2core)
-import GHC.Core.Ppr (pprCoreBindings)
 import GHC.Driver.Session
   ( updOptLevel, gopt_set, gopt_unset, xopt
   , WarningFlag
@@ -616,8 +615,8 @@ runCompile selection retained variant path includes buildProductsDir = do
     sessionT0 <- monotonicTime
     dflags <- getSessionDynFlags
     -- Force x86_64-linux target platform regardless of host architecture.
-    -- The Cranelift JIT has a single backend; we need deterministic Core IR
-    -- with x86_64 primops on all hosts (including ARM/macOS).
+    -- The Cranelift runtime has a single backend; prepared STG must use
+    -- x86_64 primops on all hosts (including ARM/macOS).
     -- Use genericPlatform verbatim — mixing in host platform_constants causes
     -- GHC's specializer to produce Core with mismatched constructor tags on
     -- aarch64, leading to case-exhaustion SIGILL in the JIT.
@@ -852,22 +851,22 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
     when (null summaries) $
       liftIO $ ioError (userError (pvLabel variant ++ ": empty module graph"))
     let compileExecutable = do
-          -- 'typecheck'/'core' are summed ACROSS the loop (one line each, emitted
+          -- 'typecheck'/'lowering' are summed ACROSS the loop (one line each, emitted
           -- after) rather than timed per-module: the wire grammar is one line per
           -- phase per process, and a turn module always compiles alongside its
-          -- preamble/stdlib dep modules in the same loop. 'core' is desugar time
+          -- preamble/stdlib dep modules in the same loop. 'lowering' is desugar time
           -- for EVERY module plus 'core2core' time for the modules 'cpTier' let
           -- through — one flat phase, unchanged by the tier.
           tcMsRef   <- liftIO (newIORef (0 :: Integer))
-          coreMsRef <- liftIO (newIORef (0 :: Integer))
+          loweringMsRef <- liftIO (newIORef (0 :: Integer))
           -- Diagnostic-only accounting (NOT part of the 'tidepool-timing phase=…'
           -- wire grammar 'emitPhase' owns — see the line emitted below, distinctly
           -- prefixed 'e6-tier', deliberately outside that contract so
           -- 'ExtractTiming::parse' never has to know about it): the desugar/
-          -- core2core split WITHIN the 'core' phase, plus how many modules the tier
-          -- actually spared. 'core' stays one flat phase per the timing contract;
+          -- core2core split within lowering, plus how many modules the tier
+          -- actually spared. Lowering stays one flat phase per the timing contract;
           -- this line exists purely so E6's own report can size its win against what
-          -- it actually removed (core2core) rather than the whole 'core' bucket
+          -- it actually removed (core2core) rather than the whole lowering bucket
           -- (desugar + core2core), which is a larger, unmeasured-by-this-item
           -- quantity.
           dsMsRef  <- liftIO (newIORef (0 :: Integer))
@@ -910,7 +909,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                 when (ms_mod_name modSum == targetModName') $ liftIO $ hPutStrLn stderr $
                   "tidepool-target phase=desugar module=" ++ targetModName
                 (desugared, dsMs) <- timeSection $ liftIO (hscDesugar hscEnv modSum tcGblEnv)
-                liftIO (modifyIORef' coreMsRef (+ dsMs))
+                liftIO (modifyIORef' loweringMsRef (+ dsMs))
                 liftIO (modifyIORef' dsMsRef (+ dsMs))
                 liftIO (modifyIORef' moduleMsRef
                           (Map.insertWith (+) (moduleNameString (ms_mod_name modSum)) (tcMs + dsMs)))
@@ -931,7 +930,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
               compileBack mf = do
                 (simplified, coreMs) <- timeSection $
                   liftIO (core2core (mfHscEnv mf) (mfDesugared mf))
-                liftIO (modifyIORef' coreMsRef (+ coreMs))
+                liftIO (modifyIORef' loweringMsRef (+ coreMs))
                 liftIO (modifyIORef' c2cMsRef (+ coreMs))
                 liftIO (modifyIORef' moduleMsRef
                           (Map.insertWith (+) (moduleNameString (ms_mod_name (mfSummary mf))) coreMs))
@@ -1098,10 +1097,8 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
               -- desugared Core. Computed on desugared (pre-'core2core') Core
               -- specifically: by desugar time, typeclass/instance selection is
               -- already resolved to explicit dictionary-Var applications, so this
-              -- walk would NOT miss a module imported only for an orphan instance
-              -- the way a renamer/typecheck-level "used name" scan would — exactly
-              -- the silent ErrorSentinel-poisoning shape 'sessionVariant's
-              -- 'cpAfterModule' commentary documents. And because this codebase
+              -- walk does not miss a module imported only for an orphan instance
+              -- the way a renamer/typecheck-level "used name" scan would. Because this codebase
               -- defines no @{-# RULES #-}@ anywhere (grep-confirmed empty),
               -- 'core2core' cannot introduce a genuinely NEW cross-module reference
               -- that wasn't already visible at this desugared stage — dictionary/
@@ -1165,14 +1162,14 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                   else pure []
               pure (fs, map fst rs, [p | (_, Just p) <- rs], Just reachableMods)
           totalTcMs   <- liftIO (readIORef tcMsRef)
-          totalCoreMs <- liftIO (readIORef coreMsRef)
+          totalLoweringMs <- liftIO (readIORef loweringMsRef)
           liftIO (emitPhase timing "typecheck" totalTcMs)
-          liftIO (emitPhase timing "core" totalCoreMs)
+          liftIO (emitPhase timing "lowering" totalLoweringMs)
           summaryT1 <- monotonicTime
           liftIO $ do
             moduleTimes <- readIORef moduleMsRef
             let topModules = take 3 (sortOn (negate . snd) (Map.toList moduleTimes))
-            emitCompileSummary (length summaries) (elapsedMs sessionT0 summaryT1) totalTcMs totalCoreMs topModules
+            emitCompileSummary (length summaries) (elapsedMs sessionT0 summaryT1) totalTcMs totalLoweringMs topModules
             emitModuleTiming timing (sortOn (negate . snd) (Map.toList moduleTimes))
           -- Diagnostic-only (see 'dsMsRef'/'c2cMsRef' haddock above): NOT part of
           -- the tidepool-timing wire grammar, so 'ExtractTiming::parse' never sees
@@ -1759,27 +1756,17 @@ sessionVariant purpose scope path = do
           -- same tidy→iface pipeline GHC's own batch compiler uses internally
           -- ('hscTidy' wraps 'initTidyOpts'+'tidyProgram'; 'mkIfaceTc' is what
           -- 'hscSimpleIface'' uses for "a stripped down interface... where we
-          -- aren't generating any object code at all" — precisely this case,
-          -- since Core is extracted separately for the Cranelift JIT and
-          -- nothing here ever executes via GHC's own bytecode interpreter,
-          -- hence no real linkable is ever needed —
+          -- aren't generating any object code at all" — precisely this case.
+          -- Prepared STG is projected for the Cranelift runtime, so no GHC
+          -- bytecode linkable is needed.
           -- 'emptyHomeModInfoLinkable' is the same legitimate "no linkable"
           -- value GHC itself uses for @.hs-boot@ modules). Mirrors
           -- 'upsweep_mod's own @addToHpt@ call.
           --
-          -- This is also why the whole home graph is recompiled to full guts
-          -- rather than the target alone: resolving the home-library
-          -- functions it calls (@object@, @.=@, @$fToJSONInt@, @toText@, …)
-          -- from their HPT interface unfoldings does NOT work — @load'@
-          -- provisions those ifaces without -O2 unfoldings, so
-          -- 'resolveExternals' cannot inline them, bakes a poison
-          -- ErrorSentinel for each, and the masking in
-          -- 'translateModuleClosed' (@trulyUnresolved@, keyed on the
-          -- un-poisoned id which never appears) hides it — the sentinel then
-          -- fires at run as @kind=4 TypeMetadata@. Recompiling the deps as
-          -- full guts gives their bodies directly, so no library function is
-          -- ever left unresolved. The target's @import Val.G<g>@ resolves
-          -- from the injection above.
+          -- The whole home graph is recompiled to full guts because prepared
+          -- projection needs dependency bodies. Interfaces loaded without
+          -- optimization do not expose every required body. The target's
+          -- @import Val.G<g>@ resolves from the injection above.
         , cpAfterModule = \modSum tcGblEnv hscEnv simplified ->
             -- A generated Lib module must also be registered from this
             -- cycle's typecheck before Val-interface injection. Removing the
@@ -1955,7 +1942,7 @@ splitTupleType ty =
        _                                  -> Nothing
 
 -- | Render a 'Type' to a display string (for the @typeDisplay@ field / @:t@),
--- the same 'ppr' pattern as 'capturedUserType' / 'dumpCore'.
+-- the same 'ppr' pattern as 'capturedUserType'.
 renderType :: Type -> String
 renderType ty = renderWithContext defaultSDocContext (ppr ty)
 
@@ -2075,7 +2062,7 @@ canonicalizeDFlags dflags =
   -- Object-code provisioning emits a .s and shells to the assembler; under the
   -- genericPlatform spoof that .s is x86_64/ELF and the macOS Mach-O assembler
   -- rejects it (`.type …, @object`; x86 mnemonics on aarch64). Bytecode is
-  -- architecture-neutral, so the spoof stays confined to extracted Core while
+  -- architecture-neutral, so the spoof stays confined to compiler lowering while
   -- splices run host-agnostically.
   (`gopt_set` Opt_UseBytecodeRatherThanObjects) $
   -- Valid-hole-fits stay ON: with ~200 stdlib/verb names in scope, "fits"
@@ -2096,22 +2083,18 @@ enableDiagnosticWarning warning = (`wopt_set` warning)
 -- | Give internal top-level simplifier floats stable module-qualified names.
 --
 -- Top-level binders with INTERNAL names (floats like @k_X1@, @$wk_snOX@) keep
--- per-module uniques. `runPipelineSelected` concatenates several modules' bindings for
--- translation, so (occName, unique-key) pairs collide across modules — and
--- @Identity.varId@ hashes exactly that pair. Two distinct floats can
--- then receive the same VarId and shadow each other in the serialized program.
+-- per-module uniques. Prepared recovery concatenates several modules' bindings,
+-- so (occName, unique-key) pairs can collide across modules.
 -- Give every internal top-level binder an EXTERNAL name qualified by its
 -- defining module, with a STABLE disambiguator baked into the OccName
 -- (@k@ → @Probe.k_t3@, where @3@ is @k@'s ordinal position among this
--- module's own top-level binders), so @Identity.stableVarId@ yields a
--- globally unique, deterministic VarId. The ordinal — not the binder's raw
+-- module's own top-level binders), yielding globally unique, deterministic
+-- identities. The ordinal — not the binder's raw
 -- GHC 'Unique' — is what makes this deterministic ACROSS separate compiles
 -- of the same source: 'mg_binds'\'s order is a pure function of this
 -- module's own source and simplifier passes, never of how many Uniques the
 -- surrounding GHC session happened to consume before reaching this module
--- (which a warm build-products-dir compile perturbs). This function handles
--- top-level binders; 'Tidepool.Translate.stabilizeLocalUniques' handles nested
--- binders. Internal names cannot be referenced
+-- (which a warm build-products-dir compile perturbs). Internal names cannot be referenced
 -- from other modules' ModGuts, so substituting binder + occurrences within
 -- the module is complete. Nested binders are untouched: their uniques cannot
 -- collide with top-level uniques of the same module, and cross-module nested
@@ -2151,6 +2134,3 @@ externalizeInternalTops guts = guts { mg_binds = map goTop (mg_binds guts) }
       Tick t e'        -> Tick t (goExpr e')
       Type _           -> e
       Coercion _       -> e
-
-dumpCore :: [CoreBind] -> String
-dumpCore binds = renderWithContext defaultSDocContext (pprCoreBindings binds)

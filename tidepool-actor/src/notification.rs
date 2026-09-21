@@ -8,30 +8,30 @@ use tokio::sync::oneshot;
 
 use crate::ActorRef;
 
-#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::ToCore)]
+#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::ToHaskell)]
 pub enum NotificationError {
-    #[core(module = "Tidepool.Effects.Core", name = "NotificationUnauthorized")]
+    #[haskell(module = "Tidepool.Effects.Core", name = "NotificationUnauthorized")]
     Unauthorized,
-    #[core(module = "Tidepool.Effects.Core", name = "NotificationUnavailable")]
+    #[haskell(module = "Tidepool.Effects.Core", name = "NotificationUnavailable")]
     Unavailable,
-    #[core(module = "Tidepool.Effects.Core", name = "NotificationInvalidReceipt")]
+    #[haskell(module = "Tidepool.Effects.Core", name = "NotificationInvalidReceipt")]
     InvalidReceipt,
-    #[core(
+    #[haskell(
         module = "Tidepool.Effects.Core",
         name = "NotificationAdmissionUnconfirmed"
     )]
     Unconfirmed(String),
-    #[core(module = "Tidepool.Effects.Core", name = "NotificationStorageFailure")]
+    #[haskell(module = "Tidepool.Effects.Core", name = "NotificationStorageFailure")]
     StorageFailure(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::ToCore)]
+#[derive(Debug, Clone, PartialEq, Eq, tidepool_bridge_derive::ToHaskell)]
 pub enum NotificationState {
-    #[core(module = "Tidepool.Effects.Core", name = "NotificationAccepted")]
+    #[haskell(module = "Tidepool.Effects.Core", name = "NotificationAccepted")]
     Accepted,
-    #[core(module = "Tidepool.Effects.Core", name = "NotificationPresented")]
+    #[haskell(module = "Tidepool.Effects.Core", name = "NotificationPresented")]
     Presented,
-    #[core(module = "Tidepool.Effects.Core", name = "NotificationUnconfirmed")]
+    #[haskell(module = "Tidepool.Effects.Core", name = "NotificationUnconfirmed")]
     Unconfirmed,
 }
 

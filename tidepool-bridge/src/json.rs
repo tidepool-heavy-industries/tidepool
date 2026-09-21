@@ -1,20 +1,20 @@
-//! Bridge between `serde_json::Value` and Tidepool Core values.
+//! Bridge between `serde_json::Value` and materialized Tidepool values.
 //!
 //! Delegates to the bridge-owned shared JSON builder used by native host
 //! functions and effect results.
 
 use crate::error::BridgeError;
-use crate::traits::{sealed::ToCoreSealed, ToCore};
+use crate::traits::{sealed::ToHaskellSealed, ToHaskell};
 use crate::Value;
 use tidepool_repr::DataConTable;
 
-impl ToCoreSealed for serde_json::Value {}
+impl ToHaskellSealed for serde_json::Value {}
 
-/// Convert a `serde_json::Value` to a Tidepool Core `Value` matching the
+/// Convert a `serde_json::Value` to a Tidepool `Value` matching the
 /// vendored `Tidepool.Aeson.Value` Haskell type.
 ///
 /// Uses the bridge-owned JSON materialization builder.
-impl ToCore for serde_json::Value {
+impl ToHaskell for serde_json::Value {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let ids = crate::json_builder::JsonConIds::from_table(table).ok_or_else(|| {
             BridgeError::UnknownDataConName(

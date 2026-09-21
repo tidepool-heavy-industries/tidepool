@@ -74,7 +74,7 @@ fn verb(ctor: &'static str, method: &'static str, arg: &'static str, ok: HsType)
         args: vec![Arg {
             name: arg,
             ty: HsType::Named("NameQuery"),
-            rust: RustBinding::CoreValue,
+            rust: RustBinding::HaskellValue,
         }],
         ret: HsType::either(HsType::Named("QueryError"), ok),
         errors: None,
@@ -272,7 +272,7 @@ fn record(name: &'static str, fields: Vec<RecordField>, doc: &'static [&'static 
     TypeDef {
         name,
         wire_rust: None,
-        core_module: None,
+        haskell_module: None,
         shape: TypeShape::Record { fields },
         json: JsonInstance::None,
         derives: NO_WIRE,
@@ -293,7 +293,7 @@ fn sum(name: &'static str, variants: Vec<SumVariant>, doc: &'static [&'static st
     TypeDef {
         name,
         wire_rust: None,
-        core_module: None,
+        haskell_module: None,
         shape: TypeShape::Sum { variants },
         json: JsonInstance::None,
         derives: NO_WIRE,

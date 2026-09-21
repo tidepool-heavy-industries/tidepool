@@ -217,73 +217,6 @@ fn non_text_warnings_item_is_malformed() {
     assert_malformed(read_metadata(&bytes), "warnings");
 }
 
-// ---- warnings-level: var_names, each malformed sub-shape ----
-
-#[test]
-fn non_array_var_names_is_malformed() {
-    let bytes = meta_bytes(
-        vec![],
-        vec![
-            has_io_false(),
-            (
-                Cbor::Text("var_names".to_string()),
-                Cbor::Text("not-an-array".to_string()),
-            ),
-        ],
-    );
-    assert_malformed(read_metadata(&bytes), "var_names");
-}
-
-#[test]
-fn non_array_var_names_item_is_malformed() {
-    let bytes = meta_bytes(
-        vec![],
-        vec![
-            has_io_false(),
-            (
-                Cbor::Text("var_names".to_string()),
-                Cbor::Array(vec![Cbor::Integer(1.into())]), // item not [id, name]
-            ),
-        ],
-    );
-    assert_malformed(read_metadata(&bytes), "var_names");
-}
-
-#[test]
-fn var_names_item_not_id_name_pair_is_malformed() {
-    let bytes = meta_bytes(
-        vec![],
-        vec![
-            has_io_false(),
-            (
-                Cbor::Text("var_names".to_string()),
-                Cbor::Array(vec![Cbor::Array(vec![Cbor::Integer(1.into())])]), // only 1 element
-            ),
-        ],
-    );
-    assert_malformed(read_metadata(&bytes), "var_names");
-}
-
-#[test]
-fn var_names_id_exceeding_u64_is_malformed() {
-    // ciborium represents CBOR integers with more range than u64 (negative
-    // included); an id that does not fit u64 must be rejected, not wrapped.
-    let bytes = meta_bytes(
-        vec![],
-        vec![
-            has_io_false(),
-            (
-                Cbor::Text("var_names".to_string()),
-                Cbor::Array(vec![Cbor::Array(vec![
-                    Cbor::Integer((-1i64).into()),
-                    Cbor::Text("neg".to_string()),
-                ])]),
-            ),
-        ],
-    );
-    assert_malformed(read_metadata(&bytes), "var_names");
-}
-
 // ---- warnings-level: map keys ----
 
 #[test]
@@ -364,10 +297,8 @@ fn writer_conforming_payload_round_trips_through_strict_reader() {
 
     let warnings = MetaWarnings {
         has_io: true,
-        var_names: vec![(0xfe00_0000_0000_0001_u64, "foo".to_string())],
         captured_type: Some("[Int]".to_string()),
         warnings: vec!["Wincomplete-patterns".to_string()],
-        poisoned: vec![(1u64, "Dep.helper".to_string())],
     };
 
     let bytes = write_metadata(&table, &warnings).expect("write_metadata failed");
@@ -376,8 +307,6 @@ fn writer_conforming_payload_round_trips_through_strict_reader() {
 
     assert_eq!(table, recovered_table);
     assert_eq!(recovered_warnings.has_io, warnings.has_io);
-    assert_eq!(recovered_warnings.var_names, warnings.var_names);
     assert_eq!(recovered_warnings.captured_type, warnings.captured_type);
     assert_eq!(recovered_warnings.warnings, warnings.warnings);
-    assert_eq!(recovered_warnings.poisoned, warnings.poisoned);
 }

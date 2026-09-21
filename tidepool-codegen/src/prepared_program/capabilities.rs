@@ -436,11 +436,7 @@ mod tests {
 
         let machine = crate::machine_state::MachineState::new();
         machine.set_first_cause(RuntimeError::Cancelled);
-        let mut vmctx = crate::context::VMContext::new(
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            crate::host_fns::gc_trigger,
-        );
+        let mut vmctx = crate::context::VMContext::new(std::ptr::null_mut(), std::ptr::null());
         vmctx.machine_state = &machine as *const _ as *mut _;
         assert_eq!(
             unsafe { unsupported(&mut vmctx, Capability::DecodeStackEntries as u8 as u64) },
@@ -583,11 +579,7 @@ mod tests {
             if let Some(error) = existing.clone() {
                 machine.set_first_cause(error);
             }
-            let mut vmctx = crate::context::VMContext::new(
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                crate::host_fns::gc_trigger,
-            );
+            let mut vmctx = crate::context::VMContext::new(std::ptr::null_mut(), std::ptr::null());
             vmctx.machine_state = &machine as *const _ as *mut _;
             unsafe { unsupported(&mut vmctx, u64::MAX) };
             assert_eq!(

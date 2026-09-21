@@ -3,7 +3,7 @@
 //! `runLLMTurn`/`runLLMTurnFork`/`runLLMTurnFanout` (`Tidepool.Agent`) all
 //! suspend on the SAME single constructor, `RunLLMTurnWith prompt payload`,
 //! where `payload` is a `Value` carrying a JSON OBJECT (`typedSite`/`fork`/
-//! `fan`/`prompts`) rather than separate positional Core fields — that
+//! `fan`/`prompts`) rather than separate positional Haskell fields — that
 //! nested-object shape has no schema vocabulary (and doesn't need one: it is
 //! interpreted once, in `tidepool-harness::engine::classify_runllmturn_payload`,
 //! which stays hand-written orchestration). This effect's job is only to get
@@ -166,7 +166,7 @@ pub fn run_llm_turn() -> Effect {
                 Arg {
                     name: "payload",
                     ty: HsType::Value,
-                    rust: RustBinding::CoreValue,
+                    rust: RustBinding::HaskellValue,
                 },
             ],
             ret: HsType::Value,

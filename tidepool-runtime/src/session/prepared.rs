@@ -22,8 +22,8 @@ use tidepool_codegen::prepared_program::{
 // Re-exported: callers of this module's realm-scoped cancellation API
 // (`open_realm`/`cancel_handle`/`close_realm`) need both types without a
 // separate `tidepool_codegen` dependency of their own.
-pub use tidepool_codegen::jit_machine::CancelHandle;
-pub use tidepool_codegen::jit_machine::MachineDisposition;
+pub use tidepool_codegen::machine::CancelHandle;
+pub use tidepool_codegen::machine::MachineDisposition;
 use tidepool_codegen::suspension::ContinuationId;
 pub use tidepool_codegen::suspension::{RealmId, ValueHandle};
 use tidepool_repr::execution_schema::{
@@ -961,8 +961,7 @@ fn typed_site_of(request: &Value, table: &DataConTable) -> Option<u64> {
 /// The prepared-STG half of a resident session's engine: one machine shared
 /// by every program the session's turns install, plus what the session keeps
 /// about each program once the machine owns its code. Bindings, generations,
-/// scopes and leases stay in `PersistentSession` (the same value plane the
-/// Core engine binds into); this owns only code and heap.
+/// scopes and leases stay in `PersistentSession`; this owns only code and heap.
 ///
 /// A session on the prepared route bootstraps its machine from its first
 /// turn's program ([`Self::bootstrap`]) and installs every later one against
@@ -1957,7 +1956,7 @@ impl PreparedEngine {
             LivePayloadPolicy::None => None,
             LivePayloadPolicy::ClosureField(field) => {
                 matches!(request, Value::Con(_, fields)
-                    if fields.get(field).is_some_and(tidepool_codegen::heap_bridge::contains_closure_sentinel))
+                    if fields.get(field).is_some_and(tidepool_codegen::observation::contains_closure_sentinel))
                 .then_some(field)
             }
             LivePayloadPolicy::ValueField(field) => {
@@ -2509,7 +2508,7 @@ impl PreparedEngine {
 
     /// [`Self::observe`] under the same budget, but a budget that runs out
     /// CUTS the walk instead of failing it: the result is a bounded SELECTION
-    /// carrying `tidepool_codegen::heap_bridge::OVERSIZE_SENTINEL` wherever a
+    /// carrying `tidepool_codegen::observation::OVERSIZE_SENTINEL` wherever a
     /// subtree was left unread. Use it where a display-sized limit must not
     /// discard work that already ran; the handle stays retained, so the part
     /// the cut omitted is still reachable through the binding.
@@ -2819,8 +2818,8 @@ impl PreparedEngine {
     /// - `nursery_bytes` ↔ `0`: `PreparedMachine` does not expose its
     ///   nursery capacity today, and no consumer of this snapshot reads it.
     #[must_use]
-    pub fn heap_stats(&self) -> tidepool_codegen::jit_machine::HeapStats {
-        tidepool_codegen::jit_machine::HeapStats {
+    pub fn heap_stats(&self) -> tidepool_codegen::machine::HeapStats {
+        tidepool_codegen::machine::HeapStats {
             nursery_bytes: 0,
             live_bytes: self.old_bytes,
             gc_count: self.major_collections,

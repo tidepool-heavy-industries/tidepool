@@ -75,14 +75,14 @@ runProbe arguments = do
   targets <- lines <$> readFile targetsFile
   createDirectoryIfMissing True outputDir
   compiled <- trySync (runPipelineSelected PreparedStg source includes)
-  (records, legacyTargets, inventories) <- case compiled of
+  (records, sourceTargets, inventories) <- case compiled of
     Left failure -> if allTops
       then ioError (userError
         ("all-tops source compilation rejected: " <> show failure))
       else let reason = "source compilation rejected: " <> show failure
         in pure
           ( map (rejectedRecord moduleNameArg reason) targets
-          , map (\target -> LegacyTarget target Nothing) targets
+          , map (\target -> SourceTarget target Nothing) targets
           , map (\target -> unavailableTargetInventory
               (missingName moduleNameArg target) [] reason) targets
           )
@@ -99,7 +99,7 @@ runProbe arguments = do
           else let reason = "prepared identity enumeration rejected: " <> show failure
             in pure
               ( map (rejectedRecord moduleNameArg reason) targets
-              , map (\target -> LegacyTarget target Nothing) targets
+              , map (\target -> SourceTarget target Nothing) targets
               , map (\target -> unavailableTargetInventory
                   (missingName moduleNameArg target) [] reason) targets
               )
@@ -109,23 +109,23 @@ runProbe arguments = do
           else let reason = "prepared identity enumeration rejected: " <> show failure
             in pure
               ( map (rejectedRecord moduleNameArg reason) targets
-              , map (\target -> LegacyTarget target Nothing) targets
+              , map (\target -> SourceTarget target Nothing) targets
               , map (\target -> unavailableTargetInventory
                   (missingName moduleNameArg target) [] reason) targets
               )
         Right (Right identities) -> do
           let selected = filter (inModule moduleNameArg) identities
-          legacy <- mapLegacyTargets moduleNameArg identities targets
+          sourceTargets <- mapSourceTargets moduleNameArg identities targets
           rowsWithInventory <- if allTops
             then forM (zip [0 :: Int ..] selected) $ \(index, identity) ->
               projectOneIdentity prepared formattingAuthority textAuthority outputDir index identity
-            else forM (zip [0 :: Int ..] (zip targets legacy)) $ \(index, (occurrence, legacyTarget)) ->
+            else forM (zip [0 :: Int ..] (zip targets sourceTargets)) $ \(index, (occurrence, sourceTarget)) ->
               projectOneTarget prepared formattingAuthority textAuthority moduleNameArg outputDir index occurrence
-                (legacyTargetIdentity legacyTarget)
+                (sourceTargetIdentity sourceTarget)
           let (rows, targetInventories) = unzip rowsWithInventory
-          pure (rows, legacy, targetInventories)
+          pure (rows, sourceTargets, targetInventories)
   BS.writeFile (outputDir </> "manifest.json")
-    (toBytes (renderManifest records legacyTargets))
+    (toBytes (renderManifest records sourceTargets))
   BS.writeFile (outputDir </> "diagnostic-inventory.json")
     (toBytes (renderTargetInventories inventories))
 
@@ -147,10 +147,10 @@ rejectedRecord :: String -> String -> String -> Record
 rejectedRecord moduleNameArg reason occurrence =
   Record (missingName moduleNameArg occurrence) Nothing [] (Rejected reason)
 
-data LegacyTarget = LegacyTarget String (Maybe SymbolIdentity)
+data SourceTarget = SourceTarget String (Maybe SymbolIdentity)
 
-legacyTargetIdentity :: LegacyTarget -> Maybe SymbolIdentity
-legacyTargetIdentity (LegacyTarget _ identity) = identity
+sourceTargetIdentity :: SourceTarget -> Maybe SymbolIdentity
+sourceTargetIdentity (SourceTarget _ identity) = identity
 
 inModule :: String -> SymbolIdentity -> Bool
 inModule moduleNameArg identity = symbolModule identity == Text.pack moduleNameArg
@@ -159,26 +159,26 @@ missingName :: String -> String -> String
 missingName moduleNameArg occurrence =
   "<unknown>:" <> moduleNameArg <> ":value:" <> occurrence
 
-mapLegacyTargets :: String -> [SymbolIdentity] -> [String] -> IO [LegacyTarget]
-mapLegacyTargets moduleNameArg identities = mapM (mapLegacyTarget moduleNameArg identities)
+mapSourceTargets :: String -> [SymbolIdentity] -> [String] -> IO [SourceTarget]
+mapSourceTargets moduleNameArg identities = mapM (mapSourceTarget moduleNameArg identities)
 
-mapLegacyTarget :: String -> [SymbolIdentity] -> String -> IO LegacyTarget
-mapLegacyTarget moduleNameArg identities legacyName = do
-  mapping <- case exactExternalMapping moduleNameArg identities legacyName of
+mapSourceTarget :: String -> [SymbolIdentity] -> String -> IO SourceTarget
+mapSourceTarget moduleNameArg identities sourceName = do
+  mapping <- case exactExternalMapping moduleNameArg identities sourceName of
     Left reason -> ioError (userError reason)
     Right value -> pure value
-  pure (LegacyTarget legacyName mapping)
+  pure (SourceTarget sourceName mapping)
 
 exactExternalMapping
   :: String -> [SymbolIdentity] -> String
   -> Either String (Maybe SymbolIdentity)
-exactExternalMapping moduleNameArg identities legacyName = case externalMatches of
+exactExternalMapping moduleNameArg identities sourceName = case externalMatches of
   [identity] -> Right (Just identity)
   [] -> Right Nothing
-  _ -> Left ("legacy target " <> show legacyName
+  _ -> Left ("source target " <> show sourceName
     <> " has ambiguous exact external matches; mapping rejected")
   where
-    externalMatches = filter (matchesExternal moduleNameArg legacyName) identities
+    externalMatches = filter (matchesExternal moduleNameArg sourceName) identities
 
 matchesExternal :: String -> String -> SymbolIdentity -> Bool
 matchesExternal moduleNameArg occurrence identity =
@@ -286,9 +286,9 @@ mappingSelfTest = do
         (ioError (userError ("mapping self-test failed: " <> label)))
   assert "exact external mapping" $
     exactExternalMapping "Suite" identities "answer" == Right (Just external)
-  assert "legacy projection keeps exact external identity" $
-    case mapLegacyTargetsPure "Suite" identities ["answer"] of
-      [Right target] -> legacyTargetIdentity target == Just external
+  assert "source mapping keeps exact external identity" $
+    case mapSourceTargetsPure "Suite" identities ["answer"] of
+      [Right target] -> sourceTargetIdentity target == Just external
       _ -> False
   assert "internal same-occurrence does not replace external" $
     exactExternalMapping "Suite" [internal] "answer" == Right Nothing
@@ -307,8 +307,8 @@ mappingSelfTest = do
   assert "internal expectation key is absent" (externalExpectationKey internal == Nothing)
   assert "empty identity input is unmapped" $
     exactExternalMapping "Suite" [] "answer" == Right Nothing
-  assert "duplicate legacy inputs are preserved" $
-    length (mapLegacyTargetsPure "Suite" identities ["answer", "answer"]) == 2
+  assert "duplicate source inputs are preserved" $
+    length (mapSourceTargetsPure "Suite" identities ["answer", "answer"]) == 2
   inventorySelfTest assert
   putStrLn "execution-corpus-projection mapping self-test: ok"
 
@@ -338,10 +338,10 @@ inventorySelfTest assert = do
         && "inventory_label" `isInfixOf` rendered
       _ -> False)
 
-mapLegacyTargetsPure
-  :: String -> [SymbolIdentity] -> [String] -> [Either String LegacyTarget]
-mapLegacyTargetsPure moduleNameArg identities = map $ \legacyName ->
-  fmap (LegacyTarget legacyName) (exactExternalMapping moduleNameArg identities legacyName)
+mapSourceTargetsPure
+  :: String -> [SymbolIdentity] -> [String] -> [Either String SourceTarget]
+mapSourceTargetsPure moduleNameArg identities = map $ \sourceName ->
+  fmap (SourceTarget sourceName) (exactExternalMapping moduleNameArg identities sourceName)
 
 projectionContext :: Maybe FormattingAuthority -> Maybe TextUnitAuthority
   -> SymbolIdentity -> ProjectionContext
@@ -366,9 +366,9 @@ targetDescriptor = case SystemInfo.arch of
 numericArtifactName :: Int -> FilePath
 numericArtifactName index = show index <> ".prepared.cbor"
 
-renderManifest :: [Record] -> [LegacyTarget] -> String
-renderManifest records legacyTargets = "{\"version\":2,\"legacy_targets\":["
-  <> intercalate "," (map renderLegacyTarget legacyTargets)
+renderManifest :: [Record] -> [SourceTarget] -> String
+renderManifest records sourceTargets = "{\"version\":2,\"source_targets\":["
+  <> intercalate "," (map renderSourceTarget sourceTargets)
   <> "],\"programs\":["
   <> intercalate "," (map renderRecord records)
   <> "]}"
@@ -388,9 +388,9 @@ renderResiduals [] = ""
 renderResiduals failures = "\"recovery_failures\":["
   <> intercalate "," (map (jsonString . show) failures) <> "],"
 
-renderLegacyTarget :: LegacyTarget -> String
-renderLegacyTarget (LegacyTarget legacyName identity) =
-  "{\"legacy_name\":" <> jsonString legacyName <> ",\"identity\":"
+renderSourceTarget :: SourceTarget -> String
+renderSourceTarget (SourceTarget sourceName identity) =
+  "{\"source_name\":" <> jsonString sourceName <> ",\"identity\":"
   <> maybe "null" renderIdentity identity <> "}"
 
 renderMaybeString :: Maybe String -> String

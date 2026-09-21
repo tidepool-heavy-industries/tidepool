@@ -137,13 +137,11 @@ mod tests {
     use crate::prepared_control::CallStatus;
     use std::sync::{atomic::AtomicBool, Arc};
 
-    unsafe extern "C" fn no_gc(_: *mut VMContext, _: usize) {}
-
     #[test]
     fn w5_a1_allocation_cancel_records_on_invocation_without_tls() {
         let machine = MachineState::new();
         machine.set_cancel_flag(Arc::new(AtomicBool::new(true)));
-        let mut vmctx = VMContext::new(std::ptr::null_mut(), std::ptr::null(), no_gc);
+        let mut vmctx = VMContext::new(std::ptr::null_mut(), std::ptr::null());
         vmctx.machine_state = (&machine as *const MachineState).cast_mut();
         let status = unsafe { crate::host_fns::prepared_gc_trigger(&mut vmctx, 8) };
         assert_eq!(status, CallStatus::Cancelled as i32);
@@ -174,7 +172,7 @@ mod tests {
     fn w5_a1_poll_records_on_invocation_without_tls() {
         let machine = MachineState::new();
         machine.set_cancel_flag(Arc::new(AtomicBool::new(true)));
-        let mut vmctx = VMContext::new(std::ptr::null_mut(), std::ptr::null(), no_gc);
+        let mut vmctx = VMContext::new(std::ptr::null_mut(), std::ptr::null());
         vmctx.machine_state = (&machine as *const MachineState).cast_mut();
         let status = unsafe {
             prepared_poll_at(
@@ -191,7 +189,7 @@ mod tests {
         let machine = MachineState::new();
         machine.set_first_cause(RuntimeError::BadPointer);
         machine.set_cancel_flag(Arc::new(AtomicBool::new(true)));
-        let mut vmctx = VMContext::new(std::ptr::null_mut(), std::ptr::null(), no_gc);
+        let mut vmctx = VMContext::new(std::ptr::null_mut(), std::ptr::null());
         vmctx.machine_state = (&machine as *const MachineState).cast_mut();
         assert_eq!(
             unsafe {
@@ -233,7 +231,7 @@ mod tests {
     #[test]
     fn w5_a1_configured_stack_overflow_records_typed_cause() {
         let machine = MachineState::new();
-        let mut vmctx = VMContext::new(std::ptr::null_mut(), std::ptr::null(), no_gc);
+        let mut vmctx = VMContext::new(std::ptr::null_mut(), std::ptr::null());
         vmctx.machine_state = (&machine as *const MachineState).cast_mut();
         assert_eq!(
             unsafe { prepared_stack_overflow(&mut vmctx) },

@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BindingTipId};
-use tidepool_codegen::jit_machine::{CancelHandle, MachineDisposition};
+use tidepool_codegen::machine::{CancelHandle, MachineDisposition};
 use tidepool_codegen::prepared_program::ResidencyCounts;
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
 use tidepool_codegen::suspension::{ContinuationId, RealmId};
@@ -108,7 +108,7 @@ impl ResidentEngine {
     /// Read-only heap/GC snapshot, whichever engine this session runs -- see
     /// [`PreparedEngine::heap_stats`] for the prepared route's field mapping.
     #[must_use]
-    pub fn heap_stats(&self) -> tidepool_codegen::jit_machine::HeapStats {
+    pub fn heap_stats(&self) -> tidepool_codegen::machine::HeapStats {
         self.0.heap_stats()
     }
 }
@@ -401,7 +401,7 @@ impl PersistentSession {
     /// Read-only heap/GC snapshot of this session's live machine, whichever
     /// engine it runs; `None` before the machine has bootstrapped.
     #[must_use]
-    pub fn heap_stats(&self) -> Option<tidepool_codegen::jit_machine::HeapStats> {
+    pub fn heap_stats(&self) -> Option<tidepool_codegen::machine::HeapStats> {
         self.machine.as_ref().map(ResidentEngine::heap_stats)
     }
 

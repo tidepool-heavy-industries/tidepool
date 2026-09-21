@@ -248,7 +248,7 @@ impl SelfHarnessDriver {
                 }
                 SuspensionRouting::Note { text } => {
                     self.announce_note(FormSource::OuterLoop, &text);
-                    use tidepool_bridge::ToCore;
+                    use tidepool_bridge::ToHaskell;
                     let answer = ().to_value(&compiled.table).map_err(|e| {
                         DriverError::Session(format!("bridge unit note-answer to Value: {e}"))
                     })?;

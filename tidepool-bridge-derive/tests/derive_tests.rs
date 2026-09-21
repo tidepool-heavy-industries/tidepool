@@ -1,41 +1,41 @@
 use tidepool_bridge::Value;
-use tidepool_bridge::{BridgeError, FromCore, ToCore};
-use tidepool_bridge_derive::{FromCore, ToCore};
+use tidepool_bridge::{BridgeError, FromHaskell, ToHaskell};
+use tidepool_bridge_derive::{FromHaskell, ToHaskell};
 use tidepool_repr::{DataCon, DataConId, DataConTable};
 use tidepool_testing::gen::datacon_table::standard_datacon_table;
 
-#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
+#[derive(Debug, PartialEq, Eq, FromHaskell, ToHaskell)]
 enum MyBool {
-    #[core(name = "True")]
+    #[haskell(name = "True")]
     MyTrue,
-    #[core(name = "False")]
+    #[haskell(name = "False")]
     MyFalse,
 }
 
-#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
+#[derive(Debug, PartialEq, Eq, FromHaskell, ToHaskell)]
 enum MyMaybe<T> {
-    #[core(name = "Nothing")]
+    #[haskell(name = "Nothing")]
     MyNothing,
-    #[core(name = "Just")]
+    #[haskell(name = "Just")]
     MyJust(T),
 }
 
-#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
+#[derive(Debug, PartialEq, Eq, FromHaskell, ToHaskell)]
 enum MultiField {
-    #[core(name = "Triple")]
+    #[haskell(name = "Triple")]
     Triple(i64, bool, String),
 }
 
 /// A ZERO-ARITY TUPLE variant (`Budget()`, parens present) — distinct from a
 /// unit variant (`MyBool::MyTrue` above, no parens). Regression coverage for
-/// a #335 bug: `ToCore`'s pattern-match arm dropped the `()` for any
+/// a #335 bug: `ToHaskell`'s pattern-match arm dropped the `()` for any
 /// `rust_arity == 0` variant, so a nullary tuple constructor (e.g. an
 /// `errors`-block ADT's `LlmBudget`) failed to compile.
-#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
+#[derive(Debug, PartialEq, Eq, FromHaskell, ToHaskell)]
 enum NullaryTuple {
-    #[core(name = "Budget")]
+    #[haskell(name = "Budget")]
     Budget(),
-    #[core(name = "NullaryDetail")]
+    #[haskell(name = "NullaryDetail")]
     Detail(String),
 }
 
@@ -144,7 +144,7 @@ fn test_multi_field_derive() {
     assert_eq!(val, back);
 }
 
-/// Regression for #335: `ToCore`'s generated pattern arm for a ZERO-ARITY
+/// Regression for #335: `ToHaskell`'s generated pattern arm for a ZERO-ARITY
 /// TUPLE variant (`Budget()`) used to drop the `()`, which doesn't compile —
 /// `rust_arity == 0` alone doesn't distinguish a nullary tuple ctor from a
 /// genuine unit variant. Round-trips both variants of `NullaryTuple`.
@@ -205,10 +205,10 @@ fn nested_unknown_constructor_keeps_the_matched_outer_context() {
     ));
 }
 
-#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
+#[derive(Debug, PartialEq, Eq, FromHaskell, ToHaskell)]
 
 enum UnusedParam<T> {
-    #[core(name = "True")]
+    #[haskell(name = "True")]
     Constant(std::marker::PhantomData<T>),
 }
 
@@ -217,7 +217,7 @@ enum UnusedParam<T> {
 fn test_unused_param_derive() {
     let table = test_table();
 
-    // This should compile even if T doesn't implement FromCore/ToCore
+    // This should compile even if T doesn't implement FromHaskell/ToHaskell
 
     #[derive(Debug, PartialEq, Eq)]
 
@@ -248,17 +248,17 @@ fn test_arity_mismatch() {
 
 // --- Struct derive tests ---
 
-#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
-#[core(name = "GetBranch")]
+#[derive(Debug, PartialEq, Eq, FromHaskell, ToHaskell)]
+#[haskell(name = "GetBranch")]
 struct GetBranchRequest {
     working_dir: String,
 }
 
-#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
+#[derive(Debug, PartialEq, Eq, FromHaskell, ToHaskell)]
 struct UnitStruct;
 
-#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
-#[core(name = "Pair")]
+#[derive(Debug, PartialEq, Eq, FromHaskell, ToHaskell)]
+#[haskell(name = "Pair")]
 struct GenericStruct<A, B> {
     first: A,
     second: B,
@@ -340,21 +340,21 @@ fn test_struct_arity_mismatch() {
 // === F7: an EARLIER variant's missing DataCon must not fail-fast a LATER,
 // present variant's decode ===
 
-#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
+#[derive(Debug, PartialEq, Eq, FromHaskell, ToHaskell)]
 enum TwoVariant {
-    #[core(name = "FirstVariant")]
+    #[haskell(name = "FirstVariant")]
     First(i64),
-    #[core(name = "SecondVariant")]
+    #[haskell(name = "SecondVariant")]
     Second(i64),
 }
 
-#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
+#[derive(Debug, PartialEq, Eq, FromHaskell, ToHaskell)]
 enum NamedVariant {
     NamedFields { left: i64, right: String },
 }
 
 #[test]
-fn named_variant_round_trips_in_core_field_order() {
+fn named_variant_round_trips_in_haskell_field_order() {
     let mut table = standard_datacon_table();
     table.insert(DataCon {
         id: DataConId(51),

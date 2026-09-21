@@ -21,18 +21,14 @@ tidepool-bignum.workspace = true
 tidepool-heap.workspace = true
 tidepool-bridge.workspace = true
 tidepool-effect.workspace = true
-frunk.workspace = true
 thiserror.workspace = true
-log.workspace = true
 tracing.workspace = true
 env_logger = "0.11"
 # `debug::tracing_env_filter` is the one shared `EnvFilter` builder every
 # long-running binary calls so a bare `RUST_LOG=info` doesn't inherit
 # cranelift-jit's own unconditional CLIF-dump `info!`s.
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-parking_lot.workspace = true
 recursion.workspace = true
-rustc-hash.workspace = true
 stacker = "0.1"
 
 [target.'cfg(unix)'.dependencies]

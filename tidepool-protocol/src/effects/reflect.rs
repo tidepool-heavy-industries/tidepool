@@ -15,7 +15,7 @@ use crate::schema::{
 };
 
 const WIRE: WireDerives = WireDerives(&[
-    WireDerive::ToCore,
+    WireDerive::ToHaskell,
     WireDerive::Clone,
     WireDerive::Debug,
     WireDerive::PartialEq,
@@ -54,7 +54,7 @@ pub fn reflect() -> Effect {
             TypeDef {
                 name: "ConversationRole",
                 wire_rust: Some("RfRole"),
-                core_module: None,
+                haskell_module: None,
                 shape: TypeShape::Sum {
                     variants: ["RoleSystem", "RoleDeveloper", "RoleUser", "RoleAssistant"]
                         .into_iter()
@@ -73,7 +73,7 @@ pub fn reflect() -> Effect {
             TypeDef {
                 name: "TurnItem",
                 wire_rust: Some("RfTurnItem"),
-                core_module: None,
+                haskell_module: None,
                 shape: TypeShape::Sum {
                     variants: vec![
                         SumVariant {
@@ -113,7 +113,7 @@ pub fn reflect() -> Effect {
             TypeDef {
                 name: "ConversationTurn",
                 wire_rust: Some("RfConversationTurn"),
-                core_module: None,
+                haskell_module: None,
                 shape: TypeShape::Record {
                     fields: vec![
                         field("turnIdentity", "identity", HsType::Text),
@@ -142,7 +142,7 @@ pub fn reflect() -> Effect {
             TypeDef {
                 name: "ReflectError",
                 wire_rust: Some("RfError"),
-                core_module: None,
+                haskell_module: None,
                 shape: TypeShape::Sum {
                     variants: vec![
                         SumVariant {

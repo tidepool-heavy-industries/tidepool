@@ -51,7 +51,7 @@ pub fn actor() -> Effect {
             TypeDef {
                 name: "ActorLaunchRole",
                 wire_rust: None,
-                core_module: None,
+                haskell_module: None,
                 shape: TypeShape::Sum {
                     variants: vec![
                         SumVariant {
@@ -99,7 +99,7 @@ pub fn actor() -> Effect {
             TypeDef {
                 name: "ActorEffectProfile",
                 wire_rust: None,
-                core_module: None,
+                haskell_module: None,
                 shape: TypeShape::Sum {
                     variants: vec![
                         SumVariant {
@@ -136,7 +136,7 @@ pub fn actor() -> Effect {
             TypeDef {
                 name: "ActorTerminalStatus",
                 wire_rust: None,
-                core_module: None,
+                haskell_module: None,
                 shape: TypeShape::Sum {
                     variants: vec![
                         SumVariant {
@@ -169,7 +169,7 @@ pub fn actor() -> Effect {
             TypeDef {
                 name: "ActorCallStatus",
                 wire_rust: None,
-                core_module: None,
+                haskell_module: None,
                 shape: TypeShape::Sum {
                     variants: vec![
                         SumVariant {
@@ -245,7 +245,7 @@ pub fn actor() -> Effect {
                                 HsType::Unit,
                             ),
                         ),
-                        rust: RustBinding::CoreValue,
+                        rust: RustBinding::HaskellValue,
                     },
                     Arg {
                         name: "role",
@@ -286,7 +286,7 @@ pub fn actor() -> Effect {
                                 HsType::Unit,
                             ),
                         ),
-                        rust: RustBinding::CoreValue,
+                        rust: RustBinding::HaskellValue,
                     },
                     Arg {
                         name: "forkGroup",
@@ -378,7 +378,7 @@ pub fn actor() -> Effect {
                     Arg {
                         name: "request",
                         ty: HsType::app(HsType::Var("protocol"), HsType::Var("result")),
-                        rust: RustBinding::CoreValue,
+                        rust: RustBinding::HaskellValue,
                     },
                 ],
                 ret: HsType::Var("result"),
@@ -398,7 +398,7 @@ pub fn actor() -> Effect {
                     Arg {
                         name: "request",
                         ty: HsType::app(HsType::Var("protocol"), HsType::Unit),
-                        rust: RustBinding::CoreValue,
+                        rust: RustBinding::HaskellValue,
                     },
                 ],
                 ret: HsType::Named("ActorCallStatus"),
@@ -418,7 +418,7 @@ pub fn actor() -> Effect {
                     Arg {
                         name: "request",
                         ty: HsType::app(HsType::Var("protocol"), HsType::Unit),
-                        rust: RustBinding::CoreValue,
+                        rust: RustBinding::HaskellValue,
                     },
                 ],
                 ret: HsType::Unit,
@@ -457,7 +457,7 @@ pub fn actor() -> Effect {
                                 HsType::Unit,
                             ),
                         ),
-                        rust: RustBinding::CoreValue,
+                        rust: RustBinding::HaskellValue,
                     },
                     Arg {
                         name: "label",
@@ -504,11 +504,11 @@ mod tests {
                 .iter()
                 .find(|verb| verb.ctor == constructor)
                 .unwrap();
-            assert!(matches!(verb.args[1].rust, RustBinding::CoreValue));
+            assert!(matches!(verb.args[1].rust, RustBinding::HaskellValue));
             assert_eq!(
                 verb.args
                     .iter()
-                    .filter(|argument| matches!(argument.rust, RustBinding::CoreValue))
+                    .filter(|argument| matches!(argument.rust, RustBinding::HaskellValue))
                     .count(),
                 1
             );

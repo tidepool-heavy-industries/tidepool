@@ -2,7 +2,7 @@
 
 ## Charter
 
-This directory owns the GHC→Core extractor and `lib/Tidepool`, the Haskell
+This directory owns the GHC-to-prepared-STG compiler worker and `lib/Tidepool`, the Haskell
 library auto-imported by the MCP surfaces. Toolchain discovery and caching live
 in `tidepool-toolchain`; CBOR decoding lives in `tidepool-repr`.
 
@@ -66,19 +66,11 @@ just fixtures-check
 just fixtures-update
 ```
 
-The check verifies a fingerprint of every extractor/library/suite source that
-can affect the corpus, then runs the committed fixtures through the semantic
-suite. Raw CBOR is not compared across fresh GHC environments because internal
-compiler identities are environment-sensitive. The update builds both
-worktree extractor halves, owns the complete output directory, and records the
-new source fingerprint.
-
-`prepared fixture` treats its output directory as an owned fixture corpus: after a
-successful write it removes stale `*.cbor` and `*.asks.json` artifacts from
-earlier runs while preserving unrelated files. Current lifted-local
-`*_t<n>.cbor` fixtures remain part of the differential corpus; do not manually
-omit them. New CBOR fixtures are ignored by default and must be added
-explicitly.
+The check regenerates the compact Suite constructor metadata with the current
+frontend and worker, compares it with the committed fixture, verifies the
+source fingerprint, and runs the prepared corpus. The update replaces that
+metadata before running the same semantic checks. Prepared program artifacts
+are generated into temporary run directories and are not committed.
 
 ## Extractor diagnostics
 
@@ -86,11 +78,9 @@ Diagnostics are opt-in:
 
 | Variable | Purpose |
 |---|---|
-| `TIDEPOOL_DUMP_CLOSED=<needle>` | print closed Core for matching bindings |
 | `TIDEPOOL_VARID_AUDIT=1` | report VarId collisions |
 | `TIDEPOOL_VARID_AUDIT=<hex>,...` | resolve selected VarIds to names |
 | `TIDEPOOL_DANGLING_DEBUG=1` | show unresolved references before allowed session refs are removed |
-| `TIDEPOOL_JOINREC_DEBUG=1` | trace join-rec translation |
 | `TIDEPOOL_IFACE_DEBUG=1` | trace fat-interface loading |
 
 `TIDEPOOL_TEST_DROP_DC` and `TIDEPOOL_TEST_FORCE_VALIDATION_ONLY` are
@@ -169,8 +159,8 @@ returned JSON value against the schema.
 ## Current limits
 
 - Topological recovery can only recover bindings whose dependencies are
-  available in extracted Core or accepted session modules.
-- Session-generated modules require the universal Core/Authored module pair
+  available through prepared recovery or accepted session modules.
+- Session-generated modules require the universal Authored module pair
   plus a per-incarnation row shim. Persisted contracts normalize `M` to the
   exact concrete row; GHC then enforces compatibility at use sites.
 - The resident worker is single-threaded and changes process CWD per request;

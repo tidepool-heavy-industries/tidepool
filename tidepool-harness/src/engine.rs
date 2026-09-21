@@ -480,7 +480,7 @@ pub enum SuspensionRouting {
     /// AUTHORED outer loop. Routed by CONSTRUCTOR NAME only; the payload is
     /// NEVER decoded here (its args are bridged ADTs, not JSON — the
     /// servicing site decodes the ORIGINAL request `Value` via the generated
-    /// `SubagentReq: FromCore` and dispatches it to the driver-owned
+    /// `SubagentReq: FromHaskell` and dispatches it to the driver-owned
     /// `SubagentHandler`; the outer session uses `SuspendAll`, so the driver
     /// remains the sole service point).
     Subagent,
@@ -491,7 +491,7 @@ pub enum SuspensionRouting {
     /// NAME, same discipline as [`SuspensionRouting::Subagent`]. One variant
     /// carrying WHICH effect rather than five near-identical ones: the
     /// servicing site decodes/dispatches identically for all five (decode
-    /// the ORIGINAL request `Value` via the generated `<Eff>Req: FromCore`,
+    /// the ORIGINAL request `Value` via the generated `<Eff>Req: FromHaskell`,
     /// dispatch into a driver-owned handler, resume with the response),
     /// differing only in which handler it reaches (and, for Console, an
     /// extra observer-feed post — see `SelfHarnessDriver::service_outer_effect`).
@@ -576,7 +576,7 @@ pub enum ClassifyError {
     UnsupportedConstructor { constructor: String },
     /// A constructor NAME matched one [`RosterRequest`] member (so the roster
     /// itself is not drifted — see [`ClassifyError::UnsupportedConstructor`]),
-    /// but that member's own `FromCore` decode failed on the matched value —
+    /// but that member's own `FromHaskell` decode failed on the matched value —
     /// a genuinely malformed payload, not a missing arm. Kept distinct from
     /// `UnsupportedConstructor` so the two failure classes are never
     /// conflated in a diagnostic: this one names a real bug in the VALUE, the
@@ -606,7 +606,7 @@ fn require_site_field(
 
 /// Validate an already-decoded `Int` argument as a [`crate::tree::SiteId`] —
 /// the generated-decode counterpart of [`require_site_field`] for a
-/// constructor whose site arrives as a positional `FromCore`-decoded `i64`
+/// constructor whose site arrives as a positional `FromHaskell`-decoded `i64`
 /// (via a [`RosterRequest`] member) rather than a JSON payload key. The value
 /// already exists (the generated request enum decoded it successfully as an
 /// `Int`); this only re-validates the ROUTING invariant — fits a `u32`,
@@ -655,7 +655,7 @@ fn require_arg_site(
 // `Subagent`/`Green`/`Worktree`/`RepoEvent`/`Exec`/`Journal` carry their
 // decoded payload for RECOGNITION only — `classify_hole` matches these arms
 // with `_`, same discipline as before this migration (payload decode happens
-// at the servicing site's own generated `<Eff>Req: FromCore`, never here).
+// at the servicing site's own generated `<Eff>Req: FromHaskell`, never here).
 #[allow(dead_code)]
 enum RosterRequest {
     RunLLMTurn(crate::generated::run_l_l_m_turn::RunLLMTurnReq),
@@ -674,7 +674,7 @@ enum RosterRequest {
 }
 
 /// Decode a suspended request [`Value`] against the whole [`RosterRequest`]
-/// composition, trying each generated member's own `FromCore` in turn. A
+/// composition, trying each generated member's own `FromHaskell` in turn. A
 /// member's derive resolves a NAME+ARITY match against `table` internally,
 /// returning `Err(BridgeError::UnknownDataCon(_))` when nothing in that one
 /// member matches — a miss just tries the next member. Only once EVERY
@@ -682,13 +682,13 @@ enum RosterRequest {
 /// [`ClassifyError::UnsupportedConstructor`]; a NAME that matched some member
 /// but whose value failed that member's own field decode (a genuinely
 /// malformed payload, never seen in practice since every field beyond `Int`/
-/// `Text`/`[Text]`/`Bool` is bound as a raw core `Value` — see each
+/// `Text`/`[Text]`/`Bool` is bound as a materialized Haskell `Value` — see each
 /// `tidepool_protocol::effects::*` module's doc) is instead
 /// [`ClassifyError::Decode`], never silently retried against a later member.
 fn decode_roster(request: &Value, table: &DataConTable) -> Result<RosterRequest, ClassifyError> {
     macro_rules! try_member {
         ($variant:path, $req:ty) => {
-            match <$req as tidepool_bridge::FromCore>::from_value(request, table) {
+            match <$req as tidepool_bridge::FromHaskell>::from_value(request, table) {
                 Ok(r) => return Ok($variant(r)),
                 Err(tidepool_bridge::BridgeError::UnknownDataCon(_)) => {}
                 Err(e) => {
@@ -761,7 +761,7 @@ fn decode_roster(request: &Value, table: &DataConTable) -> Result<RosterRequest,
 /// - `FinalizeWith` (site, value) — [`SuspensionRouting::Finalize`]. The VALUE
 ///   field is never JSON-decoded here (it crosses in-heap, may be
 ///   non-serializable — e.g. a closure) — [`RosterRequest::Finalize`]'s field
-///   is a raw core `Value` for exactly that reason; only the `Int` site id is
+///   is a materialized Haskell `Value` for exactly that reason; only the `Int` site id is
 ///   read. The raw value itself is recovered from the original request
 ///   `Value` by the caller (`Harness` retains it), not through this
 ///   JSON-shaped `ClassifiedSuspension`.
@@ -775,10 +775,10 @@ fn decode_roster(request: &Value, table: &DataConTable) -> Result<RosterRequest,
 ///   `RepoEventSubscribe`/…/`MailboxDrop` (RepoEvent) / `Run`/`RunIn`/`RunArgv`
 ///   (Exec) / `RecordStep` (Journal) → [`SuspensionRouting::OuterEffect`],
 ///   same discipline as `Subagent` below — payload decode happens at the
-///   SERVICING site (each already-generated `<Eff>Req: FromCore`), never here.
+///   SERVICING site (each already-generated `<Eff>Req: FromHaskell`), never here.
 /// - `SubagentSpawn`/…/`SubagentCancel` → [`SuspensionRouting::Subagent`],
 ///   payload never decoded here (dispatched via the servicing site's own
-///   `SubagentReq: FromCore`).
+///   `SubagentReq: FromHaskell`).
 /// - `AsyncSpawnWith`/…/`AsyncCancelWith` (`Tidepool.Async`'s substrate) →
 ///   [`SuspensionRouting::Green`], same discipline as `Subagent`.
 /// - `AskWith` (prompt, payload) — plain [`SuspensionRouting::Ask`].
@@ -2564,9 +2564,9 @@ pub async fn drive_model_turn(
 }
 
 /// Bridge a JSON answer (from a form submission or an in-context resume value)
-/// to a Core `Value` against `table`, for feeding to `ResidentSession::resume`.
+/// to a Haskell `Value` against `table`, for feeding to `ResidentSession::resume`.
 pub fn json_answer_to_value(answer: &Json, table: &DataConTable) -> Result<Value, EngineError> {
-    use tidepool_bridge::ToCore;
+    use tidepool_bridge::ToHaskell;
     answer
         .to_value(table)
         .map_err(|e| EngineError::Run(format!("bridge answer to Value: {e}")))
@@ -2669,7 +2669,7 @@ pub fn build_invocation_exit_value(
     exit: &InvocationExit,
     table: &DataConTable,
 ) -> Result<Value, EngineError> {
-    use tidepool_bridge::ToCore;
+    use tidepool_bridge::ToHaskell;
     let name = exit.constructor();
     let con = tidepool_bridge::get_resilient(table, name, 1).ok_or_else(|| {
         EngineError::Run(format!(
@@ -3826,7 +3826,7 @@ mod tests {
     // constructor (`FinalizeWith`/`ForkWith`/`ForkAllWith`) now shares — a
     // single set of direct unit tests replaces what used to be three
     // hand-decode functions each needing their own MissingField/OutOfRange
-    // pair. "Missing" is no longer a distinct case: a `FromCore`-decoded `Int`
+    // pair. "Missing" is no longer a distinct case: a `FromHaskell`-decoded `Int`
     // argument always EXISTS by the time `require_arg_site` sees it (arity
     // mismatches are caught earlier, inside the generated decode itself — see
     // `classify_hole_rejects_finalize_with_a_non_numeric_site` below); only
@@ -3861,7 +3861,7 @@ mod tests {
     }
 
     /// A `FinalizeWith` whose leading field is a non-numeric site: the
-    /// generated `FinalizeReq: FromCore` matches the CONSTRUCTOR (name+arity
+    /// generated `FinalizeReq: FromHaskell` matches the CONSTRUCTOR (name+arity
     /// agree), but `i64::from_value` rejects the site field itself before
     /// `require_arg_site` ever runs — a real bug in the VALUE, surfaced as
     /// [`ClassifyError::Decode`], never silently retried against a later
@@ -3886,13 +3886,13 @@ mod tests {
     }
 
     /// A non-`Text` element among `ForkAllWith`'s prompts: the generated
-    /// `Vec<String>: FromCore` decode fails HARD on the first element that
+    /// `Vec<String>: FromHaskell` decode fails HARD on the first element that
     /// isn't a `Text` Con (`impls.rs`'s list decode propagates via `?`, never
     /// silently filters) — a stricter, more honest failure than the old
     /// hand-decode's `FanMismatch` (which existed only because THAT decode
     /// could silently drop a bad element and had to separately catch the
     /// resulting cardinality drift). Builds a real `[]`/`:` cons list (the
-    /// shape `value_to_json`/`FromCore` actually walk) with a stray `Int` in
+    /// shape `value_to_json`/`FromHaskell` actually walk) with a stray `Int` in
     /// the middle.
     #[test]
     fn classify_hole_rejects_fork_all_with_a_non_text_prompt_element() {

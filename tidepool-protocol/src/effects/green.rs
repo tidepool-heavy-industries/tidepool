@@ -6,7 +6,7 @@
 //! `classify_hole` never decodes a Green verb's payload (`AsyncSpawnWith`'s
 //! body field carries a live closure), so every
 //! live payload field beyond a bare `Int` is bound as
-//! [`crate::schema::RustBinding::CoreValue`] — recognition, not
+//! [`crate::schema::RustBinding::HaskellValue`] — recognition, not
 //! interpretation; the real decode happens at
 //! `SelfHarnessDriver::service_green_hole`.
 //!
@@ -75,7 +75,7 @@ pub fn green() -> Effect {
         type_defs: vec![TypeDef {
             name: "AsyncStatus",
             wire_rust: None,
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
@@ -125,7 +125,7 @@ pub fn green() -> Effect {
                                 HsType::Unit,
                             ),
                         ),
-                        rust: RustBinding::CoreValue,
+                        rust: RustBinding::HaskellValue,
                     },
                 ],
                 ret: HsType::Int,

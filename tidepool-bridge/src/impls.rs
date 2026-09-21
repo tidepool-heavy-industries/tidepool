@@ -1,12 +1,12 @@
 use crate::error::BridgeError;
 use crate::traits::{
-    sealed::{FromCoreSealed, ToCoreSealed},
-    FromCore, ToCore,
+    sealed::{FromHaskellSealed, ToHaskellSealed},
+    FromHaskell, ToHaskell,
 };
 use crate::{shapes, Value};
 use tidepool_repr::{DataConId, DataConTable, Literal};
 
-/// Lookup for hand-written bridge impls (shared by `ToCore`/`FromCore` impls
+/// Lookup for hand-written bridge impls (shared by `ToHaskell`/`FromHaskell` impls
 /// in this file and effect-response list setup in `tidepool-effect`).
 ///
 /// Look up a DataCon by name and arity. Returns `None` — never a guess — when
@@ -27,7 +27,7 @@ pub fn get_resilient(table: &DataConTable, name: &str, arity: u32) -> Option<Dat
             eprintln!(
                 "[bridge] ambiguous unqualified DataCon name {:?} with arity {}: {} \
                  candidates {:?} — refusing to guess; migrate this bridge site to a \
-                 module-qualified lookup (get_by_qualified_name / #[core(module = ...)]).",
+                 module-qualified lookup (get_by_qualified_name / #[haskell(module = ...)]).",
                 ambiguous.name,
                 ambiguous.arity,
                 ambiguous.candidates.len(),
@@ -39,7 +39,7 @@ pub fn get_resilient(table: &DataConTable, name: &str, arity: u32) -> Option<Dat
 }
 
 /// Build a [`BridgeError::TypeMismatch`] naming `expected` and rendering
-/// `got`'s actual shape. The one value-kind formatter for every `FromCore`
+/// `got`'s actual shape. The one value-kind formatter for every `FromHaskell`
 /// impl — hand-written here and derive-macro-generated
 /// (`tidepool_bridge_derive::codegen`) alike — so the "what did we actually
 /// get" wording can't drift between the two.
@@ -94,10 +94,10 @@ pub fn field_decode_error(
     }
 }
 
-impl<T> FromCoreSealed for std::marker::PhantomData<T> {}
-impl<T> ToCoreSealed for std::marker::PhantomData<T> {}
+impl<T> FromHaskellSealed for std::marker::PhantomData<T> {}
+impl<T> ToHaskellSealed for std::marker::PhantomData<T> {}
 
-impl<T> FromCore for std::marker::PhantomData<T> {
+impl<T> FromHaskell for std::marker::PhantomData<T> {
     fn from_value(value: &Value, _table: &DataConTable) -> Result<Self, BridgeError> {
         match value {
             Value::Con(_, fields) if fields.is_empty() => Ok(std::marker::PhantomData),
@@ -111,9 +111,11 @@ impl<T> FromCore for std::marker::PhantomData<T> {
     }
 }
 
-impl<T> ToCore for std::marker::PhantomData<T> {
+impl<T> ToHaskell for std::marker::PhantomData<T> {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
-        // PhantomData has no Core representation; we still need an arity-0 Con as a placeholder when it appears as a derived field. We require "()" specifically rather than picking any arity-0 constructor, since a wrong choice (e.g. False, Nothing) silently corrupts downstream decode.
+        // PhantomData has no Haskell representation; derived fields still need
+        // an arity-0 placeholder. Require "()" because another nullary
+        // constructor would corrupt downstream decoding.
         let id = table
             .get_by_name_arity("()", 0)
             .ok_or_else(|| BridgeError::UnknownDataConName("()".into()))?;
@@ -124,31 +126,31 @@ impl<T> ToCore for std::marker::PhantomData<T> {
 // Box
 
 // Value identity — pass through without conversion.
-impl FromCoreSealed for Value {}
-impl ToCoreSealed for Value {}
+impl FromHaskellSealed for Value {}
+impl ToHaskellSealed for Value {}
 
-impl ToCore for Value {
+impl ToHaskell for Value {
     fn to_value(&self, _table: &DataConTable) -> Result<Value, BridgeError> {
         Ok(self.clone())
     }
 }
 
-impl FromCore for Value {
+impl FromHaskell for Value {
     fn from_value(value: &Value, _table: &DataConTable) -> Result<Self, BridgeError> {
         Ok(value.clone())
     }
 }
 
-impl<T> FromCoreSealed for Box<T> {}
-impl<T> ToCoreSealed for Box<T> {}
+impl<T> FromHaskellSealed for Box<T> {}
+impl<T> ToHaskellSealed for Box<T> {}
 
-impl<T: FromCore> FromCore for Box<T> {
+impl<T: FromHaskell> FromHaskell for Box<T> {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         T::from_value(value, table).map(Box::new)
     }
 }
 
-impl<T: ToCore> ToCore for Box<T> {
+impl<T: ToHaskell> ToHaskell for Box<T> {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         (**self).to_value(table)
     }
@@ -156,10 +158,10 @@ impl<T: ToCore> ToCore for Box<T> {
 
 // Unit
 
-impl FromCoreSealed for () {}
-impl ToCoreSealed for () {}
+impl FromHaskellSealed for () {}
+impl ToHaskellSealed for () {}
 
-impl ToCore for () {
+impl ToHaskell for () {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let id = get_resilient(table, "()", 0)
             .ok_or_else(|| BridgeError::UnknownDataConName("()".into()))?;
@@ -167,7 +169,7 @@ impl ToCore for () {
     }
 }
 
-impl FromCore for () {
+impl FromHaskell for () {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         match value {
             // Mirror `to_value`: only the `()` constructor decodes to unit.
@@ -187,16 +189,16 @@ impl FromCore for () {
 
 /// Bridges Rust `i64` to Haskell `Int#` literal.
 /// Also transparently unwraps `I#(n)` (boxed Int).
-impl FromCoreSealed for i64 {}
-impl ToCoreSealed for i64 {}
+impl FromHaskellSealed for i64 {}
+impl ToHaskellSealed for i64 {}
 
-impl FromCore for i64 {
+impl FromHaskell for i64 {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         shapes::unbox_int(value, table).ok_or_else(|| type_mismatch("LitInt or I#", value))
     }
 }
 
-impl ToCore for i64 {
+impl ToHaskell for i64 {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let id = get_resilient(table, "I#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("I#".into()))?;
@@ -206,16 +208,16 @@ impl ToCore for i64 {
 
 /// Bridges Rust `u64` to Haskell `Word#` literal.
 /// Also transparently unwraps `W#(n)` (boxed Word).
-impl FromCoreSealed for u64 {}
-impl ToCoreSealed for u64 {}
+impl FromHaskellSealed for u64 {}
+impl ToHaskellSealed for u64 {}
 
-impl FromCore for u64 {
+impl FromHaskell for u64 {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         shapes::unbox_word(value, table).ok_or_else(|| type_mismatch("LitWord or W#", value))
     }
 }
 
-impl ToCore for u64 {
+impl ToHaskell for u64 {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let id = get_resilient(table, "W#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("W#".into()))?;
@@ -225,16 +227,16 @@ impl ToCore for u64 {
 
 /// Bridges Rust `f64` to Haskell `Double#` literal.
 /// Also transparently unwraps `D#(n)` (boxed Double).
-impl FromCoreSealed for f64 {}
-impl ToCoreSealed for f64 {}
+impl FromHaskellSealed for f64 {}
+impl ToHaskellSealed for f64 {}
 
-impl FromCore for f64 {
+impl FromHaskell for f64 {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         shapes::unbox_double(value, table).ok_or_else(|| type_mismatch("LitDouble or D#", value))
     }
 }
 
-impl ToCore for f64 {
+impl ToHaskell for f64 {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let id = get_resilient(table, "D#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("D#".into()))?;
@@ -244,10 +246,10 @@ impl ToCore for f64 {
 
 /// Bridges Rust `i32` to Haskell `Int#` literal.
 /// Returns error on overflow/underflow.
-impl FromCoreSealed for i32 {}
-impl ToCoreSealed for i32 {}
+impl FromHaskellSealed for i32 {}
+impl ToHaskellSealed for i32 {}
 
-impl FromCore for i32 {
+impl FromHaskell for i32 {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         let n = i64::from_value(value, table)?;
         if n < i32::MIN as i64 || n > i32::MAX as i64 {
@@ -260,17 +262,17 @@ impl FromCore for i32 {
     }
 }
 
-impl ToCore for i32 {
+impl ToHaskell for i32 {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         (*self as i64).to_value(table)
     }
 }
 
 /// Bridges Rust `bool` to Haskell `Bool` (True/False constructors).
-impl FromCoreSealed for bool {}
-impl ToCoreSealed for bool {}
+impl FromHaskellSealed for bool {}
+impl ToHaskellSealed for bool {}
 
-impl FromCore for bool {
+impl FromHaskell for bool {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         match value {
             Value::Con(id, fields) => {
@@ -296,7 +298,7 @@ impl FromCore for bool {
     }
 }
 
-impl ToCore for bool {
+impl ToHaskell for bool {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let true_id = get_resilient(table, "True", 0)
             .ok_or_else(|| BridgeError::UnknownDataConName("True".into()))?;
@@ -307,16 +309,16 @@ impl ToCore for bool {
 }
 
 /// Also transparently unwraps `C#(c)` (boxed Char).
-impl FromCoreSealed for char {}
-impl ToCoreSealed for char {}
+impl FromHaskellSealed for char {}
+impl ToHaskellSealed for char {}
 
-impl FromCore for char {
+impl FromHaskell for char {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         shapes::unbox_char(value, table).ok_or_else(|| type_mismatch("LitChar or C#", value))
     }
 }
 
-impl ToCore for char {
+impl ToHaskell for char {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let id = get_resilient(table, "C#", 1)
             .ok_or_else(|| BridgeError::UnknownDataConName("C#".into()))?;
@@ -324,10 +326,10 @@ impl ToCore for char {
     }
 }
 
-impl FromCoreSealed for String {}
-impl ToCoreSealed for String {}
+impl FromHaskellSealed for String {}
+impl ToHaskellSealed for String {}
 
-impl FromCore for String {
+impl FromHaskell for String {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         let text_id = get_resilient(table, "Text", 3);
         let nil_id = get_resilient(table, "[]", 0);
@@ -396,7 +398,7 @@ impl FromCore for String {
     }
 }
 
-impl ToCore for String {
+impl ToHaskell for String {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let text_id = get_resilient(table, "Text", 3)
             .ok_or_else(|| BridgeError::UnknownDataConName("Text".into()))?;
@@ -406,10 +408,10 @@ impl ToCore for String {
 
 // Containers
 
-impl<T> FromCoreSealed for Option<T> {}
-impl<T> ToCoreSealed for Option<T> {}
+impl<T> FromHaskellSealed for Option<T> {}
+impl<T> ToHaskellSealed for Option<T> {}
 
-impl<T: FromCore> FromCore for Option<T> {
+impl<T: FromHaskell> FromHaskell for Option<T> {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         let nothing_id = get_resilient(table, "Nothing", 0);
         let just_id = get_resilient(table, "Just", 1);
@@ -447,7 +449,7 @@ impl<T: FromCore> FromCore for Option<T> {
     }
 }
 
-impl<T: ToCore> ToCore for Option<T> {
+impl<T: ToHaskell> ToHaskell for Option<T> {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         match self {
             None => {
@@ -464,10 +466,10 @@ impl<T: ToCore> ToCore for Option<T> {
     }
 }
 
-impl<T> FromCoreSealed for Vec<T> {}
-impl<T> ToCoreSealed for Vec<T> {}
+impl<T> FromHaskellSealed for Vec<T> {}
+impl<T> ToHaskellSealed for Vec<T> {}
 
-impl<T: FromCore> FromCore for Vec<T> {
+impl<T: FromHaskell> FromHaskell for Vec<T> {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         let nil_id =
             get_resilient(table, "[]", 0).ok_or(BridgeError::UnknownDataConName("[]".into()))?;
@@ -513,7 +515,7 @@ impl<T: FromCore> FromCore for Vec<T> {
     }
 }
 
-impl<T: ToCore> ToCore for Vec<T> {
+impl<T: ToHaskell> ToHaskell for Vec<T> {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let nil_id = get_resilient(table, "[]", 0)
             .ok_or_else(|| BridgeError::UnknownDataConName("[]".into()))?;
@@ -528,10 +530,10 @@ impl<T: ToCore> ToCore for Vec<T> {
     }
 }
 
-impl<T, E> FromCoreSealed for Result<T, E> {}
-impl<T, E> ToCoreSealed for Result<T, E> {}
+impl<T, E> FromHaskellSealed for Result<T, E> {}
+impl<T, E> ToHaskellSealed for Result<T, E> {}
 
-impl<T: FromCore, E: FromCore> FromCore for Result<T, E> {
+impl<T: FromHaskell, E: FromHaskell> FromHaskell for Result<T, E> {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         let right_id = get_resilient(table, "Right", 1).or_else(|| get_resilient(table, "Ok", 1));
         let left_id = get_resilient(table, "Left", 1).or_else(|| get_resilient(table, "Err", 1));
@@ -567,7 +569,7 @@ impl<T: FromCore, E: FromCore> FromCore for Result<T, E> {
     }
 }
 
-impl<T: ToCore, E: ToCore> ToCore for Result<T, E> {
+impl<T: ToHaskell, E: ToHaskell> ToHaskell for Result<T, E> {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         match self {
             Ok(x) => {
@@ -588,10 +590,10 @@ impl<T: ToCore, E: ToCore> ToCore for Result<T, E> {
 
 // Tuples
 
-impl<A, B> FromCoreSealed for (A, B) {}
-impl<A, B> ToCoreSealed for (A, B) {}
+impl<A, B> FromHaskellSealed for (A, B) {}
+impl<A, B> ToHaskellSealed for (A, B) {}
 
-impl<A: FromCore, B: FromCore> FromCore for (A, B) {
+impl<A: FromHaskell, B: FromHaskell> FromHaskell for (A, B) {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         // Missing-constructor is a DIFFERENT failure than "this value isn't a
         // pair": the old `pair_id == Some(*id)` fell through to the same
@@ -619,7 +621,7 @@ impl<A: FromCore, B: FromCore> FromCore for (A, B) {
     }
 }
 
-impl<A: ToCore, B: ToCore> ToCore for (A, B) {
+impl<A: ToHaskell, B: ToHaskell> ToHaskell for (A, B) {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let pair_id = get_resilient(table, "(,)", 2)
             .ok_or_else(|| BridgeError::UnknownDataConName("(,)".into()))?;
@@ -630,10 +632,10 @@ impl<A: ToCore, B: ToCore> ToCore for (A, B) {
     }
 }
 
-impl<A, B, C> FromCoreSealed for (A, B, C) {}
-impl<A, B, C> ToCoreSealed for (A, B, C) {}
+impl<A, B, C> FromHaskellSealed for (A, B, C) {}
+impl<A, B, C> ToHaskellSealed for (A, B, C) {}
 
-impl<A: FromCore, B: FromCore, C: FromCore> FromCore for (A, B, C) {
+impl<A: FromHaskell, B: FromHaskell, C: FromHaskell> FromHaskell for (A, B, C) {
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError> {
         // See the 2-tuple impl above: missing-constructor is split out of the
         // type-mismatch arm (#F6).
@@ -660,7 +662,7 @@ impl<A: FromCore, B: FromCore, C: FromCore> FromCore for (A, B, C) {
     }
 }
 
-impl<A: ToCore, B: ToCore, C: ToCore> ToCore for (A, B, C) {
+impl<A: ToHaskell, B: ToHaskell, C: ToHaskell> ToHaskell for (A, B, C) {
     fn to_value(&self, table: &DataConTable) -> Result<Value, BridgeError> {
         let triple_id = get_resilient(table, "(,,)", 3)
             .ok_or_else(|| BridgeError::UnknownDataConName("(,,)".into()))?;

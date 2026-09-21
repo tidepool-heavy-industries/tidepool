@@ -72,21 +72,28 @@ use crate::schema::{
     TypeDef, TypeShape, Validation, Verb, WireDerives,
 };
 use crate::types::WireDerive::{
-    Clone as DClone, Copy as DCopy, Debug as DDebug, Eq as DEq, FromCore as DFromCore,
-    PartialEq as DPartialEq, ToCore as DToCore,
+    Clone as DClone, Copy as DCopy, Debug as DDebug, Eq as DEq, FromHaskell as DFromHaskell,
+    PartialEq as DPartialEq, ToHaskell as DToHaskell,
 };
 
 /// The derive set most Event wire types share: no `Copy` (several carry a
 /// `String`-backed `WorktreeId`/`GitOid`/`BranchName` transitively).
-const WIRE: WireDerives = WireDerives(&[DToCore, DFromCore, DClone, DDebug, DPartialEq, DEq]);
+const WIRE: WireDerives = WireDerives(&[DToHaskell, DFromHaskell, DClone, DDebug, DPartialEq, DEq]);
 /// …plus `Copy`, for the payload-free/scalar-only shapes.
-const WIRE_COPY: WireDerives =
-    WireDerives(&[DToCore, DFromCore, DClone, DCopy, DDebug, DPartialEq, DEq]);
+const WIRE_COPY: WireDerives = WireDerives(&[
+    DToHaskell,
+    DFromHaskell,
+    DClone,
+    DCopy,
+    DDebug,
+    DPartialEq,
+    DEq,
+]);
 /// `SubscriptionId` alone additionally derives `PartialOrd, Ord, Hash` — it is
 /// used as a map/set key in `SubscriptionRegistry`.
 const WIRE_ID_ORD_HASH: WireDerives = WireDerives(&[
-    DToCore,
-    DFromCore,
+    DToHaskell,
+    DFromHaskell,
     DClone,
     DCopy,
     DDebug,
@@ -98,8 +105,8 @@ const WIRE_ID_ORD_HASH: WireDerives = WireDerives(&[
 ]);
 /// `EventId` alone additionally derives `PartialOrd, Ord` (no `Hash`).
 const WIRE_ID_ORD: WireDerives = WireDerives(&[
-    DToCore,
-    DFromCore,
+    DToHaskell,
+    DFromHaskell,
     DClone,
     DCopy,
     DDebug,
@@ -110,9 +117,9 @@ const WIRE_ID_ORD: WireDerives = WireDerives(&[
 ]);
 /// `RepositoryEvent` alone: RET-ONLY (never decoded from Haskell — it appears
 /// solely as `ret "[RepositoryEvent]"`, never in an `args { .. }` clause), so
-/// `FromCore` would be an unreachable impl, not a capability, and it carries a
+/// `FromHaskell` would be an unreachable impl, not a capability, and it carries a
 /// `serde_json::Value` field (`ObservedMessage`'s payload), which has no `Eq`.
-const WIRE_RET_ONLY: WireDerives = WireDerives(&[DToCore, DClone, DDebug, DPartialEq]);
+const WIRE_RET_ONLY: WireDerives = WireDerives(&[DToHaskell, DClone, DDebug, DPartialEq]);
 
 /// `data X = X Int` — an opaque runtime-minted identity. Both Event identities
 /// carry no string policy (`IdentityPayload::Int` requires
@@ -127,7 +134,7 @@ fn identity(
     TypeDef {
         name,
         wire_rust: Some(wire_rust),
-        core_module: None,
+        haskell_module: None,
         shape: TypeShape::Identity {
             payload: IdentityPayload::Int,
             hs_binder: "i",
@@ -229,7 +236,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "EventWatch",
             wire_rust: Some("EvWatch"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
@@ -275,7 +282,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "HeadChangeKind",
             wire_rust: Some("EvHeadChangeKind"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
@@ -325,7 +332,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "HeadChangeReceipt",
             wire_rust: Some("EvHeadChangeReceipt"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -374,7 +381,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "CommitReceipt",
             wire_rust: Some("EvCommitReceipt"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -430,10 +437,10 @@ fn type_defs() -> Vec<TypeDef> {
             name: "Tick",
             // The Rust struct name differs from the Haskell type name — the
             // hand-written block already spelled it `EvTickReceipt`, not
-            // `EvTick`, so `#[core(name = "Tick")]` is needed here too
-            // (`TypeDef::needs_core_name` fires exactly on that mismatch).
+            // `EvTick`, so `#[haskell(name = "Tick")]` is needed here too
+            // (`TypeDef::needs_haskell_name` fires exactly on that mismatch).
             wire_rust: Some("EvTickReceipt"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Record {
                 fields: vec![RecordField {
                     hs_name: "firedAtMs",
@@ -454,7 +461,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "RepositoryEvent",
             wire_rust: Some("EvRepositoryEvent"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
@@ -499,7 +506,7 @@ fn type_defs() -> Vec<TypeDef> {
                 "result. `ObservedMessage` carries a mailbox `Int` and a bare JSON payload;",
                 "the coalesce key does not ride the wire.",
                 "Ret-only (never decoded from Haskell) — it appears exclusively as",
-                "`ret \"[RepositoryEvent]\"`, never in an `args { .. }` clause, so `FromCore`",
+                "`ret \"[RepositoryEvent]\"`, never in an `args { .. }` clause, so `FromHaskell`",
                 "here would be an unreachable impl, not a capability.",
             ],
         },

@@ -77,7 +77,7 @@ pub fn ask() -> Effect {
                 Arg {
                     name: "payload",
                     ty: HsType::Value,
-                    rust: RustBinding::CoreValue,
+                    rust: RustBinding::HaskellValue,
                 },
             ],
             ret: HsType::Unit,

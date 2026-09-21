@@ -1,6 +1,6 @@
 # Haskell extractor and DSL
 
-This directory owns the GHC-to-Core extractor worker and the model-facing
+This directory owns the GHC-to-prepared-STG compiler worker and the model-facing
 `Tidepool` library. Rust owns CLI parsing, daemon/process lifecycle, toolchain
 discovery, cache policy, and artifact decoding.
 

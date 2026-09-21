@@ -233,7 +233,7 @@ pub fn value_to_json(val: &Value, table: &DataConTable, depth: usize) -> serde_j
 
                 // Data.Vector.Vector: worker-wrapper inlines fields as
                 // Vector Int# Int# (Array# a). The Array# contents come from
-                // heap_bridge as Con(shapes::ARRAY_SENTINEL, elems) — a bare
+                // observation as Con(shapes::ARRAY_SENTINEL, elems) — a bare
                 // element vector with no real constructor (see
                 // ARRAY_SENTINEL's contract). Extract and render the elements
                 // directly rather than delegating to value_to_json (which

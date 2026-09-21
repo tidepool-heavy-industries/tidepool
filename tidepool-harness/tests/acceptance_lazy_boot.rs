@@ -16,7 +16,7 @@
 //! other four freer scaffolding constructors (`E`/`Union`/`Leaf`/`Node`) reach
 //! its compiled table only via the transitive DataCon-closure walk over the
 //! `Eff`-typed binder (`collectTransitiveDCons`,
-//! `haskell/src/Tidepool/Translate.hs`). If that walk ever regresses to miss
+//! the compiler worker). If that walk ever regresses to miss
 //! one of the five, the outer session's lazy bootstrap off `render`'s pure
 //! fragment would silently fail to carry the constructor the SUBSEQUENT real
 //! `runLLMTurn` fragment needs on the same machine — this test is what would
@@ -44,7 +44,7 @@ use crate::support;
 fn heap_stats(
     harness: &Harness,
     node: tidepool_harness::tree::NodeId,
-) -> Option<tidepool_codegen::jit_machine::HeapStats> {
+) -> Option<tidepool_codegen::machine::HeapStats> {
     let sid = harness.tree().session_of(node)?;
     harness.tree().registry().peek(sid, Session::heap_stats)?
 }

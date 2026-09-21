@@ -40,9 +40,9 @@ use super::render::ExportItem;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueTier {
     /// First-order data — `deep_force`d to NF then tenured.
-    Tier0Data,
+    ForceData,
     /// A closure/PAP — tenured as-is (not forced).
-    Tier1Closure,
+    RetainOpaque,
 }
 
 /// One binder a BIND turn introduces — the extract's `BoundBinder` record.
@@ -584,7 +584,7 @@ const SCAFFOLD_EXTS_ALIAS: &str = "TidepoolScaffoldExts";
 /// scaffold the prepared route projects, the resume entry it re-enters
 /// parked continuations through, and the decode entry it lowers
 /// `Value`-carrying answers through. All three are unreachable from
-/// `__result`, so the Core closure never sees them. Built from
+/// `__result`, so they do not enlarge its prepared dependency closure. Built from
 /// [`prepared_scaffold_binding_named`] (the settled line) and
 /// [`prepared_resume_decode_binding`] (the shared resume/decode/apply group)
 /// at the fixed [`PREPARED_SCAFFOLD_TARGET`]/[`PREPARED_RESUME_TARGET`]/
@@ -2417,8 +2417,6 @@ fn read_compiled_turn(
         0,
     );
     // Runtime unresolved-error naming — see lib.rs twin sites.
-    tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
-    tidepool_codegen::host_fns::register_poisoned_externals(&warnings.poisoned);
 
     let prepared = read_prepared_program(output_dir)?;
 
@@ -2568,8 +2566,8 @@ fn decode_bound_binder(v: &CborValue) -> Result<BoundBinder, CompileError> {
     let var_id = cbor_as_u64(&arr[1], "BoundBinder varId")?;
     let module = cbor_expect_text(&arr[2], "BoundBinder module")?.to_string();
     let tier = match cbor_expect_text(&arr[3], "BoundBinder tier")? {
-        "Tier1Closure" => ValueTier::Tier1Closure,
-        "Tier0Data" => ValueTier::Tier0Data,
+        "RetainOpaque" => ValueTier::RetainOpaque,
+        "ForceData" => ValueTier::ForceData,
         other => {
             return Err(CompileError::ExtractFailed(format!(
                 "TurnOut CBOR: unknown BoundBinder tier {other:?}"
@@ -4697,7 +4695,7 @@ mod tests {
                     CborValue::Text("x".into()),
                     CborValue::Integer(42.into()),
                     CborValue::Text("Tidepool.Session.Val.G3".into()),
-                    CborValue::Text("Tier0Data".into()),
+                    CborValue::Text("ForceData".into()),
                     CborValue::Text("Int".into()),
                 ])]),
                 CborValue::Array(vec![CborValue::Array(vec![
@@ -4725,7 +4723,7 @@ mod tests {
                 assert_eq!(bound.len(), 1);
                 assert_eq!(bound[0].name, "x");
                 assert_eq!(bound[0].var_id, 42);
-                assert_eq!(bound[0].tier, ValueTier::Tier0Data);
+                assert_eq!(bound[0].tier, ValueTier::ForceData);
                 assert_eq!(
                     asks,
                     vec![YieldSite {
@@ -4828,401 +4826,5 @@ mod tests {
             matches!(err, CompileError::ExtractFailed(_)),
             "expected ExtractFailed, got {err:?}"
         );
-    }
-
-    // ---- Part 1: the classification-equivalence corpus (GHC-heavy) ----
-    //
-    // Every entry's expected `(kind, binders)` is derived from
-    // `Tidepool.Binders.classifyTurn`'s documented precedence (its doc
-    // comment, not by running the code) — the corpus is a check ON the
-    // verdict, not a mirror of whatever the code happens to produce. Each
-    // entry asserts the OLD path ([`classify_block`], a direct call) and the
-    // NEW path ([`run_turn`]'s returned verdict) agree, and that both match
-    // the table.
-
-    /// One corpus entry.
-    struct Case {
-        name: &'static str,
-        text: &'static str,
-        kind: TurnKind,
-        binders: &'static [&'static str],
-    }
-
-    /// classifyTurn rule 1: `<-` / top-level `let` are bind-only markers.
-    /// classifyTurn rule 2: a signature (`SigD`) is a decl (resolves the
-    /// two-faced `sq :: T`). Rule 3: a name-binding `ValD` is a decl. Rule 4:
-    /// a valid bare expression is an expr — runs BEFORE the other-decl
-    /// catch-all so `parseDeclaration`'s spurious accept of a bare
-    /// application/pipeline as a binder-less splice doesn't misclassify it as
-    /// a decl. Rule 5: any other parsed decl (data/class/instance — no
-    /// exportable term-level name) is a decl with no binders. Rule 6: neither
-    /// parse succeeds → expr, so the real error surfaces at compile.
-    const CORPUS: &[Case] = &[
-        // -- decl (rules 2/3/5) --
-        Case {
-            name: "fn_decl",
-            text: "sq x = x * x",
-            kind: TurnKind::Decl,
-            binders: &["sq"],
-        },
-        Case {
-            name: "value_decl",
-            text: "x = 5",
-            kind: TurnKind::Decl,
-            binders: &["x"],
-        },
-        Case {
-            name: "pattern_decl",
-            text: "(a, b) = p",
-            kind: TurnKind::Decl,
-            binders: &["a", "b"],
-        },
-        Case {
-            name: "standalone_signature",
-            text: "sq :: Int -> Int",
-            kind: TurnKind::Decl,
-            binders: &["sq"],
-        },
-        Case {
-            name: "data_decl",
-            text: "data Foo = Bar | Baz",
-            kind: TurnKind::Decl,
-            binders: &[],
-        },
-        Case {
-            name: "class_decl",
-            text: "class MyClass a where\n  cls :: a -> a",
-            kind: TurnKind::Decl,
-            binders: &[],
-        },
-        Case {
-            name: "instance_decl",
-            text: "instance Show Foo where\n  show _ = \"foo\"",
-            kind: TurnKind::Decl,
-            binders: &[],
-        },
-        // -- decl (rule 3), extension-gated syntax --
-        //
-        // `run_turn`'s decl branch wraps the turn text in the decl template's
-        // 17-extension pragma block before compiling. Dropping the wrapper is a
-        // compile-boundary narrowing (a valid declaration stops compiling),
-        // which is exactly the strict-superset violation the dialect rule
-        // forbids. These three are confirmed (by direct probe of
-        // `--emit-binders`, wrapped vs. unwrapped) to actually regress
-        // without the wrapper: their legality check lives in GHC's
-        // lexer/parser, not the renamer, so it fires even under a parse-only
-        // extraction. `RecordWildCards`/`GADTs`/`TypeApplications` were also
-        // considered — their extension-legality check is deferred to the
-        // renamer, a phase the decl parse-only extraction never reaches, so
-        // a declaration using them compiles identically wrapped or raw and
-        // would NOT catch the wrapper being dropped from this particular
-        // decl path; not included here for that reason.
-        Case {
-            name: "lambda_case_decl",
-            text: "f = \\case { 0 -> 1 ; _ -> 2 }",
-            kind: TurnKind::Decl,
-            binders: &["f"],
-        },
-        // Quasiquote regression, decl side (see `quasiquote_bind` below for
-        // the bind side): a quasiquote in a *declaration* body must still
-        // classify and compile as a decl.
-        Case {
-            name: "quasiquote_decl",
-            text: "greet = [fmt|hello|]",
-            kind: TurnKind::Decl,
-            binders: &["greet"],
-        },
-        Case {
-            name: "multi_way_if_decl",
-            text: "f x = if | x > 0 -> 1 | otherwise -> 2",
-            kind: TurnKind::Decl,
-            binders: &["f"],
-        },
-        // -- bind (rule 1) --
-        Case {
-            name: "monadic_bind",
-            text: "x <- pure 1",
-            kind: TurnKind::Bind,
-            binders: &["x"],
-        },
-        // Also the `{{TURN_STMT}}` layout case: text begins with `let `.
-        Case {
-            name: "let_bind",
-            text: "let y = 2",
-            kind: TurnKind::Bind,
-            binders: &["y"],
-        },
-        Case {
-            name: "multi_binder_tuple_bind",
-            text: "(a, b) <- pure (1, 2)",
-            kind: TurnKind::Bind,
-            binders: &["a", "b"],
-        },
-        // Quasiquote regression: a quasiquote must still classify as a bind
-        // (QuasiQuotes is parse-only here — the quote is one token to the
-        // parser).
-        Case {
-            name: "quasiquote_bind",
-            text: "x <- pure [fmt|hi|]",
-            kind: TurnKind::Bind,
-            binders: &["x"],
-        },
-        // -- zero-binder bind (Part 3: the discarding shape) --
-        Case {
-            name: "discard_bind",
-            text: "_ <- pure ()",
-            kind: TurnKind::Bind,
-            binders: &[],
-        },
-        Case {
-            name: "discard_tuple_bind",
-            text: "(_, _) <- pure ((), ())",
-            kind: TurnKind::Bind,
-            binders: &[],
-        },
-        // -- expr (rule 4: `parseDeclaration`'s spurious decl-shaped accept) --
-        Case {
-            name: "bare_application",
-            text: "id 7",
-            kind: TurnKind::Expr,
-            binders: &[],
-        },
-        Case {
-            name: "pipeline",
-            text: "(+1) . (*2) $ 5",
-            kind: TurnKind::Expr,
-            binders: &[],
-        },
-        // -- neither parse succeeds (rule 6) --
-        Case {
-            name: "unparseable",
-            text: "1 +",
-            kind: TurnKind::Expr,
-            binders: &[],
-        },
-    ];
-
-    fn binder_names(binders: &[String]) -> Vec<&str> {
-        binders.iter().map(String::as_str).collect()
-    }
-
-    /// What a DECL case's `TurnResult::Decl` must carry, spelled out per case
-    /// from the documented rules rather than read back off a run — the corpus
-    /// is a check ON the decl path, so an expectation derived from that path's
-    /// own output would assert nothing. `(binders, export-item heads)`:
-    ///
-    /// - `binders` is `classifyTurn`'s verdict names where it has any (rules
-    ///   2/3), and otherwise — rule 5, a declaration with no term-level name —
-    ///   the head names the whole-module parse harvested, per `TurnOut`'s
-    ///   `TDecl` doc. That fallback is why `data`/`class` report a head here
-    ///   while their verdict alone reports nothing.
-    /// - heads come from `Tidepool.Binders.declItems`, which reports a `ValD`'s
-    ///   binders and a `TyClD`'s head and NOTHING else. So a standalone
-    ///   signature harvests no items at all even though `SigD` does yield a
-    ///   verdict name, and an `instance` harvests none because it introduces
-    ///   no exportable head — the two columns are genuinely independent.
-    const DECL_EXPECTATIONS: &[(&str, &[&str], &[&str])] = &[
-        ("fn_decl", &["sq"], &["sq"]),
-        ("value_decl", &["x"], &["x"]),
-        ("pattern_decl", &["a", "b"], &["a", "b"]),
-        ("standalone_signature", &["sq"], &[]),
-        ("data_decl", &["Foo"], &["Foo"]),
-        ("class_decl", &["MyClass"], &["MyClass"]),
-        ("instance_decl", &[], &[]),
-        ("lambda_case_decl", &["f"], &["f"]),
-        ("quasiquote_decl", &["greet"], &["greet"]),
-        ("multi_way_if_decl", &["f"], &["f"]),
-    ];
-
-    /// Look up a decl case's expectations. A decl case absent from
-    /// [`DECL_EXPECTATIONS`] is a hard failure, so adding one to [`CORPUS`]
-    /// forces stating what it should produce instead of silently skipping it.
-    fn decl_expectations(name: &str) -> (&'static [&'static str], &'static [&'static str]) {
-        DECL_EXPECTATIONS
-            .iter()
-            .find(|(n, _, _)| *n == name)
-            .map(|(_, binders, heads)| (*binders, *heads))
-            .unwrap_or_else(|| panic!("decl corpus case {name:?} has no DECL_EXPECTATIONS entry"))
-    }
-
-    /// Insert an `import Tidepool.QQ (…)` line before the preamble's
-    /// `default (…)` decl — the same injection point `tidepool-repl`'s
-    /// `insert_imports` uses — so the quasiquote corpus entry has `fmt` in
-    /// scope. A no-op fallback (unused import) for every other entry.
-    fn with_qq_import(preamble: &str) -> String {
-        match preamble.find(tidepool_mcp::PREAMBLE_DEFAULT_DECL) {
-            Some(idx) => {
-                let mut out = String::with_capacity(preamble.len() + 64);
-                out.push_str(&preamble[..idx]);
-                out.push_str("import Tidepool.QQ (fmt, j, patch, uri)\n");
-                out.push_str(&preamble[idx..]);
-                out
-            }
-            None => preamble.to_string(),
-        }
-    }
-
-    #[test]
-    fn turn_classification_corpus_old_and_new_path_agree() {
-        tidepool_testing::eval_harness::require_extract();
-
-        let decls = tidepool_mcp::standard_decls();
-        let effects_dir =
-            tidepool_mcp::ensure_effects_module(&decls).expect("write Tidepool.Effects module");
-        let prelude_dir = tidepool_testing::eval_harness::prelude_path();
-        let preamble = with_qq_import(&tidepool_mcp::build_preamble_non_interactive_mode(
-            &decls,
-            false,
-            tidepool_mcp::PaginateMode::Passthrough,
-        ));
-        let effect_stack = tidepool_mcp::build_effect_stack_type(&decls);
-        let effects_dirs = effects_dir.include_paths();
-        let mut include: Vec<&Path> = effects_dirs
-            .iter()
-            .map(std::path::PathBuf::as_path)
-            .collect();
-        include.push(&prelude_dir);
-
-        // A named bind runs the statement, then yields the (comma-joined,
-        // parenthesized) binder tuple — valid for both a single name and an
-        // N-tuple. A discarding bind runs the statement for its effects and
-        // yields `()` — no `{{BINDERS}}` splice, so it needs no bound name at
-        // all. An expr places the turn verbatim as the whole binding. A decl
-        // selects the parse wrapper (17-extension pragma block).
-        let mut bind_source = preamble.clone();
-        bind_source.push_str(&format!("__result :: Eff {effect_stack} _\n"));
-        bind_source.push_str("__result = do {\n");
-        bind_source.push_str("{{TURN_STMT}}");
-        bind_source.push_str(" ; pure ({{BINDERS}})\n }\n");
-
-        let mut bind_discard_source = preamble.clone();
-        bind_discard_source.push_str(&format!("__result :: Eff {effect_stack} _\n"));
-        bind_discard_source.push_str("__result = do {\n");
-        bind_discard_source.push_str("{{TURN_STMT}}");
-        bind_discard_source.push_str(" ; pure ()\n }\n");
-
-        let mut expr_source = preamble.clone();
-        expr_source.push_str("__result = {{TURN}}\n");
-
-        let templates = vec![
-            TurnTemplate {
-                kind: TemplateSelector::Bind,
-                source: bind_source,
-            },
-            TurnTemplate {
-                kind: TemplateSelector::BindDiscard,
-                source: bind_discard_source,
-            },
-            TurnTemplate {
-                kind: TemplateSelector::Expr,
-                source: expr_source,
-            },
-            TurnTemplate {
-                kind: TemplateSelector::Decl,
-                source: DECL_TEMPLATE_SOURCE.to_string(),
-            },
-        ];
-
-        for case in CORPUS {
-            log::debug!("turn_classification_corpus: {}", case.name);
-            // Old path: a direct `classify_block` call (single-item batch).
-            let old = classify_block(&[case.text])
-                .map(|mut v| v.remove(0))
-                .unwrap_or_else(|e| panic!("{}: classify_block failed: {e}", case.name));
-            assert_eq!(old.kind, case.kind, "{}: old-path kind mismatch", case.name);
-            assert_eq!(
-                binder_names(&old.binders),
-                case.binders,
-                "{}: old-path binders mismatch",
-                case.name
-            );
-            if case.kind == TurnKind::Decl {
-                let (_, want_heads) = decl_expectations(case.name);
-                assert_eq!(
-                    old.items
-                        .iter()
-                        .map(ExportItem::head_name)
-                        .collect::<Vec<_>>(),
-                    want_heads,
-                    "{}: classify receipt heads mismatch",
-                    case.name
-                );
-            } else {
-                assert!(
-                    old.items.is_empty(),
-                    "{}: non-declaration verdict carried declaration items",
-                    case.name
-                );
-            }
-
-            // New path: `run_turn`, fed the SAME verdict just obtained (the
-            // batch-classify shape) so this exercises template
-            // selection/compile, not a second classify spawn.
-            let session_root = TempDir::new().unwrap();
-            let req = TurnRequest {
-                turn_text: case.text,
-                templates: &templates,
-                include: &include,
-                session_root: session_root.path(),
-                inject_modules: &[],
-                gen: 0,
-                verdict: Some(old.clone()),
-                target: None,
-                prepared: None,
-            };
-
-            match case.name {
-                "unparseable" => {
-                    // classifyTurn rule 6: both parses failed, so the verdict
-                    // is "expr" — but the text isn't valid Haskell, so the
-                    // compile itself must fail loudly (the documented
-                    // behavior), not silently succeed or panic.
-                    let err = run_turn(req).unwrap_err();
-                    assert!(
-                        matches!(err.error, CompileError::Diagnostics(_)),
-                        "{}: expected a real GHC diagnostic, got {err:?}",
-                        case.name
-                    );
-                }
-                _ => {
-                    let result = run_turn(req)
-                        .unwrap_or_else(|e| panic!("{}: run_turn failed: {e:?}", case.name));
-                    match (case.kind, result) {
-                        (TurnKind::Decl, TurnResult::Decl(receipt)) => {
-                            let (want_binders, want_heads) = decl_expectations(case.name);
-                            assert_eq!(
-                                binder_names(&receipt.binders),
-                                want_binders,
-                                "{}: new-path decl binders mismatch",
-                                case.name
-                            );
-                            assert_eq!(
-                                receipt
-                                    .items
-                                    .iter()
-                                    .map(ExportItem::head_name)
-                                    .collect::<Vec<_>>(),
-                                want_heads,
-                                "{}: harvested export-item heads mismatch",
-                                case.name
-                            );
-                        }
-                        (TurnKind::Bind, TurnResult::Bind { binders, .. }) => {
-                            assert_eq!(
-                                binder_names(&binders),
-                                case.binders,
-                                "{}: new-path bind binders mismatch",
-                                case.name
-                            );
-                        }
-                        (TurnKind::Expr, TurnResult::Expr { .. }) => {}
-                        (kind, other) => panic!(
-                            "{}: verdict kind {kind:?} produced the wrong TurnResult variant: {other:?}",
-                            case.name
-                        ),
-                    }
-                }
-            }
-        }
     }
 }

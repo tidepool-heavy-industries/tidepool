@@ -6,14 +6,13 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Intermediate representation for the Tidepool compiler"
+description = "Prepared execution schemas and metadata for Tidepool"
 readme = "../README.md"
 
 [dependencies]
 recursion.workspace = true
 ciborium.workspace = true
 thiserror.workspace = true
-rustc-hash.workspace = true
 serde_json.workspace = true
 tidepool-atomic-write.workspace = true
 

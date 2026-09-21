@@ -151,17 +151,6 @@ BATTERY_DAEMON_START_FAILED=0
 BATTERY_ARTIFACT_DIR=""
 BATTERY_NEXTEST_LOG=""
 
-# Test selection for battery entry points: every tier except Core-engine tests
-# (the `battery` nextest profile's default filter), or literally everything
-# with TIDEPOOL_CORE_TESTS=1.
-battery_selection_args() {
-  if [[ "${TIDEPOOL_CORE_TESTS:-0}" == 1 ]]; then
-    BATTERY_SELECTION=(--ignore-default-filter)
-  else
-    BATTERY_SELECTION=(--profile battery)
-  fi
-}
-
 # Failure artifacts for battery entry points. Successful runs leave nothing;
 # test or daemon-startup failures retain the exact command, nextest output,
 # toolchain report, and compile-daemon log under target/tidepool-test-runs/.

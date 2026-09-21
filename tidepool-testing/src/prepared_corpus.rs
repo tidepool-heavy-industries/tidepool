@@ -1,10 +1,10 @@
-//! Stage evidence for the prepared-STG semantic corpus, never Core execution.
+//! Stage evidence for the prepared-STG semantic corpus.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{atomic::AtomicBool, Arc};
 use tidepool_bridge::shapes::unbox_char;
-use tidepool_bridge::{FromCore, Value};
+use tidepool_bridge::{FromHaskell, Value};
 use tidepool_codegen::prepared_program::{admit_prepared, CompiledProgram, RunOptions};
 use tidepool_repr::execution_schema::{
     link_program, parse_program, DecodeLimits, MachineImports, ProgramRequirements,
@@ -110,14 +110,14 @@ impl OracleScope {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ProjectionManifest {
     pub version: u32,
-    pub legacy_targets: Vec<LegacyTargetMapping>,
+    pub source_targets: Vec<SourceTargetMapping>,
     pub programs: Vec<ProjectionRecord>,
 }
 
 /// Old artifact names are coverage provenance, not STG entry identities.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct LegacyTargetMapping {
-    pub legacy_name: String,
+pub struct SourceTargetMapping {
+    pub source_name: String,
     pub identity: Option<SourceIdentity>,
 }
 
@@ -1447,9 +1447,9 @@ mod tests {
         let cyclic: Expectation =
             serde_json::from_value(serde_json::json!({"kind": "cyclic_observation"})).unwrap();
         assert!(matches!(cyclic, Expectation::CyclicObservation));
-        let legacy: Expectations =
+        let older_format: Expectations =
             serde_json::from_value(serde_json::json!({"source_revision": "x", "expectations": {}}))
                 .unwrap();
-        assert!(legacy.source_tops.is_none());
+        assert!(older_format.source_tops.is_none());
     }
 }

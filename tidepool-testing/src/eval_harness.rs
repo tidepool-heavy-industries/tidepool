@@ -540,7 +540,7 @@ pub mod mock {
     use std::sync::LazyLock;
 
     use tidepool_bridge::Value;
-    use tidepool_bridge_derive::FromCore;
+    use tidepool_bridge_derive::FromHaskell;
     use tidepool_bridge_effects::{FileMeta, Proc};
     use tidepool_effect::{EffectContext, EffectError, EffectHandler, Response};
 
@@ -632,10 +632,10 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
     }
 
     // 0: Console
-    #[derive(FromCore)]
+    #[derive(FromHaskell)]
     #[allow(dead_code)]
     pub enum ConsoleReq {
-        #[core(name = "Print")]
+        #[haskell(name = "Print")]
         Print(String),
     }
     pub struct MockConsole;
@@ -652,16 +652,16 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
     }
 
     // 1: KV — stores serde_json::Value like the real MCP.
-    #[derive(FromCore)]
+    #[derive(FromHaskell)]
     #[allow(dead_code)]
     pub enum KvReq {
-        #[core(name = "KvGet")]
+        #[haskell(name = "KvGet")]
         KvGet(String),
-        #[core(name = "KvSet")]
+        #[haskell(name = "KvSet")]
         KvSet(String, Value),
-        #[core(name = "KvDelete")]
+        #[haskell(name = "KvDelete")]
         KvDelete(String),
-        #[core(name = "KvKeys")]
+        #[haskell(name = "KvKeys")]
         KvKeys,
     }
     #[derive(Default)]
@@ -696,18 +696,18 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
     }
 
     // 2: FsRead (stub)
-    #[derive(FromCore)]
+    #[derive(FromHaskell)]
     #[allow(dead_code)]
     pub enum FsReadReq {
-        #[core(name = "FsRead")]
+        #[haskell(name = "FsRead")]
         FsRead(String),
-        #[core(name = "FsListDir")]
+        #[haskell(name = "FsListDir")]
         FsListDir(String),
-        #[core(name = "FsGlob")]
+        #[haskell(name = "FsGlob")]
         FsGlob(String),
-        #[core(name = "FsExists")]
+        #[haskell(name = "FsExists")]
         FsExists(String),
-        #[core(name = "FsMetadata")]
+        #[haskell(name = "FsMetadata")]
         FsMetadata(String),
     }
     pub struct MockFsRead;
@@ -731,10 +731,10 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
     }
 
     // 3: FsWrite (stub)
-    #[derive(FromCore)]
+    #[derive(FromHaskell)]
     #[allow(dead_code)]
     pub enum FsWriteReq {
-        #[core(name = "FsWrite")]
+        #[haskell(name = "FsWrite")]
         FsWrite(String, String),
     }
     pub struct MockFsWrite;
@@ -750,14 +750,14 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
     }
 
     // 4: Http (stub)
-    #[derive(FromCore)]
+    #[derive(FromHaskell)]
     #[allow(dead_code)]
     pub enum HttpReq {
-        #[core(name = "HttpGet")]
+        #[haskell(name = "HttpGet")]
         HttpGet(String),
-        #[core(name = "HttpPost")]
+        #[haskell(name = "HttpPost")]
         HttpPost(String, Value),
-        #[core(name = "HttpRequest")]
+        #[haskell(name = "HttpRequest")]
         HttpRequest(String, String, Vec<(String, String)>, String),
     }
     pub struct MockHttp;
@@ -774,14 +774,14 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
     }
 
     // 5: Exec (stub)
-    #[derive(FromCore)]
+    #[derive(FromHaskell)]
     #[allow(dead_code)]
     pub enum ExecReq {
-        #[core(name = "Run")]
+        #[haskell(name = "Run")]
         Run(String),
-        #[core(name = "RunIn")]
+        #[haskell(name = "RunIn")]
         RunIn(String, String),
-        #[core(name = "RunJson")]
+        #[haskell(name = "RunJson")]
         RunJson(String),
     }
     pub struct MockExec;
@@ -800,16 +800,16 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
     }
 
     // 7: Git (stub)
-    #[derive(FromCore)]
+    #[derive(FromHaskell)]
     #[allow(dead_code)]
     pub enum GitReq {
-        #[core(name = "GitLog")]
+        #[haskell(name = "GitLog")]
         GitLog(i64),
-        #[core(name = "GitStatus")]
+        #[haskell(name = "GitStatus")]
         GitStatus,
-        #[core(name = "GitDiffStat")]
+        #[haskell(name = "GitDiffStat")]
         GitDiffStat(String),
-        #[core(name = "GitShow")]
+        #[haskell(name = "GitShow")]
         GitShow(String),
     }
     pub struct MockGit;
@@ -835,12 +835,12 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
     }
 
     // 6: Llm (stub)
-    #[derive(FromCore)]
+    #[derive(FromHaskell)]
     #[allow(dead_code)]
     pub enum LlmReq {
-        #[core(name = "LlmChat")]
+        #[haskell(name = "LlmChat")]
         LlmChat(String),
-        #[core(name = "LlmStructured")]
+        #[haskell(name = "LlmStructured")]
         LlmStructured(String, Value),
     }
     pub struct MockLlm;
@@ -857,10 +857,10 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
     }
 
     // 8: Time (stub)
-    #[derive(FromCore)]
+    #[derive(FromHaskell)]
     #[allow(dead_code)]
     pub enum TimeReq {
-        #[core(name = "TimeNow")]
+        #[haskell(name = "TimeNow")]
         TimeNow,
     }
     pub struct MockTime;
@@ -874,10 +874,10 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
     }
 
     // 9: Entropy (stub — fixed deterministic seed, never real OS entropy).
-    #[derive(FromCore)]
+    #[derive(FromHaskell)]
     #[allow(dead_code)]
     pub enum EntropyReq {
-        #[core(name = "EntropySeed")]
+        #[haskell(name = "EntropySeed")]
         EntropySeed,
     }
     pub struct MockEntropy;
@@ -891,10 +891,10 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
     }
 
     // 10: Ask (stub)
-    #[derive(FromCore)]
+    #[derive(FromHaskell)]
     #[allow(dead_code)]
     pub enum AskReq {
-        #[core(name = "Ask")]
+        #[haskell(name = "Ask")]
         Ask(String),
     }
     pub struct MockAsk;
@@ -908,10 +908,10 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
     // 11: RunLLMTurn (stub — self-iterating-harness WS-B split this out of
     // Ask; this mock harness dispatches every tag through the handler HList
     // (no suspend-tag threshold), so it needs its own stub same as MockAsk).
-    #[derive(FromCore)]
+    #[derive(FromHaskell)]
     #[allow(dead_code)]
     pub enum RunLLMTurnReq {
-        #[core(name = "RunLLMTurnStub")]
+        #[haskell(name = "RunLLMTurnStub")]
         RunLLMTurnStub(String),
     }
     pub struct MockRunLLMTurn;
@@ -928,12 +928,12 @@ type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy
 
     // 12: Fork (stub — the answerer parallel-delegation effect; same
     // dispatch-every-tag reasoning as MockRunLLMTurn).
-    #[derive(FromCore)]
+    #[derive(FromHaskell)]
     #[allow(dead_code)]
     pub enum ForkReq {
-        #[core(name = "ForkWith")]
+        #[haskell(name = "ForkWith")]
         ForkWith(i64, String),
-        #[core(name = "ForkAllWith")]
+        #[haskell(name = "ForkAllWith")]
         ForkAllWith(i64, Vec<String>),
     }
     pub struct MockFork;

@@ -2856,7 +2856,7 @@ impl Harness {
         // the finalized product — a record of
         // functions — must route through the handle-delivery path exactly
         // like a top-level closure.
-        tidepool_codegen::heap_bridge::field_contains_closure_sentinel(&pending.raw_request, 1)
+        tidepool_codegen::observation::field_contains_closure_sentinel(&pending.raw_request, 1)
     }
 
     /// Reopen a `Done` answerer node (`Done` → `Running`) for another turn —
@@ -2937,7 +2937,7 @@ impl Harness {
     /// no operator interaction. Mirrors [`Self::answer_dialog`]'s shape
     /// (lease, routing check, `resume_parent`) — the same audited resume
     /// path a mechanical dialog answer uses — but the resumed value is the
-    /// REAL Core `()` ([`tidepool_bridge::ToCore`] for `()`), not the
+    /// REAL Core `()` ([`tidepool_bridge::ToHaskell`] for `()`), not the
     /// aeson-wire `Value` `answer_dialog`'s submission bridges to:
     /// `NoteWith`'s continuation is `() -> M ()`, not `Value -> M Value`, so
     /// routing it through `json_answer_to_value`'s aeson-`Null` bridge would
@@ -2959,7 +2959,7 @@ impl Harness {
         }
 
         let table = pending.suspend_table.clone();
-        use tidepool_bridge::ToCore;
+        use tidepool_bridge::ToHaskell;
         let value = ()
             .to_value(&table)
             .map_err(|e| EngineError::Run(format!("bridge unit answer to Value: {e}")))?;

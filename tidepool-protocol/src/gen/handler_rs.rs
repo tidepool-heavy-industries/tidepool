@@ -75,9 +75,9 @@ fn body(e: &Effect) -> String {
     // `attr_fn_like_width` (70), and a generated `.rs` file has to be a fixed
     // point of `cargo fmt` or the format gate and the golden gate fight.
     if e.errors.is_some() {
-        out.push_str("use tidepool_bridge_derive::{FromCore, ToCore};\n\n");
+        out.push_str("use tidepool_bridge_derive::{FromHaskell, ToHaskell};\n\n");
     } else {
-        out.push_str("use tidepool_bridge_derive::FromCore;\n\n");
+        out.push_str("use tidepool_bridge_derive::FromHaskell;\n\n");
     }
 
     // --- the typed failure ADT -------------------------------------------
@@ -88,10 +88,12 @@ fn body(e: &Effect) -> String {
         ));
         out.push_str("///\n");
         out.push_str(
-            "/// `FromCore` is for test-side decoding of a `Left err`; the error is only\n",
+            "/// `FromHaskell` is for test-side decoding of a `Left err`; the error is only\n",
         );
-        out.push_str("/// ever SENT (`ToCore`) in production. `Debug` backs the `Display` path.\n");
-        out.push_str("#[derive(ToCore, FromCore, Debug, PartialEq, Eq)]\n");
+        out.push_str(
+            "/// ever SENT (`ToHaskell`) in production. `Debug` backs the `Display` path.\n",
+        );
+        out.push_str("#[derive(ToHaskell, FromHaskell, Debug, PartialEq, Eq)]\n");
         out.push_str(&format!("pub enum {} {{\n", adt.name));
         for v in &adt.variants {
             out.push_str(&format!("    /// {}\n", v.doc));
@@ -114,7 +116,7 @@ fn body(e: &Effect) -> String {
         e.name
     ));
     out.push_str("#[allow(clippy::enum_variant_names)]\n");
-    out.push_str("#[derive(FromCore)]\n");
+    out.push_str("#[derive(FromHaskell)]\n");
     out.push_str(&format!("pub enum {} {{\n", e.req_enum));
     for v in &e.verbs {
         let tys: Vec<String> = v

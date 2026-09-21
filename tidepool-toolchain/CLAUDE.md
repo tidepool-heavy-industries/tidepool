@@ -57,9 +57,8 @@ that crate owns binding and execution, while this crate owns cache policy.
 The key is computed from `ExtractCmd::argv()` plus the opaque
 `CompilerIdentity` returned by binding, so it stays invocation-shaped without
 reimplementing wrapper, PATH, Nix, daemon, worker, or GHC identity policy.
-This crate sits one layer above `tidepool-extract-cmd` because it also needs
-Cranelift-adjacent dependencies (`tidepool-codegen`, for
-`register_var_names`/`register_poisoned_externals`).
+This crate sits one layer above `tidepool-extract-cmd` because it also
+assembles and validates prepared artifacts with `tidepool-codegen`.
 
 Session-scope compiles (`--inject-val`/`--session-root`,
 which read per-session mutable directories) are excluded from the invocation

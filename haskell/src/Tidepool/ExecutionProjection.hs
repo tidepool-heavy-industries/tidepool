@@ -185,7 +185,7 @@ projectPrepared context modules =
 
 -- | Corpus tooling enumerates the same identities that projection resolves,
 -- before any target filtering. Preserve module/binding emission order and never
--- infer STG names from filenames emitted by the retired Core translator.
+-- infer STG names from artifact filenames.
 preparedTopIdentities :: [PreparedModule] -> Either ProjectionError [SymbolIdentity]
 preparedTopIdentities modules = traverse identityOf
   [ binder

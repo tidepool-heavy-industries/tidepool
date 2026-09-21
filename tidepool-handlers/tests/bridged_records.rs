@@ -1,6 +1,6 @@
 //! Single-source-of-truth guard for the Rust↔Haskell bridged records.
 //!
-//! Each in-scope wire-record struct derives `CoreRecord`, so its Haskell `data`
+//! Each in-scope wire-record struct derives `HaskellRecord`, so its Haskell `data`
 //! declaration is GENERATED from the Rust struct. This test:
 //!
 //!   1. pins each generated decl to its exact expected Haskell text (the
@@ -11,10 +11,10 @@
 //!
 //! A third, separate guard (bottom of this file) covers `Tidepool.Records.
 //! Stable` — the stable home for `FsError`/`FileRead`/`GitError`/`LlmError`/
-//! `HttpError`, which can't go through the `CoreRecord` pipeline above (see
+//! `HttpError`, which can't go through the `HaskellRecord` pipeline above (see
 //! `tidepool-mcp/src/fs_stable.rs`) but needs the exact same drift protection.
 
-use tidepool_bridge::CoreRecord;
+use tidepool_bridge::HaskellRecord;
 use tidepool_handlers::{
     bridged_records_module, GitCommit, GitCommitDeltas, GitFileDelta, GitStatusEntry,
 };
@@ -78,7 +78,7 @@ fn bridged_records_module_matches_committed_file() {
 
 // --- 3. `Tidepool.Records.Stable` — the stable home for `errors` ADTs. -----
 //
-// Not `CoreRecord`-derived (see `tidepool-mcp/src/fs_stable.rs` for why:
+// Not `HaskellRecord`-derived (see `tidepool-mcp/src/fs_stable.rs` for why:
 // each Rust enum is codegenerated inside THIS crate, so
 // `tidepool-bridge-effects`, a LOW crate, has no path back to it). Each
 // constant there hand-carries the SAME variant list its effect def's

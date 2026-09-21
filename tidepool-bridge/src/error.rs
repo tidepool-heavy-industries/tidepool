@@ -1,7 +1,7 @@
 use thiserror::Error;
 use tidepool_repr::DataConId;
 
-/// Errors that can occur when bridging between Rust types and Core Values.
+/// Errors that can occur when bridging between Rust types and materialized Haskell values.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum BridgeError {
     /// The outer constructor is unknown or does not belong to the decoded type.
@@ -11,7 +11,7 @@ pub enum BridgeError {
     #[error("Unknown DataCon name: {0}")]
     UnknownDataConName(String),
     /// Lookup by (name, arity) failed — no constructor with this name has the
-    /// expected representation arity. Emitted by derived `FromCore`/`ToCore`
+    /// expected representation arity. Emitted by derived `FromHaskell`/`ToHaskell`
     /// impls to disambiguate constructors sharing an unqualified name.
     #[error("Unknown DataCon name: {name} (arity {arity})")]
     UnknownDataConNameArity {
@@ -24,11 +24,11 @@ pub enum BridgeError {
     /// insertion order would otherwise silently decide which one is used
     /// (the class of bug that let a wrong-type `Value::Con` reach the
     /// runtime with metadata/field arity disagreeing). Emitted by derived
-    /// `FromCore`/`ToCore` impls instead of picking a candidate arbitrarily;
-    /// disambiguate with a `#[core(module = "...")]` attribute.
+    /// `FromHaskell`/`ToHaskell` impls instead of picking a candidate arbitrarily;
+    /// disambiguate with a `#[haskell(module = "...")]` attribute.
     #[error(
         "ambiguous DataCon name+arity: {name} (arity {arity}) matches {candidates:?} — \
-         use a module-qualified #[core(module = \"...\")] attribute or \
+         use a module-qualified #[haskell(module = \"...\")] attribute or \
          get_by_qualified_name to disambiguate"
     )]
     AmbiguousDataConNameArity {
@@ -41,8 +41,8 @@ pub enum BridgeError {
         candidates: Vec<String>,
     },
     /// Lookup by module-qualified name failed. Emitted by derived
-    /// `FromCore`/`ToCore` impls when a variant carries a
-    /// `#[core(module = "...", name = "...")]` attribute and the computed
+    /// `FromHaskell`/`ToHaskell` impls when a variant carries a
+    /// `#[haskell(module = "...", name = "...")]` attribute and the computed
     /// `<module>.<name>` is absent from the `DataConTable`. Used to
     /// disambiguate constructors that share both unqualified name and arity
     /// across source modules (e.g. `Pattern.Memory.Read` vs

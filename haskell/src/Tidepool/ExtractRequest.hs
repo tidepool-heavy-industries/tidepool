@@ -28,7 +28,6 @@ data RequestField
   | OutputDir FilePath
   | Target String
   | Targets [String]
-  | DumpCore
   | TargetModuleOnly
   | Include FilePath
   | BindGen Word64
@@ -66,7 +65,6 @@ data WorkerRequest = WorkerRequest
   { requestOutDir :: Maybe FilePath
   , requestTarget :: Maybe String
   , requestTargets :: [String]
-  , requestDumpCore :: Bool
   , requestTargetModuleOnly :: Bool
   , requestIncludes :: [FilePath]
   , requestFiles :: [FilePath]
@@ -105,7 +103,6 @@ emptyWorkerRequest = WorkerRequest
   { requestOutDir = Nothing
   , requestTarget = Nothing
   , requestTargets = []
-  , requestDumpCore = False
   , requestTargetModuleOnly = False
   , requestIncludes = []
   , requestFiles = []
@@ -175,7 +172,6 @@ requestFromFields = foldl apply emptyWorkerRequest
       OutputDir path -> request { requestOutDir = Just path }
       Target name -> request { requestTarget = Just name }
       Targets names -> request { requestTargets = requestTargets request ++ names }
-      DumpCore -> request { requestDumpCore = True }
       TargetModuleOnly -> request { requestTargetModuleOnly = True }
       Include path -> request { requestIncludes = requestIncludes request ++ [path] }
       BindGen generation -> request { requestBindGen = Just generation }
@@ -217,7 +213,7 @@ requestFromFields = foldl apply emptyWorkerRequest
       InspectionStrict -> request { requestInspectionStrict = True }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v9"
+workerRequestFlag = "--worker-request-v10"
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -236,7 +232,7 @@ type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 decodeRequest :: BS.ByteString -> Either String [RequestField]
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ009"
+  if magic /= "TPREQ010"
     then Left "worker request: unsupported magic or version"
     else do
       (count, rest) <- pWord32 body
@@ -246,7 +242,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ009" <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = "TPREQ010" <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
@@ -254,7 +250,6 @@ encodeField field = case field of
   OutputDir value -> taggedText 2 value
   Target value -> taggedText 3 value
   Targets values -> BS.singleton 4 <> putU32 (length values) <> BS.concat (map textFrame values)
-  DumpCore -> BS.singleton 5
   TargetModuleOnly -> BS.singleton 7
   Include value -> taggedText 8 value
   BindGen value -> BS.singleton 11 <> putU64 value
@@ -347,7 +342,7 @@ pField bytes = do
     4  -> do
       (count, rest') <- pWord32 rest
       mapParser Targets (pN (fromIntegral count) pText) rest'
-    5  -> Right (DumpCore, rest)
+    5  -> retired tag
     6  -> Left "retired worker request field tag: 6"
     7  -> Right (TargetModuleOnly, rest)
     8  -> mapParser Include pText rest

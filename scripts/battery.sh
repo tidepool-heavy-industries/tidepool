@@ -68,10 +68,9 @@ on_signal() {
 trap on_signal INT TERM
 start_battery_daemon
 
-# The `battery` profile: the full battery runs EVERY crate, including the
-# GHC-extract-heavy ones the default profile skips for quick inner-loop
-# `cargo nextest run`, except Core-engine tests (TIDEPOOL_CORE_TESTS=1 runs
-# those too). The profile inherits slow-timeout and the ghc-heavy thread cap.
+# The `battery` profile runs every crate, including the GHC-extract-heavy ones
+# the default profile skips for quick inner-loop `cargo nextest run`. It
+# inherits slow-timeout and the ghc-heavy thread cap.
 #
 # `exec` here would replace this shell before any check could run — same
 # zero-tests-as-a-pass trap scripts/battery-shard.sh closes; see that script's
@@ -87,8 +86,7 @@ set +e
 # Backgrounded + waited (rather than run directly in the foreground) so a
 # signal sent to this script's own pid interrupts promptly — see on_signal
 # above.
-battery_selection_args
-cargo nextest run "${BATTERY_SELECTION[@]}" --no-fail-fast \
+cargo nextest run --profile battery --no-fail-fast \
   --status-level fail --final-status-level fail \
   "$@" 2> >(tee "$tmp_log" >&2) &
 nextest_pid=$!

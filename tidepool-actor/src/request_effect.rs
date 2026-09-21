@@ -1,5 +1,5 @@
 use tidepool_bridge::Value;
-use tidepool_bridge::{BridgeError, ToCore};
+use tidepool_bridge::{BridgeError, ToHaskell};
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{ResidentHole, RootCustody};
 
@@ -8,17 +8,17 @@ use crate::{
     ResponseObservation, WatchId, WatchObservation,
 };
 
-#[derive(Debug, Clone, Copy, tidepool_bridge_derive::FromCore)]
+#[derive(Debug, Clone, Copy, tidepool_bridge_derive::FromHaskell)]
 #[allow(
     clippy::enum_variant_names,
     reason = "variant names are the stable Haskell Duration constructors"
 )]
 pub(crate) enum RequestDuration {
-    #[core(module = "Tidepool.Duration")]
+    #[haskell(module = "Tidepool.Duration")]
     DurationMilliseconds(i64),
-    #[core(module = "Tidepool.Duration")]
+    #[haskell(module = "Tidepool.Duration")]
     DurationSeconds(i64),
-    #[core(module = "Tidepool.Duration")]
+    #[haskell(module = "Tidepool.Duration")]
     DurationMinutes(i64),
 }
 
@@ -37,21 +37,21 @@ impl RequestDuration {
     }
 }
 
-#[derive(tidepool_bridge_derive::FromCore)]
+#[derive(tidepool_bridge_derive::FromHaskell)]
 #[allow(dead_code, clippy::enum_variant_names)]
 pub(crate) enum RepliesReq {
-    #[core(module = "Tidepool.Agent.Reply.Internal")]
+    #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     ReserveRequestWith(String, (i64, i64), bool),
-    #[core(module = "Tidepool.Agent.Reply.Internal")]
+    #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     // Duration reaches Core through its generated constructor representation.
     SubmitRequestWith(i64, Value, (i64, i64), Option<RequestDuration>),
-    #[core(module = "Tidepool.Agent.Reply.Internal")]
+    #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     AttemptReplyWith(i64, Value),
-    #[core(module = "Tidepool.Agent.Reply.Internal")]
+    #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     ReplyWith(i64, Value),
-    #[core(module = "Tidepool.Agent.Reply.Internal")]
+    #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     ObserveResponseWith(i64),
-    #[core(module = "Tidepool.Agent.Reply.Internal")]
+    #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     CancelRequestWith(i64),
     AbandonResponseWith(i64),
     ForgetResponseWith(i64),
@@ -64,28 +64,28 @@ pub(crate) enum RepliesReq {
     ObserveRequestUpdateWith(i64, i64),
 }
 
-#[derive(tidepool_bridge_derive::FromCore)]
+#[derive(tidepool_bridge_derive::FromHaskell)]
 #[allow(
     clippy::enum_variant_names,
     reason = "variant names are the stable Haskell constructor names"
 )]
 pub(crate) enum WatchesReq {
-    #[core(module = "Tidepool.Agent.Watch.Internal")]
+    #[haskell(module = "Tidepool.Agent.Watch.Internal")]
     RegisterWatchWith(String, Vec<AwaitDependency>),
     RegisterWatchGroupsWith(String, Vec<Vec<AwaitDependency>>),
     RegisterRouteWith(String, tidepool_bridge::Value, Vec<AwaitDependency>),
     RegisterRouteGroupsWith(String, tidepool_bridge::Value, Vec<Vec<AwaitDependency>>),
     ObserveRouteWith(i64),
     ListRoutesWith,
-    #[core(module = "Tidepool.Agent.Watch.Internal")]
+    #[haskell(module = "Tidepool.Agent.Watch.Internal")]
     ObserveWatchWith(i64),
     ForgetWatchWith(i64),
     ObserveWatchProgressWith(i64, i64, i64),
 }
 
-#[derive(tidepool_bridge_derive::FromCore)]
+#[derive(tidepool_bridge_derive::FromHaskell)]
 pub(crate) enum AwaitDependency {
-    #[core(module = "Tidepool.Agent.Watch.Internal")]
+    #[haskell(module = "Tidepool.Agent.Watch.Internal")]
     AwaitDependency(i64, bool),
     AwaitProgress(i64, i64),
 }

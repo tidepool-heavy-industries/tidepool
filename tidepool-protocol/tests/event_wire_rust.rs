@@ -13,7 +13,7 @@
 //!    itself — test 2 is the independent proof.
 //! 2. [`event_wire_types_match_the_hand_written_block_field_for_field`] — per
 //!    type, field/variant NAMES and ORDER (positional, never a set), Rust field
-//!    types, the exact derive line, and `#[core(name = …)]` presence.
+//!    types, the exact derive line, and `#[haskell(name = …)]` presence.
 //!
 //! Every expected value in test 2 is HAND-TRANSCRIBED from the `Ev*` block that
 //! was live in `tidepool-bridge-effects/src/lib.rs` before the migration flip
@@ -37,13 +37,13 @@ fn event_wire_module_matches_pin() {
 // The independent, hand-transcribed structural cross-check.
 // ---------------------------------------------------------------------------
 
-const WIRE: &str = "#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]";
-const WIRE_COPY: &str = "#[derive(ToCore, FromCore, Clone, Copy, Debug, PartialEq, Eq)]";
+const WIRE: &str = "#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]";
+const WIRE_COPY: &str = "#[derive(ToHaskell, FromHaskell, Clone, Copy, Debug, PartialEq, Eq)]";
 const WIRE_ID_ORD: &str =
-    "#[derive(ToCore, FromCore, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]";
+    "#[derive(ToHaskell, FromHaskell, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]";
 const WIRE_ID_ORD_HASH: &str =
-    "#[derive(ToCore, FromCore, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]";
-const WIRE_RET_ONLY: &str = "#[derive(ToCore, Clone, Debug, PartialEq)]";
+    "#[derive(ToHaskell, FromHaskell, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]";
+const WIRE_RET_ONLY: &str = "#[derive(ToHaskell, Clone, Debug, PartialEq)]";
 
 /// `(rust_field_name, rust_field_type)` pairs inside `pub struct NAME { … }`.
 fn struct_fields<'a>(module: &'a str, name: &str) -> Vec<(&'a str, &'a str)> {
@@ -96,7 +96,7 @@ fn assert_struct(
     wire_name: &str,
     hs_name: &str,
     derive_line: &str,
-    needs_core_name: bool,
+    needs_haskell_name: bool,
     fields: &[(&str, &str)],
 ) {
     let marker = format!("pub struct {wire_name} {{");
@@ -105,11 +105,11 @@ fn assert_struct(
         prelude.contains(derive_line),
         "{wire_name}: expected derive line `{derive_line}` in:\n{prelude}"
     );
-    let core_attr = format!("#[core(name = \"{hs_name}\")]");
+    let core_attr = format!("#[haskell(name = \"{hs_name}\")]");
     assert_eq!(
         prelude.contains(&core_attr),
-        needs_core_name,
-        "{wire_name}: #[core(name = \"{hs_name}\")] presence mismatch in:\n{prelude}"
+        needs_haskell_name,
+        "{wire_name}: #[haskell(name = \"{hs_name}\")] presence mismatch in:\n{prelude}"
     );
     assert_eq!(
         struct_fields(module, wire_name),
@@ -126,8 +126,8 @@ fn assert_enum(module: &str, wire_name: &str, derive_line: &str, variants: &[&st
         "{wire_name}: expected derive line `{derive_line}` in:\n{prelude}"
     );
     assert!(
-        !prelude.contains("#[core(name"),
-        "{wire_name}: an enum must never carry #[core(name = …)] — its data \
+        !prelude.contains("#[haskell(name"),
+        "{wire_name}: an enum must never carry #[haskell(name = …)] — its data \
          constructors ARE its variant names"
     );
     assert_eq!(

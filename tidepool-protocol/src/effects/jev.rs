@@ -37,7 +37,7 @@ pub fn jev() -> Effect {
         type_defs: vec![TypeDef {
             name: "JevCallError",
             wire_rust: None,
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     variant("JevUnconfigured", vec![]),

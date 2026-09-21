@@ -68,7 +68,7 @@
 //! flat row alongside them, with no normal-path counterpart. `load'` itself
 //! gets NO internal decomposition: it already redoes the SAME
 //! parse/typecheck/core2core work the per-module loop below it redoes a
-//! second time (see [`PHASE_TYPECHECK`]/[`PHASE_CORE`]), so one row around
+//! second time (see [`PHASE_TYPECHECK`]/[`PHASE_LOWERING`]), so one row around
 //! the whole call answers what matters. This is
 //! `haskell/src/Tidepool/Timing.hs`'s flat-phase doc, restated here since the
 //! two modules must stay in sync by hand.
@@ -161,7 +161,7 @@ pub const PHASE_GHC_SETUP: &str = "ghc_setup";
 /// FLAT (compile lane, both paths): GHC's `load' LoadAllTargets` call alone
 /// — a full compile of every home module (including `core2core`), separate
 /// from the SECOND parse/typecheck/core2core loop that
-/// [`PHASE_TYPECHECK`]/[`PHASE_CORE`] measure. Gets NO internal
+/// [`PHASE_TYPECHECK`]/[`PHASE_LOWERING`] measure. Gets NO internal
 /// decomposition — see the module doc's flat-phase-partition section for why
 /// one row around the whole call is what answers C1.
 pub const PHASE_GHC_LOAD: &str = "ghc_load";
@@ -176,7 +176,7 @@ pub const PHASE_CLASSIFY: &str = "classify";
 /// Parse + rename + typecheck of the turn module (and any `--include` modules).
 pub const PHASE_TYPECHECK: &str = "typecheck";
 /// Desugar to Core + the simplifier passes GHC runs before we read binds.
-pub const PHASE_CORE: &str = "core";
+pub const PHASE_LOWERING: &str = "lowering";
 /// `Tidepool.CborEncode`: serializing the tree + metadata.
 pub const PHASE_CBOR_ENCODE: &str = "cbor_encode";
 /// Writing `<target>.cbor` / `meta.cbor` / `asks.json`.
@@ -349,7 +349,7 @@ pub const COMPILE_SUMMARY_PREFIX: &str = "tidepool-compile-summary ";
 /// One extract invocation's default-on compile summary — module count, whole
 /// compile wall time, the typecheck/core phase totals (always computed
 /// regardless of [`TIMING_ENV`] — see `GhcPipeline.hs`'s `tcMsRef`/
-/// `coreMsRef`), and the top-3 modules by wall time. Parsed out of a fresh
+/// `loweringMsRef`), and the top-3 modules by wall time. Parsed out of a fresh
 /// compile's stderr; absent on a memo hit (no extract process ran) or a hard
 /// compile failure that threw before the summary line was reached.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -357,7 +357,7 @@ pub struct CompileSummary {
     pub modules: u32,
     pub wall_ms: u64,
     pub typecheck_ms: u64,
-    pub core_ms: u64,
+    pub lowering_ms: u64,
     /// `(module, ms)` pairs, up to 3, in descending wall-time order.
     pub top: Vec<(String, u64)>,
 }
@@ -374,7 +374,7 @@ impl CompileSummary {
             let mut modules = None;
             let mut wall_ms = None;
             let mut typecheck_ms = None;
-            let mut core_ms = None;
+            let mut lowering_ms = None;
             let mut top = Vec::new();
             for field in rest.split_whitespace() {
                 if let Some(v) = field.strip_prefix("modules=") {
@@ -383,8 +383,8 @@ impl CompileSummary {
                     wall_ms = v.parse::<u64>().ok();
                 } else if let Some(v) = field.strip_prefix("typecheck_ms=") {
                     typecheck_ms = v.parse::<u64>().ok();
-                } else if let Some(v) = field.strip_prefix("core_ms=") {
-                    core_ms = v.parse::<u64>().ok();
+                } else if let Some(v) = field.strip_prefix("lowering_ms=") {
+                    lowering_ms = v.parse::<u64>().ok();
                 } else if let Some(v) = field.strip_prefix("top=") {
                     top = v
                         .split(',')
@@ -396,14 +396,14 @@ impl CompileSummary {
                         .collect();
                 }
             }
-            if let (Some(modules), Some(wall_ms), Some(typecheck_ms), Some(core_ms)) =
-                (modules, wall_ms, typecheck_ms, core_ms)
+            if let (Some(modules), Some(wall_ms), Some(typecheck_ms), Some(lowering_ms)) =
+                (modules, wall_ms, typecheck_ms, lowering_ms)
             {
                 return Some(CompileSummary {
                     modules,
                     wall_ms,
                     typecheck_ms,
-                    core_ms,
+                    lowering_ms,
                     top,
                 });
             }
@@ -476,7 +476,7 @@ pub fn log_compile_summary(summary: &CompileSummary) {
         modules = summary.modules,
         wall_ms = summary.wall_ms,
         typecheck_ms = summary.typecheck_ms,
-        core_ms = summary.core_ms,
+        lowering_ms = summary.lowering_ms,
         top = %top,
         "compile summary"
     );
@@ -553,12 +553,12 @@ tidepool-timing phase=ghc_load ms=4533\n";
     fn parses_a_compile_summary_line_with_top_modules() {
         let stderr = "\
 some ghc warning\n\
-tidepool-compile-summary modules=39 wall_ms=361000 typecheck_ms=120000 core_ms=200000 top=Harness:90000,Tidepool.Prelude:40000,Tidepool.Agent.Spawn:15000\n";
+tidepool-compile-summary modules=39 wall_ms=361000 typecheck_ms=120000 lowering_ms=200000 top=Harness:90000,Tidepool.Prelude:40000,Tidepool.Agent.Spawn:15000\n";
         let s = CompileSummary::parse(stderr).expect("summary line present");
         assert_eq!(s.modules, 39);
         assert_eq!(s.wall_ms, 361000);
         assert_eq!(s.typecheck_ms, 120000);
-        assert_eq!(s.core_ms, 200000);
+        assert_eq!(s.lowering_ms, 200000);
         assert_eq!(
             s.top,
             vec![
@@ -576,10 +576,12 @@ tidepool-compile-summary modules=39 wall_ms=361000 typecheck_ms=120000 core_ms=2
 
     #[test]
     fn compile_summary_prefix_never_collides_with_the_phase_wire_grammar() {
-        assert!(!"tidepool-timing phase=core ms=10".starts_with(COMPILE_SUMMARY_PREFIX.trim_end()));
-        assert!(CompileSummary::parse("tidepool-timing phase=core ms=10\n").is_none());
+        assert!(
+            !"tidepool-timing phase=lowering ms=10".starts_with(COMPILE_SUMMARY_PREFIX.trim_end())
+        );
+        assert!(CompileSummary::parse("tidepool-timing phase=lowering ms=10\n").is_none());
         let phase_only = "tidepool-compile-summary modules=1 wall_ms=1 top=A:1\n";
-        // Missing typecheck_ms/core_ms -> malformed, correctly rejected.
+        // Missing typecheck_ms/lowering_ms -> malformed, correctly rejected.
         assert!(CompileSummary::parse(phase_only).is_none());
     }
 
@@ -602,7 +604,7 @@ some other noise\n";
     #[test]
     fn module_timings_absent_when_not_gated_on() {
         assert!(parse_module_timings(
-            "tidepool-compile-summary modules=1 wall_ms=1 typecheck_ms=1 core_ms=1 top=A:1\n"
+            "tidepool-compile-summary modules=1 wall_ms=1 typecheck_ms=1 lowering_ms=1 top=A:1\n"
         )
         .is_empty());
     }

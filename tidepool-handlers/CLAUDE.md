@@ -75,7 +75,7 @@ the Haskell union position is not a handler slot.
 
 ## `cx.respond*` — pick by result shape, not habit
 
-- **`respond(val)`** — the default. One value, converted eagerly via `ToCore`.
+- **`respond(val)`** — the default. One value, converted eagerly via `ToHaskell`.
   For a TYPED per-verb failure (#335), the errors-tagged method returns
   `Result<T, <ErrEnum>>` and takes no `cx`; the generated dispatch arm wraps it
   with `cx.respond` (`Ok → Right v`, `Err → Left e`), so the handler is total by

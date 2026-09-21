@@ -8,15 +8,15 @@ pub struct EnumInfo {
 
 pub struct VariantInfo {
     pub rust_name: Ident,
-    pub core_name: String,
+    pub haskell_name: String,
     /// Optional source-module path (e.g. `"Pattern.Memory"`). When present,
-    /// derive-generated lookups call `get_by_qualified_name("<module>.<core_name>")`
+    /// derive-generated lookups call `get_by_qualified_name("<module>.<haskell_name>")`
     /// to disambiguate constructors that share name and arity across modules.
-    pub core_module: Option<String>,
+    pub haskell_module: Option<String>,
     pub shape: VariantShape,
 }
 
-/// The Rust syntax of an enum constructor. Core constructor fields remain
+/// The Rust syntax of an enum constructor. Haskell constructor fields remain
 /// positional; this shape solely preserves how generated Rust must bind and
 /// construct them.
 pub enum VariantShape {
@@ -38,23 +38,23 @@ impl VariantShape {
 pub struct StructInfo {
     pub name: Ident,
     pub generics: Generics,
-    pub core_name: String,
-    /// See [`VariantInfo::core_module`].
-    pub core_module: Option<String>,
+    pub haskell_name: String,
+    /// See [`VariantInfo::haskell_module`].
+    pub haskell_module: Option<String>,
     pub fields: Vec<FieldInfo>,
 }
 
 /// A single named struct field, with optional Haskell-side overrides parsed
-/// from a field-level `#[core(hs = "...", hs_type = "...")]` attribute.
+/// from a field-level `#[haskell(hs = "...", hs_type = "...")]` attribute.
 pub struct FieldInfo {
     pub ident: Ident,
     pub ty: Type,
     /// Overrides the Haskell field NAME (default: snake_case → camelCase of the
-    /// Rust ident). E.g. `#[core(hs = "exitCode")]`.
+    /// Rust ident). E.g. `#[haskell(hs = "exitCode")]`.
     pub hs_name: Option<String>,
     /// Overrides the whole rendered Haskell field TYPE (default: mapped from the
     /// Rust type). E.g. a field typed `WirePosition` whose Haskell type should
-    /// render as `Position` uses `#[core(hs_type = "Position")]`.
+    /// render as `Position` uses `#[haskell(hs_type = "Position")]`.
     pub hs_type: Option<String>,
 }
 
@@ -67,12 +67,12 @@ pub fn parse_input(input: &DeriveInput) -> Result<DataInfo, syn::Error> {
     match &input.data {
         Data::Enum(_) => parse_enum(input).map(DataInfo::Enum),
         Data::Struct(s) => {
-            let CoreAttr {
-                name: core_name,
-                module: core_module,
+            let HaskellAttr {
+                name: haskell_name,
+                module: haskell_module,
                 ..
-            } = parse_core_attr(&input.attrs)?;
-            let core_name = core_name.unwrap_or_else(|| input.ident.to_string());
+            } = parse_haskell_attr(&input.attrs)?;
+            let haskell_name = haskell_name.unwrap_or_else(|| input.ident.to_string());
             let fields = match &s.fields {
                 Fields::Named(f) => {
                     let mut out = Vec::with_capacity(f.named.len());
@@ -80,7 +80,7 @@ pub fn parse_input(input: &DeriveInput) -> Result<DataInfo, syn::Error> {
                         let Some(ident) = field.ident.clone() else {
                             continue;
                         };
-                        let attr = parse_core_attr(&field.attrs)?;
+                        let attr = parse_haskell_attr(&field.attrs)?;
                         out.push(FieldInfo {
                             ident,
                             ty: field.ty.clone(),
@@ -101,8 +101,8 @@ pub fn parse_input(input: &DeriveInput) -> Result<DataInfo, syn::Error> {
             Ok(DataInfo::Struct(StructInfo {
                 name: input.ident.clone(),
                 generics: input.generics.clone(),
-                core_name,
-                core_module,
+                haskell_name,
+                haskell_module,
                 fields,
             }))
         }
@@ -119,11 +119,11 @@ pub fn parse_enum(input: &DeriveInput) -> Result<EnumInfo, syn::Error> {
     let mut variants = Vec::new();
     for variant in &data_enum.variants {
         let rust_name = variant.ident.clone();
-        let CoreAttr {
-            name: core_name,
-            module: core_module,
+        let HaskellAttr {
+            name: haskell_name,
+            module: haskell_module,
             ..
-        } = parse_core_attr(&variant.attrs)?;
+        } = parse_haskell_attr(&variant.attrs)?;
 
         let shape = match &variant.fields {
             Fields::Unnamed(fields) => VariantShape::Tuple(
@@ -137,7 +137,7 @@ pub fn parse_enum(input: &DeriveInput) -> Result<EnumInfo, syn::Error> {
             Fields::Named(fields) => {
                 let mut named = Vec::with_capacity(fields.named.len());
                 for field in &fields.named {
-                    let attr = parse_core_attr(&field.attrs)?;
+                    let attr = parse_haskell_attr(&field.attrs)?;
                     let Some(ident) = field.ident.clone() else {
                         return Err(syn::Error::new_spanned(
                             field,
@@ -155,12 +155,12 @@ pub fn parse_enum(input: &DeriveInput) -> Result<EnumInfo, syn::Error> {
             }
         };
 
-        let core_name_str = core_name.unwrap_or_else(|| rust_name.to_string());
+        let haskell_name_str = haskell_name.unwrap_or_else(|| rust_name.to_string());
 
         variants.push(VariantInfo {
             rust_name,
-            core_name: core_name_str,
-            core_module,
+            haskell_name: haskell_name_str,
+            haskell_module,
             shape,
         });
     }
@@ -172,9 +172,9 @@ pub fn parse_enum(input: &DeriveInput) -> Result<EnumInfo, syn::Error> {
     })
 }
 
-/// Parsed contents of a single `#[core(...)]` attribute.
+/// Parsed contents of a single `#[haskell(...)]` attribute.
 #[derive(Default)]
-pub(crate) struct CoreAttr {
+pub(crate) struct HaskellAttr {
     /// Explicit `name = "..."` override; defaults to the Rust identifier.
     pub(crate) name: Option<String>,
     /// Optional `module = "..."` qualifier. When set, derived lookups use
@@ -187,10 +187,10 @@ pub(crate) struct CoreAttr {
     pub(crate) hs_type: Option<String>,
 }
 
-pub(crate) fn parse_core_attr(attrs: &[Attribute]) -> Result<CoreAttr, syn::Error> {
-    let mut out = CoreAttr::default();
+pub(crate) fn parse_haskell_attr(attrs: &[Attribute]) -> Result<HaskellAttr, syn::Error> {
+    let mut out = HaskellAttr::default();
     for attr in attrs {
-        if attr.path().is_ident("core") {
+        if attr.path().is_ident("haskell") {
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("name") {
                     let value = meta.value()?;
@@ -230,7 +230,7 @@ pub(crate) fn parse_core_attr(attrs: &[Attribute]) -> Result<CoreAttr, syn::Erro
                     }
                 } else {
                     Err(meta.error(
-                        "unknown core attribute (expected 'name', 'module', 'hs', or 'hs_type')",
+                        "unknown haskell attribute (expected 'name', 'module', 'hs', or 'hs_type')",
                     ))
                 }
             })?;

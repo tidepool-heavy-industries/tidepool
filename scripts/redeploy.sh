@@ -52,7 +52,7 @@ if [ -n "$haskell_dirty" ]; then
   echo "      reproducible from any commit; commit before deploys that matter."
 fi
 
-# Step 2: rebuild + install the GHC→Core extractor via nix profile.
+# Step 2: rebuild + install the compiler worker via nix profile.
 #   Skippable with --no-extract (stdlib-only changes don't need this).
 
 if [ "$NO_EXTRACT" -eq 0 ]; then

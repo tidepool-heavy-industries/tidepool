@@ -246,11 +246,7 @@ mod tests {
     use tidepool_repr::execution_schema::*;
 
     fn vmctx(machine: &crate::machine_state::MachineState) -> crate::context::VMContext {
-        let mut vmctx = crate::context::VMContext::new(
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            crate::host_fns::gc_trigger,
-        );
+        let mut vmctx = crate::context::VMContext::new(std::ptr::null_mut(), std::ptr::null());
         vmctx.machine_state = machine as *const _ as *mut _;
         vmctx
     }

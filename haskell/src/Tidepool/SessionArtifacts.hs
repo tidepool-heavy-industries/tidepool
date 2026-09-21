@@ -43,7 +43,7 @@ mkBoundBinders bindNames generation root result = do
             occurrence = mkVarOcc name
             varId = stableVarId (sessionBinderName hsc sessionModule occurrence)
             moduleName = sessionModuleString sessionModule
-            tier = if isClosureType persistedType then Tier1Closure else Tier0Data
+            tier = if isClosureType persistedType then RetainOpaque else ForceData
             displayType = renderType ty
         in (BoundBinder name varId moduleName tier displayType, occurrence, persistedType)
       built = zipWith build bindNames componentTypes

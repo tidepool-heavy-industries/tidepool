@@ -1,5 +1,5 @@
 use tidepool_bridge::Value;
-use tidepool_bridge::{BridgeError, FromCore, ToCore};
+use tidepool_bridge::{BridgeError, FromHaskell, ToHaskell};
 use tidepool_repr::{DataCon, DataConId, DataConTable, Literal, SrcBang};
 
 fn get_table() -> DataConTable {
@@ -56,8 +56,8 @@ fn test_arity_mismatch_tuple() {
 fn test_nan_roundtrip() {
     let table = get_table();
     let val = f64::NAN;
-    let value = val.to_value(&table).expect("ToCore failed");
-    let back = f64::from_value(&value, &table).expect("FromCore failed");
+    let value = val.to_value(&table).expect("ToHaskell failed");
+    let back = f64::from_value(&value, &table).expect("FromHaskell failed");
     assert!(back.is_nan());
     assert_eq!(val.to_bits(), back.to_bits());
 }

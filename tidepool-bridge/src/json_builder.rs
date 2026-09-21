@@ -1,10 +1,10 @@
 //! serde_json → the runtime `Value` (the vendored `Tidepool.Aeson.Value` ADT).
 //!
 //! This is the ONE source of truth for how a parsed JSON document is built as a
-//! Tidepool Core `Value`, shared by:
+//! Tidepool `Value`, shared by:
 //!   - the pure `JsonDecode` primop, via the `runtime_json_decode` host fn in
 //!     `tidepool-codegen`, and
-//!   - `tidepool-bridge`'s `impl ToCore for serde_json::Value` (effect results
+//!   - `tidepool-bridge`'s `impl ToHaskell for serde_json::Value` (effect results
 //!     that hand JSON back to Haskell), which delegates here.
 //!
 //! Representation (must match `haskell/lib/Tidepool/Aeson/Value.hs` at -O2):
@@ -32,7 +32,7 @@ use tidepool_repr::{DataConId, DataConTable};
 ///
 /// `left`/`right` are `Option<DataConId>` because `json_to_value` does not
 /// need them — only `decode_json_str` (the `JsonDecode` primop) does. This lets
-/// `tidepool-bridge`'s `ToCore for serde_json::Value` use `from_table` even when
+/// `tidepool-bridge`'s `ToHaskell for serde_json::Value` use `from_table` even when
 /// the program's `DataConTable` has no `Either` in scope.
 #[derive(Debug, Clone, Copy)]
 pub struct JsonConIds {
@@ -79,7 +79,7 @@ pub struct JsonConIds {
 }
 
 impl JsonConIds {
-    /// Resolve constructor ids from a table. Returns `None` if any core `Value` /
+    /// Resolve constructor ids from a table. Returns `None` if any Haskell value,
     /// `Data.Map` / `Text` constructor is absent. `left`/`right` are optional:
     /// they are set to `Some` only when `Either` is in scope. Callers that need
     /// `decode_json_str` (the `JsonDecode` primop) must check that both are

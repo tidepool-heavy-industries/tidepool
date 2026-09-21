@@ -15,7 +15,6 @@ thiserror.workspace = true
 tidepool-repr.workspace = true
 tidepool-extract-cmd.workspace = true
 tidepool-extract-report.workspace = true
-tidepool-codegen.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true

@@ -359,7 +359,7 @@ impl BindingTable {
     /// # Safety
     /// `entry.value`'s [`RootSlot`] must be a registered persistent GC root
     /// valid until the session machine drops (the contract carried by
-    /// [`crate::jit_machine::PreparedMachine::run_fragment_and_bind`], which is
+    /// [`crate::machine::PreparedMachine::run_fragment_and_bind`], which is
     /// the only minter of a `RootSlot`). This method only stores the slot — it
     /// never dereferences it — so it is itself safe; the liveness invariant is
     /// upheld at the bind site and the Var-miss load site.

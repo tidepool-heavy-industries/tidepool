@@ -192,11 +192,7 @@ mod tests {
     fn host_preserves_first_cause_before_decoding_untrusted_arguments() {
         let machine = crate::machine_state::MachineState::new();
         machine.set_first_cause(RuntimeError::Cancelled);
-        let mut vmctx = crate::context::VMContext::new(
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            crate::host_fns::gc_trigger,
-        );
+        let mut vmctx = crate::context::VMContext::new(std::ptr::null_mut(), std::ptr::null());
         vmctx.machine_state = &machine as *const _ as *mut _;
         let status = unsafe { prepared_wired_in_error(&mut vmctx, u64::MAX, usize::MAX) };
         assert_eq!(
@@ -210,11 +206,7 @@ mod tests {
     fn host_rejects_an_invalid_kind_and_an_unowned_message_as_bad_pointer() {
         for kind in [u64::MAX, WiredInErrorKind::PatternMatch as u64] {
             let machine = crate::machine_state::MachineState::new();
-            let mut vmctx = crate::context::VMContext::new(
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                crate::host_fns::gc_trigger,
-            );
+            let mut vmctx = crate::context::VMContext::new(std::ptr::null_mut(), std::ptr::null());
             vmctx.machine_state = &machine as *const _ as *mut _;
             let status = unsafe { prepared_wired_in_error(&mut vmctx, kind, usize::MAX) };
             assert_eq!(
@@ -236,11 +228,7 @@ mod tests {
         machine.absorb_interned_bytes(&Arc::new(super::super::static_bytes::PinnedBytes::new(
             BTreeMap::from([(b"Suite.hs:3|f".to_vec(), payload)]),
         )));
-        let mut vmctx = crate::context::VMContext::new(
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            crate::host_fns::gc_trigger,
-        );
+        let mut vmctx = crate::context::VMContext::new(std::ptr::null_mut(), std::ptr::null());
         vmctx.machine_state = &machine as *const _ as *mut _;
         let status = unsafe {
             prepared_wired_in_error(&mut vmctx, WiredInErrorKind::PatternMatch as u64, address)

@@ -20,7 +20,7 @@ use super::run::{
 };
 use super::safepoint::NativeStackBounds;
 use super::{CompiledProgram, ExecutionError};
-use crate::host_fns::{gc_trigger, prepared_gc_trigger, RuntimeError};
+use crate::host_fns::{prepared_gc_trigger, RuntimeError};
 use crate::prepared_control::{CallStatus, PreparedSafepoint};
 use crate::{context::VMContext, machine_state::MachineState, old_space::OldSpace};
 use std::rc::Rc;
@@ -180,7 +180,7 @@ impl<'code> PreparedInvocation<'code> {
                 return Err(runtime_error(&machine, cause));
             }
         };
-        let mut vmctx = unsafe { VMContext::new(start, start.add(size), gc_trigger) };
+        let mut vmctx = unsafe { VMContext::new(start, start.add(size)) };
         vmctx.alloc_ptr = unsafe { start.add(heap_used) };
         vmctx.machine_state = Rc::as_ptr(&machine).cast_mut();
         vmctx.prepared_stack_limit = prepared_stack_limit;
@@ -309,7 +309,7 @@ impl<'code> PreparedInvocation<'code> {
             &self.old_space,
             &result_seeds,
             budget,
-            crate::heap_bridge::BudgetPolicy::Complete,
+            crate::observation::BudgetPolicy::Complete,
         ) {
             Ok(values) => values,
             Err(ExecutionError::Observation(error @ super::ObservationFailure::Integrity(_))) => {

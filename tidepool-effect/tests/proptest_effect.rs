@@ -1,6 +1,6 @@
 use frunk::hlist;
 use proptest::prelude::*;
-use tidepool_bridge::{BridgeError, FromCore, Value};
+use tidepool_bridge::{BridgeError, FromHaskell, Value};
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext, EffectHandler, Response};
 use tidepool_effect::error::EffectError;
 use tidepool_repr::datacon::DataCon;
@@ -59,16 +59,16 @@ fn decode_request(value: &Value, expected_id: DataConId) -> Result<i64, BridgeEr
 }
 
 struct FirstRequest(i64);
-impl tidepool_bridge::sealed::FromCoreSealed for FirstRequest {}
-impl FromCore for FirstRequest {
+impl tidepool_bridge::sealed::FromHaskellSealed for FirstRequest {}
+impl FromHaskell for FirstRequest {
     fn from_value(value: &Value, _table: &DataConTable) -> Result<Self, BridgeError> {
         decode_request(value, FIRST).map(Self)
     }
 }
 
 struct SecondRequest(i64);
-impl tidepool_bridge::sealed::FromCoreSealed for SecondRequest {}
-impl FromCore for SecondRequest {
+impl tidepool_bridge::sealed::FromHaskellSealed for SecondRequest {}
+impl FromHaskell for SecondRequest {
     fn from_value(value: &Value, _table: &DataConTable) -> Result<Self, BridgeError> {
         decode_request(value, SECOND).map(Self)
     }

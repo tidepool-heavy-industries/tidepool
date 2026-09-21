@@ -15,17 +15,30 @@ use crate::schema::{
 };
 use crate::types::WireDerive::{
     Clone as DClone, Copy as DCopy, Debug as DDebug, Default as DDefault, Eq as DEq,
-    FromCore as DFromCore, PartialEq as DPartialEq, ToCore as DToCore,
+    FromHaskell as DFromHaskell, PartialEq as DPartialEq, ToHaskell as DToHaskell,
 };
 
 /// The derive set every Worktree wire type shares.
-const WIRE: WireDerives = WireDerives(&[DToCore, DFromCore, DClone, DDebug, DPartialEq, DEq]);
+const WIRE: WireDerives = WireDerives(&[DToHaskell, DFromHaskell, DClone, DDebug, DPartialEq, DEq]);
 /// …plus `Copy`, for the two payload-free sums.
-const WIRE_COPY: WireDerives =
-    WireDerives(&[DToCore, DFromCore, DClone, DCopy, DDebug, DPartialEq, DEq]);
+const WIRE_COPY: WireDerives = WireDerives(&[
+    DToHaskell,
+    DFromHaskell,
+    DClone,
+    DCopy,
+    DDebug,
+    DPartialEq,
+    DEq,
+]);
 /// …plus `Default`, for `DirtySummary` (a clean tree is the empty summary).
 const WIRE_DEFAULT: WireDerives = WireDerives(&[
-    DToCore, DFromCore, DClone, DDebug, DDefault, DPartialEq, DEq,
+    DToHaskell,
+    DFromHaskell,
+    DClone,
+    DDebug,
+    DDefault,
+    DPartialEq,
+    DEq,
 ]);
 
 /// `data X = X Text` with a `WorktreeId`-shaped path-safety policy.
@@ -40,7 +53,7 @@ fn identity(
     TypeDef {
         name,
         wire_rust: Some(wire_rust),
-        core_module: None,
+        haskell_module: None,
         shape: TypeShape::Identity {
             payload: IdentityPayload::Text,
             hs_binder: "t",
@@ -173,7 +186,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "WorktreeSource",
             wire_rust: Some("WtWorktreeSource"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
@@ -208,7 +221,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "DirtyPolicy",
             wire_rust: Some("WtDirtyPolicy"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
@@ -241,7 +254,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "WorktreeSpec",
             wire_rust: Some("WtWorktreeSpec"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -278,7 +291,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "InProgressKind",
             wire_rust: Some("WtInProgressKind"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
@@ -331,7 +344,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "DirtySummary",
             wire_rust: Some("WtDirtySummary"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -390,7 +403,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "HeadState",
             wire_rust: Some("WtHeadState"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
@@ -437,7 +450,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "WorkingState",
             wire_rust: Some("WtWorkingState"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -468,7 +481,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "SubmissionObservation",
             wire_rust: Some("WtSubmissionObservation"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -521,7 +534,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "GitFailureReceipt",
             wire_rust: Some("WtGitFailureReceipt"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -586,7 +599,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "WorktreeReceipt",
             wire_rust: Some("WtWorktreeReceipt"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -650,7 +663,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "WorktreeHandle",
             wire_rust: Some("WtWorktreeHandle"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Record {
                 fields: vec![RecordField {
                     hs_name: "handleReceipt",
@@ -676,7 +689,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "WorktreeSummary",
             wire_rust: Some("WtWorktreeSummary"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -711,7 +724,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "MergeRequest",
             wire_rust: Some("WtMergeRequest"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Record {
                 fields: vec![
                     RecordField {
@@ -763,7 +776,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "MergeOutcome",
             wire_rust: Some("WtMergeOutcome"),
-            core_module: None,
+            haskell_module: None,
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {

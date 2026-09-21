@@ -177,7 +177,7 @@ fn sum(name: &'static str, variants: Vec<SumVariant>, doc: &'static [&'static st
     TypeDef {
         name,
         wire_rust: None,
-        core_module: None,
+        haskell_module: None,
         shape: TypeShape::Sum { variants },
         json: JsonInstance::None,
         derives: NO_WIRE,
@@ -194,7 +194,7 @@ fn record(
     TypeDef {
         name,
         wire_rust: None,
-        core_module: None,
+        haskell_module: None,
         shape: TypeShape::Record { fields },
         json: JsonInstance::None,
         derives: NO_WIRE,

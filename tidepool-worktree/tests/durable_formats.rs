@@ -71,7 +71,7 @@
 //!   one derives `Serialize`/`Deserialize`, but none is ever the argument to
 //!   a `serde_json::to_*`/`from_*` call in `registry.rs`, `binding.rs`, or
 //!   `journal.rs`. They cross this crate's boundary only as the `Err` arm of
-//!   a `Result`, converted to Haskell via `ToCore`/`FromCore` in a different
+//!   a `Result`, converted to Haskell via `ToHaskell`/`FromHaskell` in a different
 //!   crate (`tidepool-bridge-effects`/`tidepool-handlers`) — a distinct
 //!   mechanism from durable JSON, and out of this test's scope. §11.7 of the
 //!   scaffold doc names "`WorktreeError` and its payload types" among the

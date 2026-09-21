@@ -198,18 +198,18 @@ struct ResidentActorRecord {
     runtime_observation: crate::ActorRuntimeObservationHandle,
 }
 
-#[derive(tidepool_bridge_derive::ToCore)]
+#[derive(tidepool_bridge_derive::ToHaskell)]
 enum ObservationShareResult {
-    #[core(module = "Tidepool.Effects.Core", name = "ObservationShared")]
+    #[haskell(module = "Tidepool.Effects.Core", name = "ObservationShared")]
     Shared,
-    #[core(
+    #[haskell(
         module = "Tidepool.Effects.Core",
         name = "ObservationRecipientUnavailable"
     )]
     RecipientUnavailable,
-    #[core(module = "Tidepool.Effects.Core", name = "ObservationScopeUnavailable")]
+    #[haskell(module = "Tidepool.Effects.Core", name = "ObservationScopeUnavailable")]
     ScopeUnavailable,
-    #[core(module = "Tidepool.Effects.Core", name = "ObservationUnauthorized")]
+    #[haskell(module = "Tidepool.Effects.Core", name = "ObservationUnauthorized")]
     Unauthorized,
 }
 
@@ -388,10 +388,10 @@ enum RetainedActorInput {
     Source(crate::SourceDelivery),
 }
 
-#[derive(Clone, tidepool_bridge_derive::ToCore)]
+#[derive(Clone, tidepool_bridge_derive::ToHaskell)]
 #[allow(
     clippy::enum_variant_names,
-    reason = "variant names are the wire truth: ToCore encodes them verbatim \
+    reason = "variant names are the wire truth: ToHaskell encodes them verbatim \
               as the matching Haskell constructor names, so the shared \
               `Actor` prefix must stay exactly as spelled, not be trimmed"
 )]
