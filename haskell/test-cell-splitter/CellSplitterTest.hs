@@ -184,19 +184,37 @@ validationMemoCompilation = bracket temporary removeDirectoryRecursive $ \root -
       reexport = root </> "WarmReexport.hs"
       child = root </> "WarmChild.hs"
       target = root </> "WarmTarget.hs"
+      chainLength = 16 :: Int
+      chainName index = "WarmChain" ++ show index
   writeFile base "module WarmBase (value) where\nvalue :: Int\nvalue = 42\n"
   writeFile reexport "module WarmReexport (value) where\nimport WarmBase (value)\n"
   writeFile child "module WarmChild (value) where\nimport WarmReexport (value)\n"
-  writeFile target "module WarmTarget where\nimport WarmChild (value)\nresult = value\n"
+  forM_ [1 .. chainLength] $ \index -> do
+    let previous = if index == 1 then "WarmChild" else chainName (index - 1)
+    writeFile (root </> chainName index ++ ".hs") $ unlines
+      [ "module " ++ chainName index ++ " (value) where"
+      , "import " ++ previous ++ " (value)"
+      ]
+  writeFile target $ unlines
+    [ "module WarmTarget where"
+    , "import " ++ chainName chainLength ++ " (value)"
+    , "result = value"
+    ]
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
   setEnv "TIDEPOOL_TIMING" "1"
   (withResidentPipelineSelected [root] $ \compile -> do
-      _ <- compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+      (_, coldLog) <- captureStderr root "validation-cold" $
+        compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+      assertContains "chain dependency witnesses are computed once per node"
+        "tidepool-dependency-witness nodes=20 direct_edges=19 digest_computations=20"
+        coldLog
       (_, warmLog) <- captureStderr root "validation-warm" $
         compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
       forM_ ["WarmReexport", "WarmChild"] $ \name ->
         when (("tidepool-memo-miss module=" ++ name) `isInfixOf` warmLog) $
           fail ("unchanged validation-only module was recompiled: " ++ name)
+      when ("tidepool-memo-miss module=WarmChain" `isInfixOf` warmLog) $
+        fail "unchanged validation-only chain was recompiled"
       assertContains "warm compile prepares only its evicted target"
         "front_compiles=1 core_compiles=1 prepared_compiles=1" warmLog)
     `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming

@@ -52,6 +52,10 @@ import GHC.Core (CoreBind, CoreExpr, Bind(..), Expr(..), Alt(..))
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
+import qualified Crypto.Hash.SHA256 as SHA256
+import qualified Data.Graph as Graph
 import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable
   ( renderWithContext, defaultSDocContext, ppr, SDocContext(..)
@@ -687,17 +691,80 @@ data MemoValidity = MemoValidity
     -- A source hash does not change when one of its imports switches between
     -- a home module and a package module. Preserve the home-resolution shape
     -- that produced the body so removing a shadow cannot reuse stale Core.
-  , memoHomeDependencies :: Map.Map HomeDependency HomeDependencyWitness
+  , memoHomeDependencies :: Map.Map HomeDependency HomeDependencyDigest
   }
 
 data HomeSourceKind = OrdinaryHomeSource | BootHomeSource
-  deriving (Eq, Ord)
+  deriving (Eq, Ord, Show)
 
 data HomeDependency = HomeDependency ModuleName HomeSourceKind
   deriving (Eq, Ord)
 
 data HomeDependencyWitness = HomeDependencyWitness (Maybe FilePath) Fingerprint
-  deriving Eq
+  deriving (Eq, Show)
+
+newtype HomeDependencyDigest = HomeDependencyDigest BS.ByteString
+  deriving (Eq, Ord)
+
+-- Hash each SCC in the typed home graph once. Entries retain only the digest
+-- for each direct import, so chains use linear table work and linear aggregate
+-- memo storage instead of copying a transitive witness map into every module.
+homeDependencyDigests
+  :: Map.Map HomeDependency (HomeDependencyWitness, [HomeDependency])
+  -> (Map.Map HomeDependency HomeDependencyDigest, Int)
+homeDependencyDigests graph =
+  ( Map.fromList
+      [ (dependency, sccDigests Map.! sccId)
+      | (dependency, sccId) <- Map.toList nodeSccs
+      ]
+  , length components
+  )
+  where
+    components = zip [0 :: Int ..] $ map members $ Graph.stronglyConnComp
+      [ (dependency, dependency, children)
+      | (dependency, (_, children)) <- Map.toList graph
+      ]
+    members (Graph.AcyclicSCC dependency) = [dependency]
+    members (Graph.CyclicSCC dependencies) = sort dependencies
+    nodeSccs = Map.fromList
+      [ (dependency, sccId)
+      | (sccId, dependencies) <- components
+      , dependency <- dependencies
+      ]
+    outgoing sccId dependencies = Set.toAscList $ Set.fromList
+      [ childScc
+      | dependency <- dependencies
+      , (_, children) <- maybeToList (Map.lookup dependency graph)
+      , child <- children
+      , Just childScc <- [Map.lookup child nodeSccs]
+      , childScc /= sccId
+      ]
+    maybeToList Nothing = []
+    maybeToList (Just value) = [value]
+    componentMap = Map.fromList components
+    compute memo sccId = case Map.lookup sccId memo of
+      Just digest -> (digest, memo)
+      Nothing ->
+        let dependencies = componentMap Map.! sccId
+            (childDigests, memo') = foldl'
+              (\(digests, known) childScc ->
+                let (childDigest, known') = compute known childScc
+                in (childDigest : digests, known'))
+              ([], memo) (outgoing sccId dependencies)
+            componentDigest = digestComponent dependencies (reverse childDigests)
+        in (componentDigest, Map.insert sccId componentDigest memo')
+    (_, sccDigests) = foldl'
+      (\(_, memo) (sccId, _) -> compute memo sccId)
+      (HomeDependencyDigest BS.empty, Map.empty) components
+    digestComponent dependencies children = HomeDependencyDigest $ SHA256.hash $
+      BS.concat (map ownFrame dependencies ++ map childFrame (sort children))
+    ownFrame dependency = frame $ BS8.pack $
+      moduleNameString name ++ "\0" ++ show kind ++ "\0" ++ show witness
+      where
+        HomeDependency name kind = dependency
+        witness = fst (graph Map.! dependency)
+    childFrame (HomeDependencyDigest digest) = frame digest
+    frame bytes = BS8.pack (show (BS.length bytes) ++ ":") <> bytes
 
 -- CPP, splices, and quasiquoters can consume inputs outside the downsweep
 -- source graph. TemplateHaskellQuotes alone only constructs syntax and does
@@ -1068,24 +1135,29 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
               summaryDependencies summary =
                    importedDependencies OrdinaryHomeSource (ms_textual_imps summary)
                 ++ importedDependencies BootHomeSource (ms_srcimps summary)
-              dependencyClosure roots = go Set.empty roots
-                where
-                  go visited [] = visited
-                  go visited (dependency : pending)
-                    | dependency `Set.member` visited = go visited pending
-                    | otherwise = go (Set.insert dependency visited)
-                        (maybe [] summaryDependencies
-                          (Map.lookup dependency summaryByDependency) ++ pending)
-              homeDependencyWitnesses modSum = Map.restrictKeys summaryFingerprints
-                (dependencyClosure
-                  ( importedDependencies OrdinaryHomeSource (ms_textual_imps modSum)
-                 ++ importedDependencies BootHomeSource (ms_srcimps modSum)))
+              dependencyGraph = Map.mapWithKey
+                (\dependency summary ->
+                  (summaryFingerprints Map.! dependency, summaryDependencies summary))
+                summaryByDependency
+              (dependencyDigests, digestComputations) =
+                homeDependencyDigests dependencyGraph
+              directDependencyKeys modSum = Set.fromList
+                ( importedDependencies OrdinaryHomeSource (ms_textual_imps modSum)
+               ++ importedDependencies BootHomeSource (ms_srcimps modSum))
+              homeDependencyWitnesses modSum = Map.restrictKeys dependencyDigests
+                (directDependencyKeys modSum)
               directHomeDeps modSum = Set.fromList
                 [ mn
                 | (_, lmn) <- ms_textual_imps modSum
                 , let mn = unLoc lmn
                 , HomeDependency mn OrdinaryHomeSource `Map.member` summaryFingerprints
                 ]
+              dependencyEdgeCount = sum
+                [ length children | (_, children) <- Map.elems dependencyGraph ]
+          when timing $ liftIO $ hPutStrLn stderr $
+            "tidepool-dependency-witness nodes=" ++ show (Map.size dependencyGraph)
+              ++ " direct_edges=" ++ show dependencyEdgeCount
+              ++ " digest_computations=" ++ show digestComputations
           validThisCycleRef <- liftIO (newIORef (Map.empty :: Map.Map ModuleName Bool))
           -- The withholding pass can change only a module's own retained
           -- definitions; retained identities defined elsewhere reach it through
