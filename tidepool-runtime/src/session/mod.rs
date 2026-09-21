@@ -756,14 +756,6 @@ impl SessionLib {
         ))
     }
 
-    /// A cache salt unique to `(session, generation)`. Threaded into
-    /// [`crate::compile_haskell_salted`] so two sessions' identical-text modules
-    /// don't collide and a generation bump invalidates correctly.
-    #[must_use]
-    pub fn cache_salt(&self) -> String {
-        format!("session:{}:gen:{}", self.id, self.log.generation())
-    }
-
     /// Append a declaration turn. Extracts binder names from GHC, regenerates the
     /// gen-versioned module, writes it atomically, validates it type-checks via GHC,
     /// and returns the new generation.
@@ -1458,16 +1450,6 @@ mod tests {
                 "import qualified Data.Map.Strict as Map"
             ]
         );
-    }
-
-    #[test]
-    fn cache_salt_changes_with_generation_and_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let lib1 =
-            SessionLib::open(SessionId(1), dir.path(), ModuleEnv::standalone_default()).unwrap();
-        let lib2 =
-            SessionLib::open(SessionId(2), dir.path(), ModuleEnv::standalone_default()).unwrap();
-        assert_ne!(lib1.cache_salt(), lib2.cache_salt());
     }
 
     fn validated_staged_declaration(lib: &SessionLib, source: &str) -> StagedDeclaration {

@@ -18,53 +18,30 @@ must not be visible here (this crate sits below it). `failclass.rs`'s
 reason; `classify`/`classify_session` stay in `tidepool-runtime`, calling
 back into `classify_compile`.
 
-## Compile cache — two content-addressed layers in `cache.rs`
+## Compile cache
 
-`cache.rs` holds two keyed memos, both under `paths::compile_cache_dir()`
-(`$TIDEPOOL_COMPILE_CACHE_DIR` if set, else the ordinary cache dir — sharable
-across test processes since it is content-addressed, not path-addressed):
-the original 2-artifact eval layer (`CacheKey` / `cache_load` / `cache_store`,
-keyed on source + target + include fingerprint, optionally salted per
-session), and an N-artifact invocation layer (`InvocationKey` /
-`artifacts_load` / `artifacts_store`) that keys a COMPLETE
-`tidepool-extract` invocation — built from the caller's own `ExtractCmd`, so
-the key always describes the invocation that actually runs — and stores every
-artifact the caller reads (`meta.cbor`, per-target `.cbor`, the asks
-sidecar), not just Core. The invocation key is namespaced so it can never
-collide with an eval key even though both live under the same `<key>.*`
-filenames. `compile_turns` (`tidepool-harness`'s fixed-source boot/answerer/
-render compiles, identical across ~200 test processes) is the invocation
-layer's consumer; see the doc comments on `invocation_key` for the
-allowlisted-argv keying discipline (default-deny — an unrecognized flag makes
-the invocation uncacheable rather than silently unkeyed). Every key also
-frames the identity reported by the already-bound compiler endpoint, so the
-producer named by the key is necessarily the producer that executes. See
-`fingerprint_dir_relative` for why include-dir fingerprints are
-path-independent (module identity comes from the path relative to the search
-root, since source spans are erased before the prepared program reaches
-Rust — see root CLAUDE.md's Key Decisions Reference).
+`artifacts::compile_invocation` is the single compile front door. Immutable
+single-target and multi-target requests share one recipe and named artifact
+bundle in `cache.rs`. Session salts and injected session interfaces bypass the
+artifact cache.
 
-Each layer reads dependency bytes once, collecting the digest and CPP
-cacheability decision together. Both consume one manifest covering `.hs`,
-`.hs-boot`, `.lhs`, and `.lhs-boot`. The eval layer additionally frames each
-include root's absolute path; the invocation layer frames only root-relative
-module paths so identical relocated trees share a key. CPP directives make
-either layer explicitly uncacheable: `#include` can name files outside every
-GHC import root, so an import-directory walk cannot honestly enumerate those
-side inputs.
+The recipe binds source bytes, the generated module filename, ordered targets
+and absolute import roots, and the already-bound endpoint identity. Unknown
+options are uncacheable. A recipe lookup does not scan entire import trees.
+Instead, the worker emits versioned `dependencies.json` with SHA-256 source
+evidence, selected home modules and absent higher-priority import candidates.
+Package dependencies belong to the endpoint epoch. Incomplete evidence (including
+untracked preprocessing or request-time execution) cannot produce a hit.
+Cache safety and test-selection completeness are separate fields.
 
-The key builder deliberately lives here and not in `tidepool-extract-cmd`:
-that crate owns binding and execution, while this crate owns cache policy.
-The key is computed from `ExtractCmd::argv()` plus the opaque
-`CompilerIdentity` returned by binding, so it stays invocation-shaped without
-reimplementing wrapper, PATH, Nix, daemon, worker, or GHC identity policy.
-This crate sits one layer above `tidepool-extract-cmd` because it also
-assembles and validates prepared artifacts with `tidepool-codegen`.
+Before publication and on each lookup, validate consumed source bytes and
+negative resolution witnesses. The generated request path is normalized to a
+logical source marker; authored dependencies retain absolute path identity.
+Metadata, prepared programs, typed-site sidecars, and dependency evidence live
+in one checksummed bundle, published by atomic rename. A malformed bundle or
+incompatible evidence is a miss. The recipe namespace deliberately invalidates
+the former eval and invocation cache layouts; neither is read or written.
 
-Session-scope compiles (`--inject-val`/`--session-root`,
-which read per-session mutable directories) are excluded from the invocation
-layer by construction — those flags are not on the allowlist, so such an
-invocation keys to `None` and always compiles cold — except for the one
-`stable_val` caller path, which additionally accepts `--session-root` (like
-`--output-dir`, dropped) and one matching `--inject-val` (dropped, and
-separately content-fingerprinted by its `.hi` iface).
+`source_root_manifest` and `source_roots_identity` still own whole-source-revision
+identities for workspace capture and reload. Those identities describe a source
+snapshot; they do not determine which files a compiled program consumed.

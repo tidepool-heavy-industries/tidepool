@@ -17,12 +17,8 @@
 //! (broken) facade. Healthy verbs stay in scope and an eval can even
 //! `writeChecked` a repair.
 //!
-//! It is re-probed per eval and salted by a content-snapshot hash of the lib
-//! dirs, so it is resilient to ANY breakage source — unlike a
-//! compile-probe-before-land write gate, which would not have caught the
-//! effect-cut regression that motivated the issue. A single-entry in-process
-//! memo keyed on that snapshot hash makes the steady state (unchanged lib)
-//! essentially free.
+//! A source-snapshot memo avoids repeating the fault-isolation decision for
+//! unchanged library files. Compiler probes use the shared artifact cache.
 
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
@@ -68,16 +64,14 @@ pub fn isolate_lib_layer(lib_dirs: &[PathBuf], include: &[PathBuf]) -> LibLayer 
         }
     }
 
-    let layer = compute_layer(&lib_src, include, &snapshot);
+    let layer = compute_layer(&lib_src, include);
     *MEMO.lock() = Some((snapshot, layer.clone()));
     layer
 }
 
-fn compute_layer(lib_src: &str, include: &[PathBuf], snapshot: &str) -> LibLayer {
-    let salt = format!("libiso-{snapshot}");
-
-    // Fast path: does `import Library` compile? One probe, cached under `salt`.
-    if probe_import("Library", include, &salt).is_ok() {
+fn compute_layer(lib_src: &str, include: &[PathBuf]) -> LibLayer {
+    // The artifact cache validates compiler evidence for this import.
+    if probe_import("Library", include).is_ok() {
         return LibLayer::default();
     }
 
@@ -93,7 +87,7 @@ fn compute_layer(lib_src: &str, include: &[PathBuf], snapshot: &str) -> LibLayer
     let mut broken: Vec<String> = Vec::new();
     let mut healthy: Vec<String> = Vec::new();
     for m in &reexports {
-        if probe_import(m, include, &salt).is_ok() {
+        if probe_import(m, include).is_ok() {
             healthy.push(m.clone());
         } else {
             broken.push(m.clone());
@@ -125,23 +119,19 @@ fn compute_layer(lib_src: &str, include: &[PathBuf], snapshot: &str) -> LibLayer
 
 /// Compile-probe a single module by importing it into a throwaway module. This
 /// forces GHC to build `module` (and its transitive deps) via the include path;
-/// a broken module fails the extract. Salting by the lib snapshot hash means an
-/// on-disk edit busts the (otherwise source-identical) probe's cache entry.
+/// a broken module fails the extract. Compiler dependency evidence invalidates
+/// an otherwise source-identical probe when a consumed dependency changes.
 /// Callers keep only `is_ok()`/`is_err()` from this result (see
 /// `compute_layer` below): the actual GHC diagnostic for a broken re-export
 /// is never rendered or surfaced to the model, which instead sees only a
 /// generic brick note naming the broken module.
-fn probe_import(
-    module: &str,
-    include: &[PathBuf],
-    salt: &str,
-) -> Result<(), tidepool_runtime::CompileError> {
+fn probe_import(module: &str, include: &[PathBuf]) -> Result<(), tidepool_runtime::CompileError> {
     let src = format!(
         "{pragmas}\nmodule LibProbe where\nimport {module}\n__libProbe__ :: ()\n__libProbe__ = ()\n",
         pragmas = crate::EVAL_PRAGMAS,
     );
     let refs: Vec<&Path> = include.iter().map(PathBuf::as_path).collect();
-    tidepool_runtime::compile_haskell_salted(&src, "__libProbe__", &refs, Some(salt)).map(|_| ())
+    tidepool_runtime::compile_haskell(&src, "__libProbe__", &refs).map(|_| ())
 }
 
 /// Read the first `Library.hs` found across `lib_dirs` (project shadows global,

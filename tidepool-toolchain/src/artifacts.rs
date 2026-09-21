@@ -10,22 +10,9 @@
 //! timing to its own (node, round) pairs via the `on_stage` hook, rather than
 //! duplicating the spawn+read+deserialize sequence.
 //!
-//! # One front door, two DELIBERATELY separate cache schemes
-//!
-//! [`CompileInvocation::cache`] ([`CacheStrategy`]) is the one remaining
-//! policy delta between the lanes. The eval lane
-//! (`tidepool_runtime::compile_haskell`/`tidepool_runtime::compile_haskell_salted`) keys
-//! through [`crate::cache::eval_cache_key`] / [`crate::cache::cache_load`] /
-//! [`crate::cache::cache_store`] (a single target's prepared, metadata, and
-//! typed-site artifacts, optionally
-//! salted per session/generation); the turn lane ([`compile_targets`]) keys
-//! through [`crate::cache::invocation_key`] / [`crate::cache::artifacts_load`]
-//! / [`crate::cache::artifacts_store`] (a named artifact SET, which is what
-//! lets the asks sidecar and multiple targets share one memo entry, but has
-//! no salt concept). Merging those two key spaces is out of scope: a key
-//! change would cold every existing on-disk memo (including the harness test
-//! suite's shared one and every deployed eval cache) for whichever lane's
-//! scheme lost.
+//! All cacheable requests use one recipe and one named artifact bundle.
+//! Mutable session requests bypass caching. Compiler dependency evidence is
+//! validated on publication and on every hit.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -228,37 +215,15 @@ impl YieldSites {
 // Stable session-Val injection (turn-latency-state-injection)
 // ---------------------------------------------------------------------------
 
-/// A stable, never-rotating session `Val` module to inject via
-/// `--session-root <dir> --inject-val <module>` — see
-/// [`cache::Invocation::stable_val`]'s doc for why this is safe to treat as
-/// CACHEABLE despite naming a session-scoped iface. The ONLY caller today is
-/// the self-iterating harness driver's fused outer render/loop compile;
-/// every other `--inject-val`/`--session-root` use (the interactive session's rotating
-/// `Val.G<g>` value plane, `tidepool_runtime::session::turn`) stays on the
-/// ordinary uncacheable path and never constructs one of these.
+/// A session value module injected into a harness compilation. Injected
+/// interfaces are session state, so these requests bypass the artifact cache.
 pub struct StableValInject<'a> {
     pub module: tidepool_repr::SessionModule,
     pub session_root: &'a Path,
 }
 
-/// A session's `--session-root <dir> --inject-val <module>` (repeated) for
-/// an UNCACHED probe compile — the plural sibling of [`StableValInject`],
-/// which stays single-module and CACHEABLE (its own doc explains why that
-/// invariant matters for its one caller). This one is for a caller that
-/// needs to inject however many `Val.G<g>` modules are LIVE on a real,
-/// mutable session at an arbitrary point — [`tidepool_harness::engine`]'s
-/// pinned-`Finalize <T>`-row probe, when `T` is declared on the session's own
-/// decl plane: `PersistentSession::define_scoped_in` splices an import of
-/// every live `Val.G<g>` name into the generated decl module UNCONDITIONALLY
-/// (the decl-plane analogue of GHCi seeing earlier bindings), so a decl
-/// module that itself imports nothing from the value plane still names those
-/// modules in its own source and needs them resolvable to compile at all.
-/// Deliberately routed through [`CacheStrategy::Uncached`]
-/// ([`compile_targets_with_session_inject`]) rather than widening
-/// [`cache::Invocation::stable_val`] to a list: the live set varies with
-/// session state in a way the compile memo's argv allowlist was never built
-/// to key on, and the caller already has its OWN process-level memo over the
-/// generated probe source (`tidepool_harness::engine`'s `finalize_probe_memo`).
+/// The live value modules needed by a session probe. These requests bypass
+/// the artifact cache; the session owns their generation and lifetime.
 pub struct SessionInject<'a> {
     pub session_root: &'a Path,
     pub inject_modules: &'a [String],
@@ -295,29 +260,13 @@ pub struct CompiledArtifacts {
 // The one front door
 // ---------------------------------------------------------------------------
 
-/// How a [`CompileInvocation`]'s result is memoized — the one deliberate
-/// policy delta between the two lanes; see the module doc.
-pub enum CacheStrategy<'a> {
-    /// `tidepool_runtime::compile_haskell`/`tidepool_runtime::compile_haskell_salted`'s scheme:
-    /// a single prepared artifact set keyed by [`cache::eval_cache_key`].
-    Eval { salt: Option<&'a str> },
-    /// [`compile_targets`]'s scheme: a whole artifact SET keyed by
-    /// [`cache::invocation_key`] over the built argv.
-    Invocation,
-    /// Never memoized, in either direction (no load, no store) — for a
-    /// [`SessionInject`]ed compile, whose `--inject-val` set names a real
-    /// session's live, mutable state rather than anything the compile memo's
-    /// argv allowlist can key on. [`compile_targets_with_session_inject`]'s
-    /// one caller already has its own memo over the compile it's probing.
+/// Whether an immutable compilation may reuse a validated artifact bundle.
+pub enum CacheStrategy {
+    Immutable,
     Uncached,
 }
 
-/// One `tidepool-extract` invocation, as built by either production front
-/// door. `tidepool_runtime::compile_haskell_salted` builds one with a single-element
-/// `targets` and [`CacheStrategy::Eval`]; [`compile_targets`] builds one with
-/// N targets and [`CacheStrategy::Invocation`] — single-target compilation is
-/// a PROJECTION of the same [`compile_invocation`] this drives for the batch
-/// case, not a separate spawn/read/deserialize path.
+/// One typed compiler invocation shared by single-target and batch callers.
 pub struct CompileInvocation<'a> {
     pub source: &'a str,
     pub targets: &'a [&'a str],
@@ -333,13 +282,8 @@ pub struct CompileInvocation<'a> {
     /// disagree on what that name must be: the turn lane's wrapper declares
     /// `module Expr`, the eval lane's historical default is `Input`.
     pub fallback_module_name: &'a str,
-    pub cache: CacheStrategy<'a>,
-    /// A [`StableValInject`] to apply to this invocation's `ExtractCmd`
-    /// (`--session-root`/`--inject-val`), and to carry into the memo key as
-    /// [`cache::Invocation::stable_val`] so the invocation stays cacheable.
-    /// `None` for both existing front doors (`compile_haskell`,
-    /// `compile_targets`) — only [`compile_targets_with_stable_inject`] sets
-    /// it.
+    pub cache: CacheStrategy,
+    /// Injected session interfaces make a request uncacheable.
     pub stable_val: Option<StableValInject<'a>>,
     /// A [`SessionInject`] to apply to this invocation's `ExtractCmd`
     /// (`--session-root`/`--inject-val` per module) — mutually exclusive
@@ -366,7 +310,7 @@ pub struct CompileInvocation<'a> {
 /// collapse into one ambiguous file.
 ///
 /// **MEMOIZED** per [`CompileInvocation::cache`] — see the module doc for why
-/// the two `CacheStrategy` variants stay separate schemes.
+/// both cacheable entry points share the same recipe and bundle.
 ///
 /// `on_stage(name, elapsed, bytes)` fires once per measured stage —
 /// [`timing::STAGE_EXTRACT_SPAWN`], each forwarded `extract.<phase>` row
@@ -448,35 +392,10 @@ pub fn compile_invocation(
             let endpoint = cmd.bind()?;
             crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
 
-            let eval_key = match &inv.cache {
-                CacheStrategy::Eval { salt } => {
-                    let key = cache::eval_cache_key(
-                        inv.source,
-                        inv.targets[0],
-                        inv.include,
-                        *salt,
-                        endpoint.identity().as_bytes(),
-                    );
-                    if let Some(key) = &key {
-                        if let Some((meta_bytes, asks_bytes, prepared_bytes)) =
-                            cache::cache_load(key)
-                        {
-                            let raw = vec![RawTargetOutput {
-                                target: inv.targets[0].to_string(),
-                                asks_bytes,
-                                prepared_bytes,
-                            }];
-                            if let Ok(artifacts) = assemble(&meta_bytes, &raw, &mut on_stage) {
-                                return Ok(Ok(CompileAttempt::Cached(Box::new(artifacts))));
-                            }
-                        }
-                    }
-                    key
-                }
-                _ => None,
-            };
-
-            let inv_key = if matches!(inv.cache, CacheStrategy::Invocation) {
+            let cacheable = matches!(inv.cache, CacheStrategy::Immutable)
+                && inv.stable_val.is_none()
+                && inv.session_inject.is_none();
+            let inv_key = if cacheable {
                 let argv = cmd.argv();
                 let key = cache::invocation_key(&cache::Invocation {
                     source: inv.source,
@@ -484,16 +403,21 @@ pub fn compile_invocation(
                     input_path: &input_path,
                     include: inv.include,
                     endpoint_identity: endpoint.identity().as_bytes(),
-                    stable_val: inv.stable_val.as_ref().map(|sv| sv.module),
+                    stable_val: None,
                 });
                 if let Some(key) = &key {
                     let load_start = Instant::now();
-                    if let Some((meta_bytes, raw)) = load_memo(key, &name_refs, inv.targets) {
-                        let bytes = total_bytes(&meta_bytes, &raw);
-                        on_stage(timing::STAGE_CBOR_READ, load_start.elapsed(), bytes);
-                        return Ok(assemble(&meta_bytes, &raw, &mut on_stage)
-                            .map(Box::new)
-                            .map(CompileAttempt::Cached));
+                    if let Some((meta_bytes, raw)) =
+                        load_memo(key, &name_refs, inv.targets, inv.source)
+                    {
+                        if let Ok(artifacts) = assemble(&meta_bytes, &raw, &mut on_stage) {
+                            on_stage(
+                                timing::STAGE_CBOR_READ,
+                                load_start.elapsed(),
+                                total_bytes(&meta_bytes, &raw),
+                            );
+                            return Ok(CompileAttempt::Cached(Box::new(artifacts)));
+                        }
                     }
                 }
                 key
@@ -503,12 +427,12 @@ pub fn compile_invocation(
 
             endpoint
                 .execute(&cmd)
-                .map(|run| Ok(CompileAttempt::Executed((cmd, run, eval_key, inv_key))))
+                .map(|run| CompileAttempt::Executed((cmd, run, inv_key)))
         },
         |error| error.permits_rebind(),
     )
-    .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))??;
-    let (cmd, run, eval_key, inv_key) = match attempt {
+    .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))?;
+    let (cmd, run, inv_key) = match attempt {
         CompileAttempt::Cached(artifacts) => return Ok(*artifacts),
         CompileAttempt::Executed(executed) => executed,
     };
@@ -531,7 +455,6 @@ pub fn compile_invocation(
         "extract spawn"
     );
 
-    let is_invocation_lane = matches!(inv.cache, CacheStrategy::Invocation);
     let (meta_bytes, raw) = extract_and_read(
         run,
         temp_dir.path(),
@@ -539,19 +462,8 @@ pub fn compile_invocation(
         multi,
         &mut on_stage,
         |stderr, success| {
-            // The invocation (turn) lane only warns on failure; the eval
-            // lane always echoes stderr as a human debug channel — the same
-            // logging policy each standalone function uses
-            // this front door existed.
-            if is_invocation_lane {
-                if !success && !stderr.is_empty() {
-                    tracing::warn!(
-                        targets = %inv.targets.join(","),
-                        "extract failed:\n{stderr}"
-                    );
-                }
-            } else if !stderr.is_empty() {
-                eprintln!("[tidepool-extract stderr]\n{stderr}");
+            if !success && !stderr.is_empty() {
+                tracing::warn!(targets = %inv.targets.join(","), "extract failed:\n{stderr}");
             }
         },
     )?;
@@ -560,11 +472,15 @@ pub fn compile_invocation(
     // memoized into a permanently-failing entry. Best-effort: an unwritable
     // memo costs a recompile, it never fails a compile.
     let artifacts = assemble(&meta_bytes, &raw, &mut on_stage)?;
-    if let Some(key) = &eval_key {
-        cache::cache_store(key, &meta_bytes, &raw[0].asks_bytes, &raw[0].prepared_bytes);
-    }
     if let Some(key) = &inv_key {
-        store_memo(key, &name_refs, &meta_bytes, &raw);
+        if let Some(evidence) = std::fs::read(temp_dir.path().join("dependencies.json"))
+            .ok()
+            .and_then(|bytes| {
+                cache::DependencyEvidence::from_worker(&bytes, &input_path, inv.source)
+            })
+        {
+            store_memo(key, &name_refs, &meta_bytes, &raw, &evidence, inv.source);
+        }
     }
     Ok(artifacts)
 }
@@ -607,7 +523,7 @@ pub fn compile_targets(
         include,
         bin,
         fallback_module_name: "Expr",
-        cache: CacheStrategy::Invocation,
+        cache: CacheStrategy::Immutable,
         stable_val: None,
         session_inject: None,
     };
@@ -636,7 +552,7 @@ pub fn compile_targets_with_stable_inject(
         include,
         bin,
         fallback_module_name: "Expr",
-        cache: CacheStrategy::Invocation,
+        cache: CacheStrategy::Immutable,
         stable_val: Some(stable_val),
         session_inject: None,
     };
@@ -1006,8 +922,9 @@ fn load_memo(
     key: &cache::InvocationKey,
     names: &[&str],
     targets: &[&str],
+    source: &str,
 ) -> Option<(Vec<u8>, Vec<RawTargetOutput>)> {
-    let loaded = cache::artifacts_load(key, names)?;
+    let loaded = cache::artifacts_load(key, names, source)?;
     let mut it = loaded.into_iter();
     // Every artifact is required. An extractor represents a target with no
     // typed suspension sites by writing an `[]` sidecar.
@@ -1032,6 +949,8 @@ fn store_memo(
     names: &[&str],
     meta_bytes: &[u8],
     raw: &[RawTargetOutput],
+    evidence: &cache::DependencyEvidence,
+    source: &str,
 ) {
     let mut artifacts: Vec<(&str, Option<&[u8]>)> = Vec::with_capacity(names.len());
     let mut names = names.iter();
@@ -1045,7 +964,7 @@ fn store_memo(
         artifacts.push((prepared_name, Some(r.prepared_bytes.as_slice())));
         artifacts.push((asks_name, Some(r.asks_bytes.as_slice())));
     }
-    cache::artifacts_store(key, &artifacts);
+    cache::artifacts_store(key, &artifacts, evidence, source);
 }
 
 #[cfg(test)]
@@ -1360,5 +1279,72 @@ mod constructor_identity_tests {
             err,
             CompileError::ConstructorIdentity(ConstructorIdentityMismatch::ArityMismatch { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod dependency_cache_tests {
+    use super::*;
+
+    /// One real compiler preparation family tests both bundle reuse and the
+    /// import search witnesses; no independent fixture compile per assertion.
+    #[test]
+    fn compiler_evidence_controls_hits_and_home_shadow_invalidation() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let library = second.join("CacheDependency.hs");
+        std::fs::write(
+            &library,
+            "module CacheDependency where\nvalue = (41 :: Int)\n",
+        )
+        .unwrap();
+        let roots = [first.clone(), second.clone()];
+        let invocation = CompileInvocation {
+            source: "module CacheConsumer where\nimport CacheDependency\nresult = value + 1\n",
+            targets: &["result"],
+            include: &roots,
+            bin: None,
+            fallback_module_name: "CacheConsumer",
+            cache: CacheStrategy::Immutable,
+            stable_val: None,
+            session_inject: None,
+        };
+        let compile = || {
+            let mut prepared = false;
+            compile_invocation(&invocation, |stage, _, _| {
+                prepared |= stage == timing::STAGE_EXTRACT_SPAWN;
+            })
+            .expect("fixture compiler request");
+            prepared
+        };
+        assert!(compile(), "fresh recipe compiles");
+        assert!(!compile(), "unchanged evidence reuses the bundle");
+        std::fs::write(
+            second.join("Unrelated.hs"),
+            "module Unrelated where\nvalue = False\n",
+        )
+        .unwrap();
+        assert!(!compile(), "unconsumed files do not invalidate");
+        std::fs::write(
+            &library,
+            "module CacheDependency where\nvalue = (42 :: Int)\n",
+        )
+        .unwrap();
+        assert!(compile(), "consumed source bytes invalidate");
+        assert!(!compile());
+        let shadow = first.join("CacheDependency.hs");
+        std::fs::write(
+            &shadow,
+            "module CacheDependency where\nvalue = (43 :: Int)\n",
+        )
+        .unwrap();
+        assert!(compile(), "a new higher-priority home module invalidates");
+        assert!(!compile());
+        std::fs::remove_file(shadow).unwrap();
+        assert!(compile(), "removing the selected module invalidates");
+        assert!(!compile());
     }
 }

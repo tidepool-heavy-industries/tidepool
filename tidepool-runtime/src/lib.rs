@@ -107,20 +107,6 @@ pub fn compile_haskell(
     target: &str,
     include: &[&Path],
 ) -> Result<CompileResult, CompileError> {
-    compile_haskell_salted(source, target, include, None)
-}
-
-/// As [`compile_haskell`], but mixes `cache_salt` into the cache key. The
-/// declaration-accumulation lane ([`session::SessionLib`]) passes its
-/// `(session, generation)` salt so per-session, per-generation compilations
-/// never collide and a generation bump invalidates correctly. With `None` this
-/// is byte-for-byte identical to [`compile_haskell`].
-pub fn compile_haskell_salted(
-    source: &str,
-    target: &str,
-    include: &[&Path],
-    cache_salt: Option<&str>,
-) -> Result<CompileResult, CompileError> {
     let include_owned: Vec<PathBuf> = include.iter().map(|p| p.to_path_buf()).collect();
     let inv = artifacts::CompileInvocation {
         source,
@@ -128,7 +114,7 @@ pub fn compile_haskell_salted(
         include: &include_owned,
         bin: None,
         fallback_module_name: "Input",
-        cache: artifacts::CacheStrategy::Eval { salt: cache_salt },
+        cache: artifacts::CacheStrategy::Immutable,
         stable_val: None,
         session_inject: None,
     };
