@@ -73,9 +73,21 @@ pub fn workbench_json_to_haskell(value: &serde_json::Value) -> String {
             format!("Aeson.Bool {}", if *value { "True" } else { "False" })
         }
         serde_json::Value::Number(value) => {
-            let (coefficient, exponent) =
-                tidepool_bridge::shapes::parse_decimal_token(&value.to_string());
-            format!("Aeson.Number (Aeson.scientific ({coefficient}) ({exponent}))")
+            match tidepool_bridge::decimal::Decimal::parse_token(value.as_str()) {
+                Ok(decimal) => format!(
+                    "Aeson.Number (Aeson.scientific ({}) ({}))",
+                    decimal.coefficient(),
+                    decimal.exponent()
+                ),
+                // `serde_json` with arbitrary precision accepts exponents wider
+                // than Haskell's `Int`. Keep source generation total while
+                // preserving the failure: forcing this input reports the exact
+                // representability error instead of silently changing its value.
+                Err(error) => format!(
+                    "Aeson.Number (error \"{}\")",
+                    escape_workbench_haskell_string(&error.to_string())
+                ),
+            }
         }
         serde_json::Value::String(value) => {
             format!(

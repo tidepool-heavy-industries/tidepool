@@ -461,70 +461,21 @@ pub struct NumberConIds {
     pub in_: DataConId,
 }
 
-/// Split a JSON number token (`serde_json` under `arbitrary_precision` hands us
-/// the exact source text) into an integer `coefficient` decimal string and a
-/// `base10Exponent`, such that the value equals `coefficient * 10^exponent`.
-/// e.g. `"3.14"` → `("314", -2)`, `"1e10"` → `("1", 10)`, `"-0.001"` → `("-1", -3)`.
-pub fn parse_decimal_token(tok: &str) -> (String, i64) {
-    let (sign, rest) = match tok.strip_prefix('-') {
-        Some(r) => ("-", r),
-        None => ("", tok.strip_prefix('+').unwrap_or(tok)),
-    };
-    let (mantissa, exp_part) = match rest.split_once(['e', 'E']) {
-        Some((m, e)) => (m, e.parse::<i64>().unwrap_or(0)),
-        None => (rest, 0),
-    };
-    let (int_part, frac_part) = match mantissa.split_once('.') {
-        Some((i, f)) => (i, f),
-        None => (mantissa, ""),
-    };
-    // coefficient digits = int ++ frac; exponent shifts down by the frac length.
-    let mut digits = String::with_capacity(int_part.len() + frac_part.len());
-    digits.push_str(int_part);
-    digits.push_str(frac_part);
-    let exponent = exp_part - frac_part.len() as i64;
-    // Strip leading zeros (keep at least one digit) so `integer_from_decimal`'s
-    // i64 fast-path fires whenever possible.
-    let trimmed = digits.trim_start_matches('0');
-    let coeff = if trimmed.is_empty() {
-        "0".to_string()
-    } else {
-        format!("{sign}{trimmed}")
-    };
-    (coeff, exponent)
-}
-
-/// Whether `tok` (a raw JSON number token, e.g. from `serde_json::Number::as_str`
-/// under `arbitrary_precision`) has an exponent part [`parse_decimal_token`]
-/// cannot represent as an `i64` — the case it silently maps to `unwrap_or(0)`
-/// (`1e99999999999999999999` would decode as `1×10⁰` instead of erroring).
-/// `parse_decimal_token` itself stays infallible (shared by `tidepool-bridge`
-/// and `tidepool-mcp`'s eval-prep source rendering); callers at an untrusted
-/// JSON-text boundary can use this to reject the token before building on it.
-pub fn decimal_token_exponent_overflows(tok: &str) -> bool {
-    let rest = tok
-        .strip_prefix('-')
-        .or_else(|| tok.strip_prefix('+'))
-        .unwrap_or(tok);
-    let mantissa_and_exp = rest.split_once(['e', 'E']);
-    match mantissa_and_exp {
-        Some((_, exp_part)) => exp_part.parse::<i64>().is_err(),
-        None => false,
-    }
-}
-
 /// Build an exact aeson `Number (Scientific coeff exp)` from a parsed JSON
 /// number. No precision is lost: the coefficient rides an exact `Integer`
 /// (`IS`/`IP`/`IN`) and the base-10 exponent an `Int`. Requires
 /// `serde_json`'s `arbitrary_precision` so `n.as_str()` is the exact token.
-pub fn scientific_from_number(n: &serde_json::Number, ids: &NumberConIds) -> HaskellValue {
-    let (coeff, exp) = parse_decimal_token(n.as_str());
+pub fn scientific_from_number(
+    n: &serde_json::Number,
+    ids: &NumberConIds,
+) -> Result<HaskellValue, crate::decimal::DecimalError> {
+    let (coeff, exp) = crate::decimal::Decimal::parse_token(n.as_str())?.into_parts();
     let coefficient = integer_from_decimal(&coeff, ids.is, ids.ip, ids.in_);
     let sci = HaskellValue::Con(
         ids.scientific,
         vec![coefficient, HaskellValue::Lit(Literal::LitInt(exp))],
     );
-    HaskellValue::Con(ids.number, vec![sci])
+    Ok(HaskellValue::Con(ids.number, vec![sci]))
 }
 
 // ---------------------------------------------------------------------------
@@ -981,39 +932,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_decimal_token_splits_coeff_and_exp() {
-        assert_eq!(parse_decimal_token("3.14"), ("314".into(), -2));
-        assert_eq!(parse_decimal_token("1e10"), ("1".into(), 10));
-        assert_eq!(parse_decimal_token("-0.001"), ("-1".into(), -3));
-        assert_eq!(parse_decimal_token("42"), ("42".into(), 0));
-        assert_eq!(parse_decimal_token("1.5e-3"), ("15".into(), -4));
-        assert_eq!(parse_decimal_token("0"), ("0".into(), 0));
-        assert_eq!(parse_decimal_token("100"), ("100".into(), 0));
-        // exact big integer past f64/i64 stays exact in the coefficient
-        assert_eq!(
-            parse_decimal_token("9007199254740993"),
-            ("9007199254740993".into(), 0)
-        );
-    }
-
-    /// F7: `decimal_token_exponent_overflows` must flag exactly the tokens
-    /// whose exponent `parse_decimal_token` would otherwise silently zero.
-    #[test]
-    fn decimal_token_exponent_overflows_flags_unparseable_exponent() {
-        assert!(decimal_token_exponent_overflows("1e99999999999999999999"));
-        assert!(decimal_token_exponent_overflows("-1e99999999999999999999"));
-        assert!(decimal_token_exponent_overflows(
-            "1E999999999999999999999999"
-        ));
-        // Sanity: ordinary tokens (including large-but-representable exponents
-        // and exponent-free tokens) are NOT flagged.
-        assert!(!decimal_token_exponent_overflows("1e10"));
-        assert!(!decimal_token_exponent_overflows("3.14"));
-        assert!(!decimal_token_exponent_overflows("42"));
-        assert!(!decimal_token_exponent_overflows("1e9223372036854775807"));
-    }
-
-    #[test]
     fn scientific_from_number_builds_exact_contract() {
         let ids = NumberConIds {
             number: DataConId(200),
@@ -1022,16 +940,17 @@ mod tests {
             ip: DataConId(203),
             in_: DataConId(204),
         };
-        // A >i64 integer: Number(Scientific(IP<limbs>, 0)) — exact, not Double.
+        // A >i64 integer remains exact while the shared decimal policy trims
+        // representable trailing zeroes from its coefficient.
         let big: serde_json::Number =
             serde_json::from_str("265252859812191058636308480000000").unwrap();
-        match &scientific_from_number(&big, &ids) {
+        match &scientific_from_number(&big, &ids).unwrap() {
             HaskellValue::Con(num, nf) => {
                 assert_eq!(*num, ids.number);
                 match &nf[0] {
                     HaskellValue::Con(sci, sf) => {
                         assert_eq!(*sci, ids.scientific);
-                        assert!(matches!(&sf[1], HaskellValue::Lit(Literal::LitInt(0))));
+                        assert!(matches!(&sf[1], HaskellValue::Lit(Literal::LitInt(7))));
                         match &sf[0] {
                             HaskellValue::Con(c, cf) if *c == ids.ip => {
                                 let bytes = match &cf[0] {
@@ -1040,7 +959,7 @@ mod tests {
                                 };
                                 assert_eq!(
                                     bignat_bytes_to_decimal(&bytes),
-                                    "265252859812191058636308480000000"
+                                    "26525285981219105863630848"
                                 );
                             }
                             o => panic!("coeff not IP: {o:?}"),

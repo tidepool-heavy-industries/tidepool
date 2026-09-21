@@ -402,7 +402,7 @@ jsonHexDigit t = case T.uncons t of
 -- | A JSON number: @[-] int [frac] [exp]@ per RFC 8259 — no leading zeros
 -- (@01@), no leading @+@, no bare @.5@/@5.@ (a digit is required on both
 -- sides of the decimal point). Mirrors
--- @tidepool-bridge/src/shapes.rs@'s @parse_decimal_token@: the coefficient
+-- @tidepool-bridge/src/decimal.rs@'s checked decimal parser: the coefficient
 -- is the integer-part digits followed by the fractional-part digits (leading
 -- zeros immaterial to the 'Integer' value), and the base-10 exponent is the
 -- parsed @exp@ shifted down by the fractional digit count — so @1.50e2@ and

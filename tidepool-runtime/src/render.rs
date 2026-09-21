@@ -325,41 +325,11 @@ fn compose_scientific_json(coeff: &str, exp: i64) -> serde_json::Value {
     }
 }
 
-/// `coefficient × 10^exponent` as a canonical decimal string (no exponent form),
-/// with trailing fractional zeros trimmed.
+/// Shared checked rendering avoids expanding extreme exponents into padding.
 fn compose_decimal(coeff: &str, exp: i64) -> String {
-    let (neg, rest) = match coeff.strip_prefix('-') {
-        Some(r) => (true, r),
-        None => (false, coeff.strip_prefix('+').unwrap_or(coeff)),
-    };
-    let mag = rest.trim_start_matches('0');
-    if mag.is_empty() {
-        return "0".to_string();
-    }
-    let sign = if neg { "-" } else { "" };
-    let body = if exp >= 0 {
-        format!("{mag}{}", "0".repeat(exp as usize))
-    } else {
-        let k = (-exp) as usize;
-        if k < mag.len() {
-            let (int, frac) = mag.split_at(mag.len() - k);
-            let frac = frac.trim_end_matches('0');
-            if frac.is_empty() {
-                int.to_string()
-            } else {
-                format!("{int}.{frac}")
-            }
-        } else {
-            let frac = format!("{}{mag}", "0".repeat(k - mag.len()));
-            let frac = frac.trim_end_matches('0');
-            if frac.is_empty() {
-                "0".to_string()
-            } else {
-                format!("0.{frac}")
-            }
-        }
-    };
-    format!("{sign}{body}")
+    tidepool_bridge::decimal::Decimal::from_parts(coeff, exp)
+        .map(|decimal| decimal.render())
+        .unwrap_or_else(|_| coeff.to_owned())
 }
 
 fn bignat_field_to_decimal(val: &HaskellValue, table: &DataConTable, depth: usize) -> String {
