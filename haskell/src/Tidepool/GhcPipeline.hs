@@ -33,6 +33,7 @@ import GHC.Driver.Errors.Types (GhcMessage(..))
 import GHC.Tc.Errors.Types (TcRnMessage(..), TcRnMessageDetailed(..), DeriveInstanceErrReason(..))
 import GHC.Utils.Logger (LogAction)
 import GHC.Data.FastString (unpackFS, mkFastString)
+import GHC.Fingerprint.Type (Fingerprint)
 import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..))
 import GHC.Unit.Home (homeUnitId)
 import GHC.Data.Graph.Directed (flattenSCCs)
@@ -607,6 +608,7 @@ data ModuleFront = ModuleFront
   , mfCapturedTypes :: Map.Map String String
   , mfCheckedBinderPins :: [CheckedBinderPin]
   , mfResultType :: Maybe Type
+  , mfReferencedModules :: Set.Set ModuleName
   }
 
 runCompile :: PipelineSelection result -> Set.Set SymbolIdentity -> PipelineVariant -> FilePath -> [FilePath] -> Maybe FilePath -> IO result
@@ -677,9 +679,18 @@ runPipelineSessionSelected selection retained purpose mscope path includes build
 -- | One memoized module's compile artifacts, keyed by 'ModuleName' across a
 -- resident worker's requests. Request-local modules are removed after each
 -- compile; only stable dependency modules remain reusable.
-data GutsMemoEntry = GutsMemoEntry
-  { gmeFront :: ModuleFront
-  , gmeSimplified :: ModGuts
+data MemoValidity = MemoValidity
+  { memoSourceHash :: Fingerprint
+  , memoRetained :: Set.Set SymbolIdentity
+  }
+
+data MemoPreparation
+  = AnalyzedOnly
+  | PreparedBody PreparedModule
+
+data AnalyzedModule = AnalyzedModule
+  { analyzedFront :: ModuleFront
+  , analyzedSimplified :: ModGuts
     -- ^ Post-'core2core', PRE-'externalizeInternalTops' — needed to redo
     -- 'cpAfterModule''s HPT (re-)registration on a later cycle: 'load''
     -- clears the whole HPT on every call (§7.1), so a module 'cpAfterModule'
@@ -687,10 +698,12 @@ data GutsMemoEntry = GutsMemoEntry
     -- registration REDONE (cheaply — no recompilation, just 'hscTidy' +
     -- 'mkIfaceTc' over already-computed guts) whenever it is deferred again
     -- in a LATER cycle.
-  , gmeResult ::
-      (ModGuts, Map.Map String String, [CheckedBinderPin], Maybe Type)
-  , gmePrepared :: Maybe PreparedModule
-  , gmeRetained :: Set.Set SymbolIdentity
+  }
+
+data GutsMemoEntry = GutsMemoEntry
+  { gmeValidity :: MemoValidity
+  , gmeAnalyzed :: AnalyzedModule
+  , gmePreparation :: MemoPreparation
     -- ^ The retained identities this module DEFINES, from the set THIS entry
     -- was compiled under ('retainedDefinedBy'; see
     -- 'Tidepool.RetainedUnfoldings'). A module's Core is not just a
@@ -706,6 +719,21 @@ data GutsMemoEntry = GutsMemoEntry
     -- guts baked under a no-longer-current set of the module's own retained
     -- definitions.
   }
+
+preparedBody :: MemoPreparation -> Maybe PreparedModule
+preparedBody AnalyzedOnly = Nothing
+preparedBody (PreparedBody prepared) = Just prepared
+
+analyzedResult :: AnalyzedModule
+  -> (ModGuts, Map.Map String String, [CheckedBinderPin], Maybe Type)
+analyzedResult analyzed =
+  ( externalizeInternalTops (analyzedSimplified analyzed)
+  , mfCapturedTypes front
+  , mfCheckedBinderPins front
+  , mfResultType front
+  )
+  where
+    front = analyzedFront analyzed
 
 type GutsMemo = Map.Map ModuleName GutsMemoEntry
 
@@ -927,7 +955,8 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                                  , mfDesugared  = desugared
                                  , mfCapturedTypes = capturedTypes
                                  , mfCheckedBinderPins = checkedBinderPins
-                                 , mfResultType = mResTy }
+                                 , mfResultType = mResTy
+                                 , mfReferencedModules = moduleRefs desugared }
               -- The per-module back half: the optimized-Core pass, the
               -- variant's post-compile hook (session: HPT registration of a
               -- deferred module, which is why it sees the PRE-externalize guts and
@@ -1013,10 +1042,13 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                       case Map.lookup (ms_mod_name modSum) m of
                         Nothing -> memoMiss modSum "absent" >> pure Nothing
                         Just entry -> do
-                          dependentFiles <- liftIO (readIORef (tcg_dependent_files (mfTcGblEnv (gmeFront entry))))
-                          let cachedSummary = mfSummary (gmeFront entry)
-                              sameHash = ms_hs_hash cachedSummary == ms_hs_hash modSum
-                              sameRetained = gmeRetained entry == retainedFor modSum
+                          let analyzed = gmeAnalyzed entry
+                              front = analyzedFront analyzed
+                              validity = gmeValidity entry
+                          dependentFiles <- liftIO (readIORef (tcg_dependent_files (mfTcGblEnv front)))
+                          let cachedSummary = mfSummary front
+                              sameHash = memoSourceHash validity == ms_hs_hash modSum
+                              sameRetained = memoRetained validity == retainedFor modSum
                           -- Source hashes do not cover CPP includes or TH's
                           -- addDependentFile inputs. Recompile these modules until
                           -- the memo owns fingerprints for those dependencies.
@@ -1047,21 +1079,25 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                   -- closes) it cheaply re-registers the already-computed iface
                   -- into the HPT that 'load'' just wiped.
                   Just entry -> do
+                    let analyzed = gmeAnalyzed entry
+                        front = analyzedFront analyzed
+                        cachedPrepared = preparedBody (gmePreparation entry)
                     recordValidity modSum True
-                    mapM_ rememberPreparedSiblings (gmePrepared entry)
-                    mInterfaceMs <- cpAfterModule plan modSum (mfTcGblEnv (gmeFront entry)) (mfHscEnv (gmeFront entry)) (gmeSimplified entry)
+                    mapM_ rememberPreparedSiblings cachedPrepared
+                    mInterfaceMs <- cpAfterModule plan modSum (mfTcGblEnv front) (mfHscEnv front) (analyzedSimplified analyzed)
                     liftIO $ recordInterface modSum mInterfaceMs
-                    prepared <- case (preparation, gmePrepared entry) of
+                    prepared <- case (preparation, cachedPrepared) of
                       (CheckOnly, _) -> pure Nothing
-                      (PrepareStg, Just cachedPrepared) -> pure (Just cachedPrepared)
+                      (PrepareStg, Just preparedBody') -> pure (Just preparedBody')
                       (PrepareStg, Nothing) -> do
-                        freshPrepared <- prepareSelected (gmeFront entry) (gmeSimplified entry)
+                        freshPrepared <- prepareSelected front (analyzedSimplified analyzed)
                         case mMemoRef of
                           Just ref -> liftIO (modifyIORef' ref
-                            (Map.adjust (\e -> e { gmePrepared = freshPrepared }) mn))
+                            (Map.adjust (\e -> e
+                              { gmePreparation = maybe AnalyzedOnly PreparedBody freshPrepared }) mn))
                           Nothing -> pure ()
                         pure freshPrepared
-                    pure (gmeFront entry, gmeResult entry, prepared)
+                    pure (front, analyzedResult analyzed, prepared)
                   Nothing -> do
                     recordValidity modSum False
                     mf <- compileFront modSum
@@ -1069,7 +1105,10 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                     prepared <- prepareSelected mf simplified
                     case mMemoRef of
                       Just ref -> liftIO (modifyIORef' ref
-                        (Map.insert mn (GutsMemoEntry mf simplified r prepared (retainedFor modSum))))
+                        (Map.insert mn (GutsMemoEntry
+                          (MemoValidity (ms_hs_hash modSum) (retainedFor modSum))
+                          (AnalyzedModule mf simplified)
+                          (maybe AnalyzedOnly PreparedBody prepared))))
                       Nothing  -> pure ()
                     pure (mf, r, prepared)
               pure ([f | (f, _, _) <- pairs], [r | (_, r, _) <- pairs],
@@ -1094,7 +1133,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                 case cached of
                   Just entry -> do
                     recordValidity modSum True
-                    pure (gmeFront entry, Just entry)
+                    pure (analyzedFront (gmeAnalyzed entry), Just entry)
                   Nothing    -> do
                     recordValidity modSum False
                     mf <- compileFront modSum
@@ -1125,9 +1164,9 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
               -- a passing extraction; it only skips work whose result was always
               -- going to be thrown away.
               forceValidationOnly <- liftIO (lookupEnv "TIDEPOOL_TEST_FORCE_VALIDATION_ONLY")
-              let gutsByMod = Map.fromList
-                    [ (ms_mod_name (mfSummary f), mfDesugared f) | f <- fs ]
-                  reachableMods0 = reachableModuleClosure targetModName' gutsByMod
+              let referencesByMod = Map.fromList
+                    [ (ms_mod_name (mfSummary f), mfReferencedModules f) | f <- fs ]
+                  reachableMods0 = reachableModuleClosure targetModName' referencesByMod
                   -- E6 mis-tiering fault injection (detection-power demonstration,
                   -- see 00-spec.md's VERIFY section): forcibly deny a NAMED module
                   -- 'core2core' regardless of whether the real closure above found
@@ -1144,26 +1183,32 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                     -- a fresh 'compileBack' would recompute — reuse it, skipping
                     -- the optimizer pass entirely.
                     Just entry -> do
-                      mapM_ rememberPreparedSiblings (gmePrepared entry)
-                      prepared <- case (preparation, gmePrepared entry) of
+                      let analyzed = gmeAnalyzed entry
+                          cachedPrepared = preparedBody (gmePreparation entry)
+                      mapM_ rememberPreparedSiblings cachedPrepared
+                      prepared <- case (preparation, cachedPrepared) of
                         (CheckOnly, _) -> pure Nothing
-                        (PrepareStg, Just cachedPrepared) -> pure (Just cachedPrepared)
+                        (PrepareStg, Just preparedBody') -> pure (Just preparedBody')
                         (PrepareStg, Nothing) -> do
-                          freshPrepared <- prepareSelected f (gmeSimplified entry)
+                          freshPrepared <- prepareSelected f (analyzedSimplified analyzed)
                           case mMemoRef of
                             Just ref -> liftIO (modifyIORef' ref
-                              (Map.adjust (\e -> e { gmePrepared = freshPrepared })
+                              (Map.adjust (\e -> e
+                                { gmePreparation = maybe AnalyzedOnly PreparedBody freshPrepared })
                                 (ms_mod_name (mfSummary f))))
                             Nothing -> pure ()
                           pure freshPrepared
-                      pure [(gmeResult entry, prepared)]
+                      pure [(analyzedResult analyzed, prepared)]
                     Nothing -> do
                       (simplified, r) <- compileBack f
                       prepared <- prepareSelected f simplified
                       case mMemoRef of
                         Just ref -> liftIO (modifyIORef' ref
                           (Map.insert (ms_mod_name (mfSummary f))
-                            (GutsMemoEntry f simplified r prepared (retainedFor (mfSummary f)))))
+                            (GutsMemoEntry
+                              (MemoValidity (ms_hs_hash (mfSummary f)) (retainedFor (mfSummary f)))
+                              (AnalyzedModule f simplified)
+                              (maybe AnalyzedOnly PreparedBody prepared))))
                         Nothing  -> pure ()
                       pure [(r, prepared)]
                   -- Not reachable: never core2core'd this cycle (matches every
@@ -2052,25 +2097,26 @@ renderType ty = renderWithContext defaultSDocContext (ppr ty)
 -- this any earlier — e.g. from renamer/typecheck-level "used name" tracking
 -- — would be UNSOUND: it would miss a module imported only for an orphan
 -- instance).
-reachableModuleClosure :: ModuleName -> Map.Map ModuleName ModGuts -> Set.Set ModuleName
-reachableModuleClosure target gutsByMod = go (Set.singleton target) [target]
+reachableModuleClosure :: ModuleName -> Map.Map ModuleName (Set.Set ModuleName) -> Set.Set ModuleName
+reachableModuleClosure target referencesByMod = go (Set.singleton target) [target]
   where
-    known = Map.keysSet gutsByMod
+    known = Map.keysSet referencesByMod
     go visited [] = visited
-    go visited (m:ms) = case Map.lookup m gutsByMod of
+    go visited (m:ms) = case Map.lookup m referencesByMod of
       Nothing   -> go visited ms
-      Just guts ->
-        let refs = moduleRefs known guts
+      Just referenced ->
+        let refs = referenced `Set.intersection` known
             new  = refs `Set.difference` visited
         in go (visited `Set.union` new) (ms ++ Set.toList new)
 
--- | Every OTHER home module (restricted to @known@) a module's top-level
--- binding RHSs reference, via 'externalVarModules'.
-moduleRefs :: Set.Set ModuleName -> ModGuts -> Set.Set ModuleName
-moduleRefs known guts = Set.unions (map rhsModules (mg_binds guts))
+-- | Every external module referenced by a module's top-level binding RHSs.
+-- This graph-independent fact stays valid when a later request changes the
+-- set of home modules; reachability intersects it with that request's graph.
+moduleRefs :: ModGuts -> Set.Set ModuleName
+moduleRefs guts = Set.unions (map rhsModules (mg_binds guts))
   where
-    rhsModules (NonRec _ rhs) = externalVarModules known rhs
-    rhsModules (Rec ps)       = Set.unions [ externalVarModules known rhs | (_, rhs) <- ps ]
+    rhsModules (NonRec _ rhs) = externalVarModules rhs
+    rhsModules (Rec ps)       = Set.unions [ externalVarModules rhs | (_, rhs) <- ps ]
 
 -- | Every home module (restricted to @known@) referenced by a real 'Var'
 -- occurrence anywhere in a Core expression, at any binding depth. No
@@ -2085,12 +2131,12 @@ moduleRefs known guts = Set.unions (map rhsModules (mg_binds guts))
 -- mode this item must avoid is EXCLUDING a module the target's Core
 -- genuinely needs; including one too many only gives back some of the tier's
 -- win, never correctness.
-externalVarModules :: Set.Set ModuleName -> CoreExpr -> Set.Set ModuleName
-externalVarModules known = go
+externalVarModules :: CoreExpr -> Set.Set ModuleName
+externalVarModules = go
   where
     go expr = case expr of
       Var v -> case nameModule_maybe (idName v) of
-        Just m | moduleName m `Set.member` known -> Set.singleton (moduleName m)
+        Just m -> Set.singleton (moduleName m)
         _ -> Set.empty
       Lit _           -> Set.empty
       App f a         -> go f `Set.union` go a
