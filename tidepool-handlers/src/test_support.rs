@@ -93,7 +93,7 @@ pub(crate) fn jit_eval(code: &[&str]) -> serde_json::Value {
 
 /// Build a DataConTable with standard types + all effect constructors.
 pub(crate) fn full_effect_test_table() -> DataConTable {
-    let mut t = tidepool_testing::gen::datacon_table::standard_datacon_table();
+    let mut t = tidepool_test_data::standard_datacon_table();
     let mut decls = tidepool_mcp::standard_decls();
     decls.push(tidepool_mcp::meta_decl());
     let mut next_id = 100u64;

@@ -1,4 +1,6 @@
-//! Stage evidence for the prepared-STG semantic corpus.
+//! Stage evidence and execution support for the prepared-STG semantic corpus.
+
+pub mod watchdog;
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};

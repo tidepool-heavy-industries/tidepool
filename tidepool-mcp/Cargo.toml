@@ -39,6 +39,4 @@ tidepool-bridge.workspace = true
 tidepool-bridge-derive.workspace = true
 # Property tests for the pure eval-prep helpers (src/eval_prep.rs).
 proptest.workspace = true
-# Canonical extract_available()/prelude_path() guard for GHC-dependent tests.
-tidepool-testing.workspace = true
 tempfile.workspace = true

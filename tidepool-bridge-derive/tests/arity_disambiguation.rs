@@ -8,7 +8,7 @@ use tidepool_bridge::Value;
 use tidepool_bridge::{BridgeError, FromHaskell, ToHaskell};
 use tidepool_bridge_derive::{FromHaskell, ToHaskell};
 use tidepool_repr::{DataCon, DataConId, DataConTable};
-use tidepool_testing::gen::datacon_table::standard_datacon_table;
+use tidepool_test_data::standard_datacon_table;
 
 #[derive(Debug, PartialEq, Eq, FromHaskell, ToHaskell)]
 enum Alpha {

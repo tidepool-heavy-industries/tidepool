@@ -11,13 +11,5 @@
 //! for the effectful and compile-only recipes.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
-pub mod bridge_roundtrip;
-pub mod dispatch;
-pub mod effect_tags;
+pub mod effect_surface;
 pub mod eval_harness;
-pub mod gen;
-pub mod haskell_suite;
-pub mod prepared_corpus;
-pub mod watchdog;
-
-pub use dispatch::NullDispatcher;

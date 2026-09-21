@@ -6,7 +6,7 @@ fn get_table() -> DataConTable {
     // standard_datacon_table() covers False/True/(,)/[]/:/I#/D#/... (and more
     // that this suite doesn't need); append the 3-tuple it lacks, with a
     // fresh id, for test_arity_mismatch_tuple.
-    let mut table = tidepool_testing::gen::standard_datacon_table();
+    let mut table = tidepool_test_data::standard_datacon_table();
     table.insert(DataCon {
         id: DataConId(100),
         name: "(,,)".to_string(),

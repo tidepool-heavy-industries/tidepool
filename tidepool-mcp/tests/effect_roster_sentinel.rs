@@ -54,12 +54,7 @@ fn effect_roster_shape_sentinel() {
          \x20  then review the diff under tidepool-mcp/tests/goldens/protocol/ \
             (including the import_gating.*.txt goldens) — an unexplained change \
             there is a bug, not a refresh.\n\
-         3. Union-tag POSITION constants need NO manual update: \
-            `fork_tag()` (tidepool-runtime/tests/jit_surface.rs) and \
-            `run_llm_turn_tag()` (tidepool-runtime/tests/run_llm_turn_sidecar.rs) \
-            both derive their tag from `tidepool_testing::effect_tags::tag_of` \
-            against the SAME decl list, not a hand-copied integer. Confirm no \
-            NEW hardcoded union-tag literal was introduced instead: \
+         3. Confirm no hardcoded union-tag literal was introduced: \
             `rg -n 'TAG.*=.*[0-9]|tag == [0-9]|tag, [0-9]'` across the test dirs \
             should turn up nothing tied to `standard_decls()`'s ordering.\n"
     );

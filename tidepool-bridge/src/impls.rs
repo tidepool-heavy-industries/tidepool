@@ -682,7 +682,15 @@ impl<A: ToHaskell, B: ToHaskell, C: ToHaskell> ToHaskell for (A, B, C) {
 mod tests {
     use super::*;
     use tidepool_repr::{DataCon, DataConId};
-    use tidepool_testing::bridge_roundtrip::roundtrip;
+
+    fn roundtrip<T: FromHaskell + ToHaskell + PartialEq + std::fmt::Debug>(
+        value: T,
+        table: &DataConTable,
+    ) {
+        let encoded = value.to_value(table).expect("ToHaskell failed");
+        let decoded = T::from_value(&encoded, table).expect("FromHaskell failed");
+        assert_eq!(value, decoded, "roundtrip failed");
+    }
 
     fn test_table() -> DataConTable {
         let mut t = DataConTable::new();

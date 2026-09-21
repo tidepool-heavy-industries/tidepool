@@ -3576,6 +3576,7 @@ dependencies = [
  "tidepool-model",
  "tidepool-repr",
  "tidepool-runtime",
+ "tidepool-test-data",
  "tidepool-testing",
  "tidepool-tool",
  "tokio",
@@ -3641,7 +3642,7 @@ dependencies = [
  "thiserror",
  "tidepool-bridge-derive",
  "tidepool-repr",
- "tidepool-testing",
+ "tidepool-test-data",
 ]
 
 [[package]]
@@ -3653,7 +3654,7 @@ dependencies = [
  "syn 3.0.3",
  "tidepool-bridge",
  "tidepool-repr",
- "tidepool-testing",
+ "tidepool-test-data",
 ]
 
 [[package]]
@@ -3702,7 +3703,6 @@ dependencies = [
  "thiserror",
  "tidepool-bridge",
  "tidepool-repr",
- "tidepool-testing",
 ]
 
 [[package]]
@@ -3754,6 +3754,7 @@ dependencies = [
  "tidepool-mcp",
  "tidepool-repr",
  "tidepool-runtime",
+ "tidepool-test-data",
  "tidepool-testing",
  "tidepool-toolchain",
  "tidepool-worktree",
@@ -3836,7 +3837,6 @@ dependencies = [
  "tidepool-protocol",
  "tidepool-repr",
  "tidepool-runtime",
- "tidepool-testing",
  "tidepool-tool",
  "tokio",
  "tracing",
@@ -3873,6 +3873,19 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "tidepool-prepared-corpus"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tidepool-bridge",
+ "tidepool-codegen",
+ "tidepool-heap",
+ "tidepool-repr",
+ "tidepool-toolchain",
 ]
 
 [[package]]
@@ -3931,18 +3944,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidepool-test-data"
+version = "0.1.0"
+dependencies = [
+ "tidepool-repr",
+]
+
+[[package]]
 name = "tidepool-testing"
 version = "0.1.0"
 dependencies = [
  "frunk",
- "serde",
  "serde_json",
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-bridge-effects",
- "tidepool-codegen",
  "tidepool-effect",
- "tidepool-heap",
  "tidepool-mcp",
  "tidepool-repr",
  "tidepool-runtime",

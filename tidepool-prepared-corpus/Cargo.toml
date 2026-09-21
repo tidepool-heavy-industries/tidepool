@@ -1,0 +1,19 @@
+[package]
+name = "tidepool-prepared-corpus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Prepared-STG semantic corpus runner"
+publish = false
+
+[dependencies]
+tidepool-repr.workspace = true
+tidepool-heap.workspace = true
+tidepool-codegen.workspace = true
+tidepool-toolchain.workspace = true
+tidepool-bridge.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }

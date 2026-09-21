@@ -11,10 +11,7 @@ publish = false
 
 [dependencies]
 tidepool-repr.workspace = true
-tidepool-heap.workspace = true
-tidepool-codegen.workspace = true
 serde_json = { workspace = true, features = ["float_roundtrip"] }
-serde.workspace = true
 tidepool-runtime.workspace = true
 tidepool-toolchain.workspace = true
 tidepool-mcp.workspace = true

@@ -17,7 +17,7 @@ use tidepool_bridge::Value;
 use tidepool_bridge::{FromHaskell, ToHaskell};
 use tidepool_bridge_derive::{FromHaskell, ToHaskell};
 use tidepool_repr::{DataCon, DataConId, DataConTable};
-use tidepool_testing::gen::datacon_table::standard_datacon_table;
+use tidepool_test_data::standard_datacon_table;
 
 /// A type with no `FromHaskell`/`ToHaskell` impls. Using it inside `PhantomData<_>`
 /// proves the derive does not require bridge bounds on phantom type params.

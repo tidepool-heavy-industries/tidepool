@@ -7188,7 +7188,7 @@ mod request_tests {
 
     fn introspection_error_table() -> DataConTable {
         use tidepool_repr::{DataCon, DataConId};
-        let mut table = tidepool_testing::gen::datacon_table::standard_datacon_table();
+        let mut table = tidepool_test_data::standard_datacon_table();
         for (id, name, arity) in [
             (100, "Left", 1),
             (101, "CurrentScope", 0),
@@ -7263,7 +7263,7 @@ mod request_tests {
     #[test]
     fn matched_request_with_invalid_deadline_is_not_skipped_by_dispatch() {
         use tidepool_repr::{DataCon, DataConId};
-        let mut table = tidepool_testing::gen::datacon_table::standard_datacon_table();
+        let mut table = tidepool_test_data::standard_datacon_table();
         let submit = DataConId(100);
         table.insert(DataCon {
             id: submit,

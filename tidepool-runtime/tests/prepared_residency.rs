@@ -29,6 +29,7 @@ use tidepool_runtime::session::{
     resident_workbench_templates, run_turn, BoundBinder, ModuleEnv, ResidentOutcome,
     ResidentSession, SessionLib, TurnRequest, TurnResult, TurnTemplate,
 };
+use tidepool_testing::effect_surface::TestEffectSurface;
 use tidepool_testing::eval_harness;
 
 /// The minimal parts of `prepared_turn.rs`'s own `Notebook` this file needs:
@@ -48,11 +49,10 @@ struct Notebook {
 impl Notebook {
     fn new() -> Self {
         eval_harness::require_extract();
-        let decls = tidepool_mcp::standard_decls();
-        let preamble = tidepool_mcp::build_preamble(&decls, false);
-        let effect_stack = tidepool_mcp::build_effect_stack_type(&decls);
-        let mut include = eval_harness::effects_include().to_vec();
-        include.push(eval_harness::prelude_path());
+        let effects = TestEffectSurface::minimal(&[]).expect("materialize effect surface");
+        let preamble = effects.preamble().to_owned();
+        let effect_stack = effects.row().to_owned();
+        let mut include = effects.include_paths().to_vec();
         let root = tempfile::tempdir().expect("session root");
         let lib = SessionLib::open(
             tidepool_repr::SessionId(1),

@@ -4,6 +4,7 @@
 use tidepool_runtime::session::{
     resident_workbench_templates, run_turn, PreparedTurn, TurnRequest as HaskellTurnRequest,
 };
+use tidepool_testing::effect_surface::{TestEffectSurface, TestEffectSurfaceOptions};
 use tidepool_testing::eval_harness;
 
 #[test]
@@ -17,10 +18,16 @@ fn named_profile_compile_failures() {
         tidepool_mcp::fs_read_decl(),
         tidepool_mcp::fs_write_decl(),
     ];
-    let effects = tidepool_mcp::ensure_effects_module(&decls).expect("materialize effects");
-    let mut include = effects.include_paths().to_vec();
-    include.push(eval_harness::prelude_path());
-    let mut preamble = tidepool_mcp::build_preamble(&decls, false);
+    let effects = TestEffectSurface::with_options(
+        &decls,
+        TestEffectSurfaceOptions {
+            companion_imports: tidepool_mcp::CompanionImports::Include,
+            user_library: false,
+        },
+    )
+    .expect("materialize effects");
+    let include = effects.include_paths();
+    let mut preamble = effects.preamble().to_owned();
     preamble.push_str("type ActorEffects = '[Actor, FsRead, FsWrite]\n");
     let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();

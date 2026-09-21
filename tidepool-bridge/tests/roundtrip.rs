@@ -1,8 +1,10 @@
+mod support;
+
 use proptest::prelude::*;
 use std::sync::OnceLock;
+use support::roundtrip;
 use tidepool_bridge::traits::{FromHaskell, ToHaskell};
 use tidepool_repr::{DataCon, DataConId, DataConTable, SrcBang};
-use tidepool_testing::bridge_roundtrip::roundtrip;
 
 static TABLE: OnceLock<DataConTable> = OnceLock::new();
 
@@ -11,7 +13,7 @@ fn get_table() -> &'static DataConTable {
         // standard_datacon_table() covers Nothing/Just/False/True/(,)/[]/:/
         // I#/W#/D#/C#/Text; append the constructors it lacks that these
         // proptests still need (3-tuple, Either) with fresh ids.
-        let mut table = tidepool_testing::gen::standard_datacon_table();
+        let mut table = tidepool_test_data::standard_datacon_table();
         table.insert(DataCon {
             id: DataConId(100),
             name: "(,,)".to_string(),

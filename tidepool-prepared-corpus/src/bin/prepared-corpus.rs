@@ -9,18 +9,20 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitStatus};
 
-use tidepool_repr::serial::read_metadata;
-use tidepool_testing::prepared_corpus::{
+use tidepool_prepared_corpus::{
     Classification, Expectation, Expectations, OracleScope, Outcome, ProgramRecord,
     ProjectionManifest, ProjectionOutcome, Stage,
 };
+use tidepool_repr::serial::read_metadata;
 
 const REPORT_VERSION: u32 = 2;
 
 /// Arguments are paths owned by the corpus verification recipe. The child
 /// receives a manifest index, never a command string derived from a program.
 enum Command {
-    EffectsCore,
+    EffectsCore {
+        include: PathBuf,
+    },
     AuditOperations {
         manifest: PathBuf,
         output: PathBuf,
@@ -43,7 +45,7 @@ enum Command {
 #[derive(serde::Serialize)]
 struct CorpusReport {
     version: u32,
-    source_targets: Vec<tidepool_testing::prepared_corpus::SourceTargetMapping>,
+    source_targets: Vec<tidepool_prepared_corpus::SourceTargetMapping>,
     source_mapped: usize,
     source_unmapped: usize,
     stg_programs: usize,
@@ -106,10 +108,16 @@ struct OperationAccumulator {
 fn main() -> Result<(), Box<dyn Error>> {
     let command = parse_arguments()?;
     match command {
-        Command::EffectsCore => {
-            // Use the production generator's universal vocabulary, not the
-            // small prepared-STG fixture's substitute Effects.Core module.
-            println!("{}", tidepool_mcp::ensure_effects_core_module()?.display());
+        Command::EffectsCore { include } => {
+            let module = include.join("Tidepool/Effects/Core.hs");
+            if !module.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("generated effect surface is missing {}", module.display()),
+                )
+                .into());
+            }
+            println!("{}", include.display());
             Ok(())
         }
         Command::AuditOperations { manifest, output } => audit_operations(manifest, output),
@@ -134,8 +142,12 @@ fn parse_arguments() -> Result<Command, Box<dyn Error>> {
 }
 
 fn parse_values(values: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
-    if matches!(values.as_slice(), [mode] if mode == "effects-core") {
-        return Ok(Command::EffectsCore);
+    if let [mode, include] = values.as_slice() {
+        if mode == "effects-core" {
+            return Ok(Command::EffectsCore {
+                include: PathBuf::from(include),
+            });
+        }
     }
     if let [mode, manifest, output] = values.as_slice() {
         if mode == "audit-operations" {
@@ -188,7 +200,7 @@ fn parse_values(values: Vec<OsString>) -> Result<Command, Box<dyn Error>> {
 fn usage() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "usage: prepared-corpus effects-core | prepared-corpus audit-operations MANIFEST OUTPUT | prepared-corpus run MANIFEST EXPECTATIONS METADATA OUTPUT | prepared-corpus child MANIFEST EXPECTATIONS METADATA OUTPUT INDEX",
+        "usage: prepared-corpus effects-core GENERATED_INCLUDE | prepared-corpus audit-operations MANIFEST OUTPUT | prepared-corpus run MANIFEST EXPECTATIONS METADATA OUTPUT | prepared-corpus child MANIFEST EXPECTATIONS METADATA OUTPUT INDEX",
     )
 }
 
@@ -368,8 +380,8 @@ fn run_one(
             format!("manifest has no program at index {index}"),
         )
     })?;
-    tidepool_testing::watchdog::arm();
-    let _watchdog = tidepool_testing::watchdog::begin(&row.name);
+    tidepool_prepared_corpus::watchdog::arm();
+    let _watchdog = tidepool_prepared_corpus::watchdog::begin(&row.name);
 
     match &row.projection {
         ProjectionOutcome::Rejected { reason } => {
@@ -415,7 +427,7 @@ fn run_one(
                 merge_driver_record(&mut record, driver_record);
                 persist_or_exit(&output, &record);
             };
-            let _record = tidepool_testing::prepared_corpus::run_prepared_artifact(
+            let _record = tidepool_prepared_corpus::run_prepared_artifact(
                 row.name.clone(),
                 &bytes,
                 &requirements,
@@ -561,7 +573,7 @@ fn invalid_manifest(message: String) -> Box<dyn Error> {
     io::Error::new(io::ErrorKind::InvalidData, message).into()
 }
 
-fn canonical_identity(identity: &tidepool_testing::prepared_corpus::SourceIdentity) -> String {
+fn canonical_identity(identity: &tidepool_prepared_corpus::SourceIdentity) -> String {
     match &identity.record_parent {
         None => format!(
             "{}:{}:{}:{}",
@@ -574,14 +586,14 @@ fn canonical_identity(identity: &tidepool_testing::prepared_corpus::SourceIdenti
     }
 }
 
-fn is_external_identity(identity: &tidepool_testing::prepared_corpus::SourceIdentity) -> bool {
+fn is_external_identity(identity: &tidepool_prepared_corpus::SourceIdentity) -> bool {
     identity.namespace == "value"
         && !(identity.unit == "<interactive>" && identity.module == "<local>")
 }
 
 fn validate_expectation_key(
-    row: &tidepool_testing::prepared_corpus::ProjectionRecord,
-    identity: &tidepool_testing::prepared_corpus::SourceIdentity,
+    row: &tidepool_prepared_corpus::ProjectionRecord,
+    identity: &tidepool_prepared_corpus::SourceIdentity,
     keys: &mut BTreeSet<String>,
 ) -> Result<(), Box<dyn Error>> {
     match row.expectation_key.as_deref() {
@@ -645,9 +657,9 @@ fn validate_oracle_domain(
 }
 
 fn expected_for<'a>(
-    row: &tidepool_testing::prepared_corpus::ProjectionRecord,
+    row: &tidepool_prepared_corpus::ProjectionRecord,
     expectations: &'a Expectations,
-) -> Option<&'a tidepool_testing::prepared_corpus::Expectation> {
+) -> Option<&'a tidepool_prepared_corpus::Expectation> {
     row.expectation_key
         .as_deref()
         .and_then(|key| expectations.expectations.get(key))
@@ -810,7 +822,7 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), Box<dyn
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use tidepool_testing::prepared_corpus::Expectation;
+    use tidepool_prepared_corpus::Expectation;
 
     fn temporary_path(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -906,7 +918,7 @@ mod tests {
 
     #[test]
     fn oracle_lookup_uses_only_the_explicit_expectation_key() {
-        let row: tidepool_testing::prepared_corpus::ProjectionRecord = serde_json::from_str(
+        let row: tidepool_prepared_corpus::ProjectionRecord = serde_json::from_str(
             r#"{"name":"u:M:value:canonical","expectation_key":"historical","status":"rejected","reason":"not run"}"#,
         )
         .unwrap();
@@ -966,14 +978,14 @@ mod tests {
 
     #[test]
     fn canonical_identity_preserves_source_keys_and_distinguishes_record_fields() {
-        let no_parent = tidepool_testing::prepared_corpus::SourceIdentity {
+        let no_parent = tidepool_prepared_corpus::SourceIdentity {
             unit: "u".into(),
             module: "M".into(),
             namespace: "value".into(),
             occurrence: "field".into(),
             record_parent: None,
         };
-        let parent = tidepool_testing::prepared_corpus::SourceIdentity {
+        let parent = tidepool_prepared_corpus::SourceIdentity {
             record_parent: Some("Record".into()),
             ..no_parent.clone()
         };
@@ -984,15 +996,15 @@ mod tests {
 
     #[test]
     fn cli_accepts_only_typed_command_shapes() {
+        assert!(parse_values(vec![OsString::from("effects-core")]).is_err());
         assert!(matches!(
-            parse_values(vec![OsString::from("effects-core")]).unwrap(),
-            Command::EffectsCore
+            parse_values(vec![
+                OsString::from("effects-core"),
+                OsString::from("generated")
+            ])
+            .unwrap(),
+            Command::EffectsCore { .. }
         ));
-        assert!(parse_values(vec![
-            OsString::from("effects-core"),
-            OsString::from("unexpected")
-        ])
-        .is_err());
         let run = parse_values(
             [
                 "run",

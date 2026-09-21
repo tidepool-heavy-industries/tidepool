@@ -9,6 +9,8 @@ members = [
     "tidepool-repr",
     "tidepool-bignum",
     "tidepool-testing",
+    "tidepool-test-data",
+    "tidepool-prepared-corpus",
     "tidepool-heap",
     "tidepool-bridge",
     "tidepool-bridge-derive",
@@ -65,6 +67,8 @@ tidepool-protocol = { version = "0.1.0", path = "tidepool-protocol" }
 tidepool-repr = { version = "0.1.0", path = "tidepool-repr" }
 tidepool-runtime = { version = "0.1.0", path = "tidepool-runtime" }
 tidepool-testing = { path = "tidepool-testing" }
+tidepool-test-data = { path = "tidepool-test-data" }
+tidepool-prepared-corpus = { path = "tidepool-prepared-corpus" }
 tidepool-toolchain = { path = "tidepool-toolchain" }
 tidepool-web = { path = "tidepool-web" }
 tidepool-worktree = { path = "tidepool-worktree" }

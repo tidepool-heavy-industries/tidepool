@@ -1,4 +1,4 @@
-//! Per-item hang watchdog for corpus-loop suites.
+//! Per-item hang watchdog for the prepared corpus runner.
 //!
 //! A corpus suite is one `#[test]` iterating data files, so a single
 //! non-terminating item spins the suite at 100% CPU indefinitely and is
