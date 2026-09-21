@@ -2473,7 +2473,7 @@ where
                     gen: generation.0,
                     verdict: Some(generated_bind_verdict("sessionInput")),
                     target: None,
-                    prepared: session.prepared_turn_request(&retained),
+                    retained_imports: &retained,
                 })
                 .map_err(|failure| {
                     ResidentActorWorkbenchError::InputMount(failure.error.to_string())
@@ -3446,7 +3446,7 @@ where
             items: Vec::new(),
         }),
         target: None,
-        prepared: session.prepared_turn_request(&retained),
+        retained_imports: &retained,
     })
     .map_err(|failure| {
         ResidentActorWorkbenchError::Inspection(render_turn_compile_error(
@@ -5163,9 +5163,7 @@ where
                 }
                 match stopped {
                     Err(ResidentError::Run(tidepool_runtime::RuntimeError::Jit(
-                        tidepool_runtime::JitError::Effect(
-                            tidepool_effect::error::EffectError::Handler(_),
-                        ),
+                        tidepool_effect::error::EffectError::Handler(_),
                     ))) => {
                         Err(ResidentActorWorkbenchError::CommandObservationStopped { job, reason })
                     }
@@ -6879,7 +6877,7 @@ where
         gen: compile_view.next_value_generation().0,
         verdict,
         target: None,
-        prepared: session.prepared_turn_request(&retained),
+        retained_imports: &retained,
     };
     // A failed worker may already have published a thin value interface.
     // Its identity is never reused, whether compilation or execution succeeds.

@@ -171,7 +171,7 @@ impl Notebook {
             gen: self.generation,
             verdict: None,
             target: None,
-            prepared: self.session.prepared_turn_request(&retained),
+            retained_imports: &retained,
         })
         .unwrap_or_else(|failure| {
             panic!(

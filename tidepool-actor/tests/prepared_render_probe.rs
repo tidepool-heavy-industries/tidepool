@@ -5,7 +5,6 @@
 //! `DisplayPage`-typed statement through the shared workbench templates, so
 //! the probe exercises exactly that shape, plus a dialect-sensitive
 //! expression (defaulting, `OverloadedStrings`) and the opaque fallback.
-use tidepool_runtime::session::turn::PreparedTurn;
 use tidepool_runtime::session::{
     insert_preamble_imports, resident_workbench_templates, run_turn, TurnRequest, TurnResult,
 };
@@ -39,7 +38,7 @@ fn probe(label: &str, text: &str, gen: u64) {
         gen,
         verdict: None,
         target: None,
-        prepared: Some(PreparedTurn { retained: &[] }),
+        retained_imports: &[],
     })
     .unwrap_or_else(|error| panic!("{label}: turn failed: {error}"));
     let compiled = match &result {

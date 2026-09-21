@@ -33,31 +33,23 @@ use tidepool_repr::{SessionModule, SessionVarId};
 /// at the moment it enters or leaves `live`. Deliberately decoupled from
 /// `BoundValue` (whose `Prepared` variant carries a `PreparedHandle` this
 /// crate has no public constructor for) so index maintenance -- and its unit
-/// tests -- never need a real prepared handle, only the identity/generation
-/// pair and root address the index actually keys on.
+/// tests -- never need a real prepared handle, only the identity, generation,
+/// and root address the index actually keys on.
 pub(super) struct BindRecord {
     id: SessionVarId,
     module: SessionModule,
     root: RootSlot,
-    /// `(import identity, local generation)` when this binding is a prepared
-    /// value with a recorded origin; `None` for every other binding.
-    prepared: Option<(SymbolIdentity, u64)>,
+    identity: SymbolIdentity,
 }
 
 impl BindRecord {
     pub(super) fn of(entry: &BindingEntry) -> Self {
-        let prepared = match &entry.value {
-            BoundValue::Prepared {
-                origin: Some(origin),
-                ..
-            } => Some((origin.identity.clone(), entry.module.gen().0)),
-            _ => None,
-        };
+        let BoundValue::Prepared { identity, .. } = &entry.value;
         BindRecord {
             id: entry.id,
             module: entry.module,
             root: entry.value.root(),
-            prepared,
+            identity: identity.clone(),
         }
     }
 }
@@ -81,7 +73,7 @@ pub(crate) struct BindingIndex {
     /// deduplicated output the old per-turn sort+dedup produced, for free.
     live_modules: BTreeSet<String>,
     /// `(import identity, local generation)` pairs for every live prepared
-    /// binding with a recorded origin -- `PersistentSession::prepared_retained`.
+    /// binding with a recorded identity -- `PersistentSession::prepared_retained`.
     prepared_retained: BTreeSet<(SymbolIdentity, u64)>,
     /// Import identity -> live prepared candidates, for
     /// `resolve_prepared_import`'s newest/exact-generation lookup. Order
@@ -133,33 +125,30 @@ impl BindingIndex {
             .root_refs
             .entry(record.root.addr() as usize)
             .or_insert(0) += 1;
-        if let Some((identity, generation)) = &record.prepared {
-            self.prepared_retained
-                .insert((identity.clone(), *generation));
-            self.prepared_by_identity
-                .entry(identity.clone())
-                .or_default()
-                .push(PreparedCandidate {
-                    generation: *generation,
-                    id: record.id,
-                });
-        }
+        let generation = record.module.gen().0;
+        self.prepared_retained
+            .insert((record.identity.clone(), generation));
+        self.prepared_by_identity
+            .entry(record.identity.clone())
+            .or_default()
+            .push(PreparedCandidate {
+                generation,
+                id: record.id,
+            });
     }
 
     /// [`Self::on_evict`] for a pre-built [`BindRecord`] (see
     /// [`Self::on_bind_record`]'s rationale).
     pub(super) fn on_evict_record(&mut self, record: &BindRecord) -> bool {
         self.live_modules.remove(&record.module.module_name());
-        if let Some((identity, generation)) = &record.prepared {
-            self.prepared_retained
-                .remove(&(identity.clone(), *generation));
-            if let Some(candidates) = self.prepared_by_identity.get_mut(identity) {
-                if let Some(pos) = candidates.iter().position(|c| c.id == record.id) {
-                    candidates.swap_remove(pos);
-                }
-                if candidates.is_empty() {
-                    self.prepared_by_identity.remove(identity);
-                }
+        self.prepared_retained
+            .remove(&(record.identity.clone(), record.module.gen().0));
+        if let Some(candidates) = self.prepared_by_identity.get_mut(&record.identity) {
+            if let Some(pos) = candidates.iter().position(|c| c.id == record.id) {
+                candidates.swap_remove(pos);
+            }
+            if candidates.is_empty() {
+                self.prepared_by_identity.remove(&record.identity);
             }
         }
         let addr = record.root.addr() as usize;
@@ -185,7 +174,7 @@ impl BindingIndex {
     }
 
     /// Sorted, deduplicated `(identity, generation)` pairs for every live
-    /// prepared binding with a recorded origin.
+    /// prepared binding with a recorded identity.
     pub(super) fn prepared_retained(&self) -> Vec<(SymbolIdentity, u64)> {
         self.prepared_retained.iter().cloned().collect()
     }
@@ -229,26 +218,12 @@ mod tests {
         }
     }
 
-    fn plain_record(gen: u64, raw: u64, root: RootSlot) -> BindRecord {
+    fn record(gen: u64, raw: u64, root: RootSlot, identity: &SymbolIdentity) -> BindRecord {
         BindRecord {
             id: SessionVarId::from_extract(raw),
             module: SessionModule::val(Generation(gen)),
             root,
-            prepared: None,
-        }
-    }
-
-    fn prepared_record(
-        gen: u64,
-        raw: u64,
-        root: RootSlot,
-        identity: &SymbolIdentity,
-    ) -> BindRecord {
-        BindRecord {
-            id: SessionVarId::from_extract(raw),
-            module: SessionModule::val(Generation(gen)),
-            root,
-            prepared: Some((identity.clone(), gen)),
+            identity: identity.clone(),
         }
     }
 
@@ -272,7 +247,7 @@ mod tests {
             let mut v: Vec<(SymbolIdentity, u64)> = self
                 .live
                 .iter()
-                .filter_map(|r| r.prepared.clone())
+                .map(|r| (r.identity.clone(), r.module.gen().0))
                 .collect();
             v.sort();
             v.dedup();
@@ -286,7 +261,7 @@ mod tests {
         ) -> Option<SessionVarId> {
             self.live
                 .iter()
-                .filter(|r| matches!(&r.prepared, Some((id, _)) if id == identity))
+                .filter(|r| &r.identity == identity)
                 .filter(|r| generation.is_none_or(|g| r.module.gen().0 == g))
                 .max_by_key(|r| r.module.gen())
                 .map(|r| r.id)
@@ -308,11 +283,11 @@ mod tests {
 
         // Bind: two distinct identities, distinct generations, distinct
         // roots.
-        let r1 = prepared_record(1, 1, slot_a, &id_x);
+        let r1 = record(1, 1, slot_a, &id_x);
         index.on_bind_record(&r1);
         live.push(r1);
 
-        let r2 = prepared_record(2, 2, slot_b, &id_y);
+        let r2 = record(2, 2, slot_b, &id_y);
         index.on_bind_record(&r2);
         live.push(r2);
 
@@ -332,7 +307,7 @@ mod tests {
         // sharing the SAME root slot (as an aliasing rebind would); the old
         // entry stays live (as `BindingTable::bind_in` leaves a shadowed
         // gen), so both remain in the index simultaneously.
-        let r3 = prepared_record(3, 3, slot_a, &id_x);
+        let r3 = record(3, 3, slot_a, &id_x);
         index.on_bind_record(&r3);
         live.push(r3);
 
@@ -387,36 +362,5 @@ mod tests {
         assert!(index.prepared_retained().is_empty());
         assert_eq!(index.resolve_prepared(&id_x, None), None);
         assert_eq!(index.resolve_prepared(&id_y, None), None);
-    }
-
-    #[test]
-    fn non_prepared_bindings_track_modules_and_root_refs_only() {
-        let mut pointer: *mut u8 = std::ptr::null_mut();
-        let slot = fake_slot(&mut pointer);
-        let mut index = BindingIndex::new();
-
-        let a = plain_record(1, 1, slot);
-        index.on_bind_record(&a);
-        let b = plain_record(2, 2, slot); // shares the alias's root slot
-        index.on_bind_record(&b);
-
-        assert_eq!(
-            index.live_modules(),
-            vec![
-                SessionModule::val(Generation(1)).module_name(),
-                SessionModule::val(Generation(2)).module_name(),
-            ]
-        );
-        assert!(index.prepared_retained().is_empty());
-
-        assert!(
-            !index.on_evict_record(&a),
-            "b still holds the shared root slot"
-        );
-        assert!(
-            index.on_evict_record(&b),
-            "b was the shared root's last live reference"
-        );
-        assert!(index.live_modules().is_empty());
     }
 }

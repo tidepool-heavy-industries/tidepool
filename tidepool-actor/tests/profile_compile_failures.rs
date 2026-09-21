@@ -2,7 +2,7 @@
 //! family so each assertion does not grow a separate extractor invocation.
 
 use tidepool_runtime::session::{
-    resident_workbench_templates, run_turn, PreparedTurn, TurnRequest as HaskellTurnRequest,
+    resident_workbench_templates, run_turn, TurnRequest as HaskellTurnRequest,
 };
 use tidepool_testing::effect_surface::{TestEffectSurface, TestEffectSurfaceOptions};
 use tidepool_testing::eval_harness;
@@ -41,7 +41,7 @@ fn named_profile_compile_failures() {
         gen: 1,
         verdict: None,
         target: None,
-        prepared: PreparedTurn::first_turn(),
+        retained_imports: &[],
     })
     .expect_err("a ReadOnly actor definition must not admit FsWrite");
     let failure = tidepool_runtime::classify_compile(&error.error);

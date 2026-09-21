@@ -585,9 +585,7 @@ impl SelfHarnessDriver {
             gen: 0,
             verdict: None,
             target: None,
-            prepared: prepared_retained
-                .as_deref()
-                .map(|retained| tidepool_runtime::session::PreparedTurn { retained }),
+            retained_imports: prepared_retained.as_deref().unwrap_or(&[]),
         })
         .map_err(|failure| {
             DriverError::Session(format!(

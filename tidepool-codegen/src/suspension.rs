@@ -1,12 +1,8 @@
 //! Public contract for starting, parking, and resuming JIT computations.
 
-use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cranelift_module::FuncId;
 use tidepool_bridge::Value;
-use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
-use tidepool_repr::{DataConTable, PrincipalId};
 
 /// Identity of a continuation parked in one machine. Ids are never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -57,121 +53,6 @@ impl ValueHandle {
         Self(id)
     }
 }
-
-/// How a completed suspendable run materializes its result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParkKind {
-    /// Bridge the completed result to an owned [`Value`].
-    Plain,
-    /// Retain one result as a session root, forcing it first when requested.
-    Binding { forced: bool },
-    /// Force and retain each field of a product result.
-    Project { n_fields: NonZeroUsize },
-    /// Retain field 0 and bridge field 1 for display.
-    Render { field0_forced: bool },
-}
-
-/// Compiled function from which a suspendable run starts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SuspensionEntry {
-    Main,
-    Fragment(FuncId),
-}
-
-/// Complete configuration for one suspendable run.
-pub struct SuspensionRun<'a> {
-    pub entry: SuspensionEntry,
-    pub table: &'a DataConTable,
-    pub effect_policy: EffectRunPolicy,
-    pub realm: RealmId,
-    pub principal: PrincipalId,
-    pub completion: ParkKind,
-    pub live_payload: LivePayloadPolicy,
-}
-
-impl<'a> SuspensionRun<'a> {
-    #[must_use]
-    pub fn main(table: &'a DataConTable, effect_policy: EffectRunPolicy, realm: RealmId) -> Self {
-        Self {
-            entry: SuspensionEntry::Main,
-            table,
-            effect_policy,
-            realm,
-            principal: PrincipalId::SYSTEM,
-            completion: ParkKind::Plain,
-            live_payload: LivePayloadPolicy::None,
-        }
-    }
-
-    #[must_use]
-    pub fn fragment(
-        func_id: FuncId,
-        table: &'a DataConTable,
-        effect_policy: EffectRunPolicy,
-        realm: RealmId,
-        completion: ParkKind,
-    ) -> Self {
-        Self {
-            entry: SuspensionEntry::Fragment(func_id),
-            table,
-            effect_policy,
-            realm,
-            principal: PrincipalId::SYSTEM,
-            completion,
-            live_payload: LivePayloadPolicy::None,
-        }
-    }
-
-    /// Permit one request field to cross by reference when the data bridge
-    /// reports a live closure there.
-    #[must_use]
-    pub fn with_live_payload(mut self, policy: LivePayloadPolicy) -> Self {
-        self.live_payload = policy;
-        self
-    }
-
-    /// Run every handled request under one exact runtime authority.
-    #[must_use]
-    pub fn with_principal(mut self, principal: PrincipalId) -> Self {
-        self.principal = principal;
-        self
-    }
-}
-
-/// Outcome of a registry-backed start or resume operation.
-#[derive(Debug)]
-pub enum ParkedOutcome {
-    CompletedValue(Value),
-    CompletedBinding {
-        value: Value,
-        root: crate::old_space::RootSlot,
-    },
-    CompletedProject {
-        roots: Vec<crate::old_space::RootSlot>,
-    },
-    CompletedRender {
-        root: crate::old_space::RootSlot,
-        rendered: Value,
-    },
-    Suspended {
-        id: ContinuationId,
-        request: Value,
-        /// Whether the run's declared live payload is retained by reference on
-        /// the parked frame.
-        has_live_payload: bool,
-    },
-}
-
-/// Capacity-one outcome used by the linear session façade.
-pub enum Suspendable<T> {
-    Completed(T),
-    Suspended {
-        request: Value,
-        has_live_payload: bool,
-    },
-}
-
-pub type SuspendableOutcome = Suspendable<Value>;
 
 /// Input supplied when resuming a parked continuation.
 pub enum ResumeInput {

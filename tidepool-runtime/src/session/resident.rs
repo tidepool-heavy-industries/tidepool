@@ -12,13 +12,12 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use tidepool_bridge::Value;
-use tidepool_codegen::binding_table::{BindingEntry, BoundValue, PreparedOrigin};
+use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::prepared_program::{PreparedHandle, ProgramId};
 use tidepool_repr::execution_schema::SymbolIdentity;
 
-use super::persistent::ResidentEngine;
 use super::prepared::{ParkPolicy, PreparedRuntimeError, PreparedSettlement};
-use super::turn::{PreparedTurn, TurnCode};
+use super::turn::TurnCode;
 use tidepool_codegen::suspension::{ContinuationId, RealmId, ResumeInput, ValueHandle};
 use tidepool_effect::dispatch::{request_constructor, DispatchEffect, EffectContext, Response};
 use tidepool_effect::error::EffectError;
@@ -29,7 +28,7 @@ use tidepool_repr::{
 
 use crate::render::EvalResult;
 use crate::timing;
-use crate::{JitError, RuntimeError, YieldSite, YieldSiteCollision, EVAL_STACK_SIZE};
+use crate::{RuntimeError, YieldSite, YieldSiteCollision, EVAL_STACK_SIZE};
 
 /// Immutable compiler provenance that travels with live Haskell programs.
 /// Sites are globally stable, while the map makes accidental hash collisions
@@ -322,10 +321,10 @@ impl Drop for CustodyTransfer {
 
 /// A parked turn's own completion obligation, carried on the token
 /// [`ResidentSession::run_with_sites`]/[`ResidentSession::run_bind_with_sites`]/[`ResidentSession::run_rooted_entry`]
-/// hand back on suspension: a [`ParkKind::Plain`] turn's hole needs nothing
-/// extra to resume; a [`ParkKind::Binding`] turn's hole must materialize its
-/// binder into the value plane on completion; and a [`ParkKind::Project`]
-/// hole must atomically materialize every GHC-reported pattern binder. Binding
+/// hand back on suspension: a value turn's hole needs nothing extra to resume;
+/// a binding turn's hole must materialize its binder into the value plane on
+/// completion; and a projected hole must atomically materialize every
+/// GHC-reported pattern binder. Binding
 /// obligations retain the SAME binder metadata, generation, and lexical scope
 /// carried by the initiating operation.
 ///
@@ -521,13 +520,6 @@ pub enum ResidentError {
         attempted: String,
         pending: Vec<String>,
     },
-    /// The turn's fragment failed to add to the live machine.
-    #[error("fragment compile failed: {0}")]
-    AddFunction(JitError),
-    /// The session machine failed to bootstrap from the first real turn's
-    /// expr/table (lazy boot — see [`ResidentSession::unbootstrapped`]).
-    #[error("session bootstrap failed: {0}")]
-    Bootstrap(JitError),
     /// The turn errored during the run (a runtime fault, a caught panic, or an
     /// ask-protocol error).
     #[error("turn run failed: {0}")]
@@ -549,8 +541,7 @@ pub enum ResidentError {
     /// cross-plane shadow retract (a value bind evicting a same-name decl head).
     #[error(transparent)]
     Session(#[from] SessionError),
-    /// The prepared engine refused or failed the turn. Never a Core fallback:
-    /// a prepared-route session reports this and stays on its route.
+    /// The prepared engine refused or failed the turn.
     #[error("prepared engine: {0}")]
     Prepared(#[from] PreparedRuntimeError),
 }
@@ -571,9 +562,7 @@ impl ResidentError {
     pub fn failure_layer(&self) -> Option<crate::session::workbench::WorkbenchFailureLayer> {
         use crate::session::workbench::WorkbenchFailureLayer;
         match self {
-            Self::Run(RuntimeError::Jit(JitError::Effect(_))) => {
-                Some(WorkbenchFailureLayer::Effect)
-            }
+            Self::Run(RuntimeError::Jit(_)) => Some(WorkbenchFailureLayer::Effect),
             Self::Prepared(PreparedRuntimeError::Run(
                 tidepool_codegen::prepared_program::ExecutionError::Observation(_),
             )) => Some(WorkbenchFailureLayer::Observation),
@@ -614,12 +603,12 @@ pub(crate) enum PreparedRun {
     Projected { fields: Vec<PreparedHandle> },
     /// The turn requested a typed effect: its continuation is parked under
     /// `id` in the machine's ledger and `request` is the observed request,
-    /// exactly what Core's `ParkedRun::Suspended` carries.
+    /// ready for the host to route.
     Suspended { id: ContinuationId, request: Value },
 }
 
-/// The hole a suspension of a turn run in `mode` mints: the same completion
-/// obligation Core's turn paths seed, carried forward across resumes.
+/// The hole a suspension of a turn run in `mode` mints, carrying its
+/// completion obligation forward across resumes.
 fn hole_seed_of(mode: &PreparedTurnMode<'_>, lexical_scope: ScopeId) -> HoleSeed {
     match mode {
         PreparedTurnMode::Value => HoleSeed::Plain,
@@ -655,8 +644,7 @@ fn settle_plan_of(mode: &PreparedTurnMode<'_>) -> SettlePlan {
     }
 }
 
-/// What the eval thread does with a completed prepared value: the same
-/// preparation policy Core applies per binder tier. Tier-0 data is deep-forced
+/// What the eval thread does with a completed prepared value. Tier-0 data is deep-forced
 /// (a forcing observation) before it is tenured; a Tier-1 closure is tenured
 /// as-is, since a function cannot be observed without applying it.
 #[derive(Clone)]
@@ -674,7 +662,7 @@ pub(crate) enum SettlePlan {
 /// `park`. The invocation's realm cancel flag governs the run and any forcing
 /// observation.
 fn settle_prepared<H: DispatchEffect<O>, O>(
-    engine: &mut ResidentEngine,
+    engine: &mut super::prepared::PreparedEngine,
     program: ProgramId,
     realm: RealmId,
     argument: Option<PreparedHandle>,
@@ -684,9 +672,6 @@ fn settle_prepared<H: DispatchEffect<O>, O>(
     handlers: &mut H,
     captured: &O,
 ) -> Result<PreparedRun, PreparedRuntimeError> {
-    let engine = engine
-        .require_prepared()
-        .map_err(|_| PreparedRuntimeError::MachineNotInstalled)?;
     let settlement = match argument {
         Some(handle) => engine.run_settled_with_inputs(
             program,
@@ -706,10 +691,10 @@ fn settle_prepared<H: DispatchEffect<O>, O>(
 /// `__applyEntry` scaffold root instead of a turn's own settled scaffold, and
 /// finish the settled layer through [`finish_prepared`] — the prepared-route
 /// arm of [`ResidentSession::run_rooted_entry_borrowed`]. `entry` is a bare
-/// cross-engine handle; BORROWED throughout (never released on any path,
-/// success or failure), matching the Core rooted path's own borrow contract.
+/// machine handle; BORROWED throughout (never released on any path,
+/// success or failure).
 fn settle_rooted_entry<H: DispatchEffect<O>, O>(
-    engine: &mut ResidentEngine,
+    engine: &mut super::prepared::PreparedEngine,
     entry: ValueHandle,
     argument: i64,
     realm: RealmId,
@@ -718,9 +703,6 @@ fn settle_rooted_entry<H: DispatchEffect<O>, O>(
     handlers: &mut H,
     captured: &O,
 ) -> Result<(ProgramId, PreparedRun), PreparedRuntimeError> {
-    let engine = engine
-        .require_prepared()
-        .map_err(|_| PreparedRuntimeError::MachineNotInstalled)?;
     let f = engine
         .prepared_handle_of(entry)
         .ok_or(PreparedRuntimeError::UnknownHandle)?;
@@ -743,7 +725,7 @@ fn settle_rooted_entry<H: DispatchEffect<O>, O>(
 /// `__applyValue` — the prepared-route arm of
 /// [`ResidentSession::run_rooted_application`]. Both handles are BORROWED.
 fn settle_rooted_application<H: DispatchEffect<O>, O>(
-    engine: &mut ResidentEngine,
+    engine: &mut super::prepared::PreparedEngine,
     function: ValueHandle,
     argument: ValueHandle,
     realm: RealmId,
@@ -752,9 +734,6 @@ fn settle_rooted_application<H: DispatchEffect<O>, O>(
     handlers: &mut H,
     captured: &O,
 ) -> Result<(ProgramId, PreparedRun), PreparedRuntimeError> {
-    let engine = engine
-        .require_prepared()
-        .map_err(|_| PreparedRuntimeError::MachineNotInstalled)?;
     let f = engine
         .prepared_handle_of(function)
         .ok_or(PreparedRuntimeError::UnknownHandle)?;
@@ -800,10 +779,9 @@ fn response_value(response: Response) -> Value {
 /// The one completion routine for a settled layer, whichever entry produced
 /// it (the initial scaffold or a resume): a completed value is prepared per
 /// binder tier; a suspension is parked with the run's policy, then offered to
-/// the session's handler stack exactly as Core's `HandleOrSuspend` drive
-/// does. A handler that claims the request answers the parked frame through
+/// the session's handler stack. A handler that claims the request answers the parked frame through
 /// the host-answer path and the resumed layer is finished here in turn; a
-/// request no handler claims is reported parked, as Core reports one.
+/// request no handler claims is reported parked.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
     engine: &mut super::prepared::PreparedEngine,
@@ -828,7 +806,7 @@ pub(crate) fn finish_prepared<H: DispatchEffect<O>, O>(
         // `SuspendAll` parks without consulting handlers; `HandleOrError`
         // never reaches here (`park_suspension` refuses it). The handler
         // stack sees the observed request, the run's principal and the
-        // session's output sink, as on Core.
+        // session's output sink.
         let response = if park.effect_policy == EffectRunPolicy::SuspendAll {
             None
         } else {
@@ -988,7 +966,7 @@ fn is_observation_budget_exhausted(error: &PreparedRuntimeError) -> bool {
 ///
 /// Generic over the effect handler stack `H` and the output sink `O` so it
 /// stays below the server crate that owns the concrete buffer, exactly like
-/// [`super::ResidentEngine`]. The registry (`tidepool-harness`) instantiates
+/// [`super::PreparedEngine`]. The registry (`tidepool-harness`) instantiates
 /// `Slot<ResidentSession<H, O>>`.
 pub struct ResidentSession<H, O> {
     /// The shared persistent session state (machine + accumulated table + the two
@@ -1155,7 +1133,7 @@ where
         self.state.val_gen()
     }
 
-    /// Retain dependencies of prepared Core through the existing binding owner.
+    /// Retain prepared closure dependencies through the existing binding owner.
     /// Reserved future bindings can be leased before they materialize.
     pub fn lease_bindings(&mut self, referenced: &[tidepool_repr::VarId]) -> BindingLease {
         self.settle_dropped_custody();
@@ -1212,14 +1190,9 @@ where
         // A prepared alias shares the source's root and handle, but a later
         // turn imports it by ITS OWN thin value module and name, so the
         // recorded identity is re-minted for the alias.
-        if let BoundValue::Prepared {
-            origin: Some(origin),
-            ..
-        } = &mut value
-        {
-            origin.identity.module = alias.module.clone();
-            origin.identity.occurrence = alias.name.clone();
-        }
+        let BoundValue::Prepared { identity, .. } = &mut value;
+        identity.module = alias.module.clone();
+        identity.occurrence = alias.name.clone();
         let id = SessionVarId::from_extract(alias.var_id);
         if self.state.bindings().get(id).is_some() {
             return Err(BindingAliasError::IdentityInUse(id).into());
@@ -1429,16 +1402,14 @@ where
         counts
     }
 
-    /// Prepared-machine residency counters, or `None` before the prepared machine is installed or
-    /// before the machine has bootstrapped.
+    /// Prepared-machine residency counters, or `None` before bootstrap.
     #[must_use]
     pub fn residency(&self) -> Option<tidepool_codegen::prepared_program::ResidencyCounts> {
         self.state.residency()
     }
 
     /// Lifetime `(functions, code_bytes)` of Cranelift work this session's
-    /// prepared installs have caused; `None` before the prepared machine is installed or before
-    /// the machine has bootstrapped. Diff across a turn to attribute that
+    /// prepared installs have caused; `None` before bootstrap. Diff across a turn to attribute that
     /// turn's code generation.
     #[must_use]
     pub fn codegen_totals(&self) -> Option<(u64, u64)> {
@@ -1446,15 +1417,14 @@ where
     }
 
     /// How many package tops this session's machine can hand a later turn
-    /// instead of recompiling; `None` before the prepared machine is installed or before bootstrap.
+    /// instead of recompiling; `None` before bootstrap.
     #[must_use]
     pub fn code_export_count(&self) -> Option<usize> {
         self.state.code_export_count()
     }
 
     /// Prepared old-space bytes as of the last successful between-turn
-    /// collection, or `None` before the prepared machine is installed or before the machine has
-    /// bootstrapped.
+    /// collection, or `None` before bootstrap.
     #[must_use]
     pub fn old_bytes(&self) -> Option<usize> {
         self.state.old_bytes()
@@ -1543,10 +1513,8 @@ where
             .prepared_mut()
             .is_some_and(|engine| engine.rehome_handle(handle, owner));
         if !moved {
-            return Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
-                EffectError::Handler(format!(
-                    "cannot transfer {handle:?}: handle is not live on this machine"
-                )),
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                format!("cannot transfer {handle:?}: handle is not live on this machine"),
             ))));
         }
         Ok(transfer.into_custody())
@@ -1665,11 +1633,11 @@ where
         let expected_module = SessionModule::val(gen).module_name();
         if binder.module != expected_module {
             self.discard_custody(custody);
-            return Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
-                EffectError::Handler(format!(
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                format!(
                     "compiled binder `{}` belongs to {}, expected {expected_module}",
                     binder.name, binder.module
-                )),
+                ),
             ))));
         }
         self.state
@@ -1696,10 +1664,8 @@ where
             .prepared_handle_of(raw)
             .and_then(|handle| Some((handle, engine.hosting_program(handle)?)));
         let Some((handle, program)) = located else {
-            return Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
-                EffectError::Handler(
-                    "compiled binding mount received an unknown or already-consumed handle".into(),
-                ),
+            return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                "compiled binding mount received an unknown or already-consumed handle".into(),
             ))));
         };
         self.state.retract_in(scope, &binder.name)?;
@@ -1744,10 +1710,7 @@ where
     /// Whether the resident machine has been bootstrapped yet. `false` from
     /// [`Self::unbootstrapped`] until the session's first real turn brings the
     /// machine up (`run_with_sites`/`run_bind_with_sites`/`run_child`/
-    /// `run_child_pure`); always `true` from [`Self::bootstrap`] on Core, and
-    /// on the prepared route from [`Self::bootstrap`]'s recorded readiness
-    /// even before the first prepared install (see
-    /// `PersistentSession::mark_ready`).
+    /// `run_child_pure`).
     pub fn is_bootstrapped(&self) -> bool {
         self.state.is_bootstrapped()
     }
@@ -2032,30 +1995,17 @@ where
     }
 
     /// The live prepared bindings a later turn compiles against
-    /// ([`PersistentSession::prepared_retained`]); pair with
-    /// [`Self::prepared_turn_request`].
+    /// ([`PersistentSession::prepared_retained`]).
     #[must_use]
     pub fn prepared_retained(&self) -> Vec<(SymbolIdentity, u64)> {
         self.state.prepared_retained()
-    }
-
-    /// The prepared half a [`super::TurnRequest`] carries on this session's
-    /// route: `None` on Core, and on the prepared route the request for the
-    /// turn's program linked against `retained`
-    /// ([`Self::prepared_retained`], which outlives the request).
-    #[must_use]
-    pub fn prepared_turn_request<'a>(
-        &self,
-        retained: &'a [(SymbolIdentity, u64)],
-    ) -> Option<PreparedTurn<'a>> {
-        Some(PreparedTurn { retained })
     }
 
     /// The prepared arm of every resident turn: install the turn's program
     /// against the session's live prepared bindings, run its settled scaffold
     /// on the eval thread, and either return the observed value, bind it
     /// into the value plane, or report the suspension whose frame the machine
-    /// parked. Core is never consulted.
+    /// parked.
     fn run_prepared(
         &mut self,
         code: TurnCode<'_>,
@@ -2078,8 +2028,7 @@ where
         if let PreparedTurnMode::Binding { generation, .. }
         | PreparedTurnMode::Projected { generation, .. } = &mode
         {
-            // Claim the value-module identity before the turn runs, as the
-            // Core bind path does.
+            // Claim the value-module identity before the turn runs.
             self.state.set_val_gen(*generation);
         }
         let install_prepared_started = std::time::Instant::now();
@@ -2126,8 +2075,7 @@ where
     /// Finish one prepared run on the session thread, whichever entry
     /// produced it: bind or return a completed value per `mode`, or classify a
     /// parked suspension. `resumed` names the hole this run answered (a
-    /// resume) and is retired on a real outcome, exactly as Core's
-    /// `classify_parked` does; `None` for a fresh turn.
+    /// resume) and is retired on a real outcome; `None` for a fresh turn.
     fn complete_prepared(
         &mut self,
         run: PreparedRun,
@@ -2202,8 +2150,7 @@ where
             }
             PreparedRun::Suspended { id, request } => {
                 // The frame is parked in the machine's ledger; the hole
-                // carries the turn's completion obligation forward exactly
-                // as a Core suspension does.
+                // carries the turn's completion obligation forward.
                 self.classify_parked(
                     ParkedRun::Suspended { id, request },
                     resumed,
@@ -2283,11 +2230,7 @@ where
                 value: BoundValue::Prepared {
                     root,
                     handle: *handle,
-                    origin: Some(PreparedOrigin {
-                        identity,
-                        export: None,
-                        top: None,
-                    }),
+                    identity,
                 },
                 type_display: Some(binder.type_display.clone()),
                 defining_expr: None,
@@ -2503,8 +2446,7 @@ where
 
     /// The prepared-route arm of [`Self::run_rooted_entry_borrowed`]: apply
     /// the rooted closure through the shared `__applyEntry` scaffold root
-    /// (`settle_rooted_entry`) instead of synthesizing a Core fragment for
-    /// [`Self::run_rooted_fragment`], then finish through
+    /// (`settle_rooted_entry`), then finish through
     /// [`Self::finish_rooted_prepared`] exactly as an ordinary prepared turn
     /// finishes: a suspension parks under `realm` in the machine's ordinary
     /// continuation registry and resumes through [`Self::reenter_prepared`]
@@ -2678,13 +2620,19 @@ where
     ///
     /// The machine is taken via [`PersistentSession::lease_machine`], whose
     /// [`super::MachineLease`] restores it into `self.state` on EVERY exit from
-    /// this function — success, a `JitError`, a caught panic, or a failed
+    /// this function — success, an effect error, a caught panic, or a failed
     /// thread spawn (a transient OS resource failure, not a bug) — so no path
     /// can leave the session permanently machineless.
     fn on_eval_thread<F, T>(&mut self, body: F) -> Result<T, ResidentError>
     where
         T: Send,
-        F: FnOnce(&mut ResidentEngine, &DataConTable, &mut H, &O) -> Result<T, JitError> + Send,
+        F: FnOnce(
+                &mut super::prepared::PreparedEngine,
+                &DataConTable,
+                &mut H,
+                &O,
+            ) -> Result<T, EffectError>
+            + Send,
     {
         self.on_eval_thread_with_stack(EVAL_STACK_SIZE, body)
     }
@@ -2701,7 +2649,13 @@ where
     ) -> Result<T, ResidentError>
     where
         T: Send,
-        F: FnOnce(&mut ResidentEngine, &DataConTable, &mut H, &O) -> Result<T, JitError> + Send,
+        F: FnOnce(
+                &mut super::prepared::PreparedEngine,
+                &DataConTable,
+                &mut H,
+                &O,
+            ) -> Result<T, EffectError>
+            + Send,
     {
         self.settle_dropped_custody();
         let mut lease = self.state.lease_machine();
@@ -2816,7 +2770,7 @@ where
     /// ground truth BY IDENTITY: if the frame is gone from the registry, it
     /// WAS consumed before the failure (a genuine mid-run error, or an abort)
     /// and the hole is spent. If it is still parked, this was a retryable
-    /// rejection (Core's NF-force, the prepared validator) and the hole stays
+    /// rejection by the prepared validator and the hole stays
     /// untouched. A boolean "is the machine suspended" cannot answer this
     /// with N frames parked; membership can.
     fn reconcile_failed_reentry(&mut self, cont_id: &str, frame_id: ContinuationId) {
@@ -2833,11 +2787,9 @@ where
     /// and the settled layer finishes through the same routine as the initial
     /// run ([`finish_prepared`], [`Self::complete_prepared`]); a refused
     /// answer leaves the frame parked and the hole open. `Abort` consumes the
-    /// frame without entering it and fails the ask with the same error Core's
-    /// stowed-abort path reports, so the frontends see one abort contract.
+    /// frame without entering it and fails the ask through the normal abort contract.
     /// `Handle`/`FramedHandle` deliver an already-retained value by borrow,
-    /// the prepared analogue of Core's own handle and framed-custody
-    /// delivery (`docs/continuation-parking-contract.md`): the handle's root
+    /// framed-custody delivery (`docs/continuation-parking-contract.md`): the handle's root
     /// is untouched by the resume either way.
     fn reenter_prepared(
         &mut self,
@@ -2850,13 +2802,12 @@ where
         let input = match input {
             ResumeInput::Abort(reason) => {
                 let aborted = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
-                    let engine = engine.require_prepared()?;
                     Ok(engine.abort_parked(frame_id))
                 });
                 self.reconcile_failed_reentry(cont_id, frame_id);
                 aborted??;
-                return Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
-                    EffectError::Handler(format!("ask aborted by caller: {reason}")),
+                return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                    format!("ask aborted by caller: {reason}"),
                 ))));
             }
             other => other,
@@ -2897,7 +2848,6 @@ where
             live_payload: self.state.live_payload_policy(),
         };
         let resumed = self.on_eval_thread(move |engine, table, handlers, captured| {
-            let engine = engine.require_prepared()?;
             let outcome = match input {
                 ResumeInput::Answer(value) => engine.resume_with_answer(frame_id, &value, table),
                 ResumeInput::Handle(handle) => engine.resume_with_handle(frame_id, handle),
@@ -2944,8 +2894,7 @@ where
     /// for delivering an already-bound value into another parked frame by
     /// handle ([`Self::resume_handle`]/[`Self::resume_framed_custody`]) —
     /// [`Self::reenter_prepared`]'s `Handle`/`FramedHandle` branches' test
-    /// surface, mirroring how [`Self::live_payload_handle`] mints a Core
-    /// frame's live payload as a `RootCustody`. Reuses `BoundValue::
+    /// surface. Reuses `BoundValue::
     /// Prepared`'s own linking handle rather than minting a fresh one, so
     /// custody moves without disturbing the binding's root -- and, because
     /// the binding table (not this token) is the handle's real owner, the
@@ -3011,8 +2960,8 @@ where
     }
 }
 
-/// The `Send` projection of a [`ParkedOutcome`] that crosses the eval-thread
-/// boundary: a bind's tenured `!Send` `RootSlot` is minted into a
+/// The `Send` result that crosses the eval-thread boundary: a bind's tenured
+/// `!Send` `RootSlot` is minted into a
 /// [`ValueHandle`] IN-THREAD (`realm`-owned) and the id crosses instead —
 /// resolved back to its slot by `materialize_binder` on the session thread.
 /// `CompletedProject` is the multi-binder lane; `CompletedRender` remains
@@ -3031,7 +2980,7 @@ enum ParkedRun {
 /// one `.expect()`, which is exactly what let a spawn failure escape as an
 /// unguarded panic.
 enum EvalThreadOutcome<T> {
-    Ran(Result<T, JitError>),
+    Ran(Result<T, EffectError>),
     Panicked(Box<dyn std::any::Any + Send>),
     SpawnFailed(std::io::Error),
 }
@@ -3041,7 +2990,7 @@ enum EvalThreadOutcome<T> {
 /// a run error carrying the payload string.
 fn panic_to_run_error(payload: Box<dyn std::any::Any + Send>) -> ResidentError {
     let detail = crate::panic_payload_message(payload);
-    ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
-        format!("resident turn panicked: {detail}"),
+    ResidentError::Run(RuntimeError::Jit(EffectError::Handler(format!(
+        "resident turn panicked: {detail}"
     ))))
 }

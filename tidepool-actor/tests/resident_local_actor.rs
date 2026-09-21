@@ -110,7 +110,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
         gen: 1,
         verdict: None,
         target: None,
-        prepared: machine.prepared_turn_request(&retained),
+        retained_imports: &retained,
     })
     .expect("compile resident policy")
     {

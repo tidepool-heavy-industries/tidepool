@@ -476,25 +476,9 @@ pub struct TurnRequest<'a> {
     /// uses and which names its target `result`. Forwarded as `--target`; the
     /// output file base is `result.cbor` either way.
     pub target: Option<&'a str>,
-    /// Retained imports visible to this prepared-STG turn.
-    /// Prepared executable imports retained by this turn.
-    pub prepared: Option<PreparedTurn<'a>>,
-}
-
-/// The prepared half of a turn request: the caller's live bindings, declared
-/// as executable imports so the projection links against them instead of
-/// recompiling their bodies. Retaining a binding is only meaningful when a
-/// prepared program is requested, so the two travel together.
-pub struct PreparedTurn<'a> {
-    pub retained: &'a [(SymbolIdentity, u64)],
-}
-
-impl PreparedTurn<'static> {
-    /// A session's first turn links against no retained bindings.
-    #[must_use]
-    pub fn first_turn() -> Option<PreparedTurn<'static>> {
-        Some(PreparedTurn { retained: &[] })
-    }
+    /// Executable imports retained by this turn. Empty for declarations and
+    /// for the first turn in a machine session.
+    pub retained_imports: &'a [(SymbolIdentity, u64)],
 }
 
 /// `tidepool-extract-cmd` is a dependency leaf and cannot name
@@ -2140,8 +2124,7 @@ pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
 /// Compile the internal input-mount/preview module. Its bind shape is known
 /// by construction, so no authored-source classification request is needed.
 pub fn run_activation_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
-    if req.prepared.is_none()
-        || !matches!(&req.verdict, Some(TurnClassification { kind: TurnKind::Bind, binders, .. }) if binders.len() == 1)
+    if !matches!(&req.verdict, Some(TurnClassification { kind: TurnKind::Bind, binders, .. }) if binders.len() == 1)
         || req.templates.len() != 1
     {
         return Err(CompileError::ExtractFailed(
@@ -2286,10 +2269,8 @@ fn run_turn_with_pin(
     if let Some(pin) = pin {
         cmd.turn_pin(pin);
     }
-    if let Some(prepared) = &req.prepared {
-        for (identity, generation) in prepared.retained {
-            cmd.retained_generation(extract_identity(identity), *generation);
-        }
+    for (identity, generation) in req.retained_imports {
+        cmd.retained_generation(extract_identity(identity), *generation);
     }
 
     let endpoint = cmd.bind().map_err(map_notfound)?;
@@ -3785,7 +3766,7 @@ mod tests {
                 gen: 1,
                 verdict: Some(checked.items[0].verdict.clone()),
                 target: None,
-                prepared: None,
+                retained_imports: &[],
             },
             &first_pins,
         )
@@ -3808,7 +3789,7 @@ mod tests {
                 gen: 2,
                 verdict: Some(checked.items[1].verdict.clone()),
                 target: None,
-                prepared: None,
+                retained_imports: &[],
             },
             &second_pins,
         )
@@ -3923,7 +3904,7 @@ mod tests {
                 gen: 1,
                 verdict: Some(checked.items[1].verdict.clone()),
                 target: None,
-                prepared: None,
+                retained_imports: &[],
             },
             &pins,
         )
@@ -4591,7 +4572,7 @@ mod tests {
                 items: Vec::new(),
             }),
             target: None,
-            prepared: None,
+            retained_imports: &[],
         };
         let err = run_turn(req).unwrap_err();
         assert!(
@@ -4631,7 +4612,7 @@ mod tests {
                 items: Vec::new(),
             }),
             target: None,
-            prepared: None,
+            retained_imports: &[],
         })
         .expect_err("an infrastructure exception must not select the valid fallback template");
         assert!(

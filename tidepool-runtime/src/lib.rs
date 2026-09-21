@@ -20,9 +20,10 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 pub use tidepool_bridge::Value;
 pub use tidepool_codegen::host_fns::{drain_diagnostics, push_diagnostic};
-pub use tidepool_codegen::machine::{CancelHandle, JitError};
+pub use tidepool_codegen::machine::CancelHandle;
 pub use tidepool_codegen::suspension::ResumeInput;
 pub use tidepool_effect::dispatch::DispatchEffect;
+pub use tidepool_effect::EffectError;
 pub use tidepool_extract_cmd::{
     with_compiler_transaction, with_compiler_transaction_cancellable,
     CompilerTransactionCancellation,
@@ -88,7 +89,7 @@ pub enum RuntimeError {
     Compile(#[from] CompileError),
     /// A runtime or effect-handler failure from prepared execution.
     #[error(transparent)]
-    Jit(#[from] JitError),
+    Jit(#[from] EffectError),
     /// The prepared engine refused or failed a bare one-shot run (bootstrap,
     /// settle, or resume) — distinct from [`Self::Jit`], which covers a
     /// handler/effect failure once a run is under way.
@@ -242,7 +243,7 @@ pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
 /// [`session::prepared::PreparedEngine`] from the compiled prepared program,
 /// runs its settled entry to completion, and drops the engine (and its
 /// heap) once done. A request no installed handler recognizes is reported
-/// as [`JitError::Effect`]`(`[`tidepool_effect::error::EffectError::UnhandledEffect`]`)`,
+/// as [`tidepool_effect::error::EffectError::UnhandledEffect`],
 /// matching what a plain (non-suspendable) run has always reported for an
 /// unclaimed effect — there is no resume path here for a caller to answer
 /// it later.
@@ -294,7 +295,7 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
 /// `on_ready` receives the freshly-built engine's [`CancelHandle`] BEFORE
 /// the (blocking) run begins, exactly as [`compile_and_run_cancellable`]
 /// uses it. A request no installed handler recognizes is reported as
-/// [`JitError::Effect`]`(`[`tidepool_effect::error::EffectError::UnhandledEffect`]`)`,
+/// [`tidepool_effect::error::EffectError::UnhandledEffect`],
 /// matching what a plain (non-suspendable) run has always reported for an
 /// unclaimed effect — there is no resume path here for a caller to answer
 /// it later.
@@ -342,9 +343,9 @@ pub fn run_prepared_program<U, H: DispatchEffect<U>>(
             // No handler claimed it and there is no resume path in a
             // one-shot run: release the parked frame rather than leak it.
             let _ = engine.abort_parked(id);
-            Err(RuntimeError::Jit(JitError::Effect(
-                EffectError::UnhandledEffect { constructor },
-            )))
+            Err(RuntimeError::Jit(EffectError::UnhandledEffect {
+                constructor,
+            }))
         }
         PreparedRun::Projected { .. } => {
             unreachable!("SettlePlan::Observe never produces a projected run")

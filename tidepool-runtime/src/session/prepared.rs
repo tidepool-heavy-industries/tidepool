@@ -227,8 +227,7 @@ impl PreparedRuntimeError {
             | Self::CrossRealmArgument { .. } => PreparedFailureKind::Rejected,
             Self::Cancelled => PreparedFailureKind::Cancelled,
             Self::Compile(_) => PreparedFailureKind::Rejected,
-            // A handler fault is this turn's own failure: the machine stays
-            // reusable, exactly as Core reports a handler `EffectError`.
+            // A handler fault is this turn's own failure, so the machine stays reusable.
             Self::Handler { .. } => PreparedFailureKind::Language,
             Self::Run(error) => match error {
                 ExecutionError::MissingEntry(_)
@@ -272,10 +271,8 @@ impl From<LinkError> for PreparedRuntimeError {
 }
 
 /// The facts about an installed program the session still needs after the
-/// machine has taken its code: the declared entry (what `run_entry(None)`
-/// addresses) and, per top-level binding, the identity and entry signature
-/// an importer links against. Recorded on every binding made from the top
-/// ([`PreparedOrigin`]) so nothing downstream reconstructs them.
+/// machine has taken its code: the declared entry and, per top-level binding,
+/// the identity and entry signature an importer links against.
 struct ProgramFacts {
     entry: ValueId,
     tops: BTreeMap<ValueId, (SymbolIdentity, Option<Signature>)>,
@@ -296,7 +293,7 @@ struct ProgramFacts {
     /// its module), when the artifact retained them. Looked up by
     /// [`PreparedEngine::run_rooted_entry`]/
     /// [`PreparedEngine::run_rooted_application`] to apply a rooted closure
-    /// without compiling a fresh Core fragment for it.
+    /// without compiling a fresh fragment for it.
     apply_entry: Option<ValueId>,
     apply_value: Option<ValueId>,
     /// The typed sites this program declares and the type graph they point
@@ -886,7 +883,7 @@ fn site_field(field: &Value, table: &DataConTable) -> Option<u64> {
 /// rendered payload: the protocol's sited helpers place the site id under the
 /// `typedSite` key of the request's JSON payload object
 /// (`tidepool-protocol`'s `ObjectValue::Site`), the same field the harness
-/// classifies a Core suspension by. `None` for a request that carries no such
+/// uses to classify a suspension. `None` for a request that carries no such
 /// field: an ordinary handled effect.
 fn typed_site_of(request: &Value, table: &DataConTable) -> Option<u64> {
     /// The `Text`/string-literal content of an aeson `Key`/`Value` leaf.
@@ -1124,7 +1121,7 @@ const SETTLE_CALL: PreparedCallOptions = PreparedCallOptions {
 };
 
 /// One suspension parked by [`PreparedEngine::park_suspension`]: the frame's
-/// id and the observed request, as Core reports a suspension.
+/// id and the observed request.
 pub struct PreparedParked {
     pub id: ContinuationId,
     pub request: Value,
@@ -1429,7 +1426,7 @@ impl PreparedEngine {
                 }
                 continue;
             };
-            let BoundValue::Prepared { handle, origin, .. } = &entry.value;
+            let BoundValue::Prepared { handle, .. } = &entry.value;
             let handle = *handle;
             let evaluated = self
                 .machine
@@ -1440,7 +1437,7 @@ impl PreparedEngine {
                 ImportedValue {
                     identity: identity.clone(),
                     rep: handle.rep(),
-                    entry_signature: origin.as_ref().and_then(|origin| origin.export.clone()),
+                    entry_signature: None,
                     evaluated,
                     generation: entry.module.gen().0,
                 },
@@ -1764,7 +1761,7 @@ impl PreparedEngine {
 
     /// Park a suspension `program`'s settled layer produced under `realm`:
     /// read the `Union` layer of `request`, observe its payload through the
-    /// machine observe path (the request the host reports, as on Core), read
+    /// machine observe path (the request the host reports), read
     /// the typed site it names, resolve that site through the machine-owned
     /// index to its evidence owner, and park `continuation` with that
     /// evidence and `program`'s admitted resume entry. Every refusal releases
@@ -1832,7 +1829,7 @@ impl PreparedEngine {
             }
         };
         // The request is observed (forced) through the existing observe
-        // path, exactly the value Core reports for a suspension.
+        // path, producing the value reported for a suspension.
         let observed =
             self.machine
                 .observe_handle(program, payload, RunOptions::default().observation_budget);
@@ -1847,9 +1844,7 @@ impl PreparedEngine {
         // A live-payload policy names one field of THIS request Con (the
         // convention's field 1) as the value crossing the runtime boundary
         // by reference; mirror it into a persistent root BEFORE releasing
-        // `payload`, exactly as `PreparedEngine::run_suspendable_shared`
-        // tenures the field's raw pointer on Core -- see
-        // `Self::tenure_live_payload`.
+        // `payload`; see `Self::tenure_live_payload`.
         let live_payload_root =
             match self.tenure_live_payload(payload, realm, park.live_payload, &request) {
                 Ok(root) => root,
@@ -1887,7 +1882,7 @@ impl PreparedEngine {
                     })
                     // An open-reply request (an actor `call`'s `result`)
                     // has no wire evidence to build an answer against; it
-                    // parks unsited and re-enters only by handle, as on Core.
+                    // parks unsited and re-enters only by handle.
                     .map_or((UNSITED, program), |(site, witness)| (site, witness.owner))),
                 _ => Err(PreparedRuntimeError::UntypedRequest {
                     constructor: "a non-constructor value".to_owned(),
@@ -1942,7 +1937,7 @@ impl PreparedEngine {
     /// `ClosureField(field)` retains it only when the bridge found the
     /// closure sentinel there -- both read `request`, exactly as
     /// `PreparedEngine`'s own `request_has_field`/
-    /// `request_field_carries_closure_sentinel` do for Core. `None` when the
+    /// `request_field_carries_closure_sentinel` do. `None` when the
     /// policy names no field, the constructor doesn't have it, or (rare: a
     /// nullary/scalar-only request) the field is not itself managed.
     fn tenure_live_payload(
@@ -2004,8 +1999,7 @@ impl PreparedEngine {
     }
 
     /// Mint a [`ValueHandle`] over the declared live payload of the frame
-    /// parked under `id`, mirroring `PreparedEngine::handle_from_live_payload`
-    /// on the Core route (`PreparedMachine::take_live_payload_handle`). The
+    /// parked under `id` (`PreparedMachine::take_live_payload_handle`). The
     /// frame stays parked; `None` when `id` is not parked or its frame holds
     /// no untaken live payload.
     pub fn live_payload_handle(
@@ -2036,7 +2030,7 @@ impl PreparedEngine {
     /// settled layer through the shared decoder. `answer` is consumed on
     /// every path. Every failure before the take (unknown id, an answer from
     /// another realm, cancellation) leaves the frame parked and rooted; a
-    /// failure after the take is a run failure, as on Core.
+    /// failure after the take is a run failure.
     pub fn resume_parked(
         &mut self,
         id: ContinuationId,
@@ -2073,8 +2067,7 @@ impl PreparedEngine {
 
     /// [`Self::resume_parked`], but `answer` is BORROWED rather than
     /// consumed: it is delivered to the resume entry and left exactly as
-    /// live afterward, custody unchanged — the prepared analogue of Core's
-    /// `ResumeInput::Handle` delivery
+    /// live afterward, custody unchanged — `ResumeInput::Handle` delivery
     /// (`docs/continuation-parking-contract.md`), which reads a handle's
     /// current heap pointer without releasing its root. No realm check: a
     /// handle is meant to move between parked continuations across resource
@@ -2118,11 +2111,11 @@ impl PreparedEngine {
 
     /// Re-enter the frame parked under `id` by delivering an
     /// already-retained value verbatim — no materialization, closures
-    /// included, the same shape Core's `ResumeInput::Handle` delivers. `raw`
+    /// included, the same shape `ResumeInput::Handle` delivers. `raw`
     /// must be live in this engine's ledger; the only check possible on this
     /// route is its `RuntimeRep` (every handle this engine mints is
-    /// `LiftedRef`), matching Core's own lack of a deeper type check on this
-    /// path. The handle's root is a BORROW: this call does not release it.
+    /// `LiftedRef`), so no deeper type check is available on this path. The
+    /// handle's root is a BORROW: this call does not release it.
     pub fn resume_with_handle(
         &mut self,
         id: ContinuationId,
@@ -2140,7 +2133,7 @@ impl PreparedEngine {
     /// declared row for `constructor` exactly as an ordinary answer's fields
     /// are (`Value`-carrying prefix fields resolve through the decode entry
     /// the same way), and the borrowed field is spliced in unvalidated
-    /// beyond its `RuntimeRep`, mirroring Core's own framed delivery
+    /// beyond its `RuntimeRep`, under the framed-delivery contract
     /// (`docs/continuation-parking-contract.md`). The built constructor is
     /// released as usual once the resume entry has read it; `raw`'s root is
     /// untouched throughout.
@@ -2799,17 +2792,12 @@ impl PreparedEngine {
         Ok(())
     }
 
-    /// Read-only heap/GC snapshot mirroring `PreparedEngine::heap_stats` on
-    /// the Core route. Field mapping onto the prepared machine's own
-    /// accounting (`docs/GLOSSARY.md`'s vocabulary does not yet cover this
-    /// route, so the mapping is documented here instead):
+    /// Read-only heap/GC snapshot. Field mapping onto the prepared machine's
+    /// own accounting:
     ///
     /// - `fragments` ↔ installed programs ([`Self::residency`]'s
-    ///   `programs`) -- BOUNDED by [`Self::quiesce_and_collect_now`]'s
-    ///   retirement, unlike Core's monotonic compiled-function count, so the
-    ///   harness's fragment-ceiling rotation is a no-op on this engine by
-    ///   design: this count can fall as programs retire, and never needs the
-    ///   rotation Core relies on to bound it;
+    ///   `programs`) -- bounded by [`Self::quiesce_and_collect_now`]'s
+    ///   retirement, so this count can fall as programs retire;
     /// - `live_bytes` ↔ prepared old-space bytes as of the last successful
     ///   major collection ([`Self::old_bytes`]);
     /// - `gc_count` ↔ major collections actually run
@@ -2987,17 +2975,6 @@ mod tests {
     // through either session wrapper, tests that mechanism without
     // reintroducing a session-shaped duplicate of it.
     //
-    // Session-side bookkeeping the deleted `PreparedRuntime` also asserted on
-    // top of this contract -- `BindingTable` lease counts, `BindingLeased`,
-    // realm-scoped lease release -- is not ported: `PreparedEngine::install`
-    // (`tidepool-runtime/src/session/prepared.rs`, this file) never calls
-    // `BindingTable::acquire_leases`/`release_leases`, so on the production
-    // prepared route no import is ever leased in the first place (leasing
-    // for the prepared route's `BindingTable` entries is dead code deleted
-    // alongside `PreparedRuntime`; Core-route continuation captures are the
-    // only live caller of `acquire_leases`/`release_leases`, see
-    // `tidepool-runtime/src/session/resident.rs`).
-
     fn producer_identity() -> SymbolIdentity {
         testing::identity("S4Session", "producer")
     }

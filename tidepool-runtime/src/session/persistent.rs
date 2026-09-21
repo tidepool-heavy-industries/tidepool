@@ -24,95 +24,6 @@ use super::{
     ExactExportError, ExactExportSurface, SessionCompileView, SessionError, SessionLib,
     SourceImports,
 };
-use crate::JitError;
-
-/// The session's live prepared-STG engine.
-pub struct ResidentEngine(PreparedEngine);
-
-impl ResidentEngine {
-    #[must_use]
-    pub fn prepared_mut(&mut self) -> Option<&mut PreparedEngine> {
-        Some(&mut self.0)
-    }
-
-    /// The prepared engine, or the typed refusal a prepared-only turn path
-    /// returns the live prepared machine.
-    pub fn require_prepared(&mut self) -> Result<&mut PreparedEngine, JitError> {
-        Ok(&mut self.0)
-    }
-
-    /// The continuation ids parked on this session's machine, on this prepared machine.
-    #[must_use]
-    pub fn parked_ids(&self) -> Vec<ContinuationId> {
-        self.0.parked_ids()
-    }
-
-    /// Cancellation handle for this capacity-one registry realm.
-    #[must_use]
-    pub fn cancel_handle(&mut self) -> CancelHandle {
-        self.0.cancel_handle(RealmId::ROOT)
-    }
-
-    #[must_use]
-    pub fn disposition(&self) -> MachineDisposition {
-        self.0.disposition()
-    }
-
-    fn persistent_roots_count(&self) -> usize {
-        self.0.persistent_roots_count()
-    }
-
-    fn value_handle_count(&self) -> usize {
-        self.0.handle_count()
-    }
-
-    fn stowed_roots_count(&self) -> usize {
-        self.0.stowed_roots_count()
-    }
-
-    fn parked_count(&self) -> usize {
-        self.0.parked_count()
-    }
-
-    /// The runtime resource scope owning the frame parked under `id`.
-    #[must_use]
-    pub fn parked_realm(&self, id: ContinuationId) -> Option<RealmId> {
-        self.0.parked_realm(id)
-    }
-
-    /// Close a runtime resource scope: `(frames, handles_released)`.
-    pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
-        self.0.close_realm(realm)
-    }
-
-    /// Prepared-machine residency counters; `None` before the prepared machine is installed; has no bounded-residency accounting to report).
-    #[must_use]
-    pub fn residency(&self) -> Option<ResidencyCounts> {
-        Some(self.0.residency())
-    }
-
-    /// Lifetime `(functions, code_bytes)` of Cranelift work this engine's
-    /// installs caused; `None` before the prepared machine is installed.
-    #[must_use]
-    pub fn codegen_totals(&self) -> Option<(u64, u64)> {
-        Some(self.0.codegen_totals())
-    }
-
-    /// Prepared old-space bytes as of the last successful between-turn
-    /// collection; `None` before the prepared machine is installed.
-    #[must_use]
-    pub fn old_bytes(&self) -> Option<usize> {
-        Some(self.0.old_bytes())
-    }
-
-    /// Read-only heap/GC snapshot, whichever engine this session runs -- see
-    /// [`PreparedEngine::heap_stats`] for the prepared route's field mapping.
-    #[must_use]
-    pub fn heap_stats(&self) -> tidepool_codegen::machine::HeapStats {
-        self.0.heap_stats()
-    }
-}
-
 /// Cross-thread custody for one completed bind root. The root never moves
 /// independently: it remains inside the session while that session is stowed,
 /// and is taken only after the session returns to its owning thread.
@@ -120,7 +31,7 @@ impl ResidentEngine {
 // The shared session core
 // ---------------------------------------------------------------------------
 
-/// The resident-session substrate both servers own: one live [`PreparedEngine`]
+/// The resident-session substrate: one live [`PreparedEngine`]
 /// (`None` until the first turn bootstraps it), the accumulated constructor
 /// [`DataConTable`], the [`SessionLib`] decl plane, the [`BindingTable`] value
 /// plane, and the value-binding generation.
@@ -132,7 +43,7 @@ pub struct PersistentSession {
     /// The resident machine — `None` before the first turn bootstraps it,
     /// `Some` when idle/suspended, and moved out onto the eval thread for a
     /// turn's duration (stowed-XOR-running).
-    machine: Option<ResidentEngine>,
+    machine: Option<PreparedEngine>,
     /// The constructor metadata unioned across turns (`insert_checked`, monotone:
     /// later turns are a subset), so an ADT value bound earlier renders with real
     /// con names later.
@@ -266,7 +177,7 @@ impl PersistentSession {
                 // A prepared binding's root IS its adopted handle: releasing
                 // the handle deregisters the root.
                 (BoundValue::Prepared { handle, .. }, Some(engine)) => {
-                    if engine.0.release(*handle) {
+                    if engine.release(*handle) {
                         released += 1;
                     }
                 }
@@ -321,24 +232,23 @@ impl PersistentSession {
 
     /// The prepared engine, once the first prepared turn has installed it.
     pub fn prepared_mut(&mut self) -> Option<&mut PreparedEngine> {
-        self.machine.as_mut().and_then(ResidentEngine::prepared_mut)
+        self.machine.as_mut()
     }
 
-    /// The prepared engine, or the typed refusal a prepared-only turn path
-    /// reports before the prepared machine is installed.
+    /// The prepared engine, or a typed refusal before the machine is installed.
     pub fn require_prepared(&mut self) -> Result<&mut PreparedEngine, PreparedRuntimeError> {
         self.prepared_mut()
             .ok_or(PreparedRuntimeError::MachineNotInstalled)
     }
 
-    /// The continuation ids parked on this session's machine, whichever
-    /// engine it runs: the ground truth a hole is reconciled against after a
+    /// The continuation ids parked on this session's machine: the ground
+    /// truth a hole is reconciled against after a
     /// failed resume. Empty before the machine exists.
     #[must_use]
     pub fn parked_ids(&self) -> Vec<ContinuationId> {
         self.machine
             .as_ref()
-            .map(ResidentEngine::parked_ids)
+            .map(PreparedEngine::parked_ids)
             .unwrap_or_default()
     }
 
@@ -352,24 +262,25 @@ impl PersistentSession {
     /// declaration-plane report and never changes this decision.
     #[must_use]
     pub fn machine_disposition(&self) -> Option<MachineDisposition> {
-        self.machine.as_ref().map(ResidentEngine::disposition)
+        self.machine.as_ref().map(PreparedEngine::disposition)
     }
 
     /// Cancellation handle for this capacity-one registry realm.
     pub fn cancel_handle(&mut self) -> Option<CancelHandle> {
-        self.machine.as_mut().map(ResidentEngine::cancel_handle)
+        self.machine
+            .as_mut()
+            .map(|engine| engine.cancel_handle(RealmId::ROOT))
     }
 
     /// The runtime resource scope owning the frame parked under `id`,
-    /// whichever engine this session runs. `None` before the machine exists
-    /// or if `id` names no live frame.
+    /// `None` before the machine exists or if `id` names no live frame.
     #[must_use]
     pub fn parked_realm(&self, id: ContinuationId) -> Option<RealmId> {
         self.machine.as_ref()?.parked_realm(id)
     }
 
-    /// Close a runtime resource scope on the resident machine, whichever
-    /// engine it runs: `(frames, handles_released)`. `(0, 0)` when the
+    /// Close a runtime resource scope on the resident machine:
+    /// `(frames, handles_released)`. `(0, 0)` when the
     /// machine is not yet booted or the realm owns nothing (idempotent).
     pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
         self.machine
@@ -377,17 +288,17 @@ impl PersistentSession {
             .map_or((0, 0), |engine| engine.close_realm(realm))
     }
 
-    /// Prepared-machine residency counters; `None` before the prepared machine is installed or before the machine has bootstrapped.
+    /// Prepared-machine residency counters; `None` before bootstrap.
     #[must_use]
     pub fn residency(&self) -> Option<ResidencyCounts> {
-        self.machine.as_ref()?.residency()
+        self.machine.as_ref().map(PreparedEngine::residency)
     }
 
     /// Lifetime `(functions, code_bytes)` of Cranelift work this session's
     /// installs caused; `None` before the prepared machine is installed.
     #[must_use]
     pub fn codegen_totals(&self) -> Option<(u64, u64)> {
-        self.machine.as_ref()?.codegen_totals()
+        self.machine.as_ref().map(PreparedEngine::codegen_totals)
     }
 
     /// Prepared old-space bytes as of the last successful between-turn
@@ -395,14 +306,13 @@ impl PersistentSession {
     /// bootstrapped.
     #[must_use]
     pub fn old_bytes(&self) -> Option<usize> {
-        self.machine.as_ref()?.old_bytes()
+        self.machine.as_ref().map(PreparedEngine::old_bytes)
     }
 
-    /// Read-only heap/GC snapshot of this session's live machine, whichever
-    /// engine it runs; `None` before the machine has bootstrapped.
+    /// Read-only heap/GC snapshot; `None` before bootstrap.
     #[must_use]
     pub fn heap_stats(&self) -> Option<tidepool_codegen::machine::HeapStats> {
-        self.machine.as_ref().map(ResidentEngine::heap_stats)
+        self.machine.as_ref().map(PreparedEngine::heap_stats)
     }
 
     // -- table accumulation ------------------------------------------------
@@ -461,7 +371,7 @@ impl PersistentSession {
     // `add_function` (which needs the raw-pointer env) therefore always happens
     // on the thread that owns the session.
 
-    /// Install a prepared turn's program on the prepared route, bootstrapping
+    /// Install a prepared turn's program, bootstrapping
     /// the machine from it when this is the session's first turn. Every
     /// global the program declares resolves to a live prepared binding by
     /// the identity recorded when that binding was made.
@@ -473,12 +383,10 @@ impl PersistentSession {
             None => {
                 let (engine, program) =
                     PreparedEngine::bootstrap_with_nursery_bytes(prepared, self.nursery_size)?;
-                self.machine = Some(ResidentEngine(engine));
+                self.machine = Some(engine);
                 Ok(program)
             }
-            Some(engine) => engine
-                .0
-                .install(prepared, &self.bindings, &self.binding_index),
+            Some(engine) => engine.install(prepared, &self.bindings, &self.binding_index),
         }
     }
 
@@ -496,7 +404,6 @@ impl PersistentSession {
             let bound: std::collections::BTreeSet<&SymbolIdentity> =
                 retained.iter().map(|(identity, _)| identity).collect();
             let exported: Vec<(SymbolIdentity, u64)> = engine
-                .0
                 .code_export_retentions()
                 .filter(|(identity, _)| !bound.contains(identity))
                 .collect();
@@ -509,7 +416,7 @@ impl PersistentSession {
     /// instead of recompiling; `None` before the prepared machine is installed.
     #[must_use]
     pub fn code_export_count(&self) -> Option<usize> {
-        Some(self.machine.as_ref()?.0.code_export_count())
+        self.machine.as_ref().map(PreparedEngine::code_export_count)
     }
 
     /// Move the resident machine out onto a [`MachineLease`] (to run a turn on
@@ -541,7 +448,7 @@ impl PersistentSession {
     // would leave a live session whose value-plane `RootSlot`s all dangle — a
     // state with no legitimate use and no way to detect from the outside.
 
-    // -- value-plane bookkeeping (delegating over the two planes) ----------
+    // -- value-plane bookkeeping ------------------------------------------
 
     /// Record a materialized value binding on the value plane.
     pub fn bind(&mut self, entry: BindingEntry) {
@@ -1036,7 +943,7 @@ impl PersistentSession {
             // A prepared entry's root is its adopted handle.
             for entry in entries {
                 let BoundValue::Prepared { handle, .. } = entry.value;
-                engine.0.release(handle);
+                engine.release(handle);
             }
             return;
         }
@@ -1197,25 +1104,25 @@ impl PersistentSession {
     pub fn persistent_roots_count(&self) -> usize {
         self.machine
             .as_ref()
-            .map_or(0, ResidentEngine::persistent_roots_count)
+            .map_or(0, PreparedEngine::persistent_roots_count)
     }
 
     /// Accounting class 2 — live value handles on the resident machine,
-    /// whichever engine it runs. 0 before the machine bootstraps.
+    /// 0 before the machine bootstraps.
     #[must_use]
     pub fn value_handle_count(&self) -> usize {
         self.machine
             .as_ref()
-            .map_or(0, ResidentEngine::value_handle_count)
+            .map_or(0, PreparedEngine::handle_count)
     }
 
     /// Accounting class 1, root half — the stowed roots of parked frames,
-    /// whichever engine. 0 before the machine bootstraps.
+    /// 0 before the machine bootstraps.
     #[must_use]
     pub fn stowed_roots_count(&self) -> usize {
         self.machine
             .as_ref()
-            .map_or(0, ResidentEngine::stowed_roots_count)
+            .map_or(0, PreparedEngine::stowed_roots_count)
     }
 
     /// Accounting class 1, frame half — the parked continuations, whichever
@@ -1224,7 +1131,7 @@ impl PersistentSession {
     pub fn parked_count(&self) -> usize {
         self.machine
             .as_ref()
-            .map_or(0, ResidentEngine::parked_count)
+            .map_or(0, PreparedEngine::parked_count)
     }
 
     /// Retire `scope` and its whole subtree: drop each scope's value-plane
@@ -1298,7 +1205,7 @@ impl PersistentSession {
 /// call, by construction rather than by convention.
 pub struct MachineLease<'a> {
     session: &'a mut PersistentSession,
-    machine: Option<ResidentEngine>,
+    machine: Option<PreparedEngine>,
 }
 
 // The exclusive-borrow guarantee this type exists for ("the session's machine
@@ -1316,7 +1223,7 @@ impl MachineLease<'_> {
     /// the lease's machine has somehow already been consumed — unreachable
     /// through this type's own API, kept as a `debug_assert`-strength backstop
     /// rather than an `unwrap` a reviewer has to re-verify by hand.
-    pub fn parts(&mut self) -> (&mut ResidentEngine, &DataConTable) {
+    pub fn parts(&mut self) -> (&mut PreparedEngine, &DataConTable) {
         #[allow(
             clippy::expect_used,
             reason = "lease holds its machine for its whole lifetime"

@@ -44,7 +44,7 @@ pub use kernel::{admit_checkout, Aged, SuspendableSession};
 
 pub use persistent::{
     DeclarationPlaneCommit, MachineLease, MaterializationSetCommit, PersistentSession,
-    ResidentEngine, ScopeRetirement, ValuePlaneCommit,
+    ScopeRetirement, ValuePlaneCommit,
 };
 
 pub use prepared::{
@@ -105,9 +105,9 @@ pub use turn::{
     BoundBinder, CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellCheckFailure,
     CellCheckRequest, CellSourceSpan, CheckedBinderPin, CheckedExpressionPlan, CompileRejection,
     CompiledTurn, DeclarationReceipt, DeclarationSource, ExpressionLift, ExpressionPresentation,
-    LocatedImport, LocatedPragma, PragmaKind, PreparedTurn, SourcePrologue, TemplateSelector,
-    TurnClassification, TurnCode, TurnFailure, TurnKind, TurnRequest, TurnResult, TurnTemplate,
-    ValueTier, AMBIGUOUS_TYPE_ADVICE, CELL_PURE_DISPATCH_ADVICE, DECL_TEMPLATE_SOURCE,
+    LocatedImport, LocatedPragma, PragmaKind, SourcePrologue, TemplateSelector, TurnClassification,
+    TurnCode, TurnFailure, TurnKind, TurnRequest, TurnResult, TurnTemplate, ValueTier,
+    AMBIGUOUS_TYPE_ADVICE, CELL_PURE_DISPATCH_ADVICE, DECL_TEMPLATE_SOURCE,
     PREPARED_SCAFFOLD_TARGET,
 };
 
@@ -913,7 +913,7 @@ impl SessionLib {
                 items: Vec::new(),
             }),
             target: None,
-            prepared: None,
+            retained_imports: &[],
         })
         .map_err(|failure| SessionError::Compile(failure.error))?;
         let receipt = match turn_result {

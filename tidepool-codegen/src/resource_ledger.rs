@@ -203,7 +203,7 @@ pub struct ResourceCounts {
 /// watchdog threads. In prepared execution, cancellation is observed at the next GC
 /// safepoint (heap check), which fires on essentially every non-trivial
 /// allocation in Haskell code, and the running program unwinds via the
-/// normal error path with `JitError::Yield(YieldError::Cancelled)`. On
+/// normal cancellation error path. On
 /// prepared, it's observed at the next `PreparedSafepoint`
 /// (`Allocation`/`FunctionEntry`/`Backedge`/`ThunkEntry`/`ThunkCommit`).
 ///

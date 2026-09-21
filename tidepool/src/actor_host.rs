@@ -94,7 +94,7 @@ use tidepool_node::{
 };
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::{
-    insert_preamble_imports, resident_workbench_templates, run_turn, PreparedTurn, ResidentSession,
+    insert_preamble_imports, resident_workbench_templates, run_turn, ResidentSession,
     ResidentSessionState, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
@@ -2043,7 +2043,7 @@ fn compile_driver(
         target: None,
         // The driver is the session's first turn, so there is nothing
         // retained to link against yet.
-        prepared: PreparedTurn::first_turn(),
+        retained_imports: &[],
     })
     .map_err(render_root_compile_failure)?
     {
@@ -2125,7 +2125,7 @@ pub(crate) fn warm_compiler(
             target: None,
             // A warm-up links against nothing: it exists to fill the daemon's
             // module memo, and has no live bindings of its own.
-            prepared: PreparedTurn::first_turn(),
+            retained_imports: &[],
         })
     };
     warm(minted.gen().0, &[])?;
