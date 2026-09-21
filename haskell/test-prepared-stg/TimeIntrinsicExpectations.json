@@ -1,0 +1,12 @@
+{
+  "source_revision": "TimeIntrinsicContract.hs independent chrono 0.4.45 goldens",
+  "expectations": {
+    "directUtc": { "kind": "int", "value": 0 },
+    "offsetUtc": { "kind": "int", "value": 1782959062000 },
+    "higherOrder": { "kind": "int", "value": 1709164800000 },
+    "invalidError": {
+      "kind": "text",
+      "value": "parseISO8601: \"not-a-time\": premature end of input"
+    }
+  }
+}

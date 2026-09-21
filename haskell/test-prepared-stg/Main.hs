@@ -105,6 +105,7 @@ projectEntryWithAux result modul entry auxEntries retained =
           [ Schema.SymbolIdentity "main" (fromString modul) "value" (fromString aux) Nothing
           | aux <- auxEntries ]
       , Projection.projectionFormattingAuthority = Nothing
+      , Projection.projectionTimeAuthority = Nothing
       , Projection.projectionTextUnit = Nothing
       }
 

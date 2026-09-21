@@ -3634,7 +3634,6 @@ dependencies = [
 name = "tidepool-bridge"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "inventory",
  "proptest",
  "recursion",
@@ -3674,6 +3673,7 @@ name = "tidepool-codegen"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "chrono",
  "cranelift-codegen",
  "cranelift-frontend",
  "cranelift-jit",

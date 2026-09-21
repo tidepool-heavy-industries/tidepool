@@ -75,6 +75,7 @@ main = do
           , projectionEntry = entry
           , projectionAuxiliaryRoots = []
           , projectionFormattingAuthority = Nothing
+          , projectionTimeAuthority = Nothing
           , projectionTextUnit = Nothing
           }
     closure <- liftIO $ do

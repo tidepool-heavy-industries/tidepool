@@ -731,6 +731,9 @@ pub(super) fn recognize_operation(
     if let Some(operation) = super::formatting::recognize(&declaration.identity, signature) {
         return Some(PrimitiveOperation::Formatting(operation));
     }
+    if super::time::recognize(&declaration.identity, signature) {
+        return Some(PrimitiveOperation::ParseIso8601);
+    }
     if let Some(operation) = super::wide_words::recognize(&declaration.identity, signature) {
         return Some(PrimitiveOperation::WideWord(operation));
     }
@@ -857,6 +860,7 @@ pub(super) enum PrimitiveOperation {
     ByteArray(super::byte_arrays::ByteOperation),
     TextSearch(super::text_search::TextSearchOperation),
     Formatting(super::formatting::FormattingOperation),
+    ParseIso8601,
     DecodeDoubleInt64,
     EncodeDouble {
         signed: bool,
@@ -1138,6 +1142,10 @@ pub(super) fn emit_operation(
                 true,
             )
             .map(Some)
+        }
+        PrimitiveOperation::ParseIso8601 => {
+            super::time::emit_parse_iso8601(builder, pipeline, vmctx, gc, bytes_array, arguments)
+                .map(Some)
         }
         PrimitiveOperation::Raise => {
             super::no_success::emit_terminal(

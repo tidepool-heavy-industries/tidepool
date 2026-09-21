@@ -10,7 +10,6 @@ pub mod json;
 pub mod json_builder;
 pub mod record;
 pub mod shapes;
-pub mod time;
 pub mod traits;
 pub mod value;
 

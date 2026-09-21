@@ -15,7 +15,6 @@ tidepool-repr.workspace = true
 recursion.workspace = true
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
 inventory.workspace = true
-chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 proptest.workspace = true

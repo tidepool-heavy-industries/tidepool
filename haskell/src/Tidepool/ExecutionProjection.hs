@@ -92,6 +92,7 @@ import Tidepool.EffectSchema qualified as Effect
 import Tidepool.TypePolicy qualified as TypePolicy
 import Tidepool.PreparedFormatting
   (FormattingAuthority, FormattingSpec(..), FormattingIntrinsic(..), classifyFormatting)
+import Tidepool.PreparedTime (TimeAuthority, TimeSpec(..), classifyTime)
 
 data ProjectionContext = ProjectionContext
   { projectionProfile :: Text
@@ -104,6 +105,7 @@ data ProjectionContext = ProjectionContext
   -- the consumer checks the artifact for the entries it needs.
   , projectionAuxiliaryRoots :: [SymbolIdentity]
   , projectionFormattingAuthority :: Maybe FormattingAuthority
+  , projectionTimeAuthority :: Maybe TimeAuthority
   -- | Missing authority rejects text's kernel, not unrelated projection.
   , projectionTextUnit :: Maybe TextUnitAuthority
   } deriving stock (Eq, Show)
@@ -140,6 +142,7 @@ data PState = PState
   , retainedGenerations :: Map SymbolIdentity Word64
   , homeModules :: Set (Text, Text)
   , formattingAuthority :: Maybe FormattingAuthority
+  , timeAuthority :: Maybe TimeAuthority
   , textUnit :: Maybe TextUnitAuthority
   }
 
@@ -179,7 +182,7 @@ resolveTextPackageUnit hscEnv =
 -- | Narrow test seam for GHC literals which cannot be written in source Haskell.
 projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionError Atom
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
-  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty Nothing Nothing)
+  (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty emptyVarEnv [] [] [] [] [] [] machine Map.empty Set.empty Nothing Nothing Nothing)
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
 projectPrepared _ [] = Left (UnsupportedPreparedShape "execution program has no modules")
@@ -211,7 +214,8 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
           [ (Text.pack (unitString (moduleUnit (pmModule prepared))),
              Text.pack (moduleNameString (moduleName (pmModule prepared))))
           | prepared <- modules, pmCoverage prepared == CompleteSourceModule ])
-        (projectionFormattingAuthority context) (projectionTextUnit context)
+        (projectionFormattingAuthority context) (projectionTimeAuthority context)
+        (projectionTextUnit context)
       -- An executable import's own top-level definition is never walked:
       -- 'homeModules'/'topIdentityMap' above still see the real, unfiltered
       -- module set (so a same-name internal identity cannot borrow home-module
@@ -513,9 +517,22 @@ registeredFormatting context binder = case formattingSpec context binder of
   Right (Just _) -> True
   _ -> False
 
+timeSpec :: ProjectionContext -> Id -> Either ProjectionError (Maybe TimeSpec)
+timeSpec context binder = case projectionTimeAuthority context of
+  Nothing -> Right Nothing
+  Just authority -> case classifyTime authority binder of
+    Left failure -> Left (UnsupportedPreparedShape (Text.pack (show failure)))
+    Right spec -> Right spec
+
+registeredTime :: ProjectionContext -> Id -> Bool
+registeredTime context binder = case timeSpec context binder of
+  Right (Just _) -> True
+  _ -> False
+
 registeredReplacement :: ProjectionContext -> Id -> Bool
 registeredReplacement context binder =
-  registeredFormatting context binder || isJust (deferredFunction binder)
+  registeredFormatting context binder || registeredTime context binder
+    || isJust (deferredFunction binder)
 
 selectPreparedTarget :: ProjectionContext -> [PreparedModule]
   -> (VarEnv SymbolIdentity, [PreparedModule])
@@ -970,10 +987,13 @@ projectTopPair :: Id -> CgStgRhs -> P TopBinding
 projectTopPair binder rhs = do
   symbol <- topIdentity binder
   formatting <- formattingSpecFor binder
+  time <- timeSpecFor binder
   let project = case deferredFunction binder of
         Just deferred -> projectDeferredRhs binder deferred rhs
-        Nothing -> maybe (projectRhs binder rhs)
-          (\spec -> projectFormattingRhs spec rhs) formatting
+        Nothing -> case time of
+          Just spec -> projectTimeRhs spec rhs
+          Nothing -> maybe (projectRhs binder rhs)
+            (\spec -> projectFormattingRhs spec rhs) formatting
   TopBinding symbol <$> (HeapBinding <$> requireTopValue binder <*> project)
 
 formattingSpecFor :: Id -> P (Maybe FormattingSpec)
@@ -982,6 +1002,15 @@ formattingSpecFor binder = do
   case authority of
     Nothing -> pure Nothing
     Just owner -> case classifyFormatting owner binder of
+      Left failure -> failShape (Text.pack (show failure))
+      Right result -> pure result
+
+timeSpecFor :: Id -> P (Maybe TimeSpec)
+timeSpecFor binder = do
+  authority <- gets timeAuthority
+  case authority of
+    Nothing -> pure Nothing
+    Just owner -> case classifyTime owner binder of
       Left failure -> failShape (Text.pack (show failure))
       Right result -> pure result
 
@@ -1008,6 +1037,84 @@ projectFormattingRhs spec (StgRhsClosure _ _ ReEntrant parameters _ resultType) 
   pure (Function signature parameters' [] body)
   where scaledThing (Scaled _ ty) = ty
 projectFormattingRhs _ _ = failShape "registered formatting wrapper is not a reentrant closure"
+
+-- The shipped definition is deliberately opaque and returning so GHC may
+-- learn strictness without learning a false result constructor. Projection
+-- replaces its complete body, including higher-order uses of the top.
+projectTimeRhs :: TimeSpec -> CgStgRhs -> P HeapRhs
+projectTimeRhs spec (StgRhsClosure _ _ ReEntrant parameters _ resultType) = withScope $ do
+  actual <- concat <$> mapM (argumentRepsForType . varType) parameters
+  result <- repsForType resultType
+  unless (actual == [LiftedRefRep] && result == [LiftedRefRep])
+    (failRepresentation "registered time parser has unexpected prepared entry reps")
+  let textDataCon = timeTextConstructor spec
+  textConstructor <- internConstructor textDataCon
+  textFields <- concat <$> mapM (repsForType . scaledThing) (dataConRepArgTys textDataCon)
+  unless (textFields == [UnliftedRefRep, IntRep 64, IntRep 64])
+    (failRepresentation "time parser Text constructor must contain byte array, offset, length")
+  leftConstructor <- internConstructor (timeLeftConstructor spec)
+  rightConstructor <- internConstructor (timeRightConstructor spec)
+  parameters' <- mapM bindValue parameters
+  signature <- internSignature (Signature [LiftedRefRep] (Returns [LiftedRefRep]))
+  body <- case parameters' of
+    [input] -> timeBody spec textConstructor leftConstructor rightConstructor input
+    _ -> failShape "registered time parser has unexpected prepared arity"
+  pure (Function signature parameters' [] body)
+  where scaledThing (Scaled _ ty) = ty
+projectTimeRhs _ _ = failShape "registered time parser is not a reentrant closure"
+
+timeBody :: TimeSpec -> ConstructorId -> ConstructorId -> ConstructorId -> ValueId -> P Expr
+timeBody spec textConstructor leftConstructor rightConstructor input = do
+  enter <- internSignature (Signature [] (Returns [LiftedRefRep]))
+  parseSignature <- internSignature (Signature
+    [UnliftedRefRep, IntRep 64, IntRep 64]
+    (Returns [IntRep 64, IntRep 64, UnliftedRefRep]))
+  parse <- internSyntheticOperation
+    (Schema.IntrinsicIdentity "prepared_parse_iso8601" Schema.CCall) parseSignature
+  sizeSignature <- internSignature (Signature [UnliftedRefRep] (Returns [IntRep 64]))
+  size <- internSyntheticOperation (Schema.PrimOpIdentity "sizeofByteArray#") sizeSignature
+  intConstructor <- internConstructor intDataCon
+  inputCase <- freshValue
+  rawBytes <- freshValue
+  rawOffset <- freshValue
+  rawLength <- freshValue
+  parseCase <- freshValue
+  succeeded <- freshValue
+  decisionCase <- freshValue
+  millis <- freshValue
+  errorBytes <- freshValue
+  errorLengthCase <- freshValue
+  errorLength <- freshValue
+  errorText <- freshValue
+  boxedMillis <- freshValue
+  let textFamily = AlgebraicCase (nameSymbol "type"
+        (GHC.tyConName (dataConTyCon (timeTextConstructor spec))))
+      intFamily = AlgebraicCase (nameSymbol "type" (GHC.tyConName (dataConTyCon intDataCon)))
+      failure = Case (Operation size [Ref (Local errorBytes)]) errorLengthCase
+        (Returns [IntRep 64]) MultiValueCase
+        [Alternative DefaultPattern [errorLength]
+          (Case (Construct textConstructor
+              [ Ref (Local errorBytes)
+              , Scalar (IntLiteral 64 (BS.replicate 8 0))
+              , Ref (Local errorLength)
+              ]) errorText (Returns [LiftedRefRep]) PolymorphicCase
+            [Alternative DefaultPattern []
+              (Construct leftConstructor [Ref (Local errorText)])])]
+      success = Case (Construct intConstructor [Ref (Local millis)]) boxedMillis
+        (Returns [LiftedRefRep]) intFamily
+        [Alternative DefaultPattern []
+          (Construct rightConstructor [Ref (Local boxedMillis)])]
+      decide = Case (Return [Ref (Local succeeded)]) decisionCase
+        (Returns [IntRep 64]) (PrimitiveCase (IntRep 64))
+        [ Alternative (LiteralPattern (IntLiteral 64 (BS.replicate 8 0))) [] failure
+        , Alternative DefaultPattern [] success
+        ]
+      parsed = Case (Operation parse
+          [Ref (Local rawBytes), Ref (Local rawOffset), Ref (Local rawLength)])
+        parseCase (Returns [IntRep 64, IntRep 64, UnliftedRefRep]) MultiValueCase
+        [Alternative DefaultPattern [succeeded, millis, errorBytes] decide]
+  pure (Case (Enter (Ref (Local input)) enter) inputCase (Returns [LiftedRefRep]) textFamily
+    [Alternative (ConstructorPattern textConstructor) [rawBytes, rawOffset, rawLength] parsed])
 
 formattingBody :: FormattingSpec -> ConstructorId -> [ValueId] -> P Expr
 formattingBody spec textConstructor parameters = do

@@ -49,6 +49,7 @@ import Tidepool.GhcPipeline
 import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjection, projectSelected, resolveTextPackageUnit)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
+import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..)
   , WireProgram(..), SiteRow(..) )
@@ -440,6 +441,7 @@ prepareArtifacts _ _ _ _ [] _ _ = pure []
 prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliaryRoots retainedGenerations = do
   timing <- readTimingEnabled
   formattingAuthority <- timePhase timing "formatting_authority" $ resolveFormattingAuthority hscEnv
+  timeAuthority <- timePhase timing "time_authority" $ resolveTimeAuthority hscEnv
   textAuthority <- timePhase timing "text_authority" $ resolveTextPackageUnit hscEnv
   source <- readFile input
   let targetModule = fromMaybe (capitalize (takeBaseName input)) (extractModuleName source)
@@ -467,6 +469,7 @@ prepareArtifacts caches input hscEnv modules targets@(firstTarget : _) auxiliary
                       (T.pack targetModule) "value" (T.pack root) Nothing
               | root <- auxiliaryRoots ]
           , projectionFormattingAuthority = formattingAuthority
+          , projectionTimeAuthority = timeAuthority
           , projectionTextUnit = textAuthority
           }
   recover <- newPreparedRecovery hscEnv (rcFatIface caches) (rcOwnerIface caches)

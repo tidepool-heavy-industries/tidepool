@@ -48,6 +48,7 @@ import Tidepool.PreparedRecovery
 import Tidepool.PreparedStg (newPreparedBodyCache)
 import Tidepool.PreparedFormatting
   ( FormattingAuthority, resolveFormattingAuthority )
+import Tidepool.PreparedTime (TimeAuthority, resolveTimeAuthority)
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.Metadata
   (collectDataCons, dcToMeta, mergeMetaPreserving, targetBindingHasIO, wiredInDataCons)
@@ -95,6 +96,7 @@ runProbe rawArguments = do
     Right prepared -> do
       formattingAuthority <- resolveFormattingAuthority
         (prHscEnv (pprPipelineResult prepared))
+      timeAuthority <- resolveTimeAuthority (prHscEnv (pprPipelineResult prepared))
       textAuthority <- resolveTextPackageUnit (prHscEnv (pprPipelineResult prepared))
       enumerated <- trySync (evaluate (forceIdentities
         (preparedTopIdentities (pprModules prepared))))
@@ -129,7 +131,8 @@ runProbe rawArguments = do
           ownerCache <- newOwnerInterfaceCache
           bodyCache <- newPreparedBodyCache
           recover <- newPreparedRecovery (prHscEnv (pprPipelineResult prepared))
-            cache ownerCache bodyCache (projectionContext formattingAuthority textAuthority first)
+            cache ownerCache bodyCache
+            (projectionContext formattingAuthority timeAuthority textAuthority first)
             (pprModules prepared)
           when (not (null metadataTargets)) $ do
             constructors <- fmap concat $ forM metadataTargets $ \name -> do
@@ -138,7 +141,8 @@ runProbe rawArguments = do
                 _ -> fail ("metadata target missing or ambiguous: " ++ name)
               closure <- recover identity
               case projectPreparedTargetWithConstructors
-                     (projectionContext formattingAuthority textAuthority identity) (closureModules closure) of
+                     (projectionContext formattingAuthority timeAuthority textAuthority identity)
+                     (closureModules closure) of
                 Left failure -> fail ("metadata projection: " ++ show failure)
                 Right (_, constructors) -> pure constructors
             let result = pprPipelineResult prepared
@@ -150,9 +154,9 @@ runProbe rawArguments = do
                 (map Text.pack (prWarnings result)))
           rowsWithInventory <- if allTops
             then forM (zip [0 :: Int ..] selected) $ \(index, identity) ->
-              projectOneIdentity recover formattingAuthority textAuthority outputDir index identity
+              projectOneIdentity recover formattingAuthority timeAuthority textAuthority outputDir index identity
             else forM (zip [0 :: Int ..] (zip targets sourceTargets)) $ \(index, (occurrence, sourceTarget)) ->
-              projectOneTarget recover formattingAuthority textAuthority moduleNameArg outputDir index occurrence
+              projectOneTarget recover formattingAuthority timeAuthority textAuthority moduleNameArg outputDir index occurrence
                 (sourceTargetIdentity sourceTarget)
           let (rows, targetInventories) = unzip rowsWithInventory
           pure (rows, sourceTargets, targetInventories)
@@ -221,6 +225,7 @@ matchesExternal moduleNameArg occurrence identity =
 projectOneTarget
   :: (SymbolIdentity -> IO RecoveredClosure)
   -> Maybe FormattingAuthority
+  -> Maybe TimeAuthority
   -> Maybe TextUnitAuthority
   -> String
   -> FilePath
@@ -228,7 +233,7 @@ projectOneTarget
   -> String
   -> Maybe SymbolIdentity
   -> IO (Record, TargetInventory)
-projectOneTarget recover formattingAuthority textAuthority moduleNameArg outputDir index occurrence mapped = do
+projectOneTarget recover formattingAuthority timeAuthority textAuthority moduleNameArg outputDir index occurrence mapped = do
   let name = missingName moduleNameArg occurrence
       reject reason = pure
         ( Record name Nothing [] (Rejected reason)
@@ -236,18 +241,19 @@ projectOneTarget recover formattingAuthority textAuthority moduleNameArg outputD
         )
   case mapped of
     Nothing -> reject ("target " <> show occurrence <> " is missing from module " <> moduleNameArg)
-    Just selected -> projectOneIdentity recover formattingAuthority textAuthority outputDir index selected
+    Just selected -> projectOneIdentity recover formattingAuthority timeAuthority textAuthority outputDir index selected
 
 projectOneIdentity
   :: (SymbolIdentity -> IO RecoveredClosure)
   -> Maybe FormattingAuthority
+  -> Maybe TimeAuthority
   -> Maybe TextUnitAuthority
   -> FilePath
   -> Int
   -> SymbolIdentity
   -> IO (Record, TargetInventory)
-projectOneIdentity recover formattingAuthority textAuthority outputDir index selected = do
-  let context = projectionContext formattingAuthority textAuthority selected
+projectOneIdentity recover formattingAuthority timeAuthority textAuthority outputDir index selected = do
+  let context = projectionContext formattingAuthority timeAuthority textAuthority selected
       artifactName = numericArtifactName index
       name = identityName selected
       expectationKey = externalExpectationKey selected
@@ -371,9 +377,9 @@ mapSourceTargetsPure
 mapSourceTargetsPure moduleNameArg identities = map $ \sourceName ->
   fmap (SourceTarget sourceName) (exactExternalMapping moduleNameArg identities sourceName)
 
-projectionContext :: Maybe FormattingAuthority -> Maybe TextUnitAuthority
+projectionContext :: Maybe FormattingAuthority -> Maybe TimeAuthority -> Maybe TextUnitAuthority
   -> SymbolIdentity -> ProjectionContext
-projectionContext formattingAuthority textAuthority identity =
+projectionContext formattingAuthority timeAuthority textAuthority identity =
   ProjectionContext
     { projectionProfile = "ghc-9.12-prepared-stg"
     , projectionToolchain = "ghc-9.12.2"
@@ -382,6 +388,7 @@ projectionContext formattingAuthority textAuthority identity =
     , projectionEntry = identity
     , projectionAuxiliaryRoots = []
     , projectionFormattingAuthority = formattingAuthority
+    , projectionTimeAuthority = timeAuthority
     , projectionTextUnit = textAuthority
     }
 

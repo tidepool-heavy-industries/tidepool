@@ -24,7 +24,8 @@ containers_root="$work_root/containers-contract"
 bignum_root="$work_root/bignum-contract"
 usertypes_root="$work_root/usertypes-contract"
 text_root="$work_root/text-contract"
-mkdir -p "$run_root" "$priority_root" "$actor_root" "$suite_root" "$recovered_root" "$formatting_root" "$formatting_shadow_root" "$fingerprint_root" "$containers_root" "$bignum_root" "$usertypes_root" "$text_root"
+time_root="$work_root/time-intrinsic-contract"
+mkdir -p "$run_root" "$priority_root" "$actor_root" "$suite_root" "$recovered_root" "$formatting_root" "$formatting_shadow_root" "$fingerprint_root" "$containers_root" "$bignum_root" "$usertypes_root" "$text_root" "$time_root"
 suite_targets="$work_root/suite-targets"
 cleanup_corpus() {
   local status=$?
@@ -306,6 +307,18 @@ fingerprint_report="$fingerprint_root/results.json"
   "$metadata" "$fingerprint_report"
 assert_contract_report fingerprint-execution 3 "$fingerprint_report"
 
+echo "==> projecting time intrinsic contract (4 targets)"
+"$projection_probe" \
+  "$repo_root/haskell/test-prepared-stg/TimeIntrinsicContract.hs" TimeIntrinsicContract \
+  "$repo_root/haskell/test-prepared-stg/TimeIntrinsicTargets" "$time_root" \
+  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+time_report="$time_root/results.json"
+"$prepared_runner" run \
+  "$time_root/manifest.json" \
+  "$repo_root/haskell/test-prepared-stg/TimeIntrinsicExpectations.json" \
+  "$metadata" "$time_report"
+assert_contract_report time-intrinsic 4 "$time_report"
+
 # Pure-evaluation cohorts. Each probe is a nullary monomorphic top whose value
 # comes from an oracle compiled by the pinned GHC, so a stage failure here is an
 # engine boundary rather than a disputed expectation.
@@ -353,6 +366,7 @@ echo "  recovered base contract: $recovered_root"
 echo "  formatting execution contract: $formatting_root"
 echo "  formatting dependency-shadow contract: $formatting_shadow_root"
 echo "  fingerprint execution contract: $fingerprint_root"
+echo "  time intrinsic contract: $time_root"
 echo "  containers cohort: $containers_root"
 echo "  bignum cohort: $bignum_root"
 echo "  usertypes cohort: $usertypes_root"

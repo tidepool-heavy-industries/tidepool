@@ -61,6 +61,7 @@ verifyCallerResultProjection = do
       , projectionEntry = SymbolIdentity "main" (Text.pack modul) "value" (Text.pack entry) Nothing
       , projectionAuxiliaryRoots = []
       , projectionFormattingAuthority = Nothing
+      , projectionTimeAuthority = Nothing
       , projectionTextUnit = Nothing
       }
     assert condition message = unless condition (fail message)

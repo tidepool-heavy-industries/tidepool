@@ -151,10 +151,11 @@ daysFromCivil y0 m d =
 -- @git log --format=%cI@ shape (@2026-07-01T19:24:22-07:00@); a malformed input
 -- is a @Left message@, never a silently-corrupted timestamp.
 --
--- The parse itself is a Rust @chrono@ primop (see @ParseISO8601@ in
--- @tidepool-repr@ / the @runtime_parse_iso8601@ JIT host fn); Translate.hs
--- intercepts calls to this name and lowers them to it. The stub body below
--- only type-checks — it is never executed.
+-- Prepared projection replaces this exact shipped top with the Rust @chrono@
+-- intrinsic. The opaque fallback is intentionally strict and has both result
+-- constructors: GHC may retain the real call's strictness, but cannot infer
+-- that callers always receive @Left@ or that the input is absent before the
+-- projection boundary replaces the body.
 --
 -- >>> parseISO8601 "1970-01-01T00:00:00Z"
 -- Right 1970-01-01T00:00:00Z
@@ -163,7 +164,8 @@ daysFromCivil y0 m d =
 -- Right 2026-07-02T02:24:22Z
 {-# OPAQUE parseISO8601 #-}
 parseISO8601 :: Text -> Either Text UTCTime
-parseISO8601 _ = Left T.empty
+parseISO8601 input =
+  if T.null input then Left input else Right (UTCTime 0)
 
 -- | Difference in seconds between two 'UTCTime' values (@a - b@).
 diffUTCTime :: UTCTime -> UTCTime -> Double

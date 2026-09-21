@@ -36,6 +36,7 @@ library tidepool-extract-internal
     Tidepool.PreparedBuiltins
     Tidepool.PreparedFacts
     Tidepool.PreparedFormatting
+    Tidepool.PreparedTime
     Tidepool.SiteClassifier
     Tidepool.PreparedSites
     Tidepool.RetainedUnfoldings

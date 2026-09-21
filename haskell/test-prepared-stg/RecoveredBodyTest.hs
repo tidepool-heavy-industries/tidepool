@@ -81,6 +81,7 @@ main = do
           , projectionEntry = entry
           , projectionAuxiliaryRoots = []
           , projectionFormattingAuthority = Nothing
+          , projectionTimeAuthority = Nothing
           , projectionTextUnit = Nothing
           }
         references = preparedTargetReferences context [caller]
@@ -208,6 +209,7 @@ assertSemigroupSubset root libdir = runGhc (Just libdir) $ do
             (Text.pack "foldableCaller") Nothing
         , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
+        , projectionTimeAuthority = Nothing
         , projectionTextUnit = Nothing
         }
       references = preparedTargetReferences context [prepared]
@@ -309,6 +311,7 @@ assertRecoveredKindRep root = do
         , projectionEntry = entry
         , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
+        , projectionTimeAuthority = Nothing
         , projectionTextUnit = Nothing
         }
   cache <- newFatIfaceCache
@@ -355,6 +358,7 @@ assertPatErrorBody root = do
         , projectionEntry = entry
         , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
+        , projectionTimeAuthority = Nothing
         , projectionTextUnit = Nothing
         }
       patErrors = filter isPatError (preparedTargetReferences context home)
@@ -446,6 +450,7 @@ assertRaiseContracts root = do
         , projectionEntry = entry
         , projectionAuxiliaryRoots = []
         , projectionFormattingAuthority = Nothing
+        , projectionTimeAuthority = Nothing
         , projectionTextUnit = Nothing
         }
   program <- case projectPreparedTarget context (pprModules prepared) of
@@ -535,6 +540,7 @@ assertBottomingApplications root = do
                 (Text.pack occurrence) Nothing
             , projectionAuxiliaryRoots = []
             , projectionFormattingAuthority = Nothing
+            , projectionTimeAuthority = Nothing
             , projectionTextUnit = Nothing
             }
           modules = if occurrence == "bottomingPartial"

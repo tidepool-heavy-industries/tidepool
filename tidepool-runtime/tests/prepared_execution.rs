@@ -145,6 +145,65 @@ fn caller_result_matches_ghc_for_boxed_unboxed_and_join_forwarding() {
     }
 }
 
+#[test]
+fn chrono_parse_error_text_survives_collection_before_observation() {
+    use tidepool_extract_cmd::{resolve_bin, ExtractCmd, ResolvedExtractBin};
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let source = root.join("haskell/test-prepared-stg/TimeIntrinsicContract.hs");
+    let output = tempfile::tempdir().unwrap();
+    let mut command = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(
+        resolve_bin()
+            .expect("resolve the repository extractor")
+            .path,
+    ));
+    command
+        .input(&source)
+        .targets(["invalidError"])
+        .include(root.join("haskell/lib"))
+        .include(root.join("haskell/test-prepared-stg"))
+        .output_dir(output.path());
+    let extracted = command
+        .bind()
+        .and_then(|endpoint| endpoint.execute(&command))
+        .expect("extract chrono intrinsic fixture");
+    assert!(
+        extracted.output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&extracted.output.stderr)
+    );
+
+    let bytes = std::fs::read(output.path().join("invalidError.prepared.cbor"))
+        .expect("extractor wrote chrono artifact");
+    let result = run_prepared_once(
+        &bytes,
+        &requirements(),
+        DecodeLimits::default(),
+        MachineImports::default(),
+        Arc::new(AtomicBool::new(false)),
+    )
+    .expect("run chrono parse error");
+    assert_eq!(result.collections, 1);
+    let expected = b"parseISO8601: \"not-a-time\": premature end of input";
+    fn contains_bytes(value: &Value, expected: &[u8]) -> bool {
+        match value {
+            Value::Lit(tidepool_repr::Literal::LitByteArray(bytes)) => bytes == expected,
+            Value::Con(_, fields) => fields.iter().any(|field| contains_bytes(field, expected)),
+            _ => false,
+        }
+    }
+    assert!(
+        result
+            .values
+            .iter()
+            .any(|value| contains_bytes(value, expected)),
+        "unexpected observed parse error: {:?}",
+        result.values
+    );
+}
+
 fn head(major: u8, length: usize) -> Vec<u8> {
     assert!(length < 24);
     vec![(major << 5) | length as u8]

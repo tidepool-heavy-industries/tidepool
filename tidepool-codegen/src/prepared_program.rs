@@ -82,6 +82,7 @@ mod safepoint;
 mod settlement_tests;
 pub(crate) mod static_bytes;
 mod text_search;
+mod time;
 mod wide_words;
 pub use admission::{admit_prepared, admit_program, supports_operation};
 
@@ -557,6 +558,10 @@ impl CompiledProgram {
                 (
                     "prepared_render_double_prec_bytes",
                     formatting::prepared_render_double_prec_bytes as *const u8,
+                ),
+                (
+                    time::PARSE_ISO8601_HOST,
+                    time::prepared_parse_iso8601 as *const u8,
                 ),
                 (
                     "prepared_no_success_returned",
