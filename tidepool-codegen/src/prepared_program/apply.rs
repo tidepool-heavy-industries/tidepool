@@ -195,23 +195,6 @@ pub(super) fn layouts<'a>(
     Ok(layouts)
 }
 
-fn owner_offers_for(
-    entry: &Signature,
-    result_instances: &std::collections::BTreeSet<super::ResultContract>,
-    enter_lifts: bool,
-) -> std::collections::BTreeSet<Signature> {
-    let mut offers = std::collections::BTreeSet::new();
-    for pending in 0..entry.arguments.len().max(1) {
-        offers.extend(owner_offers_at(
-            entry,
-            pending,
-            result_instances,
-            enter_lifts,
-        ));
-    }
-    offers
-}
-
 fn owner_offers_at(
     entry: &Signature,
     pending: usize,
@@ -251,9 +234,7 @@ pub(super) fn declare_dispatchers(
     pipeline: &mut CodegenPipeline,
 ) -> Result<Dispatchers, super::CompileError> {
     let result_instances = super::plan::result_instances(plan.program);
-    let enter_lifts = enter_serves_zero_argument_lift(profile)?;
     let mut workers = std::collections::BTreeSet::new();
-    let mut owner_offers = std::collections::BTreeSet::new();
     let mut metadata = std::collections::BTreeSet::new();
     for declaration in plan.program.operations() {
         let signature = &plan.program.signatures()[declaration.signature.0 as usize];
@@ -291,17 +272,9 @@ pub(super) fn declare_dispatchers(
         }
     }
     let call_demands = workers.len();
-    // Every owner serves its exact PAP suffix and one logical application
-    // step. The worker loop composes those steps for longer partial demands.
-    for function in plan.functions.values() {
-        for offer in owner_offers_for(function.signature, &result_instances, enter_lifts) {
-            owner_offers.insert(offer);
-        }
-    }
-    let owner_demands = owner_offers.len();
     if std::env::var("TIDEPOOL_CODEGEN_DETAIL").as_deref() == Ok("1") {
         tracing::info!(target: "tidepool_codegen::prepared_compile", call_demands,
-            owner_demands, worker_demands = workers.len(), pinned_demands = metadata.len(),
+            worker_demands = workers.len(), pinned_demands = metadata.len(),
             "dispatcher demand expansion");
     }
     let mut entries = BTreeMap::new();
@@ -1352,12 +1325,11 @@ mod tests {
             ]),
         };
         let instances = std::collections::BTreeSet::new();
-        let offers = owner_offers_for(&entry, &instances, true);
         let mut planning_steps = 0;
         for pending in 0..arity.max(1) {
             planning_steps += owner_offers_at(&entry, pending, &instances, true).len();
         }
-        (offers.len(), planning_steps)
+        (arity.max(1), planning_steps)
     }
 
     #[test]
@@ -1369,8 +1341,8 @@ mod tests {
             large.1 <= small.1 * 2 + 1,
             "adapters: {small:?} -> {large:?}"
         );
-        assert_eq!(small, (17, 31));
-        assert_eq!(large, (33, 63));
+        assert_eq!(small, (16, 31));
+        assert_eq!(large, (32, 63));
     }
 
     #[test]
