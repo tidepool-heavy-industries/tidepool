@@ -46,9 +46,59 @@ main = do
     [] -> pure ()
     ["--metadata"] -> metadataCompilation
     ["--dependency-evidence"] -> dependencyEvidenceCompilation
+    ["--untracked-compile-time"] -> untrackedCompileTimeCompilation
     ["--validation-memo"] -> validationMemoCompilation
     ["--structural-display", effectsRoot] -> structuralDisplayCompilation effectsRoot
-    _ -> fail "expected --metadata, --dependency-evidence, --validation-memo, or --structural-display EFFECTS_INCLUDE"
+    _ -> fail "expected --metadata, --dependency-evidence, --untracked-compile-time, --validation-memo, or --structural-display EFFECTS_INCLUDE"
+
+untrackedCompileTimeCompilation :: IO ()
+untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let dependency = root </> "QuasiQuoteDependency.hs"
+      templateDependency = root </> "TemplateDependency.hs"
+      target = root </> "QuasiQuoteTarget.hs"
+  writeFile dependency $ unlines
+    [ "{-# LANGUAGE QuasiQuotes #-}"
+    , "module QuasiQuoteDependency (value) where"
+    , "value :: Int"
+    , "value = 42"
+    ]
+  writeFile templateDependency $ unlines
+    [ "{-# LANGUAGE TemplateHaskell #-}"
+    , "module TemplateDependency (other) where"
+    , "other :: Int"
+    , "other = 1"
+    ]
+  writeFile target $ unlines
+    [ "module QuasiQuoteTarget where"
+    , "import QuasiQuoteDependency (value)"
+    , "import TemplateDependency (other)"
+    , "result = value + other"
+    ]
+  direct <- runPipelineSelected PreparedStg target [root]
+  let evidence = pprDependencies direct
+  when (dependencyCacheSafe evidence || dependencySelectionComplete evidence) $
+    fail "QuasiQuotes source produced complete dependency evidence"
+  previousTiming <- lookupEnv "TIDEPOOL_TIMING"
+  setEnv "TIDEPOOL_TIMING" "1"
+  (withResidentPipelineSelected [root] $ \compile -> do
+      _ <- compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+      (_, warmLog) <- captureStderr root "quasiquote-warm" $
+        compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+      assertContains "QuasiQuotes source remains conservatively uncacheable"
+        "tidepool-memo-miss module=QuasiQuoteDependency reason=untracked-compile-time-execution"
+        warmLog
+      assertContains "TemplateHaskell source remains conservatively uncacheable"
+        "tidepool-memo-miss module=TemplateDependency reason=untracked-compile-time-execution"
+        warmLog)
+    `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-untracked-compile-time"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
 
 dependencyEvidenceCompilation :: IO ()
 dependencyEvidenceCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
@@ -89,6 +139,18 @@ dependencyEvidenceCompilation = bracket temporary removeDirectoryRecursive $ \ro
     fail "package import did not retain absent higher-priority home candidates"
   unless ("Data.Text" `elem` dependencyPackages evidence) $
     fail "package import was not recorded in dependency evidence"
+  previousTiming <- lookupEnv "TIDEPOOL_TIMING"
+  setEnv "TIDEPOOL_TIMING" "1"
+  (withResidentPipelineSelected [root] $ \compile -> do
+      _ <- compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+      appendFile boot "\n-- boot-only mutation\n"
+      (_, changedLog) <- captureStderr root "boot-changed" $
+        compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+      assertContains "boot-only mutation invalidates its SOURCE importer"
+        "tidepool-memo-miss module=WitnessB" changedLog
+      assertContains "boot fingerprint participates in home dependency validity"
+        "same-home-dependencies=False" changedLog)
+    `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
   where
     temporary = do
       parent <- getTemporaryDirectory

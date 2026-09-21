@@ -687,8 +687,24 @@ data MemoValidity = MemoValidity
     -- A source hash does not change when one of its imports switches between
     -- a home module and a package module. Preserve the home-resolution shape
     -- that produced the body so removing a shadow cannot reuse stale Core.
-  , memoHomeDependencies :: Set.Set ModuleName
+  , memoHomeDependencies :: Map.Map HomeDependency HomeDependencyWitness
   }
+
+data HomeSourceKind = OrdinaryHomeSource | BootHomeSource
+  deriving (Eq, Ord)
+
+data HomeDependency = HomeDependency ModuleName HomeSourceKind
+  deriving (Eq, Ord)
+
+data HomeDependencyWitness = HomeDependencyWitness (Maybe FilePath) Fingerprint
+  deriving Eq
+
+-- CPP, splices, and quasiquoters can consume inputs outside the downsweep
+-- source graph. TemplateHaskellQuotes alone only constructs syntax and does
+-- not execute a compiler-time provider, so it remains memoizable.
+hasUntrackedCompileTimeExecution :: DynFlags -> Bool
+hasUntrackedCompileTimeExecution flags =
+  any (`xopt` flags) [LangExt.Cpp, LangExt.TemplateHaskell, LangExt.QuasiQuotes]
 
 -- Facts needed even when a module contributes no executable body. Keeping
 -- these separately lets an unchanged re-export or validation-only module
@@ -1030,12 +1046,30 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
           -- dependency order, so import validity has already been recorded when a
           -- dependent is checked. A mismatch is an ordinary miss and overwrites the
           -- cached entry after recompilation.
-          let cycleModNames = Set.fromList (map ms_mod_name summaries)
+          let summaryFingerprints = Map.fromList
+                [ ( HomeDependency (ms_mod_name summary)
+                      (if ms_hsc_src summary == HsBootFile
+                        then BootHomeSource else OrdinaryHomeSource)
+                  , HomeDependencyWitness
+                      (normalise <$> ml_hs_file (ms_location summary))
+                      (ms_hs_hash summary) )
+                | ModuleNode _ summary <- mgModSummaries' modGraphRaw
+                ]
+              importedDependencies kind imports =
+                [ dependency
+                | (_, locatedName) <- imports
+                , let dependency = HomeDependency (unLoc locatedName) kind
+                , dependency `Map.member` summaryFingerprints
+                ]
+              homeDependencyWitnesses modSum = Map.restrictKeys summaryFingerprints
+                (Set.fromList
+                  ( importedDependencies OrdinaryHomeSource (ms_textual_imps modSum)
+                 ++ importedDependencies BootHomeSource (ms_srcimps modSum)))
               directHomeDeps modSum = Set.fromList
                 [ mn
-                | (_, lmn) <- ms_textual_imps modSum ++ ms_srcimps modSum
+                | (_, lmn) <- ms_textual_imps modSum
                 , let mn = unLoc lmn
-                , mn `Set.member` cycleModNames
+                , HomeDependency mn OrdinaryHomeSource `Map.member` summaryFingerprints
                 ]
           validThisCycleRef <- liftIO (newIORef (Map.empty :: Map.Map ModuleName Bool))
           -- The withholding pass can change only a module's own retained
@@ -1056,9 +1090,9 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                 Nothing  -> pure Nothing
                 Just ref -> do
                   depsOk <- depsValidSoFar modSum
-                  if not depsOk || xopt LangExt.Cpp (ms_hspp_opts modSum)
+                  if not depsOk || hasUntrackedCompileTimeExecution (ms_hspp_opts modSum)
                     then do
-                      memoMiss modSum (if depsOk then "cpp" else "dependency-miss:" ++ unwords
+                      memoMiss modSum (if depsOk then "untracked-compile-time-execution" else "dependency-miss:" ++ unwords
                         [ moduleNameString d | d <- Set.toList (directHomeDeps modSum) ])
                       pure Nothing
                     else do
@@ -1070,12 +1104,12 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                               sameHash = memoSourceHash validity == ms_hs_hash modSum
                               sameRetained = memoRetained validity == retainedFor modSum
                               sameHomeDependencies =
-                                memoHomeDependencies validity == directHomeDeps modSum
-                          -- Source hashes do not cover CPP includes or TH's
-                          -- addDependentFile inputs. Recompile these modules until
-                          -- the memo owns fingerprints for those dependencies.
+                                memoHomeDependencies validity == homeDependencyWitnesses modSum
+                          -- Source hashes do not cover CPP includes, splices,
+                          -- quasiquoters, or addDependentFile inputs. These
+                          -- modules therefore remain conservatively uncached.
                           if not (moduleFactHasDependentFiles (gmeFacts entry))
-                              && not (xopt LangExt.Cpp (ms_hspp_opts modSum))
+                              && not (hasUntrackedCompileTimeExecution (ms_hspp_opts modSum))
                               && sameHash
                               && sameRetained
                               && sameHomeDependencies
@@ -1124,7 +1158,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                           (MemoValidity
                             (ms_hs_hash modSum)
                             (retainedFor modSum)
-                            (directHomeDeps modSum))
+                            (homeDependencyWitnesses modSum))
                           facts
                           (Just r)
                           prepared
@@ -1204,7 +1238,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                             (MemoValidity
                               (ms_hs_hash modSum)
                               (retainedFor modSum)
-                              (directHomeDeps modSum))
+                              (homeDependencyWitnesses modSum))
                             moduleFacts
                             (Just output)
                             prepared
@@ -1246,7 +1280,7 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                             (MemoValidity
                               (ms_hs_hash modSum)
                               (retainedFor modSum)
-                              (directHomeDeps modSum))
+                              (homeDependencyWitnesses modSum))
                             moduleFacts
                             Nothing
                             Nothing
@@ -1475,11 +1509,10 @@ dependencyEvidenceFor (sources, sourcesComplete) graph moduleFacts = do
       , dependencyResolutionSelected = chosen
       , dependencyResolutionCandidates = nub throughSelected
       }
-  let hasUntrackedPreprocessing = any (\summary ->
-        xopt LangExt.Cpp (ms_hspp_opts summary)
-          || xopt LangExt.TemplateHaskell (ms_hspp_opts summary)) graphSummaries
+  let hasUntrackedExecution =
+        any (hasUntrackedCompileTimeExecution . ms_hspp_opts) graphSummaries
       complete = sourcesComplete && not (any moduleFactHasDependentFiles moduleFacts)
-        && not hasUntrackedPreprocessing
+        && not hasUntrackedExecution
         && all (not . null . dependencyResolutionCandidates) absoluteCandidates
       packages = sort
         [ moduleNameString imported
