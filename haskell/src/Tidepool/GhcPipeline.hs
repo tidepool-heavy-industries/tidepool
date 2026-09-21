@@ -33,7 +33,6 @@ import GHC.Driver.Errors.Types (GhcMessage(..))
 import GHC.Tc.Errors.Types (TcRnMessage(..), TcRnMessageDetailed(..), DeriveInstanceErrReason(..))
 import GHC.Utils.Logger (LogAction)
 import GHC.Data.FastString (unpackFS, mkFastString)
-import GHC.Utils.Fingerprint (getFileHash)
 import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..))
 import GHC.Unit.Home (homeUnitId)
 import GHC.Data.Graph.Directed (flattenSCCs)
@@ -130,7 +129,8 @@ import Tidepool.RetainedUnfoldings
   (installRetainedUnfoldingsPlugin, retainedDefinedBy, scopeRetainedModuleGraph)
 import Tidepool.TurnSource (extractModuleName)
 import Tidepool.DependencyEvidence
-  ( DependencyEvidence(..), DependencySource, DependencyResolution(..), sourceEvidence )
+  ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..)
+  , sourceEvidenceWithFingerprint )
 
 -- | Selects the compiler representation produced at the internal GHC API
 -- boundary. Metadata consumers stop at the checked environment.
@@ -1320,19 +1320,22 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
 -- the SHA-256 evidence once more before exposing the artifact bundle.
 captureDependencySources :: ModuleGraph -> IO ([DependencySource], Bool)
 captureDependencySources graph = do
-  paths <- forM [summary | ModuleNode _ summary <- mgModSummaries' graph] $ \summary ->
+  captured <- forM [summary | ModuleNode _ summary <- mgModSummaries' graph] $ \summary ->
     case ml_hs_file (ms_location summary) of
       Nothing -> pure (Nothing, False)
       Just source -> do
         absolute <- normalise <$> makeAbsolute source
         -- GHC's summary fingerprint covers the source read during downsweep.
-        -- Matching it here binds the SHA-256 evidence to that compiler input.
-        stillSummarized <- (== ms_hs_hash summary) <$> getFileHash source
-        pure (Just absolute, stillSummarized)
-  let complete = all (\(path, matchesSummary) -> isJust path && matchesSummary) paths
-      uniquePaths = sort (Set.toList (Set.fromList [path | (Just path, _) <- paths]))
-  evidence <- mapM sourceEvidence uniquePaths
-  pure (evidence, complete)
+        -- Both hashes come from this same read, so no race can associate the
+        -- compiler fingerprint for one version with SHA-256 for another.
+        (evidence, fingerprint) <- sourceEvidenceWithFingerprint absolute
+        pure (Just evidence, fingerprint == ms_hs_hash summary)
+  let complete = all (\(item, matchesSummary) -> isJust item && matchesSummary) captured
+      unique = Map.fromList
+        [ (dependencySourcePath evidence, evidence)
+        | (Just evidence, _) <- captured
+        ]
+  pure (map snd (Map.toAscList unique), complete)
 
 -- | Capture import-resolution witnesses from the exact module graph. Package
 -- imports have no selected home path; their ordered absent home candidates

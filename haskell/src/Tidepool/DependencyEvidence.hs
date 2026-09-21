@@ -6,6 +6,7 @@ module Tidepool.DependencyEvidence
   , DependencySource(..)
   , DependencyResolution(..)
   , sourceEvidence
+  , sourceEvidenceWithFingerprint
   , revalidateDependencyEvidence
   , renderDependencyEvidence
   ) where
@@ -15,6 +16,8 @@ import qualified Data.ByteString as BS
 import Data.List (intercalate)
 import Control.Monad (forM)
 import Numeric (showHex)
+import GHC.Fingerprint.Type (Fingerprint)
+import GHC.Utils.Fingerprint (fingerprintByteString)
 
 import Tidepool.Json (jsonString)
 
@@ -38,12 +41,20 @@ data DependencyResolution = DependencyResolution
   }
 
 sourceEvidence :: FilePath -> IO DependencySource
-sourceEvidence path = do
+sourceEvidence path = fst <$> sourceEvidenceWithFingerprint path
+
+-- | Compute both digest families from one immutable read. The GHC fingerprint
+-- can be compared with a 'ModSummary'; SHA-256 is persisted cache evidence.
+sourceEvidenceWithFingerprint :: FilePath -> IO (DependencySource, Fingerprint)
+sourceEvidenceWithFingerprint path = do
   bytes <- BS.readFile path
-  pure DependencySource
-    { dependencySourcePath = path
-    , dependencySourceSha256 = concatMap hexByte (BS.unpack (SHA256.hash bytes))
-    }
+  pure
+    ( DependencySource
+        { dependencySourcePath = path
+        , dependencySourceSha256 = concatMap hexByte (BS.unpack (SHA256.hash bytes))
+        }
+    , fingerprintByteString bytes
+    )
   where
     hexByte byte = let rendered = showHex byte "" in replicate (2 - length rendered) '0' ++ rendered
 
