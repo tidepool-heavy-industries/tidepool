@@ -2170,11 +2170,13 @@ capturedBindingDisplay :: String -> TcGblEnv -> Maybe String
 capturedBindingDisplay occurrence tcg =
   renderWithContext defaultSDocContext . ppr <$> capturedBindingType occurrence tcg
 
--- | The generated @:type@ bindings are not part of a module's public API.
+-- | Compiler-only inspection bindings are not part of a module's public API.
 -- GHC can omit them from the target reader/type environments after a session
 -- interface registration, even though it accepted their typed syntax. The
 -- typechecked source is the exact owner of those local generated binders;
--- retain only their Ids for the immediate inspection request.
+-- retain only their Ids for the immediate inspection request. This includes
+-- the effect-row sentinel as well as @:type@ probes: both are target-local and
+-- must not be resolved back through an intentionally elided target interface.
 capturedInspectionProbes :: TypecheckedModule -> TcGblEnv -> Map.Map String Id
 capturedInspectionProbes typed tcg = Map.fromList
   [ (occurrence, identifier)
@@ -2182,7 +2184,8 @@ capturedInspectionProbes typed tcg = Map.fromList
       ++ collectDataIds (tcg_binds tcg)
       ++ collectDataIds (tm_typechecked_source typed)
   , let occurrence = occNameString (nameOccName (idName identifier))
-  , "__tidepool_inspect_" `isPrefixOf` occurrence
+  , occurrence == "__tidepool_lookup_row"
+      || "__tidepool_inspect_" `isPrefixOf` occurrence
   ]
 
 -- | Harvest the compiler-reserved aliases that the whole-cell source builder

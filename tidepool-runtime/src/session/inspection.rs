@@ -1504,6 +1504,32 @@ mod tests {
     }
 
     #[test]
+    fn info_lookup_with_effect_row_uses_the_checked_row_sentinel() {
+        eval_harness::require_extract();
+        let session = tempfile::tempdir().unwrap();
+        let results = run_inspections(InspectionRequest {
+            preamble: concat!(
+                "{-# LANGUAGE NoImplicitPrelude, DataKinds #-}\n",
+                "module Expr where\n",
+                "import Prelude\n",
+            ),
+            imports: "",
+            include: &[],
+            session_root: session.path(),
+            inject_modules: &[],
+            queries: &[InspectionQuery::Info("map".into())],
+            effects: Some("'[]"),
+        })
+        .unwrap();
+
+        assert!(matches!(
+            results.as_slice(),
+            [InspectionResult::Info { query, entries }]
+                if query == "map" && !entries.is_empty()
+        ));
+    }
+
+    #[test]
     fn type_probe_batch_preserves_independent_types_and_rejected_siblings() {
         eval_harness::require_extract();
         let session = tempfile::tempdir().unwrap();

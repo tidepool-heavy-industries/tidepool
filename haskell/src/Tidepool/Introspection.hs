@@ -218,16 +218,27 @@ lookupExecutionRow rdrEnv = do
   case nubBy (==) names of
     [name] -> do
       found <- lookupName name
-      proxy <- lookupProxyTyCon
-      case (found, proxy) of
-        (Just (AnId identifier), Just proxyConstructor) ->
-          case splitTyConApp_maybe (idType identifier) of
-            Just (constructor, arguments)
-              | constructor == proxyConstructor,
-                Just row <- listToMaybe (reverse arguments) -> pure (Just row)
-            _ -> malformed
+      case found of
+        Just (AnId identifier) -> Just <$> inspectionRow identifier
         _ -> malformed
     _ -> pure Nothing
+  where
+    malformed = liftIO (ioError (userError "inspection row sentinel has no typed Proxy row"))
+
+-- | Read the actor row from the exact target-local Id retained by the checked
+-- source. Its interface is deliberately not installed merely so inspection
+-- can rediscover a compiler-only binding by name.
+inspectionRow :: (GhcMonad m) => Id -> m Type
+inspectionRow identifier = do
+  proxy <- lookupProxyTyCon
+  let (_, _, body) = tcSplitSigmaTy (idType identifier)
+  case proxy of
+    Just proxyConstructor -> case splitTyConApp_maybe body of
+      Just (constructor, arguments)
+        | constructor == proxyConstructor,
+          Just row <- listToMaybe (reverse arguments) -> pure row
+      _ -> malformed
+    Nothing -> malformed
   where
     malformed = liftIO (ioError (userError "inspection row sentinel has no typed Proxy row"))
 
@@ -475,7 +486,9 @@ runInspection hscEnv tcGblEnv rdrEnv inspectionProbes requests = do
   runGhc (Just libdir) $ do
     setSession hscEnv
     effTyCon <- lookupEffTyCon
-    row <- lookupExecutionRow rdrEnv
+    row <- case Map.lookup "__tidepool_lookup_row" inspectionProbes of
+      Just identifier -> Just <$> inspectionRow identifier
+      Nothing -> pure Nothing
     case (row, effTyCon) of
       (Just _, Nothing) -> liftIO (ioError (userError "inspection could not resolve Eff type constructor"))
       _ -> pure ()
