@@ -75,6 +75,7 @@ data Console a where
   Fetch :: Text -> Console (Either Bool Text)
   Echo :: a -> Console a
   ObserveProgress :: Console (Progress progress)
+  FunctionReply :: Console (Int -> Int)
 
 printRequest :: Console ()
 printRequest = Print "hi"
@@ -87,6 +88,9 @@ echoRequest = Echo 1
 
 progressRequest :: Console (Progress Int)
 progressRequest = ObserveProgress
+
+functionRequest :: Console (Int -> Int)
+functionRequest = FunctionReply
 
 unrelated :: Int
 unrelated = 42

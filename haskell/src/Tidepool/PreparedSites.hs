@@ -25,7 +25,7 @@ import GHC.Core.FVs (exprFreeVars)
 import GHC.Types.Var.Env (mkInScopeSet)
 import GHC.Core.Make (mkCoreConApps)
 import GHC.Builtin.Types (intDataCon, mkListTy)
-import GHC.Core.TyCo.Rep (Type, Scaled(..))
+import GHC.Core.TyCo.Rep (Type(..), Scaled(..))
 import GHC.Data.FastString (fsLit)
 import GHC.Types.Unique.Supply (UniqSupply, initUs, mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Core.Type (mkTyConApp, mkTyConTy, splitTyConApp_maybe, coreView)
@@ -338,8 +338,8 @@ requestReplyIndex constructor = case splitTyConApp_maybe (dataConOrigResTy const
   _ -> Nothing
 
 hasNominalHead :: Type -> Bool
-hasNominalHead ty = case splitTyConApp_maybe ty of
-  Just _ -> True
-  Nothing -> case coreView ty of
+hasNominalHead ty = case ty of
+  TyConApp {} -> True
+  _ -> case coreView ty of
     Just normalized -> hasNominalHead normalized
     Nothing -> False

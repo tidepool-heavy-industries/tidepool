@@ -96,6 +96,9 @@ runTypeEvidenceChecks directory project projectWithAux = do
   echoWire <- program "echoRequest"
   assert (null (programVerbSites echoWire))
     "an open reply index acquired a synthetic site"
+  functionWire <- program "functionRequest"
+  assert (null (programVerbSites functionWire))
+    "a function reply index acquired a synthetic site"
   progressWire <- program "progressRequest"
   progressNode <- verbAnswer progressWire "ObserveProgress"
   case progressNode of
