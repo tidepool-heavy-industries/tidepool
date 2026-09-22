@@ -23,7 +23,7 @@
     # MSRV/toolchain timelines.
     codex.url = "./vendor/codex";
     # Haskell this workspace compiles but does not carry: jev-dsl, pinned to
-    # the same revision `examples/shoal-workspace/flake.nix` pins. Nothing is
+    # the same revision `exomonad/examples/workspace/flake.nix` pins. Nothing is
     # built from it here; `[haskell.flake_sources]` in `.shoal/config.toml`
     # names the directory inside it that holds modules, and Shoal captures
     # them into a run as ordinary source roots.
@@ -262,7 +262,7 @@
                     export TIDEPOOL_EXTRACT_WORKER="$PWD/dist/build/tidepool-extract-bin/tidepool-extract-bin"
                     # Test suites (prepared-stg-pipeline-test, extract-fidelity-test,
                     # …) drive the extractor pipeline over fixture Haskell source that
-                    # is compiled by discovering GHC on PATH at runtime (haskell/
+                    # is compiled by discovering GHC on PATH at runtime (bridge/haskell/
                     # CLAUDE.md's toolchain resolution), the same mechanism the
                     # deployed `tidepool-extract` wrapper uses via ghcEnv on PATH. Since
                     # e50831879, site-fixtures/Core.hs imports the real
@@ -279,7 +279,7 @@
               pname = "tidepool-extract-frontend";
               version = "0.1.0";
               src = ./tidepool-extract-cmd;
-              cargoLock.lockFile = ./tidepool-extract-cmd/Cargo.lock;
+              cargoLock.lockFile = ./tidepool/extract-cmd/Cargo.lock;
               # The daemon integration test needs the separately packaged GHC
               # worker; the final wrapper is exercised by the repository battery.
               cargoTestFlags = [ "--lib" ];

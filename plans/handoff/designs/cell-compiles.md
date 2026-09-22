@@ -5,7 +5,7 @@ to the current working tree.
 
 ## 1. Where the compiles come from today
 
-`ResidentActorKernel` cell path (`tidepool-actor/src/resident_actor.rs` ~4494, ~4614):
+`ResidentActorKernel` cell path (`exomonad/actor/src/resident_actor.rs` ~4494, ~4614):
 
 | Phase | Owner | Spawns |
 |---|---|---|
@@ -64,7 +64,7 @@ __result = __tidepoolInEffectRow $ do {
   failed" semantics exactly.
 - Put the two request constructors in the existing workbench-internal effect
   definitions (owner `tidepool-protocol`; unmigrated ones live in
-  `tidepool-mcp/src/effect_defs.rs`). `AgentToolsInputWith` in `begin_tool`
+  `bridge/mcp/src/effect_defs.rs`). `AgentToolsInputWith` in `begin_tool`
   (`:1817`) is the precedent for an internal row request. Do not add a new
   union member.
 
@@ -174,7 +174,7 @@ Paging (`cellDisplay.more`) stays at 1 check + 1 item.
   and mounting a parked-request payload as a named binding.
 - `tidepool-protocol` (or `tidepool-mcp` `effect_defs.rs` if unmigrated): the
   `observationCaptured` and `presentPage` requests. Regenerate the Haskell
-  surface. `haskell/lib/Tidepool/Inspection.hs` gains the two verbs; the strict
+  surface. `bridge/haskell/lib/Tidepool/Inspection.hs` gains the two verbs; the strict
   summary lives next to `pageHasMore`/`pageUnavailable`.
 - `tidepool-actor::resident_workbench`: `compile_block_in_view` templates and
   verdict, `prepare_cell_in_session` staged-name filter, `begin_ready_block`,
@@ -182,7 +182,7 @@ Paging (`cellDisplay.more`) stays at 1 check + 1 item.
   The `presented` and budget state already lives on `ResidentWorkbenchFragment`.
 - Extractor: none for §2. §3(b) needs a batch turn request in
   `tidepool-extract-cmd` and `Main.hs`.
-- Docs: `haskell/CLAUDE.md` deploy steps for the stdlib change, and
+- Docs: `bridge/haskell/CLAUDE.md` deploy steps for the stdlib change, and
   `just fixtures-check` if the effect schema changes.
 
 ## 6. Risks
@@ -206,7 +206,7 @@ Paging (`cellDisplay.more`) stays at 1 check + 1 item.
 
 ## 7. Test (compile-count as an observability contract)
 
-Add it in `tidepool/src/actor_host/documentation_tests.rs`, beside the
+Add it in `bridge/facade/src/actor_host/documentation_tests.rs`, beside the
 `notebook_display_*` tests (the crate already depends on
 `tidepool-extract-cmd`; nextest process isolation keeps the global counter
 private):

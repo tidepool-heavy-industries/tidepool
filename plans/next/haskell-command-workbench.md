@@ -30,7 +30,7 @@ On overrun, the interactive workbench stops the computation and names a retained
 job binding; later observation does not resume that computation. `Cmd.observe`
 returns status normally after a bounded wait. Jobs survive tool return and
 observer disconnection; there is no automatic execution retry. See the shipped
-[command skill](../../examples/shoal-workspace/.shoal/skills/shoal-command/SKILL.md)
+[command skill](../../exomonad/examples/workspace/.shoal/skills/shoal-command/SKILL.md)
 for output recovery and completion routing.
 
 The default hard limit is 256 MiB and the same value is the admission weight.

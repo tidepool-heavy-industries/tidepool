@@ -37,7 +37,7 @@ aws-lc-rs 1.17.3, tokio, and webpki-roots 1.0.9 are shared by both majors.
 
 That is a much smaller prize than a fork of `openai-auth` would be worth. Our
 usage of that crate is `OAuthClient`, `OAuthConfig`, `TokenSet`, and
-`run_callback_server` (`tidepool-harness/src/provider/oauth.rs`) — small enough
+`run_callback_server` (`exomonad/harness/src/provider/oauth.rs`) — small enough
 to reimplement on reqwest 0.13, which means the deferral is a scheduling choice
 rather than a trap: the door stays open.
 

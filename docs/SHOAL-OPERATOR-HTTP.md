@@ -80,7 +80,7 @@ actors execute Haskell. It uses the same visibility rule as typed inspection.
 
 ## Console API v1
 
-The client's `wire.rs` is copied verbatim to `tidepool/src/operator/wire.rs`.
+The client's `wire.rs` is copied verbatim to `bridge/facade/src/operator/wire.rs`.
 
 - `GET /v1/sessions/{session}` returns `SessionInfo`.
 - `POST /v1/sessions/{session}/submit` accepts `{ "source": "raw UTF-8 source" }`

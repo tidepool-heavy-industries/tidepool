@@ -68,17 +68,17 @@ class ExtractHelpers(unittest.TestCase):
         self.root = Path(self.temp.name)
         (self.root / "haskell").mkdir()
         (self.root / "bin").mkdir()
-        for directory in ("haskell/src", "haskell/app", "haskell/lib/Tidepool/Aeson",
-                          "haskell/lib/Tidepool/Command", "haskell/lib/Tidepool/Data",
-                          "tidepool-extract-cmd/src"):
+        for directory in ("bridge/haskell/src", "bridge/haskell/app", "bridge/haskell/lib/Tidepool/Aeson",
+                          "bridge/haskell/lib/Tidepool/Command", "bridge/haskell/lib/Tidepool/Data",
+                          "tidepool/extract-cmd/src"):
             (self.root / directory).mkdir(parents=True)
-        for source in ("haskell/lib/Tidepool/Aeson/Scientific.hs",
-                       "haskell/lib/Tidepool/Aeson/Value.hs",
-                       "haskell/lib/Tidepool/Command/Types.hs",
-                       "haskell/lib/Tidepool/Data/Time.hs",
-                       "haskell/lib/Tidepool/Double.hs"):
+        for source in ("bridge/haskell/lib/Tidepool/Aeson/Scientific.hs",
+                       "bridge/haskell/lib/Tidepool/Aeson/Value.hs",
+                       "bridge/haskell/lib/Tidepool/Command/Types.hs",
+                       "bridge/haskell/lib/Tidepool/Data/Time.hs",
+                       "bridge/haskell/lib/Tidepool/Double.hs"):
             (self.root / source).touch()
-        for manifest in ("haskell/tidepool-extract.cabal", "tidepool-extract-cmd/Cargo.toml"):
+        for manifest in ("bridge/haskell/tidepool-extract.cabal", "tidepool/extract-cmd/Cargo.toml"):
             (self.root / manifest).touch()
         self.frontend = self.executable("frontend", FRONTEND)
         self.worker = self.executable("worker", "#!/bin/sh\nexit 0\n")
@@ -135,7 +135,7 @@ class ExtractHelpers(unittest.TestCase):
         self.run_shell("resolve_tidepool_extract", success=False, TIDEPOOL_EXTRACT=str(self.worker))
 
     def test_preset_worker_rejects_newer_embedded_authority_source(self):
-        authority = self.root / "haskell/lib/Tidepool/Aeson/Value.hs"
+        authority = self.root / "bridge/haskell/lib/Tidepool/Aeson/Value.hs"
         os.utime(self.worker, (1_700_000_000, 1_700_000_000))
         os.utime(authority, (1_700_000_100, 1_700_000_100))
         result = self.run_shell(

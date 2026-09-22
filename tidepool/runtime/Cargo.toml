@@ -1,0 +1,60 @@
+[package]
+autotests = false
+name = "tidepool-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Runtime support for Tidepool applications"
+readme = "../../README.md"
+
+[dependencies]
+tidepool-atomic-write.workspace = true
+blake3.workspace = true
+thiserror.workspace = true
+tidepool-repr.workspace = true
+tidepool-extract-cmd.workspace = true
+tidepool-toolchain.workspace = true
+tidepool-effect.workspace = true
+tidepool-codegen.workspace = true
+tidepool-bridge.workspace = true
+tidepool-bridge-derive.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+tempfile.workspace = true
+ciborium.workspace = true
+log.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+static_assertions.workspace = true
+
+[dev-dependencies]
+trybuild.workspace = true
+tidepool-testing.workspace = true
+frunk.workspace = true
+tidepool-bridge.workspace = true
+tidepool-effect.workspace = true
+tidepool-mcp.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "test-util"] }
+serial_test.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[[test]]
+name = "compile_fail"
+path = "tests/compile_fail.rs"
+
+[[test]]
+name = "session"
+path = "tests/suites/session.rs"
+
+[[test]]
+name = "prepared_execution"
+path = "tests/prepared_execution.rs"
+
+[[test]]
+name = "prepared_resident_composite"
+path = "tests/prepared_resident_composite.rs"

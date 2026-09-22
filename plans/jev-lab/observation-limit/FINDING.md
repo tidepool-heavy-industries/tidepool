@@ -20,13 +20,13 @@ unrepeatable without re-running it.
 
 **Retaining the binding — succeeds, and never consults the budget.**
 `PreparedMachine::run_entry_retained`
-(`tidepool-codegen/src/prepared_program/machine.rs:2442`) promotes the result
+(`tidepool/codegen/src/prepared_program/machine.rs:2442`) promotes the result
 into old space and issues a `PreparedHandle`. It takes `PreparedCallOptions`
 (which carries `observation_budget`) and never reads it. A binding is stored as
 `BoundValue::Prepared { handle }` — a root, not a materialized value. **Retention
 is materialization-free by construction.**
 
-**Rendering — fails here.** `tidepool-runtime/src/session/resident.rs:851`:
+**Rendering — fails here.** `tidepool/runtime/src/session/resident.rs:851`:
 
 ```rust
 match plan {
@@ -54,7 +54,7 @@ For a bind, the materialized value **is not used**:
   (`resident.rs:2237`).
 - The receipt comes from the binder names:
   `WorkbenchDisplay::Binding(names) => format!("[bound {}]", names.join(", "))`
-  (`tidepool-actor/src/resident_workbench.rs:2803`). The failing receipts show
+  (`exomonad/actor/src/resident_workbench.rs:2803`). The failing receipts show
   exactly this — `[bound semanticModulePaths]`, no value.
 - For a *projected* pattern bind the observation's result is discarded outright;
   `resident.rs:869` calls `observe` only to check for an error.

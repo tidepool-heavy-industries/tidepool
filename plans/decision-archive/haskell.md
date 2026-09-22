@@ -1,14 +1,14 @@
-# Archived history — `haskell/CLAUDE.md`
+# Archived history — `bridge/haskell/CLAUDE.md`
 
-Doc-history context pulled out of `haskell/CLAUDE.md` during the 2026-08-08
+Doc-history context pulled out of `bridge/haskell/CLAUDE.md` during the 2026-08-08
 restructure. The operative rule each item backed is unchanged and still
-lives in `haskell/CLAUDE.md` — only the backstory/self-referential framing
+lives in `bridge/haskell/CLAUDE.md` — only the backstory/self-referential framing
 moved here. Nothing on this page is authoritative; if it conflicts with
-`haskell/CLAUDE.md` or the code, trust those.
+`bridge/haskell/CLAUDE.md` or the code, trust those.
 
 ## Call-graph workspace scoping — why the note exists
 
-`haskell/CLAUDE.md`'s "Call-graph walks need workspace scoping" hazard
+`bridge/haskell/CLAUDE.md`'s "Call-graph walks need workspace scoping" hazard
 (default to `transitiveLocal*` for call-graph questions) used to end with
 this parenthetical, verbatim:
 
@@ -23,7 +23,7 @@ was already made in `.tidepool/lib/Lsp.hs` (`isLocal`/`localCallees`/
 `localCallers`) and `.tidepool/lib/LspGraph.hs`
 (`transitiveLocalCallers`/`transitiveLocalCallees`) on 2026-07-01. The note
 was added specifically so a future session wouldn't re-derive it a third
-time. That reasoning is preserved here; `haskell/CLAUDE.md` keeps only the
+time. That reasoning is preserved here; `bridge/haskell/CLAUDE.md` keeps only the
 operative rule and a pointer to this file.
 
 ## `formqq-parser-test` module-listing note — prior wording
@@ -41,6 +41,6 @@ import closure contains zero `lib/Tidepool/**` modules; only the
 `formqq-parser-test` test-suite stanza host-compiles a `lib/` module
 (`Tidepool.FormQQ.Parse`) directly. The passage was rewritten to state the
 current fact plainly, and this trailing clause was left pointing back at the
-now-deleted old wording. `haskell/CLAUDE.md` now states the current fact
+now-deleted old wording. `bridge/haskell/CLAUDE.md` now states the current fact
 without the self-referential aside; this file is where that aside lives now,
 for anyone tracing why the doc says what it says.

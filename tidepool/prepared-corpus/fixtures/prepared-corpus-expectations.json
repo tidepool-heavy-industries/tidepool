@@ -1,0 +1,1932 @@
+{
+  "expectations": {
+    "add_simple": {
+      "kind": "int",
+      "value": 3
+    },
+    "app_church_two": {
+      "kind": "int",
+      "value": 2
+    },
+    "app_church_zero": {
+      "kind": "int",
+      "value": 0
+    },
+    "app_compose": {
+      "kind": "int",
+      "value": 11
+    },
+    "app_const": {
+      "kind": "int",
+      "value": 10
+    },
+    "app_identity": {
+      "kind": "int",
+      "value": 42
+    },
+    "app_nested_lam": {
+      "kind": "int",
+      "value": 7
+    },
+    "app_thrice": {
+      "kind": "int",
+      "value": 3
+    },
+    "app_twice": {
+      "kind": "int",
+      "value": 16
+    },
+    "arith_double_add": {
+      "kind": "float64_approx",
+      "value": {
+        "absolute_tolerance": 0.0,
+        "expected": 4.0
+      }
+    },
+    "arith_double_mul": {
+      "kind": "float64_approx",
+      "value": {
+        "absolute_tolerance": 0.0,
+        "expected": 6.0
+      }
+    },
+    "arith_double_sub": {
+      "kind": "float64_approx",
+      "value": {
+        "absolute_tolerance": 0.0,
+        "expected": 6.5
+      }
+    },
+    "arith_left_assoc": {
+      "kind": "int",
+      "value": 5
+    },
+    "arith_mul_one": {
+      "kind": "int",
+      "value": 42
+    },
+    "arith_mul_zero": {
+      "kind": "int",
+      "value": 0
+    },
+    "arith_neg_result": {
+      "kind": "int",
+      "value": -7
+    },
+    "arith_precedence": {
+      "kind": "int",
+      "value": 14
+    },
+    "case_bool_and": {
+      "kind": "bool",
+      "value": true
+    },
+    "case_bool_or": {
+      "kind": "bool",
+      "value": true
+    },
+    "case_default": {
+      "kind": "int",
+      "value": 99
+    },
+    "case_either_nested": {
+      "kind": "int",
+      "value": 7
+    },
+    "case_false": {
+      "kind": "int",
+      "value": 0
+    },
+    "case_just": {
+      "kind": "int",
+      "value": 42
+    },
+    "case_left": {
+      "kind": "int",
+      "value": 10
+    },
+    "case_nested_case": {
+      "kind": "int",
+      "value": 1
+    },
+    "case_nested_just": {
+      "kind": "int",
+      "value": 99
+    },
+    "case_nothing": {
+      "kind": "int",
+      "value": 0
+    },
+    "case_pair": {
+      "kind": "int",
+      "value": 30
+    },
+    "case_right": {
+      "kind": "int",
+      "value": 20
+    },
+    "case_triple": {
+      "kind": "int",
+      "value": 6
+    },
+    "case_true": {
+      "kind": "int",
+      "value": 1
+    },
+    "case_wildcard_pair": {
+      "kind": "int",
+      "value": 20
+    },
+    "cmp_eq_false": {
+      "kind": "bool",
+      "value": false
+    },
+    "cmp_eq_true": {
+      "kind": "bool",
+      "value": true
+    },
+    "cmp_ge_eq": {
+      "kind": "bool",
+      "value": true
+    },
+    "cmp_gt_true": {
+      "kind": "bool",
+      "value": true
+    },
+    "cmp_le_eq": {
+      "kind": "bool",
+      "value": true
+    },
+    "cmp_lt_false": {
+      "kind": "bool",
+      "value": false
+    },
+    "cmp_lt_true": {
+      "kind": "bool",
+      "value": true
+    },
+    "cmp_ne_true": {
+      "kind": "bool",
+      "value": true
+    },
+    "con_false": {
+      "kind": "bool",
+      "value": false
+    },
+    "con_just": {
+      "kind": "maybe",
+      "value": {
+        "kind": "int",
+        "value": 42
+      }
+    },
+    "con_left": {
+      "kind": "either_left",
+      "value": {
+        "kind": "int",
+        "value": 10
+      }
+    },
+    "con_nested_just": {
+      "kind": "maybe",
+      "value": {
+        "kind": "maybe",
+        "value": {
+          "kind": "int",
+          "value": 99
+        }
+      }
+    },
+    "con_nested_nothing": {
+      "kind": "maybe",
+      "value": {
+        "kind": "maybe",
+        "value": null
+      }
+    },
+    "con_nothing": {
+      "kind": "maybe",
+      "value": null
+    },
+    "con_pair": {
+      "kind": "tuple",
+      "value": [
+        {
+          "kind": "int",
+          "value": 10
+        },
+        {
+          "kind": "int",
+          "value": 20
+        }
+      ]
+    },
+    "con_right": {
+      "kind": "either_right",
+      "value": {
+        "kind": "int",
+        "value": 20
+      }
+    },
+    "con_triple": {
+      "kind": "tuple",
+      "value": [
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 2
+        },
+        {
+          "kind": "int",
+          "value": 3
+        }
+      ]
+    },
+    "con_true": {
+      "kind": "bool",
+      "value": true
+    },
+    "concatmap_empty_segments": {
+      "kind": "int",
+      "value": 5
+    },
+    "concatmap_finite": {
+      "kind": "int",
+      "value": 12
+    },
+    "edge_case_of_case": {
+      "kind": "int",
+      "value": 1
+    },
+    "edge_const_chain": {
+      "kind": "int",
+      "value": 42
+    },
+    "edge_deep_let": {
+      "kind": "int",
+      "value": 10
+    },
+    "edge_deep_nesting": {
+      "kind": "int",
+      "value": 6
+    },
+    "edge_id_chain": {
+      "kind": "int",
+      "value": 42
+    },
+    "edge_large_tuple": {
+      "kind": "int",
+      "value": 15
+    },
+    "edge_mutual_data": {
+      "kind": "int",
+      "value": 42
+    },
+    "edge_nullary_con": {
+      "kind": "bool",
+      "value": true
+    },
+    "filter_order_preserved": {
+      "kind": "int",
+      "value": 135
+    },
+    "gen_patch_coalesce": {
+      "kind": "int",
+      "value": 1
+    },
+    "gen_patch_creation": {
+      "kind": "text",
+      "value": "hello\nworld\n"
+    },
+    "gen_patch_drift": {
+      "kind": "int",
+      "value": 3
+    },
+    "gen_patch_eof": {
+      "kind": "text",
+      "value": "a\nb\nc\nZ"
+    },
+    "gen_patch_nochange": {
+      "kind": "bool",
+      "value": true
+    },
+    "gen_patch_render_parse": {
+      "kind": "bool",
+      "value": true
+    },
+    "gen_patch_roundtrip": {
+      "kind": "bool",
+      "value": true
+    },
+    "gen_patch_start": {
+      "kind": "text",
+      "value": "X\nb\nc\nd"
+    },
+    "gen_patch_trailnl": {
+      "kind": "text",
+      "value": "a\nb\n"
+    },
+    "gen_patch_two_hunks": {
+      "kind": "int",
+      "value": 2
+    },
+    "ho_myall": {
+      "kind": "bool",
+      "value": false
+    },
+    "ho_myany": {
+      "kind": "bool",
+      "value": true
+    },
+    "ho_myconcatmap": {
+      "kind": "int",
+      "value": 6
+    },
+    "ho_myfilter_len": {
+      "kind": "int",
+      "value": 3
+    },
+    "ho_myfoldl": {
+      "kind": "int",
+      "value": 15
+    },
+    "ho_myfoldr": {
+      "kind": "int",
+      "value": 15
+    },
+    "ho_mymap_len": {
+      "kind": "int",
+      "value": 3
+    },
+    "ho_myzipwith": {
+      "kind": "int",
+      "value": 11
+    },
+    "ite_abs": {
+      "kind": "int",
+      "value": 5
+    },
+    "ite_false": {
+      "kind": "int",
+      "value": 0
+    },
+    "ite_nested": {
+      "kind": "int",
+      "value": 2
+    },
+    "ite_signum": {
+      "kind": "int",
+      "value": -1
+    },
+    "ite_simple": {
+      "kind": "int",
+      "value": 1
+    },
+    "lazy_concatmap_infinite": {
+      "kind": "int",
+      "value": 6
+    },
+    "lazy_filter_infinite": {
+      "kind": "int",
+      "value": 20
+    },
+    "lazy_nubby_infinite": {
+      "kind": "int",
+      "value": 5
+    },
+    "let_body_only": {
+      "kind": "int",
+      "value": 42
+    },
+    "let_chain": {
+      "kind": "int",
+      "value": 3
+    },
+    "let_complex": {
+      "kind": "int",
+      "value": 26
+    },
+    "let_nested": {
+      "kind": "int",
+      "value": 12
+    },
+    "let_shadow": {
+      "kind": "int",
+      "value": 20
+    },
+    "let_simple": {
+      "kind": "int",
+      "value": 10
+    },
+    "let_two": {
+      "kind": "int",
+      "value": 30
+    },
+    "let_unused": {
+      "kind": "int",
+      "value": 99
+    },
+    "letrec_ackermann": {
+      "kind": "int",
+      "value": 9
+    },
+    "letrec_countdown": {
+      "kind": "int",
+      "value": 0
+    },
+    "letrec_even_odd": {
+      "kind": "bool",
+      "value": true
+    },
+    "letrec_fact5": {
+      "kind": "int",
+      "value": 120
+    },
+    "letrec_fib10": {
+      "kind": "int",
+      "value": 55
+    },
+    "letrec_gcd": {
+      "kind": "int",
+      "value": 6
+    },
+    "letrec_pow": {
+      "kind": "int",
+      "value": 1024
+    },
+    "letrec_sum_to": {
+      "kind": "int",
+      "value": 55
+    },
+    "lit_42": {
+      "kind": "int",
+      "value": 42
+    },
+    "lit_char_a": {
+      "kind": "char",
+      "value": "a"
+    },
+    "lit_char_newline": {
+      "kind": "char",
+      "value": "\n"
+    },
+    "lit_char_z": {
+      "kind": "char",
+      "value": "z"
+    },
+    "lit_double_neg": {
+      "kind": "float64_approx",
+      "value": {
+        "absolute_tolerance": 0.0,
+        "expected": -2.5
+      }
+    },
+    "lit_double_pi": {
+      "kind": "float64_approx",
+      "value": {
+        "absolute_tolerance": 0.0,
+        "expected": 3.14159
+      }
+    },
+    "lit_large": {
+      "kind": "int",
+      "value": 1000000
+    },
+    "lit_neg7": {
+      "kind": "int",
+      "value": -7
+    },
+    "lit_neg_large": {
+      "kind": "int",
+      "value": -999999
+    },
+    "lit_zero": {
+      "kind": "int",
+      "value": 0
+    },
+    "mul_simple": {
+      "kind": "int",
+      "value": 42
+    },
+    "nested_arith": {
+      "kind": "int",
+      "value": 21
+    },
+    "nubby_dedup_finite": {
+      "kind": "int",
+      "value": 4
+    },
+    "prelude_and": {
+      "kind": "bool",
+      "value": false
+    },
+    "prelude_eq_int": {
+      "kind": "bool",
+      "value": true
+    },
+    "prelude_eq_string_false": {
+      "kind": "bool",
+      "value": false
+    },
+    "prelude_eq_string_true": {
+      "kind": "bool",
+      "value": true
+    },
+    "prelude_filter": {
+      "kind": "int",
+      "value": 3
+    },
+    "prelude_length": {
+      "kind": "int",
+      "value": 5
+    },
+    "prelude_map": {
+      "kind": "int",
+      "value": 3
+    },
+    "prelude_null_empty": {
+      "kind": "bool",
+      "value": true
+    },
+    "prelude_null_nonempty": {
+      "kind": "bool",
+      "value": false
+    },
+    "prelude_or": {
+      "kind": "bool",
+      "value": true
+    },
+    "prelude_string_append": {
+      "kind": "int",
+      "value": 11
+    },
+    "prelude_take": {
+      "kind": "int",
+      "value": 3
+    },
+    "prelude_take_cons": {
+      "kind": "int",
+      "value": 3
+    },
+    "prim_quot_rem_int": {
+      "kind": "int",
+      "value": 31
+    },
+    "prim_quot_rem_word": {
+      "kind": "int",
+      "value": 31
+    },
+    "qq_fmt_applied": {
+      "kind": "text",
+      "value": "shout: HI!"
+    },
+    "qq_fmt_basic": {
+      "kind": "text",
+      "value": "user: alice"
+    },
+    "qq_fmt_bool": {
+      "kind": "text",
+      "value": "flag: True"
+    },
+    "qq_fmt_char": {
+      "kind": "text",
+      "value": "ch: 'x'"
+    },
+    "qq_fmt_comprehension": {
+      "kind": "text",
+      "value": "evens: [2,4,6]"
+    },
+    "qq_fmt_double": {
+      "kind": "text",
+      "value": "val: 3.5"
+    },
+    "qq_fmt_empty": {
+      "kind": "text",
+      "value": ""
+    },
+    "qq_fmt_escape": {
+      "kind": "text",
+      "value": "use {braces} for holes and } is literal"
+    },
+    "qq_fmt_int": {
+      "kind": "text",
+      "value": "count: 3"
+    },
+    "qq_fmt_multi": {
+      "kind": "text",
+      "value": "hello WORLD, score 42"
+    },
+    "qq_fmt_multiline": {
+      "kind": "text",
+      "value": "line one\nline two"
+    },
+    "qq_fmt_op": {
+      "kind": "text",
+      "value": "next: 42"
+    },
+    "qq_fmt_plain": {
+      "kind": "text",
+      "value": "hello, tidepool world"
+    },
+    "qq_fmt_spec_align_center": {
+      "kind": "text",
+      "value": "    hi    "
+    },
+    "qq_fmt_spec_align_left": {
+      "kind": "text",
+      "value": "hi        "
+    },
+    "qq_fmt_spec_align_right": {
+      "kind": "text",
+      "value": "        hi"
+    },
+    "qq_fmt_spec_bin": {
+      "kind": "text",
+      "value": "101010"
+    },
+    "qq_fmt_spec_brace": {
+      "kind": "text",
+      "value": "a}b"
+    },
+    "qq_fmt_spec_colon": {
+      "kind": "text",
+      "value": "a:b"
+    },
+    "qq_fmt_spec_escapes": {
+      "kind": "text",
+      "value": "{x} and {y} done"
+    },
+    "qq_fmt_spec_fixed2": {
+      "kind": "text",
+      "value": "3.14"
+    },
+    "qq_fmt_spec_fixed_half": {
+      "kind": "text",
+      "value": "2.50"
+    },
+    "qq_fmt_spec_fixed_neg": {
+      "kind": "text",
+      "value": "-1.20"
+    },
+    "qq_fmt_spec_fixed_small": {
+      "kind": "text",
+      "value": "0.07"
+    },
+    "qq_fmt_spec_hex": {
+      "kind": "text",
+      "value": "ff"
+    },
+    "qq_fmt_spec_oct": {
+      "kind": "text",
+      "value": "100"
+    },
+    "qq_fmt_spec_percent": {
+      "kind": "text",
+      "value": "50.000000%"
+    },
+    "qq_fmt_spec_percent1": {
+      "kind": "text",
+      "value": "50.0%"
+    },
+    "qq_fmt_spec_sign": {
+      "kind": "text",
+      "value": "+42"
+    },
+    "qq_fmt_spec_zero_pad": {
+      "kind": "text",
+      "value": "0042"
+    },
+    "qq_fmt_usek": {
+      "kind": "text",
+      "value": "1.5"
+    },
+    "qq_j_pat_array": {
+      "kind": "int",
+      "value": 1
+    },
+    "qq_j_pat_extract": {
+      "kind": "text",
+      "value": "river"
+    },
+    "qq_j_pat_literal": {
+      "kind": "bool",
+      "value": true
+    },
+    "qq_j_pat_nested": {
+      "kind": "text",
+      "value": "alpha"
+    },
+    "qq_j_pat_open": {
+      "kind": "bool",
+      "value": true
+    },
+    "qq_patch_already_applied": {
+      "kind": "int",
+      "value": 2
+    },
+    "qq_patch_apply_clean": {
+      "kind": "text",
+      "value": "alpha\nBETA\ngamma"
+    },
+    "qq_patch_apply_drift": {
+      "kind": "int",
+      "value": 3
+    },
+    "qq_patch_conflict_ambiguous": {
+      "kind": "int",
+      "value": 4
+    },
+    "qq_patch_conflict_nomatch": {
+      "kind": "text",
+      "value": "needle|/|two"
+    },
+    "qq_patch_creation": {
+      "kind": "text",
+      "value": "hello\nworld\n"
+    },
+    "qq_patch_invert_involution": {
+      "kind": "bool",
+      "value": true
+    },
+    "qq_patch_literal": {
+      "kind": "bool",
+      "value": true
+    },
+    "qq_patch_parse_runtime": {
+      "kind": "bool",
+      "value": true
+    },
+    "qq_patch_pat_bind": {
+      "kind": "text",
+      "value": "config.txt:DEBUG"
+    },
+    "qq_patch_pat_fallthrough": {
+      "kind": "bool",
+      "value": true
+    },
+    "qq_patch_pat_match": {
+      "kind": "bool",
+      "value": true
+    },
+    "qq_patch_render_roundtrip": {
+      "kind": "bool",
+      "value": true
+    },
+    "qq_uri_accept": {
+      "kind": "text",
+      "value": "https://example.com/a/b?q=1"
+    },
+    "round_banker_half": {
+      "kind": "int",
+      "value": 2
+    },
+    "round_banker_threehalf": {
+      "kind": "int",
+      "value": 4
+    },
+    "round_negative_half": {
+      "kind": "int",
+      "value": -2
+    },
+    "round_simple_up": {
+      "kind": "int",
+      "value": 4
+    },
+    "showBool": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "char",
+          "value": "T"
+        },
+        {
+          "kind": "char",
+          "value": "r"
+        },
+        {
+          "kind": "char",
+          "value": "u"
+        },
+        {
+          "kind": "char",
+          "value": "e"
+        }
+      ]
+    },
+    "showCharA": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "char",
+          "value": "'"
+        },
+        {
+          "kind": "char",
+          "value": "a"
+        },
+        {
+          "kind": "char",
+          "value": "'"
+        }
+      ]
+    },
+    "showDouble": {
+      "kind": "text",
+      "value": "3.14"
+    },
+    "showDoubleInt": {
+      "kind": "text",
+      "value": "42.0"
+    },
+    "showDoublePrelude": {
+      "kind": "text",
+      "value": "(-2.5)"
+    },
+    "showDoublePreludeText": {
+      "kind": "text",
+      "value": "-2.5"
+    },
+    "showDoubleText": {
+      "kind": "text",
+      "value": "3.14"
+    },
+    "showHello": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "char",
+          "value": "\""
+        },
+        {
+          "kind": "char",
+          "value": "h"
+        },
+        {
+          "kind": "char",
+          "value": "e"
+        },
+        {
+          "kind": "char",
+          "value": "l"
+        },
+        {
+          "kind": "char",
+          "value": "l"
+        },
+        {
+          "kind": "char",
+          "value": "o"
+        },
+        {
+          "kind": "char",
+          "value": "\""
+        }
+      ]
+    },
+    "showInt": {
+      "kind": "text",
+      "value": "42"
+    },
+    "showIntNeg": {
+      "kind": "text",
+      "value": "-7"
+    },
+    "showMaybeInt": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "char",
+          "value": "J"
+        },
+        {
+          "kind": "char",
+          "value": "u"
+        },
+        {
+          "kind": "char",
+          "value": "s"
+        },
+        {
+          "kind": "char",
+          "value": "t"
+        },
+        {
+          "kind": "char",
+          "value": " "
+        },
+        {
+          "kind": "char",
+          "value": "4"
+        },
+        {
+          "kind": "char",
+          "value": "2"
+        }
+      ]
+    },
+    "showMaybeNothing": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "char",
+          "value": "N"
+        },
+        {
+          "kind": "char",
+          "value": "o"
+        },
+        {
+          "kind": "char",
+          "value": "t"
+        },
+        {
+          "kind": "char",
+          "value": "h"
+        },
+        {
+          "kind": "char",
+          "value": "i"
+        },
+        {
+          "kind": "char",
+          "value": "n"
+        },
+        {
+          "kind": "char",
+          "value": "g"
+        }
+      ]
+    },
+    "sub_simple": {
+      "kind": "int",
+      "value": 7
+    },
+    "t_bangPatterns": {
+      "kind": "int",
+      "value": 55
+    },
+    "t_bimap": {
+      "kind": "tuple",
+      "value": [
+        {
+          "kind": "int",
+          "value": 2
+        },
+        {
+          "kind": "int",
+          "value": 3
+        }
+      ]
+    },
+    "t_blockArguments": {
+      "kind": "int",
+      "value": 3
+    },
+    "t_deriveFoldable": {
+      "kind": "int",
+      "value": 42
+    },
+    "t_deriveFunctor": {
+      "kind": "int",
+      "value": 42
+    },
+    "t_deriveTraversable": {
+      "kind": "maybe",
+      "value": {
+        "kind": "int",
+        "value": 42
+      }
+    },
+    "t_first": {
+      "kind": "tuple",
+      "value": [
+        {
+          "kind": "int",
+          "value": 2
+        },
+        {
+          "kind": "text",
+          "value": "k"
+        }
+      ]
+    },
+    "t_fromEither": {
+      "kind": "tuple",
+      "value": [
+        {
+          "kind": "text",
+          "value": "d"
+        },
+        {
+          "kind": "int",
+          "value": 2
+        }
+      ]
+    },
+    "t_lambdaCase": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "text",
+          "value": "n"
+        },
+        {
+          "kind": "text",
+          "value": "z"
+        },
+        {
+          "kind": "text",
+          "value": "p"
+        }
+      ]
+    },
+    "t_multiWayIf": {
+      "kind": "text",
+      "value": "pos"
+    },
+    "t_multilineStrings": {
+      "kind": "int",
+      "value": 10
+    },
+    "t_namedFieldPuns": {
+      "kind": "int",
+      "value": 10
+    },
+    "t_numericUnderscores": {
+      "kind": "int",
+      "value": 1000000
+    },
+    "t_partitionEithers": {
+      "kind": "tuple",
+      "value": [
+        {
+          "kind": "list",
+          "value": [
+            {
+              "kind": "text",
+              "value": "a"
+            },
+            {
+              "kind": "text",
+              "value": "b"
+            }
+          ]
+        },
+        {
+          "kind": "list",
+          "value": [
+            {
+              "kind": "int",
+              "value": 1
+            },
+            {
+              "kind": "int",
+              "value": 2
+            }
+          ]
+        }
+      ]
+    },
+    "t_recordWildCards": {
+      "kind": "tuple",
+      "value": [
+        {
+          "kind": "int",
+          "value": 42
+        },
+        {
+          "kind": "text",
+          "value": "hello"
+        }
+      ]
+    },
+    "t_rightsLefts": {
+      "kind": "tuple",
+      "value": [
+        {
+          "kind": "list",
+          "value": [
+            {
+              "kind": "int",
+              "value": 1
+            },
+            {
+              "kind": "int",
+              "value": 2
+            }
+          ]
+        },
+        {
+          "kind": "list",
+          "value": [
+            {
+              "kind": "text",
+              "value": "a"
+            },
+            {
+              "kind": "text",
+              "value": "b"
+            }
+          ]
+        }
+      ]
+    },
+    "t_second": {
+      "kind": "tuple",
+      "value": [
+        {
+          "kind": "text",
+          "value": "k"
+        },
+        {
+          "kind": "int",
+          "value": 3
+        }
+      ]
+    },
+    "t_sortOn": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "tuple",
+          "value": [
+            {
+              "kind": "text",
+              "value": "y"
+            },
+            {
+              "kind": "int",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "kind": "tuple",
+          "value": [
+            {
+              "kind": "text",
+              "value": "z"
+            },
+            {
+              "kind": "int",
+              "value": 2
+            }
+          ]
+        },
+        {
+          "kind": "tuple",
+          "value": [
+            {
+              "kind": "text",
+              "value": "x"
+            },
+            {
+              "kind": "int",
+              "value": 3
+            }
+          ]
+        }
+      ]
+    },
+    "t_sortOnDown": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "tuple",
+          "value": [
+            {
+              "kind": "text",
+              "value": "x"
+            },
+            {
+              "kind": "int",
+              "value": 3
+            }
+          ]
+        },
+        {
+          "kind": "tuple",
+          "value": [
+            {
+              "kind": "text",
+              "value": "z"
+            },
+            {
+              "kind": "int",
+              "value": 2
+            }
+          ]
+        },
+        {
+          "kind": "tuple",
+          "value": [
+            {
+              "kind": "text",
+              "value": "y"
+            },
+            {
+              "kind": "int",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    "t_swap": {
+      "kind": "tuple",
+      "value": [
+        {
+          "kind": "text",
+          "value": "s"
+        },
+        {
+          "kind": "int",
+          "value": 1
+        }
+      ]
+    },
+    "t_tupleSections": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "tuple",
+          "value": [
+            {
+              "kind": "int",
+              "value": 1
+            },
+            {
+              "kind": "bool",
+              "value": true
+            }
+          ]
+        },
+        {
+          "kind": "tuple",
+          "value": [
+            {
+              "kind": "int",
+              "value": 2
+            },
+            {
+              "kind": "bool",
+              "value": true
+            }
+          ]
+        },
+        {
+          "kind": "tuple",
+          "value": [
+            {
+              "kind": "int",
+              "value": 3
+            },
+            {
+              "kind": "bool",
+              "value": true
+            }
+          ]
+        }
+      ]
+    },
+    "t_typeApplications": {
+      "kind": "int",
+      "value": 5
+    },
+    "t_viewPatterns": {
+      "kind": "text",
+      "value": "HELLO"
+    },
+    "text_dropWhileT_direct": {
+      "kind": "text",
+      "value": "/world"
+    },
+    "text_dropWhileT_eta": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "text",
+          "value": "/world"
+        },
+        {
+          "kind": "text",
+          "value": "/bar"
+        },
+        {
+          "kind": "text",
+          "value": ""
+        }
+      ]
+    },
+    "text_dropWhileT_map": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "text",
+          "value": "/world"
+        },
+        {
+          "kind": "text",
+          "value": "/bar"
+        },
+        {
+          "kind": "text",
+          "value": ""
+        }
+      ]
+    },
+    "text_takeWhileT_direct": {
+      "kind": "text",
+      "value": "hello"
+    },
+    "text_takeWhileT_eta": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "text",
+          "value": "hello"
+        },
+        {
+          "kind": "text",
+          "value": "foo"
+        },
+        {
+          "kind": "text",
+          "value": "noSlash"
+        }
+      ]
+    },
+    "text_takeWhileT_map": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "text",
+          "value": "hello"
+        },
+        {
+          "kind": "text",
+          "value": "foo"
+        },
+        {
+          "kind": "text",
+          "value": "noSlash"
+        }
+      ]
+    },
+    "thunk_blackhole": {
+      "kind": "no_finite_observation"
+    },
+    "thunk_cycle": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 2
+        },
+        {
+          "kind": "int",
+          "value": 3
+        },
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 2
+        },
+        {
+          "kind": "int",
+          "value": 3
+        },
+        {
+          "kind": "int",
+          "value": 1
+        }
+      ]
+    },
+    "thunk_cycle_xs'": {
+      "kind": "cyclic_observation"
+    },
+    "thunk_iterate": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "int",
+          "value": 0
+        },
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 2
+        },
+        {
+          "kind": "int",
+          "value": 3
+        },
+        {
+          "kind": "int",
+          "value": 4
+        }
+      ]
+    },
+    "thunk_letrec_knot": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 1
+        }
+      ]
+    },
+    "thunk_letrec_knot_xs": {
+      "kind": "cyclic_observation"
+    },
+    "thunk_map_inf": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "int",
+          "value": 0
+        },
+        {
+          "kind": "int",
+          "value": 2
+        },
+        {
+          "kind": "int",
+          "value": 4
+        },
+        {
+          "kind": "int",
+          "value": 6
+        },
+        {
+          "kind": "int",
+          "value": 8
+        }
+      ]
+    },
+    "thunk_repeat": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 1
+        },
+        {
+          "kind": "int",
+          "value": 1
+        }
+      ]
+    },
+    "thunk_zipwith": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "int",
+          "value": 10
+        },
+        {
+          "kind": "int",
+          "value": 21
+        },
+        {
+          "kind": "int",
+          "value": 32
+        }
+      ]
+    },
+    "thunk_zipwith_inf": {
+      "kind": "list",
+      "value": [
+        {
+          "kind": "int",
+          "value": 100
+        },
+        {
+          "kind": "int",
+          "value": 102
+        },
+        {
+          "kind": "int",
+          "value": 104
+        },
+        {
+          "kind": "int",
+          "value": 106
+        }
+      ]
+    }
+  },
+  "oracle_fingerprint": "f09e0fdba85fd753055a2390f18320e824d7073f5700578e7f33092e5a8198e9",
+  "oracle_payload_digest": "be0a2606e9adabdbd45bab9fd5da9e87235465707075b91f23ed6ceda8951fb8",
+  "refusals": {
+    "Box": {
+      "class": "not_closed",
+      "reason": "polymorphic or constrained type"
+    },
+    "Down": {
+      "class": "not_closed",
+      "reason": "polymorphic or constrained type"
+    },
+    "FmtKInt": {
+      "class": "unrepresentable",
+      "reason": "type Suite.FmtK GHC.Types.Int has no expectation kind"
+    },
+    "FmtKPrec": {
+      "class": "not_closed",
+      "reason": "function type GHC.Types.Int %1 -> Suite.FmtK GHC.Types.Double"
+    },
+    "PunRecord": {
+      "class": "not_closed",
+      "reason": "function type GHC.Types.Int %1 -> Suite.PunRecord"
+    },
+    "RWRecord": {
+      "class": "not_closed",
+      "reason": "function type GHC.Types.Int %1 -> Suite.Text %1 -> Suite.RWRecord"
+    },
+    "bimap": {
+      "class": "not_closed",
+      "reason": "polymorphic or constrained type"
+    },
+    "down": {
+      "class": "not_closed",
+      "reason": "polymorphic or constrained type"
+    },
+    "first": {
+      "class": "not_closed",
+      "reason": "polymorphic or constrained type"
+    },
+    "fromLeft": {
+      "class": "not_closed",
+      "reason": "polymorphic or constrained type"
+    },
+    "fromRight": {
+      "class": "not_closed",
+      "reason": "polymorphic or constrained type"
+    },
+    "lefts": {
+      "class": "not_closed",
+      "reason": "polymorphic or constrained type"
+    },
+    "myDropWhileT": {
+      "class": "not_closed",
+      "reason": "function type (GHC.Types.Char -> GHC.Types.Bool) ->\nData.Text.Internal.Text -> Data.Text.Internal.Text"
+    },
+    "myTakeWhileT": {
+      "class": "not_closed",
+      "reason": "function type (GHC.Types.Char -> GHC.Types.Bool) ->\nData.Text.Internal.Text -> Data.Text.Internal.Text"
+    },
+    "partitionEithers": {
+      "class": "not_closed",
+      "reason": "polymorphic or constrained type"
+    },
+    "punField": {
+      "class": "not_closed",
+      "reason": "function type Suite.PunRecord -> GHC.Types.Int"
+    },
+    "qq_j_anti": {
+      "class": "unrepresentable",
+      "reason": "type Tidepool.Aeson.Value.Value has no expectation kind"
+    },
+    "qq_j_build": {
+      "class": "unrepresentable",
+      "reason": "type Tidepool.Aeson.Value.Value has no expectation kind"
+    },
+    "qq_j_scalar": {
+      "class": "unrepresentable",
+      "reason": "type Tidepool.Aeson.Value.Value has no expectation kind"
+    },
+    "rights": {
+      "class": "not_closed",
+      "reason": "polymorphic or constrained type"
+    },
+    "rwField1": {
+      "class": "not_closed",
+      "reason": "function type Suite.RWRecord -> GHC.Types.Int"
+    },
+    "rwField2": {
+      "class": "not_closed",
+      "reason": "function type Suite.RWRecord -> Suite.Text"
+    },
+    "second": {
+      "class": "not_closed",
+      "reason": "polymorphic or constrained type"
+    },
+    "sortOn": {
+      "class": "not_closed",
+      "reason": "polymorphic or constrained type"
+    },
+    "swap": {
+      "class": "not_closed",
+      "reason": "polymorphic or constrained type"
+    },
+    "useFmtK": {
+      "class": "not_closed",
+      "reason": "polymorphic or constrained type"
+    }
+  },
+  "source_revision": "generated by scripts/prepared-corpus-oracle.sh from bridge/haskell/test/Suite.hs: native GHC 9.12.2 -package ghc -O2 -fno-full-laziness -fno-cpr-anal -fexpose-all-unfoldings -fexpose-overloaded-unfoldings",
+  "source_tops": [
+    "Box",
+    "Down",
+    "FmtKInt",
+    "FmtKPrec",
+    "PunRecord",
+    "RWRecord",
+    "add_simple",
+    "app_church_two",
+    "app_church_zero",
+    "app_compose",
+    "app_const",
+    "app_identity",
+    "app_nested_lam",
+    "app_thrice",
+    "app_twice",
+    "arith_double_add",
+    "arith_double_mul",
+    "arith_double_sub",
+    "arith_left_assoc",
+    "arith_mul_one",
+    "arith_mul_zero",
+    "arith_neg_result",
+    "arith_precedence",
+    "bimap",
+    "case_bool_and",
+    "case_bool_or",
+    "case_default",
+    "case_either_nested",
+    "case_false",
+    "case_just",
+    "case_left",
+    "case_nested_case",
+    "case_nested_just",
+    "case_nothing",
+    "case_pair",
+    "case_right",
+    "case_triple",
+    "case_true",
+    "case_wildcard_pair",
+    "cmp_eq_false",
+    "cmp_eq_true",
+    "cmp_ge_eq",
+    "cmp_gt_true",
+    "cmp_le_eq",
+    "cmp_lt_false",
+    "cmp_lt_true",
+    "cmp_ne_true",
+    "con_false",
+    "con_just",
+    "con_left",
+    "con_nested_just",
+    "con_nested_nothing",
+    "con_nothing",
+    "con_pair",
+    "con_right",
+    "con_triple",
+    "con_true",
+    "concatmap_empty_segments",
+    "concatmap_finite",
+    "down",
+    "edge_case_of_case",
+    "edge_const_chain",
+    "edge_deep_let",
+    "edge_deep_nesting",
+    "edge_id_chain",
+    "edge_large_tuple",
+    "edge_mutual_data",
+    "edge_nullary_con",
+    "filter_order_preserved",
+    "first",
+    "fromLeft",
+    "fromRight",
+    "gen_patch_coalesce",
+    "gen_patch_creation",
+    "gen_patch_drift",
+    "gen_patch_eof",
+    "gen_patch_nochange",
+    "gen_patch_render_parse",
+    "gen_patch_roundtrip",
+    "gen_patch_start",
+    "gen_patch_trailnl",
+    "gen_patch_two_hunks",
+    "ho_myall",
+    "ho_myany",
+    "ho_myconcatmap",
+    "ho_myfilter_len",
+    "ho_myfoldl",
+    "ho_myfoldr",
+    "ho_mymap_len",
+    "ho_myzipwith",
+    "ite_abs",
+    "ite_false",
+    "ite_nested",
+    "ite_signum",
+    "ite_simple",
+    "lazy_concatmap_infinite",
+    "lazy_filter_infinite",
+    "lazy_nubby_infinite",
+    "lefts",
+    "let_body_only",
+    "let_chain",
+    "let_complex",
+    "let_nested",
+    "let_shadow",
+    "let_simple",
+    "let_two",
+    "let_unused",
+    "letrec_ackermann",
+    "letrec_countdown",
+    "letrec_even_odd",
+    "letrec_fact5",
+    "letrec_fib10",
+    "letrec_gcd",
+    "letrec_pow",
+    "letrec_sum_to",
+    "lit_42",
+    "lit_char_a",
+    "lit_char_newline",
+    "lit_char_z",
+    "lit_double_neg",
+    "lit_double_pi",
+    "lit_large",
+    "lit_neg7",
+    "lit_neg_large",
+    "lit_zero",
+    "mul_simple",
+    "myDropWhileT",
+    "myTakeWhileT",
+    "nested_arith",
+    "nubby_dedup_finite",
+    "partitionEithers",
+    "prelude_and",
+    "prelude_eq_int",
+    "prelude_eq_string_false",
+    "prelude_eq_string_true",
+    "prelude_filter",
+    "prelude_length",
+    "prelude_map",
+    "prelude_null_empty",
+    "prelude_null_nonempty",
+    "prelude_or",
+    "prelude_string_append",
+    "prelude_take",
+    "prelude_take_cons",
+    "prim_quot_rem_int",
+    "prim_quot_rem_word",
+    "punField",
+    "qq_fmt_applied",
+    "qq_fmt_basic",
+    "qq_fmt_bool",
+    "qq_fmt_char",
+    "qq_fmt_comprehension",
+    "qq_fmt_double",
+    "qq_fmt_empty",
+    "qq_fmt_escape",
+    "qq_fmt_int",
+    "qq_fmt_multi",
+    "qq_fmt_multiline",
+    "qq_fmt_op",
+    "qq_fmt_plain",
+    "qq_fmt_spec_align_center",
+    "qq_fmt_spec_align_left",
+    "qq_fmt_spec_align_right",
+    "qq_fmt_spec_bin",
+    "qq_fmt_spec_brace",
+    "qq_fmt_spec_colon",
+    "qq_fmt_spec_escapes",
+    "qq_fmt_spec_fixed2",
+    "qq_fmt_spec_fixed_half",
+    "qq_fmt_spec_fixed_neg",
+    "qq_fmt_spec_fixed_small",
+    "qq_fmt_spec_hex",
+    "qq_fmt_spec_oct",
+    "qq_fmt_spec_percent",
+    "qq_fmt_spec_percent1",
+    "qq_fmt_spec_sign",
+    "qq_fmt_spec_zero_pad",
+    "qq_fmt_usek",
+    "qq_j_anti",
+    "qq_j_build",
+    "qq_j_pat_array",
+    "qq_j_pat_extract",
+    "qq_j_pat_literal",
+    "qq_j_pat_nested",
+    "qq_j_pat_open",
+    "qq_j_scalar",
+    "qq_patch_already_applied",
+    "qq_patch_apply_clean",
+    "qq_patch_apply_drift",
+    "qq_patch_conflict_ambiguous",
+    "qq_patch_conflict_nomatch",
+    "qq_patch_creation",
+    "qq_patch_invert_involution",
+    "qq_patch_literal",
+    "qq_patch_parse_runtime",
+    "qq_patch_pat_bind",
+    "qq_patch_pat_fallthrough",
+    "qq_patch_pat_match",
+    "qq_patch_render_roundtrip",
+    "qq_uri_accept",
+    "rights",
+    "round_banker_half",
+    "round_banker_threehalf",
+    "round_negative_half",
+    "round_simple_up",
+    "rwField1",
+    "rwField2",
+    "second",
+    "showBool",
+    "showCharA",
+    "showDouble",
+    "showDoubleInt",
+    "showDoublePrelude",
+    "showDoublePreludeText",
+    "showDoubleText",
+    "showHello",
+    "showInt",
+    "showIntNeg",
+    "showMaybeInt",
+    "showMaybeNothing",
+    "sortOn",
+    "sub_simple",
+    "swap",
+    "t_bangPatterns",
+    "t_bimap",
+    "t_blockArguments",
+    "t_deriveFoldable",
+    "t_deriveFunctor",
+    "t_deriveTraversable",
+    "t_first",
+    "t_fromEither",
+    "t_lambdaCase",
+    "t_multiWayIf",
+    "t_multilineStrings",
+    "t_namedFieldPuns",
+    "t_numericUnderscores",
+    "t_partitionEithers",
+    "t_recordWildCards",
+    "t_rightsLefts",
+    "t_second",
+    "t_sortOn",
+    "t_sortOnDown",
+    "t_swap",
+    "t_tupleSections",
+    "t_typeApplications",
+    "t_viewPatterns",
+    "text_dropWhileT_direct",
+    "text_dropWhileT_eta",
+    "text_dropWhileT_map",
+    "text_takeWhileT_direct",
+    "text_takeWhileT_eta",
+    "text_takeWhileT_map",
+    "thunk_blackhole",
+    "thunk_cycle",
+    "thunk_iterate",
+    "thunk_letrec_knot",
+    "thunk_map_inf",
+    "thunk_repeat",
+    "thunk_zipwith",
+    "thunk_zipwith_inf",
+    "useFmtK"
+  ]
+}

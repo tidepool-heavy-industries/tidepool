@@ -1,0 +1,69 @@
+[package]
+name = "tidepool"
+autobins = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Compile Haskell effect stacks to Cranelift JIT, drive from Rust"
+readme = "../../README.md"
+keywords = ["haskell", "jit", "cranelift", "effects", "compiler"]
+categories = ["compilers"]
+
+[[bin]]
+name = "tidepool"
+path = "src/main.rs"
+
+[[bin]]
+name = "shoal"
+path = "src/bin/shoal.rs"
+
+[[bin]]
+name = "tidepool-compile-report"
+path = "src/bin/tidepool-compile-report.rs"
+
+[dependencies]
+tempfile.workspace = true
+tidepool-repr.workspace = true
+tidepool-heap.workspace = true
+tidepool-bridge.workspace = true
+tidepool-bridge-derive.workspace = true
+tidepool-bridge-effects.workspace = true
+tidepool-effect.workspace = true
+tidepool-codegen.workspace = true
+tidepool-runtime.workspace = true
+tidepool-mcp.workspace = true
+tidepool-handlers.workspace = true
+tidepool-worktree.workspace = true
+tidepool-agent.workspace = true
+codex-shoal-protocol.workspace = true
+tidepool-actor.workspace = true
+tidepool-tool.workspace = true
+tidepool-node.workspace = true
+tidepool-atomic-write.workspace = true
+tidepool-extract-cmd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml = "1.1"
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "net", "io-util", "time"] }
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+clap.workspace = true
+axum.workspace = true
+glob.workspace = true
+frunk.workspace = true
+futures-util.workspace = true
+uuid.workspace = true
+blake3.workspace = true
+rustix = { version = "1", features = ["fs"] }
+thiserror.workspace = true
+parking_lot.workspace = true
+
+
+reqwest.workspace = true
+
+[dev-dependencies]
+tidepool-testing.workspace = true

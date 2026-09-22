@@ -90,7 +90,7 @@ you ask an agent to delegate.
 as a special hosted tool. Existing workspaces must copy `Project/Lookup.hs`
 from the shipped template and register its tool in their `Project.Tools` and
 `AgentSpec`, following the template
-[`Project.Tools`](../examples/shoal-workspace/.shoal/Project/Tools.hs).
+[`Project.Tools`](../exomonad/examples/workspace/.shoal/Project/Tools.hs).
 Use the argument object `{"queries": ["name", "Module.name"]}`.
 The tool preserves original lookup results and may add up to four related
 declarations selected by Jev. Programmatic `Introspection.info` and `typeOf`
@@ -202,11 +202,11 @@ or attaching to anything.
 
 ## Where to go next
 
-- [The workspace package in depth](../examples/shoal-workspace/README.md), with a
+- [The workspace package in depth](../exomonad/examples/workspace/README.md), with a
   fuller example: orchestration modules, prompts, recipe checks.
 - The skills, which are the manual an agent reads:
-  [Jev](../examples/shoal-workspace/.shoal/skills/shoal-jev/SKILL.md),
-  [the agent spec](../examples/shoal-workspace/.shoal/skills/shoal-agent-spec/SKILL.md),
-  [the workbench](../examples/shoal-workspace/.shoal/skills/shoal-workbench/SKILL.md),
-  [delegating](../examples/shoal-workspace/.shoal/skills/shoal-unfold/SKILL.md).
+  [Jev](../exomonad/examples/workspace/.shoal/skills/shoal-jev/SKILL.md),
+  [the agent spec](../exomonad/examples/workspace/.shoal/skills/shoal-agent-spec/SKILL.md),
+  [the workbench](../exomonad/examples/workspace/.shoal/skills/shoal-workbench/SKILL.md),
+  [delegating](../exomonad/examples/workspace/.shoal/skills/shoal-unfold/SKILL.md).
 - [The glossary](GLOSSARY.md), for what the words mean here.

@@ -10,7 +10,7 @@ that reachable text. A probe folded to a literal has an empty reachable
 closure beyond its own binding, so it cannot show a marker that names real
 library or primop machinery.
 
-See haskell/test-prepared-stg/probe-opacity-manifest.json for the marker
+See bridge/haskell/test-prepared-stg/probe-opacity-manifest.json for the marker
 naming rule this depends on.
 """
 import json

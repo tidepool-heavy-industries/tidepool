@@ -149,7 +149,7 @@ fixture generation, and executable acceptance within typed orchestration.
 The request/activation contract, cache-preserving context unfold, and
 recursive collaboration/scaffold designs once tracked here all landed; their
 architecture and verification record are in git history, and their stable
-user contracts live in [SHOAL.md](../../SHOAL.md), `tidepool-actor/CLAUDE.md`,
+user contracts live in [SHOAL.md](../../SHOAL.md), `exomonad/actor/CLAUDE.md`,
 and the shipped Haskell surface.
 
 ## Vocabulary
@@ -183,8 +183,8 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
 - [DevSwarm](../devswarm-haskell-dsl.md) remains the project-specific dogfood
   program. The actor model supplies its eventual execution substrate; DevSwarm
   still owns repository policy and roles.
-- [`tidepool-runtime::session`](../../tidepool-runtime/src/session/mod.rs) and
-  its [crate charter](../../tidepool-runtime/CLAUDE.md) own resident-machine
+- [`tidepool-runtime::session`](../../tidepool/runtime/src/session/mod.rs) and
+  its [crate charter](../../tidepool/runtime/CLAUDE.md) own resident-machine
   suspension, checkout, roots, and frontend mounting seams. This plan consumes
   those mechanisms rather than introducing another continuation registry.
 - [`ValueHandle`'s contract](../../docs/continuation-parking-contract.md)

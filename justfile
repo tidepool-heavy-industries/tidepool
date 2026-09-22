@@ -87,7 +87,7 @@ fixtures-update:
     {{ nix }} scripts/fixtures.sh update
 
 # Check that the pure-eval cohort probes still exercise the mechanism their
-# cohort claims, per haskell/test-prepared-stg/probe-opacity-manifest.json.
+# cohort claims, per bridge/haskell/test-prepared-stg/probe-opacity-manifest.json.
 # Also runs as part of scripts/prepared-corpus.sh (reached by fixtures-check).
 probe-opacity-check:
     {{ nix }} scripts/probe-opacity-check.sh

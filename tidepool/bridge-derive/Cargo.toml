@@ -1,0 +1,23 @@
+[package]
+name = "tidepool-bridge-derive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Derive macros for the Tidepool bridge"
+readme = "../../README.md"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { workspace = true, features = ["extra-traits"] }
+quote.workspace = true
+proc-macro2.workspace = true
+
+[dev-dependencies]
+tidepool-bridge.workspace = true
+tidepool-repr.workspace = true
+tidepool-test-data.workspace = true

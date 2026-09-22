@@ -32,8 +32,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source_dir="$(cd "$(dirname "$source_file")" && pwd)"
 source_file="$source_dir/$(basename "$source_file")"
 include_args=(
-  --include "$repo_root/haskell/lib"
-  --include "$repo_root/haskell/actors"
+  --include "$repo_root/bridge/haskell/lib"
+  --include "$repo_root/bridge/haskell/actors"
   --include "$source_dir"
 )
 
@@ -71,7 +71,7 @@ trap 'rm -rf -- "$output_dir"' EXIT
 # identity by staging it under a dotted basename (`Tidepool.Foo.Bar.hs`),
 # derived from the repository source root rather than by parsing Haskell.
 compiler_source="$source_file"
-for module_root in "$repo_root/haskell/lib" "$repo_root/haskell/actors"; do
+for module_root in "$repo_root/bridge/haskell/lib" "$repo_root/bridge/haskell/actors"; do
   case "$source_file" in
     "$module_root"/*.hs)
       relative_module="${source_file#"$module_root"/}"

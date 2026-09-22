@@ -18,8 +18,8 @@ providers, scheduling, resources, persistence, and argument parsing.
 4. To run it, follow `docs/GETTING-STARTED.md`: `shoal new` writes a workspace,
    `shoal init` starts a run, and in this repository `just shoal-init` builds
    the checkout first. To see the system from the model's side, read
-   `prompts/shoal/base.md` and the skills under
-   `examples/shoal-workspace/.shoal/skills/`, and drive a session from a
+   `exomonad/prompts/base.md` and the skills under
+   `exomonad/examples/workspace/.shoal/skills/`, and drive a session from a
    terminal with `shoal proxy` (`docs/SHOAL-OPERATOR-HTTP.md`).
 
 Most changes touch one of three layers, and it helps to know which:
@@ -30,8 +30,8 @@ Most changes touch one of three layers, and it helps to know which:
 - **The resident runtime**: sessions, the workbench, actors, effects and their
   handlers (`tidepool-runtime`, `tidepool-actor`, `tidepool-protocol`,
   `tidepool-handlers`). Most feature work lands here.
-- **The model-facing surface**: the Haskell library in `haskell/lib`, the
-  shipped prompts in `prompts/shoal/`, and the skills. Text here is read by a
+- **The model-facing surface**: the Haskell library in `bridge/haskell/lib`, the
+  shipped prompts in `exomonad/prompts/`, and the skills. Text here is read by a
   model on every turn, so it is held to the glossary and kept short. A Haskell
   snippet in a prompt or skill must be one that has been compiled.
 
@@ -93,7 +93,7 @@ redesigns, and distinguish structural savings from measured speedups.
 
 ## Repository navigation
 
-- `haskell/`: extractor worker and the model-facing `Tidepool` library.
+- `bridge/haskell/`: extractor worker and the model-facing `Tidepool` library.
 - `tidepool-repr`, `tidepool-heap`, `tidepool-codegen`: IR, heap, and
   JIT/effect machine. GHC is the independent language oracle for
   differential testing; there is no separate Rust reference interpreter.
@@ -142,21 +142,21 @@ Keep detailed design references out of always-loaded instructions.
 
 | Mechanism | Owning source |
 |---|---|
-| Shoal CLI, actor launch composition, prompt assembly | `tidepool/src/shoal.rs`, `tidepool/src/actor_host.rs`, `tidepool/src/actor_host/prompt_catalog.rs` |
-| Shipped resident instructions and shared API guide | `prompts/shoal/` |
-| Workspace skills, and the links a client loads them through | `examples/shoal-workspace/.shoal/skills/`, `.agents/skills/` |
-| Agent spec discovery, reload, and the after-tool slot | `tidepool-actor/src/{agent_spec,reload_spec_tool,after_tool}.rs`; Haskell side in `haskell/lib/Tidepool/Agent/Contract.hs` |
-| Comparing two declared tool surfaces | `tidepool-tool/src/surface.rs` |
-| Source layers: capture, typecheck, atomic publication, drift | `tidepool/src/shoal/source.rs` |
+| Shoal CLI, actor launch composition, prompt assembly | `bridge/facade/src/shoal.rs`, `bridge/facade/src/actor_host.rs`, `bridge/facade/src/actor_host/prompt_catalog.rs` |
+| Shipped resident instructions and shared API guide | `exomonad/prompts/` |
+| Workspace skills, and the links a client loads them through | `exomonad/examples/workspace/.shoal/skills/`, `.agents/skills/` |
+| Agent spec discovery, reload, and the after-tool slot | `exomonad/actor/src/{agent_spec,reload_spec_tool,after_tool}.rs`; Haskell side in `bridge/haskell/lib/Tidepool/Agent/Contract.hs` |
+| Comparing two declared tool surfaces | `exomonad/tool/src/surface.rs` |
+| Source layers: capture, typecheck, atomic publication, drift | `bridge/facade/src/shoal/source.rs` |
 | Jev operators | the pinned `jev-dsl` flake input, fronted per workspace by `.shoal/Jev/Operators.hs` |
-| Run trace (structured JSONL under `.shoal/logs/`) | `tidepool/src/shoal.rs` |
+| Run trace (structured JSONL under `.shoal/logs/`) | `bridge/facade/src/shoal.rs` |
 | Actor identity, lifecycle, mailbox, resident actor workbench | `tidepool-actor` |
-| Backend protocols, interactive launch and bound input-control transport | `tidepool-agent/src/backend/codex/` |
-| Process mount boundary and durable inbox | `tidepool-node/src/process_boundary.rs`, `tidepool-node/src/inbox.rs` |
-| Git invocation and managed checkout registry | `tidepool-worktree/src/git.rs`, `tidepool-worktree/src/registry.rs` |
+| Backend protocols, interactive launch and bound input-control transport | `exomonad/agent/src/backend/codex/` |
+| Process mount boundary and durable inbox | `exomonad/node/src/process_boundary.rs`, `exomonad/node/src/inbox.rs` |
+| Git invocation and managed checkout registry | `exomonad/worktree/src/git.rs`, `exomonad/worktree/src/registry.rs` |
 | Discovery, artifact cache, paths and toolchain fingerprints | `tidepool-toolchain`; extractor process/daemon invocation: `tidepool-extract-cmd` |
-| Machine-session checkout, supervision and source sequencing | `tidepool-runtime/src/session/{registry,supervisor,workbench}.rs` |
-| Durable JSONL and version migrations | `tidepool-repr/src/{jsonl,version_ladder}.rs` |
+| Machine-session checkout, supervision and source sequencing | `tidepool/runtime/src/session/{registry,supervisor,workbench}.rs` |
+| Durable JSONL and version migrations | `tidepool/repr/src/{jsonl,version_ladder}.rs` |
 | Effect schemas and generated bridge | `tidepool-protocol`; generated consumers in `tidepool-mcp` and `haskell` |
 
 ## Verification
@@ -212,7 +212,7 @@ Keep detailed design references out of always-loaded instructions.
   `just fixtures-check`; use `just fixtures-update` only when the corpus should
   intentionally change. The fixture commands also validate registered embedded
   prepared artifacts; their producers are listed in
-  `haskell/test-prepared-stg/embedded-fixtures.json`. A schema migration must
+  `bridge/haskell/test-prepared-stg/embedded-fixtures.json`. A schema migration must
   regenerate those artifacts through their producers, not edit version bytes.
 - Always run formatting appropriate to changed languages and
   `git diff --check`. Review the final diff for stale callers, duplicated

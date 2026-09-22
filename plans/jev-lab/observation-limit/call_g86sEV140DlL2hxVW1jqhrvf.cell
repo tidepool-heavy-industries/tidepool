@@ -7,7 +7,7 @@ replaceExactDocument path before after = do
   pure (either (Left . T.pack . show) (const (Right ())) (Cmd.stdout result))
 editCompletionGuidance :: (Member Commands effects, Member Jev effects) => Text -> Text -> [(Text,Text)] -> Eff effects EditorialOutcome
 editCompletionGuidance context anchor candidates = do
-  let path = "examples/shoal-workspace/.shoal/skills/shoal-command/SKILL.md"
+  let path = "exomonad/examples/workspace/.shoal/skills/shoal-command/SKILL.md"
   readResult <- Cmd.quiet (Cmd.run (Cmd.argv ["cat",path]))
   case Cmd.stdout readResult of
     Left issue -> pure (EditorialStopped (T.pack (show issue)))

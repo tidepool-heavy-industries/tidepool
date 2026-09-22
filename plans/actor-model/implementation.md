@@ -1,8 +1,8 @@
 # Actor implementation status
 
 This file is the current landed-versus-pending inventory. The active request
-and activation contract now lives in `tidepool-actor/src/request.rs` and its
-crate charter (`tidepool-actor/CLAUDE.md`); the design record that specified
+and activation contract now lives in `exomonad/actor/src/request.rs` and its
+crate charter (`exomonad/actor/CLAUDE.md`); the design record that specified
 it landed and is git history. Older `Complete`/`AgentAction` sections in the
 adjacent long-form plans are a superseded design record, not the executable
 surface.

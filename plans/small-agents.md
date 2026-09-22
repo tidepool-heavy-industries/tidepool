@@ -197,7 +197,7 @@ the worker interface through real numeric work.
 - Minimal standard tool surface, custom schema stability and context renderer.
 - Shared-worktree write arbitration and parent-pane presentation implementation.
 
-Owners to inspect: `tidepool/src/actor_host.rs`, `tidepool/src/host_dynamic_tools`,
+Owners to inspect: `bridge/facade/src/actor_host.rs`, `bridge/facade/src/host_dynamic_tools`,
 `tidepool-actor`, `tidepool-agent`, `tidepool-runtime`, `tidepool-node`,
 `tidepool-worktree`, and the Haskell library. Root and nested `AGENTS.md` govern
 implementation. Reuse those owners instead of creating another agent framework.

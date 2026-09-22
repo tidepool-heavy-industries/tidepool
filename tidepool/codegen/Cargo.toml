@@ -1,0 +1,45 @@
+[package]
+autotests = false
+name = "tidepool-codegen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Cranelift runtime for Tidepool prepared STG"
+readme = "../../README.md"
+
+[dependencies]
+cranelift-codegen = "=0.129.1"
+cranelift-frontend = "=0.129.1"
+cranelift-jit = "=0.129.1"
+cranelift-module = "=0.129.1"
+cranelift-native = "=0.129.1"
+tidepool-repr.workspace = true
+tidepool-bignum.workspace = true
+tidepool-heap.workspace = true
+tidepool-bridge.workspace = true
+tidepool-effect.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+env_logger = "0.11"
+# `debug::tracing_env_filter` is the one shared `EnvFilter` builder every
+# long-running binary calls so a bare `RUST_LOG=info` doesn't inherit
+# cranelift-jit's own unconditional CLIF-dump `info!`s.
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+recursion.workspace = true
+stacker = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[build-dependencies]
+cc = "1"
+
+[[test]]
+name = "prepared_control"
+path = "tests/prepared_control.rs"

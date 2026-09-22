@@ -281,7 +281,7 @@ owns_prepared_entry}`; `prepared_resolve_call`, `prepared_resolve_enter`,
   `foreign_apply_tests` (all non-ignored), `apply_tests`,
   `apply::tests` (`classify` plus the new id-agreement test), `entry_tests`,
   `no_success_tests`, `caller_result_tests`, `lifetime_tests`,
-  `retention_tests`, `tidepool-codegen/tests/apply_acceptance.rs`,
+  `retention_tests`, `tidepool/codegen/tests/apply_acceptance.rs`,
   `apply_cont_heap_composition_gc.rs`, the runtime `prepared_execution` and
   `prepared_resident_composite` suites, `placement_retirement`, and the
   repeated-install residency test (`repeated_installs_retire_and_keep_residency_flat`).

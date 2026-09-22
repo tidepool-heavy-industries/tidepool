@@ -3,6 +3,10 @@
 .shoal/sessions/
 .shoal/runtime/
 .shoal/build/
+.exomonad/logs/
+.exomonad/sessions/
+.exomonad/runtime/
+.exomonad/build/
 # A workspace's generated state, wherever the workspace lives. The
 # anchored patterns above only match a workspace at the repository root,
 # so an example workspace's nix-store symlinks were stageable by accident.
@@ -10,6 +14,10 @@
 **/.shoal/sessions/
 **/.shoal/runtime/
 **/.shoal/build/
+**/.exomonad/logs/
+**/.exomonad/sessions/
+**/.exomonad/runtime/
+**/.exomonad/build/
 # API keys dropbox — must NEVER be allowlisted back in
 .tidepool/secrets/
 !.tidepool/lib/
@@ -18,7 +26,7 @@ target/
 /target-*/
 dist-newstyle/
 dist-newstyle-*/
-haskell/dist-fixtures-final/
+bridge/haskell/dist-fixtures-final/
 # scripts/bench-turn.sh results (timestamped, machine-specific — not committed)
 bench/
 *.hi
@@ -40,60 +48,56 @@ investigate-*.tmp.md
 scratch*
 
 # Binary artifacts
-haskell/tidepool-extract
-haskell/haskell/
-haskell/test/text_cbor/
+bridge/haskell/tidepool-extract
+bridge/haskell/haskell/
+bridge/haskell/test/text_cbor/
 *.proptest-regressions
 
 # Debug artifacts
 *.cbor
-!haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor
-!haskell/test-prepared-stg/fixtures/freer-retention.cbor
-!haskell/test-prepared-stg/fixtures/freer-resume.cbor
-!haskell/test-prepared-stg/fixtures/import-producer.cbor
-!haskell/test-prepared-stg/fixtures/import-consumer.cbor
-!haskell/test-prepared-stg/fixtures/import-consumer-result.cbor
+!bridge/haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor
+!bridge/haskell/test-prepared-stg/fixtures/freer-retention.cbor
+!bridge/haskell/test-prepared-stg/fixtures/freer-resume.cbor
+!bridge/haskell/test-prepared-stg/fixtures/import-producer.cbor
+!bridge/haskell/test-prepared-stg/fixtures/import-consumer.cbor
+!bridge/haskell/test-prepared-stg/fixtures/import-consumer-result.cbor
 *.log
 dump_*.rs
 test_*.hs
 
 # Ad-hoc test artifacts
-haskell/Test*.hs
-haskell/TestB_cbor/
-haskell/test-*.hs
-haskell/test-*_cbor/
-haskell/test/InlineTest*.hs
-haskell/test/InlineTest*_cbor/
-haskell/test/LocalEqString.hs
-haskell/test/LocalEqString_cbor/
+bridge/haskell/Test*.hs
+bridge/haskell/TestB_cbor/
+bridge/haskell/test-*.hs
+bridge/haskell/test-*_cbor/
+bridge/haskell/test/InlineTest*.hs
+bridge/haskell/test/InlineTest*_cbor/
+bridge/haskell/test/LocalEqString.hs
+bridge/haskell/test/LocalEqString_cbor/
 test_*_cbor/
-haskell/lib/Tidepool/Prelude_cbor/
+bridge/haskell/lib/Tidepool/Prelude_cbor/
 
 # Leaked internal bindings from --all-closed extraction
-haskell/test/suite_cbor/$*.cbor
-haskell/test/suite_cbor/mymap*.cbor
-haskell/test/suite_cbor/myappend.cbor
-haskell/test/suite_cbor/myconcat.cbor
-haskell/test/suite_cbor/myfilter.cbor
-haskell/test/suite_cbor/r.cbor
-haskell/test/suite_cbor/r_*.cbor
-haskell/test/suite_cbor/con_nested_just_1.cbor
-haskell/test/suite_cbor/*.asks.json
+bridge/haskell/test/suite_cbor/$*.cbor
+bridge/haskell/test/suite_cbor/mymap*.cbor
+bridge/haskell/test/suite_cbor/myappend.cbor
+bridge/haskell/test/suite_cbor/myconcat.cbor
+bridge/haskell/test/suite_cbor/myfilter.cbor
+bridge/haskell/test/suite_cbor/r.cbor
+bridge/haskell/test/suite_cbor/r_*.cbor
+bridge/haskell/test/suite_cbor/con_nested_just_1.cbor
+bridge/haskell/test/suite_cbor/*.asks.json
 
 # Duplicate extraction output (Suite_cbor/ vs suite_cbor/)
-haskell/test/Suite_cbor/
+bridge/haskell/test/Suite_cbor/
 
 # Experimental Haskell modules (none currently)
-haskell/test-prelude.hs
+bridge/haskell/test-prelude.hs
 
 # Generated viz output
 viz/index.html
-# ExoMonad - track config and source, ignore runtime artifacts
-.exo/*
-!.exo/config.toml
-!.exo/roles/
-!.exo/lib/
-!.exo/rules/
+# Preserve stale pre-Exomonad local runtime data if it reappears.
+.exo/
 .claude/
 
 # cabal-generated GHC environment files (written by cabal v2 in-place builds)
@@ -103,10 +107,10 @@ viz/index.html
 .mcp.json
 
 # extract test harness scratch (synthetic fixture modules + their .hi/.o)
-haskell/test-session/work/
-haskell/test-fidelity/work/
-haskell/spike-batch/work-*/
-haskell/spike-build-products/work/
+bridge/haskell/test-session/work/
+bridge/haskell/test-fidelity/work/
+bridge/haskell/spike-batch/work-*/
+bridge/haskell/spike-build-products/work/
 
 # Per-worktree XDG cache used by isolated checks and local tools.
 .cache/

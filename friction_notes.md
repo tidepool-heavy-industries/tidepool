@@ -61,7 +61,7 @@ are nondeterministic.
   `bash scripts/dev-shell.sh cargo test -p tidepool-repr --lib execution_schema::validation::tests -- --nocapture`
   compiled bridge, heap, effect, codegen, toolchain, and runtime before any
   selected test ran. It stopped on four stale interpreter `Value` variants in
-  `tidepool-runtime/src/render.rs`. The repr crate's `tidepool-testing`
+  `tidepool/runtime/src/render.rs`. The repr crate's `tidepool-testing`
   dev-dependency brings the larger stack into this otherwise local check.
   Follow-up: isolate pure schema tests from execution-harness dependencies;
   keep cross-layer contracts in their own target. This is dependency fan-out,
@@ -86,7 +86,7 @@ are nondeterministic.
   alone is not evidence of native support.
 - **Endpoint retirement reaches low-level test compilation.** After the render
   migration was fixed, the focused repr command still selected/executed no
-  tests: `tidepool-mcp/src/eval_prep.rs:1093` referenced the removed
+  tests: `bridge/mcp/src/eval_prep.rs:1093` referenced the removed
   `resources::exclusion_reason`. Deleting an endpoint needs a whole-workspace
   symbol inventory, including test-only callers, before calling the batch
   complete. Retrying the same blocked target before its owner confirms the
@@ -101,7 +101,7 @@ are nondeterministic.
   Three prepared tests in toolchain/codegen/runtime included a CBOR file from
   `tidepool-eval/tests/fixtures`. Removing that crate broke unrelated prepared
   consumers. The generator now writes the shared fixture under
-  `haskell/test-prepared-stg/fixtures`; the existing broad `*.cbor` ignore rule
+  `bridge/haskell/test-prepared-stg/fixtures`; the existing broad `*.cbor` ignore rule
   required explicitly force-adding it. Follow-up: make the canonical generator
   outputs and tracked-fixture exceptions discoverable together, and regenerate
   once a coordinated schema/ABI edit is complete rather than mid-batch.
@@ -197,7 +197,7 @@ are nondeterministic.
   `tidepool-macro/src/expand.rs:32`; source inspection instead attributes that
   missing `InlineInput` code to `e1a4b9145`, not unchanged `main`. In the final
   fold, the workspace compile reached all crates and failed in
-  `tidepool-actor/tests/resident_local_actor.rs` because `sibling_server` is
+  `exomonad/actor/tests/resident_local_actor.rs` because `sibling_server` is
   undefined at lines 321 and 329. This is outside F's repair scope.
 
 ## Wave 3 fold evidence — 2026-09-12

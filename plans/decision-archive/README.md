@@ -18,7 +18,7 @@ look there.
 
 ## Index
 
-- [haskell.md](haskell.md) — extracted from `haskell/CLAUDE.md`.
+- [haskell.md](haskell.md) — extracted from `bridge/haskell/CLAUDE.md`.
   §1 (call-graph workspace scoping) is the live pointer: a fix made once and
   re-derived from scratch a session later. §2 (`formqq-parser-test`
   module-listing wording) is no longer pointed at from anywhere — it is

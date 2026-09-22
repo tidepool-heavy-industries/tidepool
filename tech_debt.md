@@ -4,8 +4,8 @@
 
 The prepared-STG boundary uses positional CBOR records and tagged arrays.
 Rust's decoder manually matches tags, lengths, and field indices in
-`tidepool-repr/src/execution_schema/codec.rs`; Haskell independently encodes
-the same layout in `haskell/src/Tidepool/ExecutionEncode.hs`. The schema types
+`tidepool/repr/src/execution_schema/codec.rs`; Haskell independently encodes
+the same layout in `bridge/haskell/src/Tidepool/ExecutionEncode.hs`. The schema types
 are typed, but the wire layout is duplicated procedural code. A previous
 GlobalDecl field-order mismatch demonstrated the maintenance risk.
 
@@ -149,7 +149,7 @@ how much of the surrounding expression also folded.
 It dumps Tidy Core for the four cohorts hardened this way (Containers, Bignum,
 UserTypes, Text) and checks each probe's reachable closure against a committed
 manifest of marker substrings in
-`haskell/test-prepared-stg/probe-opacity-manifest.json`, one derived from an
+`bridge/haskell/test-prepared-stg/probe-opacity-manifest.json`, one derived from an
 actual dump of the current source rather than guessed. It runs from
 `scripts/prepared-corpus.sh`, which `scripts/fixtures.sh check` already calls,
 so `just verify` reaches it; `just probe-opacity-check` runs it standalone.

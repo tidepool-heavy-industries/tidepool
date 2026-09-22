@@ -17,7 +17,7 @@ the same module — §3). GHC session startup + typecheck dominates; codegen for
 an extra target is noise. That is the mechanical basis for the ~90% target
 being *reachable on the batchable slice* — but roughly 40% of sampled compile
 wall time is **session-scoped** (`--session-root`/`--inject-val`), which the
-compile memo already excludes by design (`tidepool-runtime/CLAUDE.md`'s
+compile memo already excludes by design (`tidepool/runtime/CLAUDE.md`'s
 "Compile cache" section — session-scope flags are not on the argv allowlist,
 so such an invocation keys to `None` and always compiles cold)
 and which target-batching does not touch either: those compiles read live,
@@ -109,7 +109,7 @@ re-compiling byte-identical source. That fifth splits sharply by cacheability:
   109 distinct / 133 total is dominated by within-binary uniqueness
   (jit_surface's 45 unique probes are ~34% of the whole sample on their own),
   so this sample under-counts the REAL cross-process win the harness's own
-  `tidepool-harness/CLAUDE.md` already measured directly: **119s → 99s cold
+  `exomonad/harness/CLAUDE.md` already measured directly: **119s → 99s cold
   → 47s warm** on `golden_path + acceptance_askuser + selfharness_spine`
   (fixed boot/turn-template compiles shared across processes). That number is
   the actual state of the art for what the memo already delivers when
@@ -120,7 +120,7 @@ re-compiling byte-identical source. That fifth splits sharply by cacheability:
   documented elsewhere).
 
 **Bottom line on duplication:** the compile memo (already landed — see
-`tidepool-runtime/CLAUDE.md`'s "Compile cache" section) is doing its job on
+`tidepool/runtime/CLAUDE.md`'s "Compile cache" section) is doing its job on
 the FIXED-template slice
 (boot/turn wrappers) — that's a solved problem with a measured number (47s
 warm vs 119s before). The remaining duplication inside `acceptance_cross_turn`
@@ -131,7 +131,7 @@ undiscovered duplication pool waiting on a keying fix.
 ## 3. Batch-compile opportunity
 
 `compile_targets(source, targets: &[&str], include, bin, on_stage)`
-(`tidepool-runtime/src/artifacts.rs:470`) already supports N targets against
+(`tidepool/runtime/src/artifacts.rs:470`) already supports N targets against
 ONE shared module in ONE spawn — it's the production front door for the
 harness turn lane and is exactly the `--targets a,b,c` extract mode. Measured
 marginal cost of an extra target in the SAME spawn:
@@ -280,7 +280,7 @@ verified, recommend a SCOPED PILOT, not a blanket adoption.**
 
 **(d) Per-test `XDG_CACHE_HOME` isolation cost — measured, not assumed.**
 `tests/support::isolate_cache()`'s own doc (quoted in
-`tidepool-harness/CLAUDE.md`) already states the split: mutable session state
+`exomonad/harness/CLAUDE.md`) already states the split: mutable session state
 (checkpoints, transcripts, `log.jsonl`, KV, the GENERATED EFFECTS MODULE) is
 isolated per test, but the COMPILE MEMO is shared via
 `TIDEPOOL_COMPILE_CACHE_DIR` pointed at the ambient cache dir — so the memo
@@ -312,7 +312,7 @@ PROPOSAL for the operator to pick from — nothing here is built.
 | 1 | **Extend `jit_surface`-style family bundling to remaining eval-lane crates/binaries** (runtime's `misc` (45 tests, 1 binary — untested in this sample, flagged for follow-up), `effect_stack` (117 tests, 1 binary — largest single GHC-heavy binary in the suite, highest-leverage single target), handlers' single-assertion binaries) using `compile_targets`'s N-in-one-spawn mode (§3) rather than folding checks into one flattened expression: N assertions → 1 spawn instead of N, ~free marginal cost per extra target. | Spawn count on consolidated binaries: N→~1 per family (up to ~95% cut on THOSE binaries specifically, mirroring jit_surface's already-proven 97→42 test-count cut, extended to also cut spawn count which the test-count cut alone did not). | High (mechanism proven in §3; pattern proven in §4) | Medium — needs per-binary judgment on which checks can share a module (name collisions, differing helper imports) | Low — same all-or-nothing-spawn contract already accepted for existing family bundles; a broken check in a shared module fails the WHOLE spawn (root CLAUDE.md's known tradeoff, not new) |
 | 2 | **Pilot nextest setup scripts on one already-consolidated binary** (§5c) to validate the `$NEXTEST_ENV` → `TIDEPOOL_COMPILE_CACHE_DIR` handoff end to end, before wider adoption. | Removes the FIRST-test-in-binary cold-compile tax across a binary's own tests (marginal — the memo already serves 2nd+ identical compiles); real value is validating the mechanism for future binaries, not a big standalone number. | Medium (mechanism works per docs; unproven end to end in this repo) | Low (one pilot, config-gated behind `experimental`) | Medium — experimental nextest feature; config change is out of THIS lane's boundary, needs its own follow-up lane |
 | 3 | **Nothing to do for session-scoped turn compiles** (harness/repl turn lanes, 63–71% of their sampled spawns) via test consolidation — call this out explicitly rather than let it silently eat the 90% target. Making the session lane cacheable (widening the compile-memo's argv allowlist to admit `--session-root`/`--inject-val` under some narrower "same session generation, same content" key) is the ONLY lever besides reducing turn COUNT per test. | If solved: could recover most of the 41% session-scoped share of sampled wall time (296.7s of 712.0s sampled). If NOT solved: session-scoped compiles remain an unavoidable per-turn tax regardless of any test restructuring. | N/A — sizing only, not proposing to build | **Sizing:** widening the memo key to admit session state safely means keying on the INJECTED VAL MODULE'S CONTENT (not its path — the same content-addressed, path-independent trick already used for
-`--include` dirs, per `tidepool-runtime/CLAUDE.md`'s "Compile cache" section)
+`--include` dirs, per `tidepool/runtime/CLAUDE.md`'s "Compile cache" section)
 rather than the session-root PATH. This is a real design task (a session's `Val.G<g>` content changes every generation, so the key would need to hash the actual injected module bytes, not treat the flag as categorically uncacheable) — roughly comparable scope to the ORIGINAL compile-memo lane itself (a full plan doc, a keying decision, adversarial tests). NOT a quick win; explicitly flagged as the standing hazard per the boundary's "explicit call" requirement. |
 | 4 | **Reduce turns-per-test in multi-turn harness acceptance tests** (`acceptance_cross_turn`'s pattern: 10 tests, 49 spawns, ~5/test) where the assertion under test doesn't actually need EVERY intermediate turn to be a full separate spawn — e.g. combining a decl-then-use sequence into fewer turns where the property being tested survives. | Test-specific; not sized in aggregate (needs per-test judgment on whether turn count is incidental or essential to the property under test — several of these tests are EXPLICITLY testing turn-to-turn behavior, so reducing turns would test something else). | Low confidence as a blanket rule | High (needs reading each test's actual intent) | High — risks silently changing what a cross-turn test proves; flagged as LOWEST priority for exactly this reason |
 | 5 | **Setup-script-driven stdlib/effects-module SHARING across processes** (§5d) — a read-only fixture for stdlib materialization if it's shown to be a real cost. | Small, unmeasured (§5d) | Low (not directly measured) | Low once measured | Low — filesystem-only, doesn't touch compile correctness |

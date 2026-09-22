@@ -3,7 +3,7 @@
 Status: the actor substrate and persistent reply/watch vertical are landed.
 The `Complete`/interactive `AgentAction` portions later in this document are a
 superseded design record; the current contract lives in
-`tidepool-actor/src/request.rs` and `tidepool-actor/CLAUDE.md`, and the
+`exomonad/actor/src/request.rs` and `exomonad/actor/CLAUDE.md`, and the
 current inventory is [implementation status](implementation.md). The older
 process-fork-shaped `forkActors` discussion is refined by
 [cache-preserving context unfold](../../SHOAL.md#cache-preserving-context-unfold),

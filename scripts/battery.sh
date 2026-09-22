@@ -19,7 +19,7 @@
 # start_battery_daemon/teardown_battery_daemon. Failure to connect needs no
 # handling here: ExtractCmd::run() safely falls back before submission. A
 # failure after submission is surfaced rather than replayed and duplicating
-# an in-flight GHC compile (tidepool-extract-cmd/CLAUDE.md).
+# an in-flight GHC compile (tidepool/extract-cmd/CLAUDE.md).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 

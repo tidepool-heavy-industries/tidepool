@@ -72,7 +72,7 @@ the notebook: a tool or an after-tool slot is compiled once when it is installed
 and every later call runs retained machine code, so the same Jev-backed judgment
 that costs you a compile as a cell costs a few hundred milliseconds as a tool.
 
-The [Jev skill](examples/shoal-workspace/.shoal/skills/shoal-jev/SKILL.md) covers
+The [Jev skill](exomonad/examples/workspace/.shoal/skills/shoal-jev/SKILL.md) covers
 per-item question batteries, choices carrying executable actions, policies for
 settling an answer, and reading uncertainty. The [TypeSafe cookbooks](https://docs.typesafe.ai/patterns) are a
 rich source of things to try: semantic search, structured extraction, multi-path
@@ -91,7 +91,7 @@ The inspiration is **XMonad and `xmonad.hs`**: configure and extend your working
 environment in the language you use to operate it.
 
 A project’s `.shoal/` package contains Haskell modules, configuration, prompts,
-and skills. Start from the [example package](examples/shoal-workspace/README.md),
+and skills. Start from the [example package](exomonad/examples/workspace/README.md),
 then reshape it around your project. Choose the models, write your coordination
 rules, add useful functions. Experiment live; save the good parts as source for
 the next run. The package is captured at launch, and an agent that edits its
@@ -183,7 +183,7 @@ running keeps the code it started with. A reload that would change a tool's
 name, description or schema is refused with the difference: the tool list is
 registered once per session, so a changed surface waits for the agent's next
 incarnation and the prompt already sent is never rewritten. The
-[agent spec skill](examples/shoal-workspace/.shoal/skills/shoal-agent-spec/SKILL.md)
+[agent spec skill](exomonad/examples/workspace/.shoal/skills/shoal-agent-spec/SKILL.md)
 has the details.
 
 An agent can use ordinary shell tools or write reusable command values:
@@ -238,8 +238,8 @@ A fork inherits a snapshot, not future messages. New decisions still need to rea
 workers. Copy-on-write shares unchanged artifacts; new builds and writes still
 cost RAM and disk. Set limits appropriate to your machine.
 
-The [actor guide](examples/shoal-workspace/.shoal/skills/shoal-define-actors/SKILL.md)
-and [orchestration skill](examples/shoal-workspace/.shoal/skills/shoal-orchestrate/SKILL.md)
+The [actor guide](exomonad/examples/workspace/.shoal/skills/shoal-define-actors/SKILL.md)
+and [orchestration skill](exomonad/examples/workspace/.shoal/skills/shoal-orchestrate/SKILL.md)
 show how to compose these pieces. The supplied workflow is a starting point.
 A single agent with powerful cells, a collection of semantic background actors,
 or an experiment unrelated to coding swarms can use the same substrate.
@@ -252,7 +252,7 @@ interface. Authenticate that client before starting model work. For Jev, set
 `TYPESAFE_API_KEY` in the environment before launching Shoal. The Jev operators
 are [jev-dsl](https://github.com/inanna-malick/jev-dsl), compiled from the
 revision your project's `flake.nix` pins; `shoal new` writes that pin, and the
-[workspace setup guide](examples/shoal-workspace/README.md) explains it.
+[workspace setup guide](exomonad/examples/workspace/README.md) explains it.
 
 Build the matching host, extractor, and client from this checkout:
 
@@ -308,7 +308,7 @@ nix.settings.trusted-public-keys = [
 
 Configure a systemd user slice with finite RAM and swap limits appropriate to
 your machine. Shoal defaults to `swarm.slice` and checks placement before running
-payloads. Follow the [workspace setup guide](examples/shoal-workspace/README.md)
+payloads. Follow the [workspace setup guide](exomonad/examples/workspace/README.md)
 for the project package and aggregate resource boundary.
 
 From the repository you want to work on:
@@ -388,12 +388,12 @@ experiments, feeding the failures back into the interface.
 ### Extend the surface
 
 Write project functions and actors in Haskell. Add a
-[Haskell-backed tool](examples/shoal-workspace/.shoal/skills/shoal-command/references/hosted-tools.md)
+[Haskell-backed tool](exomonad/examples/workspace/.shoal/skills/shoal-command/references/hosted-tools.md)
 to the agent spec when a program should also be available through a tool
 interface. For a new
 host capability, define the effect contract in
-[`tidepool-protocol`](tidepool-protocol/README.md) and implement its Rust handler
-in [`tidepool-handlers`](tidepool-handlers/). Generated bindings connect the sides.
+[`tidepool-protocol`](bridge/protocol/README.md) and implement its Rust handler
+in [`tidepool-handlers`](bridge/handlers/). Generated bindings connect the sides.
 
 ## Status and development
 
@@ -433,11 +433,11 @@ for active work. The main implementation areas are:
 
 | Area | Source |
 | --- | --- |
-| Haskell library and extractor | [`haskell/`](haskell/) |
-| Prepared execution and resident state | [`tidepool-codegen/`](tidepool-codegen/), [`tidepool-runtime/`](tidepool-runtime/) |
-| Actors and workbench | [`tidepool-actor/`](tidepool-actor/) |
-| Processes, resource controls, worktrees | [`tidepool-node/`](tidepool-node/), [`tidepool-worktree/`](tidepool-worktree/) |
-| Providers and Shoal host | [`tidepool-agent/`](tidepool-agent/), [`tidepool/`](tidepool/) |
+| Haskell library and extractor | [`bridge/haskell/`](bridge/haskell/) |
+| Prepared execution and resident state | [`tidepool/codegen/`](tidepool/codegen/), [`tidepool/runtime/`](tidepool/runtime/) |
+| Actors and workbench | [`exomonad/actor/`](exomonad/actor/) |
+| Processes, resource controls, worktrees | [`exomonad/node/`](exomonad/node/), [`exomonad/worktree/`](exomonad/worktree/) |
+| Providers and Shoal host | [`exomonad/agent/`](exomonad/agent/), [`tidepool/`](tidepool/) |
 
 Use focused checks while developing:
 

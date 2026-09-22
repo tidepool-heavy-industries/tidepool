@@ -33,7 +33,7 @@ and where to start. This file is the short form, with the mechanism index.
 
 | Area | Responsibility |
 |---|---|
-| `haskell/` | GHC-to-prepared-STG compiler worker and the Haskell stdlib |
+| `bridge/haskell/` | GHC-to-prepared-STG compiler worker and the Haskell stdlib |
 | `tidepool-repr` | Prepared execution schema, constructor metadata, CBOR, shared identifiers |
 | `tidepool-heap` | JIT heap layout and copying-GC primitives |
 | `tidepool-codegen` | Cranelift compiler and effect machine |
@@ -45,9 +45,9 @@ and where to start. This file is the short form, with the mechanism index.
 | `tidepool-agent` | Typed coding-agent backend boundary |
 | `tidepool-worktree` | Managed coding checkouts, repository observation, and journal |
 | `tidepool` | Public facade and composition-root binaries |
-| `harness-dogfooding/` | Authored harnesses, including the Haskell devswarm |
+| `exomonad/harness-dogfooding/` | Authored harnesses, including the Haskell devswarm |
 
-The retained `tidepool-harness/` and `tidepool-web/` source trees are historical
+The retained `exomonad/harness/` and `exomonad/web/` source trees are historical
 reference material and are excluded from the supported Cargo workspace.
 
 Small support crates have short local charters describing their exact scope.
@@ -83,7 +83,7 @@ Small support crates have short local charters describing their exact scope.
 | declared tool surface comparison | `tidepool-tool::surface` |
 | source layers: capture, typecheck, publication, drift | `tidepool::shoal::source` |
 | Jev operators | pinned `jev-dsl` flake input; never vendored |
-| effect and error definitions | `tidepool-protocol` and unmigrated definitions in `tidepool-mcp/src/effect_defs.rs` |
+| effect and error definitions | `tidepool-protocol` and unmigrated definitions in `bridge/mcp/src/effect_defs.rs` |
 
 ## Build and test
 
@@ -125,7 +125,7 @@ carry another assertion. Expensive and known-bug ignored tests remain explicit
 opt-ins rather than part of `just verify`.
 
 After changing extractor translation or serialization, run
-`just fixtures-check` or `just fixtures-update`. Follow `haskell/CLAUDE.md`
+`just fixtures-check` or `just fixtures-update`. Follow `bridge/haskell/CLAUDE.md`
 for deployment of the extractor and standard library.
 
 ## Architectural invariants

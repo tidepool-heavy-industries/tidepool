@@ -23,8 +23,8 @@ EXTRACTOR_FREE = (
 # Retained reference source has no supported build or test obligation.
 RETIRED_SOURCES = (
     Path("tidepool-harness"), Path("tidepool-web"),
-    Path("tidepool/src/bin/tidepool-selfharness.rs"),
-    Path("tidepool/src/bin/tidepool-selfharness"),
+    Path("bridge/facade/src/bin/tidepool-selfharness.rs"),
+    Path("bridge/facade/src/bin/tidepool-selfharness"),
 )
 
 
@@ -43,7 +43,7 @@ class CheckObligation(IntEnum):
 
 def cabal_components(root, changed):
     """Derive source ownership from Cabal's component declarations."""
-    manifest = root / "haskell/tidepool-extract.cabal"
+    manifest = root / "bridge/haskell/tidepool-extract.cabal"
     try:
         text = manifest.read_text()
     except OSError:
@@ -89,7 +89,7 @@ def cabal_embedded_library_source_changes(manifest, changed):
     patterns = [entry for line in extra_sources[1].splitlines()
                 for entry in re.split(r"[,\s]+", line.split("--", 1)[0].strip()) if entry]
     haskell_changes = [Path(path).relative_to("haskell") for path in changed
-                       if Path(path).is_relative_to("haskell/lib")]
+                       if Path(path).is_relative_to("bridge/haskell/lib")]
     return any(path.match(pattern) for path in haskell_changes for pattern in patterns)
 
 
@@ -125,10 +125,10 @@ def select(metadata, changed, root):
         if path in ("Cargo.toml", "Cargo.lock", "flake.nix", "flake.lock", "rust-toolchain.toml", "justfile") or path.startswith((".cargo/", ".config/", "scripts/", "dev/")):
             reasons.add(path)
             continue
-        if path.startswith("haskell/"):
+        if path.startswith("bridge/haskell/"):
             if file.suffix in (".hs", ".cabal", ".cbor", ".json") or file.name.startswith("cabal.project"):
                 actions.add("haskell")
-                if path.startswith(("haskell/src/", "haskell/app/", "haskell/lib/", "haskell/test/", "haskell/test-prepared-stg/", "haskell/test-execution-corpus/")):
+                if path.startswith(("bridge/haskell/src/", "bridge/haskell/app/", "bridge/haskell/lib/", "bridge/haskell/test/", "bridge/haskell/test-prepared-stg/", "bridge/haskell/test-execution-corpus/")):
                     actions.add("fixtures")
                 all_tests("tidepool-runtime")
             continue
@@ -167,14 +167,14 @@ def select(metadata, changed, root):
     # Compiler and schema boundaries require the full structural corpus. An
     # ordinary library edit can use the worker's consumed-source evidence.
     try:
-        cabal_manifest = (root / "haskell/tidepool-extract.cabal").read_text()
+        cabal_manifest = (root / "bridge/haskell/tidepool-extract.cabal").read_text()
     except OSError:
         cabal_manifest = ""
-    structural = (any(path.startswith(("haskell/src/", "haskell/app/", "tidepool-repr/src/", "tidepool-protocol/src/")) and Path(path).suffix != ".md" for path in changed)
+    structural = (any(path.startswith(("bridge/haskell/src/", "bridge/haskell/app/", "tidepool/repr/src/", "bridge/protocol/src/")) and Path(path).suffix != ".md" for path in changed)
                   or cabal_embedded_library_source_changes(cabal_manifest, changed))
     if structural:
         actions.add("fixtures")
-    elif "fixtures" in actions and all(path.startswith("haskell/lib/") or Path(path).suffix == ".md" for path in changed):
+    elif "fixtures" in actions and all(path.startswith("bridge/haskell/lib/") or Path(path).suffix == ".md" for path in changed):
         cohorts = affected_fixtures(root / "target/prepared-corpus/dependencies.json", changed, root)
         if cohorts is not None:
             actions.remove("fixtures")

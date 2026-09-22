@@ -7,7 +7,7 @@
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-contract_dir="haskell/test-prepared-stg"
+contract_dir="bridge/haskell/test-prepared-stg"
 manifest="$contract_dir/probe-opacity-manifest.json"
 
 work="$(mktemp -d)"

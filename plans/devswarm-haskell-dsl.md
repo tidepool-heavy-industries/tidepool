@@ -2,7 +2,7 @@
 
 ## Status
 
-This is the earlier self-harness design for `harness-dogfooding/devswarm/`.
+This is the earlier self-harness design for `exomonad/harness-dogfooding/devswarm/`.
 It is not the current Shoal implementation plan or a live campaign assignment.
 [NEXT.md](../NEXT.md) owns
 the current direction: Astra-authored plans, Sol execution and tagged Astra work,
@@ -105,7 +105,7 @@ functions over paths, task text, reports, or any other useful local data.
 
 ## Implemented slice
 
-- `harness-dogfooding/devswarm/Harness.hs` is a runnable selfharness entrypoint.
+- `exomonad/harness-dogfooding/devswarm/Harness.hs` is a runnable selfharness entrypoint.
 - Its checkpointed `State` is only a compatibility seed plus last rendered
   outcome; it is not the orchestration graph or a serialized continuation.
 - `DevSwarm.Types` contains pure owner briefs and outcome sums/products.

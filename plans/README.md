@@ -65,7 +65,7 @@ are not current assignments.
   actor, request and residency design references, and the maintained
   landed-versus-pending inventory. The request/reply/watch contract and
   cache-preserving context unfold they once specified have landed; their
-  stable user contracts are in `SHOAL.md` and `tidepool-actor/CLAUDE.md`.
+  stable user contracts are in `SHOAL.md` and `exomonad/actor/CLAUDE.md`.
 - [Live values and authority](actor-model/live-values-and-authority.md):
   same-machine value transfer, caller identity, launch grants, and the
   distinction between invoking a closure and calling an actor.
@@ -82,7 +82,7 @@ are not current assignments.
   a brainstorm of resident-Haskell experiments to try in a campaign, not a
   proposal to ship another DSL.
 - [DevSwarm](devswarm-haskell-dsl.md): the earlier self-harness design for
-  `harness-dogfooding/devswarm/`; `NEXT.md` owns the current direction.
+  `exomonad/harness-dogfooding/devswarm/`; `NEXT.md` owns the current direction.
 
 ## Carried-forward one-liners
 
@@ -103,9 +103,9 @@ Small still-open items whose originating plan doc has been retired:
 - **#24 (stdlib-vs-generator ownership, the standing one-home rule for what
   the generator owns vs. the stdlib vs. verb libraries) — first act landed,
   the rest still open.** `Ask`'s pure `isOpt`/`innerSchema`/`schemaToValue`/
-  `data Schema` (`tidepool-protocol/src/effects/ask.rs`'s motivating case)
+  `data Schema` (`bridge/protocol/src/effects/ask.rs`'s motivating case)
   moved from `effect_defs.rs`'s decl `type_defs`/`helpers` into
-  `haskell/lib/Tidepool/Form/Schema.hs`, auto-imported via
+  `bridge/haskell/lib/Tidepool/Form/Schema.hs`, auto-imported via
   `extra_imports_for!(Ask)`; `Ask`'s decl block is now just `ask`'s own thin
   verb wrapper. The generator flip itself did NOT happen and still can't:
   `ask` calls `schemaToValue` directly rather than a bare `send (Ctor …)`,
@@ -129,11 +129,11 @@ Small still-open items whose originating plan doc has been retired:
   file path by hand; a Shoal session's workspace binding lock is keyed on
   the worktree path, not the session name, so several distinctly-named
   sessions cannot launch concurrently against one shared `--workspace`
-  (`tidepool-worktree/src/binding.rs`) — the second session gets a hard
+  (`exomonad/worktree/src/binding.rs`) — the second session gets a hard
   storage-failure error, not a queue.
 - `doc <topic>` now names the covering skill on a refusal (fixed), but a
   few 2026-09-17 lab findings were not reverified before this prune:
-  `renderGitOid` (exported at `haskell/lib/Tidepool/Worktree.hs:131`)
+  `renderGitOid` (exported at `bridge/haskell/lib/Tidepool/Worktree.hs:131`)
   reportedly came back `no match` from `lookup`; `R.start`/`R.client` came
   back tagged `[unknown]` because their `Derive`/`Generic`/`GActor`
   constraints don't fit the `Member X effs` shape lookup classifies by; and

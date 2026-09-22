@@ -96,7 +96,7 @@ jq -n \
 effects_generator="$(dirname "$built_runner")/test-effects-core"
 effects_core="$("$prepared_runner" effects-core "$("$effects_generator")")"
 
-metadata="$repo_root/haskell/test/suite_cbor/meta.cbor"
+metadata="$repo_root/bridge/haskell/test/suite_cbor/meta.cbor"
 
 assert_contract_report() {
   local cohort="$1"
@@ -188,17 +188,17 @@ assert_suite_report() {
   }
 }
 
-jq -r '.source_tops[]' "$repo_root/tidepool-prepared-corpus/fixtures/prepared-corpus-expectations.json" \
+jq -r '.source_tops[]' "$repo_root/tidepool/prepared-corpus/fixtures/prepared-corpus-expectations.json" \
   | LC_ALL=C sort >"$suite_targets"
 suite_count="$(wc -l <"$suite_targets" | tr -d '[:space:]')"
-priority_source="$repo_root/haskell/test-prepared-stg/ProjectWorkCandidate.hs"
+priority_source="$repo_root/bridge/haskell/test-prepared-stg/ProjectWorkCandidate.hs"
 priority_include="$priority_root/source"
 mkdir -p "$priority_include/Project"
-ln -s "$repo_root/tidepool/src/actor_host/fixtures/project/Work.hs" \
+ln -s "$repo_root/bridge/facade/src/actor_host/fixtures/project/Work.hs" \
   "$priority_include/Project/Work.hs"
-ln -s "$repo_root/tidepool/src/actor_host/fixtures/project/Types.hs" \
+ln -s "$repo_root/bridge/facade/src/actor_host/fixtures/project/Types.hs" \
   "$priority_include/Project/Types.hs"
-actor_source="$repo_root/haskell/test-prepared-stg/AwaitSettledDependencies.hs"
+actor_source="$repo_root/bridge/haskell/test-prepared-stg/AwaitSettledDependencies.hs"
 projection_requests=()
 registered_cohorts=()
 queue_projection() {
@@ -211,37 +211,37 @@ queue_projection() {
 }
 queue_projection suite \
   --metadata-targets 'con_left con_right con_just con_nothing showInt' \
-  --all-tops "$repo_root/haskell/test/Suite.hs" Suite "$suite_targets" "$suite_root" \
-  "$repo_root/haskell/lib"
+  --all-tops "$repo_root/bridge/haskell/test/Suite.hs" Suite "$suite_targets" "$suite_root" \
+  "$repo_root/bridge/haskell/lib"
 queue_projection project-work-candidate \
   "$priority_source" ProjectWorkCandidate \
-  "$repo_root/haskell/test-prepared-stg/ProjectWorkCandidateTargets" "$priority_root" \
-  "$repo_root/haskell/lib" "$priority_include"
+  "$repo_root/bridge/haskell/test-prepared-stg/ProjectWorkCandidateTargets" "$priority_root" \
+  "$repo_root/bridge/haskell/lib" "$priority_include"
 queue_projection agent-watch-await-settled \
   "$actor_source" AwaitSettledDependencies \
-  "$repo_root/haskell/test-prepared-stg/AwaitSettledDependenciesTargets" \
-  "$actor_root" "$repo_root/haskell/lib" "$effects_core"
+  "$repo_root/bridge/haskell/test-prepared-stg/AwaitSettledDependenciesTargets" \
+  "$actor_root" "$repo_root/bridge/haskell/lib" "$effects_core"
 queue_projection recovered-base-contract \
-  "$repo_root/haskell/test-prepared-stg/RecoveredBody.hs" RecoveredBody \
-  "$repo_root/haskell/test-prepared-stg/RecoveredBodyTargets" "$recovered_root" \
-  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+  "$repo_root/bridge/haskell/test-prepared-stg/RecoveredBody.hs" RecoveredBody \
+  "$repo_root/bridge/haskell/test-prepared-stg/RecoveredBodyTargets" "$recovered_root" \
+  "$repo_root/bridge/haskell/lib" "$repo_root/bridge/haskell/test-prepared-stg"
 queue_projection formatting-execution-contract \
-  "$repo_root/haskell/test-prepared-stg/FormattingExecutionContract.hs" FormattingExecutionContract \
-  "$repo_root/haskell/test-prepared-stg/FormattingExecutionTargets" "$formatting_root" \
-  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+  "$repo_root/bridge/haskell/test-prepared-stg/FormattingExecutionContract.hs" FormattingExecutionContract \
+  "$repo_root/bridge/haskell/test-prepared-stg/FormattingExecutionTargets" "$formatting_root" \
+  "$repo_root/bridge/haskell/lib" "$repo_root/bridge/haskell/test-prepared-stg"
 queue_projection formatting-dependency-shadow \
-  "$repo_root/haskell/test-prepared-stg/FormattingDependencyShadow.hs" FormattingDependencyShadow \
-  "$repo_root/haskell/test-prepared-stg/FormattingDependencyShadowTargets" "$formatting_shadow_root" \
-  "$repo_root/haskell/test-prepared-stg/formatting-dependency-shadow" \
-  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+  "$repo_root/bridge/haskell/test-prepared-stg/FormattingDependencyShadow.hs" FormattingDependencyShadow \
+  "$repo_root/bridge/haskell/test-prepared-stg/FormattingDependencyShadowTargets" "$formatting_shadow_root" \
+  "$repo_root/bridge/haskell/test-prepared-stg/formatting-dependency-shadow" \
+  "$repo_root/bridge/haskell/lib" "$repo_root/bridge/haskell/test-prepared-stg"
 queue_projection fingerprint-execution-contract \
-  "$repo_root/haskell/test-prepared-stg/FingerprintExecutionContract.hs" FingerprintExecutionContract \
-  "$repo_root/haskell/test-prepared-stg/FingerprintExecutionTargets" "$fingerprint_root" \
-  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+  "$repo_root/bridge/haskell/test-prepared-stg/FingerprintExecutionContract.hs" FingerprintExecutionContract \
+  "$repo_root/bridge/haskell/test-prepared-stg/FingerprintExecutionTargets" "$fingerprint_root" \
+  "$repo_root/bridge/haskell/lib" "$repo_root/bridge/haskell/test-prepared-stg"
 queue_projection time-intrinsic-contract \
-  "$repo_root/haskell/test-prepared-stg/TimeIntrinsicContract.hs" TimeIntrinsicContract \
-  "$repo_root/haskell/test-prepared-stg/TimeIntrinsicTargets" "$time_root" \
-  "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+  "$repo_root/bridge/haskell/test-prepared-stg/TimeIntrinsicContract.hs" TimeIntrinsicContract \
+  "$repo_root/bridge/haskell/test-prepared-stg/TimeIntrinsicTargets" "$time_root" \
+  "$repo_root/bridge/haskell/lib" "$repo_root/bridge/haskell/test-prepared-stg"
 for cohort_module in ContainersContract BignumContract UserTypesContract TextContract; do
   case "$cohort_module" in
     ContainersContract) cohort_root="$containers_root" ;;
@@ -250,9 +250,9 @@ for cohort_module in ContainersContract BignumContract UserTypesContract TextCon
     TextContract) cohort_root="$text_root" ;;
   esac
   queue_projection "$(basename "$cohort_root")" \
-    "$repo_root/haskell/test-prepared-stg/${cohort_module}.hs" "$cohort_module" \
-    "$repo_root/haskell/test-prepared-stg/${cohort_module}Targets" "$cohort_root" \
-    "$repo_root/haskell/lib" "$repo_root/haskell/test-prepared-stg"
+    "$repo_root/bridge/haskell/test-prepared-stg/${cohort_module}.hs" "$cohort_module" \
+    "$repo_root/bridge/haskell/test-prepared-stg/${cohort_module}Targets" "$cohort_root" \
+    "$repo_root/bridge/haskell/lib" "$repo_root/bridge/haskell/test-prepared-stg"
 done
 for requested_cohort in "${selected_cohorts[@]}"; do
   found=false
@@ -280,7 +280,7 @@ elif ! cmp -s "$suite_root/meta.cbor" "$metadata"; then
   exit 1
 fi
 suite_report="$suite_root/results.json"
-suite_oracle="$repo_root/tidepool-prepared-corpus/fixtures/prepared-corpus-expectations.json"
+suite_oracle="$repo_root/tidepool/prepared-corpus/fixtures/prepared-corpus-expectations.json"
 echo "==> checking the generated Suite oracle against this manifest"
 "$repo_root/scripts/prepared-corpus-oracle.sh" check "$suite_root/manifest.json"
 jq -e '.source_tops | type == "array"' "$suite_oracle" >/dev/null || {
@@ -304,7 +304,7 @@ echo "==> checking prepared priority Project.Work.candidate structural probe"
 priority_report="$priority_root/results.json"
 "$prepared_runner" run \
   "$priority_root/manifest.json" \
-  "$repo_root/haskell/test-prepared-stg/ProjectWorkCandidateExpectations.json" "$metadata" \
+  "$repo_root/bridge/haskell/test-prepared-stg/ProjectWorkCandidateExpectations.json" "$metadata" \
   "$priority_root/results.json"
 assert_contract_report priority-project-work 1 "$priority_root/results.json"
 
@@ -316,7 +316,7 @@ echo "==> checking prepared actor awaitSettled dependency probe"
 actor_report="$actor_root/results.json"
 "$prepared_runner" run \
   "$actor_root/manifest.json" \
-  "$repo_root/haskell/test-prepared-stg/AwaitSettledDependenciesExpectations.json" "$metadata" \
+  "$repo_root/bridge/haskell/test-prepared-stg/AwaitSettledDependenciesExpectations.json" "$metadata" \
   "$actor_root/results.json"
 assert_contract_report actor-await-settled-dependencies 1 "$actor_root/results.json"
 
@@ -329,7 +329,7 @@ echo "==> checking prepared recovered base-call contract (1 target)"
 recovered_report="$recovered_root/results.json"
 "$prepared_runner" run \
   "$recovered_root/manifest.json" \
-  "$repo_root/haskell/test-prepared-stg/RecoveredBodyExpectations.json" \
+  "$repo_root/bridge/haskell/test-prepared-stg/RecoveredBodyExpectations.json" \
   "$metadata" "$recovered_root/results.json"
 assert_contract_report recovered-base 1 "$recovered_root/results.json"
 
@@ -341,7 +341,7 @@ echo "==> checking prepared formatting execution contract (5 targets)"
 formatting_report="$formatting_root/results.json"
 "$prepared_runner" run \
   "$formatting_root/manifest.json" \
-  "$repo_root/haskell/test-prepared-stg/FormattingExecutionExpectations.json" \
+  "$repo_root/bridge/haskell/test-prepared-stg/FormattingExecutionExpectations.json" \
   "$metadata" "$formatting_root/results.json"
 assert_contract_report formatting-execution 5 "$formatting_root/results.json"
 
@@ -353,7 +353,7 @@ echo "==> checking prepared formatting dependency-shadow contract (1 target)"
 formatting_shadow_report="$formatting_shadow_root/results.json"
 "$prepared_runner" run \
   "$formatting_shadow_root/manifest.json" \
-  "$repo_root/haskell/test-prepared-stg/FormattingDependencyShadowExpectations.json" \
+  "$repo_root/bridge/haskell/test-prepared-stg/FormattingDependencyShadowExpectations.json" \
   "$metadata" "$formatting_shadow_root/results.json"
 assert_contract_report formatting-dependency-shadow 1 "$formatting_shadow_root/results.json"
 
@@ -365,7 +365,7 @@ echo "==> checking prepared fingerprint execution contract (3 targets)"
 fingerprint_report="$fingerprint_root/results.json"
 "$prepared_runner" run \
   "$fingerprint_root/manifest.json" \
-  "$repo_root/haskell/test-prepared-stg/FingerprintExecutionExpectations.json" \
+  "$repo_root/bridge/haskell/test-prepared-stg/FingerprintExecutionExpectations.json" \
   "$metadata" "$fingerprint_root/results.json"
 assert_contract_report fingerprint-execution 3 "$fingerprint_root/results.json"
 
@@ -377,7 +377,7 @@ echo "==> checking prepared time intrinsic contract (4 targets)"
 time_report="$time_root/results.json"
 "$prepared_runner" run \
   "$time_root/manifest.json" \
-  "$repo_root/haskell/test-prepared-stg/TimeIntrinsicExpectations.json" \
+  "$repo_root/bridge/haskell/test-prepared-stg/TimeIntrinsicExpectations.json" \
   "$metadata" "$time_root/results.json"
 assert_contract_report time-intrinsic 4 "$time_root/results.json"
 
@@ -395,7 +395,7 @@ run_pure_cohort() {
   echo "==> checking prepared $cohort pure-eval cohort ($expected targets)"
   "$prepared_runner" run \
     "$root/manifest.json" \
-    "$repo_root/haskell/test-prepared-stg/${module}Expectations.json" \
+    "$repo_root/bridge/haskell/test-prepared-stg/${module}Expectations.json" \
     "$metadata" "$root/results.json"
   assert_contract_report "$cohort" "$expected" "$root/results.json"
 }

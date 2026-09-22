@@ -1,33 +1,33 @@
 [workspace]
 members = [
-    "jev-integration",
-    "tidepool-actor",
-    "tidepool-model-output",
-    "tidepool-model",
-    "tidepool-node",
-    "tidepool-tool",
-    "tidepool-repr",
-    "tidepool-bignum",
-    "tidepool-testing",
-    "tidepool-test-data",
-    "tidepool-prepared-corpus",
-    "tidepool-heap",
-    "tidepool-bridge",
-    "tidepool-bridge-derive",
-    "tidepool-bridge-effects",
-    "tidepool-effect",
-    "tidepool-extract-cmd",
-    "tidepool-extract-report",
-    "tidepool-atomic-write",
-    "tidepool-codegen",
-    "tidepool-toolchain",
-    "tidepool-runtime",
-    "tidepool-mcp",
-    "tidepool-protocol",
-    "tidepool-handlers",
-    "tidepool-worktree",
-    "tidepool-agent",
-    "tidepool",
+    "exomonad/jev-integration",
+    "exomonad/actor",
+    "exomonad/model-output",
+    "exomonad/model",
+    "exomonad/node",
+    "exomonad/tool",
+    "tidepool/repr",
+    "tidepool/bignum",
+    "bridge/testing",
+    "bridge/test-data",
+    "tidepool/prepared-corpus",
+    "tidepool/heap",
+    "tidepool/bridge",
+    "tidepool/bridge-derive",
+    "tidepool/bridge-effects",
+    "tidepool/effect",
+    "tidepool/extract-cmd",
+    "tidepool/extract-report",
+    "bridge/atomic-write",
+    "tidepool/codegen",
+    "tidepool/toolchain",
+    "tidepool/runtime",
+    "bridge/mcp",
+    "bridge/protocol",
+    "bridge/handlers",
+    "exomonad/worktree",
+    "exomonad/agent",
+    "bridge/facade",
 ]
 resolver = "2"
 
@@ -43,32 +43,32 @@ rust-version = "1.89"
 
 [workspace.dependencies]
 codex-shoal-protocol = { path = "vendor/codex/codex-rs/shoal-protocol" }
-tidepool-actor = { version = "0.1.0", path = "tidepool-actor" }
-tidepool-agent = { version = "0.1.0", path = "tidepool-agent" }
-tidepool-atomic-write = { path = "tidepool-atomic-write" }
-tidepool-bignum = { version = "0.1.0", path = "tidepool-bignum" }
-tidepool-bridge = { version = "0.1.0", path = "tidepool-bridge" }
-tidepool-bridge-derive = { version = "0.1.0", path = "tidepool-bridge-derive" }
-tidepool-bridge-effects = { version = "0.1.0", path = "tidepool-bridge-effects" }
-tidepool-codegen = { version = "0.1.0", path = "tidepool-codegen" }
-tidepool-effect = { version = "0.1.0", path = "tidepool-effect" }
-tidepool-extract-cmd = { version = "0.1.0", path = "tidepool-extract-cmd" }
-tidepool-extract-report = { version = "0.1.0", path = "tidepool-extract-report" }
-tidepool-handlers = { version = "0.1.0", path = "tidepool-handlers" }
-tidepool-heap = { version = "0.1.0", path = "tidepool-heap" }
-tidepool-mcp = { version = "0.1.0", path = "tidepool-mcp" }
-tidepool-model-output = { version = "0.1.0", path = "tidepool-model-output" }
-tidepool-model = { version = "0.1.0", path = "tidepool-model" }
-tidepool-node = { version = "0.1.0", path = "tidepool-node" }
-tidepool-tool = { version = "0.1.0", path = "tidepool-tool" }
-tidepool-protocol = { version = "0.1.0", path = "tidepool-protocol" }
-tidepool-repr = { version = "0.1.0", path = "tidepool-repr" }
-tidepool-runtime = { version = "0.1.0", path = "tidepool-runtime" }
-tidepool-testing = { path = "tidepool-testing" }
-tidepool-test-data = { path = "tidepool-test-data" }
-tidepool-prepared-corpus = { path = "tidepool-prepared-corpus" }
-tidepool-toolchain = { path = "tidepool-toolchain" }
-tidepool-worktree = { path = "tidepool-worktree" }
+tidepool-actor = { version = "0.1.0", path = "exomonad/actor" }
+tidepool-agent = { version = "0.1.0", path = "exomonad/agent" }
+tidepool-atomic-write = { path = "bridge/atomic-write" }
+tidepool-bignum = { version = "0.1.0", path = "tidepool/bignum" }
+tidepool-bridge = { version = "0.1.0", path = "tidepool/bridge" }
+tidepool-bridge-derive = { version = "0.1.0", path = "tidepool/bridge-derive" }
+tidepool-bridge-effects = { version = "0.1.0", path = "tidepool/bridge-effects" }
+tidepool-codegen = { version = "0.1.0", path = "tidepool/codegen" }
+tidepool-effect = { version = "0.1.0", path = "tidepool/effect" }
+tidepool-extract-cmd = { version = "0.1.0", path = "tidepool/extract-cmd" }
+tidepool-extract-report = { version = "0.1.0", path = "tidepool/extract-report" }
+tidepool-handlers = { version = "0.1.0", path = "bridge/handlers" }
+tidepool-heap = { version = "0.1.0", path = "tidepool/heap" }
+tidepool-mcp = { version = "0.1.0", path = "bridge/mcp" }
+tidepool-model-output = { version = "0.1.0", path = "exomonad/model-output" }
+tidepool-model = { version = "0.1.0", path = "exomonad/model" }
+tidepool-node = { version = "0.1.0", path = "exomonad/node" }
+tidepool-tool = { version = "0.1.0", path = "exomonad/tool" }
+tidepool-protocol = { version = "0.1.0", path = "bridge/protocol" }
+tidepool-repr = { version = "0.1.0", path = "tidepool/repr" }
+tidepool-runtime = { version = "0.1.0", path = "tidepool/runtime" }
+tidepool-testing = { path = "bridge/testing" }
+tidepool-test-data = { path = "bridge/test-data" }
+tidepool-prepared-corpus = { path = "tidepool/prepared-corpus" }
+tidepool-toolchain = { path = "tidepool/toolchain" }
+tidepool-worktree = { path = "exomonad/worktree" }
 
 axum = "0.8"
 blake3 = "1"

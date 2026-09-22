@@ -45,40 +45,40 @@ tidepool # Communicates via JSON-RPC over stdio
 
 There are two paths today, depending on whether the effect you're touching
 has migrated to the schema-driven scaffold yet
-(`tidepool-protocol/src/effects/` — most effects have, and
+(`bridge/protocol/src/effects/` — most effects have, and
 `tidepool_protocol::effects::all()` is the current set; the few that remain
-are the macros in `tidepool-mcp/src/effect_defs.rs`).
+are the macros in `bridge/mcp/src/effect_defs.rs`).
 
 - **Schema-driven (migrated effects):** the effect's truth lives as data in
-  `tidepool-protocol/src/effects/<effect>.rs` (a `schema::Effect` value), and
+  `bridge/protocol/src/effects/<effect>.rs` (a `schema::Effect` value), and
   `tidepool-protocol-gen` (the crate's `[[bin]]`) projects it into the macro
   DSL, wire mirrors, extractor verb tables, and harness classification lists
   that used to be hand-maintained separately. Edit the schema, regenerate,
   and the golden byte-compatibility check catches drift — see
-  `tidepool-protocol/README.md`'s "How to change it" section for the
+  `bridge/protocol/README.md`'s "How to change it" section for the
   migration procedure.
 - **Legacy (everything else):** still declared by hand in
-  `tidepool-mcp/src/effect_defs.rs`. Each effect is one `<effect>_effect_def!`
+  `bridge/mcp/src/effect_defs.rs`. Each effect is one `<effect>_effect_def!`
   block; two projections generate the effect declaration builder and the
   Rust `<Eff>Req` enum + handler dispatch from it. Add, remove, or reorder an
   effect by editing that file, then write the handler method the dispatch
-  arm calls — see `tidepool-mcp/CLAUDE.md` (how to add an effect) and
-  `tidepool-handlers/CLAUDE.md` (handler arms, `cx.respond*` variants).
+  arm calls — see `bridge/mcp/CLAUDE.md` (how to add an effect) and
+  `bridge/handlers/CLAUDE.md` (handler arms, `cx.respond*` variants).
 
 New effects should generally target the schema-driven path going forward —
 see the Effect Protocol PRD linked from `plans/README.md`.
 
 ## Adding Prelude Functions
 
-When adding or modifying functions in `haskell/lib/Tidepool/Prelude.hs`, keep the following in mind:
+When adding or modifying functions in `bridge/haskell/lib/Tidepool/Prelude.hs`, keep the following in mind:
 
 - **Dictionary polymorphism runs on the JIT**: custom classes, multi-param classes, and GADT type-indexed dispatch all compile and execute — write the polymorphic version by default.
-- **Surface shadows are the exception**: a few functions deliberately differ from base Prelude for runtime integration (for example `round`, while `show :: Render a => a -> String` retains the conventional result type but uses the stable renderer), not as a general pattern to follow. See `haskell/CLAUDE.md`'s "Adding new Prelude functions" section for the enforcement mechanism (`tidepool-runtime/tests/jit_surface.rs`).
+- **Surface shadows are the exception**: a few functions deliberately differ from base Prelude for runtime integration (for example `round`, while `show :: Render a => a -> String` retains the conventional result type but uses the stable renderer), not as a general pattern to follow. See `bridge/haskell/CLAUDE.md`'s "Adding new Prelude functions" section for the enforcement mechanism (`tidepool/runtime/tests/jit_surface.rs`).
 
 ## Testing Approach
 
 - **Rust Tests**: Use unit tests and integration tests in the `tests/` directory of each crate.
-- **Haskell Integration Tests**: Add test cases to `haskell/test/Suite.hs`. The prepared-STG corpus compiles and verifies them through `scripts/prepared-corpus.sh` and `tidepool-prepared-corpus`.
+- **Haskell Integration Tests**: Add test cases to `bridge/haskell/test/Suite.hs`. The prepared-STG corpus compiles and verifies them through `scripts/prepared-corpus.sh` and `tidepool-prepared-corpus`.
 - **Property-Based Testing**: Use `proptest` for complex logic like the bridge conversion and the JIT machine state transitions.
 
 ## Code Style

@@ -24,19 +24,19 @@ extract_has_usage_banner() {
 
 # Print the worktree source inputs compiled into tidepool-extract-bin. The five
 # library modules are embedded by Template Haskell in the internal library;
-# ordinary haskell/lib modules are loaded later by the worker and must not make
+# ordinary bridge/haskell/lib modules are loaded later by the worker and must not make
 # the binary permanently appear stale. Keep both freshness callers on this one
 # boundary.
 tidepool_extract_worker_sources() {
   printf '%s\n' \
-    "$PWD/haskell/src" \
-    "$PWD/haskell/app" \
-    "$PWD/haskell/tidepool-extract.cabal" \
-    "$PWD/haskell/lib/Tidepool/Aeson/Scientific.hs" \
-    "$PWD/haskell/lib/Tidepool/Aeson/Value.hs" \
-    "$PWD/haskell/lib/Tidepool/Command/Types.hs" \
-    "$PWD/haskell/lib/Tidepool/Data/Time.hs" \
-    "$PWD/haskell/lib/Tidepool/Double.hs"
+    "$PWD/bridge/haskell/src" \
+    "$PWD/bridge/haskell/app" \
+    "$PWD/bridge/haskell/tidepool-extract.cabal" \
+    "$PWD/bridge/haskell/lib/Tidepool/Aeson/Scientific.hs" \
+    "$PWD/bridge/haskell/lib/Tidepool/Aeson/Value.hs" \
+    "$PWD/bridge/haskell/lib/Tidepool/Command/Types.hs" \
+    "$PWD/bridge/haskell/lib/Tidepool/Data/Time.hs" \
+    "$PWD/bridge/haskell/lib/Tidepool/Double.hs"
 }
 
 resolve_tidepool_extract() {
@@ -83,7 +83,7 @@ resolve_tidepool_extract() {
     _bin_mtime="$(stat -c %Y "$TIDEPOOL_EXTRACT" 2>/dev/null || echo 0)"
     _plausible_mtime_floor=946684800
     if [ "$_bin_mtime" -gt "$_plausible_mtime_floor" ]; then
-      _newest_src="$(find "$PWD/tidepool-extract-cmd/src" "$PWD/tidepool-extract-cmd/Cargo.toml" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)"
+      _newest_src="$(find "$PWD/tidepool/extract-cmd/src" "$PWD/tidepool/extract-cmd/Cargo.toml" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)"
       _newest_src="${_newest_src:-0}"
       if [ "$_bin_mtime" -lt "$_newest_src" ]; then
         if [ "${TIDEPOOL_ALLOW_STALE_EXTRACT:-0}" = "1" ]; then
@@ -110,7 +110,7 @@ resolve_tidepool_extract() {
   if [ -n "${TIDEPOOL_EXTRACT_WORKER:-}" ] && [ -x "$TIDEPOOL_EXTRACT_WORKER" ]; then
     _worker_mtime="$(stat -c %Y "$TIDEPOOL_EXTRACT_WORKER" 2>/dev/null || echo 0)"
     if [ "$_worker_mtime" -gt 946684800 ]; then
-      # `haskell/lib` is loaded by the worker at evaluation time; it is not a
+      # `bridge/haskell/lib` is loaded by the worker at evaluation time; it is not a
       # source input to the worker binary. Including it here makes every
       # stdlib-only edit permanently "stale": Cabal correctly declines to
       # rebuild the unaffected executable, so its mtime can never catch up.
@@ -247,7 +247,7 @@ PYLOG
 # python3, fall back to the `-S` check alone. Either way this is advisory: a
 # stale socket that refuses connection safely falls back to a direct spawn;
 # once connected, ExtractCmd never replays an indeterminate request
-# (tidepool-extract-cmd/CLAUDE.md).
+# (tidepool/extract-cmd/CLAUDE.md).
 _battery_daemon_socket_alive() {
   local sock="$1"
   [ -S "$sock" ] || return 1
@@ -284,7 +284,7 @@ cache_dir() {
 }
 
 # Resolves the deploy-handshake toolchain stamp path the same way the
-# servers do (tidepool-toolchain::toolchain, haskell/CLAUDE.md's deployment
+# servers do (tidepool-toolchain::toolchain, bridge/haskell/CLAUDE.md's deployment
 # handshake section: <cache_dir>/toolchain-stamp.json, override
 # $TIDEPOOL_TOOLCHAIN_STAMP) — not a second path-resolution mechanism, just
 # this precedence expressed in bash, via the shared cache_dir() above.
@@ -310,7 +310,7 @@ _battery_daemon_stamp_path() {
 # a second one. The explicit disable switch still takes precedence.
 #
 # An unreachable daemon needs no handling here: ExtractCmd::run() (the ONE
-# tidepool-extract invocation builder, tidepool-extract-cmd/CLAUDE.md) falls
+# tidepool-extract invocation builder, tidepool/extract-cmd/CLAUDE.md) falls
 # back after a known-unsubmitted connect failure. Timeout or crash after
 # submission is surfaced rather than replayed. This function only makes
 # TIDEPOOL_EXTRACT_DAEMON_SOCKET available; it does not own request policy.

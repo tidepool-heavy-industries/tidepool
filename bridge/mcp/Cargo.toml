@@ -1,0 +1,28 @@
+[package]
+name = "tidepool-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Effect declarations, Haskell source assembly, and validation for Tidepool"
+readme = "../../README.md"
+
+[dependencies]
+tidepool-runtime.workspace = true
+parking_lot.workspace = true
+frunk.workspace = true
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+blake3.workspace = true
+
+[dev-dependencies]
+tidepool-repr.workspace = true
+tidepool-effect.workspace = true
+tidepool-protocol.workspace = true
+# For the effectful integration tests: a capturing Console handler decoded the
+# same way the production handler is (`bridge/facade/src/main.rs`).
+tidepool-bridge.workspace = true
+tidepool-bridge-derive.workspace = true
+# Property tests for the pure eval-prep helpers (src/eval_prep.rs).
+proptest.workspace = true

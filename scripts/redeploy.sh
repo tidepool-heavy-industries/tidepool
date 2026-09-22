@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Always operate from the repo root — every path below (git status haskell/,
+# Always operate from the repo root — every path below (git status bridge/haskell/,
 # cargo --path) assumes it.
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 source scripts/lib-extract.sh
@@ -31,23 +31,23 @@ step "Preflight"
 # fail to ship (fatal), while tracked-dirty edits DO ship but make the build
 # non-reproducible (informational).
 #
-# Excludes `haskell/dist-newstyle*` — cabal's own build-output dirs (the
+# Excludes `bridge/haskell/dist-newstyle*` — cabal's own build-output dirs (the
 # plain `dist-newstyle/` name is .gitignore'd already; concurrent agents on a
 # shared box sometimes run cabal with a differently-suffixed `--builddir`,
 # e.g. `dist-newstyle-schema10/`). These are build OUTPUTS, never deploy
 # SOURCE inputs the flake would need to ship, so their being untracked is not
 # the silent-failure case this check exists to catch.
-haskell_untracked=$(git status --porcelain haskell/ 2>/dev/null | grep -E '^\?\?' | grep -vE '^\?\? haskell/dist-newstyle' || true)
+haskell_untracked=$(git status --porcelain bridge/haskell/ 2>/dev/null | grep -E '^\?\?' | grep -vE '^\?\? bridge/haskell/dist-newstyle' || true)
 if [ -n "$haskell_untracked" ]; then
-  echo "ERROR: untracked files under haskell/ — the nix flake source EXCLUDES"
+  echo "ERROR: untracked files under bridge/haskell/ — the nix flake source EXCLUDES"
   echo "       untracked files, so these would silently not ship:"
   echo "$haskell_untracked" | sed 's/^/       /'
   echo "       git add them (or remove them) and re-run."
   exit 1
 fi
-haskell_dirty=$(git status --porcelain haskell/ 2>/dev/null | grep -vE '^[?!]{2}' || true)
+haskell_dirty=$(git status --porcelain bridge/haskell/ 2>/dev/null | grep -vE '^[?!]{2}' || true)
 if [ -n "$haskell_dirty" ]; then
-  echo "note: haskell/ has uncommitted TRACKED changes — these WILL ship (the"
+  echo "note: bridge/haskell/ has uncommitted TRACKED changes — these WILL ship (the"
   echo "      flake sees the dirty working tree) but the build is not"
   echo "      reproducible from any commit; commit before deploys that matter."
 fi
@@ -95,7 +95,7 @@ fi
 
 # Steps 3+4: install Rust server binaries.
 #   Skippable with --no-servers (extract-only changes don't need these).
-#   Step 3 embeds the stdlib (haskell/lib/) into the binary at build time.
+#   Step 3 embeds the stdlib (bridge/haskell/lib/) into the binary at build time.
 
 if [ "$NO_SERVERS" -eq 0 ]; then
   # --locked: install from the workspace Cargo.lock instead of re-resolving —
@@ -142,7 +142,7 @@ fi
 
 # Step 6: write the toolchain deploy stamp — content fingerprints of the
 #   extract + stdlib just deployed, checked by every server at startup
-#   (tidepool-toolchain/src/toolchain.rs). Runs after Step 5 by convention
+#   (tidepool/toolchain/src/toolchain.rs). Runs after Step 5 by convention
 #   (mirrors the deploy order: invalidate stale cache, then bless the fresh
 #   pair), though Step 5 no longer touches toolchain-stamp.json, so ordering
 #   between them is no longer load-bearing.
@@ -165,7 +165,7 @@ else
     fi
     if ! "$stamp_bin" --write-toolchain-stamp; then
       echo "error: writing the toolchain deploy stamp failed — extract and stdlib are deployed but" >&2
-      echo "       servers cannot prove they were deployed together; see haskell/CLAUDE.md's" >&2
+      echo "       servers cannot prove they were deployed together; see bridge/haskell/CLAUDE.md's" >&2
       echo "       Deploy handshake section" >&2
       exit 1
     fi

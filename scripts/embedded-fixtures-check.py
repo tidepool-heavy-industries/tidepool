@@ -16,10 +16,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MANIFEST = ROOT / "haskell/test-prepared-stg/embedded-fixtures.json"
+MANIFEST = ROOT / "bridge/haskell/test-prepared-stg/embedded-fixtures.json"
 FIXTURE_DIRS = (
-    ROOT / "haskell/test-prepared-stg/fixtures",
-    ROOT / "haskell/test-execution-schema-encode/fixtures",
+    ROOT / "bridge/haskell/test-prepared-stg/fixtures",
+    ROOT / "bridge/haskell/test-execution-schema-encode/fixtures",
 )
 
 

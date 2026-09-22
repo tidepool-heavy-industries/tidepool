@@ -52,7 +52,7 @@ else
     fail "frontend did not print its Usage banner"
   fi
   if [ "$frontend_source" = "worktree target/debug" ]; then
-    freshness "frontend" "$frontend" "$repo_root/tidepool-extract-cmd/src" "$repo_root/tidepool-extract-cmd/Cargo.toml"
+    freshness "frontend" "$frontend" "$repo_root/tidepool/extract-cmd/src" "$repo_root/tidepool/extract-cmd/Cargo.toml"
   fi
 fi
 

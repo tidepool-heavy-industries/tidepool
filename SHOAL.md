@@ -14,7 +14,7 @@ all actors; Shoal owns continuation. The packaged Codex pin is
 `4372d1a1cf9952178aff25bafdb7e3a6de49b491`, with background completion
 acknowledgments and hosted-tool degradation that preserves the TUI conversation.
 
-The [workspace package](examples/shoal-workspace/README.md) implements the planned
+The [workspace package](exomonad/examples/workspace/README.md) implements the planned
 Sol operating mode: an Astra-authored Markdown tree, Sol leads and workers, tagged
 Astra work and an ordinary human-requested RSI engagement. Its Haskell modules
 and prompts can be customized per project. TOML selects them; one original-root

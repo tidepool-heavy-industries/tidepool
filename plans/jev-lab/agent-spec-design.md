@@ -67,8 +67,8 @@ tool boundary to test it.
 
 The existing tools DSL, unchanged, plus one record around it. A tools record is
 already an ordinary `Generic` record whose fields are endpoints
-(`haskell/lib/Tidepool/Agent/Contract.hs`, the `mode :- endpoint` family at
-`:118-135`; `haskell/lib/Tidepool/Command/Tools.hs:78-85` is a shipped example).
+(`bridge/haskell/lib/Tidepool/Agent/Contract.hs`, the `mode :- endpoint` family at
+`:118-135`; `bridge/haskell/lib/Tidepool/Command/Tools.hs:78-85` is a shipped example).
 A field's name is the tool's name and its input and output types generate the
 schemas, so no tool is ever named by a convention.
 
@@ -95,8 +95,8 @@ the type of.
 ## How the spec is found
 
 By convention, because configuration cannot express it. `[haskell] tools`
-(`tidepool/src/shoal/workspace.rs:24`, wired at
-`tidepool/src/actor_host.rs:2046-2051`) is one workspace-global key resolved once
+(`bridge/facade/src/shoal/workspace.rs:24`, wired at
+`bridge/facade/src/actor_host.rs:2046-2051`) is one workspace-global key resolved once
 at composition-root construction and threaded identically into every actor. It
 names one entry point for the whole run, which is exactly what a spec per
 checkout is not.
@@ -123,7 +123,7 @@ Two obligations follow from discovery being implicit:
   falling through to the default.
 - **The discovered module joins the checked closure.** The reload's typecheck
   covers everything reachable from the configured module list plus the driver
-  (`tidepool/src/shoal/source.rs`). A spec found by convention is not in
+  (`bridge/facade/src/shoal/source.rs`). A spec found by convention is not in
   that list, so the reload adds it, and a spec that fails to compile fails its
   own reload instead of surfacing later at an unrelated call.
 
@@ -133,27 +133,27 @@ role dimension inside the file, because the checkout already supplies it.
 
 ## What the existing code already guarantees
 
-`prepare_tools` (`tidepool-actor/src/resident_workbench.rs:1864-1982`) compiles
+`prepare_tools` (`exomonad/actor/src/resident_workbench.rs:1864-1982`) compiles
 one fragment, reads the declared schemas out of the `AgentToolsInstallWith`
 suspension it produces, and retains the parked continuation as an
 `Arc<RootCustody>`. Declarations and dispatcher are two products of one compile,
 so a schema can never advertise a handler from another revision. A call clones
-that `Arc` (`tidepool-actor/src/resident_actor.rs:4555-4592`), so a call already
+that `Arc` (`exomonad/actor/src/resident_actor.rs:4555-4592`), so a call already
 accepted keeps its implementation with no further mechanism.
 
-`SourceLayer` (`tidepool/src/shoal/source.rs`) captures source by content
+`SourceLayer` (`bridge/facade/src/shoal/source.rs`) captures source by content
 identity, typechecks a candidate, publishes by one `rename(2)` of a symlink, and
 returns a rejection as a value.
 
 Reflect resolves with the executing actor and nothing else
 (`resident_actor.rs:2104-2124`) and excludes only the turn currently executing
-(`tidepool-agent/src/interactive.rs:630-634`). A slot running in actor A's
+(`exomonad/agent/src/interactive.rs:630-634`). A slot running in actor A's
 resident machine therefore reads A's own completed turns, including the one that
 just ended.
 
 One handler runs at a time per actor, structurally
-(`haskell/lib/Tidepool/Event.hs:240-248`,
-`haskell/lib/Tidepool/Actor.hs:378-391`).
+(`bridge/haskell/lib/Tidepool/Event.hs:240-248`,
+`bridge/haskell/lib/Tidepool/Actor.hs:378-391`).
 
 ## The four gaps
 
@@ -162,9 +162,9 @@ One handler runs at a time per actor, structurally
 2. The source layer is one per run and root-only, so a child in a worktree has
    no layer to reload.
 3. The Codex bridge registers tools once and serves them read-only
-   (`tidepool/src/host_dynamic_tools.rs:1-7`, `:190-252`).
+   (`bridge/facade/src/host_dynamic_tools.rs:1-7`, `:190-252`).
 4. Nothing diffs two sets of declarations. Prompt fingerprints answer equality
-   only (`tidepool-actor/src/prompt_catalog.rs:65-75`).
+   only (`exomonad/actor/src/prompt_catalog.rs:65-75`).
 
 ## Reload
 
@@ -237,7 +237,7 @@ result in the actor's own resident machine.
 caller is blocked inside the headless one-shot seam, and the interactive path
 never spawns that subprocess at all. This is a Codex-only question by
 construction, since `CodexInteractiveBackend`
-(`tidepool-agent/src/backend/codex/node.rs:270`) is the sole interactive backend.
+(`exomonad/agent/src/backend/codex/node.rs:270`) is the sole interactive backend.
 
 There is deliberately no rollout-tail lifecycle detector. Native steering now
 crosses the generation-bound input-control protocol, whose owner reports

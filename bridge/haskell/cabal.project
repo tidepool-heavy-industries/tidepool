@@ -1,0 +1,14 @@
+packages: .
+
+-- Pinned to the nix package set (ghc-pkg list on the with-packages GHC env
+-- from bridge/haskell/CLAUDE.md is the authority for versions). This index-state
+-- resolves the same versions the nix GHC env already provides for every
+-- package it supplies; cborg/half (not in the nix env) resolve from Hackage
+-- at this index-state.
+index-state: 2026-06-11T20:22:08Z
+
+-- Bound GHC's module-level parallelism independently of cabal's package-level
+-- build scheduling. Two workers improve local build time without multiplying
+-- the compiler's peak memory footprint.
+package tidepool-extract
+  ghc-options: -j2

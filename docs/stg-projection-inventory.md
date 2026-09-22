@@ -30,7 +30,7 @@ the explicit terminal-result distinction through prepared calls while keeping
 the physical `NoSuccess` shape status-only. Lowering keeps the semantic result
 contract beside the physical register/area layout: status-only does not mean a
 successful zero-result value. See
-[`entry_abi.rs`](../tidepool-codegen/src/entry_abi.rs).
+[`entry_abi.rs`](../tidepool/codegen/src/entry_abi.rs).
 Cross-language fixture freshness is a separate check; these version
 declarations alone are not freshness evidence.
 `RuntimeRep` is the physical representation boundary: `Void`, lifted/unlifted
@@ -42,9 +42,9 @@ Global declarations carry five wire fields. Nonreturning behavior belongs to
 the callable's `ResultContract::NoSuccess`, not to a global-side boolean; it
 is never interchangeable with `ResultContract::Returns([])`, which is a
 successful zero-result call. Linking compares the typed entry contract. See
-[`codec.rs`](../tidepool-repr/src/execution_schema/codec.rs),
-[`validation.rs`](../tidepool-repr/src/execution_schema/validation.rs), and
-[`link.rs`](../tidepool-repr/src/execution_schema/link.rs).
+[`codec.rs`](../tidepool/repr/src/execution_schema/codec.rs),
+[`validation.rs`](../tidepool/repr/src/execution_schema/validation.rs), and
+[`link.rs`](../tidepool/repr/src/execution_schema/link.rs).
 
 Constructor declarations carry an appended `host_id` (`DataConId`). It is the
 stable internal constructor identity used by observation and is distinct from
@@ -87,7 +87,7 @@ the complete GHC constructor family to a primitive `Int` case with zero-based
 literal alternatives and ordinary nullary `Construct` results. It invents no
 default or family member; the existing case-failure path handles an invalid
 tag. The focused fixture checks three-way `Colour` and two-way `Bool` families
-in [`ExecutionProjectionTest.hs`](../haskell/test-prepared-stg/ExecutionProjectionTest.hs).
+in [`ExecutionProjectionTest.hs`](../bridge/haskell/test-prepared-stg/ExecutionProjectionTest.hs).
 
 Prepared `Enter` uses the shared `prepared_enter` provenance-checked
 inspection path; it does not grow a second inline header-chain path. Top-level
@@ -155,7 +155,7 @@ Calling a function or forcing a thunk that another installed program
 produced resolves through machine-wide tables,
 `MachineState::prepared_callables`/`prepared_enters`, filled at
 `PreparedMachine::install` from every installed program's function and
-thunk descriptors (`tidepool-codegen/src/prepared_program/machine.rs`).
+thunk descriptors (`tidepool/codegen/src/prepared_program/machine.rs`).
 Generated code reaches this as the terminal fallback of its own
 per-program fast chain: `apply.rs::emit_dispatchers` falls through to the
 host fn `prepared_resolve_call(vmctx, header, demand)`, and
@@ -277,8 +277,8 @@ The currently emitted strict subset is:
   index relative to the span start, or -1 when absent. It is read-only and
   noncollecting; a span or authentication failure is typed and publishes no
   result. Focused resize tests in
-  [`bytes_tests.rs`](../tidepool-codegen/src/prepared_program/bytes_tests.rs)
-  and [`machine_state.rs`](../tidepool-codegen/src/machine_state.rs) cover
+  [`bytes_tests.rs`](../tidepool/codegen/src/prepared_program/bytes_tests.rs)
+  and [`machine_state.rs`](../tidepool/codegen/src/machine_state.rs) cover
   reserve-time collection, prefix/growth, revoked aliases, failed sizes, and
   deferred reclamation; they are not corpus-progress evidence. These operations
   do not imply parity with every GHC array primop;
@@ -301,35 +301,35 @@ coverage for that finite artifact set, not coverage of all GHC primops or a
 new corpus execution/comparison result.
 
 The implementation anchors for these claims are
-[`entry.rs`](../tidepool-codegen/src/prepared_program/entry.rs),
-[`apply.rs`](../tidepool-codegen/src/prepared_program/apply.rs),
-[`forcing.rs`](../tidepool-codegen/src/prepared_program/forcing.rs),
-[`old_space/prepared.rs`](../tidepool-codegen/src/old_space/prepared.rs),
-[`gc/promotion.rs`](../tidepool-heap/src/gc/promotion.rs),
-[`gc/raw.rs`](../tidepool-heap/src/gc/raw.rs),
-[`arrays.rs`](../tidepool-codegen/src/prepared_program/arrays.rs),
-[`byte_arrays.rs`](../tidepool-codegen/src/prepared_program/byte_arrays.rs),
-[`data_tag.rs`](../tidepool-codegen/src/prepared_program/data_tag.rs),
-[`wide_words.rs`](../tidepool-codegen/src/prepared_program/wide_words.rs),
-[`static_bytes.rs`](../tidepool-codegen/src/prepared_program/static_bytes.rs),
-[`formatting.rs`](../tidepool-codegen/src/prepared_program/formatting.rs),
-[`floating.rs`](../tidepool-codegen/src/prepared_program/floating.rs), and
-[`execution_schema.rs`](../tidepool-repr/src/execution_schema.rs). The terminal
+[`entry.rs`](../tidepool/codegen/src/prepared_program/entry.rs),
+[`apply.rs`](../tidepool/codegen/src/prepared_program/apply.rs),
+[`forcing.rs`](../tidepool/codegen/src/prepared_program/forcing.rs),
+[`old_space/prepared.rs`](../tidepool/codegen/src/old_space/prepared.rs),
+[`gc/promotion.rs`](../tidepool/heap/src/gc/promotion.rs),
+[`gc/raw.rs`](../tidepool/heap/src/gc/raw.rs),
+[`arrays.rs`](../tidepool/codegen/src/prepared_program/arrays.rs),
+[`byte_arrays.rs`](../tidepool/codegen/src/prepared_program/byte_arrays.rs),
+[`data_tag.rs`](../tidepool/codegen/src/prepared_program/data_tag.rs),
+[`wide_words.rs`](../tidepool/codegen/src/prepared_program/wide_words.rs),
+[`static_bytes.rs`](../tidepool/codegen/src/prepared_program/static_bytes.rs),
+[`formatting.rs`](../tidepool/codegen/src/prepared_program/formatting.rs),
+[`floating.rs`](../tidepool/codegen/src/prepared_program/floating.rs), and
+[`execution_schema.rs`](../tidepool/repr/src/execution_schema.rs). The terminal
 path is owned by
-[`no_success.rs`](../tidepool-codegen/src/prepared_program/no_success.rs),
-[`primitives.rs`](../tidepool-codegen/src/prepared_program/primitives.rs),
-[`apply.rs`](../tidepool-codegen/src/prepared_program/apply.rs), and
-[`invocation.rs`](../tidepool-codegen/src/prepared_program/invocation.rs).
+[`no_success.rs`](../tidepool/codegen/src/prepared_program/no_success.rs),
+[`primitives.rs`](../tidepool/codegen/src/prepared_program/primitives.rs),
+[`apply.rs`](../tidepool/codegen/src/prepared_program/apply.rs), and
+[`invocation.rs`](../tidepool/codegen/src/prepared_program/invocation.rs).
 Focused native cases for exact, PAP, excess, logical `Void`, and unused-join
 behavior are in
-[`no_success_tests.rs`](../tidepool-codegen/src/prepared_program/no_success_tests.rs).
+[`no_success_tests.rs`](../tidepool/codegen/src/prepared_program/no_success_tests.rs).
 Focused settlement, application, entry, and retention tests are in
-[`settlement_tests.rs`](../tidepool-codegen/src/prepared_program/settlement_tests.rs),
-[`apply_tests.rs`](../tidepool-codegen/src/prepared_program/apply_tests.rs),
-[`entry_tests.rs`](../tidepool-codegen/src/prepared_program/entry_tests.rs), and
-[`retention_tests.rs`](../tidepool-codegen/src/prepared_program/retention_tests.rs),
+[`settlement_tests.rs`](../tidepool/codegen/src/prepared_program/settlement_tests.rs),
+[`apply_tests.rs`](../tidepool/codegen/src/prepared_program/apply_tests.rs),
+[`entry_tests.rs`](../tidepool/codegen/src/prepared_program/entry_tests.rs), and
+[`retention_tests.rs`](../tidepool/codegen/src/prepared_program/retention_tests.rs),
 alongside the heap GC tests under
-[`tidepool-heap/src/gc`](../tidepool-heap/src/gc).
+[`tidepool/heap/src/gc`](../tidepool/heap/src/gc).
 
 This is an executable connected subset, not a producer cutover. Imports are
 admitted as described under the compiled-program path above (read by slot;
@@ -440,18 +440,18 @@ The focused prepared-STG test checks named bottoming callees with exact
 partial-call assertion uses a test-local prepared-STG variant because CorePrep
 eta-expands the source PAP; it does not claim a source-retained partial
 `StgApp` or synthetic `LFUnknown` negative coverage. See
-[`ExecutionProjection.hs`](../haskell/src/Tidepool/ExecutionProjection.hs) and
-[`RecoveredBodyTest.hs`](../haskell/test-prepared-stg/RecoveredBodyTest.hs).
+[`ExecutionProjection.hs`](../bridge/haskell/src/Tidepool/ExecutionProjection.hs) and
+[`RecoveredBodyTest.hs`](../bridge/haskell/test-prepared-stg/RecoveredBodyTest.hs).
 
 External-payload graph support is a separate boundary. The machine ledger
 authenticates pointer-slot views through
-[`external_storage.rs`](../tidepool-heap/src/external_storage.rs) and
-[`machine_state.rs`](../tidepool-codegen/src/machine_state.rs); descriptor
+[`external_storage.rs`](../tidepool/heap/src/external_storage.rs) and
+[`machine_state.rs`](../tidepool/codegen/src/machine_state.rs); descriptor
 copying and selective promotion traverse those edges in
-[`gc/raw.rs`](../tidepool-heap/src/gc/raw.rs) and
-[`gc/promotion.rs`](../tidepool-heap/src/gc/promotion.rs). The prepared minor
+[`gc/raw.rs`](../tidepool/heap/src/gc/raw.rs) and
+[`gc/promotion.rs`](../tidepool/heap/src/gc/promotion.rs). The prepared minor
 collector consumes that descriptor path in
-[`host_fns/gc.rs`](../tidepool-codegen/src/host_fns/gc.rs). The prepared minor
+[`host_fns/gc.rs`](../tidepool/codegen/src/host_fns/gc.rs). The prepared minor
 collector sweeps Young payloads only after its final successful copy;
 promotion retains selected payloads independently of their young wrappers.
 The machine's checked stores update the external revision, invalidating stale
@@ -475,7 +475,7 @@ not `<<loop>>`, and evaluator identity plus wakeup/settlement must become an
 explicit runtime contract before concurrency is admitted.
 
 Wave 6B's compiled-`qApp` resume path (`freerRequest`/`resumeInt`, projected
-via `haskell/test-prepared-stg/FreerResume.hs`) exercises exactly this
+via `bridge/haskell/test-prepared-stg/FreerResume.hs`) exercises exactly this
 boundary without yet needing an evaluator-identity contract, because
 suspension there is a plain call/return: `run_entry`/`run_entry_retained`
 returns the freer `E` constructor at WHNF, no native stack is captured, and
@@ -486,7 +486,7 @@ retained after consumption (pinned by
 inert heap data, and `&mut self` on `PreparedMachine` already serializes
 every call, so two parked continuations sharing one heap do not create the
 blackhole-ownership ambiguity this section describes -- there is still only
-ever one evaluator, taking turns. `tidepool-runtime/tests/prepared_execution.rs`
+ever one evaluator, taking turns. `tidepool/runtime/tests/prepared_execution.rs`
 pins this directly: `parked_continuations_resume_out_of_order_with_a_collection_between`
 resumes two independently-parked continuations in reverse order with a forced
 collection between them; `unrelated_entry_runs_while_a_parked_k_stays_untouched_and_machine_reusable`

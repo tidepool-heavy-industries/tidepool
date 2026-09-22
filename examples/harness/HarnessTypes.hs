@@ -50,7 +50,7 @@ import Tidepool.QQ (fmt)
 -- | The author-defined 'State' this harness threads through 'loop' and reads
 -- in 'render'. A single-constructor record, per the
 -- @deriving (Generic, ToJSON, FromJSON)@ convention used throughout
--- @haskell/lib/Tidepool@ (structural, no Template Haskell). Note it stores a
+-- @bridge/haskell/lib/Tidepool@ (structural, no Template Haskell). Note it stores a
 -- typed 'Decision' ('lastDecision'), so a typed answer flows
 -- @runLLMTurn -> State -> (serialized across the loop boundary) -> render@.
 data State = State

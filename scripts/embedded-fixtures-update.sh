@@ -23,9 +23,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-fixture_root="$repo_root/haskell/test-prepared-stg/fixtures"
-prepared_root="$repo_root/haskell/test-prepared-stg"
-stdlib_root="$repo_root/haskell/lib"
+fixture_root="$repo_root/bridge/haskell/test-prepared-stg/fixtures"
+prepared_root="$repo_root/bridge/haskell/test-prepared-stg"
+stdlib_root="$repo_root/bridge/haskell/lib"
 frontend="$TIDEPOOL_EXTRACT"
 
 mkdir -p "$work_root/m3" "$work_root/freer-resume" "$work_root/freer-retention"
@@ -60,6 +60,6 @@ cargo test --config 'build.rustc-wrapper=""' -p tidepool-extract-cmd \
     --test-option="$work_root/schema6-intrinsic.cbor" \
     --test-show-details=direct )
 cp -- "$work_root/schema6-intrinsic.cbor" \
-  "$repo_root/haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor"
+  "$repo_root/bridge/haskell/test-execution-schema-encode/fixtures/schema6-intrinsic.cbor"
 
 python3 scripts/embedded-fixtures-check.py
