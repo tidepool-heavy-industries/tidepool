@@ -152,24 +152,24 @@ data PreparationKind = CheckOnly | PrepareStg
 -- later source module in this same dependency-ordered pass imports it. The
 -- checked target is returned directly to metadata consumers, so it is a leaf
 -- unless another source module still has to typecheck against it.
-data CheckedInterfaceUse
-  = CheckedInterfaceLeaf
-  | CheckedInterfaceNeededBy ModuleName
-  | CheckedInterfaceNeededForSessionInjection
+data HomeInterfaceUse
+  = HomeInterfaceLeaf
+  | HomeInterfaceNeededBy ModuleName
+  | HomeInterfaceNeededForSessionInjection
 
-checkedInterfaceUse :: ModSummary -> Map.Map ModuleName ModuleName -> CheckedInterfaceUse
-checkedInterfaceUse summary laterConsumers
+homeInterfaceUse :: ModSummary -> Map.Map ModuleName ModuleName -> HomeInterfaceUse
+homeInterfaceUse summary laterConsumers
   | Just (SessionModule LibMod _) <- parseSessionModule
       (moduleNameString (ms_mod_name summary)) =
-      CheckedInterfaceNeededForSessionInjection
-  | otherwise = maybe CheckedInterfaceLeaf CheckedInterfaceNeededBy
+      HomeInterfaceNeededForSessionInjection
+  | otherwise = maybe HomeInterfaceLeaf HomeInterfaceNeededBy
       (Map.lookup (ms_mod_name summary) laterConsumers)
 
 -- | The consumer maps line up with summaries: each map records normal home
 -- imports from only the modules after that position. Building them in one
 -- reverse pass avoids rescanning every remaining suffix for every module.
-checkedInterfaceConsumers :: [ModSummary] -> [Map.Map ModuleName ModuleName]
-checkedInterfaceConsumers summaries = drop 1 (scanr addConsumer Map.empty summaries)
+homeInterfaceConsumers :: [ModSummary] -> [Map.Map ModuleName ModuleName]
+homeInterfaceConsumers summaries = drop 1 (scanr addConsumer Map.empty summaries)
   where
     addConsumer summary laterConsumers
       | ms_hsc_src summary /= HsSrcFile = laterConsumers
@@ -177,6 +177,15 @@ checkedInterfaceConsumers summaries = drop 1 (scanr addConsumer Map.empty summar
       where
         addImport (_, imported) = Map.insertWith keepNearest (unLoc imported) (ms_mod_name summary)
         keepNearest new _ = new
+
+-- | A registered interface carries the tidy result that produced it. Both
+-- interface construction and prepared-STG lowering need that exact result;
+-- retaining it only through the immediate compile back half avoids running
+-- 'hscTidy' twice without extending the memo's retained state.
+data RegisteredInterface = RegisteredInterface
+  { riHomeModInfo :: HomeModInfo
+  , riTidyGuts :: CgGuts
+  }
 
 -- | Prepared mode keeps the ordinary typed pipeline observations alongside
 -- the unflattened per-module STG handoff.
@@ -622,8 +631,12 @@ data CompilePlan = CompilePlan
     -- session path injects value ifaces here, after their declaration-module
     -- dependencies have entered the HPT and before the first importer needs
     -- them.
-  , cpAfterModule :: Word64 -> InterfaceReuse -> ModSummary -> TcGblEnv -> HscEnv -> ModGuts
-      -> Ghc (Maybe Integer, Maybe HomeModInfo)
+  , cpNeedsInterface :: HomeInterfaceUse -> ModSummary -> Bool
+    -- ^ Whether this variant needs an HPT registration after compiling the
+    -- module. The shared cycle uses the same decision for fresh and memoized
+    -- bodies, so a cached leaf cannot become an interface-less dependency.
+  , cpAfterModule :: Word64 -> InterfaceReuse -> HomeInterfaceUse -> ModSummary -> TcGblEnv -> HscEnv -> ModGuts
+      -> Ghc (Maybe Integer, Maybe RegisteredInterface)
     -- ^ Runs after a module's 'core2core', on the pre-'externalizeInternalTops'
     -- guts. The session path registers deferred modules into the HPT and
     -- returns the thin registration value for later warm cycles.
@@ -1095,7 +1108,7 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
               -- externalization. Returns the pre-externalize 'simplified' guts so a
               -- resident session can repeat HPT registration on later requests;
               -- direct compilation discards it.
-              compileBack mf = do
+              compileBack interfaceUse mf = do
                 liftIO (modifyIORef' backCountRef (+ 1))
                 (simplified, coreMs) <- timeSection $
                   liftIO (core2core (mfHscEnv mf) (mfDesugared mf))
@@ -1104,8 +1117,8 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                 liftIO (modifyIORef' moduleMsRef
                           (Map.insertWith (+) (moduleNameString (ms_mod_name (mfSummary mf))) coreMs))
                 let interfaceReuse = if isJust mMemoRef then MemoMiss else MemoDisabled
-                (mInterfaceMs, mInterface) <- cpAfterModule plan requestIdentity interfaceReuse
-                  (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
+                (mInterfaceMs, mRegistration) <- cpAfterModule plan requestIdentity interfaceReuse
+                  interfaceUse (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
                 liftIO $ recordInterface (mfSummary mf) mInterfaceMs
                 let externalized = externalizeInternalTops simplified
                 pure
@@ -1117,13 +1130,16 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                       , moduleOutputCheckedBinderPins = mfCheckedBinderPins mf
                       , moduleOutputResultType = mfResultType mf
                       }
-                  , mInterface
+                  , riHomeModInfo <$> mRegistration
+                  , riTidyGuts <$> mRegistration
                   )
-              prepareSelected mf simplified = case preparation of
+              prepareSelected mf simplified mRegisteredTidy = case preparation of
                 CheckOnly -> pure Nothing
                 PrepareStg -> do
                   liftIO (modifyIORef' preparedCountRef (+ 1))
-                  (cgGuts, _details) <- timePhase timing "prepared_tidy" $ liftIO $ hscTidy (mfHscEnv mf) simplified
+                  cgGuts <- case mRegisteredTidy of
+                    Just tidy -> pure tidy
+                    Nothing -> fst <$> timePhase timing "prepared_tidy" (liftIO (hscTidy (mfHscEnv mf) simplified))
                   siblings <- liftIO $ atomicModifyIORef' preparedSiblingsRef $ \known ->
                     let known' = Map.union (resolvePreparedSiblings (cg_binds cgGuts)) known
                     in (known', known')
@@ -1243,9 +1259,10 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                                 , "same-retained=" ++ show sameRetained
                                 , "same-home-dependencies=" ++ show sameHomeDependencies ]
                               pure Nothing
+          let interfaceUses = zipWith homeInterfaceUse summaries (homeInterfaceConsumers summaries)
           (observations, results, preparedModules, mReachable) <- case cpTier plan of
             OptimizeEveryModule -> do
-              pairs <- forM summaries $ \modSum -> do
+              pairs <- forM (zip summaries interfaceUses) $ \(modSum, interfaceUse) -> do
                 cpBeforeModule plan modSum
                 let mn = ms_mod_name modSum
                 cached <- lookupValidMemo modSum
@@ -1260,7 +1277,8 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                   -- into the HPT that 'load'' just wiped.
                   Just entry
                     | Just output <- gmeOutput entry
-                    , Just prepared <- gmePrepared entry -> do
+                    , Just prepared <- gmePrepared entry
+                    , not (cpNeedsInterface plan interfaceUse modSum) || isJust (gmeInterface entry) -> do
                     recordValidity modSum True
                     rememberPreparedSiblings prepared
                     forM_ (gmeInterface entry) $ \hmi -> do
@@ -1269,10 +1287,13 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                     pure (CachedObservation modSum entry, output, Just prepared)
                   _ -> do
                     recordValidity modSum (isJust cached)
-                    when (isJust cached) (memoMiss modSum "executable-body-not-prepared")
+                    when (isJust cached) (memoMiss modSum
+                      (if cpNeedsInterface plan interfaceUse modSum
+                        then "required-interface-not-retained"
+                        else "executable-body-not-prepared"))
                     mf <- compileFront modSum
-                    (simplified, r, mInterface) <- compileBack mf
-                    prepared <- prepareSelected mf simplified
+                    (simplified, r, mInterface, mRegisteredTidy) <- compileBack interfaceUse mf
+                    prepared <- prepareSelected mf simplified mRegisteredTidy
                     facts <- liftIO (frontFacts mf)
                     case mMemoRef of
                       Just ref -> liftIO (modifyIORef' ref
@@ -1367,8 +1388,8 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                             mInterface)))
                       Nothing -> pure ()
                   compileReachable modSum f moduleFacts = do
-                    (simplified, r, mInterface) <- compileBack f
-                    prepared <- prepareSelected f simplified
+                    (simplified, r, mInterface, mRegisteredTidy) <- compileBack HomeInterfaceLeaf f
+                    prepared <- prepareSelected f simplified mRegisteredTidy
                     rememberExecutable modSum r prepared mInterface moduleFacts
                     pure [(r, prepared)]
               rs <- fmap concat $ forM (zip observations' facts) $ \(observation, moduleFacts) ->
@@ -1528,7 +1549,7 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
         -- module can consume an interface we build here. Completed modules no
         -- longer consult the HPT, while the returned target environment owns
         -- its types and reader scope directly.
-        checked <- forM (zip summaries (checkedInterfaceConsumers summaries)) $ \(summary, laterConsumers) -> do
+        checked <- forM (zip summaries (homeInterfaceConsumers summaries)) $ \(summary, laterConsumers) -> do
           cpBeforeModule plan summary
           current <- getSession
           let isTarget = ms_mod_name summary == targetName
@@ -1559,14 +1580,14 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                     when timing $ liftIO $ hPutStrLn stderr $
                       "tidepool-checked-interface-retained module="
                         ++ moduleNameString (ms_mod_name summary) ++ reason
-              case checkedInterfaceUse summary laterConsumers of
-                CheckedInterfaceLeaf -> when timing $ liftIO $ hPutStrLn stderr $
+              case homeInterfaceUse summary laterConsumers of
+                HomeInterfaceLeaf -> when timing $ liftIO $ hPutStrLn stderr $
                   "tidepool-checked-interface-elided module="
                     ++ moduleNameString (ms_mod_name summary)
                     ++ " reason=no-later-home-importer"
-                CheckedInterfaceNeededBy consumer ->
+                HomeInterfaceNeededBy consumer ->
                   retainInterface (" consumer=" ++ moduleNameString consumer)
-                CheckedInterfaceNeededForSessionInjection ->
+                HomeInterfaceNeededForSessionInjection ->
                   retainInterface " reason=session-value-interface"
               pure (if isTarget then Just tcg else Nothing)
         errors <- liftIO (nub . reverse <$> readIORef errorRef)
@@ -1936,7 +1957,8 @@ normalVariant purpose path = do
         -- order.
       , cpResultBinders = [scaffoldOutputBase, scaffoldTargetName]
       , cpBeforeModule = \_ -> pure ()
-      , cpAfterModule = \_ _ _ _ _ _ -> pure (Nothing, Nothing)
+      , cpNeedsInterface = \_ _ -> False
+      , cpAfterModule = \_ _ _ _ _ _ _ -> pure (Nothing, Nothing)
       , cpTier = OptimizeCoreReachable
         -- Phase barrier (backstop): a target or dependency compile error
         -- already threw a spanned 'SourceError' from inside the compile loop
@@ -2019,6 +2041,11 @@ sessionVariant purpose scope path = do
                   ]
             in if grown == seed then seed else closure grown
           deferredMods = closure (Set.fromList (targetModName' : excludedVal))
+          shouldRegister interfaceUse modSum =
+            (ms_mod_name modSum `Set.member` deferredMods || isSessionLib modSum)
+              && case interfaceUse of
+                HomeInterfaceLeaf -> False
+                _ -> True
           -- Exclude every deferred module (target ∪ transitive Val-importers)
           -- from the load' graph. A @load'@ that reaches one of them (e.g.
           -- @LoadDependenciesOf targetHUM@, whose @createBuildPlan@ includes
@@ -2105,35 +2132,14 @@ sessionVariant purpose scope path = do
                   modifyIORef' injectedRef
                     (`Set.union` Set.fromList (map renderSessionModule needed))
                   modifyIORef' injectMsRef (+ injectMs)
-          -- A deferred module (target ∪ transitive Val-importers, computed
-          -- above) was deliberately excluded from the @load'@, so nothing has
-          -- registered it in the HPT yet — do that here, now that the Val
-          -- injection has happened, so a LATER module in the same loop that
-          -- imports this one (e.g. the leaf importing a Val-referencing
-          -- @Lib.G<g>@) can resolve it. Real 'ModIface'/'ModDetails' via the
-          -- same tidy→iface pipeline GHC's own batch compiler uses internally
-          -- ('hscTidy' wraps 'initTidyOpts'+'tidyProgram'; 'mkIfaceTc' is what
-          -- 'hscSimpleIface'' uses for "a stripped down interface... where we
-          -- aren't generating any object code at all" — precisely this case.
-          -- Prepared STG is projected for the Cranelift runtime, so no GHC
-          -- bytecode linkable is needed.
-          -- 'emptyHomeModInfoLinkable' is the same legitimate "no linkable"
-          -- value GHC itself uses for @.hs-boot@ modules). Mirrors
-          -- 'upsweep_mod's own @addToHpt@ call.
-          --
-          -- The whole home graph is recompiled to full guts because prepared
-          -- projection needs dependency bodies. Interfaces loaded without
-          -- optimization do not expose every required body. The target's
-          -- @import Val.G<g>@ resolves from the injection above.
-        , cpAfterModule = \requestId interfaceReuse modSum tcGblEnv hscEnv simplified ->
-            -- A generated Lib module must also be registered from this
-            -- cycle's typecheck before Val-interface injection. Removing the
-            -- leaf target from load's graph can leave an otherwise ordinary
-            -- Lib predecessor absent from the HPT; a retained value whose
-            -- type mentions that Lib module then makes typecheckIface fail
-            -- with "module ... is not loaded". Generated Libs and deferred
-            -- importers therefore share the same single registration path.
-            if ms_mod_name modSum `Set.member` deferredMods || isSessionLib modSum
+          -- A deferred module was excluded from @load'@, so a later source
+          -- importer must receive a real HPT entry after its Val interfaces
+          -- are injected. A generated Lib is also retained because a
+          -- source-less Val interface can name it without a source import.
+          -- Leaf targets need neither registration nor a second tidy pass.
+        , cpNeedsInterface = shouldRegister
+        , cpAfterModule = \requestId interfaceReuse interfaceUse modSum tcGblEnv hscEnv simplified ->
+            if shouldRegister interfaceUse modSum
               then do
                 (cgGuts, modDetails, tidyMs) <- do
                   ((guts, details), elapsed) <- timeSection $ liftIO $ hscTidy hscEnv simplified
@@ -2146,8 +2152,14 @@ sessionVariant purpose scope path = do
                 let hmi = HomeModInfo iface modDetails emptyHomeModInfoLinkable
                 hscEnvNow <- getSession
                 setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name modSum) hmi) hscEnvNow)
-                pure (Just (tidyMs + ifaceMs), Just hmi)
-              else pure (Nothing, Nothing)
+                pure (Just (tidyMs + ifaceMs), Just (RegisteredInterface hmi cgGuts))
+              else do
+                when (timing && (ms_mod_name modSum `Set.member` deferredMods || isSessionLib modSum)) $
+                  liftIO $ hPutStrLn stderr $
+                    "tidepool-prepared-interface-elided module="
+                      ++ moduleNameString (ms_mod_name modSum)
+                      ++ " reason=no-later-home-importer"
+                pure (Nothing, Nothing)
         , cpTier = OptimizeEveryModule
           -- The load barrier already fired in 'cpAfterLoad' (see there).
         , cpBeforeMerge = \_ _ ->

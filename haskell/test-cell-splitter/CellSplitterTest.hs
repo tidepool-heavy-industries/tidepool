@@ -9,6 +9,8 @@ import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, tails)
 import Data.Char (isDigit)
 import GHC
+import GHC.Builtin.Types (intTy)
+import GHC.Types.Name.Occurrence (mkVarOcc)
 import GHC.Driver.Session (parseDynamicFilePragma)
 import GHC.Parser.Header (getOptions)
 import GHC.Driver.Config.Parser (initParserOpts)
@@ -20,6 +22,9 @@ import Tidepool.GhcPipeline
 import Tidepool.ExtractRequest (InspectionRequest(..))
 import Tidepool.Introspection (InfoEntry(..), InspectionResult(..), runInspection)
 import Tidepool.DependencyEvidence
+import Tidepool.Session
+  ( Generation(..), SessionModule(..), SessionModuleKind(..), SessionScope(..)
+  , mkThinSessionIface, writeSessionIface )
 import Tidepool.Timing
   ( InterfaceStage(..), InterfaceReuse(..), measureModuleInterface )
 import System.Directory
@@ -51,11 +56,12 @@ main = do
   getArgs >>= \case
     [] -> pure ()
     ["--metadata"] -> metadataCompilation
+    ["--prepared-session"] -> preparedSessionLeafCompilation
     ["--dependency-evidence"] -> dependencyEvidenceCompilation
     ["--untracked-compile-time"] -> untrackedCompileTimeCompilation
     ["--validation-memo"] -> validationMemoCompilation
     ["--structural-display", effectsRoot] -> structuralDisplayCompilation effectsRoot
-    _ -> fail "expected --metadata, --dependency-evidence, --untracked-compile-time, --validation-memo, or --structural-display EFFECTS_INCLUDE"
+    _ -> fail "expected --metadata, --prepared-session, --dependency-evidence, --untracked-compile-time, --validation-memo, or --structural-display EFFECTS_INCLUDE"
 
 untrackedCompileTimeCompilation :: IO ()
 untrackedCompileTimeCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
@@ -296,6 +302,50 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
     temporary = do
       parent <- getTemporaryDirectory
       (path, handle) <- openTempFile parent "tidepool-metadata"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+-- A source-less value interface activates the session pipeline. Its target is
+-- the final source consumer, so it must prepare successfully without creating
+-- a registration interface solely for itself.
+preparedSessionLeafCompilation :: IO ()
+preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let scopeRoot = root </> "session"
+      valueModule = SessionModule ValMod (Generation 1)
+      seed = root </> "SessionSeed.hs"
+      target = root </> "PreparedSessionLeaf.hs"
+      scope = SessionScope scopeRoot [valueModule]
+  writeFile seed "module SessionSeed where\nseed = 1 :: Int\n"
+  seeded <- runPipelineSelected PreparedStg seed [root]
+  let environment = prHscEnv (pprPipelineResult seeded)
+  iface <- mkThinSessionIface environment valueModule [(mkVarOcc "prior", intTy)]
+  writeSessionIface environment scopeRoot valueModule iface
+  writeFile target $ unlines
+    [ "module PreparedSessionLeaf where"
+    , "import Tidepool.Session.Val.G1 (prior)"
+    , "__result = prior + 1"
+    ]
+  previousTiming <- lookupEnv "TIDEPOOL_TIMING"
+  setEnv "TIDEPOOL_TIMING" "1"
+  (withResidentPipelineSelectedRequests [root] (const (pure ())) $ \runRequest -> do
+      (prepared, output) <- captureStderr root "prepared-session-leaf" $
+        runRequest $ \compiler ->
+          compiler PreparedStg mempty GeneralCompile (Just scope) target [root] Nothing
+      when (null (pprModules prepared)) $
+        fail "prepared session leaf produced no prepared module"
+      assertContains "prepared session leaf skips its unused registration interface"
+        "tidepool-prepared-interface-elided module=PreparedSessionLeaf reason=no-later-home-importer"
+        output
+      when (any (isInfixOf "module=PreparedSessionLeaf")
+            (filter (isPrefixOf "tidepool-timing-module-detail ") (lines output))) $
+        fail "prepared session leaf constructed an unused target interface")
+    `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-prepared-session-leaf"
       hClose handle
       removeFile path
       createDirectory path
