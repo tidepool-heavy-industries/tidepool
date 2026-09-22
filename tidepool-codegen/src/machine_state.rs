@@ -234,6 +234,63 @@ pub(crate) struct ExternalSweepPlan {
     dead: Vec<*mut u8>,
 }
 
+/// Dense collector inventory with constant-time removal by stable registration.
+/// Moving an inventory row never moves the root slot it names. Registration
+/// order, rather than vector position, defines nested-operation stack marks.
+#[derive(Default)]
+struct TemporaryRoots {
+    slots: Vec<(usize, *mut *mut u8)>,
+    indices: HashMap<usize, usize>,
+}
+
+impl TemporaryRoots {
+    fn insert(&mut self, registration: usize, slot: *mut *mut u8) {
+        self.indices.insert(registration, self.slots.len());
+        self.slots.push((registration, slot));
+    }
+
+    fn get(&self, registration: usize) -> Option<*mut *mut u8> {
+        self.indices
+            .get(&registration)
+            .map(|index| self.slots[*index].1)
+    }
+
+    fn remove(&mut self, registration: usize) {
+        let Some(index) = self.indices.remove(&registration) else {
+            return;
+        };
+        self.slots.swap_remove(index);
+        if let Some((moved, _)) = self.slots.get(index) {
+            *self.indices.get_mut(moved).expect("registered root index") = index;
+        }
+    }
+
+    fn truncate_from(&mut self, mark: usize) {
+        let mut index = 0;
+        while index < self.slots.len() {
+            let registration = self.slots[index].0;
+            if registration >= mark {
+                self.remove(registration);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.slots.clear();
+        self.indices.clear();
+    }
+
+    fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &(usize, *mut *mut u8)> {
+        self.slots.iter()
+    }
+}
+
 /// Per-machine ambient state. Each cell's wrapper type (`RefCell`/`Cell`) is
 /// chosen to match the try_borrow/borrow-panic/take semantics its callers
 /// rely on — see e.g. `set_first_cause`'s `try_borrow_mut` defense below.
@@ -270,7 +327,7 @@ pub struct MachineState {
     /// Run-scoped GC roots (`RUST_ROOTS`): heap-pointer slots registered by
     /// Rust host-fn frames the JIT frame walker cannot see. Cleared every
     /// `clear_run_scratch`/`clear_gc_state`.
-    rust_roots: RefCell<Vec<(usize, *mut *mut u8)>>,
+    rust_roots: RefCell<TemporaryRoots>,
     next_rust_root: Cell<usize>,
     /// Session-scoped GC roots (`PERSISTENT_ROOTS`): tenured bindings'
     /// stable slots. Survive across runs; cleared only at machine teardown
@@ -400,7 +457,7 @@ impl MachineState {
             diagnostics: RefCell::new(Vec::new()),
             gc_generation: Cell::new(0),
             gc_state: RefCell::new(None),
-            rust_roots: RefCell::new(Vec::new()),
+            rust_roots: RefCell::new(TemporaryRoots::default()),
             next_rust_root: Cell::new(0),
             prepared_exception: Cell::new(std::ptr::null_mut()),
             describing_exception: Cell::new(false),
@@ -1148,7 +1205,7 @@ impl MachineState {
                 .expect("temporary root registration space exhausted"),
         );
         let mut roots = self.rust_roots.borrow_mut();
-        roots.push((registration, slot));
+        roots.insert(registration, slot);
         registration
     }
 
@@ -1156,20 +1213,18 @@ impl MachineState {
     /// by nested operations across their stack marks.
     pub(crate) fn deregister_rust_root(&self, registration: usize, slot: *mut *mut u8) {
         let mut roots = self.rust_roots.borrow_mut();
-        if let Some(index) = roots
-            .iter()
-            .position(|candidate| *candidate == (registration, slot))
-        {
-            roots.remove(index);
+        if roots.get(registration) == Some(slot) {
+            roots.remove(registration);
         }
     }
 
-    /// Remove a sorted set of exact registrations in one linear pass. This is
+    /// Remove exact registrations in linear time in their count. This is
     /// used when a construction owner drops with many reusable DAG roots.
     pub(crate) fn deregister_rust_roots(&self, registrations: &[usize]) {
-        self.rust_roots
-            .borrow_mut()
-            .retain(|(registration, _)| registrations.binary_search(registration).is_err());
+        let mut roots = self.rust_roots.borrow_mut();
+        for registration in registrations {
+            roots.remove(*registration);
+        }
     }
 
     /// Number of active temporary roots; excludes the independent exception.
@@ -1182,9 +1237,7 @@ impl MachineState {
     }
 
     pub(crate) fn truncate_rust_roots(&self, mark: usize) {
-        self.rust_roots
-            .borrow_mut()
-            .retain(|(registration, _)| *registration < mark);
+        self.rust_roots.borrow_mut().truncate_from(mark);
     }
 
     /// Clear temporary registrations, not the exception settlement slot.
@@ -3321,6 +3374,39 @@ mod tests {
         let mut roots = Vec::new();
         machine.extend_rust_roots(&mut roots);
         assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn wide_temporary_root_removal_keeps_a_dense_index_and_nested_owners() {
+        let machine = MachineState::new();
+        let mut slots = vec![std::ptr::null_mut(); 8192];
+        let registrations: Vec<_> = slots
+            .iter_mut()
+            .map(|slot| machine.register_rust_root(slot))
+            .collect();
+        let nested_mark = machine.rust_roots_mark();
+        let mut nested = std::ptr::null_mut();
+        machine.register_rust_root(&mut nested);
+        // Removing the front of a wide frontier must move at most one index
+        // row per removal, without moving any collector-visible root slot.
+        for (registration, slot) in registrations.iter().zip(&mut slots) {
+            machine.deregister_rust_root(*registration, slot);
+            let roots = machine.rust_roots.borrow();
+            assert_eq!(roots.indices.len(), roots.slots.len());
+            assert_eq!(
+                roots.slots.last().map(|row| roots.indices[&row.0]),
+                roots.slots.len().checked_sub(1)
+            );
+        }
+        assert_eq!(machine.rust_roots_len(), 1);
+        machine.truncate_rust_roots(nested_mark);
+        assert_eq!(machine.rust_roots_len(), 0);
+        assert!(machine.rust_roots.borrow().indices.is_empty());
+        let registration = machine.register_rust_root(&mut slots[0]);
+        machine.deregister_rust_root(registrations[0], &mut slots[0]);
+        assert_eq!(machine.rust_roots_len(), 1);
+        machine.deregister_rust_root(registration, &mut slots[0]);
+        assert_eq!(machine.rust_roots_len(), 0);
     }
 
     fn prepared_tag_fixture(

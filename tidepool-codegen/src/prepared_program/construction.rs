@@ -93,7 +93,6 @@ impl ConstructionCore {
                 }
             }
         }
-        self.free.sort_unstable();
         machine.deregister_rust_roots(&self.free);
     }
 

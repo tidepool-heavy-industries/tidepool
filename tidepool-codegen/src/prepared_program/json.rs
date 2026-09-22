@@ -1,7 +1,7 @@
 //! Authenticated JSON intrinsics and their invocation-scoped managed sink.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap},
     io::{Read, Write},
     sync::Arc,
 };
@@ -695,7 +695,7 @@ pub(super) unsafe extern "C" fn prepared_encode_json(
         JsonEncoder {
             builder: &mut builder,
             ids,
-            active: HashSet::new(),
+            active: MovingIdentities::default(),
             steps: 0,
         }
         .write_value(input, RuntimeRep::LiftedRef, 0, &mut bytes)?;
@@ -795,14 +795,60 @@ impl EncoderIds {
 struct JsonEncoder<'a, 'b> {
     builder: &'a mut IntrinsicBuilder<'b>,
     ids: EncoderIds,
-    active: HashSet<usize>,
+    active: MovingIdentities,
     steps: usize,
 }
 
 enum MapAction {
     Enter((IntrinsicNode, RuntimeRep)),
     Emit((IntrinsicNode, RuntimeRep), (IntrinsicNode, RuntimeRep)),
-    Leave(usize),
+    Leave(IntrinsicNode),
+}
+
+/// Address membership is valid only for one collection generation. Retained
+/// nodes are collector-updated witnesses, so rebuilding the index preserves
+/// both cycle detection and distinct acyclic objects after relocation.
+#[derive(Default)]
+struct MovingIdentities {
+    generation: u64,
+    nodes: HashMap<usize, IntrinsicNode>,
+}
+
+impl MovingIdentities {
+    fn refresh(
+        &mut self,
+        generation: u64,
+        mut word: impl FnMut(IntrinsicNode) -> Result<usize, RuntimeError>,
+    ) -> Result<(), RuntimeError> {
+        if self.generation != generation {
+            let mut nodes = HashMap::with_capacity(self.nodes.len());
+            for node in self.nodes.values() {
+                nodes.insert(word(*node)? & !7, *node);
+            }
+            self.nodes = nodes;
+            self.generation = generation;
+        }
+        Ok(())
+    }
+
+    fn insert(
+        &mut self,
+        builder: &IntrinsicBuilder<'_>,
+        node: IntrinsicNode,
+    ) -> Result<bool, RuntimeError> {
+        self.refresh(builder.machine.gc_generation(), |node| builder.word(node))?;
+        Ok(self.nodes.insert(builder.word(node)? & !7, node).is_none())
+    }
+
+    fn remove(
+        &mut self,
+        builder: &IntrinsicBuilder<'_>,
+        node: IntrinsicNode,
+    ) -> Result<(), RuntimeError> {
+        self.refresh(builder.machine.gc_generation(), |node| builder.word(node))?;
+        self.nodes.remove(&(builder.word(node)? & !7));
+        Ok(())
+    }
 }
 
 impl JsonEncoder<'_, '_> {
@@ -857,8 +903,7 @@ impl JsonEncoder<'_, '_> {
             return Err(RuntimeError::StackOverflow.into());
         }
         let (id, fields) = self.constructor(node, rep)?;
-        let identity = self.builder.word(node)? & !7;
-        if !self.active.insert(identity) {
+        if !self.active.insert(self.builder, node)? {
             return Err(RuntimeError::BlackHole.into());
         }
         let result = (|| {
@@ -879,7 +924,7 @@ impl JsonEncoder<'_, '_> {
             }
             Ok(())
         })();
-        self.active.remove(&identity);
+        self.active.remove(self.builder, node)?;
         result
     }
 
@@ -910,7 +955,7 @@ impl JsonEncoder<'_, '_> {
     ) -> Result<(), EncodeFailure> {
         out.push(b'[');
         let mut first = true;
-        let mut seen = HashSet::new();
+        let mut seen = MovingIdentities::default();
         loop {
             let (id, fields) = self.constructor(field.0, field.1)?;
             if id == self.ids.nil && fields.is_empty() {
@@ -919,8 +964,7 @@ impl JsonEncoder<'_, '_> {
             if id != self.ids.cons || fields.len() != 2 {
                 return Err(RuntimeError::BadPointer.into());
             }
-            let key = self.builder.word(field.0)? & !7;
-            if !seen.insert(key) {
+            if !seen.insert(self.builder, field.0)? {
                 return Err(RuntimeError::BlackHole.into());
             }
             if !first {
@@ -942,7 +986,7 @@ impl JsonEncoder<'_, '_> {
     ) -> Result<(), EncodeFailure> {
         out.push(b'{');
         let mut first = true;
-        let mut active = HashSet::new();
+        let mut active = MovingIdentities::default();
         let mut actions = vec![MapAction::Enter(root)];
         while let Some(action) = actions.pop() {
             match action {
@@ -954,11 +998,10 @@ impl JsonEncoder<'_, '_> {
                     if id != self.ids.bin || fields.len() != 5 {
                         return Err(RuntimeError::BadPointer.into());
                     }
-                    let identity = self.builder.word(node.0)? & !7;
-                    if !active.insert(identity) {
+                    if !active.insert(self.builder, node.0)? {
                         return Err(RuntimeError::BlackHole.into());
                     }
-                    actions.push(MapAction::Leave(identity));
+                    actions.push(MapAction::Leave(node.0));
                     actions.push(MapAction::Enter(fields[4]));
                     actions.push(MapAction::Emit(fields[1], fields[2]));
                     actions.push(MapAction::Enter(fields[3]));
@@ -972,8 +1015,8 @@ impl JsonEncoder<'_, '_> {
                     out.push(b':');
                     self.write_value(value.0, value.1, depth, out)?;
                 }
-                MapAction::Leave(identity) => {
-                    active.remove(&identity);
+                MapAction::Leave(node) => {
+                    active.remove(self.builder, node)?;
                 }
             }
         }
@@ -1566,6 +1609,38 @@ impl<'a> IntrinsicBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cycle_identity_index_relocates_witnesses_before_address_reuse() {
+        let machine = MachineState::new();
+        let mut roots = ConstructionCore::new(1);
+        let first = roots
+            .push_word(&machine, 0x1001, RuntimeRep::LiftedRef)
+            .unwrap();
+        let second = roots
+            .push_word(&machine, 0x2001, RuntimeRep::LiftedRef)
+            .unwrap();
+        let mut identities = MovingIdentities {
+            generation: 0,
+            nodes: HashMap::from([(0x1000, first), (0x2000, second)]),
+        };
+        // Model the collector updating stable root slots while another object
+        // moves into an address previously used by the active traversal.
+        unsafe {
+            roots.slot(first).unwrap().write(0x3001);
+            roots.slot(second).unwrap().write(0x1001);
+        }
+        identities
+            .refresh(1, |node| {
+                roots.word(node).map_err(|_| RuntimeError::BadPointer)
+            })
+            .unwrap();
+        assert_eq!(identities.nodes.get(&0x3000), Some(&first));
+        assert_eq!(identities.nodes.get(&0x1000), Some(&second));
+        assert!(!identities.nodes.contains_key(&0x2000));
+        roots.release(&machine);
+        assert_eq!(machine.rust_roots_len(), 0);
+    }
 
     #[test]
     fn polling_reader_observes_cancellation_without_heap_pressure() {

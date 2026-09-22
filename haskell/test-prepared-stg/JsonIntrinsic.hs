@@ -30,6 +30,8 @@ result =
           && encodeValue encoded == "{\"a\":[\"snowman ☃\",true],\"z\":1.25}"
           && encodeValue (Number (scientific 10 maxBound)) == "10e9223372036854775807"
           && encodeValue (Number (scientific 0 minBound)) == "0"
+          && eitherDecodeValue (encodeValue wideArray) == Right wideArray
+          && eitherDecodeValue (encodeValue wideObject) == Right wideObject
         then 1 else 0
     _ -> 0
 
@@ -46,3 +48,17 @@ encoded = Object (Map.fromList
   ])
  where
   lazyTrue = id True
+
+-- Each field forces a nested native parse while the outer encoder retains
+-- cycle-detection witnesses. The tiny-nursery runner collects repeatedly.
+{-# OPAQUE lazyValue #-}
+lazyValue :: Int -> Value
+lazyValue n = case eitherDecodeValue ("[" <> Data.Text.pack (show n) <> ",true]") of
+  Right value -> value
+  Left _ -> Null
+
+wideArray :: Value
+wideArray = Array (map lazyValue [1 .. 2048])
+
+wideObject :: Value
+wideObject = Object (Map.fromList [(Data.Text.pack (show n), lazyValue n) | n <- [1 .. 512]])
