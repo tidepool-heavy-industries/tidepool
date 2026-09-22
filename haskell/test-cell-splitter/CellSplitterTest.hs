@@ -263,13 +263,11 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
       (checked, output) <- captureStderr root "metadata-check" $
         runRequest $ \compiler ->
           compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
-      assertContains "metadata captures the checked target's types" "Box Int"
-        (show (crCapturedTypes checked))
       inspected <- runInspection
         (crHscEnv checked)
         (crTargetTcGblEnv checked)
         (crTargetRdrEnv checked)
-        (crCapturedTypes checked)
+        (crInspectionProbes checked)
         [InspectTypeOf "value", InspectModule "MetadataTarget" False]
       case inspected of
         [InspectionType "value" rendered _, InspectionBrowse "MetadataTarget" False entries] -> do

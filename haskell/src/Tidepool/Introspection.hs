@@ -467,10 +467,10 @@ runInspection ::
   HscEnv ->
   TcGblEnv ->
   GlobalRdrEnv ->
-  Map.Map String String ->
+  Map.Map String Id ->
   [InspectionRequest] ->
   IO [InspectionResult]
-runInspection hscEnv tcGblEnv rdrEnv capturedTypes requests = do
+runInspection hscEnv tcGblEnv rdrEnv inspectionProbes requests = do
   libdir <- getLibdir
   runGhc (Just libdir) $ do
     setSession hscEnv
@@ -485,23 +485,12 @@ runInspection hscEnv tcGblEnv rdrEnv capturedTypes requests = do
     inspect context (typeIndex, results) request = case request of
       InspectTypeOf expression ->
         let binder = "__tidepool_inspect_" ++ show typeIndex
-         in case Map.lookup binder capturedTypes of
-              Just display -> do
-                let names =
-                      [ greName gre
-                      | gre <- globalRdrEnvElts rdrEnv,
-                        any (matchesQuery binder) (greRdrNames gre)
-                      ]
-                case nubBy (==) names of
-                  [name] -> do
-                    found <- lookupName name
-                    case found of
-                      Just (AnId identifier) -> do
-                        availability <- liftIO $ signatureAvailability context (idType identifier)
-                        pure (typeIndex + 1, results ++ [InspectionType expression display availability])
-                      _ -> missing binder
-                  _ -> missing binder
-              Nothing -> liftIO (ioError (userError ("inspection module did not expose " ++ binder)))
+         in case Map.lookup binder inspectionProbes of
+              Just identifier -> do
+                availability <- liftIO $ signatureAvailability context (idType identifier)
+                let display = renderWithContext defaultSDocContext (ppr (idType identifier))
+                pure (typeIndex + 1, results ++ [InspectionType expression display availability])
+              Nothing -> missing binder
       InspectNameInfo query -> do
         result <- inspectName context rdrEnv query
         pure (typeIndex, results ++ [result])

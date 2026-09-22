@@ -28,10 +28,9 @@ import GHC.Builtin.Types (intDataCon, mkListTy)
 import GHC.Core.TyCo.Rep (Type, Scaled(..))
 import GHC.Data.FastString (fsLit)
 import GHC.Types.Unique.Supply (UniqSupply, initUs, mkSplitUniqSupply, takeUniqFromSupply)
-import GHC.Core.Type (mkTyConApp, mkTyConTy, splitTyConApp_maybe)
+import GHC.Core.Type (mkTyConApp, mkTyConTy, splitTyConApp_maybe, coreView)
 import GHC.Core.TyCon (TyCon, tyConArity)
 import GHC.Core.DataCon (DataCon, dataConOrigResTy)
-import GHC.Core.TyCo.FVs (noFreeVarsOfType)
 import GHC.Driver.Env (HscEnv, lookupType)
 import GHC.Types.TyThing.Ppr (pprTyThingInContext)
 import GHC.Types.TyThing (TyThing (..))
@@ -319,15 +318,28 @@ syntheticSiteId identity =
   let Fingerprint high low = fingerprintString (T.unpack identity)
   in syntheticSiteBit .|. ((high `xor` low) .&. 0x7fffffffffffffff)
 
--- | The reply index of a request constructor: the closed last argument of its
+-- | The reply index of a request constructor: the last argument of its
 -- saturated original result type (@Print :: Text -> Console ()@ gives @()@).
--- An open index (@Finalize v a@) or a nullary result type has none. Only the
--- index is ever interned; the request type itself is a GADT the type policy
--- refuses.
+-- A polymorphic index remains useful only when it has a normalized nominal
+-- outer constructor. Its enclosing algebraic constructors are authenticated,
+-- while the unresolved field remains an explicit unconstructible node. This
+-- permits fieldless states such as @ProgressPending@ and @ProgressClosed@
+-- without claiming a way to construct the polymorphic payload. A bare type
+-- variable has no evidence: admitting it could replace a real dynamic site
+-- with an unconstructible synthetic one. A nullary result type also has no
+-- index. Only the index is interned; the request type itself is a GADT the
+-- type policy refuses.
 requestReplyIndex :: DataCon -> Maybe Type
 requestReplyIndex constructor = case splitTyConApp_maybe (dataConOrigResTy constructor) of
   Just (family, arguments)
     | length arguments == tyConArity family
     , index : _ <- reverse arguments
-    , noFreeVarsOfType index -> Just index
+    , hasNominalHead index -> Just index
   _ -> Nothing
+
+hasNominalHead :: Type -> Bool
+hasNominalHead ty = case splitTyConApp_maybe ty of
+  Just _ -> True
+  Nothing -> case coreView ty of
+    Just normalized -> hasNominalHead normalized
+    Nothing -> False

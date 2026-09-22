@@ -258,7 +258,7 @@ runInspectionMode compiler args _path = do
       (crHscEnv successful)
       (crTargetTcGblEnv successful)
       (crTargetRdrEnv successful)
-      (crCapturedTypes successful)
+      (crInspectionProbes successful)
       queries
 
     -- A source path identifies an exact generated source in this request.

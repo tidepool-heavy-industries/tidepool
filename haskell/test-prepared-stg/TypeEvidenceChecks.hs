@@ -96,6 +96,16 @@ runTypeEvidenceChecks directory project projectWithAux = do
   echoWire <- program "echoRequest"
   assert (null (programVerbSites echoWire))
     "an open reply index acquired a synthetic site"
+  progressWire <- program "progressRequest"
+  progressNode <- verbAnswer progressWire "ObserveProgress"
+  case progressNode of
+    TypeData family [payload] rows -> do
+      assert (symbolOccurrence family == "Progress"
+        && map rowFields rows == [[], [payload], []])
+        ("polymorphic progress reply lost its fieldless constructors: " ++ show progressNode)
+      assert (isRefusal (nodeAt progressWire payload))
+        "polymorphic progress payload was treated as constructible"
+    other -> ioError (userError ("polymorphic progress reply lacks algebraic evidence: " ++ show other))
 
   empty <- program "unrelated"
   assert (null (programSites empty) && null (programTypes empty))

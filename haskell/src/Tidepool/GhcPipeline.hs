@@ -201,7 +201,7 @@ data CheckedEnvironmentResult = CheckedEnvironmentResult
   { crHscEnv :: HscEnv
   , crTargetTcGblEnv :: TcGblEnv
   , crTargetRdrEnv :: GlobalRdrEnv
-  , crCapturedTypes :: Map.Map String String
+  , crInspectionProbes :: Map.Map String Id
   , crResultType :: Maybe Type
   , crCheckedBinderPins :: [CheckedBinderPin]
   }
@@ -222,9 +222,6 @@ data PipelineResult = PipelineResult
   -- This display string is not parser-faithful: 'ppr' can elide qualifiers or
   -- use Unicode. Cross-turn typechecking must use structured type data.
   , prCapturedType :: Maybe String
-  -- | Rendered types of compiler-only inspection bindings, keyed by their
-  -- generated top-level names. A batch of @:type@ queries shares one compile.
-  , prCapturedTypes :: Map.Map String String
   -- | Post-zonk types of compiler-reserved local aliases emitted by the cell
   -- checker. These are structured separately from display-only inspection
   -- strings because the runtime replants them into staged statement compiles.
@@ -657,7 +654,7 @@ data ModuleFront = ModuleFront
   , mfHscEnv     :: HscEnv
   , mfTcGblEnv   :: TcGblEnv
   , mfDesugared  :: ModGuts
-  , mfCapturedTypes :: Map.Map String String
+  , mfCapturedType :: Maybe String
   , mfCheckedBinderPins :: [CheckedBinderPin]
   , mfResultType :: Maybe Type
   , mfReferencedModules :: Set.Set ModuleName
@@ -832,7 +829,7 @@ data ModuleFacts = ModuleFacts
 data ModuleOutput = ModuleOutput
   { moduleOutputModule :: Module
   , moduleOutputBinds :: [CoreBind]
-  , moduleOutputCapturedTypes :: Map.Map String String
+  , moduleOutputCapturedType :: Maybe String
   , moduleOutputCheckedBinderPins :: [CheckedBinderPin]
   , moduleOutputResultType :: Maybe Type
   }
@@ -1078,7 +1075,7 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                     -- before optimization can inline/rename @__user@ away. Types
                     -- live on the Id in the typechecked type env; the prepared wire program erases
                     -- them after compiler-owned decisions.
-                    capturedTypes = capturedTopLevelTypes tcGblEnv
+                    capturedType = capturedBindingDisplay evalUserBinder tcGblEnv
                     checkedBinderPins = capturedCellBinderPins hscEnv tcGblEnv
                     -- 'cpResultBinders' is the @result@-vs-@__result@ convention:
                     -- the one-shot eval wrapper names @result@ while resident-turn
@@ -1097,7 +1094,7 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                                  , mfHscEnv     = hscEnv
                                  , mfTcGblEnv   = tcGblEnv
                                  , mfDesugared  = desugared
-                                 , mfCapturedTypes = capturedTypes
+                                 , mfCapturedType = capturedType
                                  , mfCheckedBinderPins = checkedBinderPins
                                  , mfResultType = mResTy
                                  , mfReferencedModules = moduleRefs desugared }
@@ -1126,7 +1123,7 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                   , ModuleOutput
                       { moduleOutputModule = mg_module externalized
                       , moduleOutputBinds = mg_binds externalized
-                      , moduleOutputCapturedTypes = mfCapturedTypes mf
+                      , moduleOutputCapturedType = mfCapturedType mf
                       , moduleOutputCheckedBinderPins = mfCheckedBinderPins mf
                       , moduleOutputResultType = mfResultType mf
                       }
@@ -1479,14 +1476,14 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
           -- Merge: dependency module bindings first, target module last
           let isTargetMod output =
                 moduleNameString (moduleName (moduleOutputModule output)) == targetModName
-          (targetOutput, depOutputs, capturedTypes, checkedBinderPins, resultTy) <-
+          (targetOutput, depOutputs, capturedType, checkedBinderPins, resultTy) <-
             case filter isTargetMod results of
             (targetResult:_) ->
               return
                 ( targetResult
                 , [output | output <- results
                     , moduleOutputModule output /= moduleOutputModule targetResult]
-                , moduleOutputCapturedTypes targetResult
+                , moduleOutputCapturedType targetResult
                 , moduleOutputCheckedBinderPins targetResult
                 , moduleOutputResultType targetResult
                 )
@@ -1521,8 +1518,7 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                 { prBinds  = allBinds
                 , prTyCons = allTyCons
                 , prHscEnv = cpFinalEnv plan hscFinal
-                , prCapturedType = Map.lookup evalUserBinder capturedTypes
-                , prCapturedTypes = capturedTypes
+                , prCapturedType = capturedType
                 , prCheckedBinderPins = checkedBinderPins
                 , prResultType   = resultTy
                 , prWarnings     = warnings
@@ -1563,6 +1559,7 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
               parsed <- parseModule summary
               typed <- typecheckModule (pvTransformParsed variant summary parsed)
               let tcg = fst (tm_internals_ typed)
+                  inspectionProbes = capturedInspectionProbes typed tcg
                   retainInterface reason = do
                     -- A later source module's normal home import resolves via
                     -- this HPT entry. A source-less Val interface injected before
@@ -1589,17 +1586,17 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
                   retainInterface (" consumer=" ++ moduleNameString consumer)
                 HomeInterfaceNeededForSessionInjection ->
                   retainInterface " reason=session-value-interface"
-              pure (if isTarget then Just tcg else Nothing)
+              pure (if isTarget then Just (tcg, inspectionProbes) else Nothing)
         errors <- liftIO (nub . reverse <$> readIORef errorRef)
         cpBeforeMerge plan loadFlag errors
-        case [tcg | Just tcg <- checked] of
-          [tcg] -> do
+        case [(tcg, probes) | Just (tcg, probes) <- checked] of
+          [(tcg, probes)] -> do
             env <- getSession
             pure CheckedEnvironmentResult
               { crHscEnv = cpFinalEnv plan env
               , crTargetTcGblEnv = tcg
               , crTargetRdrEnv = tcg_rdr_env tcg
-              , crCapturedTypes = capturedTopLevelTypes tcg
+              , crInspectionProbes = probes
               , crResultType = foldr (<|>) Nothing [capturedBindingType name tcg | name <- cpResultBinders plan]
               , crCheckedBinderPins = capturedCellBinderPins (cpFinalEnv plan env) tcg
               }
@@ -2167,14 +2164,25 @@ sessionVariant purpose scope path = do
         , cpFinalEnv = hscUpdateFlags canonicalizeDFlags
         }
    }
--- | Capture only compiler-reserved probe binders. Ordinary module bindings do
--- not belong in pipeline metadata or the resident compile memo.
-capturedTopLevelTypes :: TcGblEnv -> Map.Map String String
-capturedTopLevelTypes tcg = Map.fromList
-  [ (occ, renderWithContext defaultSDocContext (ppr (idType i)))
-  | i <- typeEnvIds (tcg_type_env tcg)
-  , let occ = occNameString (nameOccName (idName i))
-  , occ == evalUserBinder || "__tidepool_inspect_" `isPrefixOf` occ
+-- | Render the exact type held by the typechecked environment before the
+-- executable pipeline can simplify the binding away.
+capturedBindingDisplay :: String -> TcGblEnv -> Maybe String
+capturedBindingDisplay occurrence tcg =
+  renderWithContext defaultSDocContext . ppr <$> capturedBindingType occurrence tcg
+
+-- | The generated @:type@ bindings are not part of a module's public API.
+-- GHC can omit them from the target reader/type environments after a session
+-- interface registration, even though it accepted their typed syntax. The
+-- typechecked source is the exact owner of those local generated binders;
+-- retain only their Ids for the immediate inspection request.
+capturedInspectionProbes :: TypecheckedModule -> TcGblEnv -> Map.Map String Id
+capturedInspectionProbes typed tcg = Map.fromList
+  [ (occurrence, identifier)
+  | identifier <- typeEnvIds (tcg_type_env tcg)
+      ++ collectDataIds (tcg_binds tcg)
+      ++ collectDataIds (tm_typechecked_source typed)
+  , let occurrence = occNameString (nameOccName (idName identifier))
+  , "__tidepool_inspect_" `isPrefixOf` occurrence
   ]
 
 -- | Harvest the compiler-reserved aliases that the whole-cell source builder

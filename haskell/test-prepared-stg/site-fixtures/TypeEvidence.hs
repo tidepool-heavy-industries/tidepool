@@ -18,6 +18,10 @@ data Choice a where
 data Chain = End | Link Chain
 data Nest a = Nest (Nest [a])
 data Packed = Packed {-# UNPACK #-} !Int
+data Progress progress
+  = ProgressPending
+  | ProgressUpdate progress
+  | ProgressClosed
 
 boolAnswer :: Maybe Bool
 boolAnswer = runLLMTurn @Bool "bool"
@@ -70,6 +74,7 @@ data Console a where
   Print :: Text -> Console ()
   Fetch :: Text -> Console (Either Bool Text)
   Echo :: a -> Console a
+  ObserveProgress :: Console (Progress progress)
 
 printRequest :: Console ()
 printRequest = Print "hi"
@@ -79,6 +84,9 @@ fetchRequest = Fetch "path"
 
 echoRequest :: Console Int
 echoRequest = Echo 1
+
+progressRequest :: Console (Progress Int)
+progressRequest = ObserveProgress
 
 unrelated :: Int
 unrelated = 42
