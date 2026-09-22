@@ -411,7 +411,9 @@ impl Driver {
             }
             RecipeAssert(name, holds) => {
                 if !holds {
-                    return Err(runtime_error(format!("recipe assertion failed: {name}")));
+                    return Err(runtime_error(format!(
+                        "recipe assertion failed: {name}; expected: True; observed: {holds}"
+                    )));
                 }
                 println!("  passed: {name}");
                 self.assertions.push(name);

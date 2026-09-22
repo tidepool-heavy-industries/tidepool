@@ -63,8 +63,10 @@ notPresented = send . RecipeNotPresented
 unconfirmed :: Member RecipeCheck effects => Text -> Eff effects Text
 unconfirmed = send . RecipeUnconfirmed
 
+-- | Assert that an observed condition is true. The host reports the expected
+-- value (`True`) and this observed value when the assertion fails.
 check :: Member RecipeCheck effects => Text -> Bool -> Eff effects ()
-check name holds = send (RecipeAssert name holds)
+check name observed = send (RecipeAssert name observed)
 
 -- Intentionally closes this model-free swarm, then captures the edited package.
 -- Earlier CheckActor values cannot address the new swarm even if IDs repeat.
