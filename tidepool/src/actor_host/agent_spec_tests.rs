@@ -240,6 +240,77 @@ async fn status(policy: &dyn tidepool_actor::ResidentToolEndpoint) -> String {
         .to_string()
 }
 
+/// Reports activation and reload costs through the same counters as notebook
+/// cells. Run alone against a resident daemon; wall times are observations,
+/// while tool and slot output prove each measured installation was usable.
+#[tokio::test]
+#[ignore = "reports actor-spec costs; requires a resident compiler daemon"]
+async fn actor_spec_cost_measurement() {
+    use super::cell_compile_cost_tests::report;
+    use std::time::Instant;
+
+    assert!(std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).is_some());
+    for round in 0..2 {
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let started = Instant::now();
+        let campaign = start_with_slot("measurement-one", ANNOTATES).await;
+        report(
+            &campaign,
+            "specActivation",
+            Some(round),
+            None,
+            before,
+            started,
+        );
+        let policy = campaign.root_installation.policy.as_ref();
+        let initial = probe(policy).await;
+        assert!(initial.contains("measurement-one"), "{initial}");
+        assert!(
+            initial.contains("asked about this topic twice before"),
+            "{initial}"
+        );
+
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let started = Instant::now();
+        let receipt = reload(policy).await;
+        report(
+            &campaign,
+            "specUnchangedReload",
+            Some(round),
+            None,
+            before,
+            started,
+        );
+        assert!(receipt.contains("swapped"), "{receipt}");
+
+        std::fs::write(
+            campaign._repository.path().join(".shoal/Project/Tools.hs"),
+            tools_module(DESCRIPTION, "measurement-two"),
+        )
+        .unwrap();
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let started = Instant::now();
+        let receipt = reload(policy).await;
+        report(
+            &campaign,
+            "specEditedReload",
+            Some(round),
+            None,
+            before,
+            started,
+        );
+        assert!(receipt.contains("swapped"), "{receipt}");
+        let changed = probe(policy).await;
+        assert!(changed.contains("measurement-two"), "{changed}");
+        assert!(
+            changed.contains("asked about this topic twice before"),
+            "{changed}"
+        );
+        campaign.forest.shutdown().await;
+        campaign.hosted.await.unwrap();
+    }
+}
+
 /// The whole point: an edited body, the same declared surface, and the NEXT
 /// call runs the new code — inside one session, with no new incarnation.
 #[tokio::test]

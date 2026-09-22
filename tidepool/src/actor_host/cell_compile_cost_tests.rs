@@ -41,7 +41,7 @@ struct CellCostObservation<'a> {
     machine: Option<tidepool_actor::ResidentMachineMeasurement>,
 }
 
-fn report(
+pub(super) fn report(
     campaign: &super::test_campaign::TestCampaign,
     phase: &str,
     round: Option<u64>,
@@ -82,12 +82,19 @@ const ONE_STATEMENT_CELL: &str = "sum [1 .. 10 :: Int]\n";
 #[ignore = "reports compile-request counts and timings; wants a live compiler daemon"]
 async fn cell_compile_cost_measurement() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter("warn,tidepool_codegen::prepared_compile=info,tidepool_runtime::prepared_install=info,tidepool_harness::timing=debug,tidepool_extract_cmd::endpoint=debug,tidepool_actor::resident_workbench=debug")
+        .with_env_filter("warn,tidepool_codegen::prepared_compile=info,tidepool_runtime::prepared_install=info,tidepool_extract_cmd::endpoint=debug,tidepool_actor::resident_workbench=debug")
         .without_time()
         .try_init();
     let daemon = std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).is_some();
+    assert!(
+        daemon,
+        "matched cell measurements require a resident compiler daemon"
+    );
     println!("cell-cost daemon={daemon}");
+    let started = Instant::now();
+    let before = tidepool_extract_cmd::extract_spawn_count();
     let campaign = super::test_campaign::TestCampaign::start().await;
+    report(&campaign, "activation", None, None, before, started);
     let policy = campaign.root_installation.policy.clone();
 
     // Report the first cell separately because it pays the cold compile.
