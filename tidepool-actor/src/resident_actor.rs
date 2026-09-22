@@ -7907,6 +7907,16 @@ where
         self.environment.runner.resident_session_state(self.session)
     }
 
+    /// Read-only resident counters for matched measurement harnesses. A
+    /// running or retired machine has no snapshot rather than fabricated
+    /// zeroes.
+    #[must_use]
+    pub fn measurement_snapshot(
+        &self,
+    ) -> Option<crate::resident_workbench::ResidentMachineMeasurement> {
+        self.environment.runner.measurement_snapshot(self.session)
+    }
+
     pub fn new(
         source: ActorWorkbenchSource,
         session: tidepool_repr::SessionId,

@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::Serialize;
 use tidepool_bridge::HaskellValue;
 use tidepool_bridge::{BridgeError, FromHaskell, ToHaskell};
 use tidepool_bridge_derive::FromHaskell as DeriveFromHaskell;
@@ -462,6 +463,57 @@ impl ResidentWorkbenchTools {
 /// registry's checkout index; obligation-carrying `ResidentHole` values stay
 /// inside each running segment.
 pub type ActorMachineRegistry<H, O> = SessionRegistry<ResidentSession<H, O>, String>;
+
+/// Read-only counters for matched resident performance measurements.
+///
+/// Every value comes from the session's existing codegen, heap, or residency
+/// authority. `None` means the prepared machine has not bootstrapped yet;
+/// callers must preserve that distinction instead of reporting zero.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ResidentMachineMeasurement {
+    pub native_functions: Option<u64>,
+    pub native_code_bytes: Option<u64>,
+    pub live_old_bytes: Option<usize>,
+    pub major_collections: Option<u64>,
+    pub programs: Option<usize>,
+    pub block_words: Option<usize>,
+    pub persistent_roots: Option<usize>,
+    pub handles: Option<usize>,
+    pub code_exports: Option<usize>,
+    pub parked: Option<usize>,
+    pub static_regions: Option<usize>,
+    pub descriptor_rows: Option<usize>,
+    pub callable_rows: Option<usize>,
+    pub enter_rows: Option<usize>,
+}
+
+impl ResidentMachineMeasurement {
+    fn of<H, O>(session: &ResidentSession<H, O>) -> Self
+    where
+        H: DispatchEffect<O> + Send,
+        O: OutputSink + Sync,
+    {
+        let residency = session.residency();
+        let codegen = session.codegen_totals();
+        let heap = session.heap_stats();
+        Self {
+            native_functions: codegen.map(|(functions, _)| functions),
+            native_code_bytes: codegen.map(|(_, bytes)| bytes),
+            live_old_bytes: heap.map(|stats| stats.live_bytes),
+            major_collections: heap.map(|stats| stats.gc_count),
+            programs: residency.map(|counts| counts.programs),
+            block_words: residency.map(|counts| counts.block_words),
+            persistent_roots: residency.map(|counts| counts.persistent_roots),
+            handles: residency.map(|counts| counts.handles),
+            code_exports: residency.map(|counts| counts.code_exports),
+            parked: residency.map(|counts| counts.parked),
+            static_regions: residency.map(|counts| counts.static_regions),
+            descriptor_rows: residency.map(|counts| counts.descriptor_rows),
+            callable_rows: residency.map(|counts| counts.callable_rows),
+            enter_rows: residency.map(|counts| counts.enter_rows),
+        }
+    }
+}
 
 /// Shared checkout boundary for every actor machine entry path. Fenced
 /// fragments and installed actor programs differ above this layer, but use
@@ -1769,6 +1821,22 @@ impl<H, O> ResidentActorRunner<H, O> {
                     }
                 }),
         }
+    }
+
+    /// Snapshot the resident machine without checking it out. Returns `None`
+    /// while a turn owns the machine or after the session has retired.
+    #[must_use]
+    pub fn measurement_snapshot(
+        &self,
+        session: tidepool_repr::SessionId,
+    ) -> Option<ResidentMachineMeasurement>
+    where
+        H: DispatchEffect<O> + Send,
+        O: OutputSink + Sync,
+    {
+        self.access
+            .machines
+            .peek(session, ResidentMachineMeasurement::of)
     }
 
     pub(crate) fn workbench(

@@ -7,7 +7,10 @@
 //!
 //! What it reports, per dispatch of the same fixed cell: the number of logical
 //! extractor invocations ([`tidepool_extract_cmd::extract_spawn_count`], which
-//! counts daemon-served requests too) and the wall time of the tool call.
+//! counts daemon-served requests too) and the wall time of the tool call. Each
+//! observation is one JSON object so matched runs can also compare generated
+//! native code, heap residency, and installed-program ownership without
+//! scraping human prose.
 //!
 //! To run it: start one persistent daemon with phase timing on, then point
 //! this test at it.
@@ -24,6 +27,41 @@
 //! phase per request — the per-request split this test's counts do not have.
 
 use std::time::Instant;
+
+use serde::Serialize;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CellCostObservation<'a> {
+    phase: &'a str,
+    round: Option<u64>,
+    statements: Option<u64>,
+    compiler_requests: u64,
+    wall_ms: u128,
+    machine: Option<tidepool_actor::ResidentMachineMeasurement>,
+}
+
+fn report(
+    campaign: &super::test_campaign::TestCampaign,
+    phase: &str,
+    round: Option<u64>,
+    statements: Option<u64>,
+    requests_before: u64,
+    started: Instant,
+) {
+    let observation = CellCostObservation {
+        phase,
+        round,
+        statements,
+        compiler_requests: tidepool_extract_cmd::extract_spawn_count() - requests_before,
+        wall_ms: started.elapsed().as_millis(),
+        machine: campaign.forest.measurement_snapshot(),
+    };
+    println!(
+        "cell-cost {}",
+        serde_json::to_string(&observation).expect("measurement observation serializes")
+    );
+}
 
 /// Six statements, no declaration: two pure `let`s, a bind whose value a later
 /// statement reads, another `let`, a second bind, and a final expression. This
@@ -56,21 +94,20 @@ async fn cell_compile_cost_measurement() {
     let started = Instant::now();
     let before = tidepool_extract_cmd::extract_spawn_count();
     super::tests::dispatch_haskell_script(policy.as_ref(), ONE_STATEMENT_CELL).await;
-    println!(
-        "cell-cost first-cell statements=1 requests={} wall_ms={}",
-        tidepool_extract_cmd::extract_spawn_count() - before,
-        started.elapsed().as_millis()
-    );
+    report(&campaign, "firstCell", None, Some(1), before, started);
 
     for round in 0..2 {
         for (statements, cell) in [(1, ONE_STATEMENT_CELL), (6, SIX_STATEMENT_CELL)] {
             let before = tidepool_extract_cmd::extract_spawn_count();
             let started = Instant::now();
             super::tests::dispatch_haskell_script(policy.as_ref(), cell).await;
-            println!(
-                "cell-cost round={round} statements={statements} requests={} wall_ms={}",
-                tidepool_extract_cmd::extract_spawn_count() - before,
-                started.elapsed().as_millis()
+            report(
+                &campaign,
+                "recurringCell",
+                Some(round),
+                Some(statements),
+                before,
+                started,
             );
         }
     }
@@ -85,11 +122,7 @@ async fn cell_compile_cost_measurement() {
         serde_json::json!({"queries": ["map"]}),
     )
     .await;
-    println!(
-        "cell-cost lookup requests={} wall_ms={}",
-        tidepool_extract_cmd::extract_spawn_count() - before,
-        started.elapsed().as_millis()
-    );
+    report(&campaign, "lookup", None, None, before, started);
 
     campaign.hosted.abort();
 }
