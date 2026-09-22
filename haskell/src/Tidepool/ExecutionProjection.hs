@@ -977,11 +977,10 @@ lowerTypeNode nodes rebase (TypePolicy.TypeNodeId raw) = case IntMap.lookup (fro
       lowerRow (constructor, fields) = do
         sourceReps <- verifySourceLayout constructor
         identity@(ConstructorId index) <- internConstructor constructor
-        -- The row is checked against the declaration it will name, not only
-        -- the type graph's DataCon: the declaration interned first (from the
-        -- program's own STG) is authoritative for the runtime layout, and a
-        -- type reached through another DataCon object for the same
-        -- constructor must not borrow it with a different field shape.
+        -- The row is checked against the canonical declaration it will name,
+        -- not only the type graph's DataCon. Evidence reached through another
+        -- DataCon object for the same constructor must not borrow that
+        -- declaration with a different field shape.
         declared <- gets (fmap constructorFieldReps . listToMaybe
           . drop (fromIntegral index) . constructorDecls)
         unless (declared == Just sourceReps)
