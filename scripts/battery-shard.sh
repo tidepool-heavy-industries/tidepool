@@ -37,8 +37,8 @@ resolve_tidepool_extract
 # This mirrors it via the shared lib-extract.sh helpers rather than
 # duplicating the logic. On by default (kill switch: TIDEPOOL_EXTRACT_NO_DAEMON=1).
 # Outer-wrapper respect: when battery-shard.sh runs as one leg of a chain
-# (scripts/battery-shard.sh's own header documents the multi-shard sequence
-# for tidepool-harness/runtime/repl), a daemon already started by an earlier
+# (scripts/battery-shard.sh's own header documents the multi-shard sequence),
+# a daemon already started by an earlier
 # leg or an enclosing script is reused, not restarted or torn down here.
 nextest_pid=""
 prepare_battery_artifacts "battery-$crate" scripts/battery-shard.sh "$crate" "$@"

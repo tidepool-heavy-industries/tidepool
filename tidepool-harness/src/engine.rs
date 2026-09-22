@@ -1600,13 +1600,9 @@ impl EngineConfig {
         let effect_names = decls.iter().map(|d| d.type_name.to_string()).collect();
         let extract_bin = tidepool_runtime::toolchain::extract_command_name()
             .map_err(|e| EngineError::Setup(format!("resolve extract binary: {e}")))?;
-        let endpoint = tidepool_extract_cmd::ExtractCmd::with_bin(extract_bin.clone())
-            .bind()
-            .map_err(|e| EngineError::Setup(format!("bind compiler for immutable support: {e}")))?;
-        let dirs = tidepool_mcp::ensure_effects_module_at_for_compiler(
+        let dirs = tidepool_mcp::ensure_effects_module_at(
             &decls,
             &tidepool_mcp::RowArgs::default(),
-            endpoint.identity(),
         )
         .map_err(|e| EngineError::Setup(format!("materialize effects module: {e}")))?;
         let mut include = vec![prelude_dir.clone()];
