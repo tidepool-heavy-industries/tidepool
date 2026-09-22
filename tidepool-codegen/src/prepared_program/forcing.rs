@@ -115,6 +115,8 @@ impl<'a> ObservationRoots<'a> {
         slot: ObservationSlot,
         program: &CompiledProgram,
         vmctx: &mut VMContext,
+        statics: &StaticRegionCatalog,
+        registry: &BTreeMap<usize, super::DescriptorMetadata>,
     ) -> Result<(), ExecutionError> {
         if self.machine.prepared_call_status() != CallStatus::Success {
             return Err(super::run::runtime_error_from_machine(self.machine));
@@ -143,7 +145,11 @@ impl<'a> ObservationRoots<'a> {
         // Compiled owner pins both platform adapter and every Tail target.
         let adapter: unsafe extern "C" fn(*mut VMContext, *mut u64, usize) -> i32 =
             unsafe { std::mem::transmute(pointer) };
-        let raw = unsafe { adapter(vmctx, output, input) };
+        let raw = {
+            let _intrinsic =
+                super::ActiveIntrinsicScope::new(self.machine, program, statics, registry)?;
+            unsafe { adapter(vmctx, output, input) }
+        };
         let status = CallStatus::from_raw(i64::from(raw))
             .map_err(|_| super::run::runtime_error(self.machine, RuntimeError::BadPointer))?;
         if status != CallStatus::Success
@@ -259,7 +265,7 @@ pub(super) fn observe_results(
                     // inspect the pointer. The heap borrow ends before force.
                     heap.validate_reference(roots.read(slot))?;
                 }
-                roots.force(slot, program, vmctx)?;
+                roots.force(slot, program, vmctx, statics, registry)?;
                 let seed = super::observe::ObservationSeed {
                     word: roots.read(slot),
                     rep: slot.rep,

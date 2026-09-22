@@ -91,3 +91,8 @@ sharedValue :: Data.Text.Text
 sharedValue = encodeValue (Array [shared, shared])
  where
   shared = Array [Bool True, Null]
+
+data LazyEncoded = LazyEncoded Data.Text.Text
+
+lazyEncoded :: LazyEncoded
+lazyEncoded = LazyEncoded sharedValue
