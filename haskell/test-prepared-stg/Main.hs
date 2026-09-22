@@ -2,16 +2,19 @@ module Main (main) where
 
 import Control.Exception (SomeException, bracket, evaluate, try)
 import Control.Monad (unless)
-import Data.List (isInfixOf, sort)
+import Data.List (isInfixOf, nub, sort)
 import Data.String (fromString)
 import GHC (moduleNameString)
 import GHC.Builtin.Types (boolTy)
 import GHC.Core (Expr(..), bindersOf, flattenBinds)
+import GHC.Core.DataCon (dataConName, dataConRepArgTys)
 import GHC.Core.FVs (exprSomeFreeVarsList)
+import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Types.Id (idName)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Id.Make (nospecId)
+import GHC.Types.RepType (typePrimRep_maybe)
 import GHC.Core.TyCo.Compare (eqType)
 import Tidepool.SiteClassifier
   ( SiteFailure(..), classifySiteOccurrence, isNospecVar, stripNospecSpine )
@@ -26,6 +29,7 @@ import Tidepool.PreparedStg (PreparedModule(..))
 import qualified Data.Map.Strict as Map
 import qualified Tidepool.ExecutionProjection as Projection
 import qualified Tidepool.ExecutionSchema as Schema
+import qualified Tidepool.TypePolicy as TypePolicy
 import Tidepool.EffectSchema
   ( SiteDelivery(..), SiteType(..), SiteWireSource(..), YieldSite(..)
   , sitedVerbs, vsDelivery, vsName, vsWireSource )
@@ -122,6 +126,133 @@ assertProjects :: String -> Either Projection.ProjectionError Schema.WireProgram
 assertProjects label outcome = case outcome of
   Right _ -> pure ()
   Left failure -> ioError (userError (label ++ ": projection failed: " ++ show failure))
+
+-- | TH's bytecode provisioning must not change a constructor declared by an
+-- unchanged home module.  The graph checks run after metadata preparation and
+-- before projection or execution; the executable checks then compare the
+-- declarations a shared prepared machine receives from ordinary and quoted
+-- source.
+verifyConstructorRepresentations :: FilePath -> IO ()
+verifyConstructorRepresentations dir = do
+  let strictOwned = dir </> "StrictOwned.hs"
+      strictPlain = dir </> "StrictPlainMetadata.hs"
+      strictQuoted = dir </> "StrictQuotedMetadata.hs"
+      scientificPlain = dir </> "ScientificPlain.hs"
+      scientificQuoted = dir </> "ScientificQuoted.hs"
+      scientificMetadataPlain = dir </> "ScientificMetadataPlain.hs"
+      scientificMetadataQuoted = dir </> "ScientificMetadataQuoted.hs"
+  writeFile strictOwned (unlines
+    [ "{-# OPTIONS_GHC -O0 #-}"
+    , "module StrictOwned where"
+    , "data Automatic = Automatic !Int"
+    , "data NoUnpack = NoUnpack {-# NOUNPACK #-} !Int"
+    , "data ExplicitUnpack = ExplicitUnpack {-# UNPACK #-} !Int"
+    ])
+  writeFile strictPlain (strictMetadataSource "StrictPlainMetadata" False)
+  writeFile strictQuoted (strictMetadataSource "StrictQuotedMetadata" True)
+  writeFile scientificPlain (unlines
+    [ "module ScientificPlain where"
+    , "import Tidepool.Aeson.Scientific"
+    , "result :: Scientific"
+    , "result = scientific 42 0"
+    ])
+  writeFile scientificQuoted (unlines
+    [ "{-# LANGUAGE QuasiQuotes #-}"
+    , "module ScientificQuoted where"
+    , "import Tidepool.Aeson.Value (Value)"
+    , "import Tidepool.QQ (j)"
+    , "result :: Value"
+    , "result = [j|42|]"
+    ])
+  writeFile scientificMetadataPlain (scientificMetadataSource "ScientificMetadataPlain" False)
+  writeFile scientificMetadataQuoted (scientificMetadataSource "ScientificMetadataQuoted" True)
+  strictPlainResult <- runPipelineSelected PreparedStg strictPlain [dir, "lib"]
+  strictQuotedResult <- runPipelineSelected PreparedStg strictQuoted [dir, "lib"]
+  scientificPlainResult <- runPipelineSelected PreparedStg scientificPlain [dir, "lib"]
+  scientificQuotedResult <- runPipelineSelected PreparedStg scientificQuoted [dir, "lib"]
+  scientificMetadataPlainResult <- runPipelineSelected PreparedStg scientificMetadataPlain [dir, "lib"]
+  scientificMetadataQuotedResult <- runPipelineSelected PreparedStg scientificMetadataQuoted [dir, "lib"]
+  assertMetadataReps "Automatic" strictPlainResult strictQuotedResult
+    ["IntRep"]
+  assertMetadataReps "NoUnpack" strictPlainResult strictQuotedResult
+    ["BoxedRep (Just Lifted)"]
+  assertMetadataReps "ExplicitUnpack" strictPlainResult strictQuotedResult
+    ["IntRep"]
+  assertMetadataReps "Scientific" scientificMetadataPlainResult scientificMetadataQuotedResult
+    ["BoxedRep (Just Lifted)", "IntRep"]
+  plainProgram <- project scientificPlainResult "ScientificPlain"
+  quotedProgram <- project scientificQuotedResult "ScientificQuoted"
+  plainDecl <- namedDeclaration "Scientific" plainProgram
+  quotedDecl <- namedDeclaration "Scientific" quotedProgram
+  assert (plainDecl == quotedDecl)
+    ("Scientific constructor declaration changed across ordinary and quasiquoted source: "
+      ++ show (Schema.constructorFieldReps plainDecl) ++ " /= "
+      ++ show (Schema.constructorFieldReps quotedDecl))
+  assert (Schema.constructorFieldReps plainDecl == [Schema.LiftedRefRep, Schema.IntRep 64])
+    ("Scientific did not retain the canonical physical representation: "
+      ++ show (Schema.constructorFieldReps plainDecl))
+ where
+  strictMetadataSource modul quoted = unlines $
+    [ "{-# LANGUAGE TypeApplications #-}" ] ++ quasiquoteLanguage quoted ++
+    [ "module " ++ modul ++ " where"
+    , "import StrictOwned"
+    , "import Tidepool.Effects.Core"
+    ] ++ quasiquoteBindings quoted ++
+    [ "automatic :: Maybe Automatic"
+    , "automatic = runLLMTurn @Automatic \"automatic\""
+    , "noUnpack :: Maybe NoUnpack"
+    , "noUnpack = runLLMTurn @NoUnpack \"nounpack\""
+    , "explicitUnpack :: Maybe ExplicitUnpack"
+    , "explicitUnpack = runLLMTurn @ExplicitUnpack \"unpack\""
+    ]
+  scientificMetadataSource modul quoted = unlines $
+    [ "{-# LANGUAGE TypeApplications #-}" ] ++ quasiquoteLanguage quoted ++
+    [ "module " ++ modul ++ " where"
+    , "import Tidepool.Aeson.Value (Value)"
+    , "import Tidepool.Effects.Core"
+    ] ++ quasiquoteBindings quoted ++
+    [ "result :: Maybe Value"
+    , "result = runLLMTurn @Value \"scientific\""
+    ]
+  quasiquoteLanguage False = []
+  quasiquoteLanguage True = ["{-# LANGUAGE QuasiQuotes #-}"]
+  quasiquoteBindings False = []
+  quasiquoteBindings True =
+    [ "import Tidepool.Aeson.Value (Value)"
+    , "import Tidepool.QQ (j)"
+    , "quotedValue :: Value"
+    , "quotedValue = [j|42|]"
+    ]
+  assertMetadataReps occurrence plain quoted expected = do
+    let plainReps = typeGraphReps occurrence plain
+        quotedReps = typeGraphReps occurrence quoted
+    assert (plainReps == [expected])
+      ("ordinary metadata did not retain " ++ occurrence ++ " representation: "
+        ++ show plainReps)
+    assert (quotedReps == plainReps)
+      ("TH/QQ metadata changed " ++ occurrence ++ " representation: "
+        ++ show plainReps ++ " /= " ++ show quotedReps)
+  typeGraphReps occurrence result = nub
+    [ map show (concatMap (maybe [] id . typePrimRep_maybe . scaledThing)
+        (dataConRepArgTys constructor))
+    | prepared <- pprModules result
+    , TypePolicy.DataG _ _ _ rows <- TypePolicy.tgNodes (pmTypeGraph prepared)
+    , (constructor, _) <- rows
+    , dataConOccurrence constructor == occurrence
+    ]
+  scaledThing (Scaled _ ty) = ty
+  dataConOccurrence constructor = occNameString (nameOccName (dataConName constructor))
+  project result modul = case projectEntry result modul "result" mempty of
+    Left failure -> ioError (userError ("Scientific projection failed: " ++ show failure))
+    Right program -> pure program
+  namedDeclaration occurrence program = case filter (hasOccurrence occurrence)
+      (Schema.programConstructors program) of
+    [declaration] -> pure declaration
+    declarations -> ioError (userError ("expected one " ++ occurrence
+      ++ " declaration, got " ++ show declarations))
+  hasOccurrence occurrence declaration =
+    Schema.symbolModule (Schema.constructorIdentity declaration) == "Tidepool.Aeson.Scientific"
+      && Schema.symbolOccurrence (Schema.constructorIdentity declaration) == fromString occurrence
 
 assertWireSite :: String -> Schema.SiteDelivery -> String
   -> Either Projection.ProjectionError Schema.WireProgram -> IO ()
@@ -255,6 +386,7 @@ main = do
         (\result entry -> projectEntry result "TypeEvidence" entry mempty)
         (\result entry auxEntries ->
           projectEntryWithAux result "TypeEvidence" entry auxEntries mempty)
+      verifyConstructorRepresentations dir
       writeFile target validTarget
       writeFile siteTarget (unlines
         [ "{-# LANGUAGE TypeApplications #-}"

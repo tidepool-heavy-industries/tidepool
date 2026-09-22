@@ -1786,21 +1786,45 @@ internConstructor con = do
       tag <- checkedWord32 "constructor tag" (dataConTag con)
       familySize <- checkedWord32 "constructor family size" (GHC.tyConFamilySize (dataConTyCon con))
       prior <- gets constructorDecls
-      let identity = ConstructorId (fromIntegral (length prior))
-          declaration = ConstructorDecl
+      let declaration = ConstructorDecl
             (nameSymbol "constructor" (dataConName con))
             (nameSymbol "type" (GHC.tyConName (dataConTyCon con)))
             resultRep reps fieldStrictness layout tag familySize
             (varId (dataConWorkId con))
-      modify' (\current -> current
-        { constructors = constructors current <> [(con, identity)]
-        , constructorDecls = constructorDecls current <> [declaration] })
-      pure identity
+          nominal = constructorIdentity declaration
+          -- 'DataCon' equality follows a GHC object, not its durable nominal
+          -- identity. The same source can therefore reach this boundary via a
+          -- separately loaded interface. Only one physical declaration may be
+          -- published for that nominal constructor.
+          priorNominal =
+            [ (ConstructorId (fromIntegral index), existing)
+            | (index, existing) <- zip [0 :: Int ..] prior
+            , constructorIdentity existing == nominal
+            ]
+      case priorNominal of
+        [] -> do
+          let identity = ConstructorId (fromIntegral (length prior))
+          modify' (\current -> current
+            { constructors = constructors current <> [(con, identity)]
+            , constructorDecls = constructorDecls current <> [declaration] })
+          pure identity
+        [(identity, existing)]
+          | existing == declaration -> pure identity
+          | otherwise -> failRepresentation (constructorConflict existing declaration)
+        _ -> failRepresentation
+          ("nominal constructor has multiple declarations before interning: "
+            <> symbolText nominal)
   where
     scaledThing (Scaled _ ty) = ty
     isUnboxed LiftedRefRep = False
     isUnboxed UnliftedRefRep = False
     isUnboxed _ = True
+    constructorConflict existing incoming =
+      "distinct GHC provenance for nominal constructor "
+        <> symbolText (constructorIdentity incoming)
+        <> " has conflicting physical declarations before publication; existing="
+        <> Text.pack (show existing)
+        <> ", incoming=" <> Text.pack (show incoming)
 
 checkedWord32 :: Text -> Int -> P Word32
 checkedWord32 label value

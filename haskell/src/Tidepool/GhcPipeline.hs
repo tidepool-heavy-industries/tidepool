@@ -949,14 +949,20 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
     setupT1 <- monotonicTime
     liftIO (emitPhase timing "ghc_setup" (elapsedMs sessionT0 setupT1))
     plan <- pvPlan variant timing modGraphRaw
-    -- unpoison: keep the EPS healthy under the TH/QQ downgrade by unsetting
-    -- Opt_IgnoreInterfacePragmas on every summary (see the depanal/load'
-    -- haddock above). The bytecode-vs-object provisioning choice is made
-    -- session-wide in canonicalizeDFlags (Opt_UseBytecodeRatherThanObjects) —
-    -- it has to be set before downsweep, since 'load' re-derives each module's
-    -- backend and ignores a field patched onto a summary here.
-    let unpoison ms =
-          ms { ms_hspp_opts = gopt_unset (ms_hspp_opts ms) Opt_IgnoreInterfacePragmas }
+    -- Restore the representation-affecting extraction flags before 'load''
+    -- touches a home module. Its TH/QQ downgrade sets
+    -- Opt_OmitInterfacePragmas, which disables automatic field unboxing, and
+    -- leaves Opt_UnboxSmallStrictFields at -O0. A type graph can then intern
+    -- the downgraded DataCon while executable STG from another program interns
+    -- its canonical layout, giving one nominal constructor two physical
+    -- declarations.
+    --
+    -- Keep the downgrade's interpreter backend and link settings intact:
+    -- 'load'' needs those to provision splice bytecode. The bytecode choice is
+    -- still session-wide in 'canonicalizeDFlags'
+    -- (Opt_UseBytecodeRatherThanObjects).
+    let canonicalizeLoadSummary ms =
+          ms { ms_hspp_opts = canonicalizeRepresentationFlags (ms_hspp_opts ms) }
     targetName <- liftIO (targetModuleNameFor path)
     let plannedLoadGraph = cpLoadGraph plan
         (loadGraph, loadHowMuch) = case selection of
@@ -977,7 +983,7 @@ runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessio
           _ -> (plannedLoadGraph, LoadAllTargets)
     loadT0 <- monotonicTime
     loadFlag <- load' mCache loadHowMuch mkUnknownDiagnostic (Just batchMsg)
-               (scopeRetainedModuleGraph (mapMG unpoison loadGraph))
+               (scopeRetainedModuleGraph (mapMG canonicalizeLoadSummary loadGraph))
     loadT1 <- monotonicTime
     -- 'ghc_load' phase (TIDEPOOL_TIMING): the 'load'' call alone, nothing
     -- else. FLAT — see 'ghc_setup' above; the two rows partition the work,
@@ -2466,6 +2472,23 @@ canonicalizeDFlags dflags =
         , maxRelevantBinds = Just 0
         }) Opt_FullLaziness) Opt_CprAnal)
         Opt_ExposeAllUnfoldings) Opt_ExposeOverloadedUnfoldings
+
+-- | The TH/QQ downsweep must retain its interpreter backend so 'load'' can
+-- execute splices. It must nevertheless expose the same physical constructor
+-- choices as the later extraction front half. GHC's bang-option construction
+-- uses 'Opt_OmitInterfacePragmas' as its automatic-unboxing switch, so copy it
+-- with the two unboxing flags from the canonical policy. The remaining TH
+-- execution settings stay on the summary produced by downsweep.
+canonicalizeRepresentationFlags :: DynFlags -> DynFlags
+canonicalizeRepresentationFlags dflags =
+  copy Opt_OmitInterfacePragmas . copy Opt_UnboxStrictFields
+    . copy Opt_UnboxSmallStrictFields
+    . (`gopt_unset` Opt_IgnoreInterfacePragmas) $ dflags
+  where
+    canonical = canonicalizeDFlags dflags
+    copy flag current
+      | gopt flag canonical = gopt_set current flag
+      | otherwise = gopt_unset current flag
 
 enableDiagnosticWarning :: WarningFlag -> DynFlags -> DynFlags
 enableDiagnosticWarning warning = (`wopt_set` warning)
