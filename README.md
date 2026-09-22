@@ -352,7 +352,8 @@ Status and traces expose recovery generation and unavailable actors. Resource
 traces distinguish active and historical commands, retained allocations,
 cleanup failures, output truncation, service health, and bounded process,
 memory, pressure, CPU, and I/O observations. Existing cleanup and run-map
-commands report retained build storage. These observations are diagnostic;
+commands report retained build storage, and each run status contains a bounded
+run-directory byte and entry count with an explicit truncation flag. These observations are diagnostic;
 this recovery work adds no new limits. Stronger host isolation would require a
 separate security boundary rather than extending the trusted local resource
 service.

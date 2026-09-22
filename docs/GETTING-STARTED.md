@@ -165,8 +165,13 @@ stopping only tmux leaves the supervised host running. A host failure restarts
 with backoff and a finite retry limit. Recovery reopens the same run under its
 exclusive incarnation lock, stops every predecessor application whose exact
 supervisor identity can be proven, resumes the recorded conversation, reloads
-the last accepted source, and sends a recovery notice before new work. Actors
-whose process or ownership evidence cannot be verified remain unavailable.
+the last accepted source, and sends a recovery notice before new work. Child
+conversations resume independently when their accepted source, process stop,
+lineage, launch policy, and optional worktree custody all verify. Their logical
+actor IDs remain stable and their incarnations advance. Actors whose evidence
+cannot be verified remain visibly unavailable. The run status also samples
+run-directory storage through a bounded walk and reports when that sample was
+truncated.
 Live Haskell values, requests, watches, and bindings are reported lost rather
 than reconstructed. Unresolved tool calls are not replayed automatically.
 

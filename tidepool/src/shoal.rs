@@ -408,11 +408,21 @@ pub struct RunStatus {
     pub host_generation: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unavailable_actors: Vec<String>,
+    #[serde(default)]
+    pub run_storage: BoundedStorageObservation,
     pub run_id: String,
     pub workspace: PathBuf,
     pub session: String,
     pub agent: ShoalAgentDefaults,
     pub phase: RunPhase,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundedStorageObservation {
+    pub bytes: u64,
+    pub entries: u64,
+    pub unreadable: u64,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1452,6 +1462,7 @@ impl RunStatus {
             version: STATUS_VERSION,
             host_generation: 0,
             unavailable_actors: Vec::new(),
+            run_storage: BoundedStorageObservation::default(),
             run_id: run_id.into(),
             workspace: workspace.into(),
             session: session.into(),
@@ -1472,9 +1483,53 @@ impl RunStatus {
 }
 
 fn write_status(path: &Path, status: &RunStatus) -> Result<(), Box<dyn std::error::Error>> {
-    let bytes = serde_json::to_vec_pretty(status)?;
+    let mut status = status.clone();
+    if let Some(run_root) = path.parent() {
+        status.run_storage = observe_storage(run_root, 8_192);
+    }
+    let bytes = serde_json::to_vec_pretty(&status)?;
     tidepool_atomic_write::write_best_effort(path, &bytes)?;
     Ok(())
+}
+
+fn observe_storage(root: &Path, maximum_entries: usize) -> BoundedStorageObservation {
+    let mut observation = BoundedStorageObservation::default();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        if observation.entries as usize >= maximum_entries {
+            observation.truncated = true;
+            break;
+        }
+        observation.entries += 1;
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {
+                observation.bytes = observation.bytes.saturating_add(metadata.len());
+            }
+            Ok(metadata) if metadata.is_dir() => match std::fs::read_dir(&path) {
+                Ok(entries) => {
+                    for entry in entries {
+                        match entry {
+                            Ok(entry)
+                                if observation.entries as usize + pending.len()
+                                    < maximum_entries =>
+                            {
+                                pending.push(entry.path());
+                            }
+                            Ok(_) => {
+                                observation.truncated = true;
+                                break;
+                            }
+                            Err(_) => observation.unreadable += 1,
+                        }
+                    }
+                }
+                Err(_) => observation.unreadable += 1,
+            },
+            Ok(_) => {}
+            Err(_) => observation.unreadable += 1,
+        }
+    }
+    observation
 }
 
 fn shoal_state_root(workspace: &Path) -> PathBuf {
@@ -2571,6 +2626,23 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("unsupported Shoal run status version 3"));
+    }
+
+    #[test]
+    fn run_storage_observation_is_bounded_and_does_not_follow_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("one"), b"1234").unwrap();
+        std::fs::create_dir(root.path().join("nested")).unwrap();
+        std::fs::write(root.path().join("nested/two"), b"12").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.path(), root.path().join("loop")).unwrap();
+
+        let complete = observe_storage(root.path(), 16);
+        assert_eq!(complete.bytes, 6);
+        assert!(!complete.truncated);
+        let bounded = observe_storage(root.path(), 2);
+        assert!(bounded.truncated);
+        assert_eq!(bounded.entries, 2);
     }
 
     #[test]
