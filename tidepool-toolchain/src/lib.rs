@@ -22,7 +22,6 @@ pub mod diag;
 pub mod failclass;
 pub mod paths;
 pub mod prepared_artifact;
-pub mod support;
 pub mod timing;
 pub mod toolchain;
 
@@ -32,10 +31,6 @@ pub use artifacts::{
     SiteType, StableValInject, TargetArtifact, YieldSite, YieldSiteCollision, YieldSites,
 };
 pub use failclass::{classify_compile, FailureClass, FailureEnvelope, Phase};
-pub use support::{
-    stage_immutable_support, ImmutableSupport, ImmutableSupportError, ImmutableSupportFile,
-    ImmutableSupportPackage,
-};
 
 /// Errors that can occur during Haskell compilation via `tidepool-extract`.
 /// The one error type both compile front doors ([`crate::compile_targets`]

@@ -1,9 +1,8 @@
 # tidepool — facade crate + composition-root binaries
 
-**Charter.** Belongs: the `cargo install tidepool` MCP server binary, the
-composition-root `tidepool-selfharness` binary (driver + gate + provider +
-memory store + web server), the `shoal` actor-runtime composition root, and
-library re-exports of the workspace's other crates. Does NOT belong: any
-actual effect/session/harness logic — that
-lives in the crates this one wires together (`tidepool-mcp`,
-`tidepool-handlers`, `tidepool-harness`, `tidepool-web`).
+**Charter.** Belongs: the `cargo install tidepool` utility and Shoal binaries,
+the independent compile reporter, and library re-exports of the workspace's
+other crates. The retained selfharness and operator-web source trees are
+historical reference material and are excluded from the supported workspace
+build. Actual effect/session logic lives in the maintained crates this one
+wires together (`tidepool-mcp`, `tidepool-handlers`, and `tidepool-runtime`).

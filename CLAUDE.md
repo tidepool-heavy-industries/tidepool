@@ -42,12 +42,13 @@ and where to start. This file is the short form, with the mechanism index.
 | `tidepool-protocol` | Source schema for effect and error definitions |
 | `tidepool-mcp` | MCP server library and generated Haskell effect surface |
 | `tidepool-handlers` | Concrete effect handlers |
-| `tidepool-harness` | Resident authored-harness runtime and driver |
 | `tidepool-agent` | Typed coding-agent backend boundary |
 | `tidepool-worktree` | Managed coding checkouts, repository observation, and journal |
-| `tidepool-web` | Operator UI |
 | `tidepool` | Public facade and composition-root binaries |
 | `harness-dogfooding/` | Authored harnesses, including the Haskell devswarm |
+
+The retained `tidepool-harness/` and `tidepool-web/` source trees are historical
+reference material and are excluded from the supported Cargo workspace.
 
 Small support crates have short local charters describing their exact scope.
 
@@ -78,7 +79,6 @@ Small support crates have short local charters describing their exact scope.
 | field/laziness triviality policy | `tidepool-repr` |
 | authored Haskell concurrency | `Tidepool.Async` |
 | operator forms, gates, and steering | `OperatorGate::present_form` and `Tidepool.Form` |
-| operator listen queue and socket | `tidepool-harness::listen` |
 | agent spec discovery, reload, and the after-tool slot | `tidepool-actor::{agent_spec, reload_spec_tool, after_tool}` |
 | declared tool surface comparison | `tidepool-tool::surface` |
 | source layers: capture, typecheck, publication, drift | `tidepool::shoal::source` |

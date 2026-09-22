@@ -1,14 +1,5 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
-mod listen_client;
-
-#[derive(clap::Subcommand)]
-enum Command {
-    /// Connect to a resident harness's listen channel and print each frame
-    /// it publishes to stdout, acknowledging each frame after flushing it.
-    Listen(listen_client::ListenArgs),
-}
-
 #[derive(clap::Parser)]
 #[command(
     name = "tidepool",
@@ -16,9 +7,6 @@ enum Command {
     arg_required_else_help = true
 )]
 struct Args {
-    #[command(subcommand)]
-    command: Option<Command>,
-
     /// Record the deploy stamp — the content fingerprints of the extract
     /// binary and the stdlib tree this binary resolves — then exit. Run by
     /// `scripts/redeploy.sh` as its final step, so that every later server
@@ -49,20 +37,12 @@ fn write_toolchain_stamp() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     use clap::Parser;
 
     let args = Args::parse();
-
-    // `--write-toolchain-stamp`: record the pair and exit, before any
-    // subcommand dispatch.
     if args.write_toolchain_stamp {
-        return write_toolchain_stamp();
+        write_toolchain_stamp()?;
     }
-
-    match args.command {
-        Some(Command::Listen(args)) => listen_client::run(&args).await,
-        None => unreachable!("clap requires a subcommand"),
-    }
+    Ok(())
 }

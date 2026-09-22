@@ -7,9 +7,17 @@ scratch="$(mktemp -d -t tidepool-suite-check.XXXXXX)"
 trap 'rm -rf "$scratch"' EXIT
 
 cargo metadata --no-deps --format-version 1 >"$scratch/metadata.json"
+mapfile -t workspace_crates < <(jq -r '
+  .packages[] as $package
+  | select(.workspace_members | index($package.id))
+  | $package.name
+' "$scratch/metadata.json")
 
 for suite_dir in */tests/suites; do
   crate="${suite_dir%/tests/suites}"
+  if ! printf '%s\n' "${workspace_crates[@]}" | grep -Fxq "$crate"; then
+    continue
+  fi
   # Cargo owns the binary list; every suite entry point must be registered.
   jq -r --arg crate "$crate" '.packages[] | select(.name == $crate) |
     .targets[] | select(.kind == ["test"]) | .src_path' "$scratch/metadata.json" \

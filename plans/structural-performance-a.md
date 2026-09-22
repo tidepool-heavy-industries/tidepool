@@ -322,6 +322,28 @@ function/byte deltas are also unmeasured; the structural evidence proves one
 compiler request and one program for each Text/Job carrier, not a wall-time or
 native-byte claim.
 
+### Retired selfharness requirements
+
+The selfharness and operator-web crates remain in the repository as historical
+source for future reference, but are outside the supported Cargo workspace and
+are not compiled by the default or all-supported-target checks. The supported
+surface retains Shoal, the toolchain-stamp utility, and the independent compile
+reporter. The following requirements are retired with this parcel:
+
+- `tidepool-selfharness` and `tidepool-selfharness-web` are no longer
+  registered executables or deployment outputs.
+- `tidepool listen` and the durable selfharness listen channel are no longer a
+  supported operator path.
+- Selfharness/web acceptance batteries and the crash-recovery executable test
+  are no longer maintained; their source remains available only for reference.
+- Cargo automatic binary discovery is disabled for the retained source trees,
+  so an ordinary workspace build cannot rediscover those executables.
+
+The immutable-support manifest/staging layer and compiler-bound MCP wrappers
+were removed. Core/Authored source generation again uses the existing
+content-addressed source owner, preserving the established compiler memo
+reuse path.
+
 ### Baseline evidence
 
 Frozen pre-elision executable copies under

@@ -11,8 +11,6 @@ readme = "../README.md"
 
 [dependencies]
 tidepool-runtime.workspace = true
-tidepool-toolchain.workspace = true
-tidepool-extract-cmd.workspace = true
 parking_lot.workspace = true
 frunk.workspace = true
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
