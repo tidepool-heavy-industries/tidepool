@@ -151,7 +151,7 @@ Keep detailed design references out of always-loaded instructions.
 | Jev operators | the pinned `jev-dsl` flake input, fronted per workspace by `.shoal/Jev/Operators.hs` |
 | Run trace (structured JSONL under `.shoal/logs/`) | `tidepool/src/shoal.rs` |
 | Actor identity, lifecycle, mailbox, resident actor workbench | `tidepool-actor` |
-| Backend protocols, interactive launch and active-update transport | `tidepool-agent/src/backend/codex/` |
+| Backend protocols, interactive launch and bound input-control transport | `tidepool-agent/src/backend/codex/` |
 | Process mount boundary and durable inbox | `tidepool-node/src/process_boundary.rs`, `tidepool-node/src/inbox.rs` |
 | Git invocation and managed checkout registry | `tidepool-worktree/src/git.rs`, `tidepool-worktree/src/registry.rs` |
 | Discovery, artifact cache, paths and toolchain fingerprints | `tidepool-toolchain`; extractor process/daemon invocation: `tidepool-extract-cmd` |

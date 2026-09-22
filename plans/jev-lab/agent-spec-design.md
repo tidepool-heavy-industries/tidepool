@@ -239,35 +239,12 @@ never spawns that subprocess at all. This is a Codex-only question by
 construction, since `CodexInteractiveBackend`
 (`tidepool-agent/src/backend/codex/node.rs:270`) is the sole interactive backend.
 
-The signal is nonetheless available, from the session's own rollout file. It
-carries an explicit `task_complete`/`turn_complete` record naming its turn
-(`tidepool-agent/src/backend/codex/rollout_conversation.rs:84`), and tailing that
-file for a boundary is already an accepted pattern here: presenting a native
-update seeks to the end and re-reads every 100 ms until the boundary line appears
-(`tidepool-agent/src/backend/codex/active_update.rs`). The ten-second interval at
-`tidepool/src/actor_host.rs:4703-4711` is a usage poll, not the only channel.
-
-A torn write is safe by the existing reader's own rule: a partial tail becomes
-readable on a later read, so skipping it can withhold a turn but never invent
-one. A detector that finds no complete record simply waits for the next write.
-
-It is **not built in the first cut**, on Astra's own withdrawal of it as a
-requirement once the cost was known: a rollout tail is a new lifecycle detector,
-and after-tool already supplies a frequent, owned boundary where the same
-context-sensitive work improves what the model receives. Building the detector
-only to satisfy the earlier proposal would be the wrong reason.
-
-What would earn it: a concrete case the after-tool slot cannot serve, most
-likely investigation in the gap between user turns, where no tool call is running
-to attach to. If that case arrives, the route above is the one to take, and the
-answer to where its output waits is already settled. It waits in the actor's own
-`DurableInbox` on a stream published with `publish_latest`
-(`tidepool-node/src/inbox.rs:368-375`), which dedups by a monotonic
-`(stream, revision)` watermark, so only the newest unconsumed output survives. It
-enters through the delivery pump that already renders pending events with the
-next message (`actor_host.rs:4354-4434`): nothing sent is mutated, no replay
-occurs, and no extra model turn is caused, because the output waits for a turn
-that was going to happen anyway.
+There is deliberately no rollout-tail lifecycle detector. Native steering now
+crosses the generation-bound input-control protocol, whose owner reports
+not-submitted separately from unconfirmed submission and never polls rollout
+text as transport authority. A future after-turn feature needs an explicit
+owned notification and durable acceptance boundary; it must not revive the
+removed rollout-tailing path.
 
 ## What an invocation records
 
