@@ -2573,7 +2573,7 @@ where
                     )
                     .map_err(ResidentActorWorkbenchError::Resident)?;
                 let preview = match session.run_mounted_inspection_with_sites(
-                    compiled.code(),
+                    compiled.into_code(),
                     tidepool_repr::SessionVarId::from_extract(binder.var_id),
                 ) {
                     Ok(ResidentOutcome::Suspended { hole, .. }) => {
@@ -3188,9 +3188,11 @@ where
                 .map(|binder| binder.name.clone())
                 .collect::<Vec<_>>();
             let outcome = match bound.as_slice() {
-                [] => session.run_with_sites("actor_interactive_discard_bind", compiled.code()),
+                [] => {
+                    session.run_with_sites("actor_interactive_discard_bind", compiled.into_code())
+                }
                 [binder] if observation.is_some() => session.run_observation_with_sites(
-                    compiled.code(),
+                    compiled.into_code(),
                     binder,
                     generation,
                     observation
@@ -3200,13 +3202,13 @@ where
                 ),
                 [binder] => session.run_bind_with_sites(
                     "actor_interactive_bind",
-                    compiled.code(),
+                    compiled.into_code(),
                     binder,
                     generation,
                 ),
                 binders => session.run_projected_bind_with_sites(
                     "actor_interactive_pattern_bind",
-                    compiled.code(),
+                    compiled.into_code(),
                     binders,
                     generation,
                 ),
@@ -3534,7 +3536,7 @@ where
         ));
     };
     match session
-        .run_inspection_with_sites(compiled.code())
+        .run_inspection_with_sites(compiled.into_code())
         .map_err(ResidentActorWorkbenchError::Resident)?
     {
         ResidentOutcome::Completed { result, .. } => {
@@ -3634,7 +3636,7 @@ where
         ));
     };
     let outcome = session
-        .run_observation_with_sites(compiled.code(), page, ready.generation, false)
+        .run_observation_with_sites(compiled.into_code(), page, ready.generation, false)
         .map_err(ResidentActorWorkbenchError::Resident)?;
     if !matches!(outcome, ResidentOutcome::Completed { .. }) {
         return Err(ResidentActorWorkbenchError::Inspection(

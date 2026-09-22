@@ -96,9 +96,9 @@ impl CompiledTurn {
     #[must_use]
     pub fn code(&self) -> TurnCode<'_> {
         TurnCode {
-            table: &self.table,
-            sites: &self.sites,
-            prepared: self.prepared.prepared(),
+            table: std::borrow::Cow::Borrowed(&self.table),
+            sites: std::borrow::Cow::Borrowed(&self.sites),
+            prepared: std::borrow::Cow::Borrowed(self.prepared.prepared()),
         }
     }
 }

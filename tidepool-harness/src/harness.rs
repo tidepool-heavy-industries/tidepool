@@ -1776,9 +1776,9 @@ impl Harness {
                 let run_outcome = self
                     .run_checked_out(node, checkout, move |mut session| {
                         let code = TurnCode {
-                            table: &run_table,
-                            sites: &sites,
-                            prepared: &prepared,
+                            table: std::borrow::Cow::Owned(run_table),
+                            sites: std::borrow::Cow::Owned(sites),
+                            prepared: std::borrow::Cow::Owned(prepared),
                         };
                         let out = session.run_with_sites("turn", code);
                         (session, out)
@@ -2188,9 +2188,9 @@ impl Harness {
                     let run_outcome = self
                         .run_checked_out(node, checkout, move |mut session| {
                             let code = TurnCode {
-                                table: &run_table,
-                                sites: &sites,
-                                prepared: &prepared,
+                                table: std::borrow::Cow::Owned(run_table),
+                                sites: std::borrow::Cow::Owned(sites),
+                                prepared: std::borrow::Cow::Owned(prepared),
                             };
                             let out = session.run_with_sites("turn", code);
                             (session, out)
@@ -2388,9 +2388,9 @@ impl Harness {
         let outcome = self
             .run_checked_out(node, checkout, move |mut session| {
                 let code = TurnCode {
-                    table: &run_table,
-                    sites: &sites,
-                    prepared: &prepared,
+                    table: std::borrow::Cow::Owned(run_table),
+                    sites: std::borrow::Cow::Owned(sites),
+                    prepared: std::borrow::Cow::Owned(prepared),
                 };
                 let out = session.run_bind_with_sites("bind", code, &binder_for_run, gen);
                 (session, out)

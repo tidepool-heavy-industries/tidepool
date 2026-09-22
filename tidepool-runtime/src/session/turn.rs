@@ -1478,23 +1478,34 @@ pub struct CompiledTurn {
 }
 
 impl CompiledTurn {
-    /// Borrow the halves a resident session runs.
+    /// Borrow immutable inputs when the caller will reuse this artifact.
     #[must_use]
     pub fn code(&self) -> TurnCode<'_> {
         TurnCode {
-            table: &self.table,
-            sites: &self.asks,
-            prepared: &self.prepared,
+            table: std::borrow::Cow::Borrowed(&self.table),
+            sites: std::borrow::Cow::Borrowed(&self.asks),
+            prepared: std::borrow::Cow::Borrowed(&self.prepared),
+        }
+    }
+
+    /// Transfer a single-use turn into the machine without copying its graph.
+    #[must_use]
+    pub fn into_code(self) -> TurnCode<'static> {
+        TurnCode {
+            table: std::borrow::Cow::Owned(self.table),
+            sites: std::borrow::Cow::Owned(self.asks),
+            prepared: std::borrow::Cow::Owned(self.prepared),
         }
     }
 }
 
-/// The compiled inputs a resident session needs to install and run one turn.
-#[derive(Clone, Copy)]
+/// Immutable inputs for installation. Owned inputs move into the machine;
+/// borrowed inputs remain reusable and are copied only at installation.
+#[derive(Clone)]
 pub struct TurnCode<'a> {
-    pub table: &'a DataConTable,
-    pub sites: &'a [YieldSite],
-    pub prepared: &'a PreparedProgram,
+    pub table: std::borrow::Cow<'a, DataConTable>,
+    pub sites: std::borrow::Cow<'a, [YieldSite]>,
+    pub prepared: std::borrow::Cow<'a, PreparedProgram>,
 }
 
 /// The result of [`run_turn`] — one variant per verdict, each carrying only

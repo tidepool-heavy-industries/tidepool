@@ -2016,9 +2016,9 @@ where
         argument: Option<PreparedHandle>,
     ) -> Result<ResidentOutcome, ResidentError> {
         let prepared = code.prepared;
-        let provenance = self.provenance_for(code.sites)?;
+        let provenance = self.provenance_for(&code.sites)?;
         self.state
-            .merge_table(code.table)
+            .merge_table(&code.table)
             .map_err(ResidentError::TableCollision)?;
         if let PreparedTurnMode::Binding { generation, .. }
         | PreparedTurnMode::Projected { generation, .. } = &mode
@@ -2027,7 +2027,7 @@ where
             self.state.set_val_gen(*generation);
         }
         let install_prepared_started = std::time::Instant::now();
-        let program = self.state.install_prepared(prepared.clone())?;
+        let program = self.state.install_prepared(prepared.into_owned())?;
         timing::record_stage(
             timing::NO_NODE,
             timing::NO_ROUND,
