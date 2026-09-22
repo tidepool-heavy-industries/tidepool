@@ -1598,17 +1598,23 @@ impl EngineConfig {
         project_lib: Option<PathBuf>,
     ) -> Result<Self, EngineError> {
         let effect_names = decls.iter().map(|d| d.type_name.to_string()).collect();
-        let dirs =
-            tidepool_mcp::ensure_effects_module_at(&decls, &tidepool_mcp::RowArgs::default())
-                .map_err(|e| EngineError::Setup(format!("materialize effects module: {e}")))?;
+        let extract_bin = tidepool_runtime::toolchain::extract_command_name()
+            .map_err(|e| EngineError::Setup(format!("resolve extract binary: {e}")))?;
+        let endpoint = tidepool_extract_cmd::ExtractCmd::with_bin(extract_bin.clone())
+            .bind()
+            .map_err(|e| EngineError::Setup(format!("bind compiler for immutable support: {e}")))?;
+        let dirs = tidepool_mcp::ensure_effects_module_at_for_compiler(
+            &decls,
+            &tidepool_mcp::RowArgs::default(),
+            endpoint.identity(),
+        )
+        .map_err(|e| EngineError::Setup(format!("materialize effects module: {e}")))?;
         let mut include = vec![prelude_dir.clone()];
         if let Some(lib) = &project_lib {
             include.push(lib.clone());
         }
         include.push(dirs.core.clone());
         include.push(dirs.shim.clone());
-        let extract_bin = tidepool_runtime::toolchain::extract_command_name()
-            .map_err(|e| EngineError::Setup(format!("resolve extract binary: {e}")))?;
         Ok(EngineConfig {
             extract_bin,
             include,
@@ -2562,18 +2568,6 @@ pub async fn drive_model_turn(
         reasoning_items,
         blocks,
     })
-}
-
-/// Bridge a JSON answer (from a form submission or an in-context resume value)
-/// to a Haskell `Value` against `table`, for feeding to `ResidentSession::resume`.
-pub fn json_answer_to_value(
-    answer: &Json,
-    table: &DataConTable,
-) -> Result<HaskellValue, EngineError> {
-    use tidepool_bridge::ToHaskell;
-    answer
-        .to_value(table)
-        .map_err(|e| EngineError::Run(format!("bridge answer to Value: {e}")))
 }
 
 /// Assemble N raw per-child answer `Value`s into a genuine `[T]` list

@@ -1278,7 +1278,7 @@ impl SelfHarnessDriver {
                 let batch_ref = &subagent_batch;
                 let cap = self.concurrency_cap;
                 #[allow(clippy::type_complexity)]
-                let results: Vec<(usize, Result<HaskellValue, DriverError>)> =
+                let results: Vec<(usize, Result<tidepool_effect::Response, DriverError>)> =
                     drive_concurrent(cap, subagent_batch.len(), |idx| {
                         let (_, _, request) = &batch_ref[idx];
                         async move {

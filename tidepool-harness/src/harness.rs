@@ -2558,19 +2558,13 @@ impl Harness {
         ))
     }
 
-    /// Resume `node`'s parked continuation with a RAW `HaskellValue` answer,
-    /// bypassing [`Self::answer_dialog`]'s `Ask`/`AskUser`/`ReadState`
-    /// routing restriction — for a suspension whose answer is already a
-    /// bridged Core `HaskellValue` rather than operator-submitted JSON
-    /// ([`SuspensionRouting::Subagent`], serviced the same way the AUTHORED outer
-    /// loop's own Subagent suspension already is —
-    /// `SelfHarnessDriver::service_outer_subagent`'s dispatch, just resumed
-    /// against a NODE's own session instead of the outer one).
-    pub(crate) async fn resume_with_value(
+    /// Resume a serviced suspension with its owned structural answer source.
+    /// The resident session validates it against the parked answer contract.
+    pub(crate) async fn resume_with_value<T: tidepool_bridge::ToHaskell + Send + 'static>(
         &self,
         node: NodeId,
         hole: &HoleId,
-        value: HaskellValue,
+        value: T,
     ) -> Result<(), HarnessError> {
         let _lease = self.acquire_turn_lease(node)?;
         self.resume_parent(node, hole, value).await
@@ -2916,28 +2910,18 @@ impl Harness {
             }
         }
 
-        // The suspend table is the constructor set the hole suspended with; the
-        // submission HaskellValue bridges against it. Both `askUser` and `ask` return
-        // a HaskellValue, so the submission JSON IS the resume answer — always, no
-        // interpretation.
-        let table = pending.suspend_table.clone();
-        let value = engine::json_answer_to_value(&submission, &table)?;
         // `resume_parent` logs the Consumed attempt itself, exactly once,
         // only after the resume actually succeeds — the single source of
         // truth for the Consumed record; this call site must not log again.
-        self.resume_parent(node, &pending.hole, value).await?;
+        self.resume_parent(node, &pending.hole, submission).await?;
         Ok(())
     }
 
     /// Resume a `note` hole ([`SuspensionRouting::Note`]) immediately with `()` —
     /// no operator interaction. Mirrors [`Self::answer_dialog`]'s shape
     /// (lease, routing check, `resume_parent`) — the same audited resume
-    /// path a mechanical dialog answer uses — but the resumed value is the
-    /// REAL Core `()` ([`tidepool_bridge::ToHaskell`] for `()`), not the
-    /// aeson-wire `HaskellValue` `answer_dialog`'s submission bridges to:
-    /// `NoteWith`'s continuation is `() -> M ()`, not `HaskellValue -> M HaskellValue`, so
-    /// routing it through `json_answer_to_value`'s aeson-`Null` bridge would
-    /// hand the continuation the wrong constructor.
+    /// path a mechanical dialog answer uses. The structural visitor emits
+    /// Haskell `()` for the note continuation's answer contract.
     pub async fn answer_note(&self, node: NodeId) -> Result<(), HarnessError> {
         let _lease = self.acquire_turn_lease(node)?;
         let pending = self
@@ -2954,23 +2938,18 @@ impl Harness {
             }
         }
 
-        let table = pending.suspend_table.clone();
-        use tidepool_bridge::ToHaskell;
-        let value = ()
-            .to_value(&table)
-            .map_err(|e| EngineError::Run(format!("bridge unit answer to HaskellValue: {e}")))?;
-        self.resume_parent(node, &pending.hole, value).await?;
+        self.resume_parent(node, &pending.hole, ()).await?;
         Ok(())
     }
 
-    /// Resume `node`'s parked continuation with `answer` (a HaskellValue in the node's
-    /// heap). Runs the resume off-reactor; on completion marks the node done, on
+    /// Stream `answer` into `node`'s parked continuation. Runs the resume
+    /// off-reactor; on completion marks the node done, on
     /// a re-suspend re-publishes the new hole.
-    async fn resume_parent(
+    async fn resume_parent<T: tidepool_bridge::ToHaskell + Send + 'static>(
         &self,
         node: NodeId,
         hole: &HoleId,
-        answer: HaskellValue,
+        answer: T,
     ) -> Result<(), HarnessError> {
         let sid = self
             .tree
