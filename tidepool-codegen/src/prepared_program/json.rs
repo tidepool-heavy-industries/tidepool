@@ -20,13 +20,16 @@ use tidepool_repr::DataConId;
 
 use crate::{
     context::VMContext,
-    descriptor_bridge::{marshal_descriptor_object, DescriptorValue},
+    descriptor_bridge::DescriptorValue,
     host_fns::{prepared_gc_trigger, RuntimeError},
     machine_state::MachineState,
     prepared_control::CallStatus,
 };
 
-use super::{roots::RootWords, CompiledProgram};
+use super::{
+    construction::{ConstructionCore, ConstructionError, ConstructionNode},
+    CompiledProgram,
+};
 
 const NUMBER_TOKEN: &str = "$serde_json::private::Number";
 pub(super) const PARSE_JSON_HOST: &str = "prepared_parse_json";
@@ -220,8 +223,7 @@ fn int_bits(value: i64) -> [u8; 16] {
     (value as i128).to_ne_bytes()
 }
 
-#[derive(Clone, Copy)]
-struct IntrinsicNode(usize);
+type IntrinsicNode = ConstructionNode;
 
 #[derive(Clone, Copy)]
 enum IntrinsicField {
@@ -1293,7 +1295,10 @@ impl Visitor<'_> for JsonKeyVisitor {
         E: serde::de::Error,
     {
         let pointer = value.as_ptr() as usize;
-        if value == NUMBER_TOKEN && !self.0.contains(&pointer) {
+        let from_input = pointer
+            .checked_add(value.len())
+            .is_some_and(|end| pointer >= self.0.start && end <= self.0.end);
+        if value == NUMBER_TOKEN && !from_input {
             Ok(JsonKey::NumberToken)
         } else {
             Ok(JsonKey::Object(value.to_owned()))
@@ -1318,9 +1323,8 @@ impl Visitor<'_> for JsonKeyVisitor {
 struct IntrinsicBuilder<'a> {
     machine: &'a MachineState,
     vmctx: &'a mut VMContext,
+    core: ConstructionCore,
     program: &'a CompiledProgram,
-    roots: Vec<RootWords>,
-    roots_mark: usize,
     starts: Vec<u64>,
     scanned_words: usize,
     indexed_generation: u64,
@@ -1328,7 +1332,7 @@ struct IntrinsicBuilder<'a> {
 
 impl Drop for IntrinsicBuilder<'_> {
     fn drop(&mut self) {
-        self.machine.truncate_rust_roots(self.roots_mark);
+        self.core.release(self.machine);
     }
 }
 
@@ -1345,9 +1349,8 @@ impl<'a> IntrinsicBuilder<'a> {
         Ok(Self {
             machine,
             vmctx,
+            core: ConstructionCore::new(machine, program as *const _ as u64),
             program,
-            roots: Vec::new(),
-            roots_mark: machine.rust_roots_len(),
             starts: Vec::new(),
             scanned_words: 0,
             indexed_generation: u64::MAX,
@@ -1362,51 +1365,22 @@ impl<'a> IntrinsicBuilder<'a> {
             .ok_or(RuntimeError::BadPointer)
     }
 
-    fn ensure_capacity(&mut self, extent: usize) -> Result<(), RuntimeError> {
-        let free = (self.vmctx.alloc_limit as usize).saturating_sub(self.vmctx.alloc_ptr as usize);
-        if free >= extent {
-            return Ok(());
+    fn collect(
+        machine: &MachineState,
+        vmctx: &mut VMContext,
+        needed: usize,
+    ) -> Result<(), RuntimeError> {
+        let raw = unsafe { prepared_gc_trigger(vmctx, needed) };
+        let status = CallStatus::from_raw(i64::from(raw)).map_err(|_| RuntimeError::BadPointer)?;
+        if status == CallStatus::Success && machine.prepared_call_status() == CallStatus::Success {
+            Ok(())
+        } else {
+            Err(RuntimeError::BadPointer)
         }
-        let status = unsafe { prepared_gc_trigger(self.vmctx, extent) };
-        let status =
-            CallStatus::from_raw(i64::from(status)).map_err(|_| RuntimeError::BadPointer)?;
-        if status != CallStatus::Success
-            || self.machine.prepared_call_status() != CallStatus::Success
-        {
-            return Err(RuntimeError::BadPointer);
-        }
-        let free = (self.vmctx.alloc_limit as usize).saturating_sub(self.vmctx.alloc_ptr as usize);
-        (free >= extent)
-            .then_some(())
-            .ok_or(RuntimeError::HeapOverflow)
     }
 
     fn push_word(&mut self, word: usize, rep: RuntimeRep) -> Result<IntrinsicNode, RuntimeError> {
-        let root = self.prepare_root()?;
-        self.finish_root(root, word, rep)
-    }
-
-    fn prepare_root(&mut self) -> Result<RootWords, RuntimeError> {
-        self.roots
-            .try_reserve(1)
-            .map_err(|_| RuntimeError::HeapOverflow)?;
-        RootWords::new(1).map_err(|_| RuntimeError::HeapOverflow)
-    }
-
-    fn finish_root(
-        &mut self,
-        root: RootWords,
-        word: usize,
-        rep: RuntimeRep,
-    ) -> Result<IntrinsicNode, RuntimeError> {
-        root.write(0, word as u64)
-            .map_err(|_| RuntimeError::BadPointer)?;
-        let slot = root.slot_address(0).ok_or(RuntimeError::BadPointer)?;
-        if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
-            self.machine.register_rust_root(slot);
-        }
-        self.roots.push(root);
-        Ok(IntrinsicNode(self.roots.len() - 1))
+        self.core.push_word(self.machine, word, rep)
     }
 
     fn push_root(&mut self, word: usize) -> Result<IntrinsicNode, RuntimeError> {
@@ -1437,10 +1411,10 @@ impl<'a> IntrinsicBuilder<'a> {
             self.machine.set_first_cause(cause);
             self.machine.prepared_call_status()
         })?;
-        let output = self.roots[node.0]
-            .slot_address(0)
-            .ok_or(CallStatus::IntegrityFailure)?
-            .cast::<u64>();
+        let output = self
+            .core
+            .slot(node)
+            .map_err(|_| CallStatus::IntegrityFailure)?;
         let pointer = self
             .program
             .pipeline
@@ -1525,11 +1499,7 @@ impl<'a> IntrinsicBuilder<'a> {
     }
 
     fn word(&self, node: IntrinsicNode) -> Result<usize, RuntimeError> {
-        self.roots
-            .get(node.0)
-            .ok_or(RuntimeError::BadPointer)?
-            .read(0)
-            .map(|word| word as usize)
+        self.core.word(node).map_err(|_| RuntimeError::BadPointer)
     }
 
     fn constructor(
@@ -1537,67 +1507,43 @@ impl<'a> IntrinsicBuilder<'a> {
         descriptor: &ObjectDescriptor,
         fields: &[IntrinsicField],
     ) -> Result<IntrinsicNode, RuntimeError> {
-        let root = self.prepare_root()?;
-        let extent = (descriptor.allocation_extent() as usize).next_multiple_of(8);
-        self.ensure_capacity(extent)?;
-        // Resolve rooted children only after the last possible collection.
-        let values = fields
-            .iter()
-            .map(|field| match field {
-                IntrinsicField::Node(node) => self
-                    .word(*node)
-                    .map(|word| DescriptorValue::Managed(word as *mut u8)),
-                IntrinsicField::Bits(bits) => Ok(DescriptorValue::Bits(*bits)),
+        self.core
+            .constructor(
+                self.machine,
+                self.vmctx,
+                descriptor,
+                fields.len(),
+                Self::collect,
+                |core, values| {
+                    for (output, field) in values.iter_mut().zip(fields) {
+                        *output = match field {
+                            IntrinsicField::Node(node) => DescriptorValue::Managed(
+                                core.word(*node).map_err(|_| RuntimeError::BadPointer)? as *mut u8,
+                            ),
+                            IntrinsicField::Bits(bits) => DescriptorValue::Bits(*bits),
+                        };
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|error| match error {
+                ConstructionError::Runtime(error) | ConstructionError::Operation(error) => error,
+                ConstructionError::TooLarge(_) => RuntimeError::HeapOverflow,
+                ConstructionError::Marshal(_) => RuntimeError::BadPointer,
+                ConstructionError::Storage(_) => RuntimeError::HeapOverflow,
             })
-            .collect::<Result<Vec<_>, RuntimeError>>()?;
-        let pointer = self.vmctx.alloc_ptr;
-        unsafe { marshal_descriptor_object(pointer, extent, descriptor, &values) }
-            .map_err(|_| RuntimeError::BadPointer)?;
-        self.vmctx.alloc_ptr = unsafe { pointer.add(extent) };
-        self.finish_root(
-            root,
-            pointer as usize | usize::from(descriptor.tag()),
-            RuntimeRep::LiftedRef,
-        )
     }
 
     fn bytes(&mut self, bytes: &[u8]) -> Result<IntrinsicNode, RuntimeError> {
-        let root = self.prepare_root()?;
         let descriptor = Arc::clone(&self.program.externals.bytes_array);
-        let extent = (descriptor.allocation_extent() as usize).next_multiple_of(8);
-        self.ensure_capacity(extent)?;
-        let payload = self
-            .machine
-            .allocate_external_storage(ExternalStorageKind::Bytes, bytes.len())
-            .map_err(|_| RuntimeError::HeapOverflow)?;
-        if self
-            .machine
-            .store_external_bytes(payload, 0, bytes)
-            .is_err()
-        {
-            self.machine.release_external_storage(payload);
-            return Err(RuntimeError::BadPointer);
-        }
-        let pointer = self.vmctx.alloc_ptr;
-        if unsafe {
-            marshal_descriptor_object(
-                pointer,
-                extent,
-                &descriptor,
-                &[DescriptorValue::Address(payload.cast_const())],
-            )
-        }
-        .is_err()
-        {
-            self.machine.release_external_storage(payload);
-            return Err(RuntimeError::BadPointer);
-        }
-        self.vmctx.alloc_ptr = unsafe { pointer.add(extent) };
-        self.finish_root(
-            root,
-            pointer as usize | usize::from(descriptor.tag()),
-            RuntimeRep::LiftedRef,
-        )
+        self.core
+            .bytes(self.machine, self.vmctx, &descriptor, bytes, Self::collect)
+            .map_err(|error| match error {
+                ConstructionError::Runtime(error) | ConstructionError::Operation(error) => error,
+                ConstructionError::TooLarge(_) => RuntimeError::HeapOverflow,
+                ConstructionError::Marshal(_) => RuntimeError::BadPointer,
+                ConstructionError::Storage(_) => RuntimeError::HeapOverflow,
+            })
     }
 }
 
