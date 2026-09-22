@@ -31,7 +31,7 @@ use tidepool_repr::DataConTable;
 pub(crate) use tidepool_toolchain::extract_spawn_error;
 pub use tidepool_toolchain::prepared_artifact::PreparedArtifact;
 pub use tidepool_toolchain::CompileError;
-pub(crate) use tidepool_toolchain::{artifacts, cache, diag, paths, timing, toolchain};
+pub(crate) use tidepool_toolchain::{artifacts, diag, paths, timing, toolchain};
 
 pub mod failclass;
 /// Generated suspension-decode request types (`tidepool-protocol`'s
