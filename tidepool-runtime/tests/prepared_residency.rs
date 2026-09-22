@@ -46,8 +46,12 @@ struct Notebook {
 
 impl Notebook {
     fn new() -> Self {
+        Self::with_effects(&[])
+    }
+
+    fn with_effects(decls: &[tidepool_mcp::EffectDecl]) -> Self {
         eval_harness::require_extract();
-        let effects = TestEffectSurface::minimal(&[]).expect("materialize effect surface");
+        let effects = TestEffectSurface::minimal(decls).expect("materialize effect surface");
         let preamble = effects.preamble().to_owned();
         let effect_stack = effects.row().to_owned();
         let mut include = effects.include_paths().to_vec();
@@ -198,6 +202,131 @@ impl Notebook {
         self.injected.push(binder.module.clone());
         binder.clone()
     }
+}
+
+#[test]
+fn structural_resume_classifies_rejection_and_consumed_failure() {
+    use tidepool_bridge::{BridgeError, HaskellVisitor, ToHaskell};
+    use tidepool_repr::DataConTable;
+    use tidepool_runtime::session::{PreparedRuntimeError, ResidentError, ResidentResumeError};
+
+    struct MalformedAnswer;
+    impl tidepool_bridge::sealed::ToHaskellSealed for MalformedAnswer {}
+    impl ToHaskell for MalformedAnswer {
+        fn visit(
+            &self,
+            table: &DataConTable,
+            visitor: &mut dyn HaskellVisitor,
+        ) -> Result<(), BridgeError> {
+            let unit = tidepool_bridge::get_qualified(table, "GHC.Tuple.()", 0)
+                .ok_or_else(|| BridgeError::UnknownDataConName("GHC.Tuple.()".into()))?;
+            visitor.begin_constructor(unit, 0)?;
+            Err(BridgeError::UnknownDataConName(
+                "missing response metadata".into(),
+            ))
+        }
+    }
+
+    let mut notebook = Notebook::with_effects(&[tidepool_mcp::console_decl()]);
+    let success = notebook.prepare_expression("say \"pause\" >> pure (42 :: Int)");
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .session
+        .run_with_sites("response_rejection", success.code())
+        .unwrap()
+    else {
+        panic!("Console request must suspend");
+    };
+    let roots = notebook.session.persistent_roots_count();
+    let error = notebook
+        .session
+        .resume_classified(hole.clone(), MalformedAnswer)
+        .unwrap_err();
+    assert!(
+        matches!(error, ResidentResumeError::Rejected(ResidentError::Prepared(
+        PreparedRuntimeError::AnswerRejected { source: BridgeError::UnknownDataConName(ref name), .. }
+    )) if name == "missing response metadata"),
+        "{error:?}"
+    );
+    assert_eq!(notebook.session.parked_holes(), vec![hole.cont_id()]);
+    assert_eq!(notebook.session.persistent_roots_count(), roots);
+    assert!(matches!(
+        notebook.session.resume_classified(hole, ()).unwrap(),
+        ResidentOutcome::Completed { .. }
+    ));
+    assert!(notebook.session.parked_holes().is_empty());
+
+    let failure =
+        notebook.prepare_expression("say \"pause\" >> (error \"after response\" :: M Int)");
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .session
+        .run_with_sites("consumed_response", failure.code())
+        .unwrap()
+    else {
+        panic!("Console request must suspend before its failure");
+    };
+    let error = notebook.session.resume_classified(hole, ()).unwrap_err();
+    assert!(
+        matches!(error, ResidentResumeError::Consumed(_)),
+        "{error:?}"
+    );
+    assert!(notebook.session.parked_holes().is_empty());
+}
+
+#[test]
+fn custody_resume_classifies_rejected_frame_and_consumed_failure() {
+    use tidepool_runtime::session::ResidentResumeError;
+
+    let mut notebook = Notebook::with_effects(&[tidepool_mcp::console_decl()]);
+    notebook.bind("held <- pure ()");
+    let success = notebook.prepare_expression("say \"pause\" >> pure (42 :: Int)");
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .session
+        .run_with_sites("framed_rejection", success.code())
+        .unwrap()
+    else {
+        panic!("Console request must suspend");
+    };
+    let held = notebook.session.prepared_binding_handle("held").unwrap();
+    let error = notebook
+        .session
+        .resume_framed_custody_classified(
+            hole.clone(),
+            &held,
+            tidepool_repr::DataConId(u64::MAX),
+            Vec::new(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, ResidentResumeError::Rejected(_)),
+        "{error:?}"
+    );
+    assert_eq!(notebook.session.parked_holes(), vec![hole.cont_id()]);
+    assert!(matches!(
+        notebook
+            .session
+            .resume_handle_classified(hole, held)
+            .unwrap(),
+        ResidentOutcome::Completed { .. }
+    ));
+
+    let failure = notebook.prepare_expression("say \"pause\" >> (error \"after handle\" :: M Int)");
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .session
+        .run_with_sites("consumed_handle", failure.code())
+        .unwrap()
+    else {
+        panic!("Console request must suspend before its failure");
+    };
+    let held = notebook.session.prepared_binding_handle("held").unwrap();
+    let error = notebook
+        .session
+        .resume_handle_classified(hole, held)
+        .unwrap_err();
+    assert!(
+        matches!(error, ResidentResumeError::Consumed(_)),
+        "{error:?}"
+    );
+    assert!(notebook.session.parked_holes().is_empty());
 }
 
 /// Fixture mirror of `PreparedEngine::MAJOR_COLLECTION_INSTALL_INTERVAL`
