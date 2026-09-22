@@ -25,9 +25,8 @@ use crate::machine_state::MachineState;
 use crate::old_space::OldSpace;
 use crate::prepared_control::CallStatus;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use tidepool_bridge::HaskellValue;
-use tidepool_heap::static_region::StaticRegion;
+use tidepool_heap::static_region::StaticRegionCatalog;
 use tidepool_repr::execution_schema::RuntimeRep;
 
 #[derive(Clone, Copy)]
@@ -194,7 +193,7 @@ pub(super) fn observe_results(
     machine: &MachineState,
     program: &CompiledProgram,
     vmctx: &mut VMContext,
-    statics: &[Arc<StaticRegion>],
+    statics: &StaticRegionCatalog,
     registry: &BTreeMap<usize, super::DescriptorMetadata>,
     old_space: &OldSpace,
     seeds: &[super::observe::ObservationSeed],
@@ -348,7 +347,7 @@ pub(super) fn describe_raised_exception(
     machine: &MachineState,
     program: &CompiledProgram,
     vmctx: &mut VMContext,
-    statics: &[Arc<StaticRegion>],
+    statics: &StaticRegionCatalog,
     registry: &BTreeMap<usize, super::DescriptorMetadata>,
     old_space: &OldSpace,
 ) {
@@ -434,7 +433,7 @@ fn character(value: &HaskellValue) -> Option<char> {
 pub(super) fn current_heap<'a>(
     machine: &'a MachineState,
     vmctx: &VMContext,
-    statics: &'a [Arc<StaticRegion>],
+    statics: &'a StaticRegionCatalog,
     registry: &'a BTreeMap<usize, super::DescriptorMetadata>,
     old_space: &'a OldSpace,
     starts: &mut Vec<u64>,
@@ -461,7 +460,7 @@ pub(super) fn current_heap<'a>(
     }
     super::observe::append_exact_starts(nursery, registry, starts, scanned_words)
         .map_err(ExecutionError::from)?;
-    super::observe::ObservationHeap::new_with_registry_and_starts(
+    super::observe::ObservationHeap::new_with_static_catalog(
         nursery,
         statics,
         registry,

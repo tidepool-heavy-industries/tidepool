@@ -18,7 +18,7 @@ use cranelift_module::{FuncId, Module};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
-use tidepool_heap::static_region::{StaticImage, StaticImageError, StaticRegion};
+use tidepool_heap::static_region::{StaticImage, StaticImageError};
 use tidepool_repr::execution_schema::{
     Architecture, Endianness, GlobalId, LinkedProgram, ResultContract, RuntimeRep, Signature,
     TargetDescriptor, ValueId,
@@ -61,7 +61,7 @@ impl<'a> ActiveIntrinsicScope<'a> {
     fn new(
         machine: &'a crate::machine_state::MachineState,
         program: &'a CompiledProgram,
-        statics: &'a [Arc<StaticRegion>],
+        statics: &'a tidepool_heap::static_region::StaticRegionCatalog,
         registry: &'a BTreeMap<usize, DescriptorMetadata>,
     ) -> Result<Self, ExecutionError> {
         if !machine.install_active_intrinsic_program(program, statics, registry) {

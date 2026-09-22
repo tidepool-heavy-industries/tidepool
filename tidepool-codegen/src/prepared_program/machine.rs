@@ -66,6 +66,7 @@ use crate::resource_ledger::{
     ContinuationFrame, HandleClass, PreparedFrameEvidence, ResourceLedger,
 };
 use crate::suspension::{ContinuationId, RealmId, ValueHandle};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
@@ -193,13 +194,10 @@ pub struct PreparedMachine<'code> {
     machine: Rc<MachineState>,
     vmctx: VMContext,
     old_space: Box<OldSpace>,
-    /// Every installed program's instantiated static image, kept alive for
-    /// the machine's lifetime. Unioned into `machine`'s descriptor space at
-    /// install time (`extend_prepared_descriptors`); observation reads this
-    /// slice directly (see `descriptor_region`/`observe.rs`) rather than one
-    /// program's own region, so a cross-program static field resolves
-    /// through whichever region actually admits it (T4).
-    statics: Vec<Arc<StaticRegion>>,
+    /// The descriptor space's one immutable static-region owner. It is set
+    /// after the first successful installation and is then shared directly
+    /// by collection and non-moving observation.
+    static_catalog: Option<Rc<RefCell<tidepool_heap::static_region::StaticRegionCatalog>>>,
     /// Union of every installed program's pinned descriptor layouts, passed
     /// to `retain_prepared`/`promote_prepared` so a promoted value's
     /// transitive graph is covered no matter which program produced the
@@ -230,13 +228,10 @@ pub struct PreparedMachine<'code> {
     /// delta every time.
     compiled_functions: u64,
     compiled_code_bytes: u64,
-    /// Each installed program's static region paired with its owner, in
-    /// install order, for [`Self::mark_live_programs`]'s
-    /// `observation_heap_and_starts` call: a `Traced::Static { region }` hit is an
-    /// index into this same list, so it names the owning program directly.
-    /// [`Self::install`] pushes; [`Self::retire`] removes the retired
-    /// program's entry.
-    region_owners: Vec<(ProgramId, Arc<StaticRegion>)>,
+    /// Static allocation starts mapped to their installed program. The
+    /// catalog owns the regions; this is only the reverse owner lookup for a
+    /// validated observation hit.
+    region_owners: HashMap<usize, ProgramId>,
 }
 
 /// Immutable capacity selected when a prepared machine is created. Root
@@ -709,12 +704,12 @@ impl<'code> PreparedMachine<'code> {
             machine: Rc::new(MachineState::new()),
             vmctx: VMContext::new(std::ptr::null_mut(), std::ptr::null()),
             old_space: Box::new(OldSpace::new()),
-            statics: Vec::new(),
+            static_catalog: None,
             descriptors: Vec::new(),
             descriptor_registry: BTreeMap::new(),
             interner: super::DescriptorInterner::default(),
             header_owners: HashMap::new(),
-            region_owners: Vec::new(),
+            region_owners: HashMap::new(),
             compiled_functions: 0,
             compiled_code_bytes: 0,
         })
@@ -809,11 +804,27 @@ impl<'code> PreparedMachine<'code> {
             committed: false,
         };
         let staged = transaction.machine.install_staged(program.get(), imports);
-        transaction.committed = staged.is_ok();
+        // Acquire the shared owner while the install transaction can still
+        // roll descriptors and the candidate static region back. A failed
+        // borrow must never commit metadata whose program custody will drop.
+        let catalog = if staged.is_ok() && transaction.machine.static_catalog.is_none() {
+            transaction
+                .machine
+                .machine
+                .prepared_static_catalog()
+                .map(Some)
+                .map_err(|error| runtime_error(&transaction.machine.machine, error))
+        } else {
+            Ok(None)
+        };
+        transaction.committed = staged.is_ok() && catalog.is_ok();
         // Rollback (if any) deregisters the candidate block's roots while
         // `program` still owns the block.
         drop(transaction);
         let statics = staged?;
+        if let Some(catalog) = catalog? {
+            self.static_catalog = Some(catalog);
+        }
         let compiled = program.get();
         // Shared descriptors (interned constructors, external wrappers) have
         // no owner; retiring this program leaves them.
@@ -835,7 +846,9 @@ impl<'code> PreparedMachine<'code> {
         self.next_program += 1;
         self.header_owners
             .extend(owned_headers.iter().map(|&header| (header, id)));
-        self.region_owners.push((id, Arc::clone(&statics)));
+        if !statics.is_empty() {
+            self.region_owners.insert(statics.address_range().start, id);
+        }
         self.programs.insert(
             id,
             InstalledProgram {
@@ -1132,7 +1145,6 @@ impl<'code> PreparedMachine<'code> {
         // program's own heap tops initialized -- see the per-branch comments
         // above), so there is nothing left to publish here.
 
-        self.statics.push(Arc::clone(&statics));
         // Interned constructor layouts are shared by every program that
         // declares them and are never retired, so union by header identity:
         // a plain extend would grow this list by each install's shared
@@ -1262,7 +1274,10 @@ impl<'code> PreparedMachine<'code> {
             code_exports: self.handles.counts().code_exports,
             parked: self.parked_count(),
             stack_map_links: self.machine.stack_map_link_count(),
-            static_regions: self.statics.len(),
+            static_regions: self
+                .static_catalog
+                .as_ref()
+                .map_or(0, |catalog| catalog.borrow().len()),
             descriptor_rows: self.descriptor_registry.len(),
             callable_rows,
             enter_rows,
@@ -1408,12 +1423,7 @@ impl<'code> PreparedMachine<'code> {
         &self,
         from_nursery: bool,
     ) -> Result<BTreeSet<ProgramId>, ExecutionError> {
-        let regions: Vec<Arc<StaticRegion>> = self
-            .region_owners
-            .iter()
-            .map(|(_, region)| Arc::clone(region))
-            .collect();
-        let (heap, nursery_base, nursery_starts) = self.observation_heap_and_starts(&regions)?;
+        let (heap, nursery_base, nursery_starts) = self.observation_heap_and_starts()?;
 
         let mut live: BTreeSet<ProgramId> = self.pins.iter().copied().collect();
         // One worklist of program ids still needing their root block
@@ -1460,8 +1470,8 @@ impl<'code> PreparedMachine<'code> {
                 continue;
             }
             let reached = match heap.trace_step(word)? {
-                super::observe::Traced::Static { region } => {
-                    Some(self.region_owners.get(region).map(|(id, _)| *id).ok_or(
+                super::observe::Traced::Static { region_start } => {
+                    Some(self.region_owners.get(&region_start).copied().ok_or(
                         ExecutionError::Invariant(
                             "mark_live_programs: a static hit named a region index outside the \
                              observation heap's own region list",
@@ -1548,9 +1558,8 @@ impl<'code> PreparedMachine<'code> {
         //    another still-installed program's code may share the same
         //    address and, unlike a static region, an interned literal
         //    cannot be proven ownerless by header identity alone.
-        self.statics
-            .retain(|region| !Arc::ptr_eq(region, &installed.statics));
-        self.region_owners.retain(|(owner, _)| *owner != id);
+        self.region_owners
+            .remove(&installed.statics.address_range().start);
         // 6-8. The block, the receipt entry and the code go with `installed`.
         block.len()
     }
@@ -2019,19 +2028,15 @@ impl<'code> PreparedMachine<'code> {
     /// installed); [`Self::install`] only reaches this after a declared
     /// import's handle has resolved, which itself requires a live heap.
     fn observation_heap(&self) -> Result<super::observe::ObservationHeap<'_>, ExecutionError> {
-        self.observation_heap_and_starts(&self.statics)
-            .map(|(heap, _, _)| heap)
+        self.observation_heap_and_starts().map(|(heap, _, _)| heap)
     }
 
-    /// [`Self::observation_heap`] admitting exactly `statics` (in that
-    /// order), so a caller that maps static hits back to programs supplies
-    /// the regions in the order it indexes them. Also returns the nursery
-    /// base address and its exact-start bitmap (bit `i` is the word at
-    /// `base + 8 * i`).
-    fn observation_heap_and_starts<'s>(
-        &'s self,
-        statics: &'s [Arc<StaticRegion>],
-    ) -> Result<(super::observe::ObservationHeap<'s>, usize, Vec<u64>), ExecutionError> {
+    /// [`Self::observation_heap`] over the descriptor space's one static
+    /// catalog. Also returns the nursery base address and its exact-start
+    /// bitmap (bit `i` is the word at `base + 8 * i`).
+    fn observation_heap_and_starts(
+        &self,
+    ) -> Result<(super::observe::ObservationHeap<'_>, usize, Vec<u64>), ExecutionError> {
         let (start, size) = self
             .machine
             .gc_active_range()
@@ -2051,9 +2056,14 @@ impl<'code> PreparedMachine<'code> {
             &mut starts,
             &mut scanned_words,
         )?;
+        let catalog = self
+            .static_catalog
+            .as_ref()
+            .ok_or(ExecutionError::Invariant("observation: no static catalog"))?
+            .borrow();
         let heap = super::observe::ObservationHeap::new_with_registry_and_starts(
             nursery,
-            statics,
+            catalog,
             &self.descriptor_registry,
             &starts,
             Some(&*self.old_space),
@@ -2387,6 +2397,11 @@ impl<'code> PreparedMachine<'code> {
             .begin_prepared_call()
             .map_err(ExecutionError::Runtime)?;
         self.machine.set_cancel_flag(cancel);
+        let static_catalog = self
+            .static_catalog
+            .as_ref()
+            .ok_or(ExecutionError::Invariant("observe: no static catalog"))?
+            .borrow();
         let observed = {
             let _cancel = CancelScope(&self.machine);
             let _scope = OldSpaceScope::new(&self.machine, &self.old_space)?;
@@ -2394,7 +2409,7 @@ impl<'code> PreparedMachine<'code> {
                 &self.machine,
                 program,
                 &mut self.vmctx,
-                &self.statics,
+                &static_catalog,
                 &self.descriptor_registry,
                 &self.old_space,
                 &[super::observe::ObservationSeed {
@@ -2466,18 +2481,13 @@ impl<'code> PreparedMachine<'code> {
         if word == 0 {
             return None;
         }
-        let regions: Vec<Arc<StaticRegion>> = self
-            .region_owners
-            .iter()
-            .map(|(_, region)| Arc::clone(region))
-            .collect();
-        let (heap, _, _) = self.observation_heap_and_starts(&regions).ok()?;
+        let (heap, _, _) = self.observation_heap_and_starts().ok()?;
         match heap.trace_step(word).ok()? {
             super::observe::Traced::Object { header, .. } => {
                 self.header_owners.get(&header).copied()
             }
-            super::observe::Traced::Static { region } => {
-                self.region_owners.get(region).map(|(id, _)| *id)
+            super::observe::Traced::Static { region_start } => {
+                self.region_owners.get(&region_start).copied()
             }
         }
     }
@@ -2526,6 +2536,11 @@ impl<'code> PreparedMachine<'code> {
         realm: RealmId,
     ) -> Result<PreparedResultBatch, ExecutionError> {
         let cancel = self.handles.cancel_flag(realm);
+        let static_catalog = self
+            .static_catalog
+            .as_ref()
+            .ok_or(ExecutionError::Invariant("run: no static catalog"))?
+            .borrow();
         let program = self
             .programs
             .get(&id)
@@ -2541,7 +2556,7 @@ impl<'code> PreparedMachine<'code> {
             &mut self.old_space,
             &self.descriptors,
             &mut self.handles,
-            &self.statics,
+            &static_catalog,
             &self.descriptor_registry,
         );
         // The call's outcome is in `result`; nothing of it outlives the call.
@@ -2579,6 +2594,11 @@ impl<'code> PreparedMachine<'code> {
         options: PreparedCallOptions,
         cancel: Arc<AtomicBool>,
     ) -> Result<RunResult, ExecutionError> {
+        let static_catalog = self
+            .static_catalog
+            .as_ref()
+            .ok_or(ExecutionError::Invariant("run: no static catalog"))?
+            .borrow();
         let program = self
             .programs
             .get(&id)
@@ -2591,7 +2611,7 @@ impl<'code> PreparedMachine<'code> {
             &self.machine,
             &mut self.vmctx,
             &self.old_space,
-            &self.statics,
+            &static_catalog,
             &self.descriptor_registry,
         );
         self.machine.end_prepared_call();
@@ -2645,7 +2665,7 @@ impl<'code> InstalledProgram<'code> {
         old_space: &mut OldSpace,
         descriptors: &[Arc<ObjectDescriptor>],
         handles: &mut ResourceLedger,
-        statics: &[Arc<StaticRegion>],
+        statics: &tidepool_heap::static_region::StaticRegionCatalog,
         descriptor_registry: &BTreeMap<usize, DescriptorMetadata>,
     ) -> Result<PreparedResultBatch, ExecutionError> {
         let (adapter, reps, result_contract, result_layout) = {
@@ -2866,7 +2886,7 @@ impl<'code> InstalledProgram<'code> {
         machine: &MachineState,
         vmctx: &mut VMContext,
         old_space: &OldSpace,
-        statics: &[Arc<StaticRegion>],
+        statics: &tidepool_heap::static_region::StaticRegionCatalog,
         descriptor_registry: &BTreeMap<usize, DescriptorMetadata>,
     ) -> Result<RunResult, ExecutionError> {
         let (adapter, expected_arguments, has_managed_arguments, result_contract, result_layout) = {
@@ -3379,6 +3399,38 @@ mod tests {
         };
         let prepared = testing::prepare(wire).expect("base_program fixture");
         link_program(prepared, &MachineImports::default()).expect("base_program fixture links")
+    }
+
+    fn empty_static_program(mut program: CompiledProgram) -> CompiledProgram {
+        program.statics =
+            tidepool_heap::static_region::StaticImage::new(vec![], vec![], BTreeMap::new(), [])
+                .expect("empty static image validates");
+        // The fixture is installed only to exercise static ownership and
+        // retirement. Its generated entry is intentionally never invoked.
+        program.top_slots.clear();
+        program.heap_top_specs.clear();
+        program
+    }
+
+    #[test]
+    fn empty_static_programs_share_no_catalog_entry_and_retire() {
+        let first = empty_static_program(first(&base_program(12_001)));
+        let (mut machine, first_id) =
+            PreparedMachine::new(first, PreparedMachineOptions { nursery_bytes: 128 })
+                .expect("first empty static program installs");
+        let second = machine
+            .compile_for_install(&base_program(12_002))
+            .expect("second empty static program compiles");
+        let second_id = machine
+            .install_program(empty_static_program(second), ImportBindings::new())
+            .expect("second empty static program installs");
+        assert_eq!(machine.residency().static_regions, 0);
+
+        let receipt = machine
+            .collect_major(machine.quiesce().expect("quiescent"))
+            .expect("empty static programs retire");
+        assert_eq!(receipt.programs, vec![first_id, second_id]);
+        assert_eq!(machine.residency().static_regions, 0);
     }
 
     #[test]
@@ -7095,11 +7147,16 @@ mod tests {
     fn active_intrinsic_program_refuses_nesting_and_clears_on_scope_exit() {
         let (machine, program) = machine();
         let compiled = machine.programs[&program].program.get();
+        let statics = machine
+            .static_catalog
+            .as_ref()
+            .expect("installed machine has a static catalog")
+            .borrow();
         {
             let _active = crate::prepared_program::ActiveIntrinsicScope::new(
                 &machine.machine,
                 compiled,
-                &machine.statics,
+                &statics,
                 &machine.descriptor_registry,
             )
             .expect("first intrinsic operation owns the invocation scope");
@@ -7107,7 +7164,7 @@ mod tests {
                 crate::prepared_program::ActiveIntrinsicScope::new(
                     &machine.machine,
                     compiled,
-                    &machine.statics,
+                    &statics,
                     &machine.descriptor_registry,
                 ),
                 Err(ExecutionError::Invariant(
@@ -7120,7 +7177,7 @@ mod tests {
         crate::prepared_program::ActiveIntrinsicScope::new(
             &machine.machine,
             compiled,
-            &machine.statics,
+            &statics,
             &machine.descriptor_registry,
         )
         .expect("scope cleanup permits later intrinsic construction");

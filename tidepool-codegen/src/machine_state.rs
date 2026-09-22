@@ -325,9 +325,7 @@ pub struct MachineState {
     /// authenticated constructors without a process registry. Nested installs
     /// are refused by the invocation owner.
     active_intrinsic_program: Cell<*const crate::prepared_program::CompiledProgram>,
-    active_intrinsic_statics:
-        Cell<*const std::sync::Arc<tidepool_heap::static_region::StaticRegion>>,
-    active_intrinsic_statics_len: Cell<usize>,
+    active_intrinsic_catalog: Cell<*const tidepool_heap::static_region::StaticRegionCatalog>,
     active_intrinsic_registry:
         Cell<*const std::collections::BTreeMap<usize, crate::prepared_program::DescriptorMetadata>>,
     /// Payloads allocated outside the moving heap. The map key is the pointer
@@ -414,8 +412,7 @@ impl MachineState {
             old_space_arenas: RefCell::new(Vec::new()),
             prepared_old_space: RefCell::new(None),
             active_intrinsic_program: Cell::new(std::ptr::null()),
-            active_intrinsic_statics: Cell::new(std::ptr::null()),
-            active_intrinsic_statics_len: Cell::new(0),
+            active_intrinsic_catalog: Cell::new(std::ptr::null()),
             active_intrinsic_registry: Cell::new(std::ptr::null()),
             external_storage: RefCell::new(HashMap::new()),
             external_revision: Cell::new(Some(0)),
@@ -960,7 +957,9 @@ impl MachineState {
         let space = tidepool_heap::gc::raw::DescriptorSpace::new(layouts)
             .map_err(|_| RuntimeError::HeapOverflow)?;
         let space = if let Some(region) = static_region {
-            space.with_static_region(region)
+            space
+                .with_static_region(region)
+                .map_err(|_| RuntimeError::HeapOverflow)?
         } else {
             space
         };
@@ -1006,6 +1005,26 @@ impl MachineState {
             .extend_static_region(static_region)
             .map_err(|_| RuntimeError::HeapOverflow)?;
         Ok(())
+    }
+
+    /// The immutable static catalog owned by the live prepared descriptor
+    /// space. Collection mutates it only during installation/retirement;
+    /// non-moving observation borrows the same catalog between calls.
+    pub(crate) fn prepared_static_catalog(
+        &self,
+    ) -> Result<
+        std::rc::Rc<std::cell::RefCell<tidepool_heap::static_region::StaticRegionCatalog>>,
+        RuntimeError,
+    > {
+        let active = self
+            .gc_state
+            .try_borrow()
+            .map_err(|_| RuntimeError::BadPointer)?;
+        let prepared = active
+            .as_ref()
+            .and_then(|state| state.prepared.as_ref())
+            .ok_or(RuntimeError::BadPointer)?;
+        Ok(prepared.space.static_catalog())
     }
 
     /// Open the descriptor space's registration undo log (see
@@ -1665,23 +1684,21 @@ impl MachineState {
     pub(crate) fn install_active_intrinsic_program(
         &self,
         program: &crate::prepared_program::CompiledProgram,
-        statics: &[std::sync::Arc<tidepool_heap::static_region::StaticRegion>],
+        catalog: &tidepool_heap::static_region::StaticRegionCatalog,
         registry: &std::collections::BTreeMap<usize, crate::prepared_program::DescriptorMetadata>,
     ) -> bool {
         if !self.active_intrinsic_program.get().is_null() {
             return false;
         }
         self.active_intrinsic_program.set(program);
-        self.active_intrinsic_statics.set(statics.as_ptr());
-        self.active_intrinsic_statics_len.set(statics.len());
+        self.active_intrinsic_catalog.set(catalog);
         self.active_intrinsic_registry.set(registry);
         true
     }
 
     pub(crate) fn clear_active_intrinsic_program(&self) {
         self.active_intrinsic_program.set(std::ptr::null());
-        self.active_intrinsic_statics.set(std::ptr::null());
-        self.active_intrinsic_statics_len.set(0);
+        self.active_intrinsic_catalog.set(std::ptr::null());
         self.active_intrinsic_registry.set(std::ptr::null());
     }
 
@@ -1700,18 +1717,15 @@ impl MachineState {
     pub(crate) unsafe fn active_intrinsic_observation(
         &self,
     ) -> Option<(
-        &[std::sync::Arc<tidepool_heap::static_region::StaticRegion>],
+        &tidepool_heap::static_region::StaticRegionCatalog,
         &std::collections::BTreeMap<usize, crate::prepared_program::DescriptorMetadata>,
     )> {
-        let statics = self.active_intrinsic_statics.get();
+        let catalog = self.active_intrinsic_catalog.get();
         let registry = self.active_intrinsic_registry.get();
-        if statics.is_null() || registry.is_null() {
+        if catalog.is_null() || registry.is_null() {
             return None;
         }
-        Some((
-            unsafe { std::slice::from_raw_parts(statics, self.active_intrinsic_statics_len.get()) },
-            unsafe { &*registry },
-        ))
+        Some((unsafe { &*catalog }, unsafe { &*registry }))
     }
 
     /// Borrow the exact-start admission owner for one collector/observer call.

@@ -35,7 +35,7 @@ pub(super) struct PreparedInvocation<'code> {
     // contains its pointer. MachineState mutates through its existing cells.
     pub(super) machine: Rc<MachineState>,
     pub(super) vmctx: VMContext,
-    pub(super) statics: Arc<StaticRegion>,
+    static_catalog: tidepool_heap::static_region::StaticRegionCatalog,
     pub(super) results: RootWords,
     pub(super) result_contract: ResultContract,
     pub(super) result_layout: StorageLayout,
@@ -43,6 +43,14 @@ pub(super) struct PreparedInvocation<'code> {
     /// Boxed so the machine's borrowed admission pointer remains stable even
     /// while this invocation value is moved out of `enter`.
     old_space: Box<OldSpace>,
+}
+
+fn static_catalog(region: &Arc<StaticRegion>) -> tidepool_heap::static_region::StaticRegionCatalog {
+    let mut catalog = tidepool_heap::static_region::StaticRegionCatalog::new();
+    catalog
+        .insert(Arc::clone(region))
+        .expect("one invocation static region has a valid stable range");
+    catalog
 }
 
 impl<'code> PreparedInvocation<'code> {
@@ -110,6 +118,7 @@ impl<'code> PreparedInvocation<'code> {
             .map_err(runtime_error_without_machine)?;
 
         let statics = Arc::new(program.statics.instantiate()?);
+        let static_catalog = static_catalog(&statics);
         // The program's own root block carries its tops for this invocation,
         // exactly as it does when installed on a machine.
         let top_table = &program.root_block;
@@ -202,7 +211,7 @@ impl<'code> PreparedInvocation<'code> {
             program,
             machine,
             vmctx,
-            statics,
+            static_catalog,
             results,
             result_contract: compiled.abi.semantic_results().clone(),
             result_layout: compiled.abi.result_layout().clone(),
@@ -237,7 +246,7 @@ impl<'code> PreparedInvocation<'code> {
             let _intrinsic = super::ActiveIntrinsicScope::new(
                 &invocation.machine,
                 invocation.program,
-                std::slice::from_ref(&invocation.statics),
+                &invocation.static_catalog,
                 &invocation.program.descriptor_registry,
             )?;
             let _scope = OldSpaceScope::new(&invocation.machine, &invocation.old_space)?;
@@ -264,12 +273,11 @@ impl<'code> PreparedInvocation<'code> {
         if status != CallStatus::Success
             || invocation.machine.prepared_call_status() != CallStatus::Success
         {
-            let statics = Arc::clone(&invocation.statics);
             super::forcing::describe_raised_exception(
                 &invocation.machine,
                 invocation.program,
                 &mut invocation.vmctx,
-                std::slice::from_ref(&statics),
+                &invocation.static_catalog,
                 &invocation.program.descriptor_registry,
                 &invocation.old_space,
             );
@@ -323,7 +331,7 @@ impl<'code> PreparedInvocation<'code> {
             &self.machine,
             self.program,
             &mut self.vmctx,
-            std::slice::from_ref(&self.statics),
+            &self.static_catalog,
             &self.program.descriptor_registry,
             &self.old_space,
             &result_seeds,

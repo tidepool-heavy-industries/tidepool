@@ -1,5 +1,6 @@
 //! Non-forcing, bounded materialization while invocation storage remains owned.
 
+use std::cell::Ref;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -157,23 +158,36 @@ pub(super) struct ObservationHeap<'a> {
 }
 
 enum StaticRegions<'a> {
-    Borrowed(&'a [Arc<StaticRegion>]),
+    Borrowed(Ref<'a, tidepool_heap::static_region::StaticRegionCatalog>),
+    Catalog(&'a tidepool_heap::static_region::StaticRegionCatalog),
     #[cfg_attr(not(test), allow(dead_code))]
     Owned(Vec<&'a StaticRegion>),
 }
 
 impl StaticRegions<'_> {
-    fn len(&self) -> usize {
+    fn admit(
+        &self,
+        encoded: usize,
+        metrics: &tidepool_heap::static_region::StaticLookupMetrics,
+    ) -> Result<Option<&StaticRegion>, DescriptorTraceError> {
         match self {
-            Self::Borrowed(regions) => regions.len(),
-            Self::Owned(regions) => regions.len(),
-        }
-    }
-
-    fn get(&self, index: usize) -> Option<&StaticRegion> {
-        match self {
-            Self::Borrowed(regions) => regions.get(index).map(Arc::as_ref),
-            Self::Owned(regions) => regions.get(index).copied(),
+            Self::Borrowed(regions) => regions.admit(encoded, metrics),
+            Self::Catalog(regions) => regions.admit(encoded, metrics),
+            Self::Owned(regions) => {
+                let mut probes = 0;
+                for region in regions {
+                    probes += 1;
+                    match region.admit(encoded) {
+                        Ok(None) => {}
+                        result => {
+                            metrics.record(regions.len(), probes, result.is_ok());
+                            return result.map(|value| value.map(|_| *region));
+                        }
+                    }
+                }
+                metrics.record(regions.len(), probes, false);
+                Ok(None)
+            }
         }
     }
 }
@@ -240,7 +254,7 @@ impl<'a> ObservationHeap<'a> {
 
     pub(super) fn new_with_registry_and_starts(
         nursery: &'a [u64],
-        statics: &'a [Arc<StaticRegion>],
+        statics: Ref<'a, tidepool_heap::static_region::StaticRegionCatalog>,
         registry: &'a BTreeMap<usize, DescriptorMetadata>,
         starts: &[u64],
         old_space: Option<&'a dyn tidepool_heap::descriptor_region::DescriptorOldSpace>,
@@ -250,6 +264,27 @@ impl<'a> ObservationHeap<'a> {
             static_metrics: tidepool_heap::static_region::StaticLookupMetrics::new("observer"),
             nursery,
             statics: StaticRegions::Borrowed(statics),
+            old_space,
+            descriptors: DescriptorSource::Registry(registry),
+            starts: starts.to_vec(),
+            constructors: None,
+            registry: Some(registry),
+            external_owner: Some(external_owner),
+        })
+    }
+
+    pub(super) fn new_with_static_catalog(
+        nursery: &'a [u64],
+        statics: &'a tidepool_heap::static_region::StaticRegionCatalog,
+        registry: &'a BTreeMap<usize, DescriptorMetadata>,
+        starts: &[u64],
+        old_space: Option<&'a dyn tidepool_heap::descriptor_region::DescriptorOldSpace>,
+        external_owner: &'a crate::machine_state::MachineState,
+    ) -> Result<Self, ObservationFailure> {
+        Ok(Self {
+            static_metrics: tidepool_heap::static_region::StaticLookupMetrics::new("observer"),
+            nursery,
+            statics: StaticRegions::Catalog(statics),
             old_space,
             descriptors: DescriptorSource::Registry(registry),
             starts: starts.to_vec(),
@@ -324,29 +359,9 @@ impl<'a> ObservationHeap<'a> {
         encoded: usize,
     ) -> Result<(&ObjectDescriptor, *const u8, DescriptorState), ObservationFailure> {
         let address = untag(encoded);
-        // A pointer is static iff SOME installed program's region admits it;
-        // the union, not any single program's own region, is what a
-        // cross-program static field (T4) resolves through.
-        let mut static_hit = None;
-        let mut probes = 0;
-        for index in 0..self.statics.len() {
-            let region = self.statics.get(index).expect("bounded by static length");
-            probes += 1;
-            match region.admit(encoded) {
-                Ok(Some(_)) => {
-                    static_hit = Some(region);
-                    break;
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    self.static_metrics
-                        .record(self.statics.len(), probes, false);
-                    return Err(error.into());
-                }
-            }
-        }
-        self.static_metrics
-            .record(self.statics.len(), probes, static_hit.is_some());
+        // The catalog selects one address-range candidate. Its exact
+        // `StaticRegion::admit` validation remains authoritative.
+        let static_hit = self.statics.admit(encoded, &self.static_metrics)?;
         let old_pointer = if static_hit.is_some() {
             None
         } else if let Some(owner) = self.old_space {
@@ -419,17 +434,16 @@ impl<'a> ObservationHeap<'a> {
 
     /// One step of a non-moving mark over the whole heap: classify `encoded`
     /// and, for a heap object, read its managed edges without forcing
-    /// anything. A static reference names the region (by index in this
-    /// heap's admitted set) and is not traced into: a static object reaches
+    /// anything. A static reference names its stable allocation start and is
+    /// not traced into: a static object reaches
     /// only its own program's statics and bytes. A boxed array's elements
     /// come from the machine's external-payload view; a bytes payload has
     /// no managed edges. Null edges are dropped.
     pub(super) fn trace_step(&self, encoded: usize) -> Result<Traced, ObservationFailure> {
-        for index in 0..self.statics.len() {
-            let region = self.statics.get(index).expect("bounded by static length");
-            if region.admit(encoded)?.is_some() {
-                return Ok(Traced::Static { region: index });
-            }
+        if let Some(region) = self.statics.admit(encoded, &self.static_metrics)? {
+            return Ok(Traced::Static {
+                region_start: region.address_range().start,
+            });
         }
         let (descriptor, object, _) = self.object(encoded)?;
         let header = descriptor.initial_header_word();
@@ -472,7 +486,7 @@ impl<'a> ObservationHeap<'a> {
 /// What one mark step found: a reference into an installed program's static
 /// image, or a heap object with its descriptor header and managed edges.
 pub(super) enum Traced {
-    Static { region: usize },
+    Static { region_start: usize },
     Object { header: usize, children: Vec<usize> },
 }
 
