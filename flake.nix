@@ -436,7 +436,7 @@
             ${interactiveCodex}/bin/codex-code-mode-host --help
             ${interactiveCodex}/bin/codex --shoal-protocol-manifest \
               | ${pkgs.jq}/bin/jq --exit-status \
-                  '.hostProtocolVersion == 5 and .inputControlProtocolVersion == 4 and .maxCommandReplyBytes == 819200 and .maxWorkspaceReplyBytes == 16384 and (.capabilities | sort) == (["boundInputControl", "commandOperations", "hostedRegistration", "workspacePublication"] | sort)'
+                  '.hostProtocolVersion == 5 and .inputControlProtocolVersion == 5 and .maxCommandReplyBytes == 819200 and .maxWorkspaceReplyBytes == 16384 and .maxInputControlReplyBytes == 16384 and (.capabilities | sort) == (["boundInputControl", "commandOperations", "hostedRegistration", "workspacePublication"] | sort)'
             touch "$out"
           '';
 
