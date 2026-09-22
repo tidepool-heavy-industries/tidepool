@@ -623,14 +623,9 @@ impl MachineState {
     /// write wins, because the earliest record is the one closest to the
     /// fault.
     ///
-    /// Uses `try_borrow_mut` defensively: a fault + `siglongjmp` while
-    /// something holds this cell mutably borrowed would leave it PERMANENTLY
-    /// marked as mutably borrowed (a `RefCell` has no "unpoison"), and a
-    /// plain `borrow_mut` on the signal-recovery path — inside unwind/cleanup
-    /// — double-panics into `abort()` instead of surfacing
-    /// `YieldError::Signal`. If the borrow fails we simply can't record this
-    /// cause; silently dropping it (rather than panicking) is the same
-    /// tradeoff `take_runtime_error` already makes.
+    /// Uses `try_borrow_mut` defensively so nested failure bookkeeping cannot
+    /// panic while an earlier path still owns the cell. If the borrow fails,
+    /// the earlier cause remains authoritative.
     pub(crate) fn set_first_cause(&self, cause: RuntimeError) {
         self.record_first_cause(cause, None);
     }
@@ -779,11 +774,9 @@ impl MachineState {
         let _ = self.take_runtime_error();
     }
 
-    /// Take the pending cause, if any. Uses `try_borrow_mut` defensively: this
-    /// runs on the signal/teardown path, and a signal can fire while JIT host
-    /// code still holds a `borrow_mut` on the cell — a plain `borrow_mut`
-    /// would then panic (and panicking inside `Drop`/unwind double-panics →
-    /// `abort()`).
+    /// Take the pending cause, if any. Uses `try_borrow_mut` defensively so
+    /// cleanup does not panic if nested failure bookkeeping still owns the
+    /// cell.
     /// Consuming a prepared cause settles/releases its exception operand.
     /// Any future operand presentation must precede this operation.
     pub(crate) fn take_runtime_error(&self) -> Option<RuntimeError> {
@@ -1111,11 +1104,9 @@ impl MachineState {
     }
 
     /// Take this machine's `GcState` out of its cell, leaving the cell empty.
-    /// `perform_gc` uses this to operate on an OWNED `GcState` across the
-    /// Cheney copy instead of holding a live borrow across faultable code: a
-    /// signal there abandons the owned value on the dead frame (it leaks,
-    /// nothing double-frees) rather than leaving the `RefCell` permanently
-    /// marked borrowed. Pair with [`Self::put_gc_state`].
+    /// `perform_gc` uses this to operate on an owned `GcState` across the
+    /// Cheney copy without holding a `RefCell` borrow through collection.
+    /// Pair with [`Self::put_gc_state`].
     pub(crate) fn take_gc_state(&self) -> Option<GcState> {
         self.gc_state.borrow_mut().take()
     }
@@ -3171,19 +3162,12 @@ pub(crate) unsafe fn current_machine<'a>() -> Option<&'a MachineState> {
 mod tests {
     use super::*;
 
-    /// `runtime_error` relies on `try_borrow_mut` defenses: a fault +
-    /// `siglongjmp` while something holds it mutably borrowed would leave it
-    /// PERMANENTLY marked as mutably borrowed (`RefCell` has no "unpoison"
-    /// once a guard's release never runs). We reproduce that exact `RefCell`
-    /// state directly — hold a live `borrow_mut()` guard across the calls
-    /// under test — rather than actually raising a signal; `signal_safety.rs`
-    /// separately covers signal delivery/recovery itself. `gc_state` avoids
-    /// this hazard class entirely via a take/put-back discipline instead —
-    /// see the `gc_state_take_put_back_*` tests below.
+    /// Nested failure bookkeeping must not panic when an earlier path still
+    /// owns the first-cause cell.
     #[test]
-    fn stuck_runtime_error_cell_does_not_panic() {
+    fn busy_runtime_error_cell_does_not_panic() {
         let ms = MachineState::new();
-        let _guard = ms.runtime_error.borrow_mut(); // simulates a stuck signal-path borrow
+        let _guard = ms.runtime_error.borrow_mut();
 
         // set_first_cause: silently cannot write the cause, but does not panic.
         ms.set_first_cause(RuntimeError::Cancelled);
@@ -4747,14 +4731,10 @@ mod tests {
         );
     }
 
-    /// Simulates a fault mid-`perform_gc`: the `GcState` is taken out and the
-    /// frame holding it is abandoned (a `siglongjmp` skips the put-back). The
-    /// cell is left EMPTY rather than stuck mutably-borrowed, so every
-    /// teardown path that runs during signal recovery — including
-    /// `clear_run_scratch`, called from `RegistryGuard::drop` — completes
-    /// without panicking.
+    /// Teardown remains safe while `GcState` is temporarily taken out of its
+    /// cell, as it is throughout `perform_gc`.
     #[test]
-    fn gc_state_abandoned_take_leaves_cell_empty_and_teardown_is_safe() {
+    fn gc_state_taken_out_leaves_cell_empty_and_teardown_is_safe() {
         let ms = MachineState::new();
         ms.install_prepared_buffer(vec![0_u64; 16], Vec::new())
             .unwrap();

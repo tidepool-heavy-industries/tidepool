@@ -610,16 +610,9 @@ fn perform_gc_request(fp: usize, vmctx: *mut VMContext, reserve: usize) {
     // ── Cheney copying GC ──────────────────────────────
     // SAFETY: vmctx is valid; machine_state was installed before entering
     // JIT code (same contract as the stack_map_registry read above).
-    // The `GcState` is TAKEN out of its cell for the duration of the
-    // copy, not borrowed: a fault (SIGSEGV/SIGILL) anywhere in this
-    // block siglongjmps out of this frame, abandoning the owned
-    // `state`/`tospace`/`root_slots` locals on the dead stack — they
-    // leak, nothing double-frees — and the cell is left EMPTY rather
-    // than permanently marked mutably borrowed. Every teardown path
-    // (`reclaim_session_heap`, `clear_run_scratch`, `free_session_heap`)
-    // already treats an empty cell as the ordinary "no GC state" case.
-    //
-    // This empty-cell no-op ALSO means a reentrant `perform_gc` call
+    // The `GcState` is taken out of its cell for the duration of the copy,
+    // rather than keeping a `RefCell` borrow live through collection. The
+    // empty-cell no-op also means a reentrant `perform_gc` call
     // (this function calling itself, transitively, while `state` is
     // taken) would silently skip its own collection instead of running
     // one. `OldSpace::tenure`'s `run_minor_collection_for_tenure_fixup`

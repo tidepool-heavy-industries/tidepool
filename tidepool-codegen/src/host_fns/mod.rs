@@ -11,8 +11,7 @@
 //! registries) lives on [`crate::machine_state::MachineState`]; see that
 //! module's doc for the full reach-path invariant. Host fns without a
 //! `vmctx` use the per-thread `CURRENT_MACHINE` slot; the GC cluster is
-//! reached via `vmctx` only. The signal handler's `EXEC_CONTEXT`/
-//! `SIGNAL_SAFE_CTX` stay thread-scoped rather than per-machine.
+//! reached via `vmctx` only.
 
 mod errors;
 mod gc;
