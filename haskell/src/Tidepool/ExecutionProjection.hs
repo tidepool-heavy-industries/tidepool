@@ -24,13 +24,13 @@ module Tidepool.ExecutionProjection
   , TextUnitAuthority(..)
   ) where
 
-import Control.Monad (foldM, foldM_, forM, forM_, unless)
+import Control.Monad (foldM, forM, forM_, unless)
 import Control.Monad.State.Strict
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
 import Data.IntMap.Strict qualified as IntMap
 import Data.List (find)
-import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe)
+import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Tidepool.PreparedBuiltins
   ( DeferredFunction(..), deferredFunction, wiredInErrorKind )
 import Data.Map.Strict (Map)
@@ -1833,29 +1833,15 @@ constructorDeclaration con = do
   isUnboxed _ = True
 
 validateConstructorEvidence :: [DataCon] -> P ()
-validateConstructorEvidence constructors = do
-  candidates <- fmap catMaybes . traverse candidate $ constructors
-  prior <- gets constructorDecls
-  foldM_ compareOne prior candidates
+validateConstructorEvidence = mapM_ validateOne
  where
-  candidate constructor = do
-    attempted <- tryRepresentation (constructorDeclaration constructor)
+  validateOne constructor = do
+    attempted <- tryRepresentation (internConstructor constructor)
     case attempted of
-      Right declaration -> pure (Just declaration)
-      Left (InvalidPreparedLayout _) -> pure Nothing
-      Left (InvalidPreparedRepresentation _) -> pure Nothing
+      Right _ -> pure ()
+      Left (InvalidPreparedLayout _) -> pure ()
+      Left (InvalidPreparedRepresentation _) -> pure ()
       Left failure -> lift (Left failure)
-  compareOne known declaration = do
-    let nominal = constructorIdentity declaration
-        matches = filter ((== nominal) . constructorIdentity) known
-    case matches of
-      [] -> pure (known <> [declaration])
-      [existing]
-        | existing == declaration -> pure known
-        | otherwise -> failConstructorConflict existing declaration
-      _ -> lift . Left . InvalidPreparedIdentity $
-        "nominal constructor has multiple declarations before validation: "
-          <> symbolText nominal
 
 internConstructor :: DataCon -> P ConstructorId
 internConstructor con = do
