@@ -13,10 +13,12 @@ module Tidepool.HostBindingAuthority
 import Control.Exception (IOException, try)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import GHC.Core.TyCo.Rep (Type(CastTy))
+import GHC.Core.DataCon
+  ( StrictnessMark(MarkedStrict), dataConName, dataConOrigArgTys, dataConRepStrictness )
+import GHC.Core.TyCo.Rep (Scaled(..), Type(CastTy))
 import GHC.Core.Type (coreView, splitTyConApp_maybe)
-import GHC.Core.TyCon (TyCon, tyConName)
-import GHC.Driver.Env (HscEnv)
+import GHC.Core.TyCon (TyCon, tyConDataCons, tyConName)
+import GHC.Driver.Env (HscEnv, hsc_home_unit)
 import GHC.Driver.Env.Types (hsc_unit_env)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
@@ -27,11 +29,13 @@ import GHC.Unit.Module (Module, mkModuleName, moduleName, moduleNameString, modu
 import GHC.Unit.Module.Location (ml_hs_file)
 import GHC.Unit.Env (ue_units)
 import GHC.Unit.Info (PackageName(..))
+import GHC.Unit.Home (homeUnitAsUnit)
 import GHC.Unit.State (lookupPackageName)
 import GHC.Data.FastString (fsLit)
 import Language.Haskell.TH.Syntax (addDependentFile, lift, loc_filename, location, runIO)
 import System.FilePath (takeDirectory, (</>))
-import Tidepool.PreparedJson (jsonAuthorityModule, resolveJsonAuthority)
+import Tidepool.PreparedJson
+  ( JsonAuthority, jsonValueLayoutForType, resolveJsonAuthority )
 
 data HostBindingAuthority
   = JsonValueAuthority
@@ -40,7 +44,7 @@ data HostBindingAuthority
   deriving stock (Eq, Show)
 
 data HostBindingAuthorities = HostBindingAuthorities
-  { jsonValueModule :: Maybe Module
+  { jsonValueAuthority :: Maybe JsonAuthority
   , textModule :: Maybe Module
   , commandJobModule :: Maybe Module
   }
@@ -60,12 +64,12 @@ resolveHostBindingAuthorities roots env = do
   let needsJson = any (hasRoot "Tidepool.Aeson.Value" "Value") roots
       needsText = any (hasRoot "Data.Text.Internal" "Text") roots
       needsJob = any (hasRoot "Tidepool.Command.Types" "Job") roots
-  jsonValueModule <- if needsJson
-    then fmap jsonAuthorityModule <$> resolveJsonAuthority env
+  jsonValueAuthority <- if needsJson
+    then resolveJsonAuthority env
     else pure Nothing
-  textModule <- if needsText then resolveTextModule env else pure Nothing
+  textModule <- if needsText || needsJob then resolveTextModule env else pure Nothing
   commandJobModule <- if needsJob then resolveCommandJobModule env else pure Nothing
-  pure HostBindingAuthorities { jsonValueModule, textModule, commandJobModule }
+  pure HostBindingAuthorities { jsonValueAuthority, textModule, commandJobModule }
 
 resolveTextModule :: HscEnv -> IO (Maybe Module)
 resolveTextModule env = case lookupPackageName
@@ -81,7 +85,9 @@ resolveCommandJobModule :: HscEnv -> IO (Maybe Module)
 resolveCommandJobModule env = do
   found <- findImportedModule env (mkModuleName "Tidepool.Command.Types") NoPkgQual
   case found of
-    Found moduleLocation owner | Just source <- ml_hs_file moduleLocation -> do
+    Found moduleLocation owner
+      | moduleUnit owner == homeUnitAsUnit (hsc_home_unit env)
+      , Just source <- ml_hs_file moduleLocation -> do
       actual <- try (BS.readFile source) :: IO (Either IOException ByteString)
       pure $ case actual of
         Right bytes | bytes == shippedCommandTypesSource -> Just owner
@@ -92,21 +98,13 @@ resolveCommandJobModule env = do
 -- nor descends into arguments, so @Job Text@ cannot borrow Text authority.
 classifyHostBindingAuthority :: HostBindingAuthorities -> Type -> Maybe HostBindingAuthority
 classifyHostBindingAuthority authorities ty = do
-  tyCon <- rootTyCon ty
-  owner <- nameModule_maybe (tyConName tyCon)
-  let occurrence = occNameString (nameOccName (tyConName tyCon))
-      exact expected expectedModule expectedName =
-        Just owner == expected
-          && maybe False ((== moduleUnit owner) . moduleUnit) expected
-          && moduleNameString (moduleName owner) == expectedModule
-          && occurrence == expectedName
-  if exact (jsonValueModule authorities) "Tidepool.Aeson.Value" "Value"
-    then Just JsonValueAuthority
-    else if exact (textModule authorities) "Data.Text.Internal" "Text"
-      then Just TextAuthority
-      else if exact (commandJobModule authorities) "Tidepool.Command.Types" "Job"
-        then Just CommandJobAuthority
-        else Nothing
+  case jsonValueAuthority authorities of
+    Just authority | Just _ <- jsonValueLayoutForType authority ty -> Just JsonValueAuthority
+    _ -> case textModule authorities of
+      Just text | isExactRoot text "Data.Text.Internal" "Text" ty -> Just TextAuthority
+      _ -> case (commandJobModule authorities, textModule authorities) of
+        (Just job, Just text) | isExactJob job text ty -> Just CommandJobAuthority
+        _ -> Nothing
 rootTyCon :: Type -> Maybe TyCon
 rootTyCon ty = go body
   where
@@ -125,3 +123,26 @@ hasRoot expectedModule expectedName ty = case rootTyCon ty of
         && occNameString (nameOccName (tyConName tyCon)) == expectedName
     Nothing -> False
   Nothing -> False
+
+isExactRoot :: Module -> String -> String -> Type -> Bool
+isExactRoot expected expectedModule expectedName ty = case rootTyCon ty of
+  Just tyCon -> case nameModule_maybe (tyConName tyCon) of
+    Just owner -> owner == expected
+      && moduleUnit owner == moduleUnit expected
+      && moduleNameString (moduleName owner) == expectedModule
+      && occNameString (nameOccName (tyConName tyCon)) == expectedName
+    Nothing -> False
+  Nothing -> False
+
+isExactJob :: Module -> Module -> Type -> Bool
+isExactJob jobModule textModule ty = case rootTyCon ty of
+  Just jobTyCon
+    | isExactRoot jobModule "Tidepool.Command.Types" "Job" ty ->
+        case tyConDataCons jobTyCon of
+          [constructor]
+            | occNameString (nameOccName (dataConName constructor)) == "Job"
+            , dataConRepStrictness constructor == [MarkedStrict]
+            , [Scaled _ field] <- dataConOrigArgTys constructor ->
+                isExactRoot textModule "Data.Text.Internal" "Text" field
+          _ -> False
+  _ -> False
