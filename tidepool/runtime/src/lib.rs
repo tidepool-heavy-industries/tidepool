@@ -170,8 +170,7 @@ pub const EVAL_STACK_SIZE: usize = 256 * 1024 * 1024; // 256 MiB
 /// A prepared program's `Tidepool.Internal.Resume.Done`/`Suspended` are only
 /// reachable — hence observable via `run_settled` — when the compiled module
 /// defines the fixed-named scaffold bindings `session::turn`'s assembly
-/// helpers write (see `plans/core-engine-removal.md`'s "The `UnsettledEntry`
-/// condition"). Splicing that scaffold into an arbitrary ALREADY-ASSEMBLED
+/// helpers write. Splicing that scaffold into an arbitrary ALREADY-ASSEMBLED
 /// module string is not safe in general (a bare append breaks Haskell's
 /// import-before-declarations layout rule); every caller that already
 /// builds its source from a preamble + one expression already has the

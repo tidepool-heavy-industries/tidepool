@@ -490,7 +490,7 @@ Astra can plan the graph and check Sol's execution understanding once, then idle
 without routine progress subscriptions. Sol owns implementation, integration and
 ordinary choices. Fresh Astra consultations own bounded hard decisions or repairs
 and return directly to the requesting Sol. Haskell handles mechanical collection,
-cursor advancement and routing; use .exomonad/plans/coordination.md. Keep routine
+cursor advancement and routing; use .exomonad/plans/operating.md. Keep routine
 evidence out of Attention and use compact projections at decision boundaries.
 Return compact commits/checks/gates; exact transport and source
 incorporation still matter without a paragraph of acknowledgment history.

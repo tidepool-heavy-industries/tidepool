@@ -98,9 +98,8 @@ elapsedMs t0 t1 = round ((t1 - t0) * 1000)
 
 -- | Write the ONE compact per-compile summary line — ALWAYS, unlike every
 -- other emitter in this module: not gated by 'readTimingEnabled'. This is
--- the operator-visible-by-default line (compile-attribution lane,
--- plans/turn-latency-state-injection.md's companion measurement): an
--- operator reading plain harness logs sees module count, wall time, the
+-- the operator-visible-by-default line: an operator reading plain harness
+-- logs sees module count, wall time, the
 -- typecheck/lowering phase split, and the top-3 modules by wall time with NO
 -- env var to set. Deliberately ONE line, not a dump — the per-module BREAKDOWN
 -- (every module, not just the top 3) stays behind 'readTimingEnabled' via

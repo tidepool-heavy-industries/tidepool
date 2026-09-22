@@ -688,9 +688,8 @@ pub struct TurnTemplate<'a> {
     /// whichever runs first inserts before the marker, the other still
     /// finds it further down and inserts before that), and
     /// [`tidepool_runtime::session::prepared_scaffold_binding`] is appended
-    /// after the primary `result` entry — the SAME scaffold
-    /// `compile_and_run` now requires (see `plans/core-engine-removal.md`'s
-    /// "The `UnsettledEntry` condition"). One implementation of the
+    /// after the primary `result` entry — the same scaffold required by
+    /// `compile_and_run`. One implementation of the
     /// scaffold, reused, not a second one. Only settles the PRIMARY entry
     /// (`result`); `extra_entries` are not independently resumable under
     /// this flag — a caller needing that scaffolds each one itself via

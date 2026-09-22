@@ -314,10 +314,8 @@ impl EvalHarness {
 
     /// Compile MULTIPLE named top-level bindings sharing ONE module against
     /// ONE `tidepool-extract` spawn ([`compile_targets`]'s N-in-one-spawn
-    /// mode — see `tidepool/runtime/CLAUDE.md`'s "Compile cache" section and
-    /// `plans/test-time-cut.md`'s §3: an extra target in the same spawn costs
-    /// ~2% more wall time, not another full GHC session). Run each target
-    /// independently afterward via [`run_target`](Self::run_target)/
+    /// mode). Run each target independently afterward via
+    /// [`run_target`](Self::run_target)/
     /// [`run_target_owned`](Self::run_target_owned) — own handler instance,
     /// own dispatch history per target, same isolation as N separate
     /// `#[test]` fns, one spawn instead of N.
@@ -473,17 +471,9 @@ impl EvalHarness {
         U: Send + 'static,
         H: DispatchEffect<U> + Send + 'static,
     {
-        // NOT yet migrated to run_prepared_program: a `compile_many`
-        // (multi-target, N targets from one module in one extraction)
-        // artifact's non-designated targets apparently lack a settled
-        // scaffold even when genuinely effectful — confirmed by running
-        // `effect_stack::effect_fold_regression::works_effect_fold_family`
-        // (7 targets, real `Eff '[Console]` effects) against
-        // `run_prepared_program`: `PreparedRuntimeError::UnsettledEntry` on
-        // the very first target. This is orthogonal to (and unlike)
-        // `compile_and_run`/`run`/`run_with`'s single-target
-        // `compile_haskell` path, verified working. Reported to main rather
-        // than guessed at; see `plans/core-engine-removal.md`.
+        // `compile_many` artifacts do not yet provide settled scaffolds for
+        // non-designated targets. Keep this helper on the single-target path
+        // until that runtime contract is implemented and covered directly.
         let prepared = artifacts
             .targets
             .get(target)
