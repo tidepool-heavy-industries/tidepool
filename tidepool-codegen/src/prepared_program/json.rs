@@ -329,7 +329,7 @@ impl JsonDescriptors {
             return Err(RuntimeError::BadPointer);
         }
         let scientific = reps(&resolved.scientific);
-        if scientific != [lifted, scalar] && scientific != [lifted, lifted] {
+        if scientific != [lifted, scalar] {
             return Err(RuntimeError::BadPointer);
         }
         let bin = reps(&resolved.bin);
@@ -456,21 +456,7 @@ impl JsonSink<'_, '_> {
             .into_parts();
         let coefficient = self.integer(&coefficient)?;
         let scientific = Arc::clone(&self.d.scientific);
-        let exponent = match scientific
-            .payload()
-            .logical_to_stored()
-            .get(1)
-            .and_then(|stored| *stored)
-            .and_then(|stored| scientific.payload().fields().get(stored as usize))
-            .map(|field| field.rep())
-        {
-            Some(RuntimeRep::Int(64)) => IntrinsicField::Bits(int_bits(exponent)),
-            Some(RuntimeRep::LiftedRef) => {
-                let boxed = Arc::clone(&self.d.i_hash);
-                IntrinsicField::Node(self.con(&boxed, &[IntrinsicField::Bits(int_bits(exponent))])?)
-            }
-            _ => return Err(RuntimeError::BadPointer),
-        };
+        let exponent = IntrinsicField::Bits(int_bits(exponent));
         let scientific = self.con(&scientific, &[IntrinsicField::Node(coefficient), exponent])?;
         let number = Arc::clone(&self.d.number);
         self.con(&number, &[IntrinsicField::Node(scientific)])

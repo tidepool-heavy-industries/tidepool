@@ -93,6 +93,80 @@ const FREER_RESUME_EXPECTATIONS: &str =
     include_str!("../../haskell/test-prepared-stg/FreerResumeExpectations.json");
 
 #[test]
+fn scientific_plain_and_quasiquoted_programs_share_one_representation() {
+    use tidepool_repr::execution_schema::RuntimeRep;
+
+    tidepool_testing::eval_harness::require_extract();
+    let include = tidepool_testing::eval_harness::prelude_path();
+    let programs = [
+        include_str!("fixtures/ScientificPlain.hs"),
+        include_str!("fixtures/ScientificQuoted.hs"),
+    ]
+    .map(|source| {
+        tidepool_runtime::compile_haskell(source, "result", &[&include])
+            .expect("compile Scientific fixture")
+            .prepared
+            .into_prepared()
+    });
+    let declarations = programs.each_ref().map(|program| {
+        find_declared(
+            program.constructors(),
+            "Tidepool.Aeson.Scientific",
+            "Scientific",
+        )
+        .expect("Scientific declaration before execution")
+    });
+    assert_eq!(declarations[0], declarations[1]);
+    assert_eq!(
+        declarations[0].field_reps,
+        [RuntimeRep::LiftedRef, RuntimeRep::Int(64)]
+    );
+    let scientific_id = declarations[0].host_id;
+    for order in [[0, 1], [1, 0]] {
+        let (mut machine, first) = open_closed_machine_from(programs[order[0]].clone());
+        let linked = link_program(programs[order[1]].clone(), &MachineImports::default())
+            .expect("second program links");
+        let compiled = machine
+            .compile_for_install(&linked)
+            .expect("second program compiles");
+        let second = machine
+            .install_program(compiled, ImportBindings::new())
+            .expect("second program shares constructor interning");
+        for (index, program) in [(order[0], first), (order[1], second), (order[0], first)] {
+            let result = machine
+                .run_entry_with_raw_cancel(
+                    program,
+                    programs[index].entry(),
+                    &[],
+                    PreparedCallOptions {
+                        collect_before_observation: true,
+                        observation_budget: RunOptions::default().observation_budget,
+                    },
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .expect("Scientific program executes after shared installation");
+            let value = &result.values[0];
+            let scientific = if index == 1 {
+                let HaskellValue::Con(_, fields) = value else {
+                    panic!("expected Number: {value:?}")
+                };
+                assert_eq!(fields.len(), 1);
+                &fields[0]
+            } else {
+                value
+            };
+            let HaskellValue::Con(id, fields) = scientific else {
+                panic!("expected Scientific: {scientific:?}")
+            };
+            assert_eq!(*id, scientific_id);
+            assert_eq!(fields.len(), 2);
+            assert_eq!(observed_int(&fields[0]), 42);
+            assert_eq!(observed_int(&fields[1]), 0);
+        }
+    }
+}
+
+#[test]
 fn native_json_parse_preserves_duplicate_policy_and_typed_failure() {
     use tidepool_extract_cmd::{resolve_bin, ExtractCmd, ResolvedExtractBin};
 

@@ -2122,14 +2122,7 @@ impl<'a> Validator<'a> {
             scientific,
             "Scientific",
             &[RuntimeRep::LiftedRef, RuntimeRep::Int(64)],
-        )
-        .or_else(|_| {
-            Self::check_json_reps(
-                scientific,
-                "Scientific",
-                &[RuntimeRep::LiftedRef, RuntimeRep::LiftedRef],
-            )
-        })?;
+        )?;
         Self::check_json_reps(integer_small, "integer small", &[RuntimeRep::Int(64)])?;
         Self::check_json_reps(
             integer_positive,
