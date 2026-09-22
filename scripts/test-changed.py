@@ -201,7 +201,7 @@ def commands(selections, obligations, actions, components=None):
 
 def requires_compiler(work, actions):
     """Whether this selected work will actually invoke extractor-backed code."""
-    return bool(actions.intersection({"haskell", "fixtures"})
+    return bool(actions.intersection({"fixtures"})
                 or any(action.startswith("fixture:") for action in actions)
                 or any(command[0] == "scripts/battery.sh" for command in work))
 

@@ -70,6 +70,8 @@ class Selection(unittest.TestCase):
     def test_compiler_daemon_tracks_execution_not_cargo_checks(self):
         checks = changed.commands({}, {"a": changed.CheckObligation.PRODUCTION}, set())
         self.assertFalse(changed.requires_compiler(checks, set()))
+        cabal = changed.commands({}, {}, {"haskell"}, ["cell-splitter-test"])
+        self.assertFalse(changed.requires_compiler(cabal, {"haskell"}))
         self.assertTrue(changed.requires_compiler(
             [["scripts/battery.sh", "-p", "tidepool-runtime"]], set()))
         self.assertTrue(changed.requires_compiler([], {"fixture:containers-contract"}))
