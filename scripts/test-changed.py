@@ -20,6 +20,13 @@ EXTRACTOR_FREE = (
     "tidepool-codegen",
 )
 
+# Retained reference source has no supported build or test obligation.
+RETIRED_SOURCES = (
+    Path("tidepool-harness"), Path("tidepool-web"),
+    Path("tidepool/src/bin/tidepool-selfharness.rs"),
+    Path("tidepool/src/bin/tidepool-selfharness"),
+)
+
 
 class CheckObligation(IntEnum):
     """How a changed package reaches a Cargo consumer.
@@ -92,6 +99,8 @@ def select(metadata, changed, root):
 
     for path in changed:
         file = Path(path)
+        if any(file.is_relative_to(retired) for retired in RETIRED_SOURCES):
+            continue
         if path in ("Cargo.toml", "Cargo.lock", "flake.nix", "flake.lock", "rust-toolchain.toml", "justfile") or path.startswith((".cargo/", ".config/", "scripts/", "dev/")):
             reasons.add(path)
             continue

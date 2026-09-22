@@ -94,6 +94,20 @@ class Selection(unittest.TestCase):
         _, _, _, reasons = self.select("Cargo.lock", "scripts/battery.sh")
         self.assertEqual(reasons, {"Cargo.lock", "scripts/battery.sh"})
 
+    def test_retired_source_has_no_supported_build_obligation(self):
+        self.package("tidepool")
+        retired = (
+            "tidepool-harness/Cargo.toml", "tidepool-harness/src/engine.rs",
+            "tidepool-web/src/lib.rs", "tidepool/src/bin/tidepool-selfharness.rs",
+            "tidepool/src/bin/tidepool-selfharness/prompt_catalog.rs",
+        )
+        self.assertEqual(self.select(*retired), ({}, {}, set(), set()))
+        selection, checks, _, reasons = self.select(
+            *retired, "tidepool/src/bin/shoal.rs", "Cargo.toml")
+        self.assertIn("tidepool", selection)
+        self.assertIn("tidepool", checks)
+        self.assertEqual(reasons, {"Cargo.toml"})
+
     def test_haskell_corpus_change_cannot_disappear(self):
         self.package("tidepool-runtime")
         selection, _, actions, _ = self.select("haskell/test-execution-corpus/Case.hs")
