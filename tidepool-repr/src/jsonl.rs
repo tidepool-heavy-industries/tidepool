@@ -7,7 +7,8 @@
 //! `tidepool_atomic_write::create_dir_all_durable` before first publication.
 //!
 //! [`TailPolicy::Repair`] truncates an incomplete final row for a single-owner
-//! journal. [`TailPolicy::Observe`] leaves artifacts untouched for read-only or
+//! journal and completes the delimiter of a valid unterminated row.
+//! [`TailPolicy::Observe`] leaves artifacts untouched for read-only or
 //! retain-first consumers. Malformed rows before another row are corruption and
 //! fail under either policy. Complete rows rejected by the schema or version also
 //! fail without mutation; tail repair never performs a version migration.
@@ -109,7 +110,7 @@ impl std::error::Error for JsonlReadError {
 /// How [`read_tail`] treats a torn final row on disk — see the module doc.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TailPolicy {
-    /// Truncate the file to the last good row.
+    /// Truncate an incomplete row, or complete a valid final row's delimiter.
     Repair,
     /// Leave the file byte-for-byte untouched.
     Observe,
@@ -158,6 +159,7 @@ pub fn read_tail<T>(
     let mut buf: Vec<u8> = Vec::new();
     let mut offset: u64 = 0;
     let mut lineno: usize = 0;
+    let mut unterminated = false;
     loop {
         buf.clear();
         let n = reader
@@ -167,6 +169,7 @@ pub fn read_tail<T>(
             break;
         }
         lineno += 1;
+        unterminated = !buf.ends_with(b"\n");
         let line_start = offset;
         offset += n as u64;
         match std::str::from_utf8(&buf) {
@@ -235,6 +238,16 @@ pub fn read_tail<T>(
             reason,
         })
     } else {
+        if unterminated && policy == TailPolicy::Repair {
+            // A crash can leave the complete JSON payload without its newline.
+            // Preserve the accepted row and separate it from the next append.
+            let mut repair_file = OpenOptions::new()
+                .append(true)
+                .open(path)
+                .map_err(JsonlReadError::Io)?;
+            repair_file.write_all(b"\n").map_err(JsonlReadError::Io)?;
+            repair_file.sync_all().map_err(JsonlReadError::Io)?;
+        }
         None
     };
 
@@ -261,6 +274,26 @@ mod tests {
         // trailing whitespace after the value — `l` still carries the
         // trailing newline `read_until` includes.
         l.trim().parse::<u64>().map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn valid_unterminated_row_is_separated_before_append() {
+        let path = tmp_file("missing_delimiter");
+        std::fs::write(&path, b"1\n2").unwrap();
+        let (entries, torn) = read_tail(&path, parse_u64, TailPolicy::Observe).unwrap();
+        assert_eq!(entries, vec![1, 2]);
+        assert!(torn.is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), b"1\n2");
+
+        let (entries, torn) = read_tail(&path, parse_u64, TailPolicy::Repair).unwrap();
+        assert_eq!(entries, vec![1, 2]);
+        assert!(torn.is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), b"1\n2\n");
+        append_new_line(&path, "3", SyncPolicy::All).unwrap();
+        let (entries, torn) = read_tail(&path, parse_u64, TailPolicy::Repair).unwrap();
+        assert_eq!(entries, vec![1, 2, 3]);
+        assert!(torn.is_none());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
