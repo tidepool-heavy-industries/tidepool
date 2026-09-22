@@ -124,5 +124,5 @@ output/stdin/completion; `exomonad-workbench` for parser/type/display recovery;
 `exomonad-jev` for typed judgment composition; `exomonad-unfold` for delegation/source;
 `exomonad-coordinate`, `exomonad-fork`, `exomonad-orchestrate`, and `exomonad-review` for project
 coordination; `exomonad-define-actors` for custom event handlers; `exomonad-cleanup` for
-retirement; `exomonad-agent-spec` for tools and after-tool reload. Use the corresponding
+retirement; `exomonad-agent-spec` for typed tools and spec reload. Use the corresponding
 `doc` topic as fallback. Distinguish shipped APIs from project/example-only helpers.

@@ -148,15 +148,15 @@ graph. See [the operator interface](operator-http.md).
 **Change code without restarting.** Workspace modules are captured at launch.
 After an agent edits one, `reloadSource` typechecks the edited source and
 publishes it for later cells, or refuses and leaves the session as it was.
-`reload_agent_spec` does that and also rebuilds the agent's own tools and
-after-tool slot, so the next tool call runs the edited body. A reload that would
+`reload_agent_spec` rebuilds the agent's own typed tool record from the
+published source, so later tool calls use the edited body. A reload that would
 change a tool's name, description or argument types is refused with the
 difference, and takes effect at the agent's next incarnation. Prompts, and the
 Haskell library Tidepool ships, change only with a new run.
 
 **See what is live.** The agent's `status` tool, with `view: "detailed"`, shows
-which spec is installed and from which file and revision, what the after-tool
-slot did on each recent call, retained command jobs, bindings, and whether the
+which spec is installed and from which file and revision, retained command jobs,
+bindings, and whether the
 source on disk has drifted from what is loaded.
 
 **Read the trace.** `.exomonad/logs/<run>.jsonl` is a structured trace: run, actor,

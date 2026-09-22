@@ -34,10 +34,13 @@ prototyping is optional. Extend the existing owner and production consumers
 before adding an abstraction.
 
 `reloadSource` typechecks and atomically publishes edited workspace modules for
-later cells. `reload_agent_spec` also rebuilds your own tools and after-tool slot.
-Existing closures retain captured definitions. Prompts require a new run; changed
-tool schemas require a new actor incarnation. Discover installed event sources
-before designing callbacks.
+later cells. `reload_agent_spec` rebuilds your own typed tool record from the
+published source. Tool bodies work with typed Haskell inputs and effect results;
+tool-specific presenters and selectors decide how typed command or lookup values
+are shown. The example workspace's `Project.Shell` and `Project.Lookup` are the
+worked examples. Existing closures retain captured definitions. Prompts require
+a new run; a changed tool surface requires a new actor incarnation. Discover
+installed event sources before designing callbacks.
 
 # Notebook contract
 

@@ -52,7 +52,7 @@ effort. Omission uses the launch selector's inherited default. Inspect provider
 observations when checking the effective selection or cache reuse. The consumer
 branch above inherits the same committed context while explicitly selecting
 Medium, as the example workspace requires for Sol execution forks.
-`withEffort` applies at context-fork construction; it is not an API for steering
+`withEffort` applies when constructing a context unfold; it is not an API for steering
 an already active Exomonad assignment. The Codex backend's configuration-update
 mechanism is a separate control layer, not a missing model capability.
 

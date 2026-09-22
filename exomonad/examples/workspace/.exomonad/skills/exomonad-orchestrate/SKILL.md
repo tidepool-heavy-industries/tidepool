@@ -235,8 +235,8 @@ it back — to the child with `updateRequest` when the child can supply it, to
 the root as wake 2 when it cannot. Never merge on it and never repair on it.
 
 The other seams take the same shape, each recorded in the state, each with the exit, each
-under a named policy: unmatched check output → `J.lenient` over the reflex
-classes; reviewer findings → `J.lenient` over
+under a named policy: unmatched check output → `J.lenient` over the
+classification alternatives; reviewer findings → `J.lenient` over
 `{addresses_named_checklist_item, contract_change_needed, style_only,
 insufficient_evidence}`; "is this the same defect as the last one" → a Noul
 over both texts read with `J.judge`, escalating on a repeat instead of a third

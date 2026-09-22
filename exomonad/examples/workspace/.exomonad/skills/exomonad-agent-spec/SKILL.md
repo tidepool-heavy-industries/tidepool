@@ -1,313 +1,43 @@
 ---
 name: exomonad-agent-spec
-description: Use when you want your own hosted tools, or code that runs after every tool call to annotate or prune its result, and when editing and reloading them inside a live session.
+description: Use when declaring or reloading the typed tools available to an Exomonad actor.
 ---
 
-Your agent spec is one Haskell module. It names the tools you are offered and
-the after-tool slot applied to each finished tool call. It is ordinary source:
-edit it with file tools, then call `reload_agent_spec`. Nothing reloads on save.
+An agent spec selects one Haskell record of tools. Its fields and their types
+define the hosted tool names, schemas, and typed inputs and outputs. Nested tool
+records compose at the field where they are included. The spec is source in the
+actor's checkout; saving a file does not install it.
 
-## Where it lives
+## Find and check the spec
 
-The module is `AgentSpec` and the value is `agentSpec`. It is the first
-`AgentSpec.hs` in your own source roots, in the order your cells resolve
-modules: your checkout's `.exomonad/` roots first, then the run's. A workspace may
-name another entry with `[haskell] spec`; `[haskell] tools` still names a bare
-tools record. `status` with `view: "detailed"` says which rule matched, which
-file was read, and which revision is installed.
+The conventional module is `AgentSpec`, exporting `agentSpec`. Workspace
+configuration may instead set `[haskell] spec`; `[haskell] tools` names a tools
+record when there is no agent spec. Use `status` with `view: "detailed"` to see
+the selected rule, source file, and installed revision. Run
+`exomonad check --workspace <path>` to typecheck a workspace before launch.
 
-## Shape
+## Put behavior in the tool
 
-Your tools record is one field per tool — and one field may be another tools
-record, whose tools are spliced in at that position under their own names:
+A tool body receives its declared Haskell input and can use typed effects. Put
+judgment or result handling in that body, not in a separate observer of a
+completed tool call. When the boundary needs a different presentation, use the
+tool's typed seam:
 
-```haskell
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeOperators #-}
-module Project.Tools (MyTools (..), Probe (..), tools) where
+- [`Project.Shell`](../../Project/Shell.hs) selects and presents typed command
+  observations and retained output.
+- [`Project.Lookup`](../../Project/Lookup.hs) uses typed lookup results and
+  candidates for Jev-based selection.
 
-import Control.Monad.Freer (Eff, Member)
-import Data.Text (Text)
-import GHC.Generics (Generic)
-import Tidepool.Aeson.FromJSON (FromJSON)
-import Tidepool.Agent.Contract
-import qualified Tidepool.Command as Cmd
-import qualified Tidepool.Command.Tools as Shell
-
-newtype Probe = Probe { topic :: Text }
-  deriving (Generic, FromJSON, JsonSchema)
-
-data MyTools mode = MyTools
-  { shell :: Shell.ShellTools mode
-  , probe :: mode :- Call Probe Text
-  }
-  deriving (Generic)
-
-tools :: Member Cmd.Commands effects => MyTools (AsServerT (Eff effects))
-tools = MyTools
-  { shell = Shell.tools
-  , probe = tool "Answer one fixed question about a topic." (\_ -> pure "one")
-  }
-```
-
-That declares `bash`, `write_stdin`, `read_output`,
-`cancel_command`, `probe`, in that order; the `shell` field name is not a tool
-name of its own. Naming your own record REPLACES the shell record rather than
-adding to it, so a record that does not nest `Shell.ShellTools` leaves you with
-no `bash` at your next incarnation — nest it unless you
-mean to give them up.
-
-And the spec that installs it:
-
-```haskell
-{-# LANGUAGE OverloadedStrings #-}
-module AgentSpec (agentSpec) where
-
-import Control.Monad.Freer (Eff, Member)
-import Tidepool.Agent.Contract
-import qualified Tidepool.Command as Cmd
-import qualified Project.Tools as Tools
-
-agentSpec :: Member Cmd.Commands effects => AgentSpec Tools.MyTools effects
-agentSpec = defaultSpec
-  { specTools = Tools.tools
-  , afterTool = Just noted
-  }
-
-noted :: ToolCall -> ToolResult -> Eff effects Annotation
-noted call result
-  | toolCallName call /= "probe" = pure NoAnnotation
-  | otherwise = pure (Annotated "asked about this topic twice before")
-```
-
-Always build from `defaultSpec` with a record update, so a slot added later
-leaves your spec compiling. `specTools` is the same tools record as before: one
-field per tool (or per nested record), `mode :- Call input output`, the field
-name is the tool name, and schemas derive from the types.
-
-## What the slot is given
-
-```haskell
-data ToolCall   = ToolCall   { toolCallName :: Text, toolCallArguments :: Value }
-data ToolResult = ToolResult { toolResultName :: Text, toolResultHandle :: ResultHandle, toolResultOutput :: Text }
-```
-
-`toolCallArguments` is the call's arguments as the model sent them: a JSON object
-for a `Call` tool, a JSON string for a project-defined `RawCall` tool.
-`toolResultOutput` is the text the model would be shown. `ResultHandle` is
-`Text`, and is the name the whole result is bound under if you answer `Pruned`.
-All of this is `Tidepool.Agent.Contract`, which cells do not import, so `lookup`
-will not find these names; they are listed here instead.
-
-## What the slot may answer
-
-| Answer | The model is shown |
-|---|---|
-| `NoAnnotation` | the result, unchanged |
-| `Abstained reason` | the result, unchanged; the reason appears only in `status` |
-| `Annotated text` | the result, then `text` marked as derived context |
-| `Pruned text (toolResultHandle result)` | `text` marked as a selection; the whole result is bound as that handle, a `Text`, for a later cell |
-
-The slot runs in your own resident machine with your own effects, so it may
-read recent turns (`reflect n`, topic `reflect`), ask Jev (`exomonad-jev`), or run
-a command. Name the effects it uses in its signature, for example
-`(Member Reflect effects, Member Jev effects) => ToolCall -> ToolResult -> Eff effects Annotation`,
-and give `agentSpec` the same constraints. The slot is shown the result as the
-model would see it, already bounded for display, so a command's complete output
-is reached through its retained job, not through the slot's input. The result waits for it, up to
-five minutes. If it fails or runs out of time the result is delivered unchanged
-with one line naming `after-tool#N`; `status` has the rest. A slot's own tool
-use never triggers the slot. `status`, `reload_agent_spec` and authored cells
-are never shown to it, so a broken slot cannot block its repair. The template
-`lookup` is an ordinary precompiled tool and follows the same slot policy as
-your other tools; its Jev selection runs in its body.
-
-## Writing a slot you would leave on
-
-A pruning slot is only worth keeping if you would trust it without checking.
-What a first attempt gets wrong:
-
-- **Judge passages, not lines.** A line such as `impl SurfaceChange {` means
-  nothing alone. Split the result into chunks of a dozen or so lines, or at
-  blank lines, ask about each chunk, and keep whole chunks.
-- **Keep line numbers** in what you return, so the selection can be found in the
-  whole result.
-- **Abstain when the judgment is weak.** A `noul` gives only a likelihood, so
-  treat the middle band, roughly 0.35 to 0.65, as no answer rather than cutting
-  at 0.5. A `choice` also gives margin and confidence; settle it under a policy.
-  Answer `Abstained` rather than a selection you would not defend: an unpruned
-  result costs context, and a wrong pruning costs the task.
-- **Trigger on size that hurts**, a few hundred lines or several kilobytes. Forty
-  lines is cheap to read and not worth a judgment.
-- **Say what you were looking for.** Give the question the call's arguments and,
-  when it matters, your recent turns from `reflect`.
-
-## Asking Jev from a tool or the slot
-
-A module is not a cell, and three things a cell gives you for free have to be
-written out:
-
-- `import qualified Jev.Operators as J`, and `import Jev.Operators (Packet ((:=), (:&)))`
-  when you build a packet or a typed state, since those two operators are
-  written unqualified. Only cells get either import from the workbench.
-- `{-# LANGUAGE OverloadedLabels #-}` for `#yes`, and `OverloadedRecordDot` if
-  you read answers as `a.key`.
-- `Member Jev effects` on every signature that asks Jev or wraps something that
-  does: the tool body, `tools`, the slot, and `agentSpec`. `Jev` comes from
-  `Tidepool.Effects.Core`. The same goes for `Reflect`, `Cmd.Commands` and any
-  other effect a body uses.
-
-This is the slot a hosted test compiles and runs, changed only to abstain when
-Jev is unavailable:
-
-```haskell
-{-# LANGUAGE OverloadedLabels #-}
-{-# LANGUAGE OverloadedStrings #-}
-module AgentSpec (agentSpec) where
-
-import Control.Monad.Freer (Eff, Member)
-import qualified Data.Text as T
-import Tidepool.Aeson.Value (Value (String))
-import Tidepool.Agent.Contract
-import Tidepool.Effects.Core (Jev)
-import qualified Jev.Operators as J
-import qualified Project.Tools as Tools
-
-agentSpec :: Member Jev effects => AgentSpec Tools.SpecTools effects
-agentSpec =
-  defaultSpec
-    { specTools = Tools.tools
-    , afterTool = Just noted
-    }
-
-noted :: Member Jev effects => ToolCall -> ToolResult -> Eff effects Annotation
-noted call result
-  | toolCallName call /= T.pack "probe" = pure NoAnnotation
-  | otherwise = do
-      answer <-
-        J.ask1
-          (J.rawState (String (toolResultOutput result)))
-          ( J.choice
-              "Does this tool output look complete?"
-              ( J.alt #yes "The output looks complete" ()
-                  J..| J.alt #no "The output looks incomplete" ()
-              )
-          )
-      pure $ case answer of
-        Left _ -> Abstained (T.pack "jev unavailable")
-        Right a ->
-          Annotated
-            ( J.handle
-                a
-                ( #yes (\_ -> T.pack "looks complete")
-                    J..| #no (\_ -> T.pack "looks incomplete")
-                )
-            )
-```
-
-A tool body asks the same way, with the same constraint. Two things go wrong
-in module code that rarely go wrong in a cell:
-
-- **One packet per call, not one ask per item.** A `forM` of `J.ask1` over forty
-  files is forty sequential requests. `J.each` over the files inside one
-  `J.ask` is one request and answers in about the same time as a single ask.
-- **`Left` is not no.** `J.ask` answers `Left` when Jev could not be reached or
-  the packet was refused. A body that treats every non-yes as irrelevant turns
-  an outage into a confident wrong answer. Say that Jev was unavailable, and in
-  a tool fall back to the unfiltered result. When Jev cannot
-answer, abstain: a slot that fails is reported to you on every call, and one
-that abstains is not.
-
-## Watching a child's tool calls
-
-`Project.Watchdog` is an `afterTool` slot for a PARENT to install on a child it
-spawns: the same `ToolCall -> ToolResult -> Eff effects Annotation` shape as any
-other slot, so it composes or replaces like any other. A `Heuristic` is one
-yes/no question, the likelihood at or above which it trips, and what tripping
-does:
-
-```haskell
-data Heuristic = Heuristic
-  { heuristicName :: Text
-  , heuristicQuestion :: Text
-  , heuristicFloor :: Double
-  , heuristicOutcome :: Outcome
-  }
-
-data Outcome = Advise Text | Escalate Text
-```
-
-`Project.Watchdog` ships ready-made: `repeatingItself`, `guessingInsteadOfReading`,
-`ignoringAFailure`, `outOfScope`, `destructiveCommand`, plus `stayWithin path`
-and `preferTool situation toolName` for the ones you parametrize yourself. A set
-of heuristics is an ordinary `[Heuristic]`, so sets compose with `(<>)`:
-`coreHeuristics = [repeatingItself, destructiveCommand]`, and
-`codingHeuristics = coreHeuristics <> [ignoringAFailure, outOfScope, guessingInsteadOfReading]`
-is the wider set for a coding child. Add your own by consing onto whichever list.
-
-What a parent actually writes is one `afterTool` line and a function from a
-child's own path to its heuristics:
-
-```haskell
-agentSpec = defaultSpec
-  { specTools = Tools.tools
-  , afterTool = Just (Watchdog.watchBy monitorsFor)
-  }
-
-monitorsFor :: Text -> [Watchdog.Heuristic]
-monitorsFor path
-  | "review-child" `T.isInfixOf` path = Watchdog.codingHeuristics
-  | otherwise = []
-```
-
-`watchBy` reads its own `contextActorPath` — the calling child's path — picks
-heuristics with `heuristicsFor path`, and asks Jev one packet built from the
-finished call's name and arguments and the result's output. `watchWith
-heuristics` installs the same list for every child, skipping the lookup. A
-child whose path matches no heuristics (including the root, which has none)
-abstains before ever asking Jev.
-
-A tripped heuristic does one of two things:
-
-| Outcome | The child sees | The parent sees |
-|---|---|---|
-| `Advise text` | `text`, `Annotated` on its own result | nothing |
-| `Escalate reason` | a short record naming which heuristics escalated | one message: `reason`, plus the child's actor address |
-
-An `Advise` costs the parent nothing — it never leaves the child. An
-`Escalate` reaches the parent as one native message naming `reason` and the
-child's `contextActorId`, `contextActorIncarnation`, and `contextActorPath`,
-so the parent can address that child directly; a monitor never corrects the
-child itself. When a call trips several heuristics at once, every `Advise`
-folds into one annotation and every `Escalate` reaches the parent in one
-message. The arguments Jev sees are whatever the call carried, so a tool that
-exposes its own free-text field — `bash`'s optional `intent` — feeds a
-heuristic's judgment along with everything else in the call.
-
-Needs `Member Jev effects, Member ActorContext effects, Member Notifications
-effects` on the slot and on `agentSpec`, same as any other effect a slot uses.
+These modules are workspace-specific examples, not functions exported by the
+shared agent-spec API. Read their source before adapting them; a tool's effect
+constraints and record type must match the effects its body uses.
 
 ## Reload
 
-`reload_agent_spec` publishes your source layer, recompiles the spec, and swaps
-the implementations between calls. The receipt says where it stopped:
-
-- **layer rejected**: a module did not typecheck. Your files are untouched and
-  the previous spec keeps answering.
-- **spec did not compile**: the layer is published, so cells can import the new
-  modules while you repair the spec.
-- **refused**: the rebuilt spec declares a different tool name, description,
-  schema, kind or order. The difference is listed. Tool bodies and the slot may
-  change freely; a changed surface takes effect at your next incarnation.
-- **swapped**: later calls run the new code. A call already accepted keeps the
-  implementation it started with.
-
-Reload is yours alone. It never changes a child's or a parent's spec.
-
-A slot is ordinary Haskell, so a cell can exercise it directly against
-hand-built `ToolCall`/`ToolResult` values, with no `reload_agent_spec` and no
-real tool call — call `noted call result` (or `Watchdog.watchBy monitorsFor
-call result`) the same way you would call any other function.
+Edit the spec with ordinary workspace file tools, then call
+`reload_agent_spec`. It publishes the checkout's source layer and rebuilds
+your own spec. A typecheck failure or changed declared tool name, description,
+kind, schema, or order refuses the reload and leaves the installed record
+active. A tool call already running keeps its implementation. A changed tool
+surface takes effect in a new actor incarnation; this reload never changes a
+child actor's spec.
