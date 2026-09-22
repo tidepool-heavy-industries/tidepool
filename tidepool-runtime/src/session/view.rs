@@ -288,7 +288,7 @@ impl SessionCompileView {
     }
 
     fn visible_value_import(&self, module: SessionModule) -> String {
-        let Some((_, names)) = self
+        let Some((_, published)) = self
             .visible_value_names
             .iter()
             .find(|(candidate, _)| *candidate == module)
@@ -301,25 +301,40 @@ impl SessionCompileView {
             .find(|(key, _)| *key == module)
             .map(|(_, hidden)| hidden.iter().collect::<Vec<_>>())
             .unwrap_or_default();
-        let names = names
+        let is_hidden = |candidate: &String| {
+            hidden
+                .iter()
+                .any(|item| matches!(item, super::ExportItem::Value { name } if name == candidate))
+        };
+        let visible = published
             .iter()
-            .filter(|name| {
-                !hidden.iter().any(|item| {
-                    matches!(item, super::ExportItem::Value { name: hidden } if hidden == *name)
-                })
-            })
+            .filter(|name| !is_hidden(name))
+            .cloned()
+            .collect::<Vec<_>>();
+        let shadowed = published
+            .iter()
+            .filter(|name| is_hidden(name))
             .cloned()
             .collect::<Vec<_>>();
         let module_name = module.module_name();
-        if names.is_empty() {
-            return format!("qualified {module_name}");
+        let render_names = |names: &[String]| {
+            names
+                .iter()
+                .map(|name| super::ExportItem::Value { name: name.clone() }.render_entry())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut imports = Vec::with_capacity(2);
+        if !visible.is_empty() {
+            imports.push(format!("{module_name} ({})", render_names(&visible)));
         }
-        let unqualified = format!("{module_name} ({})", names.join(", "));
-        if hidden.is_empty() {
-            unqualified
-        } else {
-            format!("{unqualified}\nqualified {module_name}")
+        if !shadowed.is_empty() {
+            imports.push(format!(
+                "qualified {module_name} ({})",
+                render_names(&shadowed)
+            ));
         }
+        imports.join("\n")
     }
 
     /// External imports plus this scope's current declaration and value
@@ -424,7 +439,7 @@ mod tests {
         .with_staged_values(SessionModule::val(Generation(7)), ["answer".into()]);
 
         assert_eq!(view.turn_imports(&SourceImports::default()),
-            "Tidepool.Session.Val.G5 hiding (answer)\nqualified Tidepool.Session.Val.G5\nTidepool.Session.Val.G6 hiding (answer)\nqualified Tidepool.Session.Val.G6\nTidepool.Session.Val.G7");
+            "Tidepool.Session.Val.G5 hiding (answer)\nqualified Tidepool.Session.Val.G5\nqualified Tidepool.Session.Val.G6 (answer)\nTidepool.Session.Val.G7 (answer)");
         assert_eq!(
             view.injected_module_names(),
             [
@@ -434,6 +449,37 @@ mod tests {
             ]
         );
         assert_eq!(view.next_value_generation(), Generation(8));
+    }
+
+    #[test]
+    fn exact_value_imports_never_expose_unpublished_generated_helpers() {
+        let old = SessionModule::val(Generation(5));
+        let view = SessionCompileView {
+            session: SessionId(4),
+            lexical_scope: ScopeId::ROOT,
+            root: PathBuf::from("/session"),
+            persistent_imports: SourceImports::default(),
+            library: None,
+            visible_values: vec![old],
+            visible_value_names: vec![(
+                old,
+                vec!["__tidepoolPage5".into(), "cellDisplay".into(), ".+".into()],
+            )],
+            injected_values: vec![old],
+            next_value_generation: Generation(6),
+            shadowing: Vec::new(),
+            staged_hiding: Vec::new(),
+        }
+        .with_staged_values(SessionModule::val(Generation(6)), ["cellDisplay".into()]);
+
+        let imports = view.turn_imports(&SourceImports::default());
+        assert_eq!(
+            imports,
+            "Tidepool.Session.Val.G5 ((.+), __tidepoolPage5)\n\
+             qualified Tidepool.Session.Val.G5 (cellDisplay)\n\
+             Tidepool.Session.Val.G6 (cellDisplay)"
+        );
+        assert!(!imports.contains("__tidepoolDisplayMetadata5"));
     }
 
     #[test]
