@@ -270,6 +270,17 @@ fn structural_resume_classifies_rejection_and_consumed_failure() {
         "{error:?}"
     );
     assert!(notebook.session.parked_holes().is_empty());
+    let ResidentOutcome::Suspended { hole, .. } = notebook
+        .session
+        .run_with_sites("after_consumed_failure", success.code())
+        .unwrap()
+    else {
+        panic!("the session must remain usable after a consumed failure");
+    };
+    assert!(matches!(
+        notebook.session.resume_classified(hole, ()).unwrap(),
+        ResidentOutcome::Completed { .. }
+    ));
 }
 
 #[test]
