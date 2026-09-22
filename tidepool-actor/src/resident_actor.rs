@@ -183,6 +183,7 @@ struct ResidentEnvironment<H, O> {
     /// has no interactive resources to wait for.
     release_tracked: Arc<std::sync::atomic::AtomicBool>,
     conversation_reader: Option<crate::ConversationReader>,
+    usage_pointers: crate::UsagePointerTable,
 }
 
 #[derive(Clone)]
@@ -351,6 +352,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             jev: Arc::clone(&self.jev),
             release_tracked: Arc::clone(&self.release_tracked),
             conversation_reader: self.conversation_reader.clone(),
+            usage_pointers: self.usage_pointers,
         }
     }
 }
@@ -5841,11 +5843,12 @@ where
             } else {
                 (Vec::new(), Vec::new())
             };
-            let response = lookup_response(
+            let response = lookup_response_with_usage_pointers(
                 prepared,
                 inspected,
                 &live_modules,
                 workbench.workspace_modules(),
+                self.environment.usage_pointers,
             );
             return Ok(KernelStep::Continue(workbench_response(
                 WorkbenchRunStatus::Committed,
@@ -7890,6 +7893,14 @@ where
         self.environment.source_layers = Some(layers);
     }
 
+    /// Install the immutable usage pointers supplied by the facade's shipped
+    /// workspace. The actor kernel owns lookup behavior; the facade owns the
+    /// source inventory and its generated table.
+    pub fn with_usage_pointers(mut self, pointers: crate::UsagePointerTable) -> Self {
+        self.environment.usage_pointers = pointers;
+        self
+    }
+
     /// Declare that an actor host answers `LocalResidentDeployment::ReleaseAwait`.
     /// From now on a stop reports `StoppedNow` only once that host has released
     /// the actor's interactive resources.
@@ -7954,6 +7965,7 @@ where
             jev: Arc::new(crate::jev::UnconfiguredJev),
             release_tracked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             conversation_reader: None,
+            usage_pointers: &[],
         };
         (
             Self {
@@ -8497,11 +8509,22 @@ fn workbench_response(
     }
 }
 
+#[cfg(test)]
 fn lookup_response(
     prepared: Vec<crate::lookup_tool::PreparedLookup>,
     inspected: Vec<InspectionResult>,
     live_modules: &[String],
     workspace_modules: &[String],
+) -> crate::lookup_tool::LookupResponse {
+    lookup_response_with_usage_pointers(prepared, inspected, live_modules, workspace_modules, &[])
+}
+
+fn lookup_response_with_usage_pointers(
+    prepared: Vec<crate::lookup_tool::PreparedLookup>,
+    inspected: Vec<InspectionResult>,
+    live_modules: &[String],
+    workspace_modules: &[String],
+    usage_pointers: crate::UsagePointerTable,
 ) -> crate::lookup_tool::LookupResponse {
     use crate::lookup_tool::{
         LookupEntry, LookupEntryKind, LookupInterpretation, LookupOrigin, LookupOutcome,
@@ -8559,7 +8582,7 @@ fn lookup_response(
                         prepared.query,
                         entries
                             .into_iter()
-                            .map(|entry| info_lookup_entry(entry, live_modules))
+                            .map(|entry| info_lookup_entry(entry, live_modules, usage_pointers))
                             .collect(),
                         MATCH_LIMIT,
                     ),
@@ -8567,7 +8590,7 @@ fn lookup_response(
                         prepared.query,
                         entries
                             .into_iter()
-                            .map(|entry| info_lookup_entry(entry, live_modules))
+                            .map(|entry| info_lookup_entry(entry, live_modules, usage_pointers))
                             .collect(),
                         MATCH_LIMIT,
                     ),
@@ -8607,7 +8630,7 @@ fn lookup_response(
                     prepared.query,
                     entries
                         .into_iter()
-                        .map(|entry| info_lookup_entry(entry, live_modules))
+                        .map(|entry| info_lookup_entry(entry, live_modules, usage_pointers))
                         .collect(),
                     MATCH_LIMIT,
                 ),
@@ -8615,7 +8638,7 @@ fn lookup_response(
                     prepared.query,
                     entries
                         .into_iter()
-                        .map(|entry| info_lookup_entry(entry, live_modules))
+                        .map(|entry| info_lookup_entry(entry, live_modules, usage_pointers))
                         .collect(),
                     MATCH_LIMIT,
                 ),
@@ -8623,7 +8646,7 @@ fn lookup_response(
                     prepared.query,
                     entries
                         .into_iter()
-                        .map(|entry| info_lookup_entry(entry, live_modules))
+                        .map(|entry| info_lookup_entry(entry, live_modules, usage_pointers))
                         .collect(),
                     MATCH_LIMIT,
                 ),
@@ -8657,7 +8680,10 @@ fn lookup_response(
                                 TypeMatchQuality::Usable => MatchQuality::Usable,
                             },
                             availability: entry.availability,
-                            usage_pointer: crate::usage_pointer::pointer_for(&entry.name),
+                            usage_pointer: crate::usage_pointer::pointer_for(
+                                usage_pointers,
+                                &entry.name,
+                            ),
                         })
                         .collect(),
                     MATCH_LIMIT,
@@ -8684,6 +8710,7 @@ fn lookup_response(
     fn info_lookup_entry(
         entry: tidepool_runtime::session::InfoEntry,
         live_modules: &[String],
+        usage_pointers: crate::UsagePointerTable,
     ) -> LookupEntry {
         let kind = match entry.kind.as_str() {
             "class-method" => LookupEntryKind::ClassMethod,
@@ -8693,7 +8720,7 @@ fn lookup_response(
             "coercion" => LookupEntryKind::Coercion,
             _ => LookupEntryKind::Value,
         };
-        let usage_pointer = crate::usage_pointer::pointer_for(&entry.name);
+        let usage_pointer = crate::usage_pointer::pointer_for(usage_pointers, &entry.name);
         LookupEntry {
             name: entry.name,
             defining_module: entry.module.clone(),

@@ -78,6 +78,23 @@ use tidepool_agent::{
     InteractiveNativeSandbox, InteractiveNativeToolPolicy, InteractivePolicyMount,
     QueueReadyThread, ReasoningEffort,
 };
+
+include!(concat!(env!("OUT_DIR"), "/usage_pointers.rs"));
+
+#[cfg(test)]
+mod usage_pointer_tests {
+    #[test]
+    fn shipped_usage_table_resolves_known_callable_and_uses_path_locators() {
+        let call = super::SHOAL_USAGE_POINTERS
+            .iter()
+            .find(|(identifier, _)| *identifier == "call")
+            .map(|(_, locator)| *locator);
+        assert!(call.is_some());
+        assert!(call.is_some_and(|locator| {
+            locator.starts_with(".shoal/checks/") || locator.starts_with(".shoal/skills/")
+        }));
+    }
+}
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_handlers::{
     ActorBoundWorktreeHandler, ActorWorktreeAllocationHandler, ActorWorktreeAuthority,
@@ -1474,10 +1491,12 @@ pub async fn run(
         host_incarnation.incarnation(),
         Some(worker_launch_resolver(&config)),
     );
-    let mut forest = forest.with_conversation_reader(conversation_reader(
-        application_owners.clone(),
-        backend.clone(),
-    ));
+    let mut forest = forest
+        .with_usage_pointers(SHOAL_USAGE_POINTERS)
+        .with_conversation_reader(conversation_reader(
+            application_owners.clone(),
+            backend.clone(),
+        ));
     forest.set_jev_backend(jev_backend(&config));
     if let Some(layers) = &source_layers {
         forest.set_source_layers(layers.clone());

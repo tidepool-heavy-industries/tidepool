@@ -61,6 +61,7 @@ pub use hosted_lifecycle::{
 };
 mod typed_request;
 mod usage_pointer;
+pub use usage_pointer::UsagePointerTable;
 mod wait;
 mod workbench_display;
 pub use after_tool::AFTER_TOOL_WAIT_ENV;
