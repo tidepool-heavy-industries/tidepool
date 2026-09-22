@@ -1123,6 +1123,17 @@ impl MachineState {
         self.rust_roots.borrow_mut().push(slot);
     }
 
+    /// Stop tracing one temporary Rust root while retaining its fixed backing
+    /// slot for reuse. Construction uses this when a tree parent has adopted
+    /// a completed child; unlike a zeroed slot, it no longer costs a collector
+    /// root scan. Temporary roots are unique registrations.
+    pub(crate) fn deregister_rust_root(&self, slot: *mut *mut u8) {
+        let mut roots = self.rust_roots.borrow_mut();
+        if let Some(index) = roots.iter().position(|registered| *registered == slot) {
+            roots.swap_remove(index);
+        }
+    }
+
     /// Temporary root-vector mark; excludes the independently owned exception.
     pub(crate) fn rust_roots_len(&self) -> usize {
         self.rust_roots.borrow().len()

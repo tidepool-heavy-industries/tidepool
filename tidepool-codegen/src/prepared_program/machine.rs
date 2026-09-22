@@ -269,7 +269,13 @@ pub struct ManagedNode {
 /// One logical constructor field for incremental managed construction.
 #[derive(Clone, Copy, Debug)]
 pub enum ManagedField {
+    /// Reusable child reference. Use this for a DAG edge whose source remains
+    /// available to later fields or parents.
     Node(ManagedNode),
+    /// Transfer a completed tree child into this parent. The child remains
+    /// rooted through capacity collection and publication, then becomes
+    /// invalid and stops contributing a temporary collector root.
+    Consume(ManagedNode),
     Scalar([u8; 16]),
     Handle(PreparedHandle),
 }
@@ -377,6 +383,26 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
         let machine = &self.machine.machine;
         let old_space = &self.machine.old_space;
         let handles = &self.machine.handles;
+        let mut consumed = Vec::new();
+        consumed
+            .try_reserve_exact(fields.len())
+            .map_err(|_| runtime_error(machine, RuntimeError::HeapOverflow))?;
+        for field in fields {
+            if let ManagedField::Consume(node) = field {
+                if consumed.contains(&node.node) {
+                    return Err(runtime_error(machine, RuntimeError::BadPointer));
+                }
+                self.core.word(node.node).map_err(|error| match error {
+                    super::construction::NodeAccessError::Foreign => {
+                        super::answer::AnswerBuildError::ForeignNode.into()
+                    }
+                    super::construction::NodeAccessError::Invalid => {
+                        runtime_error(machine, RuntimeError::BadPointer)
+                    }
+                })?;
+                consumed.push(node.node);
+            }
+        }
         let node = self
             .core
             .constructor(
@@ -384,11 +410,12 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
                 &mut self.machine.vmctx,
                 &descriptor,
                 fields.len(),
+                &consumed,
                 |machine, vmctx, extent| collect_on(machine, vmctx, old_space, extent),
                 |core, values| {
                     for (index, field) in fields.iter().enumerate() {
                         values[index] = match field {
-                            ManagedField::Node(node) => core
+                            ManagedField::Node(node) | ManagedField::Consume(node) => core
                                 .word(node.node)
                                 .map(|word| DescriptorValue::Managed(word as *mut u8))
                                 .map_err(|error| match error {
@@ -440,6 +467,11 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
                 }
             })?;
         Ok(ManagedNode { node })
+    }
+
+    #[cfg(test)]
+    fn temporary_root_metrics(&self) -> (usize, usize) {
+        self.core.root_metrics()
     }
 
     pub fn finish(
@@ -7842,9 +7874,53 @@ mod tests {
         let mut builder = machine.managed_builder()?;
         let mut node = builder.constructor(DataConId(unit_id), &[])?;
         for _ in 0..depth {
-            node = builder.constructor(DataConId(box_id), &[ManagedField::Node(node)])?;
+            node = builder.constructor(DataConId(box_id), &[ManagedField::Consume(node)])?;
         }
         builder.finish(realm, node)
+    }
+
+    #[test]
+    fn consuming_tree_fields_keep_only_the_live_frontier_rooted() {
+        let (mut machine, _) = PreparedMachine::new(
+            boxed_shape_program(930, 931),
+            PreparedMachineOptions { nursery_bytes: 256 },
+        )
+        .expect("prepared machine");
+        let mut builder = machine.managed_builder().expect("managed builder");
+        let mut node = builder.constructor(DataConId(930), &[]).expect("leaf");
+        for _ in 0..200 {
+            node = builder
+                .constructor(DataConId(931), &[ManagedField::Consume(node)])
+                .expect("parent");
+        }
+        let (chunks, active) = builder.temporary_root_metrics();
+        assert_eq!(active, 1, "consumed children leave the active root set");
+        assert_eq!(chunks, 1, "one stable chunk serves the whole tree");
+        drop(builder);
+        assert_eq!(machine.machine.rust_roots_len(), 0);
+    }
+
+    #[test]
+    fn duplicate_consuming_field_rejects_before_parent_publication() {
+        let (mut machine, _) = PreparedMachine::new(
+            boxed_shape_program(930, 931),
+            PreparedMachineOptions { nursery_bytes: 256 },
+        )
+        .expect("prepared machine");
+        let mut builder = machine.managed_builder().expect("managed builder");
+        let child = builder.constructor(DataConId(930), &[]).expect("leaf");
+        let roots_before = builder.temporary_root_metrics();
+        assert!(builder
+            .constructor(
+                DataConId(931),
+                &[ManagedField::Consume(child), ManagedField::Consume(child)],
+            )
+            .is_err());
+        assert_eq!(builder.temporary_root_metrics(), roots_before);
+        assert!(
+            builder.core.word(child.node).is_ok(),
+            "failed parent preserves child"
+        );
     }
 
     /// The nesting depth of an observed `boxed` value, `None` for any other

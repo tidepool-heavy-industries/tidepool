@@ -290,6 +290,10 @@ struct ProgramFacts {
     /// rather than local index, and a bridge `HaskellValue`'s constructor resolves
     /// to the row that admits it.
     constructors: Vec<(SymbolIdentity, DataConId)>,
+    /// Exact declared identity by bridge id. Prepared-program validation
+    /// admits each bridge id once, so structural answer validation need not
+    /// rescan the complete constructor inventory at every node.
+    by_host: BTreeMap<DataConId, SymbolIdentity>,
     /// `constructors`, indexed by qualified identity `(module, occurrence)`
     /// and built once in [`Self::of`], so a leaf lookup
     /// ([`Self::constructor_named`]) is one map lookup rather than a full
@@ -386,6 +390,10 @@ impl ProgramFacts {
                 )
             })
             .collect();
+        let by_host = constructors
+            .iter()
+            .map(|(identity, host_id)| (*host_id, identity.clone()))
+            .collect();
         let sites = prepared.sites().to_vec();
         // Validation guarantees every entry names a declared constructor and
         // an admitted row.
@@ -410,6 +418,7 @@ impl ProgramFacts {
             types: prepared.types().to_vec(),
             constructors,
             by_identity,
+            by_host,
         }
     }
 
@@ -424,6 +433,10 @@ impl ProgramFacts {
         self.constructors
             .get(id.0 as usize)
             .map(|(identity, _)| identity)
+    }
+
+    fn identity_for_host(&self, host_id: DataConId) -> Option<&SymbolIdentity> {
+        self.by_host.get(&host_id)
     }
 
     /// The bridge id of a declared constructor, by qualified identity.
@@ -524,10 +537,7 @@ struct StructuralAnswerVisitor<'facts, 'builder, 'machine, 'code> {
 
 impl StructuralAnswerVisitor<'_, '_, '_, '_> {
     fn identity(&self, host_id: DataConId) -> Option<&SymbolIdentity> {
-        self.facts
-            .constructors
-            .iter()
-            .find_map(|(identity, declared)| (*declared == host_id).then_some(identity))
+        self.facts.identity_for_host(host_id)
     }
 
     fn is_constructor(&self, host_id: DataConId, module: &str, occurrence: &str) -> bool {
@@ -816,9 +826,17 @@ impl HaskellVisitor for StructuralAnswerVisitor<'_, '_, '_, '_> {
         if frame.fields.len() != frame.expected.len() {
             return Err(self.shape("a constructor ended before all fields were emitted"));
         }
+        let fields = frame
+            .fields
+            .into_iter()
+            .map(|field| match field {
+                ManagedField::Node(node) => ManagedField::Consume(node),
+                field => field,
+            })
+            .collect::<Vec<_>>();
         let node = self
             .builder
-            .constructor(frame.host_id, &frame.fields)
+            .constructor(frame.host_id, &fields)
             .map_err(|error| self.bridge_abort(PreparedRuntimeError::Run(error)))?;
         self.attach(ManagedField::Node(node))
     }
@@ -2298,6 +2316,11 @@ impl PreparedEngine {
             fields.push(ManagedField::Node(node));
         }
         fields.push(ManagedField::Handle(handle));
+        for field in &mut fields {
+            if let ManagedField::Node(node) = field {
+                *field = ManagedField::Consume(*node);
+            }
+        }
         let root = builder
             .constructor(constructor, &fields)
             .map_err(PreparedRuntimeError::Run)?;

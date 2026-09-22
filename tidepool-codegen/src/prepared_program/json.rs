@@ -1507,12 +1507,28 @@ impl<'a> IntrinsicBuilder<'a> {
         descriptor: &ObjectDescriptor,
         fields: &[IntrinsicField],
     ) -> Result<IntrinsicNode, RuntimeError> {
+        // JSON decode builds a tree. Each completed child is retained through
+        // the parent's capacity collection, then consumed after publication;
+        // no completed subtree remains as an unrelated temporary GC root.
+        let mut consumed = Vec::new();
+        consumed
+            .try_reserve_exact(fields.len())
+            .map_err(|_| RuntimeError::HeapOverflow)?;
+        for field in fields {
+            if let IntrinsicField::Node(node) = field {
+                if consumed.contains(node) || self.core.word(*node).is_err() {
+                    return Err(RuntimeError::BadPointer);
+                }
+                consumed.push(*node);
+            }
+        }
         self.core
             .constructor(
                 self.machine,
                 self.vmctx,
                 descriptor,
                 fields.len(),
+                &consumed,
                 Self::collect,
                 |core, values| {
                     for (output, field) in values.iter_mut().zip(fields) {

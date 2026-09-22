@@ -24,7 +24,6 @@ use crate::host_fns::RuntimeError;
 use crate::machine_state::MachineState;
 use crate::old_space::OldSpace;
 use crate::prepared_control::CallStatus;
-use std::cell::UnsafeCell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tidepool_bridge::HaskellValue;
@@ -43,7 +42,8 @@ pub(super) struct ObservationSlot {
 /// any child, so later traversal reads relocated slots, not stale parent fields.
 pub(super) struct ObservationRoots<'a> {
     machine: &'a MachineState,
-    slots: Box<[UnsafeCell<usize>]>,
+    chunks: Vec<super::roots::RootWords>,
+    limit: usize,
     used: usize,
     mark: usize,
     stack: super::safepoint::NativeStackBounds,
@@ -51,16 +51,12 @@ pub(super) struct ObservationRoots<'a> {
 
 impl<'a> ObservationRoots<'a> {
     pub fn new(machine: &'a MachineState, budget: usize) -> Result<Self, ExecutionError> {
-        let mut slots = Vec::new();
-        slots
-            .try_reserve_exact(budget)
-            .map_err(|_| super::run::runtime_error(machine, RuntimeError::HeapOverflow))?;
-        slots.resize_with(budget, || UnsafeCell::new(0));
         let stack = super::safepoint::NativeStackBounds::current()
             .map_err(|cause| super::run::runtime_error(machine, cause))?;
         Ok(Self {
             machine,
-            slots: slots.into_boxed_slice(),
+            chunks: Vec::new(),
+            limit: budget,
             used: 0,
             mark: machine.rust_roots_len(),
             stack,
@@ -72,29 +68,44 @@ impl<'a> ObservationRoots<'a> {
         word: usize,
         rep: RuntimeRep,
     ) -> Result<ObservationSlot, ExecutionError> {
-        if self.used == self.slots.len() {
-            return Err(ObservationFailure::BudgetExceeded {
-                limit: self.slots.len(),
-            }
-            .into());
+        if self.used == self.limit {
+            return Err(ObservationFailure::BudgetExceeded { limit: self.limit }.into());
         }
         let index = self.used;
         self.used += 1;
+        let chunk = index / super::construction::ROOT_CHUNK_WORDS;
+        let offset = index % super::construction::ROOT_CHUNK_WORDS;
+        if chunk == self.chunks.len() {
+            self.chunks
+                .try_reserve(1)
+                .map_err(|_| super::run::runtime_error(self.machine, RuntimeError::HeapOverflow))?;
+            self.chunks.push(
+                super::roots::RootWords::new(super::construction::ROOT_CHUNK_WORDS).map_err(
+                    |_| super::run::runtime_error(self.machine, RuntimeError::HeapOverflow),
+                )?,
+            );
+        }
+        let slot = self.chunks[chunk]
+            .slot_address(offset)
+            .ok_or_else(|| super::run::runtime_error(self.machine, RuntimeError::BadPointer))?;
         // The collector updates this slot through its registered raw address
         // while generated code is running; UnsafeCell makes that interior
         // mutation explicit to Rust's aliasing model.
-        unsafe { self.slots[index].get().write(word) };
+        unsafe { slot.cast::<usize>().write(word) };
         if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
             // The fixed allocation outlives every registered root; Drop removes
             // addresses before deallocating its backing storage, including unwind.
-            self.machine
-                .register_rust_root(self.slots[index].get().cast::<*mut u8>());
+            self.machine.register_rust_root(slot);
         }
         Ok(ObservationSlot { index, rep })
     }
 
     pub fn read(&self, slot: ObservationSlot) -> usize {
-        unsafe { *self.slots[slot.index].get() }
+        let chunk = slot.index / super::construction::ROOT_CHUNK_WORDS;
+        let offset = slot.index % super::construction::ROOT_CHUNK_WORDS;
+        self.chunks[chunk]
+            .read(offset)
+            .expect("observation slot remains allocated") as usize
     }
 
     /// Only the program-generated platform adapter crosses from Rust to Tail.
@@ -121,7 +132,12 @@ impl<'a> ObservationRoots<'a> {
             .ensure_current_frame_reserve(reserve)
             .map_err(|cause| super::run::runtime_error(self.machine, cause))?;
         let input = self.read(slot);
-        let output = self.slots[slot.index].get().cast::<u64>();
+        let chunk = slot.index / super::construction::ROOT_CHUNK_WORDS;
+        let offset = slot.index % super::construction::ROOT_CHUNK_WORDS;
+        let output = self.chunks[chunk]
+            .slot_address(offset)
+            .expect("observation slot remains allocated")
+            .cast::<u64>();
         let pointer = program
             .pipeline
             .get_function_ptr(program.prepared_force_adapter());

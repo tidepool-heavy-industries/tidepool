@@ -40,12 +40,31 @@ pub(super) enum ConstructionError<E> {
 }
 
 struct PreparedRoot {
-    index: usize,
+    chunk: usize,
+    slot: usize,
+}
+
+pub(super) const ROOT_CHUNK_WORDS: usize = 64;
+
+struct RootChunk {
+    words: RootWords,
+    active: Box<[bool]>,
+    registered: Box<[bool]>,
+}
+
+impl RootChunk {
+    fn new() -> Result<Self, RuntimeError> {
+        Ok(Self {
+            words: RootWords::new(ROOT_CHUNK_WORDS).map_err(|_| RuntimeError::HeapOverflow)?,
+            active: vec![false; ROOT_CHUNK_WORDS].into_boxed_slice(),
+            registered: vec![false; ROOT_CHUNK_WORDS].into_boxed_slice(),
+        })
+    }
 }
 
 pub(super) struct ConstructionCore {
     owner: u64,
-    roots: Vec<RootWords>,
+    roots: Vec<RootChunk>,
     roots_mark: usize,
 }
 
@@ -67,30 +86,103 @@ impl ConstructionCore {
         machine: &MachineState,
         rep: RuntimeRep,
     ) -> Result<PreparedRoot, RuntimeError> {
-        self.roots
-            .try_reserve(1)
-            .map_err(|_| RuntimeError::HeapOverflow)?;
-        let root = RootWords::new(1).map_err(|_| RuntimeError::HeapOverflow)?;
-        let slot = root.slot_address(0).ok_or(RuntimeError::BadPointer)?;
-        self.roots.push(root);
-        let index = self.roots.len() - 1;
+        let chunk = match self
+            .roots
+            .iter()
+            .position(|chunk| chunk.active.iter().any(|active| !active))
+        {
+            Some(chunk) => chunk,
+            None => {
+                self.roots
+                    .try_reserve(1)
+                    .map_err(|_| RuntimeError::HeapOverflow)?;
+                self.roots.push(RootChunk::new()?);
+                self.roots.len() - 1
+            }
+        };
+        let slot_index = self.roots[chunk]
+            .active
+            .iter()
+            .position(|active| !active)
+            .ok_or(RuntimeError::BadPointer)?;
+        self.roots[chunk].active[slot_index] = true;
+        let slot = self.roots[chunk]
+            .words
+            .slot_address(slot_index)
+            .ok_or(RuntimeError::BadPointer)?;
         if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
             // Register the zero-filled slot before any collection or object
             // publication. It is already at its final address, and a failed
             // operation may safely leave it registered until the owner drops.
             machine.register_rust_root(slot);
+            self.roots[chunk].registered[slot_index] = true;
         }
-        Ok(PreparedRoot { index })
+        Ok(PreparedRoot {
+            chunk,
+            slot: slot_index,
+        })
     }
 
     fn publish_root(&self, root: PreparedRoot, word: usize) -> ConstructionNode {
         // `prepare_root` proved the index and allocated its one word. No
         // fallible root work remains after the nursery object is committed.
-        unsafe { self.roots[root.index].as_mut_ptr().write(word as u64) };
+        unsafe {
+            self.roots[root.chunk]
+                .words
+                .as_mut_ptr()
+                .add(root.slot)
+                .write(word as u64)
+        };
         ConstructionNode {
-            index: root.index,
+            index: root.chunk * ROOT_CHUNK_WORDS + root.slot,
             owner: self.owner,
         }
+    }
+
+    fn root(&self, node: ConstructionNode) -> Result<(&RootChunk, usize), NodeAccessError> {
+        if node.owner != self.owner {
+            return Err(NodeAccessError::Foreign);
+        }
+        let chunk = node.index / ROOT_CHUNK_WORDS;
+        let slot = node.index % ROOT_CHUNK_WORDS;
+        let root = self.roots.get(chunk).ok_or(NodeAccessError::Invalid)?;
+        root.active
+            .get(slot)
+            .filter(|active| **active)
+            .ok_or(NodeAccessError::Invalid)?;
+        Ok((root, slot))
+    }
+
+    pub(super) fn consume(
+        &mut self,
+        machine: &MachineState,
+        node: ConstructionNode,
+    ) -> Result<(), NodeAccessError> {
+        let chunk_index = node.index / ROOT_CHUNK_WORDS;
+        let slot = node.index % ROOT_CHUNK_WORDS;
+        self.root(node)?;
+        let root = &mut self.roots[chunk_index];
+        if root.registered[slot] {
+            let address = root
+                .words
+                .slot_address(slot)
+                .ok_or(NodeAccessError::Invalid)?;
+            machine.deregister_rust_root(address);
+            root.registered[slot] = false;
+        }
+        root.active[slot] = false;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn root_metrics(&self) -> (usize, usize) {
+        (
+            self.roots.len(),
+            self.roots
+                .iter()
+                .map(|chunk| chunk.active.iter().filter(|active| **active).count())
+                .sum(),
+        )
     }
 
     fn ensure_capacity<E>(
@@ -124,10 +216,9 @@ impl ConstructionCore {
         if node.owner != self.owner {
             return Err(NodeAccessError::Foreign);
         }
-        self.roots
-            .get(node.index)
-            .ok_or(NodeAccessError::Invalid)?
-            .read(0)
+        let (root, slot) = self.root(node)?;
+        root.words
+            .read(slot)
             .map(|word| word as usize)
             .map_err(|_| NodeAccessError::Invalid)
     }
@@ -136,9 +227,9 @@ impl ConstructionCore {
         if node.owner != self.owner {
             return Err(NodeAccessError::Foreign);
         }
-        self.roots
-            .get(node.index)
-            .and_then(|root| root.slot_address(0))
+        let (root, slot) = self.root(node)?;
+        root.words
+            .slot_address(slot)
             .map(|slot| slot.cast::<u64>())
             .ok_or(NodeAccessError::Invalid)
     }
@@ -151,6 +242,7 @@ impl ConstructionCore {
         vmctx: &mut VMContext,
         descriptor: &ObjectDescriptor,
         field_count: usize,
+        consumed: &[ConstructionNode],
         collect: impl FnOnce(&MachineState, &mut VMContext, usize) -> Result<(), E>,
         resolve: impl FnOnce(&Self, &mut [DescriptorValue]) -> Result<(), E>,
     ) -> Result<ConstructionNode, ConstructionError<E>> {
@@ -169,7 +261,12 @@ impl ConstructionCore {
         unsafe { marshal_descriptor_object(pointer, extent, descriptor, &values) }
             .map_err(ConstructionError::Marshal)?;
         vmctx.alloc_ptr = unsafe { pointer.add(extent) };
-        Ok(self.publish_root(root, pointer as usize | usize::from(descriptor.tag())))
+        let node = self.publish_root(root, pointer as usize | usize::from(descriptor.tag()));
+        for child in consumed {
+            self.consume(machine, *child)
+                .map_err(|_| ConstructionError::Runtime(RuntimeError::BadPointer))?;
+        }
+        Ok(node)
     }
 
     /// Allocate and initialize an external byte payload and its managed

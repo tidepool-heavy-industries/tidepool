@@ -146,7 +146,7 @@ pub(super) struct ObservationHeap<'a> {
     nursery: &'a [u64],
     /// Every installed program's immutable static image. A pointer is static
     /// iff SOME region in this set admits it -- see [`Self::object`].
-    statics: Vec<&'a StaticRegion>,
+    statics: StaticRegions<'a>,
     static_metrics: tidepool_heap::static_region::StaticLookupMetrics,
     old_space: Option<&'a dyn tidepool_heap::descriptor_region::DescriptorOldSpace>,
     descriptors: DescriptorSource<'a>,
@@ -154,6 +154,28 @@ pub(super) struct ObservationHeap<'a> {
     constructors: Option<&'a BTreeMap<usize, ConstructorObservation>>,
     registry: Option<&'a BTreeMap<usize, DescriptorMetadata>>,
     external_owner: Option<&'a crate::machine_state::MachineState>,
+}
+
+enum StaticRegions<'a> {
+    Borrowed(&'a [Arc<StaticRegion>]),
+    #[cfg_attr(not(test), allow(dead_code))]
+    Owned(Vec<&'a StaticRegion>),
+}
+
+impl StaticRegions<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Borrowed(regions) => regions.len(),
+            Self::Owned(regions) => regions.len(),
+        }
+    }
+
+    fn get(&self, index: usize) -> Option<&StaticRegion> {
+        match self {
+            Self::Borrowed(regions) => regions.get(index).map(Arc::as_ref),
+            Self::Owned(regions) => regions.get(index).copied(),
+        }
+    }
 }
 
 /// Extend exact-start metadata across newly initialized nursery words. The
@@ -227,7 +249,7 @@ impl<'a> ObservationHeap<'a> {
         Ok(Self {
             static_metrics: tidepool_heap::static_region::StaticLookupMetrics::new("observer"),
             nursery,
-            statics: statics.iter().map(Arc::as_ref).collect(),
+            statics: StaticRegions::Borrowed(statics),
             old_space,
             descriptors: DescriptorSource::Registry(registry),
             starts: starts.to_vec(),
@@ -287,7 +309,7 @@ impl<'a> ObservationHeap<'a> {
         Ok(Self {
             static_metrics: tidepool_heap::static_region::StaticLookupMetrics::new("observer"),
             nursery,
-            statics,
+            statics: StaticRegions::Owned(statics),
             old_space: None,
             descriptors: DescriptorSource::Owned(descriptors),
             starts,
@@ -307,11 +329,12 @@ impl<'a> ObservationHeap<'a> {
         // cross-program static field (T4) resolves through.
         let mut static_hit = None;
         let mut probes = 0;
-        for region in &self.statics {
+        for index in 0..self.statics.len() {
+            let region = self.statics.get(index).expect("bounded by static length");
             probes += 1;
             match region.admit(encoded) {
                 Ok(Some(_)) => {
-                    static_hit = Some(*region);
+                    static_hit = Some(region);
                     break;
                 }
                 Ok(None) => {}
@@ -402,7 +425,8 @@ impl<'a> ObservationHeap<'a> {
     /// come from the machine's external-payload view; a bytes payload has
     /// no managed edges. Null edges are dropped.
     pub(super) fn trace_step(&self, encoded: usize) -> Result<Traced, ObservationFailure> {
-        for (index, region) in self.statics.iter().enumerate() {
+        for index in 0..self.statics.len() {
+            let region = self.statics.get(index).expect("bounded by static length");
             if region.admit(encoded)?.is_some() {
                 return Ok(Traced::Static { region: index });
             }
