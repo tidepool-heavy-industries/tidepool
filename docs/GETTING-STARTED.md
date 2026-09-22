@@ -179,10 +179,18 @@ predecessor and successor identities, lost live state, and a bounded resource
 service snapshot with retained allocations and cleanup failures. It also
 samples run-directory storage through a bounded walk and reports when that
 sample was truncated.
-Runs created before hosted-operation ownership journals existed remain
-inspectable, but their conversations are not resumed automatically.
+Recovery requires the lifecycle v2 journal and its durable creation marker.
+Runs with only the older `actor-lifecycle.v1.jsonl`, or without hosted-operation
+ownership journals, remain inspectable but are not resumed automatically.
+There is no automatic journal migration; renaming an old journal does not make
+its ownership evidence sufficient.
 Live Haskell values, requests, watches, and bindings are reported lost rather
 than reconstructed. Unresolved tool calls are not replayed automatically.
+
+If the first host startup fails before publishing its root binding and lifecycle
+evidence, restarting that run may remain unavailable. Start a fresh run and
+retain the failed run's artifacts for inspection and confirmed cleanup. Host
+incarnations are never rolled back to bypass missing ownership evidence.
 
 A stopped run's live heap and handles are gone. Durable command ownership,
 cleanup failures, accepted source, and process evidence remain until retirement

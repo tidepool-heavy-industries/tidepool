@@ -34,9 +34,11 @@ descendant, observer loss, and actor-admission timeout. A full host startup was
 not timed because the acceptance boundary
 forbids disruptive runs against active sessions and credentialed model runs.
 The model-free `actor_spec_cost_measurement` was attempted, but failed before
-activation on the repository's existing extractor nominal-identity error:
+activation on the extractor nominal-identity error present at that revision:
 `JSON True constructor does not match its admitted nominal identity`. Its
 13.948-second failing run is therefore not reported as a startup observation.
+That identity defect was subsequently fixed; the failed run remains historical
+evidence, not a measurement of the repaired implementation.
 The ignored measurement tests provide explicit commands for repeating the
 model-free portions at later integration boundaries.
 
