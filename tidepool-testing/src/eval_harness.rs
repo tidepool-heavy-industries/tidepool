@@ -326,7 +326,7 @@ impl EvalHarness {
         targets: &[&str],
     ) -> Result<CompiledArtifacts, CompileError> {
         let includes = self.owned_includes();
-        compile_targets(source, targets, &includes, None, |_, _, _| {})
+        compile_targets(source, targets, &includes, |_, _, _| {})
     }
 
     /// Compile + run an EFFECTFUL expression against `handlers` (user context

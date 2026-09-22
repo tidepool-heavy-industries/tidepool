@@ -256,7 +256,6 @@ pub struct Invocation<'a> {
     pub input_path: &'a Path,
     pub include: &'a [PathBuf],
     pub endpoint_identity: &'a [u8],
-    pub stable_val: Option<tidepool_repr::SessionModule>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -269,7 +268,7 @@ impl std::fmt::Display for InvocationKey {
 }
 
 pub fn invocation_key(inv: &Invocation<'_>) -> Option<InvocationKey> {
-    if inv.stable_val.is_some() || inv.endpoint_identity.is_empty() {
+    if inv.endpoint_identity.is_empty() {
         return None;
     }
     let mut hasher = blake3::Hasher::new();
@@ -532,7 +531,6 @@ mod tests {
             input_path: input,
             include: roots,
             endpoint_identity: endpoint,
-            stable_val: None,
         })
         .unwrap()
     }
@@ -598,7 +596,6 @@ mod tests {
                 input_path: Path::new("Generated.hs"),
                 include: &[],
                 endpoint_identity: b"endpoint",
-                stable_val: None
             })
             .is_none());
         }

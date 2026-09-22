@@ -48,9 +48,8 @@ pub mod session;
 pub use session::prepared as prepared_execution;
 
 pub use artifacts::{
-    compile_targets, compile_targets_with_session_inject, compile_targets_with_stable_inject,
-    CompiledArtifacts, NominalHead, SessionInject, SiteType, StableValInject, TargetArtifact,
-    YieldSite, YieldSiteCollision, YieldSites,
+    compile_targets, CompiledArtifacts, NominalHead, SiteType, TargetArtifact, YieldSite,
+    YieldSiteCollision, YieldSites,
 };
 pub use failclass::{
     classify, classify_compile, classify_session, FailureClass, FailureEnvelope, Phase,
@@ -111,11 +110,7 @@ pub fn compile_haskell(
         source,
         targets: &[target],
         include: &include_owned,
-        bin: None,
         fallback_module_name: "Input",
-        cache: artifacts::CacheStrategy::Immutable,
-        stable_val: None,
-        session_inject: None,
     };
     let mut bundle = artifacts::compile_invocation(&inv, |_, _, _| {})?;
     #[allow(

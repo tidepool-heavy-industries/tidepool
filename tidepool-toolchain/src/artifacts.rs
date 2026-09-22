@@ -1,18 +1,11 @@
 //! The ONE policy-bearing `tidepool-extract` compile front door:
 //! [`CompileInvocation`] + [`compile_invocation`]. `tidepool_runtime::compile_haskell`
-//! (one target, eval/session lane) and [`compile_targets`] (N targets sharing
-//! one GHC session, harness turn lane) are both thin projections that build a
-//! [`CompileInvocation`] and hand it to [`compile_invocation`] — spawning the
-//! extractor, reading its output directory, and deserializing into typed
-//! artifacts happens in exactly one place. The harness maps
-//! [`CompiledArtifacts`] onto its own turn/node vocabulary
-//! (`tidepool_harness::engine::compile_turn`/`compile_turns`) and attributes
-//! timing to its own (node, round) pairs via the `on_stage` hook, rather than
-//! duplicating the spawn+read+deserialize sequence.
+//! and [`compile_targets`] are thin projections over that owner, so spawning
+//! the extractor, reading its output directory, and deserializing typed
+//! artifacts happen in exactly one place.
 //!
 //! All cacheable requests use one recipe and one named artifact bundle.
-//! Mutable session requests bypass caching. Compiler dependency evidence is
-//! validated on publication and on every hit.
+//! Compiler dependency evidence is validated on publication and on every hit.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -21,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use tempfile::TempDir;
-use tidepool_extract_cmd::{ExtractCmd, ResolvedExtractBin};
+use tidepool_extract_cmd::ExtractCmd;
 use tidepool_repr::execution_schema::DecodeLimits;
 use tidepool_repr::serial::{read_metadata, MetaWarnings};
 use tidepool_repr::DataConTable;
@@ -213,24 +206,6 @@ impl YieldSites {
 }
 
 // ---------------------------------------------------------------------------
-// Stable session-Val injection (turn-latency-state-injection)
-// ---------------------------------------------------------------------------
-
-/// A session value module injected into a harness compilation. Injected
-/// interfaces are session state, so these requests bypass the artifact cache.
-pub struct StableValInject<'a> {
-    pub module: tidepool_repr::SessionModule,
-    pub session_root: &'a Path,
-}
-
-/// The live value modules needed by a session probe. These requests bypass
-/// the artifact cache; the session owns their generation and lifetime.
-pub struct SessionInject<'a> {
-    pub session_root: &'a Path,
-    pub inject_modules: &'a [String],
-}
-
-// ---------------------------------------------------------------------------
 // The artifact bundle
 // ---------------------------------------------------------------------------
 
@@ -261,38 +236,16 @@ pub struct CompiledArtifacts {
 // The one front door
 // ---------------------------------------------------------------------------
 
-/// Whether an immutable compilation may reuse a validated artifact bundle.
-pub enum CacheStrategy {
-    Immutable,
-    Uncached,
-}
-
 /// One typed compiler invocation shared by single-target and batch callers.
 pub struct CompileInvocation<'a> {
     pub source: &'a str,
     pub targets: &'a [&'a str],
     pub include: &'a [PathBuf],
-    /// `None` resolves fresh via `$TIDEPOOL_EXTRACT`/`PATH`
-    /// (`ExtractCmd::new`); `Some` is for a caller that resolved once at
-    /// construction and threads the binary through many calls
-    /// (`tidepool_harness::engine::EngineConfig`).
-    pub bin: Option<&'a ResolvedExtractBin>,
     /// Fallback module name (sans `.hs`) when `source` has no `module`
-    /// header — GHC derives the module name from the filename
-    /// (`capitalize(basename)`), and the two lanes' templated preambles
-    /// disagree on what that name must be: the turn lane's wrapper declares
-    /// `module Expr`, the eval lane's historical default is `Input`.
+    /// header. GHC derives the module name from the filename
+    /// (`capitalize(basename)`); the caller selects the name its source
+    /// assembly expects.
     pub fallback_module_name: &'a str,
-    pub cache: CacheStrategy,
-    /// Injected session interfaces make a request uncacheable.
-    pub stable_val: Option<StableValInject<'a>>,
-    /// A [`SessionInject`] to apply to this invocation's `ExtractCmd`
-    /// (`--session-root`/`--inject-val` per module) — mutually exclusive
-    /// with `stable_val` in practice (no caller sets both). `None` for every
-    /// front door except [`compile_targets_with_session_inject`]. Always
-    /// paired with [`CacheStrategy::Uncached`] by that front door — see
-    /// [`SessionInject`]'s doc for why.
-    pub session_inject: Option<SessionInject<'a>>,
 }
 
 /// Compile a [`CompileInvocation`] against ONE `tidepool-extract` spawn:
@@ -340,22 +293,11 @@ pub fn compile_invocation(
     let input_path = temp_dir.path().join(format!("{module}.hs"));
     std::fs::write(&input_path, inv.source)?;
 
-    let mut cmd = match inv.bin {
-        Some(b) => ExtractCmd::with_bin(b.clone()),
-        None => ExtractCmd::new().map_err(|e| CompileError::Io(e.into()))?,
-    };
+    let mut cmd = ExtractCmd::new().map_err(|e| CompileError::Io(e.into()))?;
     cmd.input(&input_path)
         .output_dir(temp_dir.path())
         .targets(inv.targets)
         .includes(inv.include);
-    if let Some(sv) = &inv.stable_val {
-        cmd.session_root(sv.session_root)
-            .inject_val(sv.module.module_name());
-    }
-    if let Some(si) = &inv.session_inject {
-        cmd.session_root(si.session_root)
-            .inject_vals(si.inject_modules.iter().cloned());
-    }
 
     // Persistent build-products dir (module-granular GHC recompilation
     // avoidance across spawns — see `crate::paths::build_products_dir`'s
@@ -393,10 +335,7 @@ pub fn compile_invocation(
             let endpoint = cmd.bind()?;
             crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
 
-            let cacheable = matches!(inv.cache, CacheStrategy::Immutable)
-                && inv.stable_val.is_none()
-                && inv.session_inject.is_none();
-            let inv_key = if cacheable {
+            let inv_key = {
                 let argv = cmd.argv();
                 let key = cache::invocation_key(&cache::Invocation {
                     source: inv.source,
@@ -404,7 +343,6 @@ pub fn compile_invocation(
                     input_path: &input_path,
                     include: inv.include,
                     endpoint_identity: endpoint.identity().as_bytes(),
-                    stable_val: None,
                 });
                 if let Some(key) = &key {
                     let load_start = Instant::now();
@@ -422,8 +360,6 @@ pub fn compile_invocation(
                     }
                 }
                 key
-            } else {
-                None
             };
 
             endpoint
@@ -504,14 +440,13 @@ fn retry_bounded<T, E>(
     }
 }
 
-/// Compile `source` against MULTIPLE named targets — the harness turn lane's
-/// projection of [`compile_invocation`]. See its doc for the full contract
+/// Compile `source` against multiple named targets through
+/// [`compile_invocation`]. See its doc for the full contract
 /// (target semantics, asks sidecar shape, memoization, timing hook).
 pub fn compile_targets(
     source: &str,
     targets: &[&str],
     include: &[PathBuf],
-    bin: Option<&ResolvedExtractBin>,
     on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
     assert!(
@@ -522,69 +457,7 @@ pub fn compile_targets(
         source,
         targets,
         include,
-        bin,
         fallback_module_name: "Expr",
-        cache: CacheStrategy::Immutable,
-        stable_val: None,
-        session_inject: None,
-    };
-    compile_invocation(&inv, on_stage)
-}
-
-/// As [`compile_targets`], but additionally injects a [`StableValInject`]
-/// (`--session-root <dir> --inject-val <module>`) — see that type's doc. The
-/// self-iterating harness driver's fused outer render/loop compile is the
-/// only caller.
-pub fn compile_targets_with_stable_inject(
-    source: &str,
-    targets: &[&str],
-    include: &[PathBuf],
-    bin: Option<&ResolvedExtractBin>,
-    stable_val: StableValInject<'_>,
-    on_stage: impl FnMut(&str, Duration, u64),
-) -> Result<CompiledArtifacts, CompileError> {
-    assert!(
-        !targets.is_empty(),
-        "compile_targets_with_stable_inject: at least one target is required"
-    );
-    let inv = CompileInvocation {
-        source,
-        targets,
-        include,
-        bin,
-        fallback_module_name: "Expr",
-        cache: CacheStrategy::Immutable,
-        stable_val: Some(stable_val),
-        session_inject: None,
-    };
-    compile_invocation(&inv, on_stage)
-}
-
-/// As [`compile_targets`], but additionally injects a [`SessionInject`]
-/// (`--session-root <dir>` plus one `--inject-val <module>` per live module)
-/// and is NEVER memoized in [`tidepool_runtime::cache`] — see
-/// [`SessionInject`]'s and [`CacheStrategy::Uncached`]'s docs for why.
-pub fn compile_targets_with_session_inject(
-    source: &str,
-    targets: &[&str],
-    include: &[PathBuf],
-    bin: Option<&ResolvedExtractBin>,
-    session_inject: SessionInject<'_>,
-    on_stage: impl FnMut(&str, Duration, u64),
-) -> Result<CompiledArtifacts, CompileError> {
-    assert!(
-        !targets.is_empty(),
-        "compile_targets_with_session_inject: at least one target is required"
-    );
-    let inv = CompileInvocation {
-        source,
-        targets,
-        include,
-        bin,
-        fallback_module_name: "Expr",
-        cache: CacheStrategy::Uncached,
-        stable_val: None,
-        session_inject: Some(session_inject),
     };
     compile_invocation(&inv, on_stage)
 }
@@ -634,7 +507,7 @@ pub(crate) fn extract_and_read(
     // Default-on per-compile summary (compile-attribution lane): unlike
     // `extract_timing` above, this is emitted by the extract UNCONDITIONALLY
     // (no `TIDEPOOL_TIMING` required) — see `Tidepool.Timing.emitCompileSummary`.
-    // Logged at INFO so it lands in a plain harness log by default; absent on
+    // Logged at INFO so it lands in the ordinary compile log; absent on
     // a memo hit (this function isn't reached) or on a compile that threw
     // before reaching the summary line.
     if let Some(summary) = timing::CompileSummary::parse(&stderr) {
@@ -888,7 +761,7 @@ pub fn read_yield_sites(path: &Path) -> Result<Vec<YieldSite>, CompileError> {
 }
 
 // ---------------------------------------------------------------------------
-// Invocation-keyed memo glue (compile_targets only — see the module doc)
+// Invocation-keyed memo glue
 // ---------------------------------------------------------------------------
 
 /// The logical artifact names of one invocation's output set — exactly the
@@ -1020,8 +893,32 @@ mod typed_site_tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn safe_refusal_rederives_cache_and_build_products_identity() {
         use std::os::unix::fs::PermissionsExt;
+
+        struct RestoreDaemon(Option<std::ffi::OsString>);
+        impl Drop for RestoreDaemon {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(socket) => unsafe {
+                        std::env::set_var(tidepool_extract_cmd::DAEMON_SOCKET_ENV, socket);
+                    },
+                    None => unsafe {
+                        std::env::remove_var(tidepool_extract_cmd::DAEMON_SOCKET_ENV);
+                    },
+                }
+            }
+        }
+
+        let _restore_daemon =
+            RestoreDaemon(std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV));
+        // This test binds two explicit producers. A surrounding battery may
+        // provide a resident daemon, which would otherwise replace both and
+        // make the producer identities identical.
+        unsafe {
+            std::env::remove_var(tidepool_extract_cmd::DAEMON_SOCKET_ENV);
+        }
 
         let root = tempfile::tempdir().expect("temporary endpoint root");
         let endpoints = [root.path().join("refused"), root.path().join("rebound")];
@@ -1038,9 +935,11 @@ mod typed_site_tests {
         let mut selections = Vec::new();
         let selected = retry_bounded(
             || {
-                let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(
-                    &endpoints[attempt_index],
-                ));
+                let mut cmd = ExtractCmd::with_bin(
+                    tidepool_extract_cmd::ResolvedExtractBin::assume_resolved(
+                        &endpoints[attempt_index],
+                    ),
+                );
                 cmd.input("Input.hs").target("result");
                 let endpoint = cmd.bind().expect("fake endpoint must bind");
                 attempt_index += 1;
@@ -1052,7 +951,6 @@ mod typed_site_tests {
                     input_path: Path::new("Input.hs"),
                     include: &[],
                     endpoint_identity: endpoint.identity().as_bytes(),
-                    stable_val: None,
                 })
                 .expect("test invocation is cacheable");
                 let products = argv
@@ -1314,11 +1212,7 @@ mod dependency_cache_tests {
             source: "module CacheConsumer where\nimport CacheDependency\nresult = value + 1\n",
             targets: &["result"],
             include: &roots,
-            bin: None,
             fallback_module_name: "CacheConsumer",
-            cache: CacheStrategy::Immutable,
-            stable_val: None,
-            session_inject: None,
         };
         let compile = || {
             let mut prepared = false;

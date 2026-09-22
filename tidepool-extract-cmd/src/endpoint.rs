@@ -210,7 +210,10 @@ impl CompilerTransactionCancellation {
     /// immediately.
     pub fn cancel(&self) {
         let target = {
-            let mut state = self.state.lock().expect("compiler cancellation poisoned");
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.cancelled = true;
             state.target.take()
         };
@@ -219,7 +222,10 @@ impl CompilerTransactionCancellation {
 
     fn arm(&self, target: CancellationTarget) {
         let target = {
-            let mut state = self.state.lock().expect("compiler cancellation poisoned");
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if state.cancelled {
                 Some(target)
             } else {
@@ -233,7 +239,7 @@ impl CompilerTransactionCancellation {
     fn disarm(&self) {
         self.state
             .lock()
-            .expect("compiler cancellation poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .target = None;
     }
 }
@@ -556,11 +562,13 @@ fn ensure_scoped_transaction(cmd: &ExtractCmd) -> Result<CompilerIdentity, Spawn
             .and_then(|state| state.cancellation.clone())
     });
     if let Some(cancellation) = cancellation {
-        let target = match transaction
-            .transport
-            .as_ref()
-            .expect("new compiler transaction has a transport")
-        {
+        let transport = transaction.transport.as_ref().ok_or_else(|| {
+            SpawnError::indeterminate(
+                "compiler transaction",
+                io::Error::other("new compiler transaction has no transport"),
+            )
+        })?;
+        let target = match transport {
             TransactionTransport::Direct(endpoint) => {
                 CancellationTarget::Direct(Arc::clone(&endpoint.child))
             }
@@ -574,14 +582,18 @@ fn ensure_scoped_transaction(cmd: &ExtractCmd) -> Result<CompilerIdentity, Spawn
         transaction.cancellation = Some(cancellation);
     }
     let identity = transaction.identity.clone();
-    TRANSACTION_SCOPE.with(|scope| {
+    TRANSACTION_SCOPE.with(|scope| -> Result<(), SpawnError> {
         let mut scope = scope.borrow_mut();
-        let state = scope
-            .as_mut()
-            .expect("transaction scope checked before binding");
+        let state = scope.as_mut().ok_or_else(|| {
+            SpawnError::indeterminate(
+                "compiler transaction",
+                io::Error::other("compiler transaction scope ended while binding"),
+            )
+        })?;
         state.transaction = Some(transaction);
         state.program = Some(cmd.program.clone());
-    });
+        Ok(())
+    })?;
     Ok(identity)
 }
 
@@ -667,7 +679,13 @@ impl CompilerTransaction {
         // an ambiguous partial write) cannot disappear from structural
         // compiler-request accounting.
         crate::EXTRACT_SPAWNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let output = match self.transport.as_mut().expect("open compiler transaction") {
+        let transport = self.transport.as_mut().ok_or_else(|| {
+            SpawnError::indeterminate(
+                "compiler transaction",
+                io::Error::other("compiler transaction is closed"),
+            )
+        })?;
+        let output = match transport {
             TransactionTransport::Direct(endpoint) => {
                 let request = daemon::encode_request(&cwd, &cmd.request.worker_argv());
                 let stdin = endpoint.stdin.as_mut().ok_or_else(|| {

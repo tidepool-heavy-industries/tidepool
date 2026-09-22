@@ -2042,6 +2042,10 @@ impl<'a> Validator<'a> {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the central JSON admission check receives the complete nominal identity tuple"
+    )]
     fn check_json_nominal(
         declaration: &ConstructorDecl,
         role: &'static str,
@@ -2669,6 +2673,10 @@ mod tests {
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the fixture builder mirrors one complete nominal constructor declaration"
+    )]
     fn json_constructor(
         host_id: u64,
         constructor_module: &str,

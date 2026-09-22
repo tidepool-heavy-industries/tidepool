@@ -26,9 +26,8 @@ pub mod timing;
 pub mod toolchain;
 
 pub use artifacts::{
-    compile_targets, compile_targets_with_session_inject, compile_targets_with_stable_inject,
-    read_yield_sites, CompiledArtifacts, ConstructorIdentityMismatch, NominalHead, SessionInject,
-    SiteType, StableValInject, TargetArtifact, YieldSite, YieldSiteCollision, YieldSites,
+    compile_targets, read_yield_sites, CompiledArtifacts, ConstructorIdentityMismatch, NominalHead,
+    SiteType, TargetArtifact, YieldSite, YieldSiteCollision, YieldSites,
 };
 pub use failclass::{classify_compile, FailureClass, FailureEnvelope, Phase};
 
@@ -99,7 +98,7 @@ pub fn extract_spawn_error(e: io::Error) -> io::Error {
     if e.kind() == io::ErrorKind::NotFound {
         io::Error::new(
             io::ErrorKind::NotFound,
-            "tidepool-extract not found on PATH (set TIDEPOOL_EXTRACT or install the Tidepool harness).",
+            "tidepool-extract not found on PATH (set TIDEPOOL_EXTRACT or install the Tidepool compiler tooling).",
         )
     } else {
         e
