@@ -118,15 +118,14 @@ pub fn all_described() -> Vec<Effect> {
     all()
 }
 
-/// The suspension-decode roster: every effect `exomonad-harness`'s
-/// `classify_hole` needs constructor names + payload shapes for, generated as
-/// decode-only request enums into `exomonad/harness/src/generated/`.
+/// The suspension-decode roster: effects whose runtime decoders need
+/// constructor names and payload shapes. The retained harness source is not a
+/// generated consumer.
 ///
 /// #20 steps 2-3: `AskUser`/`ReadState`/`RunLLMTurn`/`Fork`/`Finalize`/`Green`'s
 /// Haskell decl text has fully flipped onto [`crate::gen::decl_rs`] (see
-/// [`all`]'s doc) — they stay listed here too because `suspension_req_rs` (this
-/// generator) and `decl_rs` are disjoint GENERATORS reading the same effect
-/// data for disjoint purposes, not because the effects themselves are
+/// [`all`]'s doc) — they stay listed here too because `suspension_req_rs` and
+/// `decl_rs` are disjoint projections of the same effect data, not because the effects are
 /// unmigrated. `Ask`'s decl text remains hand-carried in
 /// `bridge/mcp/src/effect_defs.rs`: its GADT/verb shape is fully
 /// schema-described, but its one surface helper (`ask`) is ordinary pure
@@ -148,10 +147,8 @@ pub fn all_described() -> Vec<Effect> {
 /// [`crate::gen::decl_rs`]/[`crate::gen::wire_rs`]/[`crate::gen::handler_rs`]/
 /// [`crate::gen::adapter_rs`], only through [`crate::gen::suspension_req_rs`].
 /// The four already-migrated outer effects (`Worktree`/`RepoEvent`/`Exec`/
-/// `Journal`) are NOT repeated here — their request enums already exist,
-/// generated into `tidepool-handlers`, and `exomonad-harness` (a dependent of
-/// that crate already) reuses them directly rather than duplicating a second
-/// generated copy.
+/// `Journal`) are NOT repeated here — their request enums already exist in
+/// `tidepool-handlers`.
 ///
 /// [`HelperBody`]: crate::schema::HelperBody
 #[must_use]

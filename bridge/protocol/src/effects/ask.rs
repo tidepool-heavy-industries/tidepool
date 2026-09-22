@@ -3,7 +3,7 @@
 //! `ask schema prompt` (structured operator elicitation) — the fallback
 //! [`crate::schema::HandlingClass::Ask`] routing, and also the shape a
 //! malformed `AskUserWith` degrades to (handled at the harness plane, not
-//! here — see `exomonad-harness::engine::classify_hole`'s doc).
+//! here — see the runtime's decoder contract).
 //!
 //! Hand-carried Haskell decl: `bridge/mcp/src/effect_defs.rs`'s `AskWith`
 //! verb. NOT in [`crate::effects::all`] — see

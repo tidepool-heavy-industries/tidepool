@@ -1,7 +1,7 @@
 //! Generator: decode-only suspension request enums, emitted into the crate
 //! that owns each effect's orchestration (see [`path`]'s `crate_dir`).
 //!
-//! `exomonad-harness`'s turn engine never DISPATCHES these effects — a
+//! These suspending effects are interpreted by their owning runtime — a
 //! suspending effect (`Fork`, `Finalize`, `AskUser`, `RunLLMTurn`, `ReadState`,
 //! `Subagent`, `Green`, `Console`'s `Print`, plus the four already-
 //! migrated outer effects reused from `tidepool-handlers`) is classified and
@@ -12,21 +12,11 @@
 //! Haskell — and none of the error ADT / `DescribeEffect` / `EffectHandler`
 //! dispatch glue, which presuppose a handler these effects don't have.
 //!
-//! `Ask` is emitted into `tidepool-runtime` because
-//! `tidepool-runtime::session::engine::
-//! extract_ask_request` (the decode both `tidepool-repl` and the harness's
-//! own `Ask` roster member need) sits BELOW `exomonad-harness` in the crate
-//! graph, so the harness cannot be the one place this type lives without
-//! `tidepool-runtime` either depending upward (impossible) or hand-carrying a
-//! second, kept-in-sync copy (forbidden by the root `CLAUDE.md`'s
-//! "one mechanism, one home" rule). Generating it once, into the lower
-//! crate, and having the harness's `RosterRequest::Ask` reuse THAT copy is
-//! the same pattern already used for the four outer effects reused from
-//! `tidepool-handlers` — a shared type consumed by more than one crate lives
-//! in whichever crate is lowest in the graph among its consumers.
+//! `Ask` is emitted into `tidepool-runtime` for its session decoder. The
+//! runtime is the owner of that decode boundary.
 //!
 //! The effects this generator serves are declared in
-//! [`crate::effects::suspension_roster`] for the transitional harness effects;
+//! [`crate::effects::suspension_roster`] for the suspending effects;
 //! callers may also project a separately owned effect such as `Actor` into
 //! its runtime crate. This generator owns only decode/typing, never the
 //! orchestration itself.
@@ -36,7 +26,7 @@ use crate::schema::Effect;
 
 /// Where this effect's decode-only request enum lives, relative to the
 /// workspace root. `crate_dir` is the target crate's directory name
-/// (for example `"exomonad-harness"`, `"tidepool-runtime"`, or
+/// (for example `"tidepool-runtime"` or
 /// `"exomonad-actor"`).
 #[must_use]
 pub fn path(e: &Effect, crate_dir: &str) -> String {

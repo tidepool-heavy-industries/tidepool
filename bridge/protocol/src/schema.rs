@@ -1628,9 +1628,8 @@ fn render_object_value(v: &ObjectValue, site_param: &str) -> String {
 
 /// How a suspension carrying this verb's constructor must be routed.
 ///
-/// Modelled on what `exomonad-harness`'s `classify_hole` ACTUALLY
-/// distinguishes, not on an earlier five-name sketch that compressed away
-/// real distinctions. An unrecognized constructor must fail LOUD rather than
+/// Models the distinctions required by runtime suspension decoding. An
+/// unrecognized constructor must fail LOUD rather than
 /// falling through to [`HandlingClass::Ask`], which is the silent-misroute
 /// path this schema exists to close.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

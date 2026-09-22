@@ -36,7 +36,6 @@ fn main() -> ExitCode {
 
     let files = tidepool_protocol::generated_files()
         .into_iter()
-        .chain(tidepool_protocol::harness_generated_files())
         .chain(tidepool_protocol::runtime_generated_files())
         .chain(tidepool_protocol::actor_generated_files())
         .chain(tidepool_protocol::recipe_generated_files());

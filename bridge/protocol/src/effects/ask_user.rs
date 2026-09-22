@@ -3,9 +3,8 @@
 //! Two constructors ride this one GADT: `AskUserWith spec` (a typed form,
 //! routed to the human operator) and `NoteWith text` (a non-blocking display
 //! line on the same GADT, sibling constructor). `spec`'s `Value` is a JSON
-//! payload deserialized into a `FormShape` by
-//! `exomonad-harness::selfharness::operator` — this schema only recognizes
-//! the constructor and hands back the raw payload, same as every other
+//! payload deserialized into a `FormShape` by the operator — this schema only
+//! recognizes the constructor and hands back the raw payload, same as every other
 //! suspending effect.
 //!
 //! No real `tidepool-handlers` handler — harness-serviced only (same

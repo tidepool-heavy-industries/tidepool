@@ -5,8 +5,7 @@
 //! where `payload` is a `Value` carrying a JSON OBJECT (`typedSite`/`fork`/
 //! `fan`/`prompts`) rather than separate positional Haskell fields — that
 //! nested-object shape has no schema vocabulary (and doesn't need one: it is
-//! interpreted once, in `exomonad-harness::engine::classify_runllmturn_payload`,
-//! which stays hand-written orchestration). This effect's job is only to get
+//! interpreted by the agent runtime's hand-written orchestration. This effect's job is only to get
 //! the outer `Con`'s two positional fields — `prompt`, `payload` — decoded and
 //! the constructor recognized; is-it-a-fork and fan/prompts decode stay in the
 //! driver's own match arms, unchanged from before this migration.
@@ -72,7 +71,7 @@ pub fn run_llm_turn() -> Effect {
         // extractor, `Translate.hs`, any `Member RunLLMTurn` constraint)
         // spells that way. Correctness of the compiled Haskell wins over a
         // pretty derived module/file name — `run_l_l_m_turn` is accepted as
-        // the generated module basename (see `exomonad-harness`'s
+        // the generated module basename (see the runtime's
         // `generated/run_l_l_m_turn.rs`), same convention `handler_module`
         // already uses to carry an explicit override when a derived name
         // isn't the one wanted, just not plumbed as a THIRD field for a
@@ -86,8 +85,7 @@ pub fn run_llm_turn() -> Effect {
         req_enum: "RunLLMTurnReq",
         // NOT snake_case("RunLlmTurn") ("run_llm_turn_decl") — this is the
         // existing public function name every caller already uses
-        // (`tidepool_mcp::runllmturn_decl`, e.g. `exomonad-harness`'s
-        // `engine.rs`/`selfharness/driver/*`); the flip must not move it. See
+        // (`tidepool_mcp::runllmturn_decl`); the flip must not move it. See
         // `ask_user.rs`'s matching comment.
         decl_fn: "runllmturn_decl",
         description: &[
