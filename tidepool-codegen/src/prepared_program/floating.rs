@@ -1161,6 +1161,9 @@ mod tests {
             (0x3f80_0000, (1_i64 << 23, -23)),
             (0x0000_0001, (1_i64 << 23, -172)),
             (0xbf80_0000, (-(1_i64 << 23), -23)),
+            (0x8000_0000, (0, 0)),
+            (0x7f80_0000, (1_i64 << 23, 105)),
+            (0xffc0_0001, (-12_582_913, 105)),
         ] {
             let values = run(
                 "decodeFloat_Int#",
@@ -1173,6 +1176,41 @@ mod tests {
                  tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(exponent))]
                     if (*mantissa, *exponent) == expected));
         }
+    }
+
+    #[test]
+    fn decode_float_int_requires_exact_identity_and_signature() {
+        let valid = Signature {
+            arguments: vec![RuntimeRep::Float(32)],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64), RuntimeRep::Int(64)]),
+        };
+        assert!(recognize_decode_float_int(
+            &OperationIdentity::PrimOp("decodeFloat_Int#".into()),
+            &valid,
+        ));
+        for signature in [
+            Signature {
+                arguments: vec![RuntimeRep::Float(64)],
+                ..valid.clone()
+            },
+            Signature {
+                results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+                ..valid.clone()
+            },
+            Signature {
+                results: ResultContract::NoSuccess,
+                ..valid.clone()
+            },
+        ] {
+            assert!(!recognize_decode_float_int(
+                &OperationIdentity::PrimOp("decodeFloat_Int#".into()),
+                &signature,
+            ));
+        }
+        assert!(!recognize_decode_float_int(
+            &OperationIdentity::PrimOp("decodeFloat_Int#lookalike".into()),
+            &valid,
+        ));
     }
 
     #[test]

@@ -82,11 +82,8 @@ pub fn decode_double_int64(d: f64) -> (i64, i64) {
 /// decode into Double's wider mantissa/exponent and give a wrong answer for
 /// Float.
 pub fn decode_float_int(f: f32) -> (i64, i64) {
-    if f == 0.0 || f.is_nan() {
+    if f == 0.0 {
         return (0, 0);
-    }
-    if f.is_infinite() {
-        return (if f > 0.0 { 1 } else { -1 }, 0);
     }
     let bits = f.to_bits();
     let sign: i64 = if bits >> 31 == 0 { 1 } else { -1 };
@@ -97,7 +94,8 @@ pub fn decode_float_int(f: f32) -> (i64, i64) {
         let shift = raw_man.leading_zeros() - 40;
         (raw_man << shift, 1 - 127 - 23 - shift as i32)
     } else {
-        // normal: implicit leading 1
+        // Every nonzero exponent field, including infinity and NaN, receives
+        // the implicit leading bit in GHC's raw IEEE mapping.
         (raw_man | (1i64 << 23), raw_exp - 127 - 23)
     };
     (sign * man, exp as i64)
@@ -296,6 +294,20 @@ mod tests {
             );
         }
         assert_eq!(decode_float_int(-0.0), (0, 0));
+    }
+
+    #[test]
+    fn decode_float_int_matches_pinned_ghc_exceptional_patterns() {
+        // GHC 9.12.2 `decodeFloat` preserves the raw sign and payload for
+        // exceptional IEEE values, as its Double counterpart does.
+        for (bits, expected) in [
+            (0x7f80_0000, (8_388_608, 105)),
+            (0xff80_0000, (-8_388_608, 105)),
+            (0x7fc0_0001, (12_582_913, 105)),
+            (0xffc0_0001, (-12_582_913, 105)),
+        ] {
+            assert_eq!(decode_float_int(f32::from_bits(bits)), expected);
+        }
     }
 
     #[test]

@@ -87,15 +87,6 @@ records the bounded decoded message directly. The remaining integration work is
 session presentation of raised exception operands; the wired-in path already
 retains its message without requiring exception-heap observation.
 
-## Single-precision exceptional decode behavior
-
-The pinned-GHC oracle exposed incorrect NaN/infinity sentinels in the shared
-Double decoder; that owner now preserves the raw IEEE sign and payload. The
-adjacent `decode_float_int` still has analogous sentinel branches. Its
-single-precision exceptional contract has not been checked against the oracle
-in this delivery pass. Verify it before wiring `decodeFloat_Int#` into prepared
-execution; do not copy those branches as an assumed GHC contract.
-
 ## Internal IO exception handling is not a status catch-all
 
 The deferred IPE decoder owns an encoding-cleanup closure that uses catch and
