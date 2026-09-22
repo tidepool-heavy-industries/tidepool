@@ -197,6 +197,7 @@ struct ResidentActorRecord {
     bound_worktree: Option<String>,
     terminal: Option<ActorTerminal>,
     runtime_observation: crate::ActorRuntimeObservationHandle,
+    /// Scheduler ownership can differ from retained logical parentage after recovery.
     scheduler_root: bool,
 }
 
@@ -732,7 +733,6 @@ pub struct ResidentKernelBehavior<H, O> {
     deferred_child_failures: Vec<ChildExitNotice>,
     next_activation_sequence: u64,
     runtime_observation: crate::ActorRuntimeObservationHandle,
-    scheduler_root: bool,
     workbench_executions: Arc<Mutex<WorkbenchExecutions>>,
     active_route: Option<(crate::WatchId, Vec<crate::ForkGroupId>)>,
     active_fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
@@ -1274,7 +1274,6 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         boot: ResidentBoot,
         launch_worktrees: Vec<String>,
     ) -> Self {
-        let scheduler_root = matches!(&boot, ResidentBoot::Workbench | ResidentBoot::Prepared(_));
         Self {
             replacement_transfer: None,
             retained_replacements: Vec::new(),
@@ -1306,7 +1305,6 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             deferred_child_failures: Vec::new(),
             next_activation_sequence: 1,
             runtime_observation: crate::ActorRuntimeObservationHandle::default(),
-            scheduler_root,
             workbench_executions: Arc::default(),
             active_route: None,
             active_fork_boundary: None,
@@ -6783,7 +6781,7 @@ where
                     bound_worktree: self.launch_worktrees.first().cloned(),
                     terminal: None,
                     runtime_observation: self.runtime_observation.clone(),
-                    scheduler_root: self.scheduler_root,
+                    scheduler_root: kernel.supervisor_identity().is_none(),
                 },
             );
             if self.descriptor.fork_boundary().is_some() {

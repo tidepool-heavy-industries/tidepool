@@ -2203,8 +2203,14 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
     );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
-    assert!(worker.actor.terminal().get().is_some());
-    assert!(observer.actor.terminal().get().is_some());
+    assert_eq!(
+        worker.actor.terminal().get().unwrap().kind,
+        ActorExitKind::Completed
+    );
+    assert_eq!(
+        observer.actor.terminal().get().unwrap().kind,
+        ActorExitKind::Cancelled
+    );
     assert!(campaign
         .forest
         .new_workbench(
