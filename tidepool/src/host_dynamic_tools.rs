@@ -272,17 +272,22 @@ impl HostDynamicToolService {
             operation_journal::OperationJournal::open(path)
         }
         .map_err(|error| format!("cannot open hosted-operation journal: {error}"))?;
-        self.state.boundaries = Arc::new(Mutex::new(
-            journal
-                .settled_boundaries()
-                .map(|boundary| {
-                    (
-                        (boundary.thread_id.clone(), boundary.context_call_id.clone()),
-                        HostBoundaryState::Settled,
-                    )
-                })
-                .collect(),
-        ));
+        let mut boundaries = journal
+            .uncertain_boundaries()
+            .map(|boundary| {
+                (
+                    (boundary.thread_id, boundary.context_call_id),
+                    HostBoundaryState::Pending,
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        boundaries.extend(journal.settled_boundaries().map(|boundary| {
+            (
+                (boundary.thread_id.clone(), boundary.context_call_id.clone()),
+                HostBoundaryState::Settled,
+            )
+        }));
+        self.state.boundaries = Arc::new(Mutex::new(boundaries));
         self.state.operations = Some(Arc::new(parking_lot::Mutex::new(journal)));
         Ok(self)
     }
@@ -1900,6 +1905,40 @@ pub(crate) mod tests {
         assert!(!response.success);
         let CallContent::InputText { text } = &response.content_items[0];
         assert!(text.contains("outcome is uncertain"));
+        assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn restart_fences_sibling_calls_under_an_uncertain_boundary() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal_path = directory.path().join("operations.jsonl");
+        let mut request = call_request(serde_json::Value::String("effect-a".into()));
+        request.context_call_id = Some("outer-call".into());
+        let mut journal = operation_journal::OperationJournal::open(journal_path.clone()).unwrap();
+        assert!(matches!(
+            journal.admit(&request).unwrap(),
+            operation_journal::Admission::New
+        ));
+        drop(journal);
+
+        let dispatches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state = HostDynamicToolService::new(
+            counting_endpoint(Arc::clone(&dispatches)),
+            directory.path().join("binding.json"),
+            None,
+        )
+        .unwrap()
+        .with_operation_journal(journal_path, true)
+        .unwrap()
+        .state;
+        bind_test_thread(&state).await;
+        let mut sibling = call_request(serde_json::Value::String("effect-b".into()));
+        sibling.context_call_id = request.context_call_id.clone();
+        sibling.call_id = "sibling-call".into();
+        let response = call(State(state), Json(sibling)).await.0;
+        assert!(!response.success);
+        let CallContent::InputText { text } = &response.content_items[0];
+        assert!(text.contains("active call"));
         assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 

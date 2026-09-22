@@ -13,7 +13,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tidepool_repr::jsonl::{SyncPolicy, TailPolicy};
 
-const VERSION: u32 = 1;
+// Version 2 adds the creation marker that distinguishes a newly initialized
+// owner from missing recovery evidence. Version 1 is rejected rather than
+// silently treating an old or lost journal as an empty current run.
+const VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,6 +88,7 @@ pub struct DurableActorApplication {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 enum EventKind {
+    Created,
     Admitted {
         admission: Box<DurableActorAdmission>,
     },
@@ -126,9 +130,28 @@ pub struct ActorRecoveryJournal {
 
 impl ActorRecoveryJournal {
     pub fn open(path: impl Into<PathBuf>) -> std::io::Result<Arc<Self>> {
-        let path = path.into();
+        Self::open_with_mode(path.into(), false)
+    }
+
+    /// Reopen lifecycle evidence for a later host incarnation.
+    ///
+    /// Recovery must not silently replace a lost journal with an empty owner:
+    /// that would admit a fresh root while the prior actor identities and
+    /// external resources remain unaccounted for.
+    pub fn open_existing(path: impl Into<PathBuf>) -> std::io::Result<Arc<Self>> {
+        Self::open_with_mode(path.into(), true)
+    }
+
+    fn open_with_mode(path: PathBuf, require_existing: bool) -> std::io::Result<Arc<Self>> {
         if let Some(parent) = path.parent() {
             tidepool_atomic_write::create_dir_all_durable(parent).map_err(std::io::Error::from)?;
+        }
+        let existed = path.try_exists()?;
+        if require_existing && !existed {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "recovered host has no actor lifecycle journal",
+            ));
         }
         let (rows, torn) = tidepool_repr::jsonl::read_tail(
             &path,
@@ -142,6 +165,7 @@ impl ActorRecoveryJournal {
         }
         let mut expected = 1;
         let mut records = BTreeMap::new();
+        let mut created = false;
         for row in rows {
             if row.sequence != expected {
                 return Err(std::io::Error::other(format!(
@@ -150,16 +174,39 @@ impl ActorRecoveryJournal {
                 )));
             }
             expected += 1;
-            apply_event(&mut records, row.event)?;
+            match row.event {
+                EventKind::Created if !created => created = true,
+                EventKind::Created => {
+                    return Err(std::io::Error::other(
+                        "duplicate actor lifecycle journal creation marker",
+                    ));
+                }
+                event if created => apply_event(&mut records, event)?,
+                _ => {
+                    return Err(std::io::Error::other(
+                        "actor lifecycle event precedes durable creation marker",
+                    ));
+                }
+            }
         }
-        Ok(Arc::new(Self {
+        if existed && !created {
+            return Err(std::io::Error::other(
+                "actor lifecycle journal lacks a durable creation marker",
+            ));
+        }
+        let journal = Arc::new(Self {
             path,
             state: Mutex::new(State {
                 next_sequence: expected,
                 records,
                 uncertain: false,
             }),
-        }))
+        });
+        if !existed {
+            let mut state = journal.state.lock();
+            journal.append(&mut state, EventKind::Created)?;
+        }
+        Ok(journal)
     }
 
     pub fn records(&self) -> Vec<DurableActorRecord> {
@@ -363,6 +410,11 @@ fn apply_event(
     event: EventKind,
 ) -> std::io::Result<()> {
     match event {
+        EventKind::Created => {
+            return Err(std::io::Error::other(
+                "actor lifecycle creation marker reached record replay",
+            ));
+        }
         EventKind::Admitted { admission } => {
             let admission = *admission;
             let actor = admission.actor;
@@ -481,7 +533,9 @@ mod tests {
         drop(journal);
         let stored = std::fs::read_to_string(&path).unwrap();
         assert!(!stored.is_empty(), "journal append produced no bytes");
-        parse_row(stored.trim()).unwrap();
+        for row in stored.lines() {
+            parse_row(row).unwrap();
+        }
         let journal = ActorRecoveryJournal::open(&path).unwrap();
         let records = journal.records();
         assert_eq!(records.len(), 1, "stored rows: {stored}");
@@ -571,5 +625,30 @@ mod tests {
                 .as_deref(),
             Some("conversation-9")
         );
+    }
+
+    #[test]
+    fn recovered_host_requires_the_original_lifecycle_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing.jsonl");
+        assert_eq!(
+            ActorRecoveryJournal::open_existing(&missing)
+                .err()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+
+        let empty = directory.path().join("empty.jsonl");
+        std::fs::write(&empty, b"").unwrap();
+        assert!(ActorRecoveryJournal::open_existing(&empty)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("creation marker"));
+
+        let initialized = directory.path().join("initialized.jsonl");
+        drop(ActorRecoveryJournal::open(&initialized).unwrap());
+        ActorRecoveryJournal::open_existing(&initialized).unwrap();
     }
 }

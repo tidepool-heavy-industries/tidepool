@@ -143,6 +143,21 @@ impl OperationJournal {
         self.settled_boundaries.iter()
     }
 
+    pub(super) fn uncertain_boundaries(&self) -> impl Iterator<Item = BoundaryKey> + '_ {
+        self.records
+            .iter()
+            .filter(|(_, record)| record.response.is_none())
+            .filter_map(|(key, _)| {
+                key.context_call_id
+                    .as_ref()
+                    .map(|context_call_id| BoundaryKey {
+                        thread_id: key.thread_id.clone(),
+                        context_call_id: context_call_id.clone(),
+                    })
+            })
+            .filter(|boundary| !self.settled_boundaries.contains(boundary))
+    }
+
     pub(super) fn admit(&mut self, request: &CallRequest) -> std::io::Result<Admission> {
         let key = OperationKey::from(request);
         let request_digest = digest(request)?;
@@ -373,6 +388,27 @@ mod tests {
         assert_eq!(
             journal.settled_boundaries().collect::<Vec<_>>(),
             vec![&boundary]
+        );
+    }
+
+    #[test]
+    fn accepted_operation_fences_its_unsettled_boundary_after_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("operations.jsonl");
+        let mut journal = OperationJournal::open(path.clone()).unwrap();
+        assert!(matches!(
+            journal.admit(&request("effect-a")).unwrap(),
+            Admission::New
+        ));
+        drop(journal);
+
+        let journal = OperationJournal::open_existing(path).unwrap();
+        assert_eq!(
+            journal.uncertain_boundaries().collect::<Vec<_>>(),
+            vec![BoundaryKey {
+                thread_id: "thread".into(),
+                context_call_id: "outer-call".into(),
+            }]
         );
     }
 

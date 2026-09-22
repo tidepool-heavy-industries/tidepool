@@ -1974,8 +1974,12 @@ pub(crate) async fn run(
     let backend = native_interactive_backend(config.interactive_agent.clone());
     let application_owners: InteractiveOwners = Arc::new(Mutex::new(HashMap::new()));
     let source_layers = source_service(&config, &run_root, worktrees.clone());
-    let actor_recovery =
-        tidepool_actor::ActorRecoveryJournal::open(run_root.join("actor-lifecycle.v1.jsonl"))?;
+    let actor_recovery_path = run_root.join("actor-lifecycle.v2.jsonl");
+    let actor_recovery = if host_incarnation.incarnation() == tidepool_actor::Incarnation::FIRST {
+        tidepool_actor::ActorRecoveryJournal::open(actor_recovery_path)
+    } else {
+        tidepool_actor::ActorRecoveryJournal::open_existing(actor_recovery_path)
+    }?;
     let prior_actor_records = actor_recovery.records();
     let (source, root, program) = compile_root(
         &config,
