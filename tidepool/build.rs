@@ -9,10 +9,15 @@
 //! from the source it is copied out of.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
+#[path = "../tidepool-actor/src/lookup_tool/qualified_name.rs"]
+mod qualified_name;
+use qualified_name::qualifier_and_identifier;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 fn main() {
+    println!("cargo:rerun-if-changed=../tidepool-actor/src/lookup_tool/qualified_name.rs");
     // Shared target directories must not reuse another checkout's source paths.
     println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR");
     #[allow(clippy::expect_used, reason = "CARGO_MANIFEST_DIR")]
@@ -208,33 +213,6 @@ fn raw_tokens(source: &str) -> impl Iterator<Item = &str> {
         tokens.push(&source[begin..]);
     }
     tokens.into_iter()
-}
-
-fn qualifier_and_identifier(name: &str) -> Option<(&str, &str)> {
-    let (qualifier, identifier) = name.rsplit_once('.')?;
-    if qualifier.is_empty() || identifier.is_empty() {
-        return None;
-    }
-    let mut chars = identifier.chars();
-    match chars.next() {
-        Some(first) if first.is_ascii_lowercase() || first == '_' => {}
-        _ => return None,
-    }
-    if !chars
-        .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '\'')
-    {
-        return None;
-    }
-    qualifier
-        .split('.')
-        .all(|segment| {
-            let mut chars = segment.chars();
-            matches!(chars.next(), Some(first) if first.is_ascii_uppercase())
-                && chars.all(|character| {
-                    character.is_ascii_alphanumeric() || character == '_' || character == '\''
-                })
-        })
-        .then_some((qualifier, identifier))
 }
 
 /// The pinned jev-dsl flake URL, read out of the example workspace's own

@@ -4,6 +4,9 @@
 //! This module validates the hosted arguments and presents typed inspection
 //! results; it never parses Haskell type syntax.
 
+mod qualified_name;
+pub(crate) use qualified_name::qualifier_and_identifier;
+
 use serde::{Deserialize, Serialize};
 use tidepool_runtime::session::InspectionAvailability;
 use tidepool_tool::{HostedTool, ToolDeclaration, ToolKind};
@@ -69,34 +72,6 @@ fn is_dotted_capitalized(candidate: &str) -> bool {
         }
     }
     segments >= 2
-}
-
-/// Split a dotted, lowercase-final `Name` query into its qualifier prefix and
-/// final identifier: the shape a qualified value or field has (`Cmd.exitCode`,
-/// `R.await`), as opposed to the dotted-capitalized shape already classified
-/// `Qualified` (`Cmd.RunResult`) or a bare name with no dot at all. `None` when
-/// the query has no dot, either side is empty, the qualifier segments are not
-/// each capitalized-alias shaped, or the final identifier is not itself a
-/// plain lowercase-led Haskell identifier.
-pub(crate) fn qualifier_and_identifier(name: &str) -> Option<(&str, &str)> {
-    let (qualifier, identifier) = name.rsplit_once('.')?;
-    if qualifier.is_empty() || identifier.is_empty() {
-        return None;
-    }
-    let mut identifier_chars = identifier.chars();
-    match identifier_chars.next() {
-        Some(first) if first.is_ascii_lowercase() || first == '_' => {}
-        _ => return None,
-    }
-    if !identifier_chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\'') {
-        return None;
-    }
-    let qualifier_shaped = qualifier.split('.').all(|segment| {
-        let mut chars = segment.chars();
-        matches!(chars.next(), Some(first) if first.is_ascii_uppercase())
-            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\'')
-    });
-    qualifier_shaped.then_some((qualifier, identifier))
 }
 
 /// Find the real module a turn's own assembled imports bind to `qualifier`
