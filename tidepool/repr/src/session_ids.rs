@@ -147,7 +147,7 @@ impl SessionModule {
     /// The on-disk `.hi` iface path relative to a `--session-root` dir,
     /// mirroring GHC's own `hiDir` layout (dots become slashes) — the Rust
     /// twin of Haskell's `Tidepool.Session.sessionHiPath`. Used by the
-    /// compile memo (`tidepool_runtime::cache`) to content-fingerprint a
+    /// compile memo to content-fingerprint a
     /// stable `--inject-val` module's iface, the same way an `--include`
     /// root is fingerprinted.
     #[must_use]

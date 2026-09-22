@@ -505,7 +505,7 @@ pub async fn check(
 
 fn resolve_workspace(workspace: Option<PathBuf>) -> Result<PathBuf, Box<dyn std::error::Error>> {
     // Auto-detection (no `--workspace`) walks up from the launch cwd looking
-    // for an Exomonad workspace: `.exomonad/`, NOT `tidepool_runtime::paths`'s own
+    // for an Exomonad workspace: `.exomonad/`, NOT `tidepool_toolchain::paths`'s own
     // `.tidepool/` project marker. Reusing that marker previously meant a
     // workspace nested under an unrelated ancestor that happens to carry a
     // `.tidepool/` (the user-global legacy `~/.tidepool`, in particular)
@@ -515,7 +515,7 @@ fn resolve_workspace(workspace: Option<PathBuf>) -> Result<PathBuf, Box<dyn std:
         Some(workspace) => (workspace, None),
         None => {
             let cwd = std::env::current_dir()?;
-            let root = tidepool_runtime::paths::find_root_with_marker(&cwd, ".exomonad")
+            let root = tidepool_toolchain::paths::find_root_with_marker(&cwd, ".exomonad")
                 .unwrap_or_else(|| cwd.clone());
             (root, Some(cwd))
         }
@@ -584,7 +584,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     let run_id = uuid::Uuid::new_v4().to_string();
     let log_path = exomonad_log_path(&workspace, &run_id);
     let compiler_log_path = exomonad_compiler_log_path(&workspace, &run_id);
-    let run_root = tidepool_runtime::paths::cache_dir()
+    let run_root = tidepool_toolchain::paths::cache_dir()
         .join("exomonad")
         .join("runs")
         .join(&run_id);
@@ -631,7 +631,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     // instead of reinventing (and, as `.canonicalize()` did here, getting
     // wrong: canonicalize resolves a bare name against the CWD, never PATH,
     // so it failed even when `tidepool-extract` WAS on PATH).
-    let compiler_source = tidepool_runtime::toolchain::locate_extract()
+    let compiler_source = tidepool_toolchain::toolchain::locate_extract()
         .map_err(|error| {
             runtime_error(format!(
                 "{error} Exomonad also needs TIDEPOOL_EXTRACT_WORKER for the Haskell compiler \
@@ -678,7 +678,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     // keep phase timing on unconditionally for Exomonad runs.
     compiler_launch
         .environment
-        .insert(tidepool_runtime::timing::TIMING_ENV.into(), "1".into());
+        .insert(tidepool_toolchain::timing::TIMING_ENV.into(), "1".into());
     let scoped_compiler = slice.scope(slice.verified_command(
         &executable,
         exomonad_node::ProcessInvocation {
@@ -1498,7 +1498,7 @@ fn settle_host_result(
 async fn preflight(
     workspace: &Path,
 ) -> Result<InteractiveAgentInstallation, Box<dyn std::error::Error>> {
-    tidepool_runtime::toolchain::bind_extract_endpoint().map_err(|error| {
+    tidepool_toolchain::toolchain::bind_extract_endpoint().map_err(|error| {
         runtime_error(format!(
             "{error}. Launch through `just exomonad-console` or `just exomonad-init` for the matched local toolchain."
         ))
@@ -2375,7 +2375,7 @@ mod tests {
     }
 
     /// `resolve_workspace`'s cwd auto-detection (no `--workspace`) must look
-    /// for `.exomonad/`, not `tidepool_runtime::paths`'s own `.tidepool/`
+    /// for `.exomonad/`, not `tidepool_toolchain::paths`'s own `.tidepool/`
     /// project marker — regression coverage for `exomonad init` silently
     /// resolving to an unrelated ancestor (often `$HOME`, via its
     /// `~/.tidepool` legacy config dir) instead of the intended cwd. Mutates

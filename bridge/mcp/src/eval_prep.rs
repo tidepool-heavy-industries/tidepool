@@ -716,7 +716,7 @@ impl TurnTemplate<'_> {
             out.push_str(&preamble[..insert_point]);
             // 1-based line range the emitted `import ...` lines occupy —
             // tagged with its own marker (mirrors the code marker below) so
-            // `tidepool_runtime::diag::extract_user_code_ranges` can classify
+            // `tidepool_toolchain::diag::extract_user_code_ranges` can classify
             // a diagnostic anchored HERE (a bad import) as user-origin
             // rather than wrapper-scaffold fallout: `imports` is a
             // caller-authored param, textually far from `code`, but no less
@@ -1473,7 +1473,7 @@ mod template_haskell_pin {
 
     /// `imports`/`helpers` each get their OWN `-- [user-*-lines]` marker,
     /// alongside the primary `-- [user-lines]` code marker — the mechanism
-    /// `tidepool_runtime::diag::extract_user_code_ranges` reads to classify a
+    /// `tidepool_toolchain::diag::extract_user_code_ranges` reads to classify a
     /// diagnostic anchored in either param as user-origin rather than
     /// wrapper-scaffold fallout (see that function's doc, and the diag.rs
     /// tests pinning the classification itself). Pinned here at the source
@@ -1495,7 +1495,7 @@ mod template_haskell_pin {
         assert_eq!(src.matches("[user-helpers-lines]").count(), 1, "{src}");
         assert_eq!(src.matches("[user-lines]").count(), 1, "{src}");
 
-        let ranges = tidepool_runtime::diag::extract_user_code_ranges(&src)
+        let ranges = tidepool_toolchain::diag::extract_user_code_ranges(&src)
             .expect("markers present, so ranges must resolve");
         assert_eq!(ranges.len(), 3, "{ranges:?}");
 

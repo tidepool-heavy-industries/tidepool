@@ -61,18 +61,18 @@ fn materialize(
 /// Resolve the general Tidepool library, honoring development overrides before
 /// falling back to the complete embedded source bundle.
 pub fn ensure_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let fallbacks = tidepool_runtime::toolchain::StdlibFallbacks {
+    let fallbacks = tidepool_toolchain::toolchain::StdlibFallbacks {
         bundle: Some(ensure_embedded_stdlib()?),
         build_tree: None,
     };
-    Ok(tidepool_runtime::toolchain::locate_stdlib(&fallbacks)?.dir)
+    Ok(tidepool_toolchain::toolchain::locate_stdlib(&fallbacks)?.dir)
 }
 
 /// Exomonad's frozen library must match `source_identity`, independent of launch
 /// cwd or development overrides used by the general Tidepool tools.
 pub(crate) fn ensure_embedded_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let hash = content_hash(EMBEDDED_STDLIB);
-    materialize(EMBEDDED_STDLIB, tidepool_runtime::paths::stdlib_dir(&hash))
+    materialize(EMBEDDED_STDLIB, tidepool_toolchain::paths::stdlib_dir(&hash))
 }
 
 /// Resolve the Haskell modules used by Exomonad's interactive workbench.
@@ -80,7 +80,7 @@ pub fn ensure_exomonad_haskell() -> Result<PathBuf, Box<dyn std::error::Error>> 
     let hash = content_hash(EMBEDDED_EXOMONAD_HASKELL);
     materialize(
         EMBEDDED_EXOMONAD_HASKELL,
-        tidepool_runtime::paths::cache_dir()
+        tidepool_toolchain::paths::cache_dir()
             .join("exomonad-haskell")
             .join(hash),
     )

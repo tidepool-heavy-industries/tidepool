@@ -2377,7 +2377,7 @@ fn actor_worktree_resources(
     let project = blake3::hash(workspace.as_os_str().as_encoded_bytes())
         .to_hex()
         .to_string();
-    let root = tidepool_runtime::paths::cache_dir()
+    let root = tidepool_toolchain::paths::cache_dir()
         .join("exomonad")
         .join("actor-worktrees")
         .join(project);
@@ -2847,9 +2847,9 @@ fn render_root_compile_failure(
     let detail = match &failure.error {
         tidepool_runtime::CompileError::Diagnostics(diagnostics)
         | tidepool_runtime::CompileError::WorkerFailure(diagnostics) => {
-            tidepool_runtime::diag::render_diagnostics(
+            tidepool_toolchain::diag::render_diagnostics(
                 diagnostics,
-                &tidepool_runtime::diag::RenderOpts {
+                &tidepool_toolchain::diag::RenderOpts {
                     anchor: "Expr.hs",
                     label: "<exomonad-driver>",
                     user_lines: None,

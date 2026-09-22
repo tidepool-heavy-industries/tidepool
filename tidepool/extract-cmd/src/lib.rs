@@ -525,7 +525,7 @@ impl ExtractCmd {
     /// output dir the extract points `hiDir`/`objectDir` at, so a LATER spawn's
     /// `load'` can skip an unchanged home module via GHC's own `checkOldIface`
     /// (spike-verified). Dropped from
-    /// the compile-memo key (`tidepool_runtime::cache::invocation_key`), same
+    /// the compile-memo key, same
     /// bucket as `--output-dir`: it changes nothing about the OUTPUT bytes,
     /// only whether GHC's frontend can skip work to produce them.
     pub fn build_products_dir(&mut self, dir: impl AsRef<OsStr>) -> &mut Self {

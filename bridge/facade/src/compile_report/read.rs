@@ -16,7 +16,7 @@
 //!   uses to fold a foreign JSONL schema it does not own the Rust type for.
 //! - **eval-failure rows** — this crate's own `{ts_ms, op, class, phase,
 //!   detail}` shape, written by `tidepool-mcp`'s eval-surface logging (see
-//!   `tidepool_runtime::paths::eval_failure_log_path`).
+//!   `tidepool_toolchain::paths::eval_failure_log_path`).
 //!
 //! Every other row shape (`log-*.jsonl`'s per-node `Event`, an
 //! `outer_compile` transcript line, …) is silently skipped — this reader

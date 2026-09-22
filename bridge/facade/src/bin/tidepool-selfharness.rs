@@ -576,21 +576,21 @@ fn default_harness_source_path() -> PathBuf {
 }
 
 /// The stdlib include dir, via the ONE locator
-/// ([`tidepool_runtime::toolchain::locate_stdlib`], whose module docs carry the
+/// ([`tidepool_toolchain::toolchain::locate_stdlib`], whose module docs carry the
 /// precedence table). This driver embeds no stdlib, so it contributes only the
 /// build-tree tail step — the same shape as `tidepool-repl`.
 ///
 /// # Errors
-/// [`tidepool_runtime::toolchain::ToolchainError`] when no step of the table
+/// [`tidepool_toolchain::toolchain::ToolchainError`] when no step of the table
 /// finds a stdlib root.
-fn prelude_dir() -> Result<PathBuf, tidepool_runtime::toolchain::ToolchainError> {
-    let fallbacks = tidepool_runtime::toolchain::StdlibFallbacks {
+fn prelude_dir() -> Result<PathBuf, tidepool_toolchain::toolchain::ToolchainError> {
+    let fallbacks = tidepool_toolchain::toolchain::StdlibFallbacks {
         bundle: None,
         build_tree: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .map(|r| r.join("haskell/lib")),
     };
-    Ok(tidepool_runtime::toolchain::locate_stdlib(&fallbacks)?.dir)
+    Ok(tidepool_toolchain::toolchain::locate_stdlib(&fallbacks)?.dir)
 }
 
 fn project_lib_dir() -> Option<PathBuf> {

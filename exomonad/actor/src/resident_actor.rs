@@ -8424,7 +8424,7 @@ fn cell_check_rejection(
                 items[index]
                     .diagnostics
                     .extend(rejection.diagnostics.iter().cloned());
-                if diagnostic.severity == tidepool_runtime::diag::DiagnosticSeverity::Warning {
+                if diagnostic.severity == tidepool_toolchain::diag::DiagnosticSeverity::Warning {
                     items[index].warnings.push(rejection.output);
                 } else {
                     items[index].status = WorkbenchItemStatus::Rejected;

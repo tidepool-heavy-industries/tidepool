@@ -213,7 +213,7 @@ fn brick_note(excluded: &[String]) -> String {
 /// path is keyed on the source, so identical facades reuse the same dir.
 fn stage_library(src: &str) -> std::io::Result<PathBuf> {
     let hash = crate::content_hash_hex(&[src.as_bytes()]);
-    let root = tidepool_runtime::paths::effects_dir().join(format!("tidepool-libiso-{hash}"));
+    let root = tidepool_toolchain::paths::effects_dir().join(format!("tidepool-libiso-{hash}"));
     crate::write_module_file(&root, "Library.hs", src)?;
     Ok(root)
 }

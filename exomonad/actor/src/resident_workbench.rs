@@ -167,15 +167,15 @@ fn explain_source_order(
         return;
     }
     let line = u32::try_from(collision.declaration_line).unwrap_or(u32::MAX);
-    diagnostics.push(tidepool_runtime::diag::ExtractDiag {
-        span: Some(tidepool_runtime::diag::DiagSpan {
+    diagnostics.push(tidepool_toolchain::diag::ExtractDiag {
+        span: Some(tidepool_toolchain::diag::DiagSpan {
             file: "<cell>".to_string(),
             start_line: line,
             start_col: 1,
             end_line: line,
             end_col: 1,
         }),
-        severity: tidepool_runtime::diag::DiagnosticSeverity::Warning,
+        severity: tidepool_toolchain::diag::DiagnosticSeverity::Warning,
         message: collision.message(),
     });
 }

@@ -21,7 +21,7 @@ struct Args {
 /// deploy log carries which pair was blessed — the same detail a skew message
 /// prints later, making a stamp/skew pair diffable by eye.
 fn write_toolchain_stamp() -> Result<(), Box<dyn std::error::Error>> {
-    use tidepool_runtime::toolchain;
+    use tidepool_toolchain::toolchain;
 
     let (endpoint, location) = toolchain::bind_extract_endpoint()?;
     let stdlib = tidepool::haskell_sources::ensure_stdlib()?;

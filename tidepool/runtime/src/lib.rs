@@ -7,9 +7,7 @@
 //!
 //! Toolchain location, validation, fingerprinting, and the compile-output
 //! cache live in `tidepool-toolchain` (a crate this one depends on and sits
-//! above). `paths`, `toolchain`, `cache`, `artifacts`, `diag`, and `timing`
-//! below are thin module re-exports of that crate, kept so every existing
-//! `tidepool_runtime::<module>::...` call site keeps compiling unchanged;
+//! above). Internal module names below refer to `tidepool-toolchain` directly.
 //! `failclass` is a real local module (its `classify`/`classify_session`
 //! dispatch over this crate's own `RuntimeError`/`SessionError`, so they
 //! can't live below in `tidepool-toolchain`) that re-exports the rest of the
@@ -33,7 +31,7 @@ use tidepool_repr::DataConTable;
 pub(crate) use tidepool_toolchain::extract_spawn_error;
 pub use tidepool_toolchain::prepared_artifact::PreparedArtifact;
 pub use tidepool_toolchain::CompileError;
-pub use tidepool_toolchain::{artifacts, cache, diag, paths, timing, toolchain};
+pub(crate) use tidepool_toolchain::{artifacts, cache, diag, paths, timing, toolchain};
 
 pub mod failclass;
 /// Generated suspension-decode request types (`tidepool-protocol`'s

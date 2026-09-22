@@ -350,7 +350,7 @@ impl SourceLayer {
         let captured_roots: Vec<PathBuf> = (0..roots.len())
             .map(|index| pending.join(index.to_string()))
             .collect();
-        let identity = tidepool_runtime::cache::source_roots_identity(&domain, &captured_roots);
+        let identity = tidepool_toolchain::cache::source_roots_identity(&domain, &captured_roots);
         let modules = revision_modules(&pending, roots.len());
 
         std::fs::create_dir_all(pending.join("resources/Exomonad/Source"))?;
@@ -998,7 +998,7 @@ fn revision_include_paths(directory: &Path, roots: usize) -> Vec<PathBuf> {
 fn manifest_of_roots(roots: &[PathBuf]) -> Vec<(String, String)> {
     let mut modules: BTreeMap<String, String> = BTreeMap::new();
     for root in roots {
-        for (relative, digest) in tidepool_runtime::cache::source_root_manifest(root) {
+        for (relative, digest) in tidepool_toolchain::cache::source_root_manifest(root) {
             let Some(module) = module_name(&relative) else {
                 continue;
             };
@@ -1301,7 +1301,7 @@ mod tests {
     /// Source-revision identity; artifact reuse additionally validates the
     /// compiler's consumed dependency and import-resolution evidence.
     fn cache_key(include: &[PathBuf]) -> String {
-        tidepool_runtime::cache::source_roots_identity(b"source-revision-test", include)
+        tidepool_toolchain::cache::source_roots_identity(b"source-revision-test", include)
     }
 
     /// Two cooperating files edited together are one transaction, and what a

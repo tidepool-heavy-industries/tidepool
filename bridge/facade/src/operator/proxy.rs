@@ -95,7 +95,7 @@ pub fn run_root_for_session(runs_dir: &Path, session: &str) -> Result<PathBuf, P
 }
 
 fn default_runs_dir() -> PathBuf {
-    tidepool_runtime::paths::cache_dir()
+    tidepool_toolchain::paths::cache_dir()
         .join("exomonad")
         .join("runs")
 }

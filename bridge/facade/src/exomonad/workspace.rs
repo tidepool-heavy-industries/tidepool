@@ -902,7 +902,7 @@ mod tests {
     /// Source-revision identity; artifact reuse additionally validates the
     /// compiler's consumed dependency and import-resolution evidence.
     fn cache_key(include: &[PathBuf]) -> String {
-        tidepool_runtime::cache::source_roots_identity(b"source-revision-test", include)
+        tidepool_toolchain::cache::source_roots_identity(b"source-revision-test", include)
     }
 
     #[test]

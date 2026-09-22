@@ -222,7 +222,7 @@ pub(crate) fn write_module_dir(
     // collide with hashing their concatenation.
     let field_bytes: Vec<&[u8]> = files.iter().map(|(_, src)| src.as_bytes()).collect();
     let hash = content_hash_hex(&field_bytes);
-    let root = tidepool_runtime::paths::effects_dir().join(format!("{dir_prefix}-{hash}"));
+    let root = tidepool_toolchain::paths::effects_dir().join(format!("{dir_prefix}-{hash}"));
     let module_dir = root.join("Tidepool");
 
     // Acquire the process-level serialization lock. Concurrent callers
