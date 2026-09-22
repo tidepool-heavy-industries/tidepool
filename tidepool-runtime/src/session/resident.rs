@@ -636,6 +636,26 @@ pub enum ResidentError {
     Prepared(#[from] PreparedRuntimeError),
 }
 
+/// A failed continuation response classified by the parked frame's ground
+/// truth. `Rejected` leaves the original frame available for retry or abort;
+/// `Consumed` means delivery crossed the continuation boundary before the
+/// resumed computation failed.
+#[derive(Debug, thiserror::Error)]
+pub enum ResidentResumeError {
+    #[error("resident response was rejected before consuming its continuation: {0}")]
+    Rejected(ResidentError),
+    #[error("resident computation failed after consuming its response: {0}")]
+    Consumed(ResidentError),
+}
+
+impl ResidentResumeError {
+    pub fn into_inner(self) -> ResidentError {
+        match self {
+            Self::Rejected(error) | Self::Consumed(error) => error,
+        }
+    }
+}
+
 impl ResidentError {
     /// Which of the two post-compile failure layers this error belongs to —
     /// see [`crate::session::workbench::WorkbenchFailureLayer`]. `None` covers an
@@ -3262,7 +3282,21 @@ where
     where
         T: tidepool_bridge::ToHaskell + Send + 'static,
     {
-        self.resume_response(hole, Response::new(answer))
+        self.resume_classified(hole, answer)
+            .map_err(ResidentResumeError::into_inner)
+    }
+
+    /// [`Self::resume`] with authoritative pre-consume versus post-consume
+    /// failure classification for callers that publish effect disposition.
+    pub fn resume_classified<T>(
+        &mut self,
+        hole: ResidentHole,
+        answer: T,
+    ) -> Result<ResidentOutcome, ResidentResumeError>
+    where
+        T: tidepool_bridge::ToHaskell + Send + 'static,
+    {
+        self.resume_response_classified(hole, Response::new(answer))
     }
 
     /// Resume a suspended turn from one owned structural source. Conversion
@@ -3273,13 +3307,36 @@ where
         hole: ResidentHole,
         answer: Response,
     ) -> Result<ResidentOutcome, ResidentError> {
+        self.resume_response_classified(hole, answer)
+            .map_err(ResidentResumeError::into_inner)
+    }
+
+    /// [`Self::resume_response`] retaining whether the original continuation
+    /// was consumed. The resident registry is the sole authority for this
+    /// distinction; callers must not infer it from error text or variants.
+    pub fn resume_response_classified(
+        &mut self,
+        hole: ResidentHole,
+        answer: Response,
+    ) -> Result<ResidentOutcome, ResidentResumeError> {
         let seed = hole.seed();
         let id = match hole {
             ResidentHole::Plain(h) => h.id,
             ResidentHole::Binding(h) => h.id,
             ResidentHole::ProjectedBinding(h) => h.id,
         };
+        let frame = self
+            .parked
+            .iter()
+            .find_map(|(name, frame)| (name == &id).then_some(*frame));
         self.reenter(&id, ResidentResumeInput::Response(answer), seed, None)
+            .map_err(|error| match frame {
+                Some(frame) if self.state.parked_ids().contains(&frame) => {
+                    ResidentResumeError::Rejected(error)
+                }
+                Some(_) => ResidentResumeError::Consumed(error),
+                None => ResidentResumeError::Rejected(error),
+            })
     }
 
     /// Abort the suspended turn WITHOUT running the continuation — the ask

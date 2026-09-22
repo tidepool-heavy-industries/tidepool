@@ -148,8 +148,12 @@ pub enum PreparedRuntimeError {
     AnswerUnconstructible { site: u64, reason: String },
     /// Structural conversion failed at the dispatch/resume boundary. The
     /// frame stays parked and no answer root is published.
-    #[error("typed site {site} rejects its structural answer: {detail}")]
-    AnswerRejected { site: u64, detail: String },
+    #[error("typed site {site} rejects its structural answer: {source}")]
+    AnswerRejected {
+        site: u64,
+        #[source]
+        source: tidepool_bridge::BridgeError,
+    },
     /// A resumed handle (bare or framed) is not live in this engine's
     /// ledger: unknown, released, or minted under a different engine. The
     /// frame stays parked.
@@ -906,10 +910,7 @@ fn build_structural_node(
     if let Some(error) = visitor.failure.take() {
         return Err(error);
     }
-    visited.map_err(|error| PreparedRuntimeError::AnswerRejected {
-        site,
-        detail: error.to_string(),
-    })?;
+    visited.map_err(|source| PreparedRuntimeError::AnswerRejected { site, source })?;
     if !visitor.frames.is_empty() {
         return Err(PreparedRuntimeError::AnswerShape {
             site,
