@@ -3661,12 +3661,10 @@ dependencies = [
  "genai",
  "glob",
  "ignore",
- "inventory",
  "libc",
  "parking_lot",
  "regex",
  "reqwest 0.13.4",
- "serde",
  "serde_json",
  "tempfile",
  "thiserror",
@@ -3922,11 +3920,8 @@ dependencies = [
  "serde_json",
  "tidepool-harness",
  "tidepool-repr",
- "tidepool-runtime",
  "tokio",
  "tokio-stream",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
