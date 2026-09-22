@@ -2216,45 +2216,6 @@ impl<'code> PreparedMachine<'code> {
         })
     }
 
-    /// Build a host answer from a validated plan and retain it under `realm`.
-    ///
-    /// Every constructor resolves through the machine interner, so the built
-    /// cells carry exactly the descriptors installed code dispatches on. The
-    /// validated tree is built children-first, one object at a time. Completed
-    /// objects live in fixed-address temporary root slots, allowing collection
-    /// between steps and answers larger than one nursery span. Only the fully
-    /// initialized root is promoted and published as a handle.
-    ///
-    /// Each byte payload is allocated only after capacity for its wrapper is
-    /// available. No collection occurs between payload initialization and
-    /// rooting the initialized wrapper. A payload whose wrapper was not
-    /// published is released immediately; later failures leave committed,
-    /// unreachable wrappers for ordinary collection.
-    pub fn build_answer(
-        &mut self,
-        realm: RealmId,
-        plan: &super::answer::AnswerPlan,
-    ) -> Result<PreparedHandle, ExecutionError> {
-        let bytes_descriptor = Arc::clone(
-            &self
-                .interner
-                .shared_externals()
-                .ok_or(ExecutionError::Invariant(
-                    "build_answer: no program has installed the shared external wrapper \
-                     descriptors yet",
-                ))?
-                .bytes_array,
-        );
-        let flattened = super::answer::FlattenedAnswer::resolve(
-            plan,
-            &|id| self.interner.by_host(id).map(|(_, descriptor)| descriptor),
-            &bytes_descriptor,
-        )?;
-        let mut builder = self.managed_builder()?;
-        let root = flattened.build(&mut builder)?;
-        builder.finish(realm, root)
-    }
-
     /// Start one incremental managed construction operation. Dropping the
     /// builder publishes no handle and releases all temporary root ownership.
     pub fn managed_builder(&mut self) -> Result<ManagedBuilder<'_, 'code>, ExecutionError> {
@@ -6996,55 +6957,44 @@ mod tests {
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 
-    /// A host answer builds through the interner into a realm-owned handle
-    /// that observes to the planned value; a plan naming an undeclared
-    /// constructor is refused with the allocation cursor, the handle ledger
-    /// and the root counts untouched.
+    /// Managed construction resolves constructors through the interner and
+    /// publishes only a completed root. Unknown constructors and wrong arity
+    /// leave the allocation cursor, handle ledger and root counts untouched.
     #[test]
-    fn a_host_answer_builds_through_the_interner_or_leaves_the_heap_untouched() {
-        use crate::prepared_program::{AnswerBuildError, AnswerPlan};
+    fn managed_construction_builds_through_the_interner_or_leaves_the_heap_untouched() {
+        use crate::prepared_program::AnswerBuildError;
         let (mut machine, program) = machine();
         let realm = RealmId::fresh();
         let handles_before = machine.handle_count();
         let roots_before = machine.total_persistent_roots();
         let cursor_before = machine.vmctx.alloc_ptr;
 
-        let unknown = AnswerPlan::Constructor {
-            host_id: DataConId(4242),
-            fields: Vec::new(),
-        };
-        assert!(matches!(
-            machine.build_answer(realm, &unknown),
-            Err(ExecutionError::Answer(
-                AnswerBuildError::UnknownConstructor(DataConId(4242))
-            ))
-        ));
-        let wrong_arity = AnswerPlan::Constructor {
-            host_id: DataConId(900),
-            fields: vec![AnswerPlan::Scalar {
-                rep: RuntimeRep::Int(64),
-                bits: [0; 16],
-            }],
-        };
-        assert!(matches!(
-            machine.build_answer(realm, &wrong_arity),
-            Err(ExecutionError::Answer(AnswerBuildError::FieldCount {
-                expected: 0,
-                actual: 1,
-                ..
-            }))
-        ));
+        {
+            let mut builder = machine.managed_builder().expect("managed builder");
+            assert!(matches!(
+                builder.constructor(DataConId(4242), &[]),
+                Err(ExecutionError::Answer(
+                    AnswerBuildError::UnknownConstructor(DataConId(4242))
+                ))
+            ));
+            assert!(matches!(
+                builder.constructor(DataConId(900), &[ManagedField::Scalar([0; 16])]),
+                Err(ExecutionError::Answer(AnswerBuildError::FieldCount {
+                    expected: 0,
+                    actual: 1,
+                    ..
+                }))
+            ));
+        }
         assert_eq!(machine.vmctx.alloc_ptr, cursor_before);
         assert_eq!(machine.handle_count(), handles_before);
         assert_eq!(machine.total_persistent_roots(), roots_before);
 
-        let unit = AnswerPlan::Constructor {
-            host_id: DataConId(900),
-            fields: Vec::new(),
-        };
-        let handle = machine
-            .build_answer(realm, &unit)
+        let mut builder = machine.managed_builder().expect("managed builder");
+        let unit = builder
+            .constructor(DataConId(900), &[])
             .expect("the CAF program's Unit constructor builds");
+        let handle = builder.finish(realm, unit).expect("Unit is published");
         assert_eq!(machine.handle_realm(handle), Some(realm));
         assert_eq!(machine.handle_count(), handles_before + 1);
         assert!(matches!(
@@ -7078,7 +7028,7 @@ mod tests {
     /// earlier node would silently publish or embed the wrong object.
     #[test]
     fn a_managed_node_cannot_cross_builder_ownership() {
-        use crate::prepared_program::{AnswerBuildError, AnswerPlan};
+        use crate::prepared_program::AnswerBuildError;
 
         let (mut machine, _) = machine();
         let stale = {
@@ -7098,14 +7048,12 @@ mod tests {
             Err(ExecutionError::Answer(AnswerBuildError::ForeignNode))
         ));
 
-        let handle = machine
-            .build_answer(
-                RealmId::ROOT,
-                &AnswerPlan::Constructor {
-                    host_id: DataConId(900),
-                    fields: Vec::new(),
-                },
-            )
+        let mut builder = machine.managed_builder().expect("third builder");
+        let unit = builder
+            .constructor(DataConId(900), &[])
+            .expect("third builder constructs Unit");
+        let handle = builder
+            .finish(RealmId::ROOT, unit)
             .expect("the rejected cross-builder node leaves the machine reusable");
         assert!(machine.release(handle));
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
@@ -7146,20 +7094,12 @@ mod tests {
         .expect("scope cleanup permits later intrinsic construction");
     }
 
-    /// A host answer for a constructor with a scalar field builds through the
-    /// interner and observes the field back as the declared representation;
-    /// a plan that nests an object where the field expects a scalar (a
-    /// representation-category mismatch `marshal_descriptor_object` catches
-    /// at the leaf) is refused with `AnswerBuildError::Field` and leaves the
-    /// allocation cursor, the handle ledger and the root counts untouched.
-    ///
-    /// (`AnswerPlan::Scalar::rep` is not itself cross-checked against the
-    /// constructor's declared field representation -- only `bits` reaches
-    /// the write path, and `Int`/`Word`/`Float` all marshal as raw bytes -- so
-    /// the genuine mismatch this test exercises is shape, not width.)
+    /// A constructor with a scalar field observes the field back as its
+    /// declared representation. Supplying a node for that scalar field is a
+    /// typed reusable failure and publishes no partial result.
     #[test]
-    fn a_host_answer_with_scalar_fields_builds_and_a_bad_field_remains_reusable() {
-        use crate::prepared_program::{AnswerBuildError, AnswerPlan};
+    fn managed_scalar_fields_build_and_a_bad_field_remains_reusable() {
+        use crate::prepared_program::AnswerBuildError;
         let (mut machine, program) = PreparedMachine::new(
             field_constructor_program(910),
             PreparedMachineOptions {
@@ -7172,16 +7112,11 @@ mod tests {
 
         let mut bits = [0u8; 16];
         bits[..8].copy_from_slice(&42_i64.to_ne_bytes());
-        let good = AnswerPlan::Constructor {
-            host_id: DataConId(910),
-            fields: vec![AnswerPlan::Scalar {
-                rep: RuntimeRep::Int(64),
-                bits,
-            }],
-        };
-        let handle = machine
-            .build_answer(realm, &good)
+        let mut builder = machine.managed_builder().expect("managed builder");
+        let good = builder
+            .constructor(DataConId(910), &[ManagedField::Scalar(bits)])
             .expect("the Field constructor builds with its Int(64) field");
+        let handle = builder.finish(realm, good).expect("Field is published");
         assert_eq!(machine.handle_realm(handle), Some(realm));
         assert_eq!(machine.handle_count(), handles_before + 1);
         assert!(matches!(
@@ -7198,27 +7133,19 @@ mod tests {
         let handles_after_good = machine.handle_count();
         let roots_after_good = machine.total_persistent_roots();
 
-        // The field expects a scalar; nesting an object there is a
-        // representation-category mismatch caught by the same leaf
-        // validation `marshal_descriptor_object` runs for every field.
-        let bad = AnswerPlan::Constructor {
-            host_id: DataConId(910),
-            fields: vec![AnswerPlan::Constructor {
-                host_id: DataConId(910),
-                fields: vec![AnswerPlan::Scalar {
-                    rep: RuntimeRep::Int(64),
-                    bits,
-                }],
-            }],
-        };
+        let mut builder = machine.managed_builder().expect("managed builder");
+        let inner = builder
+            .constructor(DataConId(910), &[ManagedField::Scalar(bits)])
+            .expect("inner Field builds");
         assert!(matches!(
-            machine.build_answer(realm, &bad),
+            builder.constructor(DataConId(910), &[ManagedField::Node(inner)]),
             Err(ExecutionError::Answer(AnswerBuildError::Field {
                 host_id: DataConId(910),
                 index: 0,
                 ..
             }))
         ));
+        drop(builder);
         assert!(machine.vmctx.alloc_ptr > cursor_after_good);
         assert_eq!(machine.handle_count(), handles_after_good);
         assert_eq!(machine.total_persistent_roots(), roots_after_good);
@@ -7230,7 +7157,7 @@ mod tests {
 
     /// A program declaring a `Text`-shaped constructor (`ByteArray#`, `Int#`
     /// offset, `Int#` length) beside a nullary `Unit` its CAF returns, so a
-    /// host answer can exercise the byte-backed leaf without the program ever
+    /// managed construction can exercise the byte-backed leaf without the program ever
     /// constructing one itself.
     fn text_shaped_program(unit_id: u64, text_id: u64) -> CompiledProgram {
         let mut wire = testing::wire_program();
@@ -7303,13 +7230,13 @@ mod tests {
         CompiledProgram::compile(&linked).expect("text_shaped_program fixture compiles")
     }
 
-    /// A byte-backed host answer allocates its payload only after wrapper
+    /// A byte-backed managed value allocates its payload only after wrapper
     /// capacity is available and observes back as the bytes it was given. If
     /// a later field fails, the initialized wrapper is unreachable and the
     /// next collection reclaims its payload; the machine remains reusable.
     #[test]
-    fn a_byte_backed_host_answer_builds_and_failure_is_collectable() {
-        use crate::prepared_program::{AnswerBuildError, AnswerPlan};
+    fn byte_backed_managed_construction_builds_and_failure_is_collectable() {
+        use crate::prepared_program::AnswerBuildError;
         let (mut machine, program) = PreparedMachine::new(
             text_shaped_program(920, 921),
             PreparedMachineOptions {
@@ -7328,33 +7255,30 @@ mod tests {
             bits[..8].copy_from_slice(&value.to_ne_bytes());
             bits
         };
-        let scalar = |value: i64| AnswerPlan::Scalar {
-            rep: RuntimeRep::Int(64),
-            bits: int_bits(value),
-        };
-
         // A failing later field leaves the initialized byte wrapper
-        // unreachable. It publishes no answer root; normal collection owns
+        // unreachable. It publishes no result root; normal collection owns
         // reclamation rather than pretending to roll the nursery cursor back.
-        let bad = AnswerPlan::Constructor {
-            host_id: DataConId(921),
-            fields: vec![
-                AnswerPlan::Bytes(text.clone()),
-                scalar(0),
-                AnswerPlan::Constructor {
-                    host_id: DataConId(920),
-                    fields: vec![],
-                },
-            ],
-        };
+        let mut builder = machine.managed_builder().expect("managed builder");
+        let bytes = builder.bytes(&text).expect("byte wrapper builds");
+        let unit = builder
+            .constructor(DataConId(920), &[])
+            .expect("Unit builds");
         assert!(matches!(
-            machine.build_answer(realm, &bad),
+            builder.constructor(
+                DataConId(921),
+                &[
+                    ManagedField::Node(bytes),
+                    ManagedField::Scalar(int_bits(0)),
+                    ManagedField::Node(unit),
+                ],
+            ),
             Err(ExecutionError::Answer(AnswerBuildError::Field {
                 host_id: DataConId(921),
                 index: 2,
                 ..
             }))
         ));
+        drop(builder);
         assert_eq!(
             machine.machine.external_storage_stats().live_objects,
             ledger_before.live_objects + 1
@@ -7380,17 +7304,19 @@ mod tests {
             ledger_before.live_objects
         );
 
-        let good = AnswerPlan::Constructor {
-            host_id: DataConId(921),
-            fields: vec![
-                AnswerPlan::Bytes(text.clone()),
-                scalar(0),
-                scalar(text.len() as i64),
-            ],
-        };
-        let handle = machine
-            .build_answer(realm, &good)
+        let mut builder = machine.managed_builder().expect("managed builder");
+        let bytes = builder.bytes(&text).expect("byte wrapper builds");
+        let root = builder
+            .constructor(
+                DataConId(921),
+                &[
+                    ManagedField::Node(bytes),
+                    ManagedField::Scalar(int_bits(0)),
+                    ManagedField::Scalar(int_bits(text.len() as i64)),
+                ],
+            )
             .expect("the Text-shaped constructor builds over its byte array");
+        let handle = builder.finish(realm, root).expect("Text is published");
         assert_eq!(
             machine.machine.external_storage_stats().live_objects,
             ledger_before.live_objects + 1
@@ -7435,45 +7361,6 @@ mod tests {
         assert!(machine.release(handle));
         assert_eq!(machine.handle_count(), handles_before);
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
-    }
-
-    /// A plan whose root is a bare `Scalar` (no constructor to root) is
-    /// refused as `UnboxedRoot` before anything is sized or allocated: the
-    /// cursor, handle count, persistent-root count and external ledger are
-    /// all exactly as they were.
-    #[test]
-    fn a_scalar_root_is_refused_with_nothing_allocated() {
-        use crate::prepared_program::{AnswerBuildError, AnswerPlan};
-        let (mut machine, _program) = PreparedMachine::new(
-            text_shaped_program(920, 921),
-            PreparedMachineOptions {
-                nursery_bytes: RunOptions::default().nursery_bytes,
-            },
-        )
-        .expect("prepared machine");
-        let realm = RealmId::fresh();
-        let handles_before = machine.handle_count();
-        let roots_before = machine.total_persistent_roots();
-        let ledger_before = machine.machine.external_storage_stats();
-        let cursor_before = machine.vmctx.alloc_ptr;
-
-        let mut bits = [0u8; 16];
-        bits[..8].copy_from_slice(&42i64.to_ne_bytes());
-        let plan = AnswerPlan::Scalar {
-            rep: RuntimeRep::Int(64),
-            bits,
-        };
-        assert!(matches!(
-            machine.build_answer(realm, &plan),
-            Err(ExecutionError::Answer(AnswerBuildError::UnboxedRoot))
-        ));
-        assert_eq!(
-            machine.machine.external_storage_stats().live_objects,
-            ledger_before.live_objects
-        );
-        assert_eq!(machine.vmctx.alloc_ptr, cursor_before);
-        assert_eq!(machine.handle_count(), handles_before);
-        assert_eq!(machine.total_persistent_roots(), roots_before);
     }
 
     /// Compile a fixture as the first program of a fresh machine
@@ -7570,10 +7457,6 @@ mod tests {
         // figure is the same after warm-up as every other counter.
         let mut baseline: Option<(ResidencyCounts, usize)> = None;
         let mut old_bytes: Option<usize> = None;
-        let unit_answer = crate::prepared_program::AnswerPlan::Constructor {
-            host_id: DataConId(900),
-            fields: Vec::new(),
-        };
         let mut answer_handle: Option<PreparedHandle> = None;
         for iteration in 0..iterations {
             let compiled = machine
@@ -7592,9 +7475,13 @@ mod tests {
             previous = handle;
             // One heap value retained per turn, the previous turn's released:
             // without compaction its promotion arena would accumulate.
-            let answer = machine
-                .build_answer(RealmId::ROOT, &unit_answer)
-                .expect("a Unit answer builds");
+            let mut builder = machine.managed_builder().expect("managed builder");
+            let unit = builder
+                .constructor(DataConId(900), &[])
+                .expect("a Unit value builds");
+            let answer = builder
+                .finish(RealmId::ROOT, unit)
+                .expect("the Unit value is retained");
             if let Some(stale) = answer_handle.replace(answer) {
                 assert!(machine.release(stale));
             }
@@ -7887,7 +7774,7 @@ mod tests {
     }
 
     /// A program declaring a nullary `Unit` (its CAF's result) and a
-    /// one-field `Box a`, so a host answer can build a nested value graph.
+    /// one-field `Box a`, so managed construction can build a nested value graph.
     fn boxed_shape_program(unit_id: u64, box_id: u64) -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
@@ -7945,18 +7832,19 @@ mod tests {
         CompiledProgram::compile(&linked).expect("boxed_shape_program fixture compiles")
     }
 
-    fn boxed(depth: usize, unit_id: u64, box_id: u64) -> crate::prepared_program::AnswerPlan {
-        use crate::prepared_program::AnswerPlan;
-        (0..depth).fold(
-            AnswerPlan::Constructor {
-                host_id: DataConId(unit_id),
-                fields: Vec::new(),
-            },
-            |inner, _| AnswerPlan::Constructor {
-                host_id: DataConId(box_id),
-                fields: vec![inner],
-            },
-        )
+    fn build_boxed(
+        machine: &mut PreparedMachine<'_>,
+        realm: RealmId,
+        depth: usize,
+        unit_id: u64,
+        box_id: u64,
+    ) -> Result<PreparedHandle, ExecutionError> {
+        let mut builder = machine.managed_builder()?;
+        let mut node = builder.constructor(DataConId(unit_id), &[])?;
+        for _ in 0..depth {
+            node = builder.constructor(DataConId(box_id), &[ManagedField::Node(node)])?;
+        }
+        builder.finish(realm, node)
     }
 
     /// The nesting depth of an observed `boxed` value, `None` for any other
@@ -7974,20 +7862,19 @@ mod tests {
         }
     }
 
-    /// Incremental answer construction roots each completed child before it
+    /// Incremental managed construction roots each completed child before it
     /// asks the collector for the next object's space. The complete graph is
     /// deliberately much larger than this nursery; the old contiguous-span
     /// builder refused it as `TooLarge`.
     #[test]
-    fn a_host_answer_larger_than_the_nursery_builds_across_collections() {
+    fn a_managed_value_larger_than_the_nursery_builds_across_collections() {
         let (mut machine, program) = PreparedMachine::new(
             boxed_shape_program(930, 931),
             PreparedMachineOptions { nursery_bytes: 256 },
         )
         .expect("prepared machine");
         let realm = RealmId::fresh();
-        let handle = machine
-            .build_answer(realm, &boxed(100, 930, 931))
+        let handle = build_boxed(&mut machine, realm, 100, 930, 931)
             .expect("incremental construction spans nursery collections");
         let observed = machine
             .observe_handle(program, handle, 1_000)
@@ -7997,8 +7884,33 @@ mod tests {
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 
+    #[test]
+    fn a_stale_handle_field_is_rejected_without_publishing_a_root() {
+        use crate::prepared_program::AnswerBuildError;
+
+        let (mut machine, _) = PreparedMachine::new(
+            boxed_shape_program(930, 931),
+            PreparedMachineOptions {
+                nursery_bytes: RunOptions::default().nursery_bytes,
+            },
+        )
+        .expect("prepared machine");
+        let stale = build_boxed(&mut machine, RealmId::ROOT, 0, 930, 931).expect("Unit builds");
+        assert!(machine.release(stale));
+        let handles_before = machine.handle_count();
+
+        let mut builder = machine.managed_builder().expect("managed builder");
+        assert!(matches!(
+            builder.constructor(DataConId(931), &[ManagedField::Handle(stale)]),
+            Err(ExecutionError::Answer(AnswerBuildError::UnknownHandle))
+        ));
+        drop(builder);
+        assert_eq!(machine.handle_count(), handles_before);
+        assert_eq!(machine.disposition(), MachineDisposition::Reusable);
+    }
+
     /// `old_bytes_live` reads live promoted bytes without needing a major
-    /// collection first: `build_answer` retains its result straight into old
+    /// collection first: `ManagedBuilder::finish` retains its result in old
     /// space, so the accessor grows between two builds with no
     /// `collect_major` in between -- the property `PreparedEngine`'s
     /// amortization trigger (`tidepool-runtime/src/session/prepared.rs`,
@@ -8019,16 +7931,12 @@ mod tests {
         assert_eq!(machine.old_bytes_live(), 0, "nothing retained yet");
 
         let realm = RealmId::fresh();
-        let small = machine
-            .build_answer(realm, &boxed(1, 930, 931))
-            .expect("small graph builds");
+        let small = build_boxed(&mut machine, realm, 1, 930, 931).expect("small graph builds");
         let after_small = machine.old_bytes_live();
         assert!(after_small > 0, "the retained graph is live old-space");
         assert_eq!(after_small, machine.old_space.prepared_bytes_used());
 
-        let large = machine
-            .build_answer(realm, &boxed(5, 930, 931))
-            .expect("larger graph builds");
+        let large = build_boxed(&mut machine, realm, 5, 930, 931).expect("larger graph builds");
         let after_large = machine.old_bytes_live();
         assert!(
             after_large > after_small,
@@ -8065,14 +7973,11 @@ mod tests {
         // the observations below force through.
         machine.pin(program).expect("installed");
         let realm = RealmId::fresh();
-        let outer = machine
-            .build_answer(realm, &boxed(3, 930, 931))
-            .expect("the shared graph builds");
+        let outer = build_boxed(&mut machine, realm, 3, 930, 931).expect("the shared graph builds");
         let one_copy = machine.old_space.prepared_bytes_used();
         assert!(one_copy > 0, "the built graph is retained in old space");
-        let garbage = machine
-            .build_answer(realm, &boxed(2, 930, 931))
-            .expect("the discarded graph builds");
+        let garbage =
+            build_boxed(&mut machine, realm, 2, 930, 931).expect("the discarded graph builds");
         assert!(machine.release(garbage));
         let PreparedOuter::Constructor { fields, .. } = machine
             .inspect_outer(outer, realm)
@@ -8176,15 +8081,13 @@ mod tests {
         };
         let f = *f;
         // A released host value is old-space garbage for compaction.
-        let garbage = machine
-            .build_answer(
-                realm,
-                &crate::prepared_program::AnswerPlan::Constructor {
-                    host_id: DataConId(1_301),
-                    fields: Vec::new(),
-                },
-            )
-            .expect("a Ready answer builds");
+        let mut builder = machine.managed_builder().expect("managed builder");
+        let ready = builder
+            .constructor(DataConId(1_301), &[])
+            .expect("a Ready value builds");
+        let garbage = builder
+            .finish(realm, ready)
+            .expect("the Ready value is retained");
         assert!(machine.release(garbage));
         let address = |machine: &PreparedMachine<'_>, handle| {
             tidepool_heap::managed_reference::untag(unsafe {

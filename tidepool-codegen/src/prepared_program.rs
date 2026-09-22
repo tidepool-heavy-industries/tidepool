@@ -51,7 +51,7 @@ mod answer;
 mod construction;
 mod run;
 pub use crate::resource_ledger::PreparedFrameEvidence;
-pub use answer::{AnswerBuildError, AnswerPlan, MAX_ANSWER_DEPTH};
+pub use answer::{AnswerBuildError, MAX_ANSWER_DEPTH};
 
 struct ActiveIntrinsicScope<'a> {
     machine: &'a crate::machine_state::MachineState,
