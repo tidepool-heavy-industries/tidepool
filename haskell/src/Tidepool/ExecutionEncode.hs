@@ -33,6 +33,9 @@ encodeWireProgram program = toStrictByteString $ array
   , list encodeTypeNode (programTypes program)
   , list encodeSiteRow (programSites program)
   , list encodeVerbSite (programVerbSites program)
+  , case programJsonLayout program of
+      Nothing -> tag 0
+      Just layout -> tagged 1 [encodeJsonLayout layout]
   ]
  where
   envelope = programEnvelope program

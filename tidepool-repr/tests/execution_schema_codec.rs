@@ -34,6 +34,7 @@ fn root(signatures: Cbor) -> Cbor {
         Cbor::Array(vec![]),
         Cbor::Array(vec![]),
         Cbor::Array(vec![]),
+        Cbor::Array(vec![int(0)]),
     ])
 }
 

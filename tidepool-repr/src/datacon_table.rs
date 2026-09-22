@@ -1,6 +1,7 @@
 //! A lookup table for data constructor metadata.
 
 use crate::datacon::DataCon;
+use crate::execution_schema::JsonLayout;
 use crate::types::DataConId;
 use std::collections::{HashMap, HashSet};
 
@@ -125,12 +126,26 @@ pub struct DataConTable {
     /// for the same reason as `field_labels`: pure render metadata, no effect
     /// on constructor identity/equality.
     field_types: HashMap<DataConId, Vec<String>>,
+    /// Per-program JSON runtime IDs, attached only while a typed host value is
+    /// streamed through this table. Constructor metadata remains mergeable
+    /// without carrying another program's JSON authority forward.
+    json_layout: Option<JsonLayout<DataConId>>,
 }
 
 impl DataConTable {
     /// Create an empty table.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attach the compiler-authenticated JSON roles for one structural mount.
+    pub fn set_json_layout(&mut self, layout: JsonLayout<DataConId>) {
+        self.json_layout = Some(layout);
+    }
+
+    /// JSON roles attached by the owning prepared program, if any.
+    pub fn json_layout(&self) -> Option<&JsonLayout<DataConId>> {
+        self.json_layout.as_ref()
     }
 
     /// Insert a data constructor, refusing to silently overwrite a DISTINCT

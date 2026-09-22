@@ -351,7 +351,8 @@ fn strict_artifact() -> Vec<u8> {
         uint(0),
         array([]),
         array([]),
-        array([]), // verb sites
+        array([]),        // verb sites
+        array([uint(0)]), // no authenticated JSON layout
     ])
 }
 

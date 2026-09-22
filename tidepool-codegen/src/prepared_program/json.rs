@@ -35,6 +35,88 @@ const NUMBER_TOKEN: &str = "$serde_json::private::Number";
 pub(super) const PARSE_JSON_HOST: &str = "prepared_parse_json";
 pub(super) const ENCODE_JSON_HOST: &str = "prepared_encode_json";
 
+/// The JIT-facing form of the one authenticated JSON payload layout. Decode
+/// result constructors are deliberately not part of this object.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(super) struct JsonLayoutIds {
+    object: u32,
+    array: u32,
+    string: u32,
+    number: u32,
+    bool_: u32,
+    null: u32,
+    map_bin: u32,
+    map_tip: u32,
+    true_: u32,
+    false_: u32,
+    cons: u32,
+    nil: u32,
+    scientific: u32,
+    integer_small: u32,
+    integer_positive: u32,
+    integer_negative: u32,
+    text: u32,
+    int: u32,
+}
+
+impl From<JsonLayout> for JsonLayoutIds {
+    fn from(layout: JsonLayout) -> Self {
+        Self {
+            object: layout.object.0,
+            array: layout.array.0,
+            string: layout.string.0,
+            number: layout.number.0,
+            bool_: layout.bool_.0,
+            null: layout.null.0,
+            map_bin: layout.map_bin.0,
+            map_tip: layout.map_tip.0,
+            true_: layout.true_.0,
+            false_: layout.false_.0,
+            cons: layout.cons.0,
+            nil: layout.nil.0,
+            scientific: layout.scientific.0,
+            integer_small: layout.integer_small.0,
+            integer_positive: layout.integer_positive.0,
+            integer_negative: layout.integer_negative.0,
+            text: layout.text.0,
+            int: layout.int.0,
+        }
+    }
+}
+
+fn emit_layout_ids(builder: &mut FunctionBuilder<'_>, slot: ir::StackSlot, layout: JsonLayout) {
+    let ids = JsonLayoutIds::from(layout);
+    macro_rules! store {
+        ($field:ident) => {{
+            let value = builder.ins().iconst(types::I32, i64::from(ids.$field));
+            builder.ins().stack_store(
+                value,
+                slot,
+                std::mem::offset_of!(JsonLayoutIds, $field) as i32,
+            );
+        }};
+    }
+    store!(object);
+    store!(array);
+    store!(string);
+    store!(number);
+    store!(bool_);
+    store!(null);
+    store!(map_bin);
+    store!(map_tip);
+    store!(true_);
+    store!(false_);
+    store!(cons);
+    store!(nil);
+    store!(scientific);
+    store!(integer_small);
+    store!(integer_positive);
+    store!(integer_negative);
+    store!(text);
+    store!(int);
+}
+
 pub(super) fn recognize(
     identity: &OperationIdentity,
     signature: &Signature,
@@ -84,7 +166,7 @@ pub(super) fn emit_parse_json(
     arguments: &[Value],
 ) -> Result<Vec<Value>, super::CompileError> {
     let mut signature = ir::Signature::new(pipeline.isa.default_call_conv());
-    signature.params = vec![AbiParam::new(types::I64); 7];
+    signature.params = vec![AbiParam::new(types::I64); 9];
     signature.returns = vec![AbiParam::new(types::I32)];
     let host = pipeline
         .module
@@ -94,16 +176,13 @@ pub(super) fn emit_parse_json(
     let output = super::arrays::output_slot(builder);
     let layout_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
         ir::StackSlotKind::ExplicitSlot,
-        20 * 4,
+        std::mem::size_of::<JsonLayoutIds>() as u32,
         2,
     ));
-    for (index, constructor) in layout_ids(layout, left, right).into_iter().enumerate() {
-        let value = builder.ins().iconst(types::I32, i64::from(constructor.0));
-        builder
-            .ins()
-            .stack_store(value, layout_slot, (index * 4) as i32);
-    }
+    emit_layout_ids(builder, layout_slot, layout);
     let layout = builder.ins().stack_addr(types::I64, layout_slot, 0);
+    let left = builder.ins().iconst(types::I64, i64::from(left.0));
+    let right = builder.ins().iconst(types::I64, i64::from(right.0));
     let owner = builder
         .ins()
         .iconst(types::I64, descriptor.initial_header_word() as i64);
@@ -116,6 +195,8 @@ pub(super) fn emit_parse_json(
             arguments[1],
             arguments[2],
             layout,
+            left,
+            right,
             output,
         ],
     );
@@ -125,35 +206,6 @@ pub(super) fn emit_parse_json(
         .load(types::I64, MemFlags::trusted(), output, 0);
     builder.declare_value_needs_stack_map(result);
     Ok(vec![result])
-}
-
-fn layout_ids(
-    layout: JsonLayout,
-    left: tidepool_repr::execution_schema::ConstructorId,
-    right: tidepool_repr::execution_schema::ConstructorId,
-) -> [tidepool_repr::execution_schema::ConstructorId; 20] {
-    [
-        layout.object,
-        layout.array,
-        layout.string,
-        layout.number,
-        layout.bool_,
-        layout.null,
-        layout.map_bin,
-        layout.map_tip,
-        layout.true_,
-        layout.false_,
-        layout.cons,
-        layout.nil,
-        layout.scientific,
-        layout.integer_small,
-        layout.integer_positive,
-        layout.integer_negative,
-        layout.text,
-        layout.int,
-        left,
-        right,
-    ]
 }
 
 pub(super) fn emit_encode_json(
@@ -173,15 +225,10 @@ pub(super) fn emit_encode_json(
     let host = pipeline.module.declare_func_in_func(host, builder.func);
     let layout_slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
         ir::StackSlotKind::ExplicitSlot,
-        18 * 4,
+        std::mem::size_of::<JsonLayoutIds>() as u32,
         2,
     ));
-    for (index, constructor) in encode_layout_ids(layout).into_iter().enumerate() {
-        let value = builder.ins().iconst(types::I32, i64::from(constructor.0));
-        builder
-            .ins()
-            .stack_store(value, layout_slot, (index * 4) as i32);
-    }
+    emit_layout_ids(builder, layout_slot, layout);
     let layout = builder.ins().stack_addr(types::I64, layout_slot, 0);
     let output = super::arrays::output_slot(builder);
     builder.declare_value_needs_stack_map(arguments[0]);
@@ -194,29 +241,6 @@ pub(super) fn emit_encode_json(
         .load(types::I64, MemFlags::trusted(), output, 0);
     builder.declare_value_needs_stack_map(result);
     Ok(vec![result])
-}
-
-fn encode_layout_ids(layout: JsonLayout) -> [tidepool_repr::execution_schema::ConstructorId; 18] {
-    [
-        layout.object,
-        layout.array,
-        layout.string,
-        layout.number,
-        layout.bool_,
-        layout.null,
-        layout.map_bin,
-        layout.map_tip,
-        layout.true_,
-        layout.false_,
-        layout.cons,
-        layout.nil,
-        layout.scientific,
-        layout.integer_small,
-        layout.integer_positive,
-        layout.integer_negative,
-        layout.text,
-        layout.int,
-    ]
 }
 
 fn int_bits(value: i64) -> [u8; 16] {
@@ -253,31 +277,31 @@ struct JsonDescriptors {
 }
 
 impl JsonDescriptors {
-    fn resolve(builder: &IntrinsicBuilder<'_>, layout: *const u32) -> Result<Self, RuntimeError> {
-        if layout.is_null() {
-            return Err(RuntimeError::BadPointer);
-        }
-        let ids = unsafe { std::slice::from_raw_parts(layout, 20) };
-        let d = |index| builder.descriptor(ids[index]);
+    fn resolve(
+        builder: &IntrinsicBuilder<'_>,
+        layout: *const JsonLayoutIds,
+    ) -> Result<Self, RuntimeError> {
+        let ids = unsafe { layout.as_ref() }.ok_or(RuntimeError::BadPointer)?;
+        let d = |id| builder.descriptor(id);
         let resolved = Self {
-            object: d(0)?,
-            array: d(1)?,
-            string: d(2)?,
-            number: d(3)?,
-            bool_: d(4)?,
-            null: d(5)?,
-            bin: d(6)?,
-            tip: d(7)?,
-            true_: d(8)?,
-            false_: d(9)?,
-            cons: d(10)?,
-            nil: d(11)?,
-            scientific: d(12)?,
-            is: d(13)?,
-            ip: d(14)?,
-            in_: d(15)?,
-            text: d(16)?,
-            i_hash: d(17)?,
+            object: d(ids.object)?,
+            array: d(ids.array)?,
+            string: d(ids.string)?,
+            number: d(ids.number)?,
+            bool_: d(ids.bool_)?,
+            null: d(ids.null)?,
+            bin: d(ids.map_bin)?,
+            tip: d(ids.map_tip)?,
+            true_: d(ids.true_)?,
+            false_: d(ids.false_)?,
+            cons: d(ids.cons)?,
+            nil: d(ids.nil)?,
+            scientific: d(ids.scientific)?,
+            is: d(ids.integer_small)?,
+            ip: d(ids.integer_positive)?,
+            in_: d(ids.integer_negative)?,
+            text: d(ids.text)?,
+            i_hash: d(ids.int)?,
         };
         let reps = descriptor_reps;
         let lifted = RuntimeRep::LiftedRef;
@@ -533,7 +557,9 @@ pub(super) unsafe extern "C" fn prepared_parse_json(
     descriptor: *const ObjectDescriptor,
     offset: i64,
     length: i64,
-    layout: *const u32,
+    layout: *const JsonLayoutIds,
+    left: u64,
+    right: u64,
     output: *mut u64,
 ) -> i32 {
     let machine = unsafe { crate::machine_state::machine_state(vmctx) };
@@ -570,9 +596,10 @@ pub(super) unsafe extern "C" fn prepared_parse_json(
         let input_range = input_start..input_end;
         let mut builder = unsafe { IntrinsicBuilder::active(machine, &mut *vmctx) }?;
         let descriptors = JsonDescriptors::resolve(&builder, layout)?;
-        let ids = unsafe { std::slice::from_raw_parts(layout, 20) };
-        let left = builder.descriptor(ids[18])?;
-        let right = builder.descriptor(ids[19])?;
+        let left =
+            builder.descriptor(u32::try_from(left).map_err(|_| RuntimeError::BadPointer)?)?;
+        let right =
+            builder.descriptor(u32::try_from(right).map_err(|_| RuntimeError::BadPointer)?)?;
         if descriptor_reps(&left) != [RuntimeRep::LiftedRef]
             || descriptor_reps(&right) != [RuntimeRep::LiftedRef]
         {
@@ -676,7 +703,7 @@ impl Read for PollingReader<'_> {
 pub(super) unsafe extern "C" fn prepared_encode_json(
     vmctx: *mut VMContext,
     reference: *mut u8,
-    layout: *const u32,
+    layout: *const JsonLayoutIds,
     output: *mut u64,
 ) -> i32 {
     let machine = unsafe { crate::machine_state::machine_state(vmctx) };
@@ -759,35 +786,38 @@ struct EncoderIds {
 }
 
 impl EncoderIds {
-    fn resolve(builder: &IntrinsicBuilder<'_>, layout: *const u32) -> Result<Self, RuntimeError> {
-        let indexes = unsafe { std::slice::from_raw_parts(layout, 18) };
-        let id = |n: usize| {
+    fn resolve(
+        builder: &IntrinsicBuilder<'_>,
+        layout: *const JsonLayoutIds,
+    ) -> Result<Self, RuntimeError> {
+        let layout = unsafe { layout.as_ref() }.ok_or(RuntimeError::BadPointer)?;
+        let id = |index: u32| {
             builder
                 .program
                 .interned_constructors
-                .get(indexes[n] as usize)
+                .get(index as usize)
                 .map(|(decl, _)| decl.host_id)
                 .ok_or(RuntimeError::BadPointer)
         };
         Ok(Self {
-            object: id(0)?,
-            array: id(1)?,
-            string: id(2)?,
-            number: id(3)?,
-            bool_: id(4)?,
-            null: id(5)?,
-            bin: id(6)?,
-            tip: id(7)?,
-            true_: id(8)?,
-            false_: id(9)?,
-            cons: id(10)?,
-            nil: id(11)?,
-            scientific: id(12)?,
-            is: id(13)?,
-            ip: id(14)?,
-            in_: id(15)?,
-            text: id(16)?,
-            i_hash: id(17)?,
+            object: id(layout.object)?,
+            array: id(layout.array)?,
+            string: id(layout.string)?,
+            number: id(layout.number)?,
+            bool_: id(layout.bool_)?,
+            null: id(layout.null)?,
+            bin: id(layout.map_bin)?,
+            tip: id(layout.map_tip)?,
+            true_: id(layout.true_)?,
+            false_: id(layout.false_)?,
+            cons: id(layout.cons)?,
+            nil: id(layout.nil)?,
+            scientific: id(layout.scientific)?,
+            is: id(layout.integer_small)?,
+            ip: id(layout.integer_positive)?,
+            in_: id(layout.integer_negative)?,
+            text: id(layout.text)?,
+            i_hash: id(layout.int)?,
         })
     }
 }

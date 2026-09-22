@@ -204,7 +204,7 @@ impl Decoder {
         if schema_version != super::SCHEMA_VERSION {
             return Err(ParseError::UnsupportedVersion(schema_version));
         }
-        let fields = array(value, 16, "program")?;
+        let fields = array(value, 17, "program")?;
         let target = self.target(&fields[5])?;
         let signatures = self.list(&fields[6], true, |this, value| this.signature(value))?;
         let globals = self.list(&fields[7], true, |this, value| this.global(value))?;
@@ -215,6 +215,7 @@ impl Decoder {
         let types = self.type_nodes(&fields[13])?;
         let sites = self.sites(&fields[14])?;
         let verb_sites = self.verb_sites(&fields[15])?;
+        let json_layout = self.optional_json_layout(&fields[16])?;
         Ok(WireProgram {
             envelope: ProgramEnvelope {
                 schema_version,
@@ -233,6 +234,7 @@ impl Decoder {
             types,
             sites,
             verb_sites,
+            json_layout,
         })
     }
 
@@ -623,6 +625,24 @@ impl Decoder {
             text: id(16, "JSON Text constructor")?,
             int: id(17, "JSON Int constructor")?,
         })
+    }
+
+    fn optional_json_layout(
+        &mut self,
+        value: &Value,
+    ) -> Result<Option<super::JsonLayout>, ParseError> {
+        let fields = tagged(value, "program JSON layout")?;
+        match (
+            unsigned(&fields[0], "program JSON layout tag")?,
+            fields.len(),
+        ) {
+            (0, 1) => Ok(None),
+            (1, 2) => self.json_layout(&fields[1]).map(Some),
+            (0..=1, _) => Err(ParseError::Malformed(
+                "wrong program JSON layout field count".into(),
+            )),
+            (tag, _) => Err(ParseError::InvalidTag(tag)),
+        }
     }
 
     fn value_ref(&mut self, value: &Value) -> Result<ValueRef, ParseError> {
@@ -1026,6 +1046,7 @@ mod tests {
             array(vec![]),
             array(vec![]),
             array(vec![]),
+            array(vec![n(0)]),
         ]);
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&wire, &mut bytes).unwrap();

@@ -77,6 +77,7 @@ pub fn wire_program() -> WireProgram {
         types: vec![],
         sites: vec![],
         verb_sites: vec![],
+        json_layout: None,
     }
 }
 

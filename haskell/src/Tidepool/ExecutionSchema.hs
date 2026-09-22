@@ -23,8 +23,8 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 
 schemaVersion, executionAbiVersion :: Word64
-schemaVersion = 12
-executionAbiVersion = 5
+schemaVersion = 13
+executionAbiVersion = 6
 
 newtype ValueId = ValueId Word32 deriving stock (Eq, Ord, Show, Generic)
 newtype JoinId = JoinId Word32 deriving stock (Eq, Ord, Show, Generic)
@@ -184,4 +184,7 @@ data WireProgram = WireProgram
   -- 'programSites': an ordinary effect request carries no dynamic site, so
   -- the host classifies it by its outer constructor.
   , programVerbSites :: [(ConstructorId, Word64)]
+  -- | Compiler-authenticated JSON constructor roles. Kept independently of
+  -- intrinsic operations because typed host mounts and answers also need it.
+  , programJsonLayout :: Maybe (JsonLayout ConstructorId)
   } deriving stock (Eq, Show, Generic)

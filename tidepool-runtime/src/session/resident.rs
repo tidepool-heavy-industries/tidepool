@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use tidepool_bridge::HaskellValue;
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::prepared_program::{PreparedHandle, ProgramId};
-use tidepool_repr::execution_schema::SymbolIdentity;
+use tidepool_repr::execution_schema::{JsonLayout, PreparedProgram, SymbolIdentity};
 
 use super::prepared::{ParkPolicy, PreparedRuntimeError, PreparedSettlement};
 use super::turn::TurnCode;
@@ -29,7 +29,7 @@ use tidepool_repr::{
 
 use crate::render::EvalResult;
 use crate::timing;
-use crate::{RuntimeError, YieldSite, YieldSiteCollision, EVAL_STACK_SIZE};
+use crate::{NominalHead, RuntimeError, YieldSite, YieldSiteCollision, EVAL_STACK_SIZE};
 
 enum ResidentResumeInput {
     Response(Response),
@@ -129,14 +129,7 @@ impl HostBindingType {
         authority: HostBindingAuthority::JsonValue,
         module: "Tidepool.Aeson.Value",
         name: "Value",
-        constructors: &[
-            "Tidepool.Aeson.Value.Object",
-            "Tidepool.Aeson.Value.Array",
-            "Tidepool.Aeson.Value.String",
-            "Tidepool.Aeson.Value.Number",
-            "Tidepool.Aeson.Value.Bool",
-            "Tidepool.Aeson.Value.Null",
-        ],
+        constructors: &[],
     };
     pub const TEXT: Self = Self {
         authority: HostBindingAuthority::Text,
@@ -150,6 +143,28 @@ impl HostBindingType {
         name: "Job",
         constructors: &["Tidepool.Command.Types.Job"],
     };
+}
+
+fn json_runtime_layout_optional(prepared: &PreparedProgram) -> Option<JsonLayout<DataConId>> {
+    prepared.json_layout().and_then(|layout| {
+        let constructors = prepared.constructors();
+        (*layout)
+            .try_map(|constructor| {
+                constructors
+                    .get(constructor.0 as usize)
+                    .map(|row| row.host_id)
+                    .ok_or(())
+            })
+            .ok()
+    })
+}
+
+fn json_runtime_layout(prepared: &PreparedProgram) -> Result<JsonLayout<DataConId>, ResidentError> {
+    json_runtime_layout_optional(prepared).ok_or_else(|| {
+        ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+            "compiled host mount has no authenticated JSON layout".into(),
+        )))
+    })
 }
 
 /// Require the compiler-issued sidecar before any host mount can merge a
@@ -1868,8 +1883,9 @@ where
             &code,
             HostBindingType::JSON_VALUE,
         )?;
-        self.mount_host_value_in(scope, binder, gen, code, |engine, realm, table| {
-            engine.build_host_json(realm, value, table)
+        let layout = json_runtime_layout(&code.prepared)?;
+        self.mount_host_value_in(scope, binder, gen, code, |engine, realm, _| {
+            engine.build_host_json(realm, value, &layout)
         })
     }
 
@@ -2036,6 +2052,9 @@ where
                 ),
             ))));
         }
+        if expected == HostBindingType::JSON_VALUE {
+            return self.validate_json_mount_layout(&code.prepared, root, binder);
+        }
         for qualified in expected.constructors {
             let id = self
                 .host_constructor_id(&code.table, expected, qualified)
@@ -2077,6 +2096,47 @@ where
             }
         }
         Ok(())
+    }
+
+    fn validate_json_mount_layout(
+        &self,
+        prepared: &PreparedProgram,
+        root: &NominalHead,
+        binder: &BoundBinder,
+    ) -> Result<(), ResidentError> {
+        let layout = json_runtime_layout(prepared)?;
+        let check = |host_id: DataConId| {
+            let family = prepared
+                .constructors()
+                .iter()
+                .find(|declaration| declaration.host_id == host_id)
+                .map(|declaration| &declaration.family)
+                .ok_or_else(|| {
+                    ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                        "authenticated JSON layout names no prepared constructor".into(),
+                    )))
+                })?;
+            if family.unit != root.unit
+                || family.module != root.module
+                || family.namespace != "type"
+                || family.occurrence != root.name
+                || family.record_parent.is_some()
+            {
+                return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+                    format!(
+                        "compiled binder `{}` root evidence disagrees with authenticated JSON layout",
+                        binder.name,
+                    ),
+                ))));
+            }
+            Ok(())
+        };
+        check(layout.object)?;
+        check(layout.array)?;
+        check(layout.string)?;
+        check(layout.number)?;
+        check(layout.bool_)?;
+        check(layout.null)
     }
 
     /// `Text` is authenticated by both its compiler table id and prepared
@@ -2146,10 +2206,13 @@ where
             &DataConTable,
         ) -> Result<PreparedHandle, PreparedRuntimeError>,
     ) -> Result<(), ResidentError> {
+        let mut table = code.table.clone().into_owned();
+        if let Some(layout) = json_runtime_layout_optional(&code.prepared) {
+            table.set_json_layout(layout);
+        }
         self.state
-            .merge_table(&code.table)
+            .merge_table(&table)
             .map_err(ResidentError::TableCollision)?;
-        let table = code.table;
         let program = self.state.install_prepared(code.prepared.into_owned())?;
         let realm = self.run_context.resource_scope;
         let mounted = (|| {

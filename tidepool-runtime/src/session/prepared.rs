@@ -27,9 +27,9 @@ pub use tidepool_codegen::machine::MachineDisposition;
 use tidepool_codegen::suspension::ContinuationId;
 pub use tidepool_codegen::suspension::{RealmId, ValueHandle};
 use tidepool_repr::execution_schema::{
-    link_program, CtorRow, Group, HeapRhs, ImportedValue, LinkError, MachineImports, ParseError,
-    PreparedProgram, RuntimeRep, Signature, SiteDelivery, SiteRow, SymbolIdentity, TypeNode,
-    TypeNodeId, ValueId,
+    link_program, CtorRow, Group, HeapRhs, ImportedValue, JsonLayout, LinkError, MachineImports,
+    ParseError, PreparedProgram, RuntimeRep, Signature, SiteDelivery, SiteRow, SymbolIdentity,
+    TypeNode, TypeNodeId, ValueId,
 };
 use tidepool_repr::{DataConId, DataConTable, Literal, PrincipalId, SessionVarId};
 
@@ -299,10 +299,9 @@ struct ProgramFacts {
     /// rather than local index, and a bridge `HaskellValue`'s constructor resolves
     /// to the row that admits it.
     constructors: Vec<(SymbolIdentity, DataConId)>,
-    /// Exact declared identity by bridge id. Prepared-program validation
-    /// admits each bridge id once, so structural answer validation need not
-    /// rescan the complete constructor inventory at every node.
-    by_host: BTreeMap<DataConId, SymbolIdentity>,
+    /// Compiler-authenticated runtime IDs for the JSON constructors. This is
+    /// the only JSON role inventory consumed by answer validation.
+    json_layout: Option<JsonLayout<DataConId>>,
     /// `constructors`, indexed by qualified identity `(module, occurrence)`
     /// and built once in [`Self::of`], so a leaf lookup
     /// ([`Self::constructor_named`]) is one map lookup rather than a full
@@ -399,10 +398,9 @@ impl ProgramFacts {
                 )
             })
             .collect();
-        let by_host = constructors
-            .iter()
-            .map(|(identity, host_id)| (*host_id, identity.clone()))
-            .collect();
+        let json_layout = prepared
+            .json_layout()
+            .map(|layout| (*layout).map(|constructor| constructors[constructor.0 as usize].1));
         let sites = prepared.sites().to_vec();
         // Validation guarantees every entry names a declared constructor and
         // an admitted row.
@@ -427,7 +425,7 @@ impl ProgramFacts {
             types: prepared.types().to_vec(),
             constructors,
             by_identity,
-            by_host,
+            json_layout,
         }
     }
 
@@ -444,8 +442,50 @@ impl ProgramFacts {
             .map(|(identity, _)| identity)
     }
 
-    fn identity_for_host(&self, host_id: DataConId) -> Option<&SymbolIdentity> {
-        self.by_host.get(&host_id)
+    fn json_layout(&self) -> Option<JsonLayout<DataConId>> {
+        self.json_layout
+    }
+
+    fn is_json_value_node(&self, node: TypeNodeId) -> bool {
+        let Some(layout) = self.json_layout() else {
+            return false;
+        };
+        let Some(TypeNode::Data { rows, .. }) = self.type_node(node) else {
+            return false;
+        };
+        rows.len() == 6
+            && rows
+                .iter()
+                .any(|row| self.constructor_host_id(row.constructor) == Some(layout.object))
+            && rows
+                .iter()
+                .any(|row| self.constructor_host_id(row.constructor) == Some(layout.array))
+            && rows
+                .iter()
+                .any(|row| self.constructor_host_id(row.constructor) == Some(layout.string))
+            && rows
+                .iter()
+                .any(|row| self.constructor_host_id(row.constructor) == Some(layout.number))
+            && rows
+                .iter()
+                .any(|row| self.constructor_host_id(row.constructor) == Some(layout.bool_))
+            && rows
+                .iter()
+                .any(|row| self.constructor_host_id(row.constructor) == Some(layout.null))
+    }
+
+    fn constructor_host_id(
+        &self,
+        id: tidepool_repr::execution_schema::ConstructorId,
+    ) -> Option<DataConId> {
+        self.constructors
+            .get(id.0 as usize)
+            .map(|(_, host_id)| *host_id)
+    }
+
+    fn is_json_list_constructor(&self, host_id: DataConId) -> bool {
+        self.json_layout()
+            .is_some_and(|layout| host_id == layout.cons || host_id == layout.nil)
     }
 
     /// The bridge id of a declared constructor, by qualified identity.
@@ -473,15 +513,6 @@ impl ProgramFacts {
 const TEXT_MODULE: &str = "Data.Text.Internal";
 const INTEGER_MODULE: &str = "GHC.Num.Integer";
 const NATURAL_MODULE: &str = "GHC.Num.Natural";
-const AESON_VALUE_MODULE: &str = "Tidepool.Aeson.Value";
-const AESON_SCIENTIFIC_MODULE: &str = "Tidepool.Aeson.Scientific";
-const GHC_TYPES_MODULE: &str = "GHC.Internal.Types";
-const AESON_VALUE_OCCURRENCE: &str = "Value";
-
-/// Whether `family` names the vendored `Tidepool.Aeson.Value.Value` type.
-fn is_aeson_value(family: &SymbolIdentity) -> bool {
-    family.module == AESON_VALUE_MODULE && family.occurrence == AESON_VALUE_OCCURRENCE
-}
 
 /// Target-encode `literal` for a field of representation `rep`: the value's
 /// native bytes, of which the builder writes only the field's declared width.
@@ -545,33 +576,28 @@ struct StructuralAnswerVisitor<'facts, 'builder, 'machine, 'code> {
 }
 
 impl StructuralAnswerVisitor<'_, '_, '_, '_> {
-    fn identity(&self, host_id: DataConId) -> Option<&SymbolIdentity> {
-        self.facts.identity_for_host(host_id)
-    }
-
-    fn is_constructor(&self, host_id: DataConId, module: &str, occurrence: &str) -> bool {
-        self.identity(host_id)
-            .is_some_and(|identity| identity.module == module && identity.occurrence == occurrence)
-    }
-
     fn json_value_shape(
         &mut self,
         host_id: DataConId,
     ) -> Result<Vec<StructuralExpected>, BridgeError> {
-        let Some(identity) = self.identity(host_id) else {
-            return Err(self.shape("a JSON value names an undeclared constructor"));
+        let Some(layout) = self.facts.json_layout() else {
+            return Err(self.shape("the program has no authenticated JSON layout"));
         };
-        if identity.module != AESON_VALUE_MODULE {
-            return Err(self.shape("a JSON value requires a vendored Value constructor"));
-        }
-        match identity.occurrence.as_str() {
-            "Object" => Ok(vec![StructuralExpected::JsonMap]),
-            "Array" => Ok(vec![StructuralExpected::JsonList]),
-            "String" => Ok(vec![StructuralExpected::JsonText]),
-            "Number" => Ok(vec![StructuralExpected::JsonScientific]),
-            "Bool" => Ok(vec![StructuralExpected::JsonBool]),
-            "Null" => Ok(Vec::new()),
-            _ => Err(self.shape("the vendored Value constructor is not an authenticated anchor")),
+        if host_id == layout.object {
+            Ok(vec![StructuralExpected::JsonMap])
+        } else if host_id == layout.array {
+            Ok(vec![StructuralExpected::JsonList])
+        } else if host_id == layout.string {
+            Ok(vec![StructuralExpected::JsonText])
+        } else if host_id == layout.number {
+            Ok(vec![StructuralExpected::JsonScientific])
+        } else if host_id == layout.bool_ {
+            Ok(vec![StructuralExpected::JsonBool])
+        } else if host_id == layout.null {
+            Ok(Vec::new())
+        } else {
+            Err(self
+                .shape("the JSON value constructor is absent from authenticated layout evidence"))
         }
     }
 
@@ -624,9 +650,12 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
         let StructuralExpected::Node(node) = expected else {
             return match expected {
                 StructuralExpected::JsonMap => {
-                    if self.is_constructor(host_id, "Data.Map.Internal", "Tip") {
+                    let Some(layout) = self.facts.json_layout() else {
+                        return Err(self.shape("the program has no authenticated JSON layout"));
+                    };
+                    if host_id == layout.map_tip {
                         Ok(Vec::new())
-                    } else if self.is_constructor(host_id, "Data.Map.Internal", "Bin") {
+                    } else if host_id == layout.map_bin {
                         Ok(vec![
                             StructuralExpected::JsonBoxedInt,
                             StructuralExpected::JsonText,
@@ -639,9 +668,12 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
                     }
                 }
                 StructuralExpected::JsonList => {
-                    if self.is_constructor(host_id, GHC_TYPES_MODULE, "[]") {
+                    let Some(layout) = self.facts.json_layout() else {
+                        return Err(self.shape("the program has no authenticated JSON layout"));
+                    };
+                    if host_id == layout.nil {
                         Ok(Vec::new())
-                    } else if self.is_constructor(host_id, GHC_TYPES_MODULE, ":") {
+                    } else if host_id == layout.cons {
                         Ok(vec![
                             StructuralExpected::JsonValue,
                             StructuralExpected::JsonList,
@@ -651,7 +683,11 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
                     }
                 }
                 StructuralExpected::JsonText => {
-                    if self.is_constructor(host_id, TEXT_MODULE, "Text") {
+                    if self
+                        .facts
+                        .json_layout()
+                        .is_some_and(|layout| host_id == layout.text)
+                    {
                         Ok(vec![
                             StructuralExpected::Bytes,
                             StructuralExpected::Scalar(RuntimeRep::Int(64)),
@@ -662,7 +698,11 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
                     }
                 }
                 StructuralExpected::JsonScientific => {
-                    if self.is_constructor(host_id, AESON_SCIENTIFIC_MODULE, "Scientific") {
+                    if self
+                        .facts
+                        .json_layout()
+                        .is_some_and(|layout| host_id == layout.scientific)
+                    {
                         Ok(vec![
                             StructuralExpected::JsonInteger,
                             StructuralExpected::Scalar(RuntimeRep::Int(64)),
@@ -672,19 +712,25 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
                     }
                 }
                 StructuralExpected::JsonInteger => {
-                    if self.is_constructor(host_id, INTEGER_MODULE, "IS") {
-                        Ok(vec![StructuralExpected::Scalar(RuntimeRep::Int(64))])
-                    } else if self.is_constructor(host_id, INTEGER_MODULE, "IP")
-                        || self.is_constructor(host_id, INTEGER_MODULE, "IN")
+                    if self
+                        .facts
+                        .json_layout()
+                        .is_some_and(|layout| host_id == layout.integer_small)
                     {
+                        Ok(vec![StructuralExpected::Scalar(RuntimeRep::Int(64))])
+                    } else if self.facts.json_layout().is_some_and(|layout| {
+                        host_id == layout.integer_positive || host_id == layout.integer_negative
+                    }) {
                         Ok(vec![StructuralExpected::Bytes])
                     } else {
                         Err(self.shape("a JSON coefficient requires IS, IP or IN"))
                     }
                 }
                 StructuralExpected::JsonBool => {
-                    if self.is_constructor(host_id, GHC_TYPES_MODULE, "True")
-                        || self.is_constructor(host_id, GHC_TYPES_MODULE, "False")
+                    if self
+                        .facts
+                        .json_layout()
+                        .is_some_and(|layout| host_id == layout.true_ || host_id == layout.false_)
                     {
                         Ok(Vec::new())
                     } else {
@@ -692,7 +738,11 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
                     }
                 }
                 StructuralExpected::JsonBoxedInt => {
-                    if self.is_constructor(host_id, GHC_TYPES_MODULE, "I#") {
+                    if self
+                        .facts
+                        .json_layout()
+                        .is_some_and(|layout| host_id == layout.int)
+                    {
                         Ok(vec![StructuralExpected::Scalar(RuntimeRep::Int(64))])
                     } else {
                         Err(self.shape("a JSON map size requires I#"))
@@ -705,12 +755,13 @@ impl StructuralAnswerVisitor<'_, '_, '_, '_> {
                 StructuralExpected::Node(_) => unreachable!(),
             };
         };
-        let Some(node) = self.facts.type_node(node) else {
+        let structural_node = node;
+        let Some(node) = self.facts.type_node(structural_node) else {
             return Err(self.shape("the site's type evidence names an undeclared node"));
         };
         match node {
-            TypeNode::Data { family, rows, .. } => {
-                if is_aeson_value(family) {
+            TypeNode::Data { rows, .. } => {
+                if self.facts.is_json_value_node(structural_node) {
                     let admitted = rows.iter().any(|row| {
                         self.facts
                             .constructors
@@ -807,8 +858,7 @@ impl HaskellVisitor for StructuralAnswerVisitor<'_, '_, '_, '_> {
                 | StructuralExpected::JsonInteger
                 | StructuralExpected::JsonBool
                 | StructuralExpected::JsonBoxedInt
-        ) && !self.is_constructor(id, GHC_TYPES_MODULE, "[]")
-            && !self.is_constructor(id, GHC_TYPES_MODULE, ":");
+        ) && !self.facts.is_json_list_constructor(id);
         if counts_depth && self.depth >= MAX_ANSWER_DEPTH {
             return Err(self.shape("the response exceeds the maximum constructor nesting depth"));
         }
@@ -1496,15 +1546,8 @@ impl PreparedEngine {
         &mut self,
         realm: RealmId,
         value: &serde_json::Value,
-        table: &DataConTable,
+        layout: &JsonLayout<DataConId>,
     ) -> Result<PreparedHandle, PreparedRuntimeError> {
-        let ids =
-            tidepool_bridge::json_builder::JsonConIds::from_table(table).ok_or_else(|| {
-                PreparedRuntimeError::HostMount {
-                    detail: "the compiler table does not declare the JSON construction family"
-                        .into(),
-                }
-            })?;
         let mut builder = self
             .machine
             .managed_builder()
@@ -1515,7 +1558,7 @@ impl PreparedEngine {
                 frames: Vec::new(),
                 root: None,
             };
-            tidepool_bridge::json_builder::visit_json(value, &ids, &mut visitor).map_err(
+            tidepool_bridge::json_builder::visit_json(value, layout, &mut visitor).map_err(
                 |error| PreparedRuntimeError::HostMount {
                     detail: error.to_string(),
                 },
@@ -3113,6 +3156,7 @@ impl PreparedEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tidepool_bridge::ToHaskell;
     use tidepool_codegen::host_fns::RuntimeError;
     use tidepool_codegen::machine_state::MachineFailure;
     use tidepool_repr::execution_schema::{
@@ -3747,6 +3791,26 @@ mod tests {
             captures: vec![],
             body: 0,
         };
+        wire.json_layout = Some(JsonLayout {
+            object: ConstructorId(1),
+            array: ConstructorId(2),
+            string: ConstructorId(3),
+            number: ConstructorId(4),
+            bool_: ConstructorId(5),
+            null: ConstructorId(6),
+            map_bin: ConstructorId(13),
+            map_tip: ConstructorId(14),
+            true_: ConstructorId(11),
+            false_: ConstructorId(12),
+            cons: ConstructorId(17),
+            nil: ConstructorId(18),
+            scientific: ConstructorId(7),
+            integer_small: ConstructorId(8),
+            integer_positive: ConstructorId(9),
+            integer_negative: ConstructorId(10),
+            text: ConstructorId(16),
+            int: ConstructorId(15),
+        });
         testing::prepare(wire).expect("JSON mount fixture")
     }
 
@@ -3786,12 +3850,22 @@ mod tests {
 
     #[test]
     fn host_json_and_text_mount_stream_through_tiny_nursery_and_recover_after_rejection() {
-        let (mut engine, program) =
-            PreparedEngine::bootstrap_with_nursery_bytes(json_mount_program(), 64)
-                .expect("bootstrap JSON mount fixture");
-        let table = json_mount_table();
-        let ids =
-            tidepool_bridge::json_builder::JsonConIds::from_table(&table).expect("JSON mount ids");
+        let prepared = json_mount_program();
+        let layout = prepared
+            .json_layout()
+            .expect("JSON mount program carries layout")
+            .try_map(|constructor| {
+                prepared
+                    .constructors()
+                    .get(constructor.0 as usize)
+                    .map(|declaration| declaration.host_id)
+                    .ok_or(())
+            })
+            .expect("JSON layout IDs are declared");
+        let (mut engine, program) = PreparedEngine::bootstrap_with_nursery_bytes(prepared, 64)
+            .expect("bootstrap JSON mount fixture");
+        let mut table = json_mount_table();
+        table.set_json_layout(layout);
         let payload = serde_json::json!({
             "nested": [[{"key": "value", "n": serde_json::Value::Number("1000000000000000000000000000001".parse().expect("large JSON number"))}], [true, null]],
             "large": (0..128).map(|index| serde_json::json!({"index": index, "text": "x".repeat(32)})).collect::<Vec<_>>(),
@@ -3800,11 +3874,10 @@ mod tests {
         let initial_handles = engine.handle_count();
         let initial_roots = engine.persistent_roots_count();
         let json = engine
-            .build_host_json(RealmId::ROOT, &payload, &table)
+            .build_host_json(RealmId::ROOT, &payload, &layout)
             .expect("large nested JSON mounts under a tiny nursery");
         let observed = engine.observe(program, json).expect("observe mounted JSON");
-        let expected = tidepool_bridge::json_builder::json_to_value(&payload, &ids)
-            .expect("reference JSON value");
+        let expected = payload.to_value(&table).expect("reference JSON value");
         let mut observed_shape = String::new();
         canonical_mount_value(&observed, &mut observed_shape);
         let mut expected_shape = String::new();

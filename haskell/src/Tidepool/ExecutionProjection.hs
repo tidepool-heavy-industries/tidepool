@@ -94,7 +94,8 @@ import Tidepool.TypePolicy qualified as TypePolicy
 import Tidepool.PreparedFormatting
   (FormattingAuthority, FormattingSpec(..), FormattingIntrinsic(..), classifyFormatting)
 import Tidepool.PreparedTime (TimeAuthority, TimeSpec(..), classifyTime)
-import Tidepool.PreparedJson (JsonAuthority, JsonSpec(..), classifyJson)
+import Tidepool.PreparedJson
+  ( JsonAuthority, JsonSpec(..), classifyJson, jsonAuthorityLayout )
 
 data ProjectionContext = ProjectionContext
   { projectionProfile :: Text
@@ -226,11 +227,13 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
       -- module set (so a same-name internal identity cannot borrow home-module
       -- standing from the retained one), but nothing here recovers its body.
       projectable = map (dropRetainedTops context) modules
-  ((bindingGroups, programTypes, programSites, programVerbSites), final) <- runStateT
+  ((bindingGroups, programTypes, programSites, programVerbSites, programJsonLayout), final) <- runStateT
     (do preallocate projectable
         groups <- concat <$> mapM projectModule projectable
         (types, sites, verbSites) <- lowerPreparedEvidence context projectable
-        pure (groups, types, sites, verbSites)) initial
+        jsonLayout <- traverse (traverse internConstructor . jsonAuthorityLayout)
+          (projectionJsonAuthority context)
+        pure (groups, types, sites, verbSites, jsonLayout)) initial
   entryTop <- maybe (Left (MissingPreparedEntry (projectionEntry context)))
     pure (findTop bindingGroups)
   let entry = topValue entryTop
@@ -253,6 +256,7 @@ projectPreparedWithTopSymbols context modules topIdentityMap = do
         , programTypes = programTypes
         , programSites = programSites
         , programVerbSites = programVerbSites
+        , programJsonLayout = programJsonLayout
         }
   pure (program, map fst (constructors final))
   where

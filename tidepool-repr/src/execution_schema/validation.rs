@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    Alternative, AlternativePattern, Atom, CaseKind, CheckedLayout, ConstructorId, DecodeLimits,
-    Expr, ExprFrame, GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationId,
-    ParseError, ProgramRequirements, ResultContract, RuntimeRep, ScalarLiteral, SignatureId,
-    SymbolIdentity, TypeNode, TypeNodeId, ValueId, ValueRef, WireProgram, EXECUTION_ABI_VERSION,
-    SCHEMA_VERSION, SYNTHETIC_SITE_BIT,
+    Alternative, AlternativePattern, Atom, CaseKind, CheckedLayout, ConstructorDecl, ConstructorId,
+    DecodeLimits, Expr, ExprFrame, GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId,
+    OperationId, ParseError, ProgramRequirements, ResultContract, RuntimeRep, ScalarLiteral,
+    SignatureId, SymbolIdentity, TypeNode, TypeNodeId, ValueId, ValueRef, WireProgram,
+    EXECUTION_ABI_VERSION, SCHEMA_VERSION, SYNTHETIC_SITE_BIT,
 };
 use recursion::{try_expand_and_collapse, MappableFrame, PartiallyApplied};
 use std::{cell::RefCell, rc::Rc};
@@ -1401,6 +1401,10 @@ impl<'a> Validator<'a> {
             self.check_layout(&constructor.field_reps, &constructor.layout)?;
         }
 
+        if let Some(layout) = &self.wire.json_layout {
+            self.check_json_layout(layout)?;
+        }
+
         self.check_type_nodes(&family_sizes)?;
         self.check_sites()?;
         self.check_verb_sites()?;
@@ -1984,131 +1988,196 @@ impl<'a> Validator<'a> {
                 left,
                 right,
             } => {
-                let constructors = [
-                    layout.object,
-                    layout.array,
-                    layout.string,
-                    layout.number,
-                    layout.bool_,
-                    layout.null,
-                    layout.map_bin,
-                    layout.map_tip,
-                    layout.true_,
-                    layout.false_,
-                    layout.cons,
-                    layout.nil,
-                    layout.scientific,
-                    layout.integer_small,
-                    layout.integer_positive,
-                    layout.integer_negative,
-                    layout.text,
-                    layout.int,
-                    *left,
-                    *right,
-                ];
-                if constructors.iter().copied().collect::<BTreeSet<_>>().len() != constructors.len()
-                {
-                    return Err(ParseError::Malformed(
-                        "duplicate JSON constructor role".into(),
-                    ));
-                }
-                for constructor in constructors {
-                    if constructor.0 as usize >= self.wire.constructors.len() {
-                        return Err(ParseError::Malformed(
-                            "JSON constructor is out of range".into(),
-                        ));
-                    }
-                }
-                self.check_json_layout(layout)?;
-                self.check_json_role(*left, "GHC.Internal.Data.Either", "Left")?;
-                self.check_json_role(*right, "GHC.Internal.Data.Either", "Right")?;
-                Ok(())
+                self.check_canonical_json_layout(layout)?;
+                self.check_json_decode_result(*left, *right)
             }
             super::OperationIdentity::JsonEncode { layout } => {
-                let constructors = [
-                    layout.object,
-                    layout.array,
-                    layout.string,
-                    layout.number,
-                    layout.bool_,
-                    layout.null,
-                    layout.map_bin,
-                    layout.map_tip,
-                    layout.true_,
-                    layout.false_,
-                    layout.cons,
-                    layout.nil,
-                    layout.scientific,
-                    layout.integer_small,
-                    layout.integer_positive,
-                    layout.integer_negative,
-                    layout.text,
-                    layout.int,
-                ];
-                if constructors.iter().copied().collect::<BTreeSet<_>>().len() != constructors.len()
-                {
-                    return Err(ParseError::Malformed(
-                        "duplicate JSON constructor role".into(),
-                    ));
-                }
-                for constructor in constructors {
-                    if constructor.0 as usize >= self.wire.constructors.len() {
-                        return Err(ParseError::Malformed(
-                            "JSON constructor is out of range".into(),
-                        ));
-                    }
-                }
-                self.check_json_layout(layout)?;
-                Ok(())
+                self.check_canonical_json_layout(layout)
             }
             super::OperationIdentity::Capability { name } => self.check_text(name),
             super::OperationIdentity::WiredInError { .. } => Ok(()),
         }
     }
 
-    fn check_json_layout(&self, layout: &super::JsonLayout) -> Result<(), ParseError> {
-        for (id, module, occurrence) in [
-            (layout.object, "Tidepool.Aeson.Value", "Object"),
-            (layout.array, "Tidepool.Aeson.Value", "Array"),
-            (layout.string, "Tidepool.Aeson.Value", "String"),
-            (layout.number, "Tidepool.Aeson.Value", "Number"),
-            (layout.bool_, "Tidepool.Aeson.Value", "Bool"),
-            (layout.null, "Tidepool.Aeson.Value", "Null"),
-            (layout.map_bin, "Data.Map.Internal", "Bin"),
-            (layout.map_tip, "Data.Map.Internal", "Tip"),
-            (layout.true_, "GHC.Types", "True"),
-            (layout.false_, "GHC.Types", "False"),
-            (layout.cons, "GHC.Types", ":"),
-            (layout.nil, "GHC.Types", "[]"),
-            (layout.scientific, "Tidepool.Aeson.Scientific", "Scientific"),
-            (layout.integer_small, "GHC.Num.Integer", "IS"),
-            (layout.integer_positive, "GHC.Num.Integer", "IP"),
-            (layout.integer_negative, "GHC.Num.Integer", "IN"),
-            (layout.text, "Data.Text.Internal", "Text"),
-            (layout.int, "GHC.Types", "I#"),
-        ] {
-            self.check_json_role(id, module, occurrence)?;
+    fn check_canonical_json_layout(&self, layout: &super::JsonLayout) -> Result<(), ParseError> {
+        let canonical = self.wire.json_layout.as_ref().ok_or_else(|| {
+            ParseError::Malformed("JSON operation lacks program layout evidence".into())
+        })?;
+        if layout != canonical {
+            return Err(ParseError::Malformed(
+                "JSON operation layout differs from program layout evidence".into(),
+            ));
         }
         Ok(())
     }
 
-    fn check_json_role(
+    fn json_constructor(
         &self,
         id: ConstructorId,
-        module: &str,
-        occurrence: &str,
+        role: &'static str,
+        seen: &mut BTreeSet<ConstructorId>,
+    ) -> Result<&ConstructorDecl, ParseError> {
+        if !seen.insert(id) {
+            return Err(ParseError::Malformed(format!(
+                "duplicate JSON constructor role at {role}"
+            )));
+        }
+        self.wire.constructors.get(id.0 as usize).ok_or_else(|| {
+            ParseError::Malformed(format!("JSON {role} constructor is out of range"))
+        })
+    }
+
+    fn check_json_reps(
+        declaration: &ConstructorDecl,
+        role: &'static str,
+        expected: &[RuntimeRep],
     ) -> Result<(), ParseError> {
-        let declaration = self
-            .wire
-            .constructors
-            .get(id.0 as usize)
-            .ok_or_else(|| ParseError::Malformed("JSON constructor is out of range".into()))?;
-        if declaration.identity.module != module || declaration.identity.occurrence != occurrence {
-            return Err(ParseError::Malformed(
-                "JSON constructor role has the wrong identity".into(),
-            ));
+        if declaration.result_rep != RuntimeRep::LiftedRef || declaration.field_reps != expected {
+            return Err(ParseError::InvalidLayout(format!(
+                "JSON {role} constructor has an inadmissible physical layout"
+            )));
         }
         Ok(())
+    }
+
+    fn check_json_same_family(
+        role: &'static str,
+        first: &ConstructorDecl,
+        other: &ConstructorDecl,
+    ) -> Result<(), ParseError> {
+        if first.family != other.family || first.family_size != other.family_size {
+            return Err(ParseError::Malformed(format!(
+                "JSON {role} constructors do not share declared nominal family evidence"
+            )));
+        }
+        Ok(())
+    }
+
+    /// JSON role assignment is compiler evidence, so schema admission checks
+    /// that every named role has the representation and family relation the
+    /// runtime can safely construct. It deliberately does not reconstruct a
+    /// second module-name inventory.
+    fn check_json_layout(&self, layout: &super::JsonLayout) -> Result<(), ParseError> {
+        let mut seen = BTreeSet::new();
+        let object = self.json_constructor(layout.object, "Object", &mut seen)?;
+        let array = self.json_constructor(layout.array, "Array", &mut seen)?;
+        let string = self.json_constructor(layout.string, "String", &mut seen)?;
+        let number = self.json_constructor(layout.number, "Number", &mut seen)?;
+        let bool_ = self.json_constructor(layout.bool_, "Bool", &mut seen)?;
+        let null = self.json_constructor(layout.null, "Null", &mut seen)?;
+        let map_bin = self.json_constructor(layout.map_bin, "map Bin", &mut seen)?;
+        let map_tip = self.json_constructor(layout.map_tip, "map Tip", &mut seen)?;
+        let true_ = self.json_constructor(layout.true_, "True", &mut seen)?;
+        let false_ = self.json_constructor(layout.false_, "False", &mut seen)?;
+        let cons = self.json_constructor(layout.cons, "list cons", &mut seen)?;
+        let nil = self.json_constructor(layout.nil, "list nil", &mut seen)?;
+        let scientific = self.json_constructor(layout.scientific, "Scientific", &mut seen)?;
+        let integer_small =
+            self.json_constructor(layout.integer_small, "integer small", &mut seen)?;
+        let integer_positive =
+            self.json_constructor(layout.integer_positive, "integer positive", &mut seen)?;
+        let integer_negative =
+            self.json_constructor(layout.integer_negative, "integer negative", &mut seen)?;
+        let text = self.json_constructor(layout.text, "Text", &mut seen)?;
+        let int = self.json_constructor(layout.int, "boxed Int", &mut seen)?;
+
+        for (role, declaration) in [
+            ("Object", object),
+            ("Array", array),
+            ("String", string),
+            ("Number", number),
+            ("Bool", bool_),
+        ] {
+            Self::check_json_reps(declaration, role, &[RuntimeRep::LiftedRef])?;
+            Self::check_json_same_family("Value", object, declaration)?;
+        }
+        Self::check_json_reps(null, "Null", &[])?;
+        Self::check_json_same_family("Value", object, null)?;
+        Self::check_json_reps(map_tip, "map Tip", &[])?;
+        Self::check_json_reps(
+            map_bin,
+            "map Bin",
+            &[
+                RuntimeRep::LiftedRef,
+                RuntimeRep::LiftedRef,
+                RuntimeRep::LiftedRef,
+                RuntimeRep::LiftedRef,
+                RuntimeRep::LiftedRef,
+            ],
+        )
+        .or_else(|_| {
+            Self::check_json_reps(
+                map_bin,
+                "map Bin",
+                &[
+                    RuntimeRep::Int(64),
+                    RuntimeRep::LiftedRef,
+                    RuntimeRep::LiftedRef,
+                    RuntimeRep::LiftedRef,
+                    RuntimeRep::LiftedRef,
+                ],
+            )
+        })?;
+        Self::check_json_same_family("Map", map_bin, map_tip)?;
+        Self::check_json_reps(true_, "True", &[])?;
+        Self::check_json_reps(false_, "False", &[])?;
+        Self::check_json_same_family("Bool", true_, false_)?;
+        Self::check_json_reps(
+            cons,
+            "list cons",
+            &[RuntimeRep::LiftedRef, RuntimeRep::LiftedRef],
+        )?;
+        Self::check_json_reps(nil, "list nil", &[])?;
+        Self::check_json_same_family("list", cons, nil)?;
+        Self::check_json_reps(
+            scientific,
+            "Scientific",
+            &[RuntimeRep::LiftedRef, RuntimeRep::Int(64)],
+        )
+        .or_else(|_| {
+            Self::check_json_reps(
+                scientific,
+                "Scientific",
+                &[RuntimeRep::LiftedRef, RuntimeRep::LiftedRef],
+            )
+        })?;
+        Self::check_json_reps(integer_small, "integer small", &[RuntimeRep::Int(64)])?;
+        Self::check_json_reps(
+            integer_positive,
+            "integer positive",
+            &[RuntimeRep::UnliftedRef],
+        )?;
+        Self::check_json_reps(
+            integer_negative,
+            "integer negative",
+            &[RuntimeRep::UnliftedRef],
+        )?;
+        Self::check_json_same_family("Integer", integer_small, integer_positive)?;
+        Self::check_json_same_family("Integer", integer_small, integer_negative)?;
+        Self::check_json_reps(
+            text,
+            "Text",
+            &[
+                RuntimeRep::UnliftedRef,
+                RuntimeRep::Int(64),
+                RuntimeRep::Int(64),
+            ],
+        )?;
+        Self::check_json_reps(int, "boxed Int", &[RuntimeRep::Int(64)])?;
+        Ok(())
+    }
+
+    fn check_json_decode_result(
+        &self,
+        left: ConstructorId,
+        right: ConstructorId,
+    ) -> Result<(), ParseError> {
+        let mut seen = BTreeSet::new();
+        let left = self.json_constructor(left, "decode Left", &mut seen)?;
+        let right = self.json_constructor(right, "decode Right", &mut seen)?;
+        Self::check_json_reps(left, "decode Left", &[RuntimeRep::LiftedRef])?;
+        Self::check_json_reps(right, "decode Right", &[RuntimeRep::LiftedRef])?;
+        Self::check_json_same_family("decode result", left, right)
     }
 
     fn check_text(&mut self, text: &str) -> Result<(), ParseError> {
@@ -2266,6 +2335,7 @@ mod tests {
             types: vec![],
             sites: vec![],
             verb_sites: vec![],
+            json_layout: None,
         }
     }
 
@@ -2307,7 +2377,7 @@ mod tests {
         };
         assert!(matches!(
             validator.check_operation_identity(&unique_but_absent),
-            Err(ParseError::Malformed(message)) if message.contains("out of range")
+            Err(ParseError::Malformed(message)) if message.contains("lacks program layout evidence")
         ));
 
         let duplicate = super::super::OperationIdentity::JsonDecode {
@@ -2336,7 +2406,7 @@ mod tests {
         };
         assert!(matches!(
             validator.check_operation_identity(&duplicate),
-            Err(ParseError::Malformed(message)) if message.contains("duplicate")
+            Err(ParseError::Malformed(message)) if message.contains("lacks program layout evidence")
         ));
     }
 
@@ -2436,7 +2506,7 @@ mod tests {
         let mut validator = Validator::new(&program, DecodeLimits::default());
         assert!(matches!(
             validator.check_operation_identity(&identity),
-            Err(ParseError::Malformed(message)) if message.contains("wrong identity")
+            Err(ParseError::Malformed(message)) if message.contains("lacks program layout evidence")
         ));
     }
 
