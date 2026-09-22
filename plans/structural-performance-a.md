@@ -1,5 +1,8 @@
 # Structural performance: measurements and open questions
 
+Status: matched measurements are complete; open questions below have no
+implementation commitment.
+
 The matched cost tests in `bridge/facade/src/actor_host/cell_compile_cost_tests.rs`
 are the current performance evidence. They report compiler request counts,
 wall time, and machine snapshots against a resident compiler daemon. Timing

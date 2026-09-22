@@ -1,53 +1,16 @@
-# JIT memory lifetime follow-up
+# JIT memory lifetime
 
-The resident JIT uses Cranelift's system memory provider and enforces long-range
-function/data references at `CodegenPipeline::define_function`. Incremental
-compilation can grow beyond a fixed arena while existing addresses remain valid.
-Tests exercise 288 MiB of definitions and references spanning more than 2 GiB.
+Status: open follow-up, with no reclamation implementation scheduled. The actor
+guide links here because retiring a binding root does not establish that its
+compiled code is unreachable.
 
-This removes the fixed allocation ceiling, not lifetime memory growth.
-Production still retains compiled functions and literal data within each live
-machine. The owning module releases its allocations on destruction. Binding-root expiry
-does not reclaim old-space storage or executable code.
+`tidepool-codegen` owns JIT module allocation and releases it when the module is
+dropped. `PersistentSession` owns a live machine; there is no live-machine code
+collector. A future design must trace the same closures, literals, compiled
+references, metadata, and parked continuations used by execution. Actor
+liveness or lexical-scope retirement alone cannot establish code reachability.
 
-## Owning work
-
-1. Design reclamation within a live machine around the actual reference graph:
-   closures, thunks, literal data, compiled references, stack-map/debug metadata,
-   and parked continuations. Retiring a lexical scope alone does not prove its
-   code is unreachable. Preserve cross-scope captures and immutable fork tips.
-2. Measure repeated compilation through the existing fragment/function/block
-   counters. Reuse must respect resolved binding identities and compiler settings;
-   identical source text alone is not a sound key. Extend compilation ownership
-   rather than introducing a frontend cache.
-
-`tidepool-codegen` owns executable allocation and JIT reference lifetimes.
-`PersistentSession` and the session registry own machine lifetime and recovery.
-Use deterministic ownership and address-validity checks; process RSS alone is
-not proof of reclamation. Keep tests for old code remaining callable after growth
-and for independent parked continuations surviving sibling work.
-
-## Running-session boundary
-
-Building a corrected binary does not update an already running host. The
-exomonad-repl report records typed requests that remained pending after compilation
-failed; their recovery has not been established. Do not replay assignments or
-effects to manufacture settlement, or claim `:recovery` restored live values.
-Recovery must report which exact requests, bindings, and handles survive or are
-lost through the existing owners. A host restart is a separate operational action.
-
-## Structural hardening opportunities
-
-`OwnedJitModule` makes allocation cleanup follow module ownership on success,
-partial compilation failure, and machine teardown. Actor stop cannot trigger
-that cleanup because actors share machine ownership rather than owning code.
-The survivor regression stops a producer and invokes its retained closures and
-watch snapshots from a different actor.
-
-Raw code pointers and mutable module access remain low-level escape hatches.
-A stronger boundary would restrict replacing the underlying module and carry
-module provenance/lifetime with callable entries, checking or borrowing that
-owner at every invocation. Do that at the pipeline/machine entry points, not
-with scattered caller checks. Any live-machine collector must derive reachability
-from the same roots, compiled references, and continuations used for execution;
-a separate actor-liveness heuristic cannot safely decide what code to free.
+Measure retained code under real workloads before adding reclamation or reuse.
+Any reuse key must include resolved binding identity and compiler settings;
+matching source text alone is not enough. Process RSS alone does not prove that
+code was reclaimed.

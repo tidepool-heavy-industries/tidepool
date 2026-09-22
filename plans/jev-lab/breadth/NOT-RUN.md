@@ -42,12 +42,6 @@ found two worth rewriting, and is the starting point for this.
 
 ## Also worth doing, lower priority
 
-**Contextual tool-output selection.** Current task plus recent turns plus a tool
-output, selecting the useful passages and keeping addresses for everything
-omitted. Half of this exists as an adaptive-view idea from the closed survey
-and was never run. The consumer interview already told us a count warns and
-does not help, while an address list does both.
-
 **Steering fan-out that actually forwards.** Run 7's root received operator
 steering and forwarded none of it. Per live child, whether the steering changes
 what that child's assignment asks, with the payload being a real message send.

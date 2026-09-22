@@ -1,5 +1,8 @@
 # What the three failure shapes taught the investigation
 
+Status: historical evidence retained until the recipe-check lane has migrated
+its failure-shape fixtures. It is not current implementation guidance.
+
 `Project.Investigate` was built against one failure, then run against two more.
 Each new shape found a real defect. This is the record of what changed and why,
 because the defects are more useful than the successes.
