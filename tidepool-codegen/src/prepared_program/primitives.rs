@@ -746,6 +746,9 @@ pub(super) fn recognize_operation(
     if super::floating::recognize_decode_double_int64(&declaration.identity, signature) {
         return Some(PrimitiveOperation::DecodeDoubleInt64);
     }
+    if super::floating::recognize_decode_float_int(&declaration.identity, signature) {
+        return Some(PrimitiveOperation::DecodeFloatInt);
+    }
     if let Some((function, width)) =
         super::floating::recognize_libm(&declaration.identity, signature)
     {
@@ -873,6 +876,7 @@ pub(super) enum PrimitiveOperation {
     ),
     EncodeJson,
     DecodeDoubleInt64,
+    DecodeFloatInt,
     EncodeDouble {
         signed: bool,
     },
@@ -1233,6 +1237,9 @@ pub(super) fn emit_operation(
         }
         PrimitiveOperation::DecodeDoubleInt64 => {
             super::floating::emit_decode_double_int64(builder, pipeline, arguments[0]).map(Some)
+        }
+        PrimitiveOperation::DecodeFloatInt => {
+            super::floating::emit_decode_float_int(builder, pipeline, arguments[0]).map(Some)
         }
         PrimitiveOperation::Libm { function, width } => {
             super::floating::emit_libm(builder, pipeline, function, width, arguments).map(Some)

@@ -36,6 +36,16 @@ fn classify_symbol(symbol: &str) -> Option<(u8, ClassificationKind)> {
 }
 
 pub(super) const DECODE_DOUBLE_INT64_HOST: &str = "prepared_decode_double_int64";
+pub(super) const DECODE_FLOAT_INT_HOST: &str = "prepared_decode_float_int";
+
+pub(super) fn recognize_decode_float_int(
+    identity: &OperationIdentity,
+    signature: &Signature,
+) -> bool {
+    matches!(identity, OperationIdentity::PrimOp(name) if name == "decodeFloat_Int#")
+        && signature.arguments == [RuntimeRep::Float(32)]
+        && returns_exact(signature, &[RuntimeRep::Int(64), RuntimeRep::Int(64)])
+}
 
 pub(super) fn recognize_decode_double_int64(
     identity: &OperationIdentity,
@@ -52,6 +62,18 @@ pub(super) fn recognize_decode_double_int64(
 /// `output` points to two writable `i64` words in the generated caller's frame.
 pub(super) unsafe extern "C" fn prepared_decode_double_int64(bits: u64, output: *mut i64) {
     let (mantissa, exponent) = tidepool_bignum::decode_double_int64(f64::from_bits(bits));
+    unsafe {
+        output.write(mantissa);
+        output.add(1).write(exponent);
+    }
+}
+
+/// Decode one bit-exact Float into GHC's `(mantissa, exponent)` result.
+///
+/// # Safety
+/// `output` points to two writable `i64` words in the generated caller's frame.
+pub(super) unsafe extern "C" fn prepared_decode_float_int(bits: u32, output: *mut i64) {
+    let (mantissa, exponent) = tidepool_bignum::decode_float_int(f32::from_bits(bits));
     unsafe {
         output.write(mantissa);
         output.add(1).write(exponent);
@@ -77,6 +99,36 @@ pub(super) fn emit_decode_double_int64(
     ));
     let output = builder.ins().stack_addr(types::I64, slot, 0);
     let bits = builder.ins().bitcast(types::I64, MemFlags::new(), argument);
+    builder.ins().call(host, &[bits, output]);
+    Ok(vec![
+        builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), output, 0),
+        builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), output, 8),
+    ])
+}
+
+pub(super) fn emit_decode_float_int(
+    builder: &mut FunctionBuilder<'_>,
+    pipeline: &mut crate::pipeline::CodegenPipeline,
+    argument: Value,
+) -> Result<Vec<Value>, super::CompileError> {
+    let mut signature = ir::Signature::new(pipeline.isa.default_call_conv());
+    signature.params = vec![AbiParam::new(types::I32), AbiParam::new(types::I64)];
+    let host = pipeline
+        .module
+        .declare_function(DECODE_FLOAT_INT_HOST, Linkage::Import, &signature)
+        .map_err(|error| crate::pipeline::PipelineError::Declaration(error.to_string()))?;
+    let host = pipeline.module.declare_func_in_func(host, builder.func);
+    let slot = builder.create_sized_stack_slot(ir::StackSlotData::new(
+        ir::StackSlotKind::ExplicitSlot,
+        16,
+        3,
+    ));
+    let output = builder.ins().stack_addr(types::I64, slot, 0);
+    let bits = builder.ins().bitcast(types::I32, MemFlags::new(), argument);
     builder.ins().call(host, &[bits, output]);
     Ok(vec![
         builder
@@ -1095,6 +1147,26 @@ mod tests {
                 vec![RuntimeRep::Float(64)],
                 vec![RuntimeRep::Int(64), RuntimeRep::Int(64)],
                 vec![float(64, bits)],
+            );
+            assert!(matches!(values.as_slice(),
+                [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(mantissa)),
+                 tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(exponent))]
+                    if (*mantissa, *exponent) == expected));
+        }
+    }
+
+    #[test]
+    fn decode_float_int_real_adapter_matches_pinned_ieee_results() {
+        for (bits, expected) in [
+            (0x3f80_0000, (1_i64 << 23, -23)),
+            (0x0000_0001, (1_i64 << 23, -172)),
+            (0xbf80_0000, (-(1_i64 << 23), -23)),
+        ] {
+            let values = run(
+                "decodeFloat_Int#",
+                vec![RuntimeRep::Float(32)],
+                vec![RuntimeRep::Int(64), RuntimeRep::Int(64)],
+                vec![float(32, bits)],
             );
             assert!(matches!(values.as_slice(),
                 [tidepool_bridge::HaskellValue::Lit(tidepool_repr::Literal::LitInt(mantissa)),

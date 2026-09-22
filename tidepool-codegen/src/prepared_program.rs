@@ -633,6 +633,10 @@ impl CompiledProgram {
                     floating::prepared_decode_double_int64 as *const u8,
                 ),
                 (
+                    floating::DECODE_FLOAT_INT_HOST,
+                    floating::prepared_decode_float_int as *const u8,
+                ),
+                (
                     floating::LIBM_HOST,
                     floating::prepared_float_libm as *const u8,
                 ),
