@@ -103,10 +103,8 @@ doctor:
 exomonad-init *args:
     {{ exomonad_nix }} exomonad/scripts/exomonad-init.sh "$@"
 
-# Start the alpha smoke run: one Sol root agent in this repository's own
-# workspace, handed plans/jev-lab/alpha-smoke-prompt.md. Needs a TypeSafe key
-# in TYPESAFE_API_KEY or ~/.config/typesafe/api-key. Extra arguments are
-# forwarded to `exomonad init`, for example `just exomonad-smoke -- --recreate`.
+# Disabled: the current root-only prompt does not install a verified child
+# monitor. Redesign this smoke before enabling it again.
 [positional-arguments]
 exomonad-smoke *args:
     {{ exomonad_nix }} exomonad/scripts/exomonad-smoke.sh "$@"

@@ -5,6 +5,10 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
+echo 'exomonad-smoke is disabled: its root-only prompt has no verified child-monitor setup.' >&2
+echo 'Redesign the smoke to install a watchdog before reenabling it.' >&2
+exit 2
+
 session=${EXOMONAD_SMOKE_SESSION:-exomonad-alpha-smoke}
 brief=plans/jev-lab/alpha-smoke-prompt.md
 
