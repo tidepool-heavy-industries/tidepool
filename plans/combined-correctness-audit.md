@@ -37,8 +37,8 @@ selection tests; exact registered runtime target listing; eight JSONL tests;
 three isolated delegated-resource tests (2.24 seconds); eight selected Haskell
 components; compiler/cache/rebind 8/8; extractor transaction 3/3; schema JSON
 6/6; actor projection 5/5; compiler-backed response streaming 1/1; park ownership
-1/1; GC traversal/construction 6/6. The original matched Codex executable
-contract passed; the updated-pin contract is still running.
+1/1; GC traversal/construction 6/6. Both the original and updated-pin matched
+Codex executable contracts passed.
 
 The initial strict Clippy pass exposed supported-path findings. Owning repairs
 removed the retired compiler APIs and fixed the codegen findings; the joined
@@ -53,8 +53,7 @@ The exact 498-test default-profile complement is running no-fail-fast. It has
 found a repeated prepared-engine constructor-tag mismatch across actor-host
 documentation scenarios. That shared failure is the next investigation item;
 do not count the complement as passed. Pending after repair: the joined strict
-gate, complete fixture corpus, fresh external workspace, updated Codex contract,
-and final report.
+gate, complete fixture corpus, fresh external workspace, and final report.
 
 ## Verification efficiency
 
