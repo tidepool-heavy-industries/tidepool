@@ -19,6 +19,12 @@ receives typed command observations and retained output; its
 typed lookup results and candidates. These are the examples for presenting or
 selecting tool results inside the tool itself.
 
+An after-tool hook serves a separate purpose: a parent can install a monitor on
+a child actor that runs after its tool calls, gives the child advice in its
+result, or escalates a call to the parent. The workspace's Watchdog module
+provides the Haskell monitor logic; it does not replace typed presentation
+inside tools.
+
 ## Workspaces and operation
 
 A workspace's `.exomonad/` package contains configuration, Haskell modules,

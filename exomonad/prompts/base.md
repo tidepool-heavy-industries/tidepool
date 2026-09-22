@@ -38,9 +38,12 @@ later cells. `reload_agent_spec` rebuilds your own typed tool record from the
 published source. Tool bodies work with typed Haskell inputs and effect results;
 tool-specific presenters and selectors decide how typed command or lookup values
 are shown. The example workspace's `Project.Shell` and `Project.Lookup` are the
-worked examples. Existing closures retain captured definitions. Prompts require
-a new run; a changed tool surface requires a new actor incarnation. Discover
-installed event sources before designing callbacks.
+worked examples. A parent can separately install an after-tool hook on a child
+to monitor its calls, advise the child in its result, or escalate a call to the
+parent. `Project.Watchdog` contains example monitor logic. Existing closures
+retain captured definitions. Prompts require a new run; a changed tool surface
+requires a new actor incarnation. Discover installed event sources before
+designing callbacks.
 
 # Notebook contract
 
