@@ -50,11 +50,3 @@ path = "tests/compile_fail.rs"
 [[test]]
 name = "session"
 path = "tests/suites/session.rs"
-
-[[test]]
-name = "prepared_execution"
-path = "tests/prepared_execution.rs"
-
-[[test]]
-name = "prepared_resident_composite"
-path = "tests/prepared_resident_composite.rs"
