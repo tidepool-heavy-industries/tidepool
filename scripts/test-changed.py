@@ -50,6 +50,8 @@ def cabal_components(root, changed):
         return ["all"]
     if any(path.endswith(".cabal") or Path(path).name.startswith("cabal.project") for path in changed):
         return ["all"]
+    if cabal_embedded_library_source_changes(text, changed):
+        return ["all"]
     selected = set()
     components = {}
     for component in re.split(r"(?m)^(?=(?:library|executable|test-suite) )", text)[1:]:
@@ -70,6 +72,25 @@ def cabal_components(root, changed):
             break
         selected = expanded
     return sorted(selected) or ["all"]
+
+
+def cabal_embedded_library_source_changes(manifest, changed):
+    """Whether a library source embedded into the worker changed.
+
+    The manifest's library entries under extra-source-files are Template
+    Haskell inputs to the internal compiler library. Other extra sources are
+    distribution fixtures and retain their ordinary component ownership.
+    """
+    package_fields = re.split(r"(?m)^(?=(?:library|executable|test-suite) )", manifest)[0]
+    extra_sources = re.search(
+        r"(?ms)^extra-source-files:\s*(.*?)(?=^\S|\Z)", package_fields)
+    if extra_sources is None:
+        return False
+    patterns = [entry for line in extra_sources[1].splitlines()
+                for entry in re.split(r"[,\s]+", line.split("--", 1)[0].strip()) if entry]
+    haskell_changes = [Path(path).relative_to("haskell") for path in changed
+                       if Path(path).is_relative_to("haskell/lib")]
+    return any(path.match(pattern) for path in haskell_changes for pattern in patterns)
 
 
 def select(metadata, changed, root):
@@ -145,7 +166,12 @@ def select(metadata, changed, root):
 
     # Compiler and schema boundaries require the full structural corpus. An
     # ordinary library edit can use the worker's consumed-source evidence.
-    structural = any(path.startswith(("haskell/src/", "haskell/app/", "tidepool-repr/src/", "tidepool-protocol/src/")) and Path(path).suffix != ".md" for path in changed)
+    try:
+        cabal_manifest = (root / "haskell/tidepool-extract.cabal").read_text()
+    except OSError:
+        cabal_manifest = ""
+    structural = (any(path.startswith(("haskell/src/", "haskell/app/", "tidepool-repr/src/", "tidepool-protocol/src/")) and Path(path).suffix != ".md" for path in changed)
+                  or cabal_embedded_library_source_changes(cabal_manifest, changed))
     if structural:
         actions.add("fixtures")
     elif "fixtures" in actions and all(path.startswith("haskell/lib/") or Path(path).suffix == ".md" for path in changed):

@@ -127,6 +127,32 @@ class Selection(unittest.TestCase):
         self.assertEqual(changed.cabal_components(self.root, ["haskell/test-parser/A.hs"]), ["parser"])
         self.assertEqual(changed.cabal_components(self.root, ["haskell/tidepool-extract.cabal"]), ["all"])
 
+    def test_cabal_extra_sources_select_all_components(self):
+        manifest = self.root / "haskell/tidepool-extract.cabal"
+        manifest.parent.mkdir()
+        manifest.write_text(
+            "extra-source-files:\n"
+            "  lib/Tidepool/Aeson/Value.hs\n"
+            "  test-fixtures/*.hs\n"
+            "library compiler\n  hs-source-dirs: src\n"
+            "test-suite display\n  hs-source-dirs: lib\n"
+            "test-suite fixtures\n  hs-source-dirs: test-fixtures\n")
+        self.assertEqual(changed.cabal_components(
+            self.root, ["haskell/lib/Tidepool/Aeson/Value.hs"]), ["all"])
+        self.assertEqual(changed.cabal_components(
+            self.root, ["haskell/test-fixtures/Case.hs"]), ["fixtures"])
+
+    def test_cabal_extra_source_keeps_full_structural_fixtures(self):
+        self.fixture_index()
+        manifest = self.root / "haskell/tidepool-extract.cabal"
+        manifest.write_text(
+            "extra-source-files:\n"
+            "  lib/Tidepool/Aeson/Value.hs\n"
+            "library compiler\n  hs-source-dirs: src\n")
+        _, _, actions, _ = self.select("haskell/lib/Tidepool/Aeson/Value.hs")
+        self.assertIn("fixtures", actions)
+        self.assertFalse(any(action.startswith("fixture:") for action in actions))
+
     def fixture_index(self):
         self.package("tidepool-runtime")
         library = self.root / "haskell/lib/Library.hs"
