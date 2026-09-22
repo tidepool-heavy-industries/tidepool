@@ -5,14 +5,16 @@ driven from Rust. Haskell describes the computation; Rust executes it and
 services its effects.
 
 `AGENTS.md` is the contributor guide: how to work here, the language boundary,
-and where to start. This file is the short form, with the mechanism index.
+and where to start. This file is a short repository overview. Contributor rules
+and the cross-crate ownership map live in `AGENTS.md`; crate boundaries live in
+the nearest crate guide.
 
 ## Repository rules
 
-- Cross-crate mechanisms have one implementation. Check the mechanism index
-  before adding a cache, registry, path resolver, process launcher, durable
-  log, identifier issuer, or supervision layer. Extend the existing mechanism
-  instead of copying it.
+- Cross-crate mechanisms have one implementation. Check the ownership map in
+  `AGENTS.md` before adding a cache, registry, path resolver, process launcher,
+  durable log, identifier issuer, or supervision layer. Extend the existing
+  mechanism instead of copying it.
 - Root decisions govern cross-crate architecture. A crate's `CLAUDE.md` governs
   its local boundaries and invariants.
 - `plans/README.md` lists active design work. Plans are temporary and are not
@@ -51,39 +53,6 @@ The retained `exomonad/harness/` and `exomonad/web/` source trees are historical
 reference material and are excluded from the supported Cargo workspace.
 
 Small support crates have short local charters describing their exact scope.
-
-## Mechanism index
-
-| Mechanism | Home |
-|---|---|
-| git subprocess invocation | `exomonad-worktree::git::GitCli` |
-| interactive actor process mount boundary | `exomonad-node::process_boundary` |
-| durable JSONL append/read | shared primitive in `tidepool-repr` |
-| durable single-consumer delivery queue and ack cursor | `exomonad-node::DurableInbox` |
-| config, cache, and project paths | `tidepool-toolchain::paths` |
-| extractor CLI, typed requests, daemon, and worker invocation | `tidepool-extract-cmd` |
-| compiled-artifact cache | `tidepool-toolchain::cache` |
-| toolchain fingerprint and deploy handshake | `tidepool-toolchain::toolchain` |
-| monotonic process-local identifiers | issuer in `tidepool-repr` |
-| provider-neutral conversation values and call seam | `exomonad-model` |
-| model-authored fenced-output parsing | `exomonad-model-output` |
-| actor identity, lifecycle, turns, and events | `exomonad-actor` |
-| Haskell turn-module templates | `tidepool-runtime::session::turn` |
-| resident Haskell workbench sequencing and source classification | `tidepool-runtime::session::workbench` |
-| durable-format migration ladders | `tidepool_repr::version_ladder` |
-| turn timeout, cancellation, and crash supervision | `tidepool-runtime::TurnSupervisor` |
-| machine-session checkout and ownership | `tidepool_runtime::session::registry` |
-| MCP transport and resource catalog | helpers in `tidepool-mcp` |
-| prepared-heap observation | `tidepool-codegen::prepared_program::observe` |
-| prepared-program free-variable analysis | `tidepool-repr::free_vars` |
-| field/laziness triviality policy | `tidepool-repr` |
-| authored Haskell concurrency | `Tidepool.Async` |
-| operator forms, gates, and steering | `OperatorGate::present_form` and `Tidepool.Form` |
-| agent spec discovery, reload, and the after-tool slot | `exomonad-actor::{agent_spec, reload_spec_tool, after_tool}` |
-| declared tool surface comparison | `exomonad-tool::surface` |
-| source layers: capture, typecheck, publication, drift | `tidepool::exomonad::source` |
-| Jev operators | pinned `jev-dsl` flake input; never vendored |
-| effect and error definitions | `tidepool-protocol` and unmigrated definitions in `bridge/mcp/src/effect_defs.rs` |
 
 ## Build and test
 

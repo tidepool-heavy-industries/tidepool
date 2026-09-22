@@ -109,10 +109,11 @@ redesigns, and distinguish structural savings from measured speedups.
 
 Read the nearest nested `AGENTS.md` before editing a subsystem. Use
 `docs/GLOSSARY.md` for names, especially model-facing text. `plans/README.md`
-lists active designs; plan documents are temporary scaffolding, not standing
-architecture. The root `CLAUDE.md` carries the same rules in brief with the
-cross-crate mechanism index; a nested `CLAUDE.md` governs its own crate. Verify
-architectural claims against owning source and production consumers.
+lists current design work; plan documents are temporary scaffolding, not
+standing architecture. The root `CLAUDE.md` is a short repository overview;
+this file owns contributor rules and the cross-crate ownership map. A nested
+`CLAUDE.md` governs its own crate. Verify architectural claims against owning
+source and production consumers.
 Keep detailed design references out of always-loaded instructions.
 
 ## Shared-context development
