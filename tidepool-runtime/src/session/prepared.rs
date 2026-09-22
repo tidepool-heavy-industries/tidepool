@@ -3818,7 +3818,7 @@ mod tests {
         let error = engine
             .build_host_text(RealmId::ROOT, "must not publish", &wrong_text)
             .expect_err("wrong Text descriptor is rejected after byte construction");
-        assert!(matches!(error, PreparedRuntimeError::Run(_)));
+        assert!(matches!(error, PreparedRuntimeError::HostMount { .. }));
         assert_eq!(engine.handle_count(), initial_handles);
         assert_eq!(engine.persistent_roots_count(), initial_roots);
 

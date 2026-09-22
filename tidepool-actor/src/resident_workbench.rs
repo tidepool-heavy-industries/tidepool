@@ -6620,6 +6620,7 @@ fn compile_host_binding<H, O>(
     type_name: &str,
     anchor: &str,
     imports: SourceImports,
+    retain_text_constructor: bool,
 ) -> Result<(BoundBinder, CompiledTurn, tidepool_repr::Generation), ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
@@ -6635,7 +6636,21 @@ where
         &prepared.imports,
     );
     let include: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
-    let turn = format!("{binding} <- pure (({anchor}) :: {type_name})");
+    let retained_anchor = format!("__tidepoolCarrierAnchor{generation}");
+    let (turn, expected_binders) = if retain_text_constructor {
+        (
+            format!(
+                "({binding}, {retained_anchor}) <- pure ((({anchor}) :: {type_name}), \
+                 (TidepoolHostJson.String (TidepoolHostText.pack \"\") :: TidepoolHostJson.Value))"
+            ),
+            vec![binding.to_owned(), retained_anchor],
+        )
+    } else {
+        (
+            format!("{binding} <- pure (({anchor}) :: {type_name})"),
+            vec![binding.to_owned()],
+        )
+    };
     let retained = session.prepared_retained();
     let result = run_turn(TurnRequest {
         turn_text: &turn,
@@ -6644,7 +6659,7 @@ where
         session_root: view.session_root(),
         inject_modules: &prepared.injected,
         gen: generation.0,
-        verdict: Some(generated_bind_verdict(binding)),
+        verdict: Some(generated_binds_verdict(&expected_binders)),
         target: None,
         retained_imports: &retained,
     })
@@ -6668,9 +6683,14 @@ where
             "host interface did not compile as a bind".into(),
         ));
     };
-    if bound.len() != 1 || bound[0].name != binding {
+    if bound.len() != expected_binders.len()
+        || !bound
+            .iter()
+            .zip(&expected_binders)
+            .all(|(binder, expected)| binder.name == *expected)
+    {
         return Err(ResidentActorWorkbenchError::InputMount(format!(
-            "host interface expected one `{binding}` binder"
+            "host interface returned an unexpected binder shape for `{binding}`"
         )));
     }
     Ok((bound.remove(0), compiled, generation))
@@ -6706,6 +6726,7 @@ where
             "qualified Tidepool.Aeson as TidepoolHostJson",
             "Tidepool.Aeson (object, (.=), toJSON)",
         ]),
+        false,
     )?;
     session
         .mount_json_binding_in(
@@ -6751,7 +6772,9 @@ where
             "qualified Data.Text as TidepoolHostText",
             "qualified Data.Text.Internal as TidepoolHostTextInternal",
             "qualified GHC.Exts as TidepoolHostExts",
+            "qualified Tidepool.Aeson as TidepoolHostJson",
         ]),
+        true,
     )?;
     session
         .mount_text_binding_in(
@@ -6815,7 +6838,9 @@ where
             "qualified Data.Text as TidepoolHostText",
             "qualified Data.Text.Internal as TidepoolHostTextInternal",
             "qualified GHC.Exts as TidepoolHostExts",
+            "qualified Tidepool.Aeson as TidepoolHostJson",
         ]),
+        true,
     )?;
     session
         .mount_typed_binding_in(
@@ -7427,6 +7452,53 @@ mod request_tests {
             .iter()
             .all(|name| name != &input.name));
 
+        let mut input_source = source.clone();
+        input_source
+            .workbench_imports
+            .extend_text(&format!("qualified {} as TidepoolHostInput", input.module));
+        input_source
+            .workbench_imports
+            .extend_text("qualified Data.Map as TidepoolHostMap");
+        input_source
+            .workbench_imports
+            .extend_text("qualified Tidepool.Aeson as TidepoolHostJson");
+        input_source.preamble = format!(
+            "{}\ninput = TidepoolHostInput.{}\n",
+            input_source.preamble, input.name
+        )
+        .into();
+        let json_step = begin_fragment(
+            &mut session,
+            &context,
+            &input_source,
+            RequestWorkbenchScope {
+                response: None,
+                request: None,
+                type_modules: &[],
+            },
+            ParsedBlock {
+                ordinal: 1,
+                total: 1,
+                source: "jsonSeen <- pure (\\() -> case input of { TidepoolHostJson.Object fields -> if TidepoolHostMap.member \"nested\" fields then (17 :: Int) else 0; _ -> 0 })".into(),
+            },
+            None,
+            None,
+        )
+        .expect("mounted JSON is executable from the request alias");
+        assert!(matches!(json_step, ResidentWorkbenchStep::Committed { .. }));
+        let json_display = render_cell_observation(
+            &mut session,
+            &context,
+            &input_source,
+            &[],
+            "jsonSeen",
+            1024,
+            &[],
+            ExpressionPresentation::Rendered,
+        )
+        .expect("mounted JSON result renders");
+        assert!(json_display.contains("17"), "JSON result: {json_display}");
+
         mount_text_binding(
             &mut session,
             &context,
@@ -7435,7 +7507,7 @@ mod request_tests {
             "tool_result",
             "tool output",
         )
-        .expect("Text carrier mounts");
+        .expect("Text carrier mounts after the JSON request executes");
         mount_command_job(
             &mut session,
             &context,
@@ -7443,10 +7515,52 @@ mod request_tests {
             "job_binding",
             "command job",
         )
-        .expect("newtype Job carrier mounts through Text representation");
+        .expect("strict Job carrier mounts through its authenticated constructor");
         assert_eq!(
             session.host_text_binding_in(context.placement.lexical_scope, "command job"),
             Some("job_binding".into())
+        );
+
+        let mut text_source = source.clone();
+        text_source
+            .workbench_imports
+            .extend_text("qualified Data.Text as TidepoolHostText");
+        text_source
+            .workbench_imports
+            .extend_text("qualified Tidepool.Command.Types as TidepoolHostJob");
+        let text_step = begin_fragment(
+            &mut session,
+            &context,
+            &text_source,
+            RequestWorkbenchScope {
+                response: None,
+                request: None,
+                type_modules: &[],
+            },
+            ParsedBlock {
+                ordinal: 1,
+                total: 1,
+                source: "textSeen <- pure (\\() -> TidepoolHostText.unpack tool_result ++ \":\" ++ case job_binding of TidepoolHostJob.Job text -> TidepoolHostText.unpack text)".into(),
+            },
+            None,
+            None,
+        )
+        .expect("mounted Text and strict Job are executable");
+        assert!(matches!(text_step, ResidentWorkbenchStep::Committed { .. }));
+        let text_display = render_cell_observation(
+            &mut session,
+            &context,
+            &text_source,
+            &[],
+            "textSeen",
+            1024,
+            &[],
+            ExpressionPresentation::Rendered,
+        )
+        .expect("mounted Text and Job result renders");
+        assert!(
+            text_display.contains("tool output:command job"),
+            "Text/Job result: {text_display}"
         );
         session.retire_host_binding_owner(&input.binder);
     }

@@ -4714,6 +4714,11 @@ mod tests {
                     CborValue::Text("Tidepool.Session.Val.G3".into()),
                     CborValue::Text("ForceData".into()),
                     CborValue::Text("Int".into()),
+                    CborValue::Array(vec![
+                        CborValue::Text("main".into()),
+                        CborValue::Text("GHC.Types".into()),
+                        CborValue::Text("Int".into()),
+                    ]),
                 ])]),
                 CborValue::Array(vec![CborValue::Array(vec![
                     CborValue::Integer(7.into()),
@@ -4741,6 +4746,14 @@ mod tests {
                 assert_eq!(bound[0].name, "x");
                 assert_eq!(bound[0].var_id, 42);
                 assert_eq!(bound[0].tier, ValueTier::ForceData);
+                assert_eq!(
+                    bound[0].root_head.as_ref().map(|head| (
+                        head.unit.as_str(),
+                        head.module.as_str(),
+                        head.name.as_str(),
+                    )),
+                    Some(("main", "GHC.Types", "Int")),
+                );
                 assert_eq!(
                     asks,
                     vec![YieldSite {

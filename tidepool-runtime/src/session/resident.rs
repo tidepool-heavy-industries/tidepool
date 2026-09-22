@@ -1831,24 +1831,7 @@ where
         text: &str,
     ) -> Result<(), ResidentError> {
         self.settle_dropped_custody();
-        self.mount_text_binding_as_in(scope, binder, gen, code, HostBindingType::TEXT, text)
-    }
-
-    /// Mount the runtime `Text` representation under a compiler-issued
-    /// logical binder whose newtype erases to `Text` at STG. `Job` is the
-    /// current shipped use: its nominal root is still checked before the
-    /// exact `Text` descriptor is authenticated and built.
-    pub fn mount_text_binding_as_in(
-        &mut self,
-        scope: ScopeId,
-        binder: &BoundBinder,
-        gen: Generation,
-        code: TurnCode<'_>,
-        expected: HostBindingType,
-        text: &str,
-    ) -> Result<(), ResidentError> {
-        self.settle_dropped_custody();
-        self.validate_compiled_mount_target(scope, binder, gen, &code, expected)?;
+        self.validate_compiled_mount_target(scope, binder, gen, &code, HostBindingType::TEXT)?;
         self.validate_text_runtime_constructor(&code)?;
         self.mount_host_value_in(scope, binder, gen, code, |engine, realm, table| {
             engine.build_host_text(realm, text, table)
@@ -2040,9 +2023,8 @@ where
         Ok(())
     }
 
-    /// `Text` is the actual runtime representation for direct Text mounts and
-    /// for shipped newtypes such as `Job`. The table supplies the exact host
-    /// id; the prepared declaration supplies the defining family and unit.
+    /// `Text` is authenticated by both its compiler table id and prepared
+    /// family identity before a direct host mount allocates it.
     fn validate_text_runtime_constructor(&self, code: &TurnCode<'_>) -> Result<(), ResidentError> {
         let qualified = "Data.Text.Text";
         let id = self
