@@ -3734,9 +3734,11 @@ dependencies = [
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-effect",
+ "tidepool-extract-cmd",
  "tidepool-protocol",
  "tidepool-repr",
  "tidepool-runtime",
+ "tidepool-toolchain",
 ]
 
 [[package]]

@@ -98,6 +98,23 @@ pub fn ensure_effects_module_at(
     effects: &[EffectDecl],
     row: &RowArgs,
 ) -> std::io::Result<EffectsModuleDirs> {
+    let endpoint = tidepool_toolchain::toolchain::bind_extract_endpoint()
+        .map_err(|error| {
+            std::io::Error::other(format!("bind compiler for immutable support: {error}"))
+        })?
+        .0;
+    ensure_effects_module_at_for_compiler(effects, row, endpoint.identity())
+}
+
+/// [`ensure_effects_module_at`] using the exact compiler that will consume the
+/// include roots. Composition roots that already bind an extractor pass its
+/// identity here so the immutable support package cannot be staged under a
+/// different toolchain selection.
+pub fn ensure_effects_module_at_for_compiler(
+    effects: &[EffectDecl],
+    row: &RowArgs,
+    compiler: &tidepool_extract_cmd::CompilerIdentity,
+) -> std::io::Result<EffectsModuleDirs> {
     let vocabulary = all_decls();
     for effect in effects {
         assert!(
@@ -108,7 +125,7 @@ pub fn ensure_effects_module_at(
             effect.type_name
         );
     }
-    let core = ensure_effects_core_module()?;
+    let core = ensure_effects_core_module_for_compiler(compiler)?;
     let shim = ensure_effects_shim_module(effects, row)?;
     Ok(EffectsModuleDirs { core, shim })
 }
@@ -118,7 +135,21 @@ pub fn ensure_effects_module_at(
 /// the per-window shim, so it can materialize this pair without minting a
 /// throwaway row-keyed dir.
 pub fn ensure_effects_core_module() -> std::io::Result<PathBuf> {
-    write_core_module(&effects_core_module_source())
+    let endpoint = tidepool_toolchain::toolchain::bind_extract_endpoint()
+        .map_err(|error| {
+            std::io::Error::other(format!("bind compiler for immutable support: {error}"))
+        })?
+        .0;
+    ensure_effects_core_module_for_compiler(endpoint.identity())
+}
+
+/// Materialize the fixed Core/Authored support package under `compiler`'s
+/// stable producer identity. Row-dependent shims and session-generated source
+/// deliberately do not enter this package.
+pub fn ensure_effects_core_module_for_compiler(
+    compiler: &tidepool_extract_cmd::CompilerIdentity,
+) -> std::io::Result<PathBuf> {
+    write_core_module_for_compiler(compiler, &effects_core_module_source())
 }
 
 /// Like [`ensure_effects_core_module`] but takes the already-rendered source
@@ -126,14 +157,41 @@ pub fn ensure_effects_core_module() -> std::io::Result<PathBuf> {
 /// generated sources to re-materialize them if the staging dir is reaped)
 /// calls this instead of re-deriving the universal text each time.
 pub fn write_core_module(core_src: &str) -> std::io::Result<PathBuf> {
+    let endpoint = tidepool_toolchain::toolchain::bind_extract_endpoint()
+        .map_err(|error| {
+            std::io::Error::other(format!("bind compiler for immutable support: {error}"))
+        })?
+        .0;
+    write_core_module_for_compiler(endpoint.identity(), core_src)
+}
+
+/// Like [`write_core_module`], with an already-bound compiler identity. This
+/// is the explicit boundary used by hosts that own compiler selection.
+pub fn write_core_module_for_compiler(
+    compiler: &tidepool_extract_cmd::CompilerIdentity,
+    core_src: &str,
+) -> std::io::Result<PathBuf> {
     let authored = effects_authored_module_source();
-    write_module_dir(
-        "tidepool-effects-core",
-        &[
-            ("Effects/Core.hs", core_src),
-            ("Effects/Authored.hs", &authored),
-        ],
+    let files = [
+        tidepool_toolchain::ImmutableSupportFile {
+            path: "Tidepool/Effects/Core.hs",
+            source: core_src,
+        },
+        tidepool_toolchain::ImmutableSupportFile {
+            path: "Tidepool/Effects/Authored.hs",
+            source: &authored,
+        },
+    ];
+    tidepool_toolchain::stage_immutable_support(
+        compiler,
+        tidepool_toolchain::ImmutableSupportPackage {
+            name: "tidepool-effects-core",
+            exports: &["Tidepool.Effects.Core", "Tidepool.Effects.Authored"],
+            files: &files,
+        },
     )
+    .map(|support| support.root().to_path_buf())
+    .map_err(std::io::Error::other)
 }
 
 /// Write just the per-window shim (`Tidepool/Effects.hs` +
