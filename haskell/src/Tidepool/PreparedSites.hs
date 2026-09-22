@@ -133,6 +133,10 @@ data SiteRejection = SiteRejection
 -- cast or tick) with none, which leaves its result type open. No verb reference leaves
 -- elaboration without either a rewrite or a recorded rejection; projection
 -- then raises only the rejections its executable closure reaches.
+-- Surface bodies must delegate to their sited siblings with an unavailable
+-- site argument, preserving the sibling's returning behavior. OPAQUE prevents
+-- inlining but not demand analysis: a whole-body error would mark callers as
+-- bottoming before this pass replaces the call.
 elaboratePreparedSites :: SiteAuthority -> Map String Id -> [CoreBind]
   -> IO ([CoreBind], [YieldSite], [PreparedSite], TypeGraph, [SiteRejection])
 elaboratePreparedSites authority siblings bindings = do

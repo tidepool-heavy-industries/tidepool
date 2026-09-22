@@ -494,7 +494,7 @@ child
    . (KnownEffects child, Subset child parent)
   => Branch child input result
   -> Unfold parent (Response result)
-child = error "child: extractor must assign a typed site"
+child = childSited (error "child: extractor must assign a typed site")
 
 {-# OPAQUE childSited #-}
 childSited
@@ -511,7 +511,8 @@ childWithProgress
    . (KnownEffects child, Subset child parent)
   => Branch child input result
   -> Unfold parent (Response result, Progress progress)
-childWithProgress = error "childWithProgress: extractor must assign a typed site"
+childWithProgress = childWithProgressSited
+  (error "childWithProgress: extractor must assign a typed site")
 
 {-# OPAQUE childWithProgressSited #-}
 childWithProgressSited

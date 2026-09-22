@@ -6366,6 +6366,56 @@ fn runtime_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn typed_site_surface_callers_have_returning_contracts() {
+        use tidepool_repr::execution_schema::{Group, HeapRhs, ResultContract, RuntimeRep};
+
+        tidepool_testing::eval_harness::require_extract();
+        let haskell = crate::haskell_sources::ensure_shoal_haskell().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let sources = driver_sources(&haskell, None, directory.path(), None).unwrap();
+        let names = [
+            "receiveProbe",
+            "requestProbe",
+            "requestWithProbe",
+            "progressProbe",
+            "retainedProgressProbe",
+            "childProbe",
+            "childProgressProbe",
+        ];
+        let artifacts = tidepool_runtime::compile_targets(
+            include_str!("actor_host/typed_site_return_contract.hs"),
+            &names,
+            &sources.include,
+            |_, _, _| {},
+        )
+        .unwrap();
+        for name in names {
+            let program = artifacts.targets[name].prepared.prepared();
+            let entry = program
+                .bindings()
+                .iter()
+                .flat_map(|group| match group {
+                    Group::NonRecursive(binding) => std::slice::from_ref(binding),
+                    Group::Recursive(bindings) => bindings.as_slice(),
+                })
+                .find(|binding| binding.binding.id == program.entry())
+                .unwrap();
+            let signature = match entry.binding.rhs {
+                HeapRhs::Function { signature, .. } | HeapRhs::Thunk { signature, .. } => {
+                    &program.signatures()[signature.0 as usize]
+                }
+                ref other => panic!("{name} has no callable entry: {other:?}"),
+            };
+            assert_eq!(
+                signature.results,
+                ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+                "{name}: site elaboration must preserve a returning caller"
+            );
+            assert!(!program.sites().is_empty(), "{name}: expected a typed site");
+        }
+    }
+
     #[tokio::test]
     async fn roster_observation_preserves_host_and_sibling_workbenches() {
         let mut campaign = test_campaign::TestCampaign::start().await;
