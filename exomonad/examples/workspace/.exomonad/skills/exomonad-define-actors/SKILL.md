@@ -152,8 +152,8 @@ R.call (noteCount (R.client tally)) ()
 ```
 
 A record actor may hold a worktree. `R.withWorktree tree spec` starts it
-holding a worktree the parent created and did not bind; custody is exclusive
-and integrate authority follows custody, so this is how an actor comes to own
+holding a worktree the parent created and did not bind; ownership is exclusive
+and integrate authority follows the owned handle, so this is how an actor comes to own
 the tree it merges into. An actor with a worktree resolves to the coding role,
 one without resolves to research, and a row that needs `WorktreeIntegration`
 only sits under the first. The host admits at most one worktree per actor.

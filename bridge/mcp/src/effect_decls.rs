@@ -41,7 +41,7 @@ pub struct EffectDecl {
     /// `Tidepool.Cargo` (its helpers build on `runArgv`), `Git` needs
     /// `Tidepool.Git`, `AskUser` needs `Tidepool.Form` (built on
     /// `askUserRaw`). Emitted by both the stmt/eval plane
-    /// (`preamble::pragmas_and_imports`) and the decl plane
+    /// (`preamble::pragmas_and_imports`) and the persistent declaration environment
     /// (`preamble::session_decl_module_env`) via ONE fold over the effect
     /// list, in list order — the single source for what used to be two
     /// hand-mirrored `type_name == "..."` gates (friction #23: they drifted).

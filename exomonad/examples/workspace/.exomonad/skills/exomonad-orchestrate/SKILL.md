@@ -95,7 +95,7 @@ line per decision, so reading the whole state costs one short display.
 ## The handlers
 
 The implementer's settlement carries a claim; the OID carries the evidence.
-Derive the diff yourself, in the parent's custody, from the OID on the reply —
+Derive the diff yourself, using the parent's owned handle, from the OID on the reply —
 never from the child's own file list, and never by reading the child's
 checkout. Check coverage and ownership in code *before* asking Jev anything: a
 confident `all_present` on incomplete evidence is a measured failure mode, and
@@ -149,8 +149,8 @@ merge.
 
 ## The integrator owns the worktree
 
-Worktree custody is exclusive and integrate authority follows custody: only the
-actor bound to a worktree may `tryMerge` into it, and a record actor started
+Worktree ownership is exclusive and integrate authority follows the owned
+handle: only the actor bound to a worktree may `tryMerge` into it, and a record actor started
 without a worktree resolves to the research role, whose ceiling has no
 `WorktreeIntegration` at all. So merging is its own actor. The parent creates
 the integration worktree and does not bind it; one `Integrator` is started

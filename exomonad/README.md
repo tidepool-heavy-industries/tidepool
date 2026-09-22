@@ -196,7 +196,7 @@ the next request with its accumulated conversation and declarations intact.
 
 The low-level `Tidepool.Actor` API remains available through an intentional
 advanced import. It is not imported or re-exported by the default facade.
-Exomonad context forks use the applicative `Tidepool.Actors.Unfold` API exported
+Exomonad context unfolds use the applicative `Tidepool.Actors.Unfold` API exported
 by the default facade.
 
 ## exomonad-repl development launch

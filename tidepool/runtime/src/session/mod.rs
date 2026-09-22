@@ -313,7 +313,7 @@ pub struct SessionLib {
     /// the import. Empty by default (the pure `standalone_default` surface needs
     /// only the stdlib). Set via [`with_validation_include`](Self::with_validation_include).
     extra_include: Vec<PathBuf>,
-    /// Each scope's current decl-plane tip: the generation a new turn in that
+    /// Each scope's current persistent declaration environment tip: the generation a new turn in that
     /// scope chains its [`DeclTurn::parent`] from. `SessionLib`
     /// does not own the [`tidepool_codegen::scope::ScopeTree`] itself (that
     /// lives on `PersistentSession`) — it only keys this map by whatever
@@ -540,7 +540,7 @@ impl SessionLib {
         self.log.generation()
     }
 
-    /// The generation `scope`'s decl plane currently stands at — the
+    /// The generation `scope`'s persistent declaration environment currently stands at — the
     /// [`DeclTurn::parent`] a new turn in `scope` chains from. `Generation(0)`
     /// means `scope` has never had a turn pushed (nor inherited one): the same
     /// meaning as an empty session at ROOT. There is NO fallback to the log's
@@ -632,7 +632,7 @@ impl SessionLib {
     #[must_use]
     pub fn decl_value_names_in(&self, scope: ScopeId) -> Vec<&str> {
         // Latest-wins with retraction: a name removed by a later retraction turn
-        // (its binding migrated to the value plane) is no longer a decl-plane
+        // (its binding migrated to the value plane) is no longer a persistent declaration environment
         // value, so it drops out.
         let mut live: Vec<&str> = Vec::new();
         for g in self.log.chain_from_root(self.scope_tip(scope)) {
@@ -675,7 +675,7 @@ impl SessionLib {
     }
 
     /// The currently in-scope declaration heads paired with the generation of
-    /// their latest defining turn — the decl-plane half of the live
+    /// their latest defining turn — the persistent declaration environment half of the live
     /// `tidepool://session/bindings` resource snapshot. Latest-wins across turns.
     /// `current_decl_heads() == current_decl_heads_in(ScopeId::ROOT)`.
     #[must_use]
@@ -782,7 +782,7 @@ impl SessionLib {
         self.define_batch(&[decl_text])
     }
 
-    /// [`Self::define`], but against `scope`'s own decl plane rather than
+    /// [`Self::define`], but against `scope`'s own persistent declaration environment rather than
     /// ROOT's — see [`Self::define_batch_with_vals_in`].
     pub fn define_scoped_in(
         &mut self,
@@ -1115,12 +1115,12 @@ impl SessionLib {
         }
     }
 
-    /// Retract `name` from the decl plane: after its binding migrates to the
+    /// Retract `name` from the persistent declaration environment: after its binding migrates to the
     /// value plane, the decl module must stop exporting it, or a later
     /// `let`/`def` would compile against the stale decl (a value bound
     /// `findings <- pure []` then rebound `findings <- pure (findings ++ xs)`
     /// otherwise leaves `findings = []` defined forever). The dual of
-    /// `tidepool-repl`'s value-plane eviction — call it when a decl-plane name is
+    /// `tidepool-repl`'s value-plane eviction — call it when a persistent declaration environment name is
     /// materialized.
     ///
     /// No-op when `name` is not a current decl head. Otherwise appends a
@@ -1133,7 +1133,7 @@ impl SessionLib {
         self.retract_in(ScopeId::ROOT, name)
     }
 
-    /// [`Self::retract`], but against `scope`'s own decl plane — a name
+    /// [`Self::retract`], but against `scope`'s own persistent declaration environment — a name
     /// retracted in a child scope never touches the parent's (or a sibling's)
     /// tip or heads.
     pub fn retract_in(&mut self, scope: ScopeId, name: &str) -> Result<(), SessionError> {

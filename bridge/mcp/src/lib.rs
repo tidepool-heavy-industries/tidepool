@@ -114,7 +114,7 @@ pub fn ensure_effects_module_at(
 }
 
 /// Write the universal stable Core module and authored facade into their own
-/// content-addressed dir. The declaration plane imports the facade but never
+/// content-addressed dir. The persistent declaration environment imports the facade but never
 /// the per-window shim, so it can materialize this pair without minting a
 /// throwaway row-keyed dir.
 pub fn ensure_effects_core_module() -> std::io::Result<PathBuf> {
@@ -486,7 +486,7 @@ mod tests {
                 "session decl import `{imp}` missing from eval preamble — drift"
             );
         }
-        // Same pragma block, modulo the decl-plane's intentional
+        // Same pragma block, modulo the persistent declaration environment's intentional
         // NoMonomorphismRestriction (decl_pragmas adds it so nullary
         // constrained binds generalize; the eval expr module must NOT carry it
         // — see decl_pragmas). Strip that one addition, then the blocks match.

@@ -256,7 +256,7 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
 }
 
 /// Run an ALREADY-COMPILED prepared program to completion against `handlers`,
-/// as a bare one-shot: no session, no actor, no decl plane. Bootstraps a
+/// as a bare one-shot: no session, no actor, no persistent declaration environment. Bootstraps a
 /// standalone [`session::prepared::PreparedEngine`], settles the entry, and
 /// drives any parked request through `handlers` via the resident turn
 /// machinery's own suspend/dispatch/resume loop

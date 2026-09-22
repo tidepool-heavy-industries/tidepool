@@ -1,4 +1,4 @@
-`unfold` admits persistent context forks and returns their handles now. Children
+`unfold` admits persistent child actor applications and returns their handles now. Children
 start after the entire enclosing cell finishes, including statements after
 `unfold`. All forks queued in that block inherit its final committed Haskell
 bindings and the conversation through the actual tool result.

@@ -283,8 +283,8 @@ definition
   -> ActorSpec api effects
 definition label profile record = ActorSpec label profile record Nothing
 
--- | Start the actor holding one registered worktree. Custody is exclusive and
--- integrate authority follows custody, so this is how a record actor comes
+-- | Start the actor holding one registered worktree. Ownership is exclusive and
+-- integrate authority follows the owned handle, so this is how a record actor comes
 -- to own the tree it merges into: the parent creates the worktree and hands
 -- the (still unbound) id here. An actor with a worktree resolves to the
 -- coding role; one without resolves to research. The host admits at most one

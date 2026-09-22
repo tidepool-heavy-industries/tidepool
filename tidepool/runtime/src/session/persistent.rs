@@ -58,7 +58,7 @@ fn value_import_specs(entries: impl IntoIterator<Item = (String, SessionModule)>
 
 /// The resident-session substrate: one live [`PreparedEngine`]
 /// (`None` until the first turn bootstraps it), the accumulated constructor
-/// [`DataConTable`], the [`SessionLib`] decl plane, the [`BindingTable`] value
+/// [`DataConTable`], the [`SessionLib`] persistent declaration environment, the [`BindingTable`] value
 /// plane, and the value-binding generation.
 ///
 /// The consumers keep their own higher-level turn orchestration (source
@@ -73,9 +73,9 @@ pub struct PersistentSession {
     /// later turns are a subset), so an ADT value bound earlier renders with real
     /// con names later.
     session_table: DataConTable,
-    /// The declaration plane: user `data`/`class`/`f x = …` accumulated as source
+    /// The persistent declaration environment: user `data`/`class`/`f x = …` accumulated as source
     /// across turns, imported by later turns through the gen-versioned module.
-    /// `None` for a session with no decl plane; `Some` for the repl and the
+    /// `None` for a session with no persistent declaration environment; `Some` for the repl and the
     /// accumulating harness.
     lib: Option<SessionLib>,
     /// The value plane: `name → (SessionVarId, RootSlot, Val.G<g>)` for each
@@ -93,7 +93,7 @@ pub struct PersistentSession {
     val_gen: Generation,
     /// The scope forest — one per session, shared by BOTH
     /// planes. The value plane hangs [`BindingTable`] frames off these ids and
-    /// the decl plane keys its per-scope tips off the SAME ids, which is why
+    /// the persistent declaration environment keys its per-scope tips off the SAME ids, which is why
     /// neither owns a forest of its own: two forests would be two answers to "is
     /// this scope live", and a scoped decl and a scoped binding would drift.
     /// [`ScopeId::ROOT`] is the flat session every pre-C2 caller lives in.
@@ -133,7 +133,7 @@ pub struct DeclarationPlaneCommit {
 }
 
 impl PersistentSession {
-    /// Build an idle session core. `lib` is the decl plane (`Some` for the repl
+    /// Build an idle session core. `lib` is the persistent declaration environment (`Some` for the repl
     /// and the accumulating harness; `None` for a value-plane-only session). The
     /// machine is not bootstrapped until the first turn.
     pub fn new(lib: Option<SessionLib>, nursery_size: usize) -> Self {
@@ -153,20 +153,20 @@ impl PersistentSession {
 
     // -- accessors ---------------------------------------------------------
 
-    /// The decl-plane library (read). Panics if the session has no decl plane —
-    /// a repl invariant; the harness only calls this once a decl plane has been
+    /// The persistent declaration environment library (read). Panics if the session has no persistent declaration environment —
+    /// a repl invariant; the harness only calls this once a persistent declaration environment has been
     /// installed.
     pub fn lib(&self) -> &SessionLib {
         #[allow(clippy::expect_used, reason = "decl plane present")]
         self.lib.as_ref().expect("decl plane present")
     }
-    /// The decl-plane library (mutate — e.g. `define_batch_with_vals`). Panics if
-    /// the session has no decl plane (see [`Self::lib`]).
+    /// The persistent declaration environment library (mutate — e.g. `define_batch_with_vals`). Panics if
+    /// the session has no persistent declaration environment (see [`Self::lib`]).
     pub fn lib_mut(&mut self) -> &mut SessionLib {
         #[allow(clippy::expect_used, reason = "decl plane present")]
         self.lib.as_mut().expect("decl plane present")
     }
-    /// Whether this session has a decl plane.
+    /// Whether this session has a persistent declaration environment.
     pub fn has_lib(&self) -> bool {
         self.lib.is_some()
     }
@@ -522,8 +522,8 @@ impl PersistentSession {
         v
     }
 
-    /// The current decl-plane module (`Lib.G<g>`), if any (also `None` when the
-    /// session has no decl plane at all).
+    /// The current persistent declaration environment module (`Lib.G<g>`), if any (also `None` when the
+    /// session has no persistent declaration environment at all).
     pub fn current_lib_module(&self) -> Option<SessionModule> {
         self.lib.as_ref().and_then(|l| l.current_module())
     }
@@ -625,10 +625,10 @@ impl PersistentSession {
         lib.exact_exports_in(scope, heads)
     }
 
-    /// The decl-plane include directory (where `Lib.G<g>.hs` modules live), for
+    /// The persistent declaration environment include directory (where `Lib.G<g>.hs` modules live), for
     /// a later turn's compile search path. `None` when the session has no decl
     /// plane.
-    /// Move the decl plane OUT (machine rotation, one-session living
+    /// Move the persistent declaration environment OUT (machine rotation, one-session living
     /// structure): the plane is SOURCE-side state (gen modules on disk +
     /// the in-memory decl log), independent of any machine's heap, so it
     /// transfers wholesale into a freshly-built session while the old
@@ -646,7 +646,7 @@ impl PersistentSession {
 
     /// Define decl text(s) scoped against live session values: the current
     /// `Val.G<g>` per still-live name are imported unqualified, every live
-    /// `Val.G<g>` is injected for validation. The decl-plane analogue of GHCi
+    /// `Val.G<g>` is injected for validation. The persistent declaration environment analogue of GHCi
     /// seeing earlier bindings from a new top-level definition.
     pub fn define_scoped(&mut self, decl_texts: &[&str]) -> Result<Generation, SessionError> {
         self.define_scoped_in(ScopeId::ROOT, decl_texts)
@@ -794,7 +794,7 @@ impl PersistentSession {
         }
     }
 
-    /// Retract `name` from the decl plane (its binding migrated to the value
+    /// Retract `name` from the persistent declaration environment (its binding migrated to the value
     /// plane). No-op when `name` is not a current decl head.
     pub fn retract(&mut self, name: &str) -> Result<(), SessionError> {
         self.retract_in(ScopeId::ROOT, name)
@@ -804,7 +804,7 @@ impl PersistentSession {
     /// `retract(n) == retract_in(ScopeId::ROOT, n)`.
     ///
     /// A name lives in at most one plane per scope, so a CHILD binding
-    /// `helper` on the value plane must not retract the PARENT's decl-plane
+    /// `helper` on the value plane must not retract the PARENT's persistent declaration environment
     /// `helper` — the parent's name is still the parent's, and nothing ever
     /// walks downward.
     pub fn retract_in(&mut self, scope: ScopeId, name: &str) -> Result<(), SessionError> {
@@ -837,7 +837,7 @@ impl PersistentSession {
     /// ancestor.
     ///
     /// This is also where both planes freeze the new scope's inherited
-    /// environment. The declaration plane captures its parent's generation;
+    /// environment. The persistent declaration environment captures its parent's generation;
     /// the binding plane captures an immutable name-to-value tip with root
     /// leases. Capturing both here prevents parent or sibling progress between
     /// mint and first use from leaking into the child.
@@ -897,7 +897,7 @@ impl PersistentSession {
         Ok(())
     }
 
-    /// Atomically move `entry.name` from this scope's declaration plane to its
+    /// Atomically move `entry.name` from this scope's persistent declaration environment to its
     /// materialized value plane.  Durable retraction is the commit point: if
     /// it fails, the binding table is untouched and the caller must report the
     /// failure rather than a successful bind.

@@ -86,7 +86,7 @@ complete retained stdout, or reports why it is unavailable. Repeated `await`
 is not a way to enlarge capture.
 
 `Cmd.run command` starts and waits up to 30 seconds; `Cmd.await job` observes an
-existing job for the same window. Both return completed results, including
+existing job for the same command job. Both return completed results, including
 nonzero exits. On overrun, the interactive workbench stops the current computation
 and installs a real `jobN :: Cmd.Job` binding, named in its receipt. The command
 continues. The enclosing result is not bound and subsequent statements do not
@@ -114,7 +114,7 @@ Cmd.describe (preview "a path; not shell syntax")
 own workspace, and relative paths start there. For an actor with an agent
 process of its own that workspace is its sandbox; an actor started with
 `R.start` has no process and no sandbox, so its commands run in whatever
-worktree it holds custody of, or in the source checkout when it holds none —
+worktree for which it holds an owned handle, or in the source checkout when it holds none —
 which is why such an actor can write in the worktree it was given
 (`git reset --hard` in its own checkout works) and nowhere else. Constructing
 a command does not snapshot inherited environment or location. `Cmd.describe`

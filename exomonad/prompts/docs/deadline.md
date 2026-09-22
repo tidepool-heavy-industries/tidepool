@@ -15,5 +15,5 @@ Expiry makes the response unavailable with `ResponseDeadlineExceeded` and
 wakes dependent watches without waiting for cancellation acknowledgement.
 Later replies are rejected. If reply acceptance already won the race, its
 terminal settlement is preserved. Cancellation is requested separately, and
-target custody remains live until its execution actually closes. Inspect the
+the target remains active until its execution actually closes. Inspect the
 reply/actor state before assuming it is safe to clean up.

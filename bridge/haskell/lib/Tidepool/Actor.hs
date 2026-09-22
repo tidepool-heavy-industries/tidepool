@@ -410,7 +410,7 @@ awaitExit (ActorRef actorId incarnation cell) = do
 
 -- | Observe an exact actor without parking the caller. Completion reads the
 -- same shared exit cell as 'awaitExit'; repeated polls therefore return the
--- same typed result and never consume custody.
+    -- same typed result and never consume the owned handle.
 pollExit :: Member Actor effs => ActorRef api exit -> Eff effs (Maybe (ActorExit exit))
 pollExit (ActorRef actorId incarnation cell) = do
   terminal <- send (ActorPollWith (actorId, incarnation))

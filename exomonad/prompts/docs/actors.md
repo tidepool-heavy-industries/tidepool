@@ -41,8 +41,8 @@ from retained current source state, not a replay of earlier history, and
 publications accepted while a handler is busy stay ordered.
 
 `R.withWorktree tree spec` starts the actor holding a worktree the parent
-created and did not bind. Custody is exclusive and integrate authority follows
-custody, so the actor that merges into a worktree is the actor that holds it;
+created and did not bind. Worktree ownership is exclusive and integrate
+authority follows the owned handle, so the actor that merges into a worktree is the actor that holds it;
 an actor with a worktree resolves to the coding role, one without to research.
 At most one worktree per actor.
 

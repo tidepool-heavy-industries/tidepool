@@ -147,14 +147,14 @@ pub struct DeclTurn {
     /// from metadata written before types were retained. The status path may
     /// fill those entries after one batched inspection, fenced by generation.
     pub value_types: BTreeMap<String, String>,
-    /// Names this turn REMOVES from the decl plane (no replacement). A name is
+    /// Names this turn REMOVES from the persistent declaration environment (no replacement). A name is
     /// retracted when its binding migrates to the value plane (e.g. a
     /// self-referential `n <- pure (n+1)` that must materialize) — the decl
     /// plane must then stop exporting it, or a later `let`/`def` would compile
     /// against the stale decl. A pure-retraction turn carries empty
     /// `sources`/`items` and one or more `retracts`. Honored by every scoping
     /// fold (`cumulative_exports_before`, `current_heads`, `replayable_sources`,
-    /// `render_module`) so all decl-plane views stay consistent; a later
+    /// `render_module`) so all persistent declaration environment views stay consistent; a later
     /// `define` of the same name naturally un-retracts it (latest-wins).
     pub retracts: Vec<String>,
     /// The generation this turn chains from — `None` only for the very first
@@ -220,7 +220,7 @@ impl DeclLog {
     /// turns, mirroring the eval-time module scoping), as seen from `tip` —
     /// walks `tip`'s parent chain rather than assuming the log is one flat
     /// history. Lets a caller with several tips in flight (one per scope)
-    /// query each independently. Backs the decl-plane half of the
+    /// query each independently. Backs the persistent declaration environment half of the
     /// `tidepool://session/bindings` live-state snapshot.
     #[must_use]
     pub fn current_heads_at(&self, tip: Generation) -> Vec<(String, u64)> {
@@ -806,7 +806,7 @@ mod tests {
         turn
     }
 
-    /// A pure-retraction turn: removes `names` from the decl plane, no source.
+    /// A pure-retraction turn: removes `names` from the persistent declaration environment, no source.
     fn retract_turn(names: &[&str]) -> DeclTurn {
         DeclTurn {
             normalized: Default::default(),
@@ -1246,7 +1246,7 @@ mod tests {
         );
     }
 
-    // --- Retraction (a name leaving the decl plane on decl→value migration) ---
+    // --- Retraction (a name leaving the persistent declaration environment on decl→value migration) ---
 
     fn heads(log: &DeclLog) -> Vec<String> {
         log.current_heads_at(log.generation())

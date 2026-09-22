@@ -647,7 +647,7 @@ pub enum ResidentError {
     TableCollision(String),
     #[error(transparent)]
     ProgramProvenance(#[from] ProgramProvenanceError),
-    /// A decl-plane operation failed while materializing a value bind — the
+    /// A persistent declaration environment operation failed while materializing a value bind — the
     /// cross-plane shadow retract (a value bind evicting a same-name decl head).
     #[error(transparent)]
     Session(#[from] SessionError),
@@ -1218,9 +1218,9 @@ where
         }
     }
 
-    /// Accumulate `decls` on the decl plane (mirrors the repl's
+    /// Accumulate `decls` on the persistent declaration environment (mirrors the repl's
     /// `Session::define_scoped`): a declaration turn appends to the gen-versioned
-    /// `Lib.G<g>` module a later turn imports. Requires a decl plane (`Some(lib)`
+    /// `Lib.G<g>` module a later turn imports. Requires a persistent declaration environment (`Some(lib)`
     /// at bootstrap). Each node's plane is independent, so a parent's accumulated
     /// declarations survive across a child run on a different node.
     pub fn define_scoped(
@@ -1284,7 +1284,7 @@ where
         self.state.discard_staged_declaration(staged);
     }
 
-    /// The current decl-plane module name (`Tidepool.Session.Lib.G<g>`) a later
+    /// The current persistent declaration environment module name (`Tidepool.Session.Lib.G<g>`) a later
     /// turn imports to see accumulated declarations, or `None` before any decl.
     pub fn session_import_module(&self) -> Option<String> {
         self.state.current_lib_module().map(|m| m.module_name())
@@ -1306,8 +1306,8 @@ where
         self.state.next_lib_module()
     }
 
-    /// The decl-plane include directory to add to a later turn's compile search
-    /// path (so `import Lib.G<g>` resolves), or `None` with no decl plane.
+    /// The persistent declaration environment include directory to add to a later turn's compile search
+    /// path (so `import Lib.G<g>` resolves), or `None` with no persistent declaration environment.
     pub fn lib_include_dir(&self) -> Option<PathBuf> {
         self.state.lib_include_dir().map(Path::to_path_buf)
     }
@@ -2394,7 +2394,7 @@ where
     /// [`Self::unbootstrapped`]/[`Self::is_bootstrapped`]) or during the
     /// transient window a turn is running on its own eval thread (the machine
     /// moved out; see [`Self::on_eval_thread`]).
-    /// Move the decl plane out for a machine rotation — see
+    /// Move the persistent declaration environment out for a machine rotation — see
     /// [`super::persistent::PersistentSession::take_lib`].
     pub fn take_lib(&mut self) -> Option<crate::session::SessionLib> {
         self.state.take_lib()

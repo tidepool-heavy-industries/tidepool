@@ -22,7 +22,7 @@ data ActorRef (protocol :: Type -> Type) exit where
 
 -- | An exact actor reference with its mailbox protocol hidden.
 --
--- Worker custody needs only the actor's successful exit type. Hiding the
+-- A worker's owned handle needs only the actor's successful exit type. Hiding the
 -- protocol avoids coupling the private worker ledger to a particular mailbox
 -- API while retaining the live Haskell exit cell verbatim.
 data ExitRef exit where

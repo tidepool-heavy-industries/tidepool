@@ -3,7 +3,7 @@ and Git branch relationships. Use the `status` tool's `lineage` view for those
 relationships, `summary` for current work, `detailed` for terminal history, and
 `trace` for provider usage samples, prompt fingerprints, and exact identities.
 The canonical workspace path is actor-relative; actor, worktree, and branch
-identities establish custody.
+identities establish which actor owns each worktree handle.
 
 First and latest provider observations are distinct: inspect `contextFirstUsage`
 and `contextLatestUsage` on `Tidepool.Actors.Observe.actorContext`, or `rosterFirstUsage` and

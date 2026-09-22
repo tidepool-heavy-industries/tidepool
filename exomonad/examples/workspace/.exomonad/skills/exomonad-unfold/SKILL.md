@@ -3,7 +3,7 @@ name: exomonad-unfold
 description: Admit several Exomonad children in one applicative unfold, join their settlements in one watch, and read a child's committed work from the parent's own Git view. Load when decomposing work across children and inspecting what they produced.
 ---
 
-`unfold` admits persistent context forks and returns their handles now. The
+`unfold` admits persistent child actor applications and returns their handles now. The
 children start after the entire enclosing cell finishes, and they inherit that
 cell's final committed bindings plus the conversation through the real tool
 result. Combine independent children applicatively in one `unfold`; keep the

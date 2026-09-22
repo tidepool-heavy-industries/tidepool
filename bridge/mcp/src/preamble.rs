@@ -116,7 +116,7 @@ fn eval_import_lines(user_library: bool, hides: PreludeHides) -> Vec<&'static st
 /// that produced when they drifted). Passing the wrong (e.g.
 /// empty/minimal) effect set here used to be masked by callers reaching for
 /// the lens-free `ModuleEnv::standalone_default` instead — but that surface
-/// also drops Prelude/Aeson, so a decl-plane pure bind (`v = object [...]`,
+/// also drops Prelude/Aeson, so a persistent declaration environment pure bind (`v = object [...]`,
 /// promoted to a decl for GHCi-parity generalization — see
 /// `tidepool-runtime` `try_pure_bind_as_decl`) failed to resolve `object`/
 /// `toJSON` under a minimal stack even though production always has them.
@@ -167,7 +167,7 @@ pub fn session_decl_module_env_with_companions(
     }
     // Orchestration helpers (readGlob/searchFiles/memo/renderJson/…): the
     // stmt plane gets these via the expr module's imports; without this the
-    // decl plane's import surface diverges — a decl using `readGlob` failed
+    // persistent declaration environment's import surface diverges — a decl using `readGlob` failed
     // "not in scope" with no hint (friction #23, found live 2026-07-01).
     imports.push("import Tidepool.Orchestrate".into());
     ModuleEnv {

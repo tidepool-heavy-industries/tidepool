@@ -130,7 +130,7 @@ pub struct BindingTable {
     live: HashMap<SessionVarId, BindingEntry>,
     /// Immutable, flattened inherited view captured when a scope is minted.
     tips: HashMap<ScopeId, BindingTip>,
-    /// Names deliberately hidden by this scope's declaration plane.
+    /// Names deliberately hidden by this scope's persistent declaration environment.
     hidden: HashMap<ScopeId, HashSet<BindingName>>,
     /// Binding tips and prepared work retaining each value identity.
     leases: HashMap<SessionVarId, usize>,

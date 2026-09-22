@@ -16,7 +16,7 @@ This file guides contributors; it is not part of the shipped model prompt.
   information. Check against live/public types rather than inventing API shapes.
 - Keep role-specific instructions and runtime authority observations separate.
   Inherited bindings and descriptions do not transfer permissions or reply ownership.
-- Teach scaffold, exact-context fork, independent review and checked integration.
+- Teach scaffold, context unfold, independent review and checked integration.
   Delivery of a baseline is not acknowledgment or verified incorporation.
 - Describe omitted fork effort through the native launch selector's inherited
   default; native Codex goals remain disabled on all Exomonad nodes. Verify policy
