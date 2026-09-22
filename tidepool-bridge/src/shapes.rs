@@ -33,7 +33,7 @@
 //!     choose the surface.
 //!
 //! Constructors take pre-resolved `DataConId`s (each caller has its own
-//! resolution policy: `JsonConIds`, bridge `get_resilient`, …). Decoders take
+//! resolution policy: `JsonConIds`, bridge `get_qualified`, …). Decoders take
 //! a `&DataConTable` and recognize constructors BY NAME (`name_of`), which
 //! tolerates duplicate same-name cons from cross-module closures.
 
@@ -280,12 +280,27 @@ pub fn text_bytes_checked(
     fields: &[HaskellValue],
     table: &DataConTable,
 ) -> Result<Vec<u8>, TextShapeError> {
+    text_bytes_checked_with(
+        fields,
+        |id| is_con_named(id, "ByteArray", table),
+        |id| is_con_named(id, "I#", table),
+    )
+}
+
+/// Table-free strict Text slicing for callers that already authenticated the
+/// exact wrapper constructors they permit.
+pub fn text_bytes_checked_with(
+    fields: &[HaskellValue],
+    is_bytearray_con: impl Fn(DataConId) -> bool,
+    is_int_con: impl Fn(DataConId) -> bool,
+) -> Result<Vec<u8>, TextShapeError> {
     if fields.len() != 3 {
         return Err(TextShapeError::WrongShape);
     }
-    let backing = text_backing(&fields[0], table).ok_or(TextShapeError::BadBacking)?;
-    let off_i = unbox_int(&fields[1], table).ok_or(TextShapeError::BadOffLen)?;
-    let len_i = unbox_int(&fields[2], table).ok_or(TextShapeError::BadOffLen)?;
+    let backing =
+        text_backing_with(&fields[0], &is_bytearray_con).ok_or(TextShapeError::BadBacking)?;
+    let off_i = unbox_int_with(&fields[1], &is_int_con).ok_or(TextShapeError::BadOffLen)?;
+    let len_i = unbox_int_with(&fields[2], &is_int_con).ok_or(TextShapeError::BadOffLen)?;
     let bytes = backing.lock().unwrap_or_else(PoisonError::into_inner);
     let bad = || TextShapeError::BadSlice {
         off: off_i,
@@ -651,13 +666,25 @@ mod tests {
             (18, "IN", 1),
         ];
         for (id, name, arity) in cons {
+            let qualified_name = match name {
+                "I#" | "W#" | "C#" | "D#" | "F#" | "True" | "False" | ":" | "[]" => {
+                    format!("GHC.Types.{name}")
+                }
+                "Text" => "Data.Text.Text".into(),
+                "Bin" | "Tip" => format!("Data.Map.Internal.{name}"),
+                "Number" => "Tidepool.Aeson.Value.Number".into(),
+                "Scientific" => "Tidepool.Aeson.Scientific.Scientific".into(),
+                "IS" | "IP" | "IN" => format!("GHC.Num.Integer.{name}"),
+                "ByteArray" => "Tidepool.Runtime.ByteArray".into(),
+                _ => unreachable!("complete shape test constructor family"),
+            };
             t.insert(DataCon {
                 id: DataConId(id),
                 name: name.into(),
                 tag: id as u32,
                 rep_arity: arity,
                 field_bangs: vec![],
-                qualified_name: None,
+                qualified_name: Some(qualified_name),
                 type_name: String::new(),
             });
         }

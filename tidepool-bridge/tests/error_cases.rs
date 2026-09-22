@@ -13,7 +13,7 @@ fn get_table() -> DataConTable {
         tag: 1,
         rep_arity: 3,
         field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
-        qualified_name: None,
+        qualified_name: Some("GHC.Tuple.(,,)".into()),
         type_name: String::new(),
     });
     table

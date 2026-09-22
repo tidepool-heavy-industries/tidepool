@@ -67,13 +67,24 @@ mod tests {
         ];
 
         for (i, (name, tag, arity)) in cons.iter().enumerate() {
+            let qualified_name = match *name {
+                "Object" | "Array" | "String" | "Number" | "Bool" | "Null" => {
+                    format!("Tidepool.Aeson.Value.{name}")
+                }
+                "Scientific" => "Tidepool.Aeson.Scientific.Scientific".into(),
+                "IS" | "IP" | "IN" => format!("GHC.Num.Integer.{name}"),
+                "True" | "False" | "I#" | ":" | "[]" => format!("GHC.Types.{name}"),
+                "Bin" | "Tip" => format!("Data.Map.Internal.{name}"),
+                "Text" => "Data.Text.Text".into(),
+                _ => unreachable!("complete JSON test constructor family"),
+            };
             t.insert(DataCon {
                 id: DataConId(i as u64),
                 name: (*name).into(),
                 tag: *tag,
                 rep_arity: *arity,
                 field_bangs: vec![],
-                qualified_name: None,
+                qualified_name: Some(qualified_name),
                 type_name: String::new(),
             });
         }

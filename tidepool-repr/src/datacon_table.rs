@@ -421,8 +421,8 @@ impl DataConTable {
     /// Look up by name AND expected arity, erroring loudly instead of
     /// tie-breaking when more than one constructor shares both — the strict
     /// counterpart of [`Self::get_by_name_arity`]. Callers that must not let
-    /// metadata insertion order decide encoding (the derive's default
-    /// resolution path, `tidepool-bridge`'s `get_resilient`) use this instead.
+    /// metadata insertion order decide encoding (including the derive's
+    /// default unqualified resolution path) use this instead.
     ///
     /// - Zero matches (name absent entirely, or present only at other
     ///   arities): `Ok(None)` — a plain "not found," not an ambiguity.
@@ -1107,8 +1107,7 @@ mod tests {
 
     /// A requested arity that no same-named constructor carries is a plain
     /// "not found" — `Ok(None)`, never a silent fallback to a wrong-arity
-    /// entry (that fallback lived in `tidepool-bridge::get_resilient`, not
-    /// here, but this method must not reintroduce it).
+    /// entry.
     #[test]
     fn get_by_name_arity_checked_absent_arity_is_ok_none() {
         let mut table = DataConTable::new();

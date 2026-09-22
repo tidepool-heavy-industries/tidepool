@@ -226,14 +226,14 @@ impl<T: ToHaskell> ToHaskell for ReplyResult<T> {
     ) -> Result<(), BridgeError> {
         match &self.0 {
             Ok(value) => {
-                let right = tidepool_bridge::get_resilient(table, "Right", 1)
+                let right = tidepool_bridge::get_qualified(table, "Data.Either.Right", 1)
                     .ok_or_else(|| BridgeError::UnknownDataConName("Right".into()))?;
                 visitor.begin_constructor(right, 1)?;
                 value.visit(table, visitor)?;
                 visitor.end_constructor()
             }
             Err(error) => {
-                let left = tidepool_bridge::get_resilient(table, "Left", 1)
+                let left = tidepool_bridge::get_qualified(table, "Data.Either.Left", 1)
                     .ok_or_else(|| BridgeError::UnknownDataConName("Left".into()))?;
                 visitor.begin_constructor(left, 1)?;
                 error.visit(table, visitor)?;

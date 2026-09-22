@@ -5600,8 +5600,8 @@ where
                 let table = session.data_con_table();
                 let answer = match terminal {
                     Some(terminal) => {
-                        let just =
-                            tidepool_bridge::get_resilient(table, "Just", 1).ok_or_else(|| {
+                        let just = tidepool_bridge::get_qualified(table, "GHC.Maybe.Just", 1)
+                            .ok_or_else(|| {
                                 tidepool_bridge::BridgeError::UnknownDataConName("Just".into())
                             })?;
                         HaskellValue::Con(
@@ -5610,7 +5610,7 @@ where
                         )
                     }
                     None => {
-                        let nothing = tidepool_bridge::get_resilient(table, "Nothing", 0)
+                        let nothing = tidepool_bridge::get_qualified(table, "GHC.Maybe.Nothing", 0)
                             .ok_or_else(|| {
                                 tidepool_bridge::BridgeError::UnknownDataConName("Nothing".into())
                             })?;
@@ -5917,8 +5917,12 @@ fn either_constructor(
     right: bool,
     field: HaskellValue,
 ) -> Result<HaskellValue, tidepool_bridge::BridgeError> {
-    let name = if right { "Right" } else { "Left" };
-    let constructor = tidepool_bridge::get_resilient(table, name, 1)
+    let (name, qualified) = if right {
+        ("Right", "Data.Either.Right")
+    } else {
+        ("Left", "Data.Either.Left")
+    };
+    let constructor = tidepool_bridge::get_qualified(table, qualified, 1)
         .ok_or_else(|| tidepool_bridge::BridgeError::UnknownDataConName(name.into()))?;
     Ok(HaskellValue::Con(constructor, vec![field]))
 }
@@ -6254,9 +6258,9 @@ fn core_list(
     table: &DataConTable,
     values: Vec<HaskellValue>,
 ) -> Result<HaskellValue, tidepool_bridge::BridgeError> {
-    let nil = tidepool_bridge::get_resilient(table, "[]", 0)
+    let nil = tidepool_bridge::get_qualified(table, "GHC.Types.[]", 0)
         .ok_or_else(|| tidepool_bridge::BridgeError::UnknownDataConName("[]".into()))?;
-    let cons = tidepool_bridge::get_resilient(table, ":", 2)
+    let cons = tidepool_bridge::get_qualified(table, "GHC.Types.:", 2)
         .ok_or_else(|| tidepool_bridge::BridgeError::UnknownDataConName(":".into()))?;
     Ok(values
         .into_iter()
@@ -7581,7 +7585,11 @@ mod request_tests {
                 tag: 1,
                 rep_arity: arity,
                 field_bangs: Vec::new(),
-                qualified_name: (name != "Left").then(|| format!("Tidepool.Effects.Core.{name}")),
+                qualified_name: Some(if name == "Left" {
+                    "Data.Either.Left".into()
+                } else {
+                    format!("Tidepool.Effects.Core.{name}")
+                }),
                 type_name: String::new(),
             });
         }

@@ -2590,10 +2590,10 @@ pub fn build_list_value(
     items: Vec<HaskellValue>,
     table: &DataConTable,
 ) -> Result<HaskellValue, EngineError> {
-    let nil_id = tidepool_bridge::get_resilient(table, "[]", 0).ok_or_else(|| {
+    let nil_id = tidepool_bridge::get_qualified(table, "GHC.Types.[]", 0).ok_or_else(|| {
         EngineError::Run("build_list_value: no [] constructor in table".to_string())
     })?;
-    let cons_id = tidepool_bridge::get_resilient(table, ":", 2).ok_or_else(|| {
+    let cons_id = tidepool_bridge::get_qualified(table, "GHC.Types.:", 2).ok_or_else(|| {
         EngineError::Run("build_list_value: no : constructor in table".to_string())
     })?;
     let mut result = HaskellValue::Con(nil_id, vec![]);
@@ -2607,7 +2607,7 @@ pub fn build_list_value(
 /// side of the `InvocationExit` generated into `Tidepool.Effects`
 /// (`tidepool_mcp::runllmturn_effect_def!`'s `type_defs`). The constructor
 /// names here ARE that ADT's, and [`build_invocation_exit_value`] resolves
-/// them by name against the turn's own `DataConTable`.
+/// their exact `Tidepool.Effects.Core` identities in the turn's own table.
 ///
 /// **The line this type draws:** an
 /// `InvocationExit` describes a failure ATTRIBUTABLE TO ONE CHILD'S WINDOW —
@@ -2678,7 +2678,8 @@ pub fn build_invocation_exit_value(
 ) -> Result<HaskellValue, EngineError> {
     use tidepool_bridge::ToHaskell;
     let name = exit.constructor();
-    let con = tidepool_bridge::get_resilient(table, name, 1).ok_or_else(|| {
+    let qualified = format!("Tidepool.Effects.Core.{name}");
+    let con = tidepool_bridge::get_qualified(table, &qualified, 1).ok_or_else(|| {
         EngineError::Run(format!(
             "build_invocation_exit_value: no `{name}` constructor in table — the \
              compiling row generated no `InvocationExit`, so a fork/fanout child's \
@@ -2705,11 +2706,15 @@ pub fn build_child_answer_value(
     outcome: Result<HaskellValue, InvocationExit>,
     table: &DataConTable,
 ) -> Result<HaskellValue, EngineError> {
-    let (name, payload) = match outcome {
-        Ok(v) => ("Right", v),
-        Err(exit) => ("Left", build_invocation_exit_value(&exit, table)?),
+    let (name, qualified, payload) = match outcome {
+        Ok(v) => ("Right", "Data.Either.Right", v),
+        Err(exit) => (
+            "Left",
+            "Data.Either.Left",
+            build_invocation_exit_value(&exit, table)?,
+        ),
     };
-    let con = tidepool_bridge::get_resilient(table, name, 1).ok_or_else(|| {
+    let con = tidepool_bridge::get_qualified(table, qualified, 1).ok_or_else(|| {
         EngineError::Run(format!(
             "build_child_answer_value: no `{name}` constructor in table — a \
              fork/fanout answer is `Either InvocationExit T`, so both `Left` and \
@@ -2745,6 +2750,85 @@ pub type SharedProvider = Arc<dyn DynModelProvider>;
 mod tests {
     use super::*;
     use crate::provider::{Message, ReasoningItem, Role};
+
+    fn insert_fixed_constructor(
+        table: &mut DataConTable,
+        id: u64,
+        name: &str,
+        arity: u32,
+        qualified_name: &str,
+    ) {
+        table.insert(tidepool_repr::DataCon {
+            id: tidepool_repr::DataConId(id),
+            name: name.into(),
+            tag: 1,
+            rep_arity: arity,
+            field_bangs: vec![],
+            qualified_name: Some(qualified_name.into()),
+            type_name: String::new(),
+        });
+    }
+
+    #[test]
+    fn fixed_answer_assembly_uses_canonical_constructors_among_impostors() {
+        let mut table = DataConTable::new();
+        for (id, name, arity, qualified) in [
+            (1, "[]", 0, "GHC.Types.[]"),
+            (2, ":", 2, "GHC.Types.:"),
+            (3, "Right", 1, "Data.Either.Right"),
+            (4, "ExitCancelled", 1, "Tidepool.Effects.Core.ExitCancelled"),
+            (5, "Text", 3, "Data.Text.Text"),
+        ] {
+            insert_fixed_constructor(&mut table, id, name, arity, qualified);
+            insert_fixed_constructor(&mut table, id + 100, name, arity, &format!("User.{name}"));
+        }
+
+        let list = build_list_value(
+            vec![HaskellValue::Lit(tidepool_repr::Literal::LitInt(7))],
+            &table,
+        )
+        .unwrap();
+        assert!(matches!(
+            list,
+            HaskellValue::Con(tidepool_repr::DataConId(2), _)
+        ));
+
+        let answer = build_child_answer_value(
+            Ok(HaskellValue::Lit(tidepool_repr::Literal::LitInt(8))),
+            &table,
+        )
+        .unwrap();
+        assert!(matches!(
+            answer,
+            HaskellValue::Con(tidepool_repr::DataConId(3), _)
+        ));
+
+        let exit =
+            build_invocation_exit_value(&InvocationExit::Cancelled("done".into()), &table).unwrap();
+        assert!(matches!(
+            exit,
+            HaskellValue::Con(tidepool_repr::DataConId(4), _)
+        ));
+    }
+
+    #[test]
+    fn fixed_answer_assembly_rejects_impostor_only_tables() {
+        let mut table = DataConTable::new();
+        insert_fixed_constructor(&mut table, 101, "[]", 0, "User.[]");
+        insert_fixed_constructor(&mut table, 102, ":", 2, "User.:");
+        insert_fixed_constructor(&mut table, 103, "Right", 1, "User.Right");
+        insert_fixed_constructor(&mut table, 104, "ExitCancelled", 1, "User.ExitCancelled");
+
+        assert!(build_list_value(Vec::new(), &table).is_err());
+        assert!(build_child_answer_value(
+            Ok(HaskellValue::Lit(tidepool_repr::Literal::LitInt(8))),
+            &table,
+        )
+        .is_err());
+        assert!(
+            build_invocation_exit_value(&InvocationExit::Cancelled("done".into()), &table).is_err()
+        );
+    }
 
     fn user(content: &str) -> Message {
         Message {

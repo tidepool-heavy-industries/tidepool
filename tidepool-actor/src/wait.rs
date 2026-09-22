@@ -1,5 +1,5 @@
 use tidepool_bridge::HaskellValue;
-use tidepool_bridge::{get_resilient, BridgeError, FromHaskell, ToHaskell};
+use tidepool_bridge::{get_qualified, BridgeError, FromHaskell, ToHaskell};
 use tidepool_repr::DataConTable;
 
 use crate::generated::actor::ActorReq;
@@ -75,7 +75,55 @@ pub fn actor_terminal_value(
             vec![terminal.summary.to_value(table)?],
         ),
     };
-    let constructor = get_resilient(table, name, arity)
-        .ok_or_else(|| BridgeError::UnknownDataConName(name.to_string()))?;
+    let qualified = format!("Tidepool.Effects.Core.{name}");
+    let constructor = get_qualified(table, &qualified, arity)
+        .ok_or_else(|| BridgeError::UnknownDataConName(qualified))?;
     Ok(HaskellValue::Con(constructor, fields))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidepool_repr::{DataCon, DataConId};
+
+    fn insert(table: &mut DataConTable, id: u64, qualified_name: &str) {
+        table.insert(DataCon {
+            id: DataConId(id),
+            name: "ActorCompletedStatus".into(),
+            tag: 1,
+            rep_arity: 0,
+            field_bangs: vec![],
+            qualified_name: Some(qualified_name.into()),
+            type_name: "ActorTerminalStatus".into(),
+        });
+    }
+
+    fn completed() -> ActorTerminal {
+        ActorTerminal {
+            kind: ActorExitKind::Completed,
+            summary: String::new(),
+        }
+    }
+
+    #[test]
+    fn terminal_status_uses_canonical_constructor_among_impostors() {
+        let mut table = DataConTable::new();
+        insert(&mut table, 1, "Tidepool.Effects.Core.ActorCompletedStatus");
+        insert(&mut table, 2, "User.ActorCompletedStatus");
+
+        let value = actor_terminal_value(&completed(), &table).unwrap();
+        assert!(matches!(value, HaskellValue::Con(DataConId(1), ref fields) if fields.is_empty()));
+    }
+
+    #[test]
+    fn terminal_status_rejects_impostor_only_table() {
+        let mut table = DataConTable::new();
+        insert(&mut table, 2, "User.ActorCompletedStatus");
+
+        assert!(matches!(
+            actor_terminal_value(&completed(), &table),
+            Err(BridgeError::UnknownDataConName(ref name))
+                if name == "Tidepool.Effects.Core.ActorCompletedStatus"
+        ));
+    }
 }
