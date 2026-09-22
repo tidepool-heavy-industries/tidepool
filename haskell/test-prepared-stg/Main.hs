@@ -44,7 +44,7 @@ import Tidepool.ExecutionIR
 import Tidepool.PreparedSites (buildYieldSite, lookupPreparedVerb, resolvePreparedSiblings)
 import RetainedPluginTest (verifyCompilerReuse)
 import TypeEvidenceChecks (runTypeEvidenceChecks)
-import Tidepool.PreparedJson (resolveJsonAuthority)
+import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthority)
 
 assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
@@ -93,6 +93,26 @@ projectEntry :: PreparedPipelineResult -> String -> String
   -> Map.Map Schema.SymbolIdentity Word -> Either Projection.ProjectionError Schema.WireProgram
 projectEntry result modul entry retained =
   projectEntryWithAux result modul entry [] retained
+
+projectEntryWithJsonAuthority :: JsonAuthority -> PreparedPipelineResult
+  -> String -> String -> Either Projection.ProjectionError Schema.WireProgram
+projectEntryWithJsonAuthority authority result modul entry =
+  Projection.projectPreparedTarget context (pprModules result)
+ where
+  context = Projection.ProjectionContext
+    { Projection.projectionProfile = "ghc-9.12-prepared-stg"
+    , Projection.projectionToolchain = "ghc-9.12.2"
+    , Projection.projectionTarget =
+        Schema.TargetDescriptor Schema.X86_64 Schema.LittleEndian 64 64 "sysv64" []
+    , Projection.projectionRetainedGenerations = mempty
+    , Projection.projectionEntry = Schema.SymbolIdentity "main" (fromString modul)
+        "value" (fromString entry) Nothing
+    , Projection.projectionAuxiliaryRoots = []
+    , Projection.projectionFormattingAuthority = Nothing
+    , Projection.projectionTimeAuthority = Nothing
+    , Projection.projectionJsonAuthority = Just authority
+    , Projection.projectionTextUnit = Nothing
+    }
 
 -- | 'projectEntry' plus a set of auxiliary root occurrences in the same
 -- module (mirroring the fixed entries beside a turn's resume entry): admitted
@@ -152,6 +172,41 @@ verifyJsonDependencyAuthority dir = do
   substitutedAuthority <- resolveJsonAuthority (prHscEnv (pprPipelineResult substituted))
   assert (substitutedAuthority == Nothing)
     "JSON authority admitted a same-shaped Scientific dependency with changed semantics"
+  let eitherRoot = dir </> "json-either-shadow"
+      eitherDirectory = eitherRoot </> "GHC" </> "Internal" </> "Data"
+  createDirectoryIfMissing True eitherDirectory
+  writeFile (eitherDirectory </> "Either.hs") (unlines
+    [ "{-# LANGUAGE NoImplicitPrelude #-}"
+    , "module GHC.Internal.Data.Either (Either(..)) where"
+    , "data Either a b = Left a | Right a"
+    ])
+  writeFile (eitherRoot </> "Prelude.hs") (unlines
+    [ "{-# LANGUAGE PackageImports #-}"
+    , "module Prelude (module Base, Either(..)) where"
+    , "import \"base\" Prelude as Base hiding (Either(..))"
+    , "import GHC.Internal.Data.Either (Either(..))"
+    ])
+  let eitherFixture = eitherRoot </> "JsonEitherAuthorityContract.hs"
+  writeFile eitherFixture (unlines
+    [ "module JsonEitherAuthorityContract where"
+    , "import Data.Text (Text)"
+    , "import Tidepool.Aeson.Value (Value, eitherDecodeValue)"
+    , "result :: Text -> Either Text Value"
+    , "result = eitherDecodeValue"
+    ])
+  shadowedEither <- runPipelineSelected PreparedStg eitherFixture
+    [eitherRoot, "test-prepared-stg", "lib"]
+  shadowedEitherAuthority <- resolveJsonAuthority
+    (prHscEnv (pprPipelineResult shadowedEither))
+  authority <- maybe (ioError (userError "installed JSON owners did not resolve")) pure
+    shadowedEitherAuthority
+  case projectEntryWithJsonAuthority authority shadowedEither
+      "JsonEitherAuthorityContract" "result" of
+    Left (Projection.UnsupportedPreparedShape detail)
+      | "InvalidJsonType" `Text.isInfixOf` detail -> pure ()
+    outcome -> ioError (userError
+      ("JSON authority admitted a home-shadowed Either dependency: "
+        ++ either show (const "projected") outcome))
 
 -- An O0 bytecode interface exposes a private helper that the prepared O2 body
 -- removes. Importers must receive the prepared owner's interface, including on
@@ -309,17 +364,22 @@ verifyRepeatedConstructorEvidence :: PreparedPipelineResult -> IO ()
 verifyRepeatedConstructorEvidence result = do
   let originals = [ con | prepared <- pprModules result
         , TypePolicy.DataG _ _ _ rows <- TypePolicy.tgNodes (pmTypeGraph prepared)
-        , (con, _) <- rows, occNameString (nameOccName (dataConName con)) == "I#" ]
+        , (con, _) <- rows, occNameString (nameOccName (dataConName con)) == "NoUnpack" ]
   original <- case originals of
     con : _ -> pure con
-    [] -> ioError (userError "constructor collision fixture lacks I# evidence")
-  let clone name fields = DC.mkDataCon name False name (DC.dataConSrcBangs original)
-        [] [] [] (DC.dataConConcreteTyVars original) [] [] [] fields
-        (DC.dataConOrigResTy original) NoPromInfo (DC.dataConTyCon original)
-        (DC.dataConTag original) [] (DC.dataConWorkId original) DC.NoDataConRep
+    [] -> ioError (userError "constructor collision fixture lacks NoUnpack evidence")
+  let clone name sourceFields runtimeFields = case DC.dataConBoxer original of
+        Nothing -> error "constructor collision fixture lacks a wrapper boxer"
+        Just boxer -> DC.mkDataCon name False name (DC.dataConSrcBangs original)
+          [] [] [] (DC.dataConConcreteTyVars original) [] [] [] sourceFields
+          (DC.dataConOrigResTy original) NoPromInfo (DC.dataConTyCon original)
+          (DC.dataConTag original) [] (DC.dataConWorkId original)
+          (DC.DCR (DC.dataConWrapId original) boxer runtimeFields
+            (DC.dataConRepStrictness original) (DC.dataConImplBangs original))
       name = dataConName original
       otherName = setNameUnique name (mkUnique 'z' 54321)
       fields = DC.dataConOrigArgTys original
+      runtimeFields = DC.dataConRepArgTys original
       conflictingFields = [Scaled multiplicity wordPrimTy | Scaled multiplicity _ <- fields]
       replace pair prepared = prepared { pmTypeGraph = TypePolicy.TypeGraph
         [ case node of
@@ -337,11 +397,16 @@ verifyRepeatedConstructorEvidence result = do
             ("unexpected constructor rejection: " ++ show detail)
         outcome -> ioError (userError ("conflicting constructor evidence was not rejected: "
           ++ either show (const "accepted") outcome))
-  assertProjects "identical constructor provenance" (project [original, clone otherName fields])
+  assertProjects "identical constructor provenance"
+    (project [original, clone otherName fields runtimeFields])
   mapM_ (\changed -> do
     rejects [original, changed]
     rejects [changed, original])
-    [clone name conflictingFields, clone otherName conflictingFields]
+    [ clone name conflictingFields conflictingFields
+    , clone otherName conflictingFields conflictingFields
+    , clone name fields conflictingFields
+    , clone otherName fields conflictingFields
+    ]
 
 assertWireSite :: String -> Schema.SiteDelivery -> String
   -> Either Projection.ProjectionError Schema.WireProgram -> IO ()

@@ -54,12 +54,12 @@ shippedScientificSource = BS.pack $(do
   addDependentFile source
   lift . BS.unpack =<< runIO (BS.readFile source))
 
-data JsonAuthority = JsonAuthority Module Unit (JsonLayout DataCon) deriving stock (Eq)
+data JsonAuthority = JsonAuthority Module Unit Module (JsonLayout DataCon) deriving stock (Eq)
 instance Show JsonAuthority where
-  show (JsonAuthority owner _ _) = showSDocUnsafe (ppr owner)
+  show (JsonAuthority owner _ _ _) = showSDocUnsafe (ppr owner)
 
 jsonAuthorityLayout :: JsonAuthority -> JsonLayout DataCon
-jsonAuthorityLayout (JsonAuthority _ _ layout) = layout
+jsonAuthorityLayout (JsonAuthority _ _ _ layout) = layout
 
 resolveJsonAuthority :: HscEnv -> IO (Maybe JsonAuthority)
 -- Source authentication covers the numeric interpretation as well as the
@@ -72,6 +72,7 @@ resolveJsonAuthority env = do
   mapOwner <- installed "containers" "Data.Map.Internal"
   primitiveOwner <- installed "ghc-prim" "GHC.Types"
   integerOwner <- installed "ghc-bignum" "GHC.Num.Integer"
+  eitherOwner <- installed "ghc-internal" "GHC.Internal.Data.Either"
   pure $ do
     owner <- valueOwner
     scientific <- scientificOwner
@@ -79,11 +80,12 @@ resolveJsonAuthority env = do
     map_ <- mapOwner
     primitive <- primitiveOwner
     integer <- integerOwner
+    either_ <- eitherOwner
     hmi <- lookupHpt (hsc_HPT env) (moduleName owner)
     tyCon <- find (exact (Just (moduleUnit owner)) "Tidepool.Aeson.Value" "Value")
       (typeEnvTyCons (md_types (hm_details hmi)))
     layout <- jsonValueLayoutForTyCon scientific text map_ primitive integer tyCon
-    Just (JsonAuthority owner (moduleUnit text) layout)
+    Just (JsonAuthority owner (moduleUnit text) either_ layout)
  where
   shippedHome name expected = do
     found <- findImportedModule env (mkModuleName name) NoPkgQual
@@ -112,7 +114,7 @@ data JsonError = InvalidJsonType Text | BottomingJsonDefinition Text
   deriving stock (Eq, Show)
 
 classifyJson :: JsonAuthority -> Id -> Either JsonError (Maybe JsonSpec)
-classifyJson authority@(JsonAuthority owner textUnit _) binder
+classifyJson authority@(JsonAuthority owner textUnit eitherOwner _) binder
   | not (isExternalName name) || nameModule_maybe name /= Just owner = Right Nothing
   | occurrence /= "eitherDecodeValue" && occurrence /= "encodeValue" = Right Nothing
   | isDeadEndId binder = Left (BottomingJsonDefinition label)
@@ -120,7 +122,7 @@ classifyJson authority@(JsonAuthority owner textUnit _) binder
       ("eitherDecodeValue", ([Scaled _ argument], result))
         | Just textConstructor <- textConstructorOf argument
         , Just (eitherTyCon, [failure, success]) <- splitTyConApp_maybe result
-        , exact Nothing "GHC.Internal.Data.Either" "Either" eitherTyCon
+        , exact (Just (moduleUnit eitherOwner)) "GHC.Internal.Data.Either" "Either" eitherTyCon
         , isText failure, isValue success
         , Just _ <- jsonLayoutForValue success
         , Just left <- named "Left" (tyConDataCons eitherTyCon)
@@ -155,7 +157,7 @@ classifyJson authority@(JsonAuthority owner textUnit _) binder
 -- authority. This is shared by the intrinsic recognizer and host mounts so a
 -- matching outer @Value@ TyCon cannot authorize a different layout.
 jsonValueLayoutForType :: JsonAuthority -> Type -> Maybe (JsonLayout DataCon)
-jsonValueLayoutForType (JsonAuthority owner _ layout) valueType = do
+jsonValueLayoutForType (JsonAuthority owner _ _ layout) valueType = do
   (valueTyCon, []) <- splitTyConApp_maybe valueType
   if not (exact (Just (moduleUnit owner)) "Tidepool.Aeson.Value" "Value" valueTyCon)
     then Nothing

@@ -24,13 +24,13 @@ module Tidepool.ExecutionProjection
   , TextUnitAuthority(..)
   ) where
 
-import Control.Monad (foldM, forM, forM_, unless)
+import Control.Monad (foldM, foldM_, forM, forM_, unless)
 import Control.Monad.State.Strict
 import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
 import Data.IntMap.Strict qualified as IntMap
 import Data.List (find)
-import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe)
 import Tidepool.PreparedBuiltins
   ( DeferredFunction(..), deferredFunction, wiredInErrorKind )
 import Data.Map.Strict (Map)
@@ -875,8 +875,23 @@ lowerTypeGraph base nodes roots = do
       rebase node = maybe
         (failShape "prepared type graph reachability omitted a referenced node")
         pure (Map.lookup node mapping)
+      constructors = concatMap (nodeConstructors graphNodes) ordered
+  -- Representation policy may deliberately turn an unpacked or flattened
+  -- authored type into TypeUnconstructible. Compare all constructor evidence
+  -- first, outside that recoverable transaction, so a conflicting declaration
+  -- cannot disappear with the rollback and later be published in the opposite
+  -- encounter order.
+  validateConstructorEvidence constructors
   lowered <- traverse (lowerTypeNode graphNodes rebase) ordered
   pure (lowered, rebase)
+ where
+  nodeConstructors graphNodes (TypePolicy.TypeNodeId raw) =
+    case IntMap.lookup (fromIntegral raw) graphNodes of
+      Just (TypePolicy.DataG _ _ _ rows) -> map fst rows
+      Just (TypePolicy.TextG _ constructors) -> constructors
+      Just (TypePolicy.IntegerG _ constructors) -> constructors
+      Just (TypePolicy.NaturalG _ constructors) -> constructors
+      _ -> []
 
 reachableTypeNodes :: IntMap.IntMap TypePolicy.TypeNodeG -> [TypePolicy.TypeNodeId]
   -> Either ProjectionError (Set Int)
@@ -1759,8 +1774,8 @@ internSignature signature = do
       modify' (\current -> current { signatures = signatures current <> [(signature, identity)] })
       pure identity
 
-internConstructor :: DataCon -> P ConstructorId
-internConstructor con = do
+constructorDeclaration :: DataCon -> P ConstructorDecl
+constructorDeclaration con = do
   reps <- concat <$> mapM (repsForType . scaledThing) (dataConRepArgTys con)
   -- GHC expands strictness along with representation arguments: a strict
   -- unboxed tuple does not make its lifted components strict. Resolve all
@@ -1778,13 +1793,47 @@ internConstructor con = do
   layout <- layoutFor reps
   tag <- checkedWord32 "constructor tag" (dataConTag con)
   familySize <- checkedWord32 "constructor family size" (GHC.tyConFamilySize (dataConTyCon con))
-  prior <- gets constructorDecls
-  let declaration = ConstructorDecl
+  pure (ConstructorDecl
         (nameSymbol "constructor" (dataConName con))
         (nameSymbol "type" (GHC.tyConName (dataConTyCon con)))
         resultRep reps fieldStrictness layout tag familySize
-        (varId (dataConWorkId con))
-      nominal = constructorIdentity declaration
+        (varId (dataConWorkId con)))
+ where
+  scaledThing (Scaled _ ty) = ty
+  isUnboxed LiftedRefRep = False
+  isUnboxed UnliftedRefRep = False
+  isUnboxed _ = True
+
+validateConstructorEvidence :: [DataCon] -> P ()
+validateConstructorEvidence constructors = do
+  candidates <- fmap catMaybes . traverse candidate $ constructors
+  prior <- gets constructorDecls
+  foldM_ compareOne prior candidates
+ where
+  candidate constructor = do
+    attempted <- tryRepresentation (constructorDeclaration constructor)
+    case attempted of
+      Right declaration -> pure (Just declaration)
+      Left (InvalidPreparedLayout _) -> pure Nothing
+      Left (InvalidPreparedRepresentation _) -> pure Nothing
+      Left failure -> lift (Left failure)
+  compareOne known declaration = do
+    let nominal = constructorIdentity declaration
+        matches = filter ((== nominal) . constructorIdentity) known
+    case matches of
+      [] -> pure (known <> [declaration])
+      [existing]
+        | existing == declaration -> pure known
+        | otherwise -> failConstructorConflict existing declaration
+      _ -> lift . Left . InvalidPreparedIdentity $
+        "nominal constructor has multiple declarations before validation: "
+          <> symbolText nominal
+
+internConstructor :: DataCon -> P ConstructorId
+internConstructor con = do
+  declaration <- constructorDeclaration con
+  prior <- gets constructorDecls
+  let nominal = constructorIdentity declaration
       -- 'DataCon' equality follows a GHC object, not its durable nominal
       -- identity. The same source can therefore reach this boundary via a
       -- separately loaded interface. Only one physical declaration may be
@@ -1803,21 +1852,19 @@ internConstructor con = do
       pure identity
     [(identity, existing)]
       | existing == declaration -> pure identity
-      | otherwise -> lift (Left (InvalidPreparedIdentity (constructorConflict existing declaration)))
+      | otherwise -> failConstructorConflict existing declaration
     _ -> lift . Left . InvalidPreparedIdentity $
       ("nominal constructor has multiple declarations before interning: "
         <> symbolText nominal)
-  where
-    scaledThing (Scaled _ ty) = ty
-    isUnboxed LiftedRefRep = False
-    isUnboxed UnliftedRefRep = False
-    isUnboxed _ = True
-    constructorConflict existing incoming =
-      "distinct GHC provenance for nominal constructor "
-        <> symbolText (constructorIdentity incoming)
-        <> " has conflicting physical declarations before publication; existing="
-        <> Text.pack (show existing)
-        <> ", incoming=" <> Text.pack (show incoming)
+
+failConstructorConflict :: ConstructorDecl -> ConstructorDecl -> P a
+failConstructorConflict existing incoming =
+  lift . Left . InvalidPreparedIdentity $
+    "distinct GHC provenance for nominal constructor "
+      <> symbolText (constructorIdentity incoming)
+      <> " has conflicting physical declarations before publication; existing="
+      <> Text.pack (show existing)
+      <> ", incoming=" <> Text.pack (show incoming)
 
 checkedWord32 :: Text -> Int -> P Word32
 checkedWord32 label value
