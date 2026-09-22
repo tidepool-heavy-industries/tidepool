@@ -187,7 +187,10 @@ Keep detailed design references out of always-loaded instructions.
 - `just quick` runs the explicit extractor-free engine unit-test packages and
   does not build or start the compiler worker. `just changed-plan BASE` previews
   affected targets; `just changed BASE` runs each selected target once and
-  compile-checks downstream consumers of production changes. Shared build inputs
+  compile-checks downstream consumers of production changes. Normal/build
+  dependencies propagate; development dependencies check their direct consumer
+  without propagating through its production users. Cargo-only and Cabal-only
+  build selections do not start a compiler daemon. Shared build inputs
   require an explicit integration check instead of silently launching one.
 - `just test-lib PACKAGE 'test(=NAME)'` selects a unit test;
   `just test-target PACKAGE TARGET 'test(=NAME)'` selects an integration test.
@@ -207,7 +210,10 @@ Keep detailed design references out of always-loaded instructions.
   boundary check at major integration or release points, not after every edit.
 - After extractor translation or serialization changes, run
   `just fixtures-check`; use `just fixtures-update` only when the corpus should
-  intentionally change.
+  intentionally change. The fixture commands also validate registered embedded
+  prepared artifacts; their producers are listed in
+  `haskell/test-prepared-stg/embedded-fixtures.json`. A schema migration must
+  regenerate those artifacts through their producers, not edit version bytes.
 - Always run formatting appropriate to changed languages and
   `git diff --check`. Review the final diff for stale callers, duplicated
   policy, unused surface, magic-string control flow, and obsolete comments.

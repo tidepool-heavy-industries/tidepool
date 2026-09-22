@@ -36,9 +36,8 @@ call-site evidence.
   machinery; retain production error and response-depth contracts.
 - Finish opt-in interface wall/CPU/RTS attribution and restore the interrupted
   measurement harness. Missing attribution is explicit, not zero.
-- Unify embedded prepared-fixture inventory and migration checks. The six files
-  under haskell/test-prepared-stg/fixtures still carry schema 11; the corpus
-  check does not validate them. Regenerate from their producers, not header edits.
+- Unify embedded prepared-fixture inventory and migration checks. Embedded artifacts must be registered and regenerated from their producers,
+  not header edits; corpus and embedded validation run together.
 - Remove deep artifact/program copies at consuming ownership boundaries.
 - Audit unused mutable-turn evidence/sidecars before removing their production.
 - Remove JSON guard placeholder trees, bigint intermediate values, repeated
@@ -146,3 +145,34 @@ No timings from concurrent-build runs will be presented as controlled speedups.
   stage log was not retained by the daemon wrapper; repeat matched runs with an
   explicitly retained compiler log. Native cumulative bytes grew from 3,729,234
   after first cell to 5,033,170 at final lookup; 14 live programs, 936 code exports.
+
+### Integration progress (2026-09-22)
+
+- `3ae07389f` independently repaired checked-interface elision: session Lib
+  interfaces remain available to source-less injected Val interfaces.
+  `5e942226f` shares prepared interface tidy work and elides unused prepared
+  leaf interfaces. Worker and focused metadata/prepared/TH/boot tests passed.
+  A notebook old-type retention test also fails with the frozen baseline
+  worker; its source-less value-interface path is under investigation.
+- `39b613495`, `5440ca555`, `9b60fc459`: seven embedded artifacts now use
+  schema 12, with complete producer contexts and executable regeneration.
+  Full embedded regeneration reproduced all seven committed payloads exactly.
+- `ed7548597`: mutable turns no longer serialize unused dependency/ask sidecars
+  or successful attempted source/provisional plans. Evidence is still revalidated.
+  Last-attempt/failure/no-retry and notebook rejected-source preservation checks
+  passed; worker compiled.
+- `25d577b0f`, `f93f9b52f`: immutable raw bytes and parsed artifacts share Arc
+  ownership; single-use compiled turns move graphs into installation. Runtime,
+  actor and harness test targets compile. The composite runtime bind/import/
+  park/resume/cancel/retire scenario passed. Shared artifacts retain borrowing.
+- `f895bea4a`: independent managed-root review repaired stale-handle slot reuse,
+  zero-before-registration, nested ownership cleanup, and allocation failure.
+  Construction uses an O(1) free list; response fields mutate in place. Focused
+  stale/duplicate/nested/tiny-nursery/failure tests passed; runtime compiled.
+- `690ad57f9`: MCP dependency audit: removing obsolete production dependencies reduces the
+  normal `tidepool-testing` graph from 222 to 153 package/version entries.
+  Actor/model/tool and transport support no longer enter through MCP. This is
+  a graph measurement, not a wall-time speedup. MCP/testing/runtime all-target
+  checks passed; nine protocol goldens passed after restoring three missing
+  already-shipped effects to the ordered declaration assertion. Facade/harness
+  all-target consumer checks also passed.

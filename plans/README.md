@@ -8,6 +8,9 @@ archive).
 
 ## Active work
 
+- [Structural performance A](structural-performance-a.md): current broad reuse,
+  managed-root, compiler-interface, and build/test preparation implementation.
+
 - [Structural STG performance follow-up](stg-specialization-followup.md):
   measured compiler/native costs, the current JSON/dispatch/state wave, and
   evidence gates for later resident-Haskell compute candidates.
