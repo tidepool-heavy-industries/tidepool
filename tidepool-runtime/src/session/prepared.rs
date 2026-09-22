@@ -946,6 +946,15 @@ fn build_structural_node(
     facts: &ProgramFacts,
     builder: &mut ManagedBuilder<'_, '_>,
 ) -> Result<ManagedNode, PreparedRuntimeError> {
+    // A structural reply belongs to the parked site's owner, not to the
+    // accumulated session table. Attach that owner's admitted JSON roles for
+    // this visit only: `serde_json::Value` then cannot borrow another
+    // program's layout, and ordinary JSON effect replies work even when the
+    // session table was assembled before this program installed.
+    let mut response_table = table.clone();
+    if let Some(layout) = facts.json_layout() {
+        response_table.set_json_layout(layout);
+    }
     let mut visitor = StructuralAnswerVisitor {
         site,
         root,
@@ -956,7 +965,7 @@ fn build_structural_node(
         failure: None,
         depth: 0,
     };
-    let visited = response.visit(table, &mut visitor);
+    let visited = response.visit(&response_table, &mut visitor);
     if let Some(error) = visitor.failure.take() {
         return Err(error);
     }
@@ -3161,8 +3170,8 @@ mod tests {
     use tidepool_codegen::machine_state::MachineFailure;
     use tidepool_repr::execution_schema::{
         testing, Atom, CheckedLayout, ConstructorDecl, ConstructorId, ExprFrame, FieldLayout,
-        GlobalDecl, GlobalId, ResultContract, ScalarLiteral, SignatureId, StorageLayout,
-        UpdatePolicy, ValueRef,
+        GlobalDecl, GlobalId, HeapBinding, ResultContract, ScalarLiteral, Signature, SignatureId,
+        StorageLayout, TopBinding, UpdatePolicy, ValueRef,
     };
     use tidepool_repr::DataCon;
 
@@ -3504,9 +3513,13 @@ mod tests {
     ) -> ConstructorDecl {
         let layout = StorageLayout::for_reps(&testing::target(), &fields)
             .expect("mount fixture field layout");
+        let mut identity = testing::identity(module, occurrence);
+        identity.namespace = "constructor".into();
+        let mut family = testing::identity(family_module, family_occurrence);
+        family.namespace = "type".into();
         ConstructorDecl {
-            identity: testing::identity(module, occurrence),
-            family: testing::identity(family_module, family_occurrence),
+            identity,
+            family,
             host_id: DataConId(id),
             result_rep: RuntimeRep::LiftedRef,
             tag,
@@ -3777,6 +3790,26 @@ mod tests {
                 1,
                 vec![RuntimeRep::Int(64); 3],
             ),
+            mount_constructor(
+                "Tidepool.Internal.Resume",
+                "Done",
+                "Tidepool.Internal.Resume",
+                "Settled",
+                901,
+                1,
+                2,
+                vec![RuntimeRep::LiftedRef],
+            ),
+            mount_constructor(
+                "Tidepool.Internal.Resume",
+                "Suspended",
+                "Tidepool.Internal.Resume",
+                "Settled",
+                902,
+                2,
+                2,
+                vec![RuntimeRep::LiftedRef; 2],
+            ),
         ];
         wire.expressions.nodes[0] = ExprFrame::Construct {
             constructor: ConstructorId(0),
@@ -3791,6 +3824,69 @@ mod tests {
             captures: vec![],
             body: 0,
         };
+        wire.signatures.push(Signature {
+            arguments: vec![RuntimeRep::LiftedRef; 2],
+            results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+        });
+        wire.expressions.nodes.push(ExprFrame::Construct {
+            constructor: ConstructorId(20),
+            fields: vec![Atom::Ref(ValueRef::Local(ValueId(3)))],
+        });
+        wire.bindings.push(Group::NonRecursive(TopBinding {
+            identity: testing::identity("Fixture", PREPARED_RESUME_TARGET),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Function {
+                    signature: SignatureId(1),
+                    parameters: vec![ValueId(2), ValueId(3)],
+                    captures: vec![],
+                    body: 1,
+                },
+            },
+        }));
+        let mut json_value_family = testing::identity("Tidepool.Aeson.Value", "Value");
+        json_value_family.namespace = "type".into();
+        wire.types = vec![
+            TypeNode::Data {
+                family: json_value_family,
+                arguments: vec![],
+                rows: vec![
+                    CtorRow {
+                        constructor: ConstructorId(1),
+                        fields: vec![TypeNodeId(0)],
+                    },
+                    CtorRow {
+                        constructor: ConstructorId(2),
+                        fields: vec![TypeNodeId(0)],
+                    },
+                    CtorRow {
+                        constructor: ConstructorId(3),
+                        fields: vec![TypeNodeId(0)],
+                    },
+                    CtorRow {
+                        constructor: ConstructorId(4),
+                        fields: vec![TypeNodeId(0)],
+                    },
+                    CtorRow {
+                        constructor: ConstructorId(5),
+                        fields: vec![TypeNodeId(0)],
+                    },
+                    CtorRow {
+                        constructor: ConstructorId(6),
+                        fields: vec![],
+                    },
+                ],
+            },
+            TypeNode::Scalar(RuntimeRep::Int(64)),
+        ];
+        wire.sites = vec![SiteRow {
+            site: 7,
+            origin: "Fixture.Mount.json_reply".into(),
+            ordinal: 0,
+            delivery: SiteDelivery::HostAnswer,
+            wire: TypeNodeId(0),
+            inputs: vec![],
+        }];
         wire.json_layout = Some(JsonLayout {
             object: ConstructorId(1),
             array: ConstructorId(2),
@@ -3908,6 +4004,66 @@ mod tests {
         assert!(engine.release(text));
         assert_eq!(engine.handle_count(), initial_handles);
         assert_eq!(engine.persistent_roots_count(), initial_roots);
+    }
+
+    #[test]
+    fn structural_json_effect_reply_uses_parked_owner_layout() {
+        let (mut engine, program) =
+            PreparedEngine::bootstrap(json_mount_program()).expect("bootstrap JSON reply fixture");
+        let table = json_mount_table();
+        assert!(
+            table.json_layout().is_none(),
+            "the accumulated session table deliberately has no JSON authority"
+        );
+
+        let continuation = {
+            let mut builder = engine
+                .machine
+                .managed_builder()
+                .expect("JSON reply fixture opens a managed builder");
+            let root = builder
+                .constructor(DataConId(105), &[])
+                .expect("fixture Null constructor is declared");
+            builder
+                .finish(RealmId::ROOT, root)
+                .expect("fixture continuation is retained")
+        };
+        let id = engine
+            .machine
+            .park(
+                continuation,
+                RealmId::ROOT,
+                None,
+                ParkRequest {
+                    principal: PrincipalId::SYSTEM,
+                    effect_policy: EffectRunPolicy::SuspendAll,
+                    live_payload: LivePayloadPolicy::None,
+                    evidence: PreparedFrameEvidence {
+                        owner: program,
+                        site: 7,
+                        runner: program,
+                        resume_entry: ValueId(1),
+                        continuation_rep: RuntimeRep::LiftedRef,
+                    },
+                },
+            )
+            .expect("fixture continuation parks");
+
+        let response = serde_json::json!({"worked": [true, 3]});
+        let resumed = engine
+            .resume_with_structural_answer(id, &response, &table)
+            .expect("JSON response derives its layout from the parked site owner");
+        let PreparedSettlement::Done { value } = resumed.settlement else {
+            panic!("resume fixture returns a settled Done value")
+        };
+        assert!(matches!(
+            engine
+                .observe(program, value)
+                .expect("observe resumed JSON"),
+            HaskellValue::Con(DataConId(100), _)
+        ));
+        assert!(engine.release(value));
+        assert_eq!(engine.parked_count(), 0);
     }
 
     /// A program that constructs nothing but declares an effect request
