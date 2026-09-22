@@ -1262,6 +1262,97 @@ mod tests {
         );
     }
 
+    fn fake_allocation(root: &Path, actor: &str, command: &str, populated: u64) {
+        let directory = root.join(actor).join(command);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("memory.max"), MIB.to_string()).unwrap();
+        std::fs::write(
+            directory.join("cgroup.events"),
+            format!("populated {populated}\n"),
+        )
+        .unwrap();
+        std::fs::write(directory.join("memory.events"), "oom_kill 0\n").unwrap();
+    }
+
+    fn allocated_events(started: bool) -> Vec<JournalEvent> {
+        let mut events = vec![
+            JournalEvent::Admission {
+                producer: "actor-1".into(),
+                actor: "actor-1".into(),
+                command: "command-1".into(),
+                requested_bytes: MIB,
+            },
+            JournalEvent::Allocation {
+                producer: "actor-1".into(),
+                actor: "actor-1".into(),
+                command: "command-1".into(),
+                requested_bytes: MIB,
+                allocation: "actor-1/command-1".into(),
+            },
+        ];
+        if started {
+            events.push(JournalEvent::Started {
+                producer: "actor-1".into(),
+                actor: "actor-1".into(),
+                command: "command-1".into(),
+            });
+        }
+        events
+    }
+
+    #[test]
+    fn recovery_adopts_a_recorded_populated_allocation() {
+        let root = tempfile::tempdir().unwrap();
+        fake_allocation(root.path(), "actor-1", "command-1", 1);
+        let owner = owner(root.path());
+
+        owner.reconcile(allocated_events(false)).unwrap();
+
+        assert_eq!(
+            owner.status("actor-1", "command-1").unwrap(),
+            CommandResourceStatus::Running
+        );
+        let observation = owner.observation();
+        assert_eq!(observation.active, 1);
+        assert_eq!(observation.retained_allocations, 1);
+    }
+
+    #[test]
+    fn recovery_retains_a_started_empty_allocation_as_unconfirmed() {
+        let root = tempfile::tempdir().unwrap();
+        fake_allocation(root.path(), "actor-1", "command-1", 0);
+        let owner = owner(root.path());
+
+        owner.reconcile(allocated_events(true)).unwrap();
+
+        assert!(matches!(
+            owner.status("actor-1", "command-1").unwrap(),
+            CommandResourceStatus::CleanupUnconfirmed { .. }
+        ));
+        let observation = owner.observation();
+        assert_eq!(observation.active, 1);
+        assert_eq!(observation.retained_allocations, 1);
+        assert_eq!(observation.cleanup_failures, 1);
+    }
+
+    #[test]
+    fn recovery_retains_an_orphaned_allocation_without_inventing_ownership() {
+        let root = tempfile::tempdir().unwrap();
+        fake_allocation(root.path(), "actor-1", "command-1", 1);
+        let owner = owner(root.path());
+
+        owner.reconcile(Vec::new()).unwrap();
+
+        assert!(matches!(
+            owner.status("actor-1", "command-1").unwrap(),
+            CommandResourceStatus::CleanupUnconfirmed { .. }
+        ));
+        let observation = owner.observation();
+        assert_eq!(observation.active, 0);
+        assert_eq!(observation.retained_allocations, 1);
+        assert_eq!(observation.cleanup_failures, 1);
+    }
+
     #[test]
     #[ignore = "measurement harness; run explicitly at integration boundaries"]
     fn retained_history_does_not_scale_resource_polling() {

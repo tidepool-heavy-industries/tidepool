@@ -8,7 +8,7 @@ matched pre-change baseline, so they do not establish speedups.
 
 | Boundary | Workload | Observation |
 |---|---|---|
-| Private command protocol | 100,000 JSON encode/decode round trips of a terminal response | 79-byte message; 2,205 ns per round trip |
+| Private command protocol | 100,000 JSON encode/decode round trips of a generation-bound terminal response | 198-byte message; 5,598 ns per round trip |
 | Resource status polling | 2,000 observations with no history, then with 100,000 retained terminal entries | 3,728 ns and 3,093 ns per observation respectively; 68,136 KiB RSS added by the retained records |
 | Retained output | Push 256 MiB in 64 KiB chunks through one stream ring | 25,742.6 MiB/s; 4 MiB retained and 252 MiB reported dropped |
 | Run storage status | 100 bounded walks over 8,000 eight-byte files | 8,001 entries and 64,000 file bytes observed; 6,066 microseconds per sample |

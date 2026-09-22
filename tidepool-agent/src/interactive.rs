@@ -640,8 +640,13 @@ pub enum NativeCommandOperation {
 
 #[derive(Clone, Debug)]
 pub enum NativeCommandReply {
+    /// The controller proved that no request bytes were submitted.
+    NotSubmitted(String),
     Pending,
-    Finished { exit_code: i32, cancelled: bool },
+    Finished {
+        exit_code: i32,
+        cancelled: bool,
+    },
     Unconfirmed(String),
     Output(tidepool_bridge_effects::CommandOutput),
     Page(tidepool_bridge_effects::CommandPage),

@@ -4,9 +4,8 @@
 //! over the actor-private Unix socket selected during hosted registration.
 
 use codex_shoal_protocol::{
-    Binding as BindingWire, Envelope as InputEnvelopeWire, InputControlRequest,
-    InputControlResponse, Mode as ModeWire, Outcome as OutcomeWire, Purpose as PurposeWire,
-    Target as TargetWire, INPUT_CONTROL_PATH, INPUT_CONTROL_PROTOCOL_VERSION,
+    Envelope as InputEnvelopeWire, InputControlRequest, InputControlResponse, Mode as ModeWire,
+    Outcome as OutcomeWire, Purpose as PurposeWire, Target as TargetWire, INPUT_CONTROL_PATH,
 };
 
 use crate::interactive::{
@@ -16,64 +15,36 @@ use crate::interactive::{
 };
 use crate::BackendThreadId;
 
-fn binding(thread: &QueueReadyThread) -> Result<BindingWire, InteractiveInputError> {
-    let value = thread.session_binding().ok_or_else(|| {
-        InteractiveInputError::NotSubmitted(
-            "bound TUI has not completed the generation/nonce challenge".into(),
-        )
-    })?;
-    Ok(BindingWire {
-        protocol_version: INPUT_CONTROL_PROTOCOL_VERSION,
-        launch_id: value.launch_id.clone(),
-        instance_id: value.instance_id.clone(),
-        generation: value.generation.get(),
-        nonce: value.nonce.clone(),
-    })
+use super::super::controller;
+
+fn binding(
+    thread: &QueueReadyThread,
+) -> Result<codex_shoal_protocol::Binding, InteractiveInputError> {
+    controller::binding(thread).map_err(map_failure)
 }
 
 async fn send(
     thread: &QueueReadyThread,
     request: InputControlRequest,
 ) -> Result<InputAdmission, InteractiveInputError> {
-    let socket = thread.input_control_socket().ok_or_else(|| {
-        InteractiveInputError::NotSubmitted("bound TUI did not advertise input control".into())
-    })?;
     let expected = binding(thread)?;
-    let client = reqwest::Client::builder()
-        .unix_socket(socket)
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
-        .http1_only()
-        .build()
-        .map_err(|e| InteractiveInputError::NotSubmitted(e.to_string()))?;
-    let response = client
-        .post(format!("http://localhost{INPUT_CONTROL_PATH}"))
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_connect() {
-                InteractiveInputError::NotSubmitted(e.to_string())
-            } else {
-                InteractiveInputError::Unconfirmed(e.to_string())
-            }
-        })?;
-    if !response.status().is_success() {
+    let response = controller::post(
+        thread,
+        INPUT_CONTROL_PATH,
+        &request,
+        codex_shoal_protocol::MAX_INPUT_CONTROL_REPLY_BYTES,
+    )
+    .await
+    .map_err(map_failure)?;
+    if !response.status.is_success() {
         return Err(InteractiveInputError::Unconfirmed(format!(
             "native input control returned HTTP {}",
-            response.status()
+            response.status
         )));
     }
-    let response: InputControlResponse = response
-        .json()
-        .await
-        .map_err(|e| InteractiveInputError::Unconfirmed(e.to_string()))?;
-    if response.binding != expected {
-        return Err(InteractiveInputError::Unconfirmed(
-            "native input response binding does not match the challenged generation".into(),
-        ));
-    }
+    let response: InputControlResponse = serde_json::from_slice(&response.body)
+        .map_err(|error| InteractiveInputError::Unconfirmed(error.to_string()))?;
+    controller::validate_reply_binding(&expected, &response.binding).map_err(map_failure)?;
     Ok(match response.outcome {
         OutcomeWire::Admitted => InputAdmission::Admitted,
         OutcomeWire::Dispatching => InputAdmission::Dispatching,
@@ -83,6 +54,13 @@ async fn send(
         OutcomeWire::Compacted => InputAdmission::Compacted,
         OutcomeWire::Unknown | OutcomeWire::EvidenceUnavailable => InputAdmission::Unknown,
     })
+}
+
+fn map_failure(error: controller::Failure) -> InteractiveInputError {
+    match error {
+        controller::Failure::NotSubmitted(detail) => InteractiveInputError::NotSubmitted(detail),
+        controller::Failure::Unconfirmed(detail) => InteractiveInputError::Unconfirmed(detail),
+    }
 }
 
 pub(super) async fn bind(
@@ -344,8 +322,8 @@ mod tests {
 
     fn bind_response(generation: u64, outcome: OutcomeWire) -> InputControlResponse {
         InputControlResponse {
-            binding: BindingWire {
-                protocol_version: INPUT_CONTROL_PROTOCOL_VERSION,
+            binding: codex_shoal_protocol::Binding {
+                protocol_version: codex_shoal_protocol::INPUT_CONTROL_PROTOCOL_VERSION,
                 launch_id: "launch-1".into(),
                 instance_id: "instance-2".into(),
                 generation,
@@ -413,7 +391,7 @@ mod tests {
                 serde_json::json!({
                     "operation": "bind",
                     "binding": {
-                        "protocolVersion": 4,
+                        "protocolVersion": 5,
                         "launchId": "launch-1",
                         "instanceId": "instance-2",
                         "generation": 7,
@@ -525,7 +503,7 @@ mod tests {
 
     #[test]
     fn compacted_outcome_matches_native_wire_vector() {
-        let json = r#"{"binding":{"protocolVersion":4,"launchId":"launch-1","instanceId":"instance-2","generation":7,"nonce":"nonce-3"},"outcome":"compacted"}"#;
+        let json = r#"{"binding":{"protocolVersion":5,"launchId":"launch-1","instanceId":"instance-2","generation":7,"nonce":"nonce-3"},"outcome":"compacted"}"#;
         let response: InputControlResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.outcome, OutcomeWire::Compacted);
         assert_eq!(serde_json::to_string(&response).unwrap(), json);

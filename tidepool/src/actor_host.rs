@@ -8220,7 +8220,7 @@ mod tests {
         ) {
             let body = serde_json::to_vec(&serde_json::json!({
                 "binding": {
-                    "protocolVersion": 4,
+                    "protocolVersion": 5,
                     "launchId": binding.launch_id,
                     "instanceId": binding.instance_id,
                     "generation": binding.generation.get(),

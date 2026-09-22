@@ -1,5 +1,27 @@
 use super::*;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+fn wire_binding() -> codex_shoal_protocol::Binding {
+    codex_shoal_protocol::Binding {
+        protocol_version: codex_shoal_protocol::INPUT_CONTROL_PROTOCOL_VERSION,
+        launch_id: "launch".into(),
+        instance_id: "instance".into(),
+        generation: 1,
+        nonce: "nonce".into(),
+    }
+}
+
+fn bound_thread(socket: PathBuf) -> QueueReadyThread {
+    QueueReadyThread::new(crate::BackendThreadId("bound-thread".into()))
+        .with_input_control(Some(socket))
+        .with_challenged_session_binding(Some(crate::InteractiveSessionBinding {
+            launch_id: "launch".into(),
+            instance_id: "instance".into(),
+            generation: NonZeroU64::new(1).unwrap(),
+            nonce: "nonce".into(),
+        }))
+}
 
 #[tokio::test]
 async fn exact_publication_request_and_lost_reply_are_not_retried() {
@@ -46,7 +68,16 @@ async fn exact_publication_request_and_lost_reply_are_not_retried() {
                         }
                     }
                 };
-                let mut expected = serde_json::json!({"threadId":"bound-thread", "sequence":7, "operation":"begin"});
+                let mut expected = serde_json::json!({
+                    "binding": {
+                        "protocolVersion": 5,
+                        "launchId": "launch",
+                        "instanceId": "instance",
+                        "generation": 1,
+                        "nonce": "nonce"
+                    },
+                    "threadId":"bound-thread", "sequence":7, "operation":"begin"
+                });
                 if matches!(operation, PublicationOperation::Finish { .. }) {
                     expected["operation"] = "finish".into();
                 }
@@ -56,12 +87,21 @@ async fn exact_publication_request_and_lost_reply_are_not_retried() {
                 }
                 assert_eq!(payload, expected);
                 if respond {
-                    let body = r#"{"status":"ready","pid":123,"startTicks":42,"mountNamespaceInode":1234,"cgroupPath":"/sys/fs/cgroup/writers"}"#;
-                    let body = if matches!(operation, PublicationOperation::Finish { .. }) {
-                        r#"{"status":"settled"}"#
+                    let payload = if matches!(operation, PublicationOperation::Finish { .. }) {
+                        Reply::Settled
                     } else {
-                        body
+                        Reply::Ready {
+                            pid: 123,
+                            start_ticks: 42,
+                            mount_namespace_inode: 1234,
+                            cgroup_path: "/sys/fs/cgroup/writers".to_string(),
+                        }
                     };
+                    let body = serde_json::to_string(&BoundReply {
+                        binding: wire_binding(),
+                        payload,
+                    })
+                    .unwrap();
                     stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
                 }
                 drop(stream);
@@ -71,8 +111,7 @@ async fn exact_publication_request_and_lost_reply_are_not_retried() {
                         .is_err()
                 );
             });
-            let thread = QueueReadyThread::new(crate::BackendThreadId("bound-thread".into()))
-                .with_input_control(Some(socket));
+            let thread = bound_thread(socket);
             let reply = request(&thread, NonZeroU64::new(7).unwrap(), operation).await;
             if respond {
                 match operation {
@@ -135,9 +174,16 @@ fn namespace_publication_server() {
         .unwrap()
         .parse()
         .unwrap();
-    let body = serde_json::json!({"status":"ready", "pid":std::process::id(),
-        "startTicks":start, "mountNamespaceInode":std::fs::metadata("/proc/self/ns/mnt").unwrap().ino(),
-        "cgroupPath":"/sys/fs/cgroup/writers"}).to_string();
+    let body = serde_json::to_string(&BoundReply {
+        binding: wire_binding(),
+        payload: Reply::Ready {
+            pid: std::process::id(),
+            start_ticks: start,
+            mount_namespace_inode: std::fs::metadata("/proc/self/ns/mnt").unwrap().ino(),
+            cgroup_path: "/sys/fs/cgroup/writers".to_string(),
+        },
+    })
+    .unwrap();
     write!(
         stream,
         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -191,8 +237,7 @@ async fn publication_peer_pid_is_host_visible_across_pid_namespace() {
     })
     .await
     .unwrap();
-    let thread = QueueReadyThread::new(crate::BackendThreadId("bound-thread".into()))
-        .with_input_control(Some(socket));
+    let thread = bound_thread(socket);
     let reply = request(
         &thread,
         NonZeroU64::new(1).unwrap(),

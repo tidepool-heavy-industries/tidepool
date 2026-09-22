@@ -115,6 +115,29 @@ impl NativeCommandBackend {
         let mut stop_sent = false;
         loop {
             match reply {
+                Reply::NotSubmitted(message) => {
+                    let resource = self
+                        .resources
+                        .cancel(&self.actor, id)
+                        .await
+                        .map_err(detail)?;
+                    let cleanup = match resource {
+                        Resource::Completed
+                        | Resource::ResourceExhausted
+                        | Resource::CancelledBeforeStart => CommandCleanup::CommandClean,
+                        Resource::CleanupUnconfirmed { detail } => {
+                            CommandCleanup::CommandCleanupUnknown(detail)
+                        }
+                        Resource::Admitted { .. } | Resource::Running | Resource::Queued => {
+                            CommandCleanup::CommandRetained
+                        }
+                        Resource::Retired => CommandCleanup::CommandClean,
+                    };
+                    return Ok(CommandResult {
+                        outcome: CommandOutcome::CommandFailed(message),
+                        cleanup,
+                    });
+                }
                 Reply::Finished {
                     exit_code,
                     cancelled,

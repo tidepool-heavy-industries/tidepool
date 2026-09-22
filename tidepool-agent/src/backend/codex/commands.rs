@@ -5,10 +5,13 @@ use tidepool_bridge_effects::{
     CommandOutput, CommandPage, CommandPosition, CommandSpec, CommandStream,
 };
 
+use super::controller;
+
 type Request = codex_shoal_protocol::CommandRequest<CommandSpec, CommandStream, CommandPosition>;
 type Operation =
     codex_shoal_protocol::CommandOperation<CommandSpec, CommandStream, CommandPosition>;
 type Response = codex_shoal_protocol::CommandResponse<CommandOutput, CommandPage>;
+type BoundResponse = codex_shoal_protocol::BoundReply<Response>;
 use codex_shoal_protocol::CommandState as State;
 
 pub(super) async fn request(
@@ -33,18 +36,13 @@ async fn request_with_deadlines(
     connect_timeout: Duration,
     operation_timeout: Duration,
 ) -> Result<NativeCommandReply, AgentBackendError> {
-    let socket = thread
-        .input_control_socket()
-        .ok_or_else(|| unconfirmed("native command socket unavailable"))?;
-    let client = reqwest::Client::builder()
-        .unix_socket(socket)
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
-        .connect_timeout(connect_timeout)
-        .timeout(operation_timeout)
-        .build()
-        .map_err(unconfirmed)?;
+    let binding = match controller::binding(thread) {
+        Ok(binding) => binding,
+        Err(controller::Failure::NotSubmitted(detail)) => {
+            return Ok(NativeCommandReply::NotSubmitted(detail));
+        }
+        Err(controller::Failure::Unconfirmed(detail)) => return Err(unconfirmed(detail)),
+    };
     let operation = match operation {
         NativeCommandOperation::Start(spec) => Operation::Start { spec },
         NativeCommandOperation::Wait => Operation::Wait,
@@ -55,45 +53,49 @@ async fn request_with_deadlines(
         NativeCommandOperation::Resize { rows, columns } => Operation::Resize { rows, columns },
         NativeCommandOperation::Cancel => Operation::Cancel,
     };
-    let mut response = client
-        .post(format!(
-            "http://localhost{}",
-            codex_shoal_protocol::COMMAND_PATH
-        ))
-        .json(&Request {
+    let response = controller::post_with_deadlines(
+        thread,
+        codex_shoal_protocol::COMMAND_PATH,
+        &Request {
+            binding: binding.clone(),
             thread_id: thread.id().0.clone(),
             id: id.to_owned(),
             operation,
-        })
-        .send()
-        .await
-        .map_err(unconfirmed)?
-        .error_for_status()
-        .map_err(unconfirmed)?;
-    // JSON escaping can expand a bounded byte read by up to six times.
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(unconfirmed)? {
-        if body.len() + chunk.len() > codex_shoal_protocol::MAX_COMMAND_REPLY_BYTES {
-            return Err(unconfirmed("native command reply exceeds limit"));
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(
-        match serde_json::from_slice::<Response>(&body).map_err(unconfirmed)? {
-            Response::State(State::Starting) => NativeCommandReply::Pending,
-            Response::State(State::Finished {
-                exit_code,
-                cancelled,
-            }) => NativeCommandReply::Finished {
-                exit_code,
-                cancelled,
-            },
-            Response::State(State::Failed { detail }) => NativeCommandReply::Unconfirmed(detail),
-            Response::Output(output) => NativeCommandReply::Output(output),
-            Response::Page(page) => NativeCommandReply::Page(page),
-            Response::Acknowledged => NativeCommandReply::Acknowledged,
         },
+        codex_shoal_protocol::MAX_COMMAND_REPLY_BYTES,
+        connect_timeout,
+        operation_timeout,
     )
+    .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(controller::Failure::NotSubmitted(detail)) => {
+            return Ok(NativeCommandReply::NotSubmitted(detail));
+        }
+        Err(controller::Failure::Unconfirmed(detail)) => return Err(unconfirmed(detail)),
+    };
+    if !response.status.is_success() {
+        return Err(unconfirmed(format!(
+            "native command controller returned HTTP {}",
+            response.status
+        )));
+    }
+    let response: BoundResponse = serde_json::from_slice(&response.body).map_err(unconfirmed)?;
+    controller::validate_reply_binding(&binding, &response.binding).map_err(unconfirmed)?;
+    Ok(match response.payload {
+        Response::State(State::Starting) => NativeCommandReply::Pending,
+        Response::State(State::Finished {
+            exit_code,
+            cancelled,
+        }) => NativeCommandReply::Finished {
+            exit_code,
+            cancelled,
+        },
+        Response::State(State::Failed { detail }) => NativeCommandReply::Unconfirmed(detail),
+        Response::Output(output) => NativeCommandReply::Output(output),
+        Response::Page(page) => NativeCommandReply::Page(page),
+        Response::Acknowledged => NativeCommandReply::Acknowledged,
+    })
 }
 
 fn unconfirmed(error: impl std::fmt::Display) -> AgentBackendError {
@@ -107,6 +109,27 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn bound_thread(socket: PathBuf) -> QueueReadyThread {
+        QueueReadyThread::new(crate::BackendThreadId("thread".into()))
+            .with_input_control(Some(socket))
+            .with_challenged_session_binding(Some(crate::InteractiveSessionBinding {
+                launch_id: "launch".into(),
+                instance_id: "instance".into(),
+                generation: std::num::NonZeroU64::new(1).unwrap(),
+                nonce: "nonce".into(),
+            }))
+    }
+
+    fn response_binding() -> codex_shoal_protocol::Binding {
+        codex_shoal_protocol::Binding {
+            protocol_version: codex_shoal_protocol::INPUT_CONTROL_PROTOCOL_VERSION,
+            launch_id: "launch".into(),
+            instance_id: "instance".into(),
+            generation: 1,
+            nonce: "nonce".into(),
+        }
+    }
 
     async fn serve_reply(socket: PathBuf, response: Option<Vec<u8>>) {
         let listener = tokio::net::UnixListener::bind(socket).unwrap();
@@ -142,8 +165,7 @@ mod tests {
         while !socket.exists() {
             tokio::task::yield_now().await;
         }
-        let thread = QueueReadyThread::new(crate::BackendThreadId("thread".into()))
-            .with_input_control(Some(socket));
+        let thread = bound_thread(socket);
         let error = request_with_deadlines(
             &thread,
             "command",
@@ -169,7 +191,7 @@ mod tests {
             Duration::from_secs(2),
         )
         .await;
-        assert!(oversized.to_string().contains("exceeds limit"));
+        assert!(oversized.to_string().contains("byte limit"));
     }
 
     #[tokio::test]
@@ -178,19 +200,47 @@ mod tests {
         assert!(error.to_string().contains("unconfirmed"));
     }
 
+    #[tokio::test]
+    async fn missing_binding_is_proven_not_submitted() {
+        let thread = QueueReadyThread::new(crate::BackendThreadId("thread".into()));
+        assert!(matches!(
+            request(&thread, "command", NativeCommandOperation::Wait).await,
+            Ok(NativeCommandReply::NotSubmitted(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn wrong_generation_reply_is_unconfirmed() {
+        let mut reply = BoundResponse {
+            binding: response_binding(),
+            payload: Response::Acknowledged,
+        };
+        reply.binding.generation = 2;
+        let error = invoke(
+            Some(serde_json::to_vec(&reply).unwrap()),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(error.to_string().contains("challenged generation"));
+    }
+
     #[test]
     #[ignore = "measurement harness; run explicitly at integration boundaries"]
     fn command_protocol_roundtrip_measurement() {
-        let value = Response::State(State::Finished {
-            exit_code: 0,
-            cancelled: false,
-        });
+        let value = BoundResponse {
+            binding: response_binding(),
+            payload: Response::State(State::Finished {
+                exit_code: 0,
+                cancelled: false,
+            }),
+        };
         let encoded = serde_json::to_vec(&value).unwrap();
         let iterations = 100_000_u128;
         let started = std::time::Instant::now();
         for _ in 0..iterations {
             let bytes = serde_json::to_vec(std::hint::black_box(&value)).unwrap();
-            let decoded: Response = serde_json::from_slice(std::hint::black_box(&bytes)).unwrap();
+            let decoded: BoundResponse =
+                serde_json::from_slice(std::hint::black_box(&bytes)).unwrap();
             std::hint::black_box(decoded);
         }
         let elapsed = started.elapsed();

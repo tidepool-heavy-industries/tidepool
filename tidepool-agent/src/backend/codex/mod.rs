@@ -34,6 +34,7 @@
 //! never the unbounded set of generated actor repositories.
 
 mod commands;
+mod controller;
 pub mod driver;
 pub mod dynamic_tools;
 pub mod isolation;
