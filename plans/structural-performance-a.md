@@ -505,6 +505,10 @@ artifacts were regenerated through their canonical producers.
   conservative through optimization, and authenticated every embedded source
   which can change the worker. Its compiler and runtime regressions are part of
   the joined acceptance boundary rather than a separate performance claim.
+- `034503692`: restored the projection-only retained-import fixture's opaque
+  boundary, updated the real unretained compiler baseline for canonical
+  optimization, and regenerated the affected import artifacts and corpus
+  fingerprints through their producers.
 
 ### Current evidence and remaining gate
 
@@ -518,10 +522,14 @@ failure repairs. Independent compiler/schema review accepted canonical
 cross-graph constructor interning, authenticated `Either`/JSON ownership,
 prepared-interface consistency, conservative intrinsic demand, and COW
 authority clearing; its stale provenance comment was corrected in
-`4860ab773`. Exact final integration counts, matched workload
-measurements, and the final revision are recorded after the one complete
-`just fixtures-check` run; `just verify` remains intentionally unrun by
-repository policy.
+`4860ab773`. The complete `just fixtures-check` passed on the joined candidate:
+845 projections, validations, admissions, and compilations passed; 738 finite
+executions passed, with 104 intentionally non-closed and three without finite
+observations; all 280 reached comparisons passed; all seven registered schema
+14 artifacts passed their producer check. `just quick` passed 726 tests with
+one ignored, and supported Cargo all-target compilation passed. Matched workload
+measurements and the final post-audit revision are recorded after the required
+second pass; `just verify` remains intentionally unrun by repository policy.
 
 ### Required second-pass audit
 
