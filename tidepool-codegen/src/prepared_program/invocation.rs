@@ -26,6 +26,7 @@ use crate::{context::VMContext, machine_state::MachineState, old_space::OldSpace
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use tidepool_heap::execution_descriptor::DescriptorTraceError;
 use tidepool_heap::static_region::StaticRegion;
 use tidepool_repr::execution_schema::{ResultContract, RuntimeRep, StorageLayout, ValueId};
 
@@ -45,12 +46,17 @@ pub(super) struct PreparedInvocation<'code> {
     old_space: Box<OldSpace>,
 }
 
-fn static_catalog(region: &Arc<StaticRegion>) -> tidepool_heap::static_region::StaticRegionCatalog {
+fn static_catalog(
+    region: &Arc<StaticRegion>,
+) -> Result<tidepool_heap::static_region::StaticRegionCatalog, RuntimeError> {
     let mut catalog = tidepool_heap::static_region::StaticRegionCatalog::new();
     catalog
         .insert(Arc::clone(region))
-        .expect("one invocation static region has a valid stable range");
-    catalog
+        .map_err(|error| match error {
+            DescriptorTraceError::MetadataAllocation => RuntimeError::HeapOverflow,
+            _ => RuntimeError::BadPointer,
+        })?;
+    Ok(catalog)
 }
 
 impl<'code> PreparedInvocation<'code> {
@@ -118,7 +124,7 @@ impl<'code> PreparedInvocation<'code> {
             .map_err(runtime_error_without_machine)?;
 
         let statics = Arc::new(program.statics.instantiate()?);
-        let static_catalog = static_catalog(&statics);
+        let static_catalog = static_catalog(&statics).map_err(runtime_error_without_machine)?;
         // The program's own root block carries its tops for this invocation,
         // exactly as it does when installed on a machine.
         let top_table = &program.root_block;
