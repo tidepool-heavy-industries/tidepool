@@ -13,15 +13,22 @@ module Tidepool.Timing
   , emitCompileSummary
   , emitModuleTiming
   , emitModuleInterfaceTiming
+  , InterfaceStage(..)
+  , InterfaceReuse(..)
+  , measureModuleInterface
+  , newTimingRequestIdentity
   , monotonicTime
   , elapsedMs
   ) where
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.List (intercalate)
-import GHC.Clock (getMonotonicTime)
+import Data.Word (Word64)
+import GHC.Clock (getMonotonicTime, getMonotonicTimeNSec)
+import qualified GHC.Stats as RTS
 import System.Environment (lookupEnv)
 import System.IO (hPutStrLn, stderr)
+import System.CPUTime (getCPUTime)
 
 -- | Read the @TIDEPOOL_TIMING@ env var. On iff exactly @"1"@; unset or any
 -- other value is off.
@@ -137,3 +144,91 @@ emitModuleInterfaceTiming False _ _ _ _ = pure ()
 emitModuleInterfaceTiming True moduleName parent phase ms =
   hPutStrLn stderr ("tidepool-timing-module-detail module=" ++ moduleName
     ++ " parent=" ++ parent ++ " phase=" ++ phase ++ " ms=" ++ show ms)
+
+-- | The two compiler stages that construct an in-memory interface themselves.
+-- Keeping this closed prevents diagnostic spelling from becoming control flow.
+data InterfaceStage
+  = CheckedEnvironmentInterface
+  | SessionRegistrationInterface
+
+data InterfaceReuse
+  = HptMiss
+  | MemoMiss
+  | MemoDisabled
+
+-- | A process-local identity for one compiler cycle. Compiler requests are
+-- serialized, so their monotonic start stamps distinguish direct requests and
+-- resident transactions without adding diagnostic identity to the protocol.
+newTimingRequestIdentity :: IO Word64
+newTimingRequestIdentity = getMonotonicTimeNSec
+
+-- | Measure one @mkIfaceTc@ call. Wall time comes from the monotonic clock and
+-- CPU time is process CPU. Allocation and GC counters are process-wide deltas
+-- from GHC's RTS statistics. They are available only when the worker started
+-- with RTS statistics enabled. This samples existing counters and never forces
+-- a collection.
+measureModuleInterface
+  :: Bool -> Word64 -> String -> InterfaceStage -> InterfaceReuse
+  -> IO a -> IO (a, Integer)
+measureModuleInterface enabled request moduleName stage reuse action = do
+  wall0 <- getMonotonicTimeNSec
+  cpu0 <- if enabled then Just <$> getCPUTime else pure Nothing
+  rts0 <- if enabled then readRtsStats else pure Nothing
+  result <- action
+  wall1 <- getMonotonicTimeNSec
+  cpu1 <- if enabled then Just <$> getCPUTime else pure Nothing
+  rts1 <- if enabled then readRtsStats else pure Nothing
+  let wallNs = delta wall0 wall1
+      wallMs = fromIntegral ((wallNs + 500000) `div` 1000000)
+  if enabled
+    then hPutStrLn stderr (renderInterfaceMeasurement request moduleName stage reuse
+      wallNs (cpuDelta cpu0 cpu1) rts0 rts1)
+    else pure ()
+  pure (result, wallMs)
+
+readRtsStats :: IO (Maybe RTS.RTSStats)
+readRtsStats = do
+  available <- RTS.getRTSStatsEnabled
+  if available then Just <$> RTS.getRTSStats else pure Nothing
+
+renderInterfaceMeasurement
+  :: Word64 -> String -> InterfaceStage -> InterfaceReuse -> Word64 -> Integer
+  -> Maybe RTS.RTSStats -> Maybe RTS.RTSStats -> String
+renderInterfaceMeasurement request moduleName stage reuse wallNs cpuNs before after =
+  "tidepool-timing-module-detail module=" ++ moduleName
+    ++ " request=" ++ show request
+    ++ " parent=module_interface phase=make_iface"
+    ++ " stage=" ++ renderStage stage
+    ++ " reuse=" ++ renderReuse reuse
+    ++ " ms=" ++ show ((wallNs + 500000) `div` 1000000)
+    ++ " wall_ns=" ++ show wallNs
+    ++ " cpu_ns=" ++ show cpuNs
+    ++ case (before, after) of
+      (Just rts0, Just rts1) ->
+        " rts=enabled rts_scope=process_delta"
+          ++ " allocated_bytes=" ++ show (delta (RTS.allocated_bytes rts0) (RTS.allocated_bytes rts1))
+          ++ " gc_cpu_ns=" ++ show (delta (RTS.gc_cpu_ns rts0) (RTS.gc_cpu_ns rts1))
+          ++ " gc_elapsed_ns=" ++ show (delta (RTS.gc_elapsed_ns rts0) (RTS.gc_elapsed_ns rts1))
+          ++ " gcs=" ++ show (delta (RTS.gcs rts0) (RTS.gcs rts1))
+      _ ->
+        " rts=unavailable rts_scope=process_delta"
+          ++ " allocated_bytes=unavailable gc_cpu_ns=unavailable"
+          ++ " gc_elapsed_ns=unavailable gcs=unavailable"
+
+renderStage :: InterfaceStage -> String
+renderStage CheckedEnvironmentInterface = "checked_environment"
+renderStage SessionRegistrationInterface = "session_registration"
+
+renderReuse :: InterfaceReuse -> String
+renderReuse HptMiss = "hpt_miss"
+renderReuse MemoMiss = "memo_miss"
+renderReuse MemoDisabled = "memo_disabled"
+
+cpuDelta :: Maybe Integer -> Maybe Integer -> Integer
+cpuDelta (Just before) (Just after) = delta before after `div` 1000
+cpuDelta _ _ = 0
+
+delta :: (Num a, Ord a) => a -> a -> a
+delta before after
+  | after >= before = after - before
+  | otherwise = 0

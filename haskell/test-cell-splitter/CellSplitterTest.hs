@@ -7,6 +7,7 @@ import Control.Exception (SomeException, bracket, finally, throwIO, try)
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, tails)
+import Data.Char (isDigit)
 import GHC
 import GHC.Driver.Session (parseDynamicFilePragma)
 import GHC.Parser.Header (getOptions)
@@ -17,6 +18,8 @@ import Tidepool.Binders
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.GhcPipeline
 import Tidepool.DependencyEvidence
+import Tidepool.Timing
+  ( InterfaceStage(..), InterfaceReuse(..), measureModuleInterface )
 import System.Directory
   ( getTemporaryDirectory, createDirectory, createDirectoryIfMissing
   , removeFile, removeDirectoryRecursive )
@@ -42,6 +45,7 @@ main = do
       prologuePlans flags
       automaticGenericPlans flags
       noStandaloneDerivingLeavesCellUntouched flags
+  interfaceMeasurementDiagnostics
   getArgs >>= \case
     [] -> pure ()
     ["--metadata"] -> metadataCompilation
@@ -255,6 +259,11 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
         (show (crCapturedTypes checked))
       assertEqual "exactly one checked target" 1
         (length (filter (isInfixOf "tidepool-checked module=MetadataTarget target=True") (lines output)))
+      case filter (isInfixOf "module=MetadataTarget")
+            (filter (isPrefixOf "tidepool-timing-module-detail ") (lines output)) of
+        row : _ -> validateInterfaceMeasurement
+          "MetadataTarget" "checked_environment" "hpt_miss" row
+        [] -> fail "metadata compile omitted its interface measurement"
       unless (not ("tidepool-target phase=desugar" `isInfixOf` output || "phase=lowering " `isInfixOf` output)) $
         fail "metadata target entered the executable pipeline"
       writeFile dependency "module MetadataDependency where\nvalue = missingDependencyName\n"
@@ -419,6 +428,53 @@ captureStderr root label action = do
   output <- readFile' path
   removeFile path
   pure (result, output)
+
+interfaceMeasurementDiagnostics :: IO ()
+interfaceMeasurementDiagnostics = bracket temporary removeDirectoryRecursive $ \root -> do
+  (_, output) <- captureStderr root "interface-measurements" $ do
+    _ <- measureModuleInterface True 101 "Checked" CheckedEnvironmentInterface HptMiss (pure ())
+    _ <- measureModuleInterface True 102 "Registered" SessionRegistrationInterface MemoMiss (pure ())
+    pure ()
+  case filter (isPrefixOf "tidepool-timing-module-detail ") (lines output) of
+    [checked, registered] -> do
+      validateInterfaceMeasurement "Checked" "checked_environment" "hpt_miss" checked
+      validateInterfaceMeasurement "Registered" "session_registration" "memo_miss" registered
+    rows -> fail ("expected two interface measurement rows, got " ++ show rows)
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-interface-measurements"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
+
+validateInterfaceMeasurement :: String -> String -> String -> String -> IO ()
+validateInterfaceMeasurement expectedModule expectedStage expectedReuse row = do
+  assertEqual "interface measurement module" (Just expectedModule) (field "module")
+  assertEqual "interface measurement parent" (Just "module_interface") (field "parent")
+  assertEqual "interface measurement phase" (Just "make_iface") (field "phase")
+  assertEqual "interface measurement stage" (Just expectedStage) (field "stage")
+  assertEqual "interface measurement reuse" (Just expectedReuse) (field "reuse")
+  forM_ ["request", "ms", "wall_ns", "cpu_ns"] assertDecimal
+  assertEqual "RTS counter scope" (Just "process_delta") (field "rts_scope")
+  case field "rts" of
+    Just "enabled" -> forM_ rtsCounters assertDecimal
+    Just "unavailable" -> forM_ rtsCounters $ \name ->
+      assertEqual ("unavailable RTS counter " ++ name) (Just "unavailable") (field name)
+    status -> fail ("unexpected RTS availability in interface measurement: " ++ show status)
+  where
+    fields =
+      [ (name, drop 1 value)
+      | token <- words row
+      , let (name, value) = break (== '=') token
+      , not (null value)
+      ]
+    field name = lookup name fields
+    assertDecimal name = case field name of
+      Just value | not (null value) && all isDigit value -> pure ()
+      value -> fail ("non-decimal interface measurement field " ++ name ++ ": " ++ show value)
+    rtsCounters = ["allocated_bytes", "gc_cpu_ns", "gc_elapsed_ns", "gcs"]
 
 lexicalIslands :: DynFlags -> IO ()
 lexicalIslands flags = do

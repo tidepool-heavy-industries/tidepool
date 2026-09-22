@@ -115,6 +115,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, forM_, when)
 import Data.Data (Data, cast, gmapQ)
 import Data.Foldable (toList)
+import Data.Word (Word64)
 import Tidepool.Binders (CheckedBinderPin(..), CellSourcePlan(..), CellDisplayTarget(..), CellGenericDeclaration(..), CellExpressionPlan(..), ExpressionLiftPlan(..), ExpressionPresentation(..), omitCellGenericDeclarations, omitCellDisplayDeclarations)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
@@ -125,7 +126,9 @@ import Tidepool.Session
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule )
 import Tidepool.Timing
   ( readTimingEnabled, timeSection, timePhase, emitPhase, monotonicTime, elapsedMs
-  , emitCompileSummary, emitModuleTiming, emitModuleInterfaceTiming )
+  , emitCompileSummary, emitModuleTiming, emitModuleInterfaceTiming
+  , InterfaceStage(..), InterfaceReuse(..), measureModuleInterface
+  , newTimingRequestIdentity )
 import Tidepool.PreparedStg (PreparedElaboration(..), PreparedModule(..), prepareModule)
 import Tidepool.PreparedSites
   ( elaboratePreparedSites, resolvePreparedSiblings, resolveSiteAuthority )
@@ -589,7 +592,7 @@ data CompilePlan = CompilePlan
     -- session path injects value ifaces here, after their declaration-module
     -- dependencies have entered the HPT and before the first importer needs
     -- them.
-  , cpAfterModule :: ModSummary -> TcGblEnv -> HscEnv -> ModGuts
+  , cpAfterModule :: Word64 -> InterfaceReuse -> ModSummary -> TcGblEnv -> HscEnv -> ModGuts
       -> Ghc (Maybe Integer, Maybe HomeModInfo)
     -- ^ Runs after a module's 'core2core', on the pre-'externalizeInternalTops'
     -- guts. The session path registers deferred modules into the HPT and
@@ -620,6 +623,7 @@ data ModuleFront = ModuleFront
 runCompile :: PipelineSelection result -> Set.Set SymbolIdentity -> PipelineVariant -> FilePath -> [FilePath] -> Maybe FilePath -> IO result
 runCompile selection retained variant path includes buildProductsDir = do
   timing <- readTimingEnabled
+  requestIdentity <- newTimingRequestIdentity
   (libdir, startupMs) <- timeSection getLibdir
   emitPhase timing "startup" startupMs
   runGhc (Just libdir) $ do
@@ -661,7 +665,7 @@ runCompile selection retained variant path includes buildProductsDir = do
     -- DynFlags bootstrap (above) so the default-on per-compile summary's
     -- wall-clock figure covers it too, exactly as it always has. See
     -- 'runCompileCycle''s haddock for what each argument controls.
-    runCompileCycle selection Nothing Nothing retained timing sessionT0 variant path
+    runCompileCycle selection Nothing Nothing retained timing requestIdentity sessionT0 variant path
 
 -- | Like 'runPipelineSelected'/'runPipelineSessionSelected', but also taking a
 -- retained-generation set (see 'Tidepool.RetainedUnfoldings') to withhold
@@ -857,8 +861,8 @@ type GutsMemo = Map.Map ModuleName GutsMemoEntry
 -- constant for the whole cycle.
 runCompileCycle
   :: PipelineSelection result -> Maybe ModIfaceCache -> Maybe (IORef GutsMemo)
-  -> Set.Set SymbolIdentity -> Bool -> Double -> PipelineVariant -> FilePath -> Ghc result
-runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path = do
+  -> Set.Set SymbolIdentity -> Bool -> Word64 -> Double -> PipelineVariant -> FilePath -> Ghc result
+runCompileCycle selection mCache mMemoRef retained timing requestIdentity sessionT0 variant path = do
     let preparation = selectionKind selection
     target <- guessTarget path Nothing Nothing
     setTargets [target]
@@ -1069,7 +1073,8 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
                 liftIO (modifyIORef' c2cMsRef (+ coreMs))
                 liftIO (modifyIORef' moduleMsRef
                           (Map.insertWith (+) (moduleNameString (ms_mod_name (mfSummary mf))) coreMs))
-                (mInterfaceMs, mInterface) <- cpAfterModule plan
+                let interfaceReuse = if isJust mMemoRef then MemoMiss else MemoDisabled
+                (mInterfaceMs, mInterface) <- cpAfterModule plan requestIdentity interfaceReuse
                   (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
                 liftIO $ recordInterface (mfSummary mf) mInterfaceMs
                 let externalized = externalizeInternalTops simplified
@@ -1508,7 +1513,9 @@ runCompileCycle selection mCache mMemoRef retained timing sessionT0 variant path
               -- These type-only interfaces require neither Core nor STG.
               env <- getSession
               details <- liftIO (mkBootModDetailsTc (hsc_logger env) tcg)
-              iface <- liftIO (mkIfaceTc env Sf_None details summary Nothing tcg)
+              (iface, _ifaceMs) <- liftIO $ measureModuleInterface timing requestIdentity
+                (moduleNameString (ms_mod_name summary)) CheckedEnvironmentInterface HptMiss $
+                  mkIfaceTc env Sf_None details summary Nothing tcg
               let hmi = HomeModInfo iface details emptyHomeModInfoLinkable
               setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name summary) hmi) env)
               pure (if isTarget then Just tcg else Nothing)
@@ -1682,8 +1689,8 @@ withResidentPipelineSelectedRequests baseIncludes evictRecovery useRequests = do
             forM_ (Set.toList targets) $ \targetModName' -> do
               sanitizeMemo targetModName' memoRef
               evictRecovery targetModName'
-          compile :: ResidentCompiler
-          compile selection retained purpose mscope path extraIncludes buildProductsDir = do
+          compile :: Word64 -> ResidentCompiler
+          compile requestIdentity selection retained purpose mscope path extraIncludes buildProductsDir = do
             targetModName' <- targetModuleNameFor path
             modifyIORef' requestTargetsRef (Set.insert targetModName')
             -- The target's parsed tree depends on the compile purpose (for
@@ -1694,11 +1701,14 @@ withResidentPipelineSelectedRequests baseIncludes evictRecovery useRequests = do
             evictTargetMemo targetModName' memoRef
             (writeIORef retainedRef retained >>
               reflectGhc
-                (residentCompileOne selection cache memoRef retainedRef dflags' baseImportPaths timing purpose mscope path extraIncludes buildProductsDir)
+                (residentCompileOne selection cache memoRef retainedRef dflags' baseImportPaths
+                  timing requestIdentity purpose mscope path extraIncludes buildProductsDir)
                 session)
               `finally` writeIORef retainedRef Set.empty
           runRequest :: RequestRunner
-          runRequest action = action compile `finally` finishRequest
+          runRequest action = do
+            requestIdentity <- newTimingRequestIdentity
+            action (compile requestIdentity) `finally` finishRequest
       in useRequests runRequest
 
 type ResidentCompiler = forall result.
@@ -1733,9 +1743,9 @@ type RequestRunner = forall requestResult.
 -- per module.
 residentCompileOne
   :: PipelineSelection result -> ModIfaceCache -> IORef GutsMemo -> IORef (Set.Set SymbolIdentity) -> DynFlags -> [FilePath]
-  -> Bool -> CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath
+  -> Bool -> Word64 -> CompilePurpose -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath
   -> Ghc result
-residentCompileOne selection cache memoRef retainedRef baseDFlags baseImportPaths timing purpose mscope path extraIncludes buildProductsDir = do
+residentCompileOne selection cache memoRef retainedRef baseDFlags baseImportPaths timing requestIdentity purpose mscope path extraIncludes buildProductsDir = do
   sessionT0 <- monotonicTime
   retained <- liftIO (readIORef retainedRef)
   hsc0 <- getSession
@@ -1746,7 +1756,7 @@ residentCompileOne selection cache memoRef retainedRef baseDFlags baseImportPath
   variant <- liftIO $ case mscope of
     Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
     _                                        -> normalVariant purpose path
-  runCompileCycle selection (Just cache) (Just memoRef) retained timing sessionT0 variant path
+  runCompileCycle selection (Just cache) (Just memoRef) retained timing requestIdentity sessionT0 variant path
 
 -- | Strip every transaction-scoped entry from the shared 'GutsMemo' after a
 -- compiler transaction: every target module compiled by it and any
@@ -1876,7 +1886,7 @@ normalVariant purpose path = do
         -- order.
       , cpResultBinders = [scaffoldOutputBase, scaffoldTargetName]
       , cpBeforeModule = \_ -> pure ()
-      , cpAfterModule = \_ _ _ _ -> pure (Nothing, Nothing)
+      , cpAfterModule = \_ _ _ _ _ _ -> pure (Nothing, Nothing)
       , cpTier = OptimizeCoreReachable
         -- Phase barrier (backstop): a target or dependency compile error
         -- already threw a spanned 'SourceError' from inside the compile loop
@@ -2065,7 +2075,7 @@ sessionVariant purpose scope path = do
           -- projection needs dependency bodies. Interfaces loaded without
           -- optimization do not expose every required body. The target's
           -- @import Val.G<g>@ resolves from the injection above.
-        , cpAfterModule = \modSum tcGblEnv hscEnv simplified ->
+        , cpAfterModule = \requestId interfaceReuse modSum tcGblEnv hscEnv simplified ->
             -- A generated Lib module must also be registered from this
             -- cycle's typecheck before Val-interface injection. Removing the
             -- leaf target from load's graph can leave an otherwise ordinary
@@ -2080,10 +2090,9 @@ sessionVariant purpose scope path = do
                   liftIO $ emitModuleInterfaceTiming timing (moduleNameString (ms_mod_name modSum))
                     "module_interface" "tidy" elapsed
                   pure (guts, details, elapsed)
-                (iface, ifaceMs) <- timeSection $ liftIO $
-                  mkIfaceTc hscEnv Sf_None modDetails modSum (Just (cg_binds cgGuts)) tcGblEnv
-                liftIO $ emitModuleInterfaceTiming timing (moduleNameString (ms_mod_name modSum))
-                  "module_interface" "make_iface" ifaceMs
+                (iface, ifaceMs) <- liftIO $ measureModuleInterface timing requestId
+                  (moduleNameString (ms_mod_name modSum)) SessionRegistrationInterface interfaceReuse $
+                    mkIfaceTc hscEnv Sf_None modDetails modSum (Just (cg_binds cgGuts)) tcGblEnv
                 let hmi = HomeModInfo iface modDetails emptyHomeModInfoLinkable
                 hscEnvNow <- getSession
                 setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name modSum) hmi) hscEnvNow)
