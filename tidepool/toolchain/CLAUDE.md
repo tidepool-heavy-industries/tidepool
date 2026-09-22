@@ -23,7 +23,9 @@ back into `classify_compile`.
 `artifacts::compile_invocation` is the single compile front door. Immutable
 single-target and multi-target requests share one recipe and named artifact
 bundle in `cache.rs`. Session salts and injected session interfaces bypass the
-artifact cache.
+Rust artifact cache. The resident compiler daemon has a separate,
+dependency-validated module memo that can reuse immutable support across those
+requests. Matched measurement tests are the evidence for costs and savings.
 
 The recipe binds source bytes, the generated module filename, ordered targets
 and absolute import roots, and the already-bound endpoint identity. Unknown

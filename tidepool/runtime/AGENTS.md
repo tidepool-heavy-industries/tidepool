@@ -17,6 +17,16 @@ session checkout, turn supervision, and runtime/session failure classification.
   re-exported here.
 - JIT root/continuation ownership remains in `tidepool-codegen`; runtime code
   should compose those mechanisms rather than create parallel registries.
+- Display observes an expression once. Publish the observation before any
+  presentation failure; pass runtime budgets and keys as values rather than
+  specializing generated source.
+- Host mounts use typed construction and machine-owned handles. Validate type
+  and machine-session identity before installing imported values.
+- Temporary root chunks keep stable addresses. Reusable DAG handles remain
+  rooted; consume a tree only after parent publication. No borrowed heap view
+  may survive collection or forcing.
+- Static-region indices select candidates only. Exact object/tag validation
+  and transactional installation and retirement remain authoritative.
 
 ## Workbench execution and recovery
 

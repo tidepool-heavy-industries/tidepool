@@ -19,3 +19,11 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   or runtime policy into that dependency leaf.
 - Cache tests must cover invalidation, relocation, warnings, and uncacheable
   negative cases, not only hits.
+- Session salts and injected session interfaces bypass the artifact cache.
+  Inside the resident compiler daemon, dependency-validated memo entries can
+  still reuse immutable support modules; this module memo is distinct from the
+  Rust artifact cache. Use the matched measurement tests as evidence for cost
+  and savings, not projected estimates.
+- Register embedded prepared artifacts with their real producers and schema
+  contracts. Regenerate payloads through those producers; never patch version
+  headers by hand.

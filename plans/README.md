@@ -50,8 +50,6 @@ archive).
   they do not gate the current orchestration package without a concrete consumer.
 - [JIT memory lifetime](actor-model/jit-memory-lifetime.md): executable-memory
   reclamation and honest recovery after removing the fixed JIT arena ceiling.
-- [Test-time cut](test-time-cut.md): diagnosis landed; family bundling
-  merged, turn-count top-5 lane in flight.
 
 ## Supporting actor designs
 
@@ -165,7 +163,3 @@ Small still-open items whose originating plan doc has been retired:
   would invite re-tripping a hazard already fixed once. Current architecture
   contracts belong in owning source, `AGENTS.md`, and focused design references,
   not historical charters.
-- [Notebook cell compile-count reduction](handoff/designs/cell-compiles.md)
-  and [descriptor dispatch](handoff/designs/descriptor-dispatch.md): the two
-  still-live designs from a since-retired handoff bundle, cited by
-  `STG_KNOWN_ISSUES.md` for open cost and perf issues.

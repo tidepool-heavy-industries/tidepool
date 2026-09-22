@@ -413,27 +413,20 @@ Interfaces will change without notice. Setup is involved, and live use still
 finds workbench papercuts. The most useful examples come from trying real tasks,
 keeping what works, and fixing what gets in the way.
 
-The sharpest edge today is compile latency. A first notebook cell in a fresh
-session takes on the order of a minute, and reloading an edited agent spec about
-half of that, because each statement is compiled and its machine code generated
-from scratch. Everything downstream of a compile is fast: a tool call answers in
-well under a second, an idle after-tool slot adds tens of milliseconds, and Jev
-answers in a few hundred. We are working on the compile path, and the design
-already lets you spend it once rather than every turn.
+Compile latency has improved substantially, and the current cost profile is
+measured rather than projected. In the latest matched run, a first measured
+one-statement cell took 4.607 s. Recurring one-statement cells took 860–1,438 ms;
+six-statement cells took 2,473–3,540 ms. The recurring cells made 3 and 8
+compiler requests respectively, and lookup took 33 ms with 1 request. The
+timings varied between repeats, so no further latency reduction is claimed.
+The final machine snapshot held 12,113 native functions and 4,476,101 bytes of
+native code. These are benchmark observations, not general throughput promises.
 
-This is early alpha. Given another week on compiles-per-call and compile speed,
-here is what I expect:
-
-| Operation | Today | Expected |
-| --- | --- | --- |
-| Reload an edited spec | 28–35 s | 1–2 s |
-| Warm cell, six statements | ~62 s | 2–3 s plus the effects themselves |
-| First cell, fresh session, known workspace | 78 s | 3–5 s |
-| First ever session in a new workspace | ~113 s | 20–30 s, once |
-| Child joining a swarm | 7 m 45 s | 10–20 s |
-
-Still, a 60-second compile that saves you a frontier-model round trip is worth
-it today.
+The request counts expose the largest current multi-statement opportunity:
+each statement still executes as its own unit, while only the final expression
+needs display. Reusable display execution and a checked-cell execution bundle
+remain open investigations; the matched measurement tests are the evidence for
+their cost and any future improvement.
 
 We are exploring agents exchanging and improving semantic functions, context-aware
 tool views, and programs that do more work between model turns. These are directions
