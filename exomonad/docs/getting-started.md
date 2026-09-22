@@ -48,7 +48,6 @@ build this checkout and then run it:
 
 ```bash
 just exomonad-init           # build, then `exomonad init` in this repository
-just exomonad-smoke          # the alpha smoke run, with its brief
 ```
 
 ## `exomonad new`: write a workspace

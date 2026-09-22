@@ -8,7 +8,8 @@ providers, scheduling, resources, persistence, and argument parsing.
 ## Start here
 
 1. Read this file, then `docs/GLOSSARY.md` for names. `README.md` says what the
-   system is for; `plans/README.md` lists what is being designed right now.
+   system is for; `plans/README.md` lists open design questions and retained
+   evidence.
 2. Before editing a subsystem, read the nearest nested `AGENTS.md` or
    `CLAUDE.md`. They state that crate's boundaries and invariants.
 3. Build and test through the `justfile`, which enters the Nix shell itself:
@@ -146,7 +147,7 @@ Keep detailed design references out of always-loaded instructions.
 | Exomonad CLI, actor launch composition, prompt assembly | `bridge/facade/src/exomonad.rs`, `bridge/facade/src/actor_host.rs`, `bridge/facade/src/actor_host/prompt_catalog.rs` |
 | Shipped resident instructions and shared API guide | `exomonad/prompts/` |
 | Workspace skills, and the links a client loads them through | `exomonad/examples/workspace/.exomonad/skills/`, `.agents/skills/` |
-| Agent spec discovery, reload, and the after-tool slot | `exomonad/actor/src/{agent_spec,reload_spec_tool,after_tool}.rs`; Haskell side in `bridge/haskell/lib/Tidepool/Agent/Contract.hs` |
+| Agent spec discovery, reload, and the after-tool hook | `exomonad/actor/src/{agent_spec,reload_spec_tool,after_tool}.rs`; Haskell side in `bridge/haskell/lib/Tidepool/Agent/Contract.hs` |
 | Comparing two declared tool surfaces | `exomonad/tool/src/surface.rs` |
 | Source layers: capture, typecheck, atomic publication, drift | `bridge/facade/src/exomonad/source.rs` |
 | Jev operators | the pinned `jev-dsl` flake input, fronted per workspace by `.exomonad/Jev/Operators.hs` |

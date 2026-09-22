@@ -17,7 +17,8 @@ the nearest crate guide.
   mechanism instead of copying it.
 - Root decisions govern cross-crate architecture. A crate's `CLAUDE.md` governs
   its local boundaries and invariants.
-- `plans/README.md` lists active design work. Plans are temporary and are not
+- `plans/README.md` lists open design questions and retained evidence. Plans
+  are temporary and are not
   standing architecture.
 - Use the vocabulary in `docs/GLOSSARY.md`, especially in model-facing text.
 - Keep history in git. Standing documentation describes the current system,
