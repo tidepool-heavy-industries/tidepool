@@ -1,8 +1,9 @@
 # harness-dogfooding
 
-Live authored harnesses for the self-iterating harness system — **Xmonad.hs
-vibes**: you write `render` / `loop` / `State` in plain Haskell, the runtime
-(`tidepool-selfharness`) drives it. This is *our* dogfood space (distinct from
+Historical authored harness sources for the retired self-iterating harness
+system. The former `tidepool-selfharness` runtime and its launcher are no
+longer supported; `run.sh` fails explicitly rather than attempting to build a
+removed binary. The files remain as reference material (distinct from
 `examples/harness/`, which holds the frozen reference contract), where the
 "smart agent" (a clean-context Claude session) authors and iterates the harness
 by hand — the manual precursor to autonomous distillation.

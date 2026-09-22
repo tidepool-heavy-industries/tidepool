@@ -11,7 +11,8 @@
 //!
 //! # The event shape
 //!
-//! One `tracing` DEBUG event per stage, on target `tidepool_harness::timing`,
+//! One `tracing` DEBUG event per stage, on the retained target
+//! `tidepool_harness::timing`,
 //! message `"turn stage"`, fields:
 //!
 //! | field   | type          | meaning                                        |
@@ -75,14 +76,10 @@
 //!
 //! # Two frontends, one module
 //!
-//! `tidepool-harness` and `tidepool-runtime` both instrument turns with this
-//! format; `tidepool-harness` depends on `tidepool-runtime` (never the
-//! reverse — a back-dependency would cycle), so this module lives here and
-//! `tidepool-harness` re-exports it (`pub use tidepool_runtime::timing::*`)
-//! rather than each crate hand-mirroring the event shape by hand. The target
-//! string stays `tidepool_harness::timing` regardless of which crate calls
-//! [`record_stage`] — collectors group on the target, not the emitting
-//! crate, and a rename would break every existing collector.
+//! The runtime and the historical harness frontend used this format; this
+//! module owns the shared event shape so callers do not hand-mirror it. The
+//! target string remains `tidepool_harness::timing` for collector compatibility
+//! regardless of which crate calls [`record_stage`].
 
 use std::time::Duration;
 

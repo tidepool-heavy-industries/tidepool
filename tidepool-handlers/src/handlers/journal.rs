@@ -3,8 +3,7 @@
 //! One JSON line per `record` call — `{ts, seq, kind, key, payload}` — appended
 //! and `fsync`ed before the call returns. No rewrite or compaction code path
 //! exists. The fold API below (`load_journal`/`last_by_key`/`last_by_kind_key`)
-//! is for the swarm driver's boot-time resume; nothing here wires it in
-//! (`tidepool_harness::selfharness::resume` is what does).
+//! is for the driver's boot-time resume; nothing here wires it in.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -347,8 +346,8 @@ pub fn last_by_key(entries: &[JournalEntry]) -> HashMap<String, JournalEntry> {
 ///
 /// The winner is the LAST entry in `entries` — POSITION, never `seq`. Correct
 /// only when the caller supplies `entries` in the run's TRUE PHYSICAL WRITE
-/// ORDER: for a segmented journal (`tidepool_harness::selfharness::resume`),
-/// that means every segment's entries concatenated in segment order, each
+/// ORDER: for a segmented journal, the caller supplies every segment's entries
+/// concatenated in segment order, each
 /// segment's own entries already in this function's append order. That
 /// physical order is exactly the durable byte sequence a crash leaves behind,
 /// so folding on it is folding over the real evidence.
@@ -383,11 +382,11 @@ pub fn last_by_kind_key(entries: &[JournalEntry]) -> HashMap<(String, String), J
 /// nobody allocated" is a type error to construct, not a runtime hazard to
 /// remember to avoid.
 ///
-/// `tidepool_harness::selfharness::resume::allocate_segment` is the one
-/// legitimate non-test caller: it owns the segment NAMING scheme (ordinal
+/// The resume layer is the legitimate non-test caller: it owns the segment
+/// NAMING scheme (ordinal
 /// picking, retry-on-collision) and calls [`Self::create_exclusive`] on each
 /// candidate path in turn. This type owns the CLAIM primitive only, not the
-/// naming scheme — `tidepool-handlers` sits below `tidepool-harness` in the
+/// naming scheme — `tidepool-handlers` sits below the resume layer in the
 /// crate graph (see this module's other doc comments on why this crate
 /// never decides where a segment lives), so the naming scheme cannot live
 /// here.
@@ -473,8 +472,8 @@ const LOCAL_SEQ_BITS: u32 = 32;
 ///
 /// This is what makes `seq` run-GLOBALLY UNIQUE by construction, with NO
 /// cross-process coordination beyond the segment claim itself: two processes
-/// racing to resume the same lease at once (`tidepool_harness::selfharness
-/// ::resume::acquire_lease`'s warn-never-refuse alive-pid policy — a wedged
+/// racing to resume the same lease at once. The resume layer's
+/// warn-never-refuse alive-pid policy — a wedged
 /// pid must never block a resume, so this cannot lean on refusing the race)
 /// always land on DISTINCT segment ordinals, because
 /// [`SegmentPath::create_exclusive`] is what claims one — so their composed
@@ -523,8 +522,7 @@ pub struct JournalHandler {
 
 impl JournalHandler {
     /// One journal file over an already-claimed [`SegmentPath`] (typically
-    /// one process's own SEGMENT of a run; see
-    /// `tidepool_harness::selfharness::resume`, which is what decides that
+    /// one process's own SEGMENT of a run; the resume layer decides that
     /// path and claims it, never this type). Composes `seq` at segment
     /// ordinal `0` — right for a FRESH run's first process, whose segment
     /// always IS ordinal 0. A process continuing a run a prior process
@@ -544,8 +542,8 @@ impl JournalHandler {
     /// a folded `max_seq` — the latter is what let two concurrent resumes,
     /// which fold the identical prior state, seed an identical counter and
     /// collide. `segment_ordinal` is exactly what
-    /// `tidepool_harness::selfharness::resume::AcquiredLease::segment_ordinal`
-    /// carries — the ordinal [`SegmentPath::create_exclusive`] claimed for
+    /// the acquired lease carries — the ordinal
+    /// [`SegmentPath::create_exclusive`] claimed for
     /// this process's segment, never computed here. Opening in append mode
     /// is unchanged; nothing here reads or rewrites the file.
     pub fn resuming(path: SegmentPath, segment_ordinal: u64) -> Result<Self, JournalAppendError> {

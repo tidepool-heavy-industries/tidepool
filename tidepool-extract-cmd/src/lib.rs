@@ -378,8 +378,8 @@ impl ExtractCmd {
 
     /// Start building against an already-resolved binary. For a caller that
     /// resolves once at construction and reuses the result across many
-    /// invocations (`tidepool_harness::compile`, which is handed the binary
-    /// path rather than re-reading the env per turn).
+    /// invocations from a resident compiler caller, which is handed the binary
+    /// path rather than re-reading the environment per turn).
     ///
     /// Takes [`ResolvedExtractBin`] rather than an arbitrary string, so the
     /// only way to reach this constructor is through a real [`resolve_bin`]

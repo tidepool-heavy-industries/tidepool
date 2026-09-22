@@ -3,7 +3,7 @@
 //! mechanism for durable, non-reproducible persistence artifacts). Stamped
 //! PER SEGMENT, not per run: the segmented-journal design already treats
 //! each segment file as independently readable/foldable
-//! (`tidepool_harness::selfharness::resume`), and a run-level version would
+//! (the resume layer), and a run-level version would
 //! need to reach into that crate's lease/fold machinery, which sits above
 //! this crate in the dependency graph.
 

@@ -8,12 +8,6 @@ archive).
 
 ## Active work
 
-- [Structural performance A](structural-performance-a.md): current broad reuse,
-  managed-root, compiler-interface, and build/test preparation implementation.
-
-- [Structural STG performance follow-up](stg-specialization-followup.md):
-  measured compiler/native costs, the current JSON/dispatch/state wave, and
-  evidence gates for later resident-Haskell compute candidates.
 - [Agent spec and System 1 slots](jev-lab/agent-spec-design.md): one Haskell
   module per checkout names an agent's tools and the slot applied after every
   tool call; edited with file tools and reloaded live. After-tool is the first
