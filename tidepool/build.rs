@@ -79,15 +79,19 @@ fn emit_scaffold_package(repository: PathBuf) {
         ".shoal/Jev/Operators.hs".to_owned(),
         repository.join("examples/shoal-workspace/.shoal/Jev/Operators.hs"),
     ));
-    // The starter agent spec: this repository's own, which `shoal check` keeps
-    // compiling.
+    // The starter agent spec belongs to the shipped template. This checkout's
+    // active `.shoal` may evolve independently and is never scaffold input.
     entries.push((
         ".shoal/AgentSpec.hs".to_owned(),
-        repository.join(".shoal/AgentSpec.hs"),
+        repository.join("examples/shoal-workspace/.shoal/AgentSpec.hs"),
     ));
     entries.push((
         ".shoal/Project/Tools.hs".to_owned(),
-        repository.join(".shoal/Project/Tools.hs"),
+        repository.join("examples/shoal-workspace/.shoal/Project/Tools.hs"),
+    ));
+    entries.push((
+        ".shoal/Project/Shell.hs".to_owned(),
+        repository.join("examples/shoal-workspace/.shoal/Project/Shell.hs"),
     ));
     // The worked-example watchdog: a set of monitors a parent may install on
     // the children it spawns. The starter `AgentSpec.hs` does not turn it on

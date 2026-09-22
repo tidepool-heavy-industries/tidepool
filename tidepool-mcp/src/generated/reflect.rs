@@ -5,7 +5,7 @@
 pub fn reflect_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         type_name: "Reflect",
-        description: "Read your own recent conversation as data. `reflect n` returns your last n COMPLETED turns, oldest first, each carrying the messages, tool calls and tool results that belonged to it. The turn you are executing has not completed and is never included; fewer than n completed turns returns the ones that exist and `n <= 0` returns none. It reads only the caller's own conversation — there is no argument naming another actor or a file. `Left ReflectUnbound` means this context has no bound conversation to read, which an operator proxy and a recreated host both are; the root's conversation is never substituted for a caller's. Because it is an ordinary effect, an authored function can fetch its own recent context once and reuse it across a whole sequence of later calls.",
+        description: "Read your own recent conversation as data. `reflect n` returns your latest n turns including the active turn, oldest first, each carrying the recorded messages, tool calls and tool results that belong to it. An active turn has `completed_at = Nothing`; pending results are never invented. Fewer than n turns returns the ones that exist and `n <= 0` returns none. It reads only the caller's own conversation — there is no argument naming another actor or a file. `Left ReflectUnbound` means this context has no bound conversation to read, which an operator proxy and a recreated host both are; the root's conversation is never substituted for a caller's. Because it is an ordinary effect, an authored function can fetch its own recent context once and reuse it across a whole sequence of later calls.",
         prompt_card: None,
         constructors: &[
             "ReflectWith :: Int -> Reflect (Either ReflectError [ConversationTurn])",
@@ -18,7 +18,7 @@ pub fn reflect_decl() -> crate::EffectDecl {
         ],
         extra_imports: &[],
         helpers: &[
-            "-- | `reflect n` reads your OWN last n completed conversation turns, oldest\n-- first, each carrying its messages, tool calls and tool results. The turn\n-- you are executing is not complete and is never among them; fewer than n\n-- completed turns returns the ones that exist, and `n <= 0` returns none.\n-- Natural spelling: `Right recent <- reflect 5`. `Left ReflectUnbound`\n-- means this context has no conversation of its own — no other actor's is\n-- returned in its place. Bind the result once and reuse it across the\n-- calls that need it rather than reading it again per call.\nreflect :: forall effs. Member Reflect effs => Int -> Eff effs (Either ReflectError [ConversationTurn])\nreflect = send . ReflectWith",
+            "-- | `reflect n` reads your OWN latest n conversation turns including the active\n-- turn, oldest first, each carrying recorded messages, tool calls and tool\n-- results. An unfinished turn has `turnCompletedAt = Nothing`; pending tool\n-- results are never invented. Fewer than n turns returns the ones that exist,\n-- and `n <= 0` returns none.\n-- Natural spelling: `Right recent <- reflect 5`. `Left ReflectUnbound`\n-- means this context has no conversation of its own — no other actor's is\n-- returned in its place. Bind the result once and reuse it across the\n-- calls that need it rather than reading it again per call.\nreflect :: forall effs. Member Reflect effs => Int -> Eff effs (Either ReflectError [ConversationTurn])\nreflect = send . ReflectWith",
         ],
         type_params: &[],
         default_row_args: &[],

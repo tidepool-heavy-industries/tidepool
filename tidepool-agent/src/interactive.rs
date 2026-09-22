@@ -627,11 +627,12 @@ pub trait InteractiveAgentBackend: Send + Sync {
         Box::pin(async { Ok(None) })
     }
 
-    /// This conversation's last `count` COMPLETED turns, oldest first.
+    /// This conversation's latest `count` turns, oldest first, including the
+    /// active turn when the durable record already contains it.
     ///
-    /// The turn the caller is executing has not completed and is never
-    /// included. `None` means this backend keeps no readable conversation
-    /// record; an empty list means it keeps one with no completed turns yet.
+    /// An active turn has no completion timestamp and contains only recorded
+    /// messages and tool activity; a pending result is never fabricated.
+    /// `None` means this backend keeps no readable conversation record.
     fn conversation<'a>(
         &'a self,
         _thread: &'a QueueReadyThread,

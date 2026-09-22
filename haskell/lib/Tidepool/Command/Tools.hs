@@ -12,9 +12,13 @@ module Tidepool.Command.Tools
     ReadOutput (..),
     CancelCommand (..),
     Stream (..),
+    ObservationPresenter,
     tools,
+    toolsWith,
     execute,
+    executeWith,
     writeInput,
+    writeInputWith,
     readRetained,
     cancelRetained,
   )
@@ -84,17 +88,25 @@ data ShellTools mode = ShellTools
   }
   deriving (Generic)
 
+-- | A composable policy for one command observation.  The shared shell owns
+-- validation, process/input handling and retained jobs; a workspace may only
+-- replace how a successful observation is prepared for display.
+type ObservationPresenter effects = Maybe Text -> Maybe Text -> Cmd.Observation -> Cmd.Job -> Eff effects Text
+
 tools :: (Member Cmd.Commands effects) => ShellTools (AsServerT (Eff effects))
-tools =
+tools = toolsWith defaultPresenter
+
+toolsWith :: (Member Cmd.Commands effects) => ObservationPresenter effects -> ShellTools (AsServerT (Eff effects))
+toolsWith presenter =
   ShellTools
     { bash =
         tool
-          "Execute Bash once; no shell profiles. Optional workdir/environment, memory_mib (default 256), tty or piped stdin. Observe 0..30000ms (default 30000); output 1024..32768 bytes (default 32768). Returns session_id and a retained Cmd.Job. Observation expiry leaves execution alive: use write_stdin to observe, read_output to recover output. intent supplies the purpose to an after-tool slot."
-          execute,
+          "Execute Bash once; no shell profiles. Optional workdir/environment, memory_mib (default 256), tty or piped stdin. Observe 0..30000ms (default 30000); output 1024..32768 bytes (default 32768). Returns session_id and a retained Cmd.Job. Observation expiry leaves execution alive: use write_stdin to observe, read_output to recover output. intent supplies the command's purpose to its presenter."
+          (executeWith presenter),
       writeStdin =
         tool
           "Observe an existing session_id; optional chars sends input first. Empty/omitted chars only observes. close_stdin sends final bytes then EOF (pipes only). Write acknowledgment does not prove consumption; never replay uncertain input. PTYs accept control characters. Observe 0..30000ms (default 250); output 1024..32768 bytes."
-          writeInput,
+          (writeInputWith presenter),
       readOutput =
         tool
           "Read retained output; no execution, waiting, or consumption. Defaults: Stdout, byte offset 0, 8192 bytes (1024..32768 including metadata). Contiguous pages report next_offset, EOF/current end, and retention gaps. Use Stderr for diagnostics."
@@ -117,7 +129,10 @@ observation defaultWait wait limit
     bytes = fromMaybe 32768 limit
 
 execute :: (Member Cmd.Commands effects) => Execute -> Eff effects Text
-execute
+execute = executeWith defaultPresenter
+
+executeWith :: (Member Cmd.Commands effects) => ObservationPresenter effects -> Execute -> Eff effects Text
+executeWith presenter
   Execute
     { cmd = script,
       workdir = directory,
@@ -126,7 +141,8 @@ execute
       tty = terminal,
       stdin = pipe,
       yield_time_ms = wait,
-      max_output_bytes = limit
+      max_output_bytes = limit,
+      intent = purpose
     } =
     case observation 30000 wait limit of
       Left rejection -> pure rejection
@@ -146,11 +162,13 @@ execute
             pure "Rejected · command not started · this actor has no command authority"
           Left issue -> pure $ "Rejected · command not started · " <> T.pack (show issue)
           Right retained -> do
-            _ <- Cmd.observe options retained
-            pure ""
+            presenter (Just script) purpose options retained
 
 writeInput :: (Member Cmd.Commands effects) => WriteInput -> Eff effects Text
-writeInput WriteInput {session_id = key, chars = input, close_stdin = close, yield_time_ms = wait, max_output_bytes = limit} =
+writeInput = writeInputWith defaultPresenter
+
+writeInputWith :: (Member Cmd.Commands effects) => ObservationPresenter effects -> WriteInput -> Eff effects Text
+writeInputWith presenter WriteInput {session_id = key, chars = input, close_stdin = close, yield_time_ms = wait, max_output_bytes = limit} =
   case observation 250 wait limit of
     Left rejection -> pure rejection
     Right options -> do
@@ -170,14 +188,15 @@ writeInput WriteInput {session_id = key, chars = input, close_stdin = close, yie
           pure $ "session_id: " <> key <> "\nBackend acknowledged the write; child consumption is unknown. EOF unconfirmed: " <> detail <> "\nRetry close-only with write_stdin(close_stdin=true), without chars. Do not resend these bytes."
         Left issue -> pure $ "session_id: " <> key <> "\nInput submission unconfirmed: " <> T.pack (show issue) <> "\nInspect the same job before recovery. Do not replay input after an uncertain acknowledgment."
         Right () -> do
-          _ <- Cmd.observe options (Job key)
-          pure $
-            if eof
-              then "Stdin is closed."
-              else
-                if T.null text
-                  then ""
-                  else "Input acknowledged by backend; child consumption is unknown."
+          shown <- presenter Nothing Nothing options (Job key)
+          let receipt =
+                if eof
+                  then "Stdin is closed."
+                  else
+                    if T.null text
+                      then ""
+                      else "Input acknowledged by backend; child consumption is unknown."
+          pure $ T.intercalate "\n" (filter (not . T.null) [receipt, shown])
 
 cancelRetained :: (Member Cmd.Commands effects) => CancelCommand -> Eff effects Text
 cancelRetained CancelCommand {session_id = key, yield_time_ms = wait, max_output_bytes = limit} =
@@ -230,3 +249,6 @@ utf8Bytes = T.foldl' (\n c -> n + width c) 0
       | ord c < 0x800 = 2
       | ord c < 0x10000 = 3
       | otherwise = 4
+
+defaultPresenter :: (Member Cmd.Commands effects) => ObservationPresenter effects
+defaultPresenter _ _ options retained = Cmd.observe options retained >> pure ""

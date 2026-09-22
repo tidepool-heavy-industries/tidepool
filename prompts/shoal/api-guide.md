@@ -104,8 +104,8 @@ judgeChanges task = do
 
 `Cmd.stdout` returns complete successful stdout or an explicit issue. For failed
 commands, inspect outcome and stderr; `Cmd.quiet` suppresses routine display.
-`reflect n` returns your last `n` completed conversation turns, oldest first;
-reuse that evidence across questions. `me` is lexically captured; `parentAgent`
+`reflect n` returns your latest `n` conversation turns including the active turn,
+oldest first; reuse that evidence across questions. `me` is lexically captured; `parentAgent`
 is the spawning actor or `Nothing` for a root.
 
 ## Discover missing information

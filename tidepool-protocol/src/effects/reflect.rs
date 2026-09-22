@@ -1,4 +1,4 @@
-//! The calling actor's own completed conversation turns.
+//! The calling actor's own recent conversation turns.
 //!
 //! Only the caller's conversation. The verb takes no actor, thread, or path
 //! argument, so there is nothing to widen: an actor can read what it said and
@@ -33,11 +33,11 @@ pub fn reflect() -> Effect {
         req_enum: "ReflectReq",
         decl_fn: "reflect_decl",
         description: &[
-            "Read your own recent conversation as data. `reflect n` returns your last ",
-            "n COMPLETED turns, oldest first, each carrying the messages, tool calls ",
-            "and tool results that belonged to it. The turn you are executing has not ",
-            "completed and is never included; fewer than n completed turns returns the ",
-            "ones that exist and `n <= 0` returns none. It reads only the caller's own ",
+            "Read your own recent conversation as data. `reflect n` returns your latest ",
+            "n turns including the active turn, oldest first, each carrying the recorded ",
+            "messages, tool calls and tool results that belong to it. An active turn has ",
+            "`completed_at = Nothing`; pending results are never invented. Fewer than n ",
+            "turns returns the ones that exist and `n <= 0` returns none. It reads only the caller's own ",
             "conversation — there is no argument naming another actor or a file. ",
             "`Left ReflectUnbound` means this context has no bound conversation to ",
             "read, which an operator proxy and a recreated host both are; the root's ",
@@ -134,9 +134,8 @@ pub fn reflect() -> Effect {
                 derives: WIRE,
                 domain: None,
                 doc: &[
-                    "One completed turn: everything that happened between one request",
-                    "and the answer to it, in provider order. Absent timestamps mean the",
-                    "record carried none, not an instant zero.",
+                    "One recorded turn in provider order. An unfinished active turn has",
+                    "no completion timestamp and contains only items recorded so far.",
                 ],
             },
             TypeDef {
@@ -189,10 +188,11 @@ pub fn reflect() -> Effect {
             ctor: Some("ReflectWith"),
             substrate: false,
             doc: &[
-                "`reflect n` reads your OWN last n completed conversation turns, oldest",
-                "first, each carrying its messages, tool calls and tool results. The turn",
-                "you are executing is not complete and is never among them; fewer than n",
-                "completed turns returns the ones that exist, and `n <= 0` returns none.",
+                "`reflect n` reads your OWN latest n conversation turns including the active",
+                "turn, oldest first, each carrying recorded messages, tool calls and tool",
+                "results. An unfinished turn has `turnCompletedAt = Nothing`; pending tool",
+                "results are never invented. Fewer than n turns returns the ones that exist,",
+                "and `n <= 0` returns none.",
                 "Natural spelling: `Right recent <- reflect 5`. `Left ReflectUnbound`",
                 "means this context has no conversation of its own — no other actor's is",
                 "returned in its place. Bind the result once and reuse it across the",

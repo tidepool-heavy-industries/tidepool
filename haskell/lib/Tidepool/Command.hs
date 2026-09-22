@@ -29,7 +29,9 @@ module Tidepool.Command
     run,
     await,
     Observation (..),
+    PresentedObservation (..),
     observe,
+    observeWith,
     quiet,
     job,
     status,
@@ -112,6 +114,18 @@ data RunResult
 
 -- | Bounded observation, independent of the lifetime of the process.
 data Observation = Observation {waitMilliseconds :: Int, outputBytes :: Int}
+  deriving (Eq, Show)
+
+-- | One immutable view taken after an observation wait.  A custom command
+-- presenter can inspect the endpoints in 'presentedOutput' and read exactly
+-- those retained ranges before anything is shown.  Output refusal stays data:
+-- a command may have a useful status even while its streams are unavailable.
+data PresentedObservation = PresentedObservation
+  { presentedJob :: Job,
+    presentedStatus :: CommandStatus,
+    presentedOutput :: Either CommandError CommandOutput,
+    presentedByteBudget :: Int
+  }
   deriving (Eq, Show)
 
 data OutputIssue
@@ -230,6 +244,29 @@ observe Observation {waitMilliseconds = milliseconds, outputBytes = bytes} (Job 
         _ -> "\nnext: observe the same job with write_stdin; read_output for retained output"
   send (CommandPresentWith key (CommandVisible ("session_id: " <> key <> "\n" <> heading <> next) bytes))
   pure current
+
+-- | Observe once, then let ordinary Haskell prepare what the tool returns
+-- before command output is presented.  The callback receives stream endpoints
+-- frozen immediately after the wait.  The small presentation emitted here is
+-- intentionally output-free: for a hosted command tool it preserves the
+-- retained @Cmd.Job@ binding, while the callback's result is the only command
+-- text the tool body returns.  Explicit page reads remain independent.
+observeWith ::
+  (Member Commands effects) =>
+  Observation ->
+  Job ->
+  (PresentedObservation -> Eff effects Text) ->
+  Eff effects (CommandStatus, Text)
+observeWith options@Observation {waitMilliseconds = milliseconds} retained@(Job key) prepare = do
+  current <- checked <$> send (CommandAwaitWith key milliseconds)
+  output <- send (CommandOutputWith key (1024 * 1024))
+  prepared <- prepare (PresentedObservation retained current output (outputBytes options))
+  send
+    ( CommandPresentWith
+        key
+        (CommandVisible ("session_id: " <> key <> "\noutput prepared from frozen stream endpoints; raw pages remain retained") 512)
+    )
+  pure (current, prepared)
 
 -- | Suppress routine command output within this computation, without changing
 -- command execution, retained results, or necessary background-handoff receipts.

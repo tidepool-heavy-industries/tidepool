@@ -418,7 +418,7 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
 }
 
 /// `None` means this conversation has no durable rollout to read, which is not
-/// the same answer as a conversation whose completed turns are none.
+/// the same answer as a conversation that has no recorded turns.
 fn read_rollout_conversation(
     sessions: &Path,
     thread: &str,

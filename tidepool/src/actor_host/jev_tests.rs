@@ -1,6 +1,7 @@
 use super::test_campaign::TestCampaign;
 use super::tests::{dispatch_haskell_script, dispatch_structured_tool};
 use super::*;
+use super::{command_jobs_tests::backend_request, command_jobs_tests::TestCommands};
 use tidepool_actor::{JevBackend, JevCallFailure};
 
 /// Answers every request with one choice answer and records the requests.
@@ -19,6 +20,69 @@ impl JevBackend for FakeJev {
             .push(serde_json::from_str(&request).expect("request is JSON"));
         let answer = self.answer.clone();
         Box::pin(async move { answer })
+    }
+}
+
+/// Mirrors every score question and makes sections containing `ESSENTIAL`
+/// outrank the rest. The response legend is copied from the request so the
+/// pinned DSL's exact response validation remains part of the test.
+struct SectionScoreJev {
+    requests: Mutex<Vec<serde_json::Value>>,
+}
+
+impl JevBackend for SectionScoreJev {
+    fn ask(
+        &self,
+        request: String,
+    ) -> futures_util::future::BoxFuture<'_, Result<String, JevCallFailure>> {
+        let parsed: serde_json::Value = serde_json::from_str(&request).expect("request is JSON");
+        self.requests.lock().push(parsed.clone());
+        let answers = parsed["questions"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(key, question)| {
+                let essential = question
+                    .get("instructions")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|text| text.contains("ESSENTIAL"));
+                let legend = question["criteria"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                    .map(|(index, value)| (index.to_string(), value.clone()))
+                    .collect::<serde_json::Map<_, _>>();
+                let (score, probabilities) = if essential {
+                    (
+                        3.0,
+                        serde_json::json!({"0": 0.0, "1": 0.0, "2": 0.0, "3": 1.0}),
+                    )
+                } else {
+                    (
+                        0.0,
+                        serde_json::json!({"0": 1.0, "1": 0.0, "2": 0.0, "3": 0.0}),
+                    )
+                };
+                (
+                    key.clone(),
+                    serde_json::json!({
+                        "type": "score",
+                        "score": score,
+                        "confidence": 1.0,
+                        "legend": legend,
+                        "probabilities": probabilities,
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let body = serde_json::json!({
+            "model": "jev-test",
+            "answers": answers,
+            "usage": {},
+        })
+        .to_string();
+        Box::pin(async move { Ok(body) })
     }
 }
 
@@ -62,6 +126,112 @@ async fn campaign_with(backend: Arc<FakeJev>) -> TestCampaign {
         },
     )
     .await
+}
+
+fn selected_shell_workspace(config: &mut ActorHostConfig) {
+    let package = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../examples/shoal-workspace")
+        .canonicalize()
+        .expect("the shipped workspace template");
+    let authored = config.workspace.join(".shoal");
+    std::fs::create_dir_all(&authored).unwrap();
+    std::fs::write(
+        authored.join("config.toml"),
+        format!(
+            "[defaults]\nmodel = 'test-model'\n\n\
+             [haskell]\nsource_roots = ['{}']\n\
+             modules = ['Project.Shell']\n\
+             spec = 'AgentSpec.agentSpec'\n\n\
+             [haskell.flake_sources]\njev-dsl = ['core']\n",
+            package.join(".shoal").display()
+        ),
+    )
+    .unwrap();
+    for name in ["flake.nix", "flake.lock"] {
+        std::fs::copy(package.join(name), config.workspace.join(name)).unwrap();
+    }
+    super::test_campaign::commit_workspace(&config.workspace);
+    config.workspace_inputs = Some(
+        crate::shoal::workspace::FrozenWorkspace::load(&config.workspace, &config.run_root)
+            .expect("resolve the selected-shell template"),
+    );
+}
+
+#[tokio::test]
+// Engine handoff: current HEAD first rejects the structured Bash argument map
+// with `a JSON map size requires I#`. Authenticating primitives as GHC.Types
+// and unwrapping Data.Map's strict size field reaches the selector, where the
+// prepared runtime then reports `bad pointer in JIT runtime` while constructing
+// the dynamic J.each/J.score request, before the Jev backend receives it.
+#[ignore = "prepared engine currently corrupts the selector request before Jev; unignore after the engine correctness rewrite"]
+async fn template_bash_scores_before_display_and_keeps_recovery() {
+    let backend = Arc::new(SectionScoreJev {
+        requests: Mutex::new(Vec::new()),
+    });
+    let mut campaign = TestCampaign::start_with_config(
+        tidepool_actor::ResearchPolicy::default(),
+        |admission| admission,
+        |config| {
+            config.jev = Some(Arc::clone(&backend) as tidepool_actor::JevBackendHandle);
+            selected_shell_workspace(config);
+        },
+    )
+    .await;
+    let policy = Arc::clone(&campaign.root_installation.policy);
+    let invoked = tokio::spawn(async move {
+        dispatch_structured_tool(
+            policy.as_ref(),
+            "bash",
+            serde_json::json!({
+                "cmd": "for i in $(seq 1 900); do echo background-$i; done; echo ESSENTIAL-diagnostic",
+                "workdir": null,
+                "environment": null,
+                "memory_mib": null,
+                "tty": null,
+                "stdin": null,
+                "yield_time_ms": 30000,
+                "max_output_bytes": 32768,
+                "intent": "retain the decisive diagnostic"
+            }),
+        )
+        .await
+    });
+    let command_output = (1..=40)
+        .map(|index| format!("background-{index}\n"))
+        .collect::<String>();
+    let commands = TestCommands::completed_streams(&command_output, "ESSENTIAL-diagnostic\n");
+    backend_request(&mut campaign)
+        .await
+        .supply(Ok(commands.clone()));
+    let output = invoked.await.unwrap().to_string();
+    assert!(output.contains("ESSENTIAL-diagnostic"), "{output}");
+    assert!(output.contains("<s"), "section markers missing: {output}");
+    assert!(
+        output.contains("omitted:"),
+        "omission summary missing: {output}"
+    );
+    assert!(
+        output.contains("Project.Shell.snapshot jobN"),
+        "recovery missing: {output}"
+    );
+    assert!(
+        !output.contains("background-1\nbackground-2"),
+        "raw output leaked before selection: {output}"
+    );
+
+    let requests = backend.requests.lock();
+    assert!(!requests.is_empty(), "long output must invoke Jev");
+    assert!(
+        requests[0]["state"]
+            .as_str()
+            .is_some_and(|state| state.contains("for i in $(seq 1 900)")),
+        "command absent from Jev state: {}",
+        requests[0]["state"]
+    );
+    assert_eq!(commands.executions(), 1, "selection must not re-execute");
+    drop(requests);
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
 }
 
 /// No `LANGUAGE` pragma: `OverloadedLabels` is in the cell dialect

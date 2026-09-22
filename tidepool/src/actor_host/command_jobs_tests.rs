@@ -23,8 +23,13 @@ pub(super) struct TestCommands {
 }
 impl TestCommands {
     pub(super) fn completed(stdout: &str) -> Arc<Self> {
+        Self::completed_streams(stdout, "")
+    }
+
+    pub(super) fn completed_streams(stdout: &str, stderr: &str) -> Arc<Self> {
         let backend = Self::new();
         *backend.stdout.lock() = stdout.into();
+        *backend.stderr.lock() = stderr.into();
         backend.finish.send_replace(true);
         backend
     }

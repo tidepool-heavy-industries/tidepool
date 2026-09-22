@@ -25,6 +25,8 @@ maximum_depth = 8
 
 [haskell]
 source_roots = ["."]
+modules = ["Project.Shell"]
+spec = "AgentSpec.agentSpec"
 
 # jev-dsl is compiled from the revision `flake.nix` pins, not from a copy in
 # this project. Only `core` is named: it is the JSON-polymorphic library, and
