@@ -32,6 +32,7 @@ use super::{
 };
 
 const NUMBER_TOKEN: &str = "$serde_json::private::Number";
+const MAX_JSON_VALUE_DEPTH: usize = 128;
 pub(super) const PARSE_JSON_HOST: &str = "prepared_parse_json";
 pub(super) const ENCODE_JSON_HOST: &str = "prepared_encode_json";
 
@@ -377,6 +378,10 @@ impl JsonSink<'_, '_> {
         result
     }
 
+    fn release_node(&mut self, node: IntrinsicNode) -> Result<(), RuntimeError> {
+        self.builder.release_node(node)
+    }
+
     fn text(&mut self, value: &str) -> Result<IntrinsicNode, RuntimeError> {
         let bytes = self.builder.bytes(value.as_bytes());
         if let Err(error) = &bytes {
@@ -698,7 +703,7 @@ pub(super) unsafe extern "C" fn prepared_encode_json(
         JsonEncoder {
             builder: &mut builder,
             ids,
-            active: MovingIdentities::default(),
+            ancestors: ValueAncestors::default(),
             steps: 0,
         }
         .write_value(input, RuntimeRep::LiftedRef, 0, &mut bytes)?;
@@ -801,14 +806,163 @@ impl EncoderIds {
 struct JsonEncoder<'a, 'b> {
     builder: &'a mut IntrinsicBuilder<'b>,
     ids: EncoderIds,
-    active: MovingIdentities,
+    ancestors: ValueAncestors,
     steps: usize,
 }
 
 enum MapAction {
-    Enter((IntrinsicNode, RuntimeRep)),
+    Enter((IntrinsicNode, RuntimeRep), bool),
     Emit((IntrinsicNode, RuntimeRep), (IntrinsicNode, RuntimeRep)),
-    Leave(IntrinsicNode),
+    Leave(IntrinsicNode, bool),
+}
+
+/// Recursive JSON values retain only their active ancestor roots. The JSON
+/// nesting limit bounds the linear identity scan, so shared acyclic values do
+/// not need a process-wide or traversal-wide identity inventory.
+#[derive(Default)]
+struct ValueAncestors {
+    nodes: Vec<IntrinsicNode>,
+}
+
+impl ValueAncestors {
+    fn enter(&mut self, core: &ConstructionCore, node: IntrinsicNode) -> Result<(), RuntimeError> {
+        let identity = core.word(node).map_err(|_| RuntimeError::BadPointer)? & !7;
+        for ancestor in self.nodes.iter().rev() {
+            if core.word(*ancestor).map_err(|_| RuntimeError::BadPointer)? & !7 == identity {
+                return Err(RuntimeError::BlackHole);
+            }
+        }
+        self.nodes
+            .try_reserve(1)
+            .map_err(|_| RuntimeError::HeapOverflow)?;
+        self.nodes.push(node);
+        Ok(())
+    }
+
+    fn leave(&mut self, node: IntrinsicNode) -> Result<(), RuntimeError> {
+        if self.nodes.pop() == Some(node) {
+            Ok(())
+        } else {
+            Err(RuntimeError::BadPointer)
+        }
+    }
+}
+
+/// Brent's cycle detector retains one collector-updated checkpoint, rather
+/// than every list spine node. Inspection compares roots before ordinary
+/// traversal expands the current node, so it never forces a lookahead solely
+/// to check for a cycle.
+struct BrentCycle {
+    checkpoint: Option<IntrinsicNode>,
+    power: usize,
+    distance: usize,
+    #[cfg(test)]
+    metrics: BrentMetrics,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct BrentMetrics {
+    checkpoint_registrations: usize,
+    checkpoint_releases: usize,
+    identity_comparisons: usize,
+}
+
+impl BrentCycle {
+    fn new(
+        core: &mut ConstructionCore,
+        machine: &MachineState,
+        node: (IntrinsicNode, RuntimeRep),
+    ) -> Result<Self, RuntimeError> {
+        let checkpoint = core.push_word(
+            machine,
+            core.word(node.0).map_err(|_| RuntimeError::BadPointer)?,
+            node.1,
+        )?;
+        Ok(Self {
+            checkpoint: Some(checkpoint),
+            power: 1,
+            distance: 0,
+            #[cfg(test)]
+            metrics: BrentMetrics {
+                checkpoint_registrations: 1,
+                ..BrentMetrics::default()
+            },
+        })
+    }
+
+    fn inspect(
+        &mut self,
+        core: &mut ConstructionCore,
+        machine: &MachineState,
+        node: (IntrinsicNode, RuntimeRep),
+    ) -> Result<(), RuntimeError> {
+        let checkpoint = self.checkpoint.ok_or(RuntimeError::BadPointer)?;
+        if self.distance != 0 {
+            #[cfg(test)]
+            {
+                self.metrics.identity_comparisons += 1;
+            }
+            if core
+                .word(checkpoint)
+                .map_err(|_| RuntimeError::BadPointer)?
+                & !7
+                == core.word(node.0).map_err(|_| RuntimeError::BadPointer)? & !7
+            {
+                return Err(RuntimeError::BlackHole);
+            }
+        }
+        if self.distance == self.power {
+            let next_power = self
+                .power
+                .checked_mul(2)
+                .ok_or(RuntimeError::HeapOverflow)?;
+            let replacement = core.push_word(
+                machine,
+                core.word(node.0).map_err(|_| RuntimeError::BadPointer)?,
+                node.1,
+            )?;
+            core.consume(machine, checkpoint)
+                .map_err(|_| RuntimeError::BadPointer)?;
+            self.checkpoint = Some(replacement);
+            self.power = next_power;
+            self.distance = 0;
+            #[cfg(test)]
+            {
+                self.metrics.checkpoint_registrations += 1;
+                self.metrics.checkpoint_releases += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn advance(&mut self) -> Result<(), RuntimeError> {
+        self.distance = self
+            .distance
+            .checked_add(1)
+            .ok_or(RuntimeError::HeapOverflow)?;
+        Ok(())
+    }
+
+    fn finish(
+        &mut self,
+        core: &mut ConstructionCore,
+        machine: &MachineState,
+    ) -> Result<(), RuntimeError> {
+        let checkpoint = self.checkpoint.take().ok_or(RuntimeError::BadPointer)?;
+        core.consume(machine, checkpoint)
+            .map_err(|_| RuntimeError::BadPointer)?;
+        #[cfg(test)]
+        {
+            self.metrics.checkpoint_releases += 1;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn metrics(&self) -> BrentMetrics {
+        self.metrics
+    }
 }
 
 /// Address membership is valid only for one collection generation. Retained
@@ -827,7 +981,10 @@ impl MovingIdentities {
         mut word: impl FnMut(IntrinsicNode) -> Result<usize, RuntimeError>,
     ) -> Result<(), RuntimeError> {
         if self.generation != generation {
-            let mut nodes = HashMap::with_capacity(self.nodes.len());
+            let mut nodes = HashMap::new();
+            nodes
+                .try_reserve(self.nodes.len())
+                .map_err(|_| RuntimeError::HeapOverflow)?;
             for node in self.nodes.values() {
                 nodes.insert(word(*node)? & !7, *node);
             }
@@ -843,17 +1000,61 @@ impl MovingIdentities {
         node: IntrinsicNode,
     ) -> Result<bool, RuntimeError> {
         self.refresh(builder.machine.gc_generation(), |node| builder.word(node))?;
-        Ok(self.nodes.insert(builder.word(node)? & !7, node).is_none())
+        let identity = builder.word(node)? & !7;
+        if self.nodes.contains_key(&identity) {
+            return Ok(false);
+        }
+        self.nodes
+            .try_reserve(1)
+            .map_err(|_| RuntimeError::HeapOverflow)?;
+        self.nodes.insert(identity, node);
+        Ok(true)
     }
 
     fn remove(
         &mut self,
         builder: &IntrinsicBuilder<'_>,
         node: IntrinsicNode,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<bool, RuntimeError> {
         self.refresh(builder.machine.gc_generation(), |node| builder.word(node))?;
-        self.nodes.remove(&(builder.word(node)? & !7));
-        Ok(())
+        Ok(self.nodes.remove(&(builder.word(node)? & !7)).is_some())
+    }
+
+    #[cfg(test)]
+    fn insert_core(
+        &mut self,
+        core: &ConstructionCore,
+        generation: u64,
+        node: IntrinsicNode,
+    ) -> Result<bool, RuntimeError> {
+        self.refresh(generation, |node| {
+            core.word(node).map_err(|_| RuntimeError::BadPointer)
+        })?;
+        let identity = core.word(node).map_err(|_| RuntimeError::BadPointer)? & !7;
+        if self.nodes.contains_key(&identity) {
+            return Ok(false);
+        }
+        self.nodes
+            .try_reserve(1)
+            .map_err(|_| RuntimeError::HeapOverflow)?;
+        self.nodes.insert(identity, node);
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    fn remove_core(
+        &mut self,
+        core: &ConstructionCore,
+        generation: u64,
+        node: IntrinsicNode,
+    ) -> Result<bool, RuntimeError> {
+        self.refresh(generation, |node| {
+            core.word(node).map_err(|_| RuntimeError::BadPointer)
+        })?;
+        Ok(self
+            .nodes
+            .remove(&(core.word(node).map_err(|_| RuntimeError::BadPointer)? & !7))
+            .is_some())
     }
 }
 
@@ -905,33 +1106,34 @@ impl JsonEncoder<'_, '_> {
         depth: usize,
         out: &mut Vec<u8>,
     ) -> Result<(), EncodeFailure> {
-        if depth > 128 {
+        if depth > MAX_JSON_VALUE_DEPTH {
             return Err(RuntimeError::StackOverflow.into());
         }
-        let (id, fields) = self.constructor(node, rep)?;
-        if !self.active.insert(self.builder, node)? {
-            return Err(RuntimeError::BlackHole.into());
-        }
+        self.ancestors.enter(&self.builder.core, node)?;
         let result = (|| {
-            if id == self.ids.null && fields.is_empty() {
-                out.extend_from_slice(b"null");
-            } else if id == self.ids.string && fields.len() == 1 {
-                self.write_text(fields[0], out)?;
-            } else if id == self.ids.bool_ && fields.len() == 1 {
-                self.write_bool(fields[0], out)?;
-            } else if id == self.ids.number && fields.len() == 1 {
-                self.write_number(fields[0], out)?;
-            } else if id == self.ids.array && fields.len() == 1 {
-                self.write_list(fields[0], depth + 1, out)?;
-            } else if id == self.ids.object && fields.len() == 1 {
-                self.write_map(fields[0], depth + 1, out)?;
-            } else {
-                return Err(RuntimeError::BadPointer.into());
-            }
-            Ok(())
+            let (id, fields) = self.constructor(node, rep)?;
+            let result = (|| {
+                if id == self.ids.null && fields.is_empty() {
+                    out.extend_from_slice(b"null");
+                } else if id == self.ids.string && fields.len() == 1 {
+                    self.write_text(fields[0], out)?;
+                } else if id == self.ids.bool_ && fields.len() == 1 {
+                    self.write_bool(fields[0], out)?;
+                } else if id == self.ids.number && fields.len() == 1 {
+                    self.write_number(fields[0], out)?;
+                } else if id == self.ids.array && fields.len() == 1 {
+                    self.write_list(fields[0], depth + 1, out)?;
+                } else if id == self.ids.object && fields.len() == 1 {
+                    self.write_map(fields[0], depth + 1, out)?;
+                } else {
+                    return Err(RuntimeError::BadPointer.into());
+                }
+                Ok(())
+            })();
+            self.finish_nodes(result, fields.into_iter().map(|field| field.0))
         })();
-        self.active.remove(self.builder, node)?;
-        result
+        let leave = self.ancestors.leave(node).map_err(EncodeFailure::from);
+        result.or(leave)
     }
 
     fn write_bool(
@@ -940,48 +1142,92 @@ impl JsonEncoder<'_, '_> {
         out: &mut Vec<u8>,
     ) -> Result<(), EncodeFailure> {
         let (id, fields) = self.constructor(field.0, field.1)?;
-        if !fields.is_empty() {
-            return Err(RuntimeError::BadPointer.into());
-        }
-        if id == self.ids.true_ {
+        let result = if !fields.is_empty() {
+            Err(RuntimeError::BadPointer.into())
+        } else if id == self.ids.true_ {
             out.extend_from_slice(b"true");
+            Ok(())
         } else if id == self.ids.false_ {
             out.extend_from_slice(b"false");
+            Ok(())
         } else {
-            return Err(RuntimeError::BadPointer.into());
-        }
-        Ok(())
+            Err(RuntimeError::BadPointer.into())
+        };
+        self.finish_nodes(result, fields.into_iter().map(|field| field.0))
     }
 
     fn write_list(
         &mut self,
-        mut field: (IntrinsicNode, RuntimeRep),
+        field: (IntrinsicNode, RuntimeRep),
         depth: usize,
         out: &mut Vec<u8>,
     ) -> Result<(), EncodeFailure> {
         out.push(b'[');
+        let mut cycle = BrentCycle::new(&mut self.builder.core, self.builder.machine, field)?;
+        let result = self.write_list_body(field, depth, out, &mut cycle);
+        let cleanup = cycle
+            .finish(&mut self.builder.core, self.builder.machine)
+            .map_err(EncodeFailure::from);
+        match result {
+            Err(error) => Err(error),
+            Ok(value) => cleanup.map(|()| value),
+        }
+    }
+
+    fn write_list_body(
+        &mut self,
+        mut field: (IntrinsicNode, RuntimeRep),
+        depth: usize,
+        out: &mut Vec<u8>,
+        cycle: &mut BrentCycle,
+    ) -> Result<(), EncodeFailure> {
         let mut first = true;
-        let mut seen = MovingIdentities::default();
+        let mut owned_current = false;
         loop {
-            let (id, fields) = self.constructor(field.0, field.1)?;
+            if let Err(error) = cycle.inspect(&mut self.builder.core, self.builder.machine, field) {
+                if owned_current {
+                    let _ = self.builder.release_node(field.0);
+                }
+                return Err(error.into());
+            }
+            let expanded = self.constructor(field.0, field.1);
+            if owned_current {
+                let release = self
+                    .builder
+                    .release_node(field.0)
+                    .map_err(EncodeFailure::from);
+                if let Err(error) = expanded {
+                    return Err(error);
+                }
+                release?;
+            }
+            let (id, fields) = expanded?;
             if id == self.ids.nil && fields.is_empty() {
-                break;
+                out.push(b']');
+                return Ok(());
             }
             if id != self.ids.cons || fields.len() != 2 {
-                return Err(RuntimeError::BadPointer.into());
+                return self.finish_nodes(
+                    Err(RuntimeError::BadPointer.into()),
+                    fields.into_iter().map(|field| field.0),
+                );
             }
-            if !seen.insert(self.builder, field.0)? {
-                return Err(RuntimeError::BlackHole.into());
-            }
+            let head = fields[0];
+            let tail = fields[1];
             if !first {
                 out.push(b',');
             }
             first = false;
-            self.write_value(fields[0].0, fields[0].1, depth, out)?;
-            field = fields[1];
+            let value = self.write_value(head.0, head.1, depth, out);
+            let value = self.finish_nodes(value, std::iter::once(head.0));
+            if let Err(error) = value {
+                let _ = self.builder.release_node(tail.0);
+                return Err(error);
+            }
+            field = tail;
+            owned_current = true;
+            cycle.advance()?;
         }
-        out.push(b']');
-        Ok(())
     }
 
     fn write_map(
@@ -993,41 +1239,98 @@ impl JsonEncoder<'_, '_> {
         out.push(b'{');
         let mut first = true;
         let mut active = MovingIdentities::default();
-        let mut actions = vec![MapAction::Enter(root)];
-        while let Some(action) = actions.pop() {
-            match action {
-                MapAction::Enter(node) => {
-                    let (id, fields) = self.constructor(node.0, node.1)?;
-                    if id == self.ids.tip && fields.is_empty() {
-                        continue;
+        let mut actions = vec![MapAction::Enter(root, false)];
+        let result = (|| {
+            while let Some(action) = actions.pop() {
+                match action {
+                    MapAction::Enter(node, owned) => {
+                        let expanded = self.constructor(node.0, node.1);
+                        let (id, mut fields) = match expanded {
+                            Ok(expanded) => expanded,
+                            Err(error) => {
+                                if owned {
+                                    let _ = self.builder.release_node(node.0);
+                                }
+                                return Err(error);
+                            }
+                        };
+                        if id == self.ids.tip && fields.is_empty() {
+                            if owned {
+                                self.builder.release_node(node.0)?;
+                            }
+                            continue;
+                        }
+                        if id != self.ids.bin || fields.len() != 5 {
+                            let result = self.finish_nodes(
+                                Err(RuntimeError::BadPointer.into()),
+                                fields.into_iter().map(|field| field.0),
+                            );
+                            if owned {
+                                let _ = self.builder.release_node(node.0);
+                            }
+                            return result;
+                        }
+                        if !active.insert(self.builder, node.0)? {
+                            let result = self.finish_nodes(
+                                Err(RuntimeError::BlackHole.into()),
+                                fields.into_iter().map(|field| field.0),
+                            );
+                            if owned {
+                                let _ = self.builder.release_node(node.0);
+                            }
+                            return result;
+                        }
+                        let right = fields.pop().expect("validated map fields");
+                        let left = fields.pop().expect("validated map fields");
+                        let value = fields.pop().expect("validated map fields");
+                        let key = fields.pop().expect("validated map fields");
+                        let size = fields.pop().expect("validated map fields");
+                        self.builder.release_node(size.0)?;
+                        actions.push(MapAction::Leave(node.0, owned));
+                        actions.push(MapAction::Enter(right, true));
+                        actions.push(MapAction::Emit(key, value));
+                        actions.push(MapAction::Enter(left, true));
                     }
-                    if id != self.ids.bin || fields.len() != 5 {
-                        return Err(RuntimeError::BadPointer.into());
+                    MapAction::Emit(key, value) => {
+                        if !first {
+                            out.push(b',');
+                        }
+                        first = false;
+                        let result = (|| {
+                            self.write_text(key, out)?;
+                            out.push(b':');
+                            self.write_value(value.0, value.1, depth, out)
+                        })();
+                        self.finish_nodes(result, [key.0, value.0])?;
                     }
-                    if !active.insert(self.builder, node.0)? {
-                        return Err(RuntimeError::BlackHole.into());
+                    MapAction::Leave(node, owned) => {
+                        if !active.remove(self.builder, node)? {
+                            return Err(RuntimeError::BadPointer.into());
+                        }
+                        if owned {
+                            self.builder.release_node(node)?;
+                        }
                     }
-                    actions.push(MapAction::Leave(node.0));
-                    actions.push(MapAction::Enter(fields[4]));
-                    actions.push(MapAction::Emit(fields[1], fields[2]));
-                    actions.push(MapAction::Enter(fields[3]));
                 }
-                MapAction::Emit(key, value) => {
-                    if !first {
-                        out.push(b',');
+            }
+            out.push(b'}');
+            Ok(())
+        })();
+        if result.is_err() {
+            for action in actions {
+                match action {
+                    MapAction::Enter((node, _), true) | MapAction::Leave(node, true) => {
+                        let _ = self.builder.release_node(node);
                     }
-                    first = false;
-                    self.write_text(key, out)?;
-                    out.push(b':');
-                    self.write_value(value.0, value.1, depth, out)?;
-                }
-                MapAction::Leave(node) => {
-                    active.remove(self.builder, node)?;
+                    MapAction::Emit(key, value) => {
+                        let _ = self.builder.release_node(key.0);
+                        let _ = self.builder.release_node(value.0);
+                    }
+                    _ => {}
                 }
             }
         }
-        out.push(b'}');
-        Ok(())
+        result
     }
 
     fn write_text(
@@ -1036,26 +1339,29 @@ impl JsonEncoder<'_, '_> {
         out: &mut Vec<u8>,
     ) -> Result<(), EncodeFailure> {
         let (id, fields) = self.constructor(field.0, field.1)?;
-        if id != self.ids.text || fields.len() != 3 {
-            return Err(RuntimeError::BadPointer.into());
-        }
-        let bytes = self.bytes(fields[0])?;
-        let offset = self.int(fields[1])?;
-        let length = self.int(fields[2])?;
-        let offset = usize::try_from(offset).map_err(|_| RuntimeError::BadPointer)?;
-        let length = usize::try_from(length).map_err(|_| RuntimeError::BadPointer)?;
-        let end = offset.checked_add(length).ok_or(RuntimeError::BadPointer)?;
-        let text = std::str::from_utf8(bytes.get(offset..end).ok_or(RuntimeError::BadPointer)?)
+        let result = (|| {
+            if id != self.ids.text || fields.len() != 3 {
+                return Err(RuntimeError::BadPointer.into());
+            }
+            let bytes = self.bytes(fields[0])?;
+            let offset = self.int(fields[1])?;
+            let length = self.int(fields[2])?;
+            let offset = usize::try_from(offset).map_err(|_| RuntimeError::BadPointer)?;
+            let length = usize::try_from(length).map_err(|_| RuntimeError::BadPointer)?;
+            let end = offset.checked_add(length).ok_or(RuntimeError::BadPointer)?;
+            let text = std::str::from_utf8(bytes.get(offset..end).ok_or(RuntimeError::BadPointer)?)
+                .map_err(|_| RuntimeError::BadPointer)?;
+            serde_json::to_writer(
+                PollingWriter {
+                    output: out,
+                    machine: self.builder.machine,
+                },
+                text,
+            )
             .map_err(|_| RuntimeError::BadPointer)?;
-        serde_json::to_writer(
-            PollingWriter {
-                output: out,
-                machine: self.builder.machine,
-            },
-            text,
-        )
-        .map_err(|_| RuntimeError::BadPointer)?;
-        Ok(())
+            Ok(())
+        })();
+        self.finish_nodes(result, fields.into_iter().map(|field| field.0))
     }
 
     fn write_number(
@@ -1064,31 +1370,37 @@ impl JsonEncoder<'_, '_> {
         out: &mut Vec<u8>,
     ) -> Result<(), EncodeFailure> {
         let (id, fields) = self.constructor(field.0, field.1)?;
-        if id != self.ids.scientific || fields.len() != 2 {
-            return Err(RuntimeError::BadPointer.into());
-        }
-        let coefficient = self.integer(fields[0])?;
-        let exponent = self.int(fields[1])?;
-        let decimal = tidepool_bridge::decimal::Decimal::from_parts(&coefficient, exponent)
-            .map_err(|_| RuntimeError::BadPointer)?;
-        out.extend_from_slice(decimal.render().as_bytes());
-        Ok(())
+        let result = (|| {
+            if id != self.ids.scientific || fields.len() != 2 {
+                return Err(RuntimeError::BadPointer.into());
+            }
+            let coefficient = self.integer(fields[0])?;
+            let exponent = self.int(fields[1])?;
+            let decimal = tidepool_bridge::decimal::Decimal::from_parts(&coefficient, exponent)
+                .map_err(|_| RuntimeError::BadPointer)?;
+            out.extend_from_slice(decimal.render().as_bytes());
+            Ok(())
+        })();
+        self.finish_nodes(result, fields.into_iter().map(|field| field.0))
     }
 
     fn integer(&mut self, field: (IntrinsicNode, RuntimeRep)) -> Result<String, EncodeFailure> {
         let (id, fields) = self.constructor(field.0, field.1)?;
-        if id == self.ids.is && fields.len() == 1 {
-            return Ok(self.int(fields[0])?.to_string());
-        }
-        if (id == self.ids.ip || id == self.ids.in_) && fields.len() == 1 {
-            let magnitude = self.bytes(fields[0])?;
-            let mut value = self.bignat_decimal(&magnitude)?;
-            if id == self.ids.in_ {
-                value.insert(0, '-');
+        let result = (|| {
+            if id == self.ids.is && fields.len() == 1 {
+                return Ok(self.int(fields[0])?.to_string());
             }
-            return Ok(value);
-        }
-        Err(RuntimeError::BadPointer.into())
+            if (id == self.ids.ip || id == self.ids.in_) && fields.len() == 1 {
+                let magnitude = self.bytes(fields[0])?;
+                let mut value = self.bignat_decimal(&magnitude)?;
+                if id == self.ids.in_ {
+                    value.insert(0, '-');
+                }
+                return Ok(value);
+            }
+            Err(RuntimeError::BadPointer.into())
+        })();
+        self.finish_nodes(result, fields.into_iter().map(|field| field.0))
     }
 
     fn int(&mut self, field: (IntrinsicNode, RuntimeRep)) -> Result<i64, EncodeFailure> {
@@ -1096,12 +1408,34 @@ impl JsonEncoder<'_, '_> {
             super::observe::ObservationFrame::Leaf(tidepool_bridge::HaskellValue::Lit(
                 tidepool_repr::Literal::LitInt(v),
             )) => Ok(v),
-            super::observe::ObservationFrame::Constructor(id, fields)
-                if id == self.ids.i_hash && fields.len() == 1 =>
-            {
-                self.int(fields[0])
+            super::observe::ObservationFrame::Constructor(id, fields) => {
+                let result = if id == self.ids.i_hash && fields.len() == 1 {
+                    self.int(fields[0])
+                } else {
+                    Err(RuntimeError::BadPointer.into())
+                };
+                self.finish_nodes(result, fields.into_iter().map(|field| field.0))
             }
             _ => Err(RuntimeError::BadPointer.into()),
+        }
+    }
+
+    fn finish_nodes<T>(
+        &mut self,
+        result: Result<T, EncodeFailure>,
+        nodes: impl IntoIterator<Item = IntrinsicNode>,
+    ) -> Result<T, EncodeFailure> {
+        let mut cleanup = Ok(());
+        for node in nodes {
+            if let Err(error) = self.builder.release_node(node) {
+                if cleanup.is_ok() {
+                    cleanup = Err(error.into());
+                }
+            }
+        }
+        match result {
+            Err(error) => Err(error),
+            Ok(value) => cleanup.map(|()| value),
         }
     }
 
@@ -1295,14 +1629,20 @@ impl<'de> Visitor<'de> for JsonSeed<'_, '_, '_> {
             unreachable!()
         };
         let mut entries = BTreeMap::new();
-        entries.insert(first, access.next_value_seed(JsonSeed(self.0))?);
+        let value = access.next_value_seed(JsonSeed(self.0))?;
+        if let Some(displaced) = entries.insert(first, value) {
+            self.0.release_node(displaced).map_err(A::Error::custom)?;
+        }
         while let Some(key) = access.next_key_seed(JsonKeySeed(self.0.input.clone()))? {
             let JsonKey::Object(key) = key else {
                 return Err(A::Error::custom(
                     "number token is only valid as a numeric wrapper",
                 ));
             };
-            entries.insert(key, access.next_value_seed(JsonSeed(self.0))?);
+            let value = access.next_value_seed(JsonSeed(self.0))?;
+            if let Some(displaced) = entries.insert(key, value) {
+                self.0.release_node(displaced).map_err(A::Error::custom)?;
+            }
         }
         let map = self.0.map(entries).map_err(A::Error::custom)?;
         let d = Arc::clone(&self.0.d.object);
@@ -1434,6 +1774,15 @@ impl<'a> IntrinsicBuilder<'a> {
 
     fn push_root(&mut self, word: usize) -> Result<IntrinsicNode, RuntimeError> {
         self.push_word(word, RuntimeRep::LiftedRef)
+    }
+
+    /// Consume one traversal-owned temporary root after its final reader has
+    /// finished. The free-list capacity was admitted before the slot was
+    /// published, so this cleanup cannot allocate while reporting an error.
+    fn release_node(&mut self, node: IntrinsicNode) -> Result<(), RuntimeError> {
+        self.core
+            .consume(self.machine, node)
+            .map_err(|_| RuntimeError::BadPointer)
     }
 
     fn force(&mut self, node: IntrinsicNode) -> Result<(), CallStatus> {
@@ -1615,6 +1964,183 @@ impl<'a> IntrinsicBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rooted_words(
+        roots: &mut ConstructionCore,
+        machine: &MachineState,
+        words: impl IntoIterator<Item = usize>,
+    ) -> Vec<IntrinsicNode> {
+        words
+            .into_iter()
+            .map(|word| {
+                roots
+                    .push_word(machine, word | 1, RuntimeRep::LiftedRef)
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn brent_cycle_detection_covers_prefixes_and_cycle_lengths() {
+        for prefix in [0, 1, 3, 8] {
+            for cycle_length in [1, 2, 3, 7, 16] {
+                let machine = MachineState::new();
+                let mut roots = ConstructionCore::new(1);
+                let unique = prefix + cycle_length;
+                let words = (0..unique).map(|index| 0x1000 + index * 16);
+                let mut nodes = rooted_words(&mut roots, &machine, words);
+                let mut detector =
+                    BrentCycle::new(&mut roots, &machine, (nodes[0], RuntimeRep::LiftedRef))
+                        .unwrap();
+                let mut detected = false;
+                for step in 0..(4 * unique + 2) {
+                    let index = if step < unique {
+                        step
+                    } else {
+                        prefix + (step - prefix) % cycle_length
+                    };
+                    let word = roots.word(nodes[index]).unwrap();
+                    let current = roots
+                        .push_word(&machine, word, RuntimeRep::LiftedRef)
+                        .unwrap();
+                    match detector.inspect(&mut roots, &machine, (current, RuntimeRep::LiftedRef)) {
+                        Err(RuntimeError::BlackHole) => {
+                            detected = true;
+                            roots.consume(&machine, current).unwrap();
+                            break;
+                        }
+                        Ok(()) => detector.advance().unwrap(),
+                        Err(error) => panic!("unexpected detector error: {error:?}"),
+                    }
+                    roots.consume(&machine, current).unwrap();
+                }
+                assert!(detected, "prefix={prefix}, cycle_length={cycle_length}");
+                detector.finish(&mut roots, &machine).unwrap();
+                for node in nodes.drain(..) {
+                    roots.consume(&machine, node).unwrap();
+                }
+                assert_eq!(machine.rust_roots_len(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn value_ancestors_reject_cycles_but_allow_shared_acyclic_values() {
+        let machine = MachineState::new();
+        let mut roots = ConstructionCore::new(1);
+        let nodes = rooted_words(&mut roots, &machine, [0x1000, 0x2000, 0x1000]);
+        let mut ancestors = ValueAncestors::default();
+        ancestors.enter(&roots, nodes[0]).unwrap();
+        ancestors.enter(&roots, nodes[1]).unwrap();
+        assert!(matches!(
+            ancestors.enter(&roots, nodes[2]),
+            Err(RuntimeError::BlackHole)
+        ));
+        ancestors.leave(nodes[1]).unwrap();
+        ancestors.leave(nodes[0]).unwrap();
+        ancestors.enter(&roots, nodes[2]).unwrap();
+        ancestors.leave(nodes[2]).unwrap();
+        for node in nodes {
+            roots.consume(&machine, node).unwrap();
+        }
+        assert_eq!(machine.rust_roots_len(), 0);
+    }
+
+    #[test]
+    fn brent_checkpoint_uses_collector_updated_root_identity() {
+        let machine = MachineState::new();
+        let mut roots = ConstructionCore::new(1);
+        let nodes = rooted_words(&mut roots, &machine, [0x1000, 0x2000]);
+        let mut detector =
+            BrentCycle::new(&mut roots, &machine, (nodes[0], RuntimeRep::LiftedRef)).unwrap();
+        detector.advance().unwrap();
+        let checkpoint = detector.checkpoint.unwrap();
+        unsafe {
+            roots.slot(checkpoint).unwrap().write(0x9001);
+            roots.slot(nodes[1]).unwrap().write(0x9001);
+        }
+        assert!(matches!(
+            detector.inspect(&mut roots, &machine, (nodes[1], RuntimeRep::LiftedRef)),
+            Err(RuntimeError::BlackHole)
+        ));
+        detector.finish(&mut roots, &machine).unwrap();
+        for node in nodes {
+            roots.consume(&machine, node).unwrap();
+        }
+        assert_eq!(machine.rust_roots_len(), 0);
+    }
+
+    #[test]
+    fn active_map_identity_can_be_reused_after_subtree_exit() {
+        let machine = MachineState::new();
+        let mut roots = ConstructionCore::new(1);
+        let nodes = rooted_words(&mut roots, &machine, [0x1000, 0x1000]);
+        let mut active = MovingIdentities::default();
+        assert!(active.insert_core(&roots, 0, nodes[0]).unwrap());
+        assert!(!active.insert_core(&roots, 0, nodes[1]).unwrap());
+        assert!(active.remove_core(&roots, 0, nodes[0]).unwrap());
+        assert!(active.insert_core(&roots, 0, nodes[1]).unwrap());
+        assert!(active.remove_core(&roots, 0, nodes[1]).unwrap());
+        for node in nodes {
+            roots.consume(&machine, node).unwrap();
+        }
+        assert_eq!(machine.rust_roots_len(), 0);
+    }
+
+    #[test]
+    fn brent_identity_and_root_work_scale_linearly_and_logarithmically() {
+        for width in [16_usize, 256, 4096] {
+            let machine = MachineState::new();
+            let mut roots = ConstructionCore::new(1);
+            let nodes = rooted_words(
+                &mut roots,
+                &machine,
+                (0..width).map(|index| 0x1000 + index * 16),
+            );
+            let before = roots.root_operation_metrics();
+            let mut detector =
+                BrentCycle::new(&mut roots, &machine, (nodes[0], RuntimeRep::LiftedRef)).unwrap();
+            for node in &nodes {
+                detector
+                    .inspect(&mut roots, &machine, (*node, RuntimeRep::LiftedRef))
+                    .unwrap();
+                detector.advance().unwrap();
+            }
+            detector.finish(&mut roots, &machine).unwrap();
+            let metrics = detector.metrics();
+            let after = roots.root_operation_metrics();
+            let checkpoint_roots = 1 + width.ilog2() as usize;
+            assert_eq!(metrics.identity_comparisons, width - 1);
+            assert_eq!(metrics.checkpoint_registrations, checkpoint_roots);
+            assert_eq!(metrics.checkpoint_releases, checkpoint_roots);
+            assert_eq!(after.registrations - before.registrations, checkpoint_roots);
+            assert_eq!(after.releases - before.releases, checkpoint_roots);
+            for node in nodes {
+                roots.consume(&machine, node).unwrap();
+            }
+            assert_eq!(machine.rust_roots_len(), 0);
+        }
+    }
+
+    #[test]
+    fn temporary_root_slots_grow_geometrically_and_are_reusable() {
+        let machine = MachineState::new();
+        let mut roots = ConstructionCore::new(1);
+        for width in [1_usize, 65, 257] {
+            let nodes = rooted_words(&mut roots, &machine, (0..width).map(|index| index * 16));
+            assert_eq!(roots.root_metrics().1, width);
+            for node in nodes {
+                roots.consume(&machine, node).unwrap();
+            }
+            assert_eq!(roots.root_metrics().1, 0);
+            let (free_capacity, admitted_slots) = roots.root_pool_metrics();
+            assert!(free_capacity.is_power_of_two());
+            assert!(free_capacity >= admitted_slots);
+        }
+        let metrics = roots.root_operation_metrics();
+        assert_eq!(metrics.registrations, metrics.releases);
+        assert_eq!(machine.rust_roots_len(), 0);
+    }
 
     #[test]
     fn cycle_identity_index_relocates_witnesses_before_address_reuse() {

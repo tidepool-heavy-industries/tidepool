@@ -47,6 +47,16 @@ struct PreparedRoot {
 
 pub(super) const ROOT_CHUNK_WORDS: usize = 64;
 
+/// Counts temporary root-slot ownership transitions. These are test-only
+/// operation counts, rather than timing measurements, so wide traversal tests
+/// can assert that registration and release work stays structurally bounded.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct RootOperationMetrics {
+    pub(super) registrations: usize,
+    pub(super) releases: usize,
+}
+
 struct RootChunk {
     words: RootWords,
     active: Box<[bool]>,
@@ -70,6 +80,8 @@ pub(super) struct ConstructionCore {
     roots: Vec<RootChunk>,
     free: Vec<usize>,
     next_index: usize,
+    #[cfg(test)]
+    root_operations: RootOperationMetrics,
 }
 
 impl ConstructionCore {
@@ -79,7 +91,31 @@ impl ConstructionCore {
             roots: Vec::new(),
             free: Vec::new(),
             next_index: 0,
+            #[cfg(test)]
+            root_operations: RootOperationMetrics::default(),
         }
+    }
+
+    /// Reserve enough capacity for teardown before publishing a new root
+    /// chunk. `release` and `consume` then only push into this free list and
+    /// cannot allocate while an error is unwinding. Growing geometrically
+    /// avoids repeatedly asking the allocator for one chunk at a time.
+    fn reserve_free_slots(&mut self, required: usize) -> Result<(), RuntimeError> {
+        if self.free.capacity() >= required {
+            return Ok(());
+        }
+        let mut target = self.free.capacity().max(ROOT_CHUNK_WORDS);
+        while target < required {
+            target = target.checked_mul(2).ok_or(RuntimeError::HeapOverflow)?;
+        }
+        let additional = target
+            .checked_sub(self.free.len())
+            .ok_or(RuntimeError::HeapOverflow)?;
+        self.free
+            .try_reserve_exact(additional)
+            .map_err(|_| RuntimeError::HeapOverflow)?;
+        debug_assert!(self.free.capacity() >= required);
+        Ok(())
     }
 
     pub(super) fn release(&mut self, machine: &MachineState) {
@@ -89,6 +125,7 @@ impl ConstructionCore {
         for chunk in &mut self.roots {
             for slot in 0..ROOT_CHUNK_WORDS {
                 if let Some(registration) = chunk.registrations[slot].take() {
+                    debug_assert!(self.free.len() < self.free.capacity());
                     self.free.push(registration);
                 }
             }
@@ -114,9 +151,7 @@ impl ConstructionCore {
                     let required_free_capacity = index
                         .checked_add(ROOT_CHUNK_WORDS)
                         .ok_or(RuntimeError::HeapOverflow)?;
-                    self.free
-                        .try_reserve_exact(required_free_capacity - self.free.len())
-                        .map_err(|_| RuntimeError::HeapOverflow)?;
+                    self.reserve_free_slots(required_free_capacity)?;
                     self.roots.push(RootChunk::new()?);
                 }
                 self.next_index = self
@@ -147,6 +182,10 @@ impl ConstructionCore {
         root.active[slot_index] = true;
         if matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef) {
             root.registrations[slot_index] = Some(machine.register_rust_root(slot));
+        }
+        #[cfg(test)]
+        {
+            self.root_operations.registrations += 1;
         }
         Ok(PreparedRoot {
             node: ConstructionNode {
@@ -214,7 +253,12 @@ impl ConstructionCore {
         }
         unsafe { root.words.as_mut_ptr().add(slot).write(0) };
         root.active[slot] = false;
+        debug_assert!(self.free.len() < self.free.capacity());
         self.free.push(node.index);
+        #[cfg(test)]
+        {
+            self.root_operations.releases += 1;
+        }
         Ok(())
     }
 
@@ -227,6 +271,16 @@ impl ConstructionCore {
                 .map(|chunk| chunk.active.iter().filter(|active| **active).count())
                 .sum(),
         )
+    }
+
+    #[cfg(test)]
+    pub(super) fn root_operation_metrics(&self) -> RootOperationMetrics {
+        self.root_operations
+    }
+
+    #[cfg(test)]
+    pub(super) fn root_pool_metrics(&self) -> (usize, usize) {
+        (self.free.capacity(), self.next_index)
     }
 
     fn ensure_capacity<E>(
