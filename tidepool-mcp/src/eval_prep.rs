@@ -640,7 +640,6 @@ pub struct TurnTemplate<'a> {
     pub code: &'a str,
     pub imports: &'a str,
     pub helpers: &'a str,
-    pub input: Option<&'a serde_json::Value>,
     pub budget: Option<u32>,
     pub render: Render,
     pub anchor_result: bool,
@@ -771,9 +770,6 @@ impl TurnTemplate<'_> {
             ));
             out.push('\n');
         }
-
-        // Inject input binding if provided
-        out.push_str(&input_binding_source(self.input));
 
         // The primary entry: `__user`/`result`, from `self.code` — the ONLY
         // entry that emits the `-- [user-lines]` marker.
@@ -913,7 +909,6 @@ pub fn template_haskell(
     code: &str,
     imports: &str,
     helpers: &str,
-    input: Option<&serde_json::Value>,
     budget: Option<u32>,
 ) -> String {
     TurnTemplate {
@@ -922,7 +917,6 @@ pub fn template_haskell(
         code,
         imports,
         helpers,
-        input,
         budget,
         settled: true,
         ..Default::default()
@@ -942,7 +936,6 @@ pub fn template_haskell_anchored(
     code: &str,
     imports: &str,
     helpers: &str,
-    input: Option<&serde_json::Value>,
     budget: Option<u32>,
 ) -> String {
     TurnTemplate {
@@ -951,7 +944,6 @@ pub fn template_haskell_anchored(
         code,
         imports,
         helpers,
-        input,
         budget,
         anchor_result: true,
         settled: true,
@@ -971,7 +963,6 @@ pub fn template_haskell_show_default(
     code: &str,
     imports: &str,
     helpers: &str,
-    input: Option<&serde_json::Value>,
     budget: Option<u32>,
 ) -> String {
     TurnTemplate {
@@ -980,7 +971,6 @@ pub fn template_haskell_show_default(
         code,
         imports,
         helpers,
-        input,
         budget,
         render: Render::ToWire,
         settled: true,
@@ -997,19 +987,6 @@ pub fn template_haskell_show_default(
 /// code path that emits a Haskell string literal escapes it identically.
 pub fn escape_haskell_string(s: &str) -> String {
     tidepool_runtime::session::escape_workbench_haskell_string(s)
-}
-
-/// Render the `input :: Aeson.Value` top-level binding for injection into a
-/// generated module, or the empty string when there is no payload. Shared by
-/// the eval template here and the `tidepool-repl` session wraps so every code
-/// path that can reference `input` injects it identically.
-pub fn input_binding_source(input: Option<&serde_json::Value>) -> String {
-    tidepool_runtime::session::workbench_input_binding(input)
-}
-
-#[cfg(test)]
-fn json_to_haskell(value: &serde_json::Value) -> String {
-    tidepool_runtime::session::workbench_json_to_haskell(value)
 }
 
 #[cfg(test)]
@@ -1055,8 +1032,8 @@ mod tests {
         #[test]
         fn prop_template_haskell_deterministic(code in "[a-zA-Z0-9 \n]{0,40}") {
             let pre = "module Expr where\ndefault (Int)\n";
-            let a = template_haskell(pre, "'[Console]", &code, "", "", None, None);
-            let b = template_haskell(pre, "'[Console]", &code, "", "", None, None);
+            let a = template_haskell(pre, "'[Console]", &code, "", "", None);
+            let b = template_haskell(pre, "'[Console]", &code, "", "", None);
             prop_assert_eq!(a, b);
         }
 
@@ -1065,7 +1042,7 @@ mod tests {
         #[test]
         fn prop_template_haskell_embeds_user_code(code in "[a-zA-Z0-9 ]{1,40}") {
             let pre = "module Expr where\ndefault (Int)\n";
-            let src = template_haskell(pre, "'[Console]", &code, "", "", None, None);
+            let src = template_haskell(pre, "'[Console]", &code, "", "", None);
             let verbatim = format!("__user = let {{\n __b =\n{code}\n }} in __b");
             prop_assert!(src.contains(&verbatim));
         }
@@ -1364,37 +1341,6 @@ mod tests {
     }
 
     #[test]
-    fn test_json_to_haskell_escapes_control_chars() {
-        let v = serde_json::json!({"multi\nline\tkey": "line1\nline2\twith\rcontrols"});
-        let rendered = json_to_haskell(&v);
-        assert!(!rendered.contains('\n'), "raw newline leaked: {rendered}");
-        assert!(rendered.contains("\\n"), "{rendered}");
-        assert!(rendered.contains("\\t"), "{rendered}");
-    }
-
-    #[test]
-    fn test_json_to_haskell() {
-        let val = serde_json::json!({
-            "str": "hello",
-            "bool": true,
-            "null": null,
-            "num": 42,
-            "arr": [1, 2],
-            "obj": {"a": 1}
-        });
-        let haskell = json_to_haskell(&val);
-        assert!(haskell.contains("\"str\" .= Aeson.String \"hello\""));
-        assert!(haskell.contains("\"bool\" .= Aeson.Bool True"));
-        assert!(haskell.contains("\"null\" .= Aeson.Null"));
-        assert!(haskell.contains("\"num\" .= Aeson.Number (Aeson.scientific (42) (0))"));
-        assert!(haskell.contains(
-            "\"arr\" .= toJSON [Aeson.Number (Aeson.scientific (1) (0)), Aeson.Number (Aeson.scientific (2) (0))]"
-        ));
-        assert!(haskell
-            .contains("\"obj\" .= object [\"a\" .= Aeson.Number (Aeson.scientific (1) (0))]"));
-    }
-
-    #[test]
     fn orchestrate_emits_towire_class() {
         // ToWire moved into the generated Tidepool.Orchestrate module (always
         // emitted, no effect dependency); the expr-module preamble imports it.
@@ -1455,7 +1401,7 @@ mod template_haskell_pin {
 
     #[test]
     fn plain_wrapper_pin() {
-        let src = template_haskell(PRE, STACK, CODE, "", "", None, None);
+        let src = template_haskell(PRE, STACK, CODE, "", "", None);
         assert_eq!(
             src,
             "module Expr where\ndefault (Int)\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 6:6\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toJSON _r)\n",
@@ -1465,7 +1411,7 @@ mod template_haskell_pin {
 
     #[test]
     fn anchored_wrapper_pin() {
-        let src = template_haskell_anchored(PRE, STACK, CODE, "", "", None, None);
+        let src = template_haskell_anchored(PRE, STACK, CODE, "", "", None);
         assert_eq!(
             src,
             "module Expr where\ndefault (Int)\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 6:6\n\n__anchor :: P.Show a => a -> a\n__anchor = P.id\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toJSON (__anchor _r))\n",
@@ -1475,7 +1421,7 @@ mod template_haskell_pin {
 
     #[test]
     fn show_default_wrapper_pin() {
-        let src = template_haskell_show_default(PRE, STACK, CODE, "", "", None, None);
+        let src = template_haskell_show_default(PRE, STACK, CODE, "", "", None);
         assert_eq!(
             src,
             "module Expr where\ndefault (Int)\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 6:6\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toWire _r)\n",

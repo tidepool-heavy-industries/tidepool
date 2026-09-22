@@ -1447,7 +1447,7 @@ mod tests {
             "  \"sortedRead\" .= sorted\n",
             "  ])",
         ));
-        let source = tidepool_mcp::template_haskell(&preamble, &stack, &code, "", "", None, None);
+        let source = tidepool_mcp::template_haskell(&preamble, &stack, &code, "", "", None);
 
         // Only Fs is exercised (readGlob), so the handler HList only needs to
         // cover tags 0..2 (Console, KV, Fs) — dispatch never recurses past Fs.

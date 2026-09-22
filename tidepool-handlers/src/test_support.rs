@@ -40,7 +40,7 @@ pub(crate) fn jit_test_source(code: &[&str]) -> String {
     let preamble = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let code_str = tidepool_mcp::wrap_do(&code.join("\n"));
-    tidepool_mcp::template_haskell(&preamble, &stack, &code_str, "", "", None, None)
+    tidepool_mcp::template_haskell(&preamble, &stack, &code_str, "", "", None)
 }
 
 pub(crate) fn jit_eval(code: &[&str]) -> serde_json::Value {

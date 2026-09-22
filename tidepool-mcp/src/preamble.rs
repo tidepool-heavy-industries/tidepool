@@ -77,9 +77,7 @@ fn eval_import_lines(user_library: bool, hides: PreludeHides) -> Vec<&'static st
         // Merge/reconcile API (merge, zipWithMatched, …) — strict, matches Map.
         "import qualified Data.Map.Merge.Strict as MM",
         "import qualified Data.Set as Set",
-        // `Aeson` qualifier: the `input` payload-lane injection emits
-        // `input :: Aeson.Value` / `Aeson.String …` (json_to_haskell), so the
-        // qualifier must be in scope for both eval AND session_eval.
+        // The qualified Aeson surface is part of the ordinary eval vocabulary.
         "import qualified Tidepool.Aeson as Aeson",
         "import qualified Tidepool.Aeson.KeyMap as KM",
         "import qualified Data.List as L",
@@ -813,8 +811,7 @@ pub fn build_preamble_non_interactive_mode(
 }
 
 /// Qualified aeson imports for MCP eval. Unqualified symbols now come from Tidepool.Prelude.
-/// These provide `Aeson.` prefix (used by json_to_haskell for input injection) and
-/// qualified access to KeyMap/Vector for power users.
+/// These provide the `Aeson.` prefix and qualified access to KeyMap for power users.
 pub fn aeson_imports() -> String {
     concat!(
         "qualified Tidepool.Aeson as Aeson\n",

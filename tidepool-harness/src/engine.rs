@@ -2015,11 +2015,9 @@ pub fn template_turn_for(
     } else {
         let preamble = tidepool_mcp::build_preamble(decls, false);
         if finalize_pin_active(stack) {
-            tidepool_mcp::template_haskell_anchored(
-                &preamble, stack, code, imports, helpers, None, None,
-            )
+            tidepool_mcp::template_haskell_anchored(&preamble, stack, code, imports, helpers, None)
         } else {
-            tidepool_mcp::template_haskell(&preamble, stack, code, imports, helpers, None, None)
+            tidepool_mcp::template_haskell(&preamble, stack, code, imports, helpers, None)
         }
     }
 }

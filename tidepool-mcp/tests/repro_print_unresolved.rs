@@ -55,7 +55,7 @@ fn run(code: &str) -> (Vec<String>, Result<String, String>) {
     let decls = [tidepool_mcp::console_decl()];
     let preamble = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
-    let source = tidepool_mcp::template_haskell(&preamble, &stack, code, "", "", None, None);
+    let source = tidepool_mcp::template_haskell(&preamble, &stack, code, "", "", None);
 
     let pp = prelude_dir();
     let dirs = tidepool_mcp::ensure_effects_module(&decls).expect("write effects module");
