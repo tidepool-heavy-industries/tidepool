@@ -72,39 +72,34 @@ fn main() {
 /// A skill tree is globbed rather than listed, so adding a skill to the example
 /// workspace adds it to the scaffolded package.
 fn emit_scaffold_package(repository: PathBuf) {
-    let mut entries: Vec<(String, PathBuf)> = Vec::new();
-    // The facade over the pinned Jev core. The example workspace is the single
-    // source; this repository's own `.shoal/Jev/Operators.hs` is a copy of it.
-    entries.push((
-        ".shoal/Jev/Operators.hs".to_owned(),
-        repository.join("examples/shoal-workspace/.shoal/Jev/Operators.hs"),
-    ));
-    // The starter agent spec belongs to the shipped template. This checkout's
-    // active `.shoal` may evolve independently and is never scaffold input.
-    entries.push((
-        ".shoal/AgentSpec.hs".to_owned(),
-        repository.join("examples/shoal-workspace/.shoal/AgentSpec.hs"),
-    ));
-    entries.push((
-        ".shoal/Project/Tools.hs".to_owned(),
-        repository.join("examples/shoal-workspace/.shoal/Project/Tools.hs"),
-    ));
-    entries.push((
-        ".shoal/Project/Shell.hs".to_owned(),
-        repository.join("examples/shoal-workspace/.shoal/Project/Shell.hs"),
-    ));
-    entries.push((
-        ".shoal/Project/Lookup.hs".to_owned(),
-        repository.join("examples/shoal-workspace/.shoal/Project/Lookup.hs"),
-    ));
-    // The worked-example watchdog: a set of monitors a parent may install on
-    // the children it spawns. The starter `AgentSpec.hs` does not turn it on
-    // (its slot keeps abstaining); the module ships so a project can adopt it
-    // by writing one `afterTool` line.
-    entries.push((
-        ".shoal/Project/Watchdog.hs".to_owned(),
-        repository.join(".shoal/Project/Watchdog.hs"),
-    ));
+    // The starter tools belong to the shipped template. Only the worked
+    // watchdog example is shared with this checkout's active workspace.
+    let mut entries: Vec<(String, PathBuf)> = [
+        (
+            "Jev/Operators.hs",
+            "examples/shoal-workspace/.shoal/Jev/Operators.hs",
+        ),
+        (
+            "AgentSpec.hs",
+            "examples/shoal-workspace/.shoal/AgentSpec.hs",
+        ),
+        (
+            "Project/Tools.hs",
+            "examples/shoal-workspace/.shoal/Project/Tools.hs",
+        ),
+        (
+            "Project/Shell.hs",
+            "examples/shoal-workspace/.shoal/Project/Shell.hs",
+        ),
+        (
+            "Project/Lookup.hs",
+            "examples/shoal-workspace/.shoal/Project/Lookup.hs",
+        ),
+        ("Project/Watchdog.hs", ".shoal/Project/Watchdog.hs"),
+    ]
+    .into_iter()
+    .map(|(relative, source)| (format!(".shoal/{relative}"), repository.join(source)))
+    .collect();
 
     let skills = repository.join("examples/shoal-workspace/.shoal/skills");
     println!("cargo:rerun-if-changed={}", skills.display());
@@ -154,8 +149,11 @@ fn emit_usage_pointer_index(repository: &Path, skill_files: &[(String, PathBuf)]
     println!("cargo:rerun-if-changed={}", checks.display());
     let mut sources: Vec<(String, PathBuf)> = std::fs::read_dir(&checks)
         .unwrap_or_else(|error| panic!("read {}: {error}", checks.display()))
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|error| panic!("read entry in {}: {error}", checks.display()))
+                .path()
+        })
         .filter(|path| path.extension().is_some_and(|extension| extension == "hs"))
         .map(|path| {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -163,14 +161,12 @@ fn emit_usage_pointer_index(repository: &Path, skill_files: &[(String, PathBuf)]
         })
         .collect();
     sources.sort_by(|left, right| left.0.cmp(&right.0));
-    for (relative, path) in skill_files
-        .iter()
-        .filter(|(relative, _)| relative.ends_with("SKILL.md"))
-    {
-        let skill = relative
-            .strip_suffix("/SKILL.md")
-            .expect("skill markdown has directory");
-        sources.push((format!(".shoal/skills/{skill}/SKILL.md"), path.clone()));
+    for (relative, path) in skill_files.iter().filter(|(relative, _)| {
+        Path::new(relative)
+            .file_name()
+            .is_some_and(|name| name == "SKILL.md")
+    }) {
+        sources.push((format!(".shoal/skills/{relative}"), path.clone()));
     }
 
     let mut index = BTreeMap::<String, String>::new();
@@ -197,7 +193,12 @@ fn emit_usage_pointer_index(repository: &Path, skill_files: &[(String, PathBuf)]
         out.push_str(&format!("    ({identifier:?}, {locator:?}),\n"));
     }
     out.push_str("];\n");
+    #[allow(
+        clippy::unwrap_used,
+        reason = "Cargo supplies OUT_DIR to build scripts"
+    )]
     let dest = Path::new(&std::env::var("OUT_DIR").unwrap()).join("usage_pointers.rs");
+    #[allow(clippy::expect_used, reason = "generation failure must fail the build")]
     std::fs::write(dest, out).expect("write generated usage pointers");
 }
 
