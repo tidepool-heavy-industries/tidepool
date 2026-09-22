@@ -480,6 +480,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-shoal-protocol"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3298,6 +3307,7 @@ dependencies = [
  "camino",
  "chrono",
  "codex-codes",
+ "codex-shoal-protocol",
  "http-body-util",
  "hyper",
  "hyper-util",
